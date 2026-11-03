@@ -28,22 +28,21 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertTrue(pile.contains("charge > 0 ? GlassTokens.Color.mapOrbShared.color"))
     }
 
-    /// The Not contributed card has no border. A shimmer crossed it from
-    /// 2026-10-20, a soft light turned round its edge from 2026-10-22, and
-    /// since 2026-10-27 a brighter light glances across it
-    /// (`DesignRulings20261027Tests`), over its fill and watermark.
-    func test_lightGlancesAcrossTheNotContributedCard() throws {
+    /// The Not contributed card has no border and nothing moving on it
+    /// (owner, 2026-11-02). A shimmer crossed it from 2026-10-20, a soft
+    /// light turned round its edge from 2026-10-22, and a brighter light
+    /// glanced across it from 2026-10-27; all are gone.
+    func test_theNotContributedCardIsStill() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         let card = try XCTUnwrap(home.range(of: "private struct HomeNotContributedCard: View {"))
         let end = try XCTUnwrap(home.range(of: "\n}\n", range: card.upperBound..<home.endIndex))
         let body = home[card.upperBound..<end.lowerBound]
         XCTAssertFalse(body.contains("strokeBorder"), "the border is back")
         XCTAssertFalse(body.contains("glassCardBeacon"), "the beacon is back")
+        XCTAssertFalse(body.contains("Shimmer"), "the shimmer is back")
         let mark = try XCTUnwrap(body.range(of: ".glassCardWatermark("))
         let tier = try XCTUnwrap(body.range(of: ".glassTier(.card,"))
-        let shimmer = try XCTUnwrap(body.range(of: ".glassCardShimmer()"))
         XCTAssertLessThan(mark.lowerBound, tier.lowerBound)
-        XCTAssertLessThan(tier.lowerBound, shimmer.lowerBound, "the light sits over the card's fill")
     }
 
     /// The card's line is the core's call to share; an older core's plain
@@ -69,8 +68,9 @@ final class DesignRulings20261020Tests: XCTestCase {
 
     /// Home's groups are titled, in the owner's words. The order is the
     /// 2026-10-28 ruling: Traces first, then Account, then Private AI,
-    /// below and smaller than Traces. The Traces hero sits above the Traces
-    /// heading (owner, 2026-10-29), so the heading is over Waiting.
+    /// below and smaller than Traces. The Traces hero, when it shows, takes
+    /// the Traces cards' place under the heading (owner, 2026-11-02; it sat
+    /// above the heading from 2026-10-29).
     func test_homesSectionsAreTitledInOrder() throws {
         let words = try XCTUnwrap(MonitorWords.table).homeHistory
         XCTAssertEqual(words.sectionPrivateAI, "Private AI")
@@ -78,15 +78,15 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertEqual(words.sectionAccount, "Account")
         XCTAssertEqual(words.privateAISignIn, "Sign in to NEAR AI to get started.")
         let home = try Self.text("Views/Monitor/HomeViews.swift")
-        let hero = try XCTUnwrap(home.range(of: "            tracesHero\n            HomeSection(words?.sectionTraces) {\n                Grid("))
+        let hero = try XCTUnwrap(home.range(of: "                    tracesHero\n                } else {\n                    Grid("))
         let traces = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionTraces) {"))
         let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))
-        let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount) {"))
+        let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount, accessory: accountSignIn) {"))
         let tiles = try XCTUnwrap(home.range(of: "                HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)\n            }\n"))
         let privateAI = try XCTUnwrap(home.range(of: "            privateAI\n", range: tiles.upperBound..<home.endIndex))
         let credit = try XCTUnwrap(home.range(of: "HomeStatTile(label: HomeFormat.creditPendingWord"))
-        XCTAssertLessThan(hero.lowerBound, traces.lowerBound)
-        XCTAssertLessThan(traces.lowerBound, waiting.lowerBound)
+        XCTAssertLessThan(traces.lowerBound, hero.lowerBound)
+        XCTAssertLessThan(hero.lowerBound, waiting.lowerBound)
         XCTAssertLessThan(waiting.lowerBound, account.lowerBound)
         XCTAssertLessThan(account.lowerBound, privateAI.lowerBound)
         XCTAssertLessThan(account.lowerBound, credit.lowerBound)

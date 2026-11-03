@@ -46,15 +46,14 @@ final class DesignRulings20261029Tests: XCTestCase {
         XCTAssertNil(HomeFormat.creditAccountTotal(known, words: nil))
     }
 
-    /// The total goes under this Mac's figure, in the sign-in line's place
-    /// (the two never meet: one needs known points, the other unknown).
-    /// The change since yesterday, its formatter and the Mac's own store of
-    /// daily totals are gone.
+    /// The total goes under this Mac's figure. The tile has no sign-in line
+    /// since 2026-11-02 (that is the Account heading's), so the total is its
+    /// only detail. The change since yesterday, its formatter and the Mac's
+    /// own store of daily totals are gone.
     func test_theCreditTileDrawsTheTotalAndNoChangeSinceYesterday() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains(
-            "let creditDetail = HomeFormat.creditSignIn(freshCredit, line: HomeFormat.creditSignInLine)\n"
-                + "            ?? HomeFormat.creditAccountTotal(freshCredit, words: MonitorWords.table?.homeHistory)"))
+            "let creditDetail = HomeFormat.creditAccountTotal(freshCredit, words: MonitorWords.table?.homeHistory)"))
         XCTAssertTrue(home.contains("detail: creditDetail, systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
         XCTAssertFalse(home.contains("creditDelta"))
         XCTAssertFalse(home.contains("creditTotal("))

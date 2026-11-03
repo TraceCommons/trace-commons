@@ -125,6 +125,10 @@ enum HomeClosedCards {
     static let insightsKey = "home.insightsCardClosedOn"
     /// Settings' "Show promotions on Home", on by default.
     static let promotionsKey = "home.showsPromotions"
+    /// The Traces hero was closed with its X (owner, 2026-11-02). It stays
+    /// closed on this Mac: what it explains does not change, and Traces
+    /// and Private AI keep their tabs.
+    static let tracesHeroKey = "home.tracesHeroClosed"
 
     /// Everything the campaign card shows, so any change in the feed --
     /// under the same id or a new one -- is a different fingerprint. New
@@ -183,6 +187,8 @@ private struct HomeOverview: View {
     @AppStorage(HomeClosedCards.insightsKey) private var insightsClosedOn = ""
     /// Settings' "Show promotions on Home": off, no campaign card.
     @AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true
+    /// The Traces hero, closed with its X: gone from Home on this Mac.
+    @AppStorage(HomeClosedCards.tracesHeroKey) private var tracesHeroClosed = false
 
     /// The rollup, or nil after a failed `history_rollup` read
     /// (`SummaryFacts.fresh`): a stale one is not shown as current.
@@ -349,33 +355,36 @@ private struct HomeOverview: View {
         // A failed status read draws no dollar line rather than an old one.
         let settlement = SummaryFacts.fresh(store.status, unless: store.failures["status"])?.settlementEstimate
         let uncontributed = HomeUncontributed(traces.tree.allSessions, settlement: settlement)
-        // The Traces hero leads (owner, 2026-10-28: the macOS MVP is
-        // "contribute traces, earn credit"), above the Traces heading
-        // (owner, 2026-10-29), so the heading sits over Waiting and
-        // Contributed. Then three groups, each under its title: Traces
-        // (the tiles and what is not contributed across both columns),
-        // Account (Credit and the NEAR AI balance), then Private AI, below
-        // and smaller than Traces.
+        // Three groups, each under its title: Traces (the tiles and what is
+        // not contributed across both columns), Account (Credit and the NEAR
+        // AI balance), then Private AI, below and smaller than Traces. The
+        // Traces walkthrough stands in for the Traces cards while no trace
+        // folder is watched and on the launch that finished first run, until
+        // it is closed (owner, 2026-11-02; it led Home above the heading from
+        // 2026-10-28).
         return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            tracesHero
             HomeSection(words?.sectionTraces) {
-                Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
-                    GridRow {
-                        HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
-                                     systemImage: HomeStatIcons.waiting, action: openTraces)
-                        HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted),
-                                     systemImage: HomeStatIcons.contributed, action: openHistory)
-                    }
-                    if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) {
+                if showsTracesWalkthrough {
+                    tracesHero
+                } else {
+                    Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
                         GridRow {
-                            notContributed(uncontributed, title: title)
-                                .gridCellColumns(2)
+                            HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
+                                         systemImage: HomeStatIcons.waiting, action: openTraces)
+                            HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted),
+                                         systemImage: HomeStatIcons.contributed, action: openHistory)
+                        }
+                        if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) {
+                            GridRow {
+                                notContributed(uncontributed, title: title)
+                                    .gridCellColumns(2)
+                            }
                         }
                     }
+                    .fixedSize(horizontal: false, vertical: true)
                 }
-                .fixedSize(horizontal: false, vertical: true)
             }
-            HomeSection(words?.sectionAccount) {
+            HomeSection(words?.sectionAccount, accessory: accountSignIn) {
                 HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)
             }
             // Over Private AI, so the coins that burst from the Balance
@@ -385,35 +394,66 @@ private struct HomeOverview: View {
         }
     }
 
-    /// Home's Traces hero (owner, 2026-10-28): the first and largest card,
-    /// saying what contributing is and that it earns credit, with the way
-    /// into Traces, where the person shares. Under its line, three steps
-    /// across the whole card, contribute, earn, use Private AI (owner,
-    /// 2026-10-29, from the owner's mock-up). Drawn once the core's words
-    /// have loaded.
+    /// Whether the Traces walkthrough stands in for the Traces cards
+    /// (`HomeFormat.showsTracesWalkthrough`), unless its X closed it.
+    private var showsTracesWalkthrough: Bool {
+        !tracesHeroClosed && words != nil && HomeFormat.showsTracesWalkthrough(
+            folders: traces.tree.folders, loaded: traces.phase == .loaded,
+            finishedFirstRunThisLaunch: model.finishedFirstRunThisLaunch)
+    }
+
+    /// Home's Traces hero (owner, 2026-10-28): the first card, saying that
+    /// traces earn credit, with the way into Traces, where the person
+    /// shares. Under its title, three steps across the whole card,
+    /// contribute, earn, use Private AI (owner, 2026-10-29, from the
+    /// owner's mock-up). Condensed on 2026-11-02 (owner): no line under the
+    /// title, which runs the card's width, and an X that closes it for good
+    /// on this Mac, as the campaign's and Insights' do for theirs. Drawn
+    /// once the core's words have loaded.
     @ViewBuilder
     private var tracesHero: some View {
-        if let words {
+        if let words, !tracesHeroClosed {
             GlassHeroCard(
                 gradient: GlassTokens.Gradient.heroMissions,
-                title: words.tracesHeroTitle, subtitle: words.tracesHeroBody,
+                title: words.tracesHeroTitle,
                 actionTitle: words.tracesHeroAction, action: openTraces,
-                contentSpansGraphic: true, actionOnPill: true
+                closeLabel: MonitorWords.close, onClose: { tracesHeroClosed = true },
+                contentSpansGraphic: true, titleSpansGraphic: true, actionOnPill: true
             ) {
                 HomeHeroRing()
             } content: {
                 HomeHeroSteps(steps: [
-                    .init(number: 1, systemImage: "apple.terminal",
+                    .init(number: 1, graphic: .tools,
                           title: words.tracesHeroStepContribute, detail: words.tracesHeroStepContributeDetail,
                           action: openTraces),
-                    .init(number: 2, systemImage: "cylinder.split.1x2",
+                    .init(number: 2, graphic: .traces,
                           title: words.tracesHeroStepEarn, detail: words.tracesHeroStepEarnDetail),
-                    .init(number: 3, systemImage: "sparkles",
+                    .init(number: 3, graphic: .privateAI,
                           title: words.tracesHeroStepUse, detail: words.tracesHeroStepUseDetail,
                           action: openPrivateAI),
                 ])
             }
         }
+    }
+
+    /// Beside the Account heading while its figures wait on a sign-in
+    /// (owner, 2026-11-02): the core's "No data", then Sign in as a link,
+    /// which begins the NEAR AI sign-in as the Private AI section's Sign in
+    /// does, offering the same logins. The Account cards carry no sign-in
+    /// words of their own. Nil, and nothing drawn, otherwise.
+    private var accountSignIn: AnyView? {
+        guard let noData = HomeFormat.cardHeading(words?.accountNoData),
+              let signIn = HomeFormat.cardHeading(model.managedText("sign_in_near_ai")),
+              HomeFormat.accountNeedsSignIn(
+                  credit: freshCredit, balanceState: model.balanceStatus.state,
+                  renewalFailure: model.accountRenewalFailure, signInFailed: model.nearAiSignInFailed)
+        else { return nil }
+        return AnyView(HomeAccountSignIn(
+            noData: noData, signIn: signIn, signInName: model.managedText("sign_in_near_ai_accessibility"),
+            choice: NearAiSignInChoice.of(model.privateInferenceCopy), busy: model.credentialBusy
+        ) { provider in
+            NearAiSignIn.begin(model, provider: provider, openURL: openURL)
+        })
     }
 
     /// Home's Private AI section (owner, 2026-10-20), drawn once the core's
@@ -490,11 +530,12 @@ private struct HomeOverview: View {
 /// label and the count and size on the left, and the core's call to share
 /// (owner, 2026-10-20) on the right in a translucent card of its own
 /// (owner, 2026-10-27), over its icon as a watermark on the right, as the
-/// tiles'. It is on the standard card fill with no border, and now and
-/// then a soft band of light crosses it (`GlassCardShimmer`, owner,
-/// 2026-10-27; before that a soft light turned round its edge, before that
-/// a duller band crossed it, before that it had a solid accent border, and
-/// before that a turning glow edge). The whole card is the button.
+/// tiles'. It is on the standard card fill with no border and nothing
+/// moving on it (owner, 2026-11-02: no shimmer; from 2026-10-27 a soft band
+/// of light crossed it, before that a soft light turned round its edge,
+/// before that a duller band crossed it, before that it had a solid accent
+/// border, and before that a turning glow edge). The whole card is the
+/// button.
 private struct HomeNotContributedCard: View {
     let title: String
     let count: Int
@@ -547,9 +588,6 @@ private struct HomeNotContributedCard: View {
             .glassCardWatermark(HomeStatIcons.uncontributed)
             // The stat tiles' fill and hover.
             .glassTier(.card, hover: GlassTokens.Color.cardHover)
-            // A soft band of light crossing it, over the fill and the words
-            // (owner, 2026-10-27).
-            .glassCardShimmer()
             .contentShape(shape)
         }
         .buttonStyle(GlassPressStyle())
@@ -576,6 +614,37 @@ enum HomeStatIcons {
 /// 2026-10-20): the core's line and Sign in, centred on the card's height,
 /// which the button sets. No icon. Sign in waits while a sign-in is under
 /// way.
+/// The Account heading's "No data - Sign in" (owner, 2026-11-02): the
+/// core's "No data" in secondary ink, a dash, and the managed copy's "Sign
+/// in" as a link, a menu of the logins when the build offers several, as
+/// the Private AI section's button is. The link is its own control, named
+/// for VoiceOver by what it signs in to.
+private struct HomeAccountSignIn: View {
+    let noData: String
+    let signIn: String
+    let signInName: String
+    let choice: NearAiSignInChoice
+    let busy: Bool
+    let start: (String?) -> Void
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s2) {
+            Text(noData)
+                .foregroundStyle(GlassColor.textSecondary)
+            Text("\u{2013}")
+                .foregroundStyle(GlassColor.textTertiary)
+                .accessibilityHidden(true)
+            NearAiSignInButton(
+                title: signIn, accessibilityName: signInName.isEmpty ? nil : signInName, choice: choice,
+                style: GlassButtonStyle(.link), start: start)
+                .fixedSize()
+                .disabled(busy)
+        }
+        .glassType(GlassTokens.TypeScale.label.weight(.regular))
+        .accessibilityElement(children: .contain)
+    }
+}
+
 private struct HomePrivateAISignInCard: View {
     let line: String
     let button: String
@@ -652,10 +721,14 @@ private struct HomePrivateAIRow: View {
 /// title (the core's words not loaded yet) the cards are drawn alone.
 struct HomeSection<Content: View>: View {
     let title: String?
+    /// Drawn just after the title, on its baseline (owner, 2026-11-02: the
+    /// Account section's "No data - Sign in"); nil draws nothing.
+    let accessory: AnyView?
     let content: Content
 
-    init(_ title: String?, @ViewBuilder content: () -> Content) {
+    init(_ title: String?, accessory: AnyView? = nil, @ViewBuilder content: () -> Content) {
         self.title = title
+        self.accessory = accessory
         self.content = content()
     }
 
@@ -666,10 +739,13 @@ struct HomeSection<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             if let title, !title.isEmpty {
-                Text(title)
-                    .glassType(Self.titleType)
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .accessibilityAddTraits(.isHeader)
+                HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s5) {
+                    Text(title)
+                        .glassType(Self.titleType)
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .accessibilityAddTraits(.isHeader)
+                    if let accessory { accessory }
+                }
             }
             content
         }
@@ -1673,10 +1749,11 @@ private struct HistoryPeriodCard: View {
 
 /// Home's Account tiles: this Mac's credit earned, with the account's whole
 /// total under it, its credit pending, and the NEAR AI balance beside them
-/// (owner, 2026-10-19; 2026-10-29), each opening Private AI. Home draws
-/// them under Account, and the edge
-/// rail's Private AI peek under the tool buttons (owner, 2026-10-22). A
-/// failed rollup or credit read is a dash, never the store's earlier value.
+/// (owner, 2026-10-19; 2026-10-29), each opening Private AI. Home draws them
+/// under Account, and the edge rail's Private AI peek under the tool buttons
+/// (owner, 2026-10-22). A failed rollup or credit read is a dash, never the
+/// store's earlier value. No tile says why it has no figure (owner,
+/// 2026-11-02): a sign-in they wait on is the Account heading's.
 struct HomeAccountTiles: View {
     let store: HomeStore
     let openPrivateAI: () -> Void
@@ -1691,11 +1768,10 @@ struct HomeAccountTiles: View {
     }
 
     var body: some View {
-        // The sign-in line while the commons' points are unknown for want of
-        // a session, the account's whole total while they are known: never
-        // both, since each is drawn only in the other's absence of points.
-        let creditDetail = HomeFormat.creditSignIn(freshCredit, line: HomeFormat.creditSignInLine)
-            ?? HomeFormat.creditAccountTotal(freshCredit, words: MonitorWords.table?.homeHistory)
+        // The account's whole total under this Mac's figure, while the
+        // commons knows its points (product owner, 2026-10-29, #1753). No
+        // sign-in line: that is the Account heading's (owner, 2026-11-02).
+        let creditDetail = HomeFormat.creditAccountTotal(freshCredit, words: MonitorWords.table?.homeHistory)
         Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
             GridRow {
                 // Received and pending side by side (owner, 2026-10-29), both
@@ -1707,6 +1783,8 @@ struct HomeAccountTiles: View {
                 let tiles = HomeFormat.creditTiles(final: freshRollup?.creditFinal,
                                                    pending: freshRollup?.creditPending,
                                                    credit: freshCredit)
+                // No sign-in line under it (owner, 2026-11-02): the Account
+                // heading says "No data - Sign in" instead.
                 HomeStatTile(label: HomeFormat.creditReceivedWord, value: tiles.received,
                              detail: creditDetail, systemImage: HomeStatIcons.credit, action: openPrivateAI)
                 HomeStatTile(label: HomeFormat.creditPendingTitleWord, value: tiles.pending,
@@ -1716,8 +1794,7 @@ struct HomeAccountTiles: View {
                     BalanceArrivalFlourish(status: model.balanceStatus, calls: model.balanceCalls) { counting in
                         HomeStatTile(label: copy.balanceTitle, value: counting ?? balance.value,
                                      detail: balance.detail, detailInk: balance.detailInk,
-                                     systemImage: HomeStatIcons.balance, valueAccessory: balance.beside,
-                                     action: openPrivateAI)
+                                     systemImage: HomeStatIcons.balance, action: openPrivateAI)
                     }
                 } else {
                     Color.clear
@@ -1735,21 +1812,24 @@ struct HomeAccountTiles: View {
 /// One of Home's and History's three counts (Ron's `StatCard`): a full
 /// card, 10 by 12 inside, its eyebrow word over an 18pt-class bold tabular
 /// figure. The word wraps at a space, never inside a word.
-/// The Traces hero's three steps (owner, 2026-10-29): side by side, an
-/// arrow between each, each a translucent panel on the hero's ground with
-/// a numbered disc and an icon on one row, then a title and one line
-/// across the panel's width. All in heroInk, as
-/// every word on a hero is; the discs and icons are heroAccent, the
-/// owner's mock-up's blue. The panels are as tall as the tallest.
-/// Contribute opens Traces and Use Private AI opens Private AI, each panel
-/// a button of its own; Earn credit stays on Home, a plain panel (owner,
-/// 2026-10-29). The hero itself is a panel, so these clicks are not
-/// swallowed by it; its Start earning pill is its own button. Part of the hero's one button, so VoiceOver reads
-/// the steps with the card.
+/// The Traces hero's three steps (owner, 2026-10-29): side by side, a lit
+/// stretch of first run's step thread between each (`HomeHeroThread`), each
+/// its first-run screen in small and still (`HomeHeroStepGraphic`, owner,
+/// 2026-11-02: "match the applicable FTUX dialogue visuals and screens")
+/// over a title and one line, straight on the hero's ground in its ink: no
+/// card behind a step (owner, 2026-11-02: "remove the step card
+/// backgrounds"). Contribute opens Traces and Use
+/// Private AI opens Private AI, each panel a button of its own; Earn credit
+/// stays on Home, a plain panel (owner, 2026-10-29). The hero itself is a
+/// panel, so these clicks are not swallowed by it; its Start earning pill is
+/// its own button.
 struct HomeHeroSteps: View {
     struct Step: Identifiable {
+        /// The step's place, left to right: its identity, and every step
+        /// after the first has a stretch of thread before it. Not drawn.
         let number: Int
-        let systemImage: String
+        /// Which first-run screen it shows in small.
+        let graphic: Graphic
         let title: String
         let detail: String
         /// Opens the step's tab; nil draws a plain panel.
@@ -1757,21 +1837,22 @@ struct HomeHeroSteps: View {
         var id: Int { number }
     }
 
+    /// The first-run screen a step shows: Tools' watched tiles, Traces'
+    /// ring round the N, Private AI's route into the N.
+    enum Graphic: Equatable {
+        case tools, traces, privateAI
+    }
+
     let steps: [Step]
 
-    static var disc: CGFloat { 30 }
-    static var icon: CGFloat { 28 }
+    /// The pictures' height, and the thread's length between two steps.
+    static var graphicHeight: CGFloat { 28 }
+    static var thread: CGFloat { 14 }
 
     var body: some View {
-        let ink = GlassTokens.Color.heroInk.color
         HStack(alignment: .center, spacing: GlassTokens.Space.s2) {
             ForEach(steps) { step in
-                if step.number > 1 {
-                    Image(systemName: "arrow.right")
-                        .glassGlyph(14, weight: .semibold)
-                        .foregroundStyle(ink.opacity(0.6))
-                        .accessibilityHidden(true)
-                }
+                if step.number > 1 { HomeHeroThread() }
                 HomeHeroStepPanel(step: step)
             }
         }
@@ -1780,9 +1861,104 @@ struct HomeHeroSteps: View {
     }
 }
 
-/// One of the Traces hero's steps: a translucent panel, brighter under the
-/// pointer when it opens a tab, and then a button that reads its title and
-/// line to VoiceOver as one.
+/// The lit stretch of first run's step thread (`FirstRunStepThread`): a
+/// short beam, glow blue to its bright core, between two steps.
+struct HomeHeroThread: View {
+    var body: some View {
+        let glow = GlassTokens.Color.firstRunGlow
+        Capsule()
+            .fill(LinearGradient(
+                colors: [glow.color, GlassTokens.Color.firstRunBeamCore.color],
+                startPoint: .leading, endPoint: .trailing))
+            .frame(width: HomeHeroSteps.thread, height: 3)
+            .shadow(color: glow.opacity(0.35).color, radius: 4)
+            .accessibilityHidden(true)
+    }
+}
+
+/// A step's first-run screen in small, built from first run's own pieces
+/// and still: Home is on screen for long stretches, and first run's
+/// breathing glow and streaming orbs would run the whole time.
+struct HomeHeroStepGraphic: View {
+    let graphic: HomeHeroSteps.Graphic
+
+    var body: some View {
+        let side = HomeHeroSteps.graphicHeight
+        Group {
+            switch graphic {
+            case .tools:
+                // Tools: the watched tools' tiles, a trace leaving them.
+                HStack(spacing: GlassTokens.Space.s2) {
+                    HStack(spacing: -side * 0.25) {
+                        FirstRunToolFace(tool: .claudeCode).frame(width: side, height: side)
+                        FirstRunToolFace(tool: .codex).frame(width: side, height: side)
+                    }
+                    HomeHeroDash()
+                    FirstRunOrb(diameter: 10)
+                }
+            case .traces:
+                // Traces: traces gathered on the ring round the N.
+                ZStack {
+                    Circle()
+                        .stroke(GlassTokens.Color.firstRunRule.color, style: StrokeStyle(lineWidth: 1.5, dash: [2, 3]))
+                    HomeHeroMark(side: side * 0.45)
+                    ForEach([-60.0, 60, 180], id: \.self) { degrees in
+                        FirstRunOrb(diameter: 9)
+                            .offset(x: cos(degrees * .pi / 180) * side / 2, y: sin(degrees * .pi / 180) * side / 2)
+                    }
+                }
+                .frame(width: side, height: side)
+            case .privateAI:
+                // Private AI: a tool's route into the N, dashed until it is
+                // connected.
+                HStack(spacing: GlassTokens.Space.s2) {
+                    FirstRunToolFace(tool: .claudeCode).frame(width: side * 0.86, height: side * 0.86)
+                    HomeHeroDash()
+                    HomeHeroMark(side: side * 0.6)
+                        .frame(width: side, height: side)
+                }
+            }
+        }
+        .frame(height: side, alignment: .leading)
+        .accessibilityHidden(true)
+    }
+}
+
+/// First run's dotted stretch, still to go.
+private struct HomeHeroDash: View {
+    var body: some View {
+        Path { path in
+            path.move(to: CGPoint(x: 0, y: 1))
+            path.addLine(to: CGPoint(x: 12, y: 1))
+        }
+        .stroke(GlassTokens.Color.firstRunRule.color, style: StrokeStyle(lineWidth: 2, lineCap: .butt, dash: [2, 3]))
+        .frame(width: 12, height: 2)
+    }
+}
+
+/// The NEAR mark in first run's blue, over a still glow, as `FirstRunHub`
+/// draws it at rest.
+private struct HomeHeroMark: View {
+    let side: CGFloat
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let glow = GlassTokens.Color.firstRunGlow
+        ZStack {
+            Circle()
+                .fill(RadialGradient(
+                    colors: [glow.opacity(scheme == .dark ? 0.35 : 0.2).color, glow.opacity(0).color],
+                    center: .center, startRadius: 0, endRadius: side))
+                .frame(width: side * 2, height: side * 2)
+            GlassBrandMarkDrawing(fill: glow.color)
+                .frame(width: side, height: side)
+        }
+    }
+}
+
+/// One of the Traces hero's steps, on the hero's ground with no card of its
+/// own: a button, when it opens a tab, that reads its title and line to
+/// VoiceOver as one, its line brightening under the pointer.
 struct HomeHeroStepPanel: View {
     let step: HomeHeroSteps.Step
     @State private var hovering = false
@@ -1804,40 +1980,25 @@ struct HomeHeroStepPanel: View {
 
     private var panel: some View {
         let ink = GlassTokens.Color.heroInk.color
-        let shape = RoundedRectangle(cornerRadius: GlassTier.cardQuiet.radius, style: .continuous)
-        // The disc and icon share the top row, so the title and line take
-        // the panel's whole width: beside the disc they wrapped a word a
-        // line and hyphenated "Contribute" in a narrow window.
+        // The picture sits over the title, so the title and line take the
+        // panel's whole width: beside it they wrapped a word a line in a
+        // narrow window. No inset of its own, so the first step starts
+        // where the hero's title does.
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-            HStack(alignment: .center, spacing: GlassTokens.Space.s2) {
-                Text("\(step.number)")
-                    .glassType(GlassTokens.TypeScale.bodyStrong)
-                    .foregroundStyle(ink)
-                    .frame(width: HomeHeroSteps.disc, height: HomeHeroSteps.disc)
-                    .background(Circle().fill(GlassTokens.Color.heroAccent.color))
-                    .accessibilityHidden(true)
-                Image(systemName: step.systemImage)
-                    .glassGlyph(HomeHeroSteps.icon, weight: .regular)
-                    .foregroundStyle(GlassTokens.Color.heroAccent.color)
-                    // One height for every icon, so the titles line up.
-                    .frame(height: HomeHeroSteps.icon + 6, alignment: .leading)
-                    .accessibilityHidden(true)
-            }
-            .padding(.bottom, GlassTokens.Space.s1)
+            HomeHeroStepGraphic(graphic: step.graphic)
+                .padding(.bottom, GlassTokens.Space.s2)
             Text(step.title)
                 .glassType(GlassTokens.TypeScale.bodyStrong)
                 .foregroundStyle(ink)
                 .fixedSize(horizontal: false, vertical: true)
             Text(step.detail)
                 .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(ink.opacity(0.8))
+                .foregroundStyle(ink.opacity(hovering ? 1 : 0.8))
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(GlassTokens.Space.s3)
+        .padding(.vertical, GlassTokens.Space.s2)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(shape.fill(ink.opacity(hovering ? 0.16 : 0.08)))
-        .contentShape(shape)
-        .overlay(shape.strokeBorder(ink.opacity(0.18), lineWidth: 1))
+        .contentShape(Rectangle())
     }
 }
 
@@ -1866,8 +2027,6 @@ private struct HomeStatTile: View {
     var detailInk: GlassRGBA? = nil
     /// The tile's icon (`HomeStatIcons`); nil draws none.
     var systemImage: String? = nil
-    /// A quieter figure beside the value; nil draws none.
-    var valueAccessory: String? = nil
     /// Opens where the number lives, and the whole tile is the button;
     /// nil for a tile on the page its number lives on (History's).
     var action: (() -> Void)?
@@ -1879,12 +2038,12 @@ private struct HomeStatTile: View {
         if let action {
             Button(action: action) {
                 GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
-                              valueAccessory: valueAccessory, interactive: true, iconPlacement: .watermark)
+                              interactive: true, iconPlacement: .watermark)
             }
             .buttonStyle(GlassPressStyle())
         } else {
             GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
-                          valueAccessory: valueAccessory, iconPlacement: .watermark)
+                          iconPlacement: .watermark)
         }
     }
 }
@@ -1943,10 +2102,13 @@ struct HomeUncontributed: Equatable {
 /// Formatting for Home and History. Pure, so the rules are tested.
 enum HomeFormat {
     /// The Balance tile's figure (owner, 2026-10-19): the amount left when
-    /// the core reads one, else a dash with the core's sentence for why.
-    /// Signed out, the core's short "Sign in required" sits beside the dash
-    /// (`beside`); every other sentence is longer, some carry a recovery,
-    /// and they go under it (`detail`). Never a figure the core did not give.
+    /// the core reads one, else a dash. The core's sentence for why there is
+    /// none ("Sign in required", "Couldn't read your balance. Try again.")
+    /// is not drawn on the tile (owner, 2026-11-02): a sign-in it waits on
+    /// is the Account heading's "No data - Sign in"
+    /// (`accountNeedsSignIn`). The Rust's sentence for an account with no
+    /// ceiling is the answer, not a status, and stays. Never a figure the
+    /// core did not give.
     ///
     /// With a figure, the core's line for the change over the last 24 hours
     /// goes under it (owner, 2026-10-23), up in the status green and down in
@@ -1954,18 +2116,40 @@ enum HomeFormat {
     /// hides the change line; it is never represented as "$0.00".
     static func balance(
         _ status: BalanceStatus, copy: PrivateInferenceCopy, calls: BalanceCalls
-    ) -> (value: String, beside: String?, detail: String?, detailInk: GlassRGBA?) {
-        if let sentence = BalanceSurface.stateLine(status, copy: copy, calls: calls) {
-            return status.state == signedOutBalance ? ("—", sentence, nil, nil) : ("—", nil, sentence, nil)
-        }
-        guard BalanceSurface.showsFigures(status, calls: calls) else { return ("—", nil, nil, nil) }
+    ) -> (value: String, detail: String?, detailInk: GlassRGBA?) {
+        guard BalanceSurface.showsFigures(status, calls: calls) else { return ("—", nil, nil) }
         switch BalanceSurface.remaining(status, copy: copy, calls: calls) {
-        case .unavailable: return ("—", nil, nil, nil)
+        case .unavailable: return ("—", nil, nil)
         case .figure(let amount):
             let change = balanceChange(status)
-            return (amount, nil, change?.text, change?.ink)
-        case .sentence(let sentence): return ("—", nil, sentence, nil)
+            return (amount, change?.text, change?.ink)
+        case .sentence(let sentence): return ("—", sentence, nil)
         }
+    }
+
+    /// Whether the Traces walkthrough stands in for the Traces cards (owner,
+    /// 2026-11-02: "in place of them on first launch or when trace
+    /// directories are not setup/watched"): on the launch that finished
+    /// first run, or once the tree has loaded with no folder watched, none
+    /// at all or every one set to Never. A tree still loading, or one that
+    /// failed, shows the cards, which say unknown in their own way.
+    static func showsTracesWalkthrough(
+        folders: [TracesTree.FolderNode], loaded: Bool, finishedFirstRunThisLaunch: Bool
+    ) -> Bool {
+        finishedFirstRunThisLaunch || (loaded && !folders.contains { $0.mode != .ignore })
+    }
+
+    /// Whether the Account section's figures wait on a sign-in, so its
+    /// heading says "No data - Sign in" (owner, 2026-11-02): the commons'
+    /// points are unknown for want of an account session, or the NEAR AI
+    /// balance would offer a sign-in (`NearAiSignInOffer.balanceOffers`:
+    /// signed out, expired, or a sign-in that failed). A read that failed
+    /// while signed in is not one: signing in again would not fix it.
+    static func accountNeedsSignIn(
+        credit: DaemonData.CommonsCreditSummary?, balanceState: String, renewalFailure: String?, signInFailed: Bool
+    ) -> Bool {
+        credit?.accountSessionRequired == true
+            || NearAiSignInOffer.balanceOffers(state: balanceState, renewalFailure: renewalFailure, failed: signInFailed)
     }
 
     /// The Balance tile's 24-hour change: the core's words, inked by the
@@ -1978,9 +2162,6 @@ enum HomeFormat {
             : (direction > 0 ? GlassTokens.Color.statusOnText : GlassTokens.Color.statusOutsideText)
         return (text, ink)
     }
-
-    /// The daemon's balance label with no NEAR AI sign-in kept here.
-    static let signedOutBalance = "no_session"
 
     /// A card heading from the core's copy: the word, or nil when the copy
     /// has not arrived (or the word is empty), so no card is drawn on a
@@ -2000,14 +2181,6 @@ enum HomeFormat {
     /// arrive.
     static let creditSignInLine: String? = TCConsentCopy.payoutLinkCopyJSON()
         .flatMap(PayoutLinkCopy.decode(fromJSON:))?.sessionEnded
-
-    /// The Credit tile's reason line: `line` when the commons' points are
-    /// unknown because no account session could be used or renewed, else
-    /// nil (the tile keeps its dash, as for every other unknown).
-    static func creditSignIn(_ credit: DaemonData.CommonsCreditSummary?, line: String?) -> String? {
-        guard credit?.accountSessionRequired == true, let line, !line.isEmpty else { return nil }
-        return line
-    }
 
     /// The Credit earned tile's line for the whole account (product owner,
     /// 2026-10-29, #1753): the commons' lifetime points, in the core's
