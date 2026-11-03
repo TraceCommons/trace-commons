@@ -598,39 +598,114 @@ struct StartedCeremony {
 enum CeremonyFor {
     /// Enrolment and renewal: the labels their shells word.
     Enrolment,
-    /// A fresh sign-in's check ([`check_fresh_login`]): a commons that did
-    /// not answer -- no response, a server error, a `429` -- is told apart
-    /// from one that answered, at the start and at the finish.
+    /// A fresh sign-in's check ([`check_fresh_login`]). No start answer
+    /// refuses a login, and at the finish only the commons's uniform `400`
+    /// deny and the revoked-key `409` do. Every other failure is a
+    /// [`FreshCheckFailure`]: no verdict, of a named kind.
     FreshLogin,
 }
 
-/// The fresh-login check's label for a start the commons did not answer.
-pub(super) const FRESH_START_UNANSWERED: &str = "near_ai_enroll_start_failed";
-/// The fresh-login check's label for a start the commons answered with
-/// something unusable: a client error, or a body that does not parse. No
-/// start answer refuses a login -- only the finish can -- and the commons
-/// answers its own rate limit and other transient trouble at the start
-/// with its uniform `400` deny, so the check treats this like a start it
-/// did not answer.
-pub(super) const FRESH_START_REFUSED: &str = "near_ai_enroll_start_refused";
-/// The fresh-login check's label for a finish the commons did not answer,
-/// or answered with something other than a refusal: no response, a server
-/// error, a `429`, a client error that is not its uniform deny (a proxy's
-/// `403` or `408`, say), or a body that does not parse.
-pub(super) const FRESH_FINISH_UNANSWERED: &str = "near_ai_enroll_finish_unanswered";
+/// Why a fresh sign-in's check got no verdict from the commons, carried in
+/// the error so the caller maps each kind exhaustively, never through a
+/// label string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FreshCheckFailure {
+    /// No answer came from the commons: no response (a connect or TLS
+    /// failure, a timeout), or a status that says it is busy or did not
+    /// get there -- a server error other than `511`, or `408`, `421`, `425`,
+    /// `429`, the set #1850 treats as transient. A TLS interception that
+    /// breaks the handshake lands here too: it is not told apart from a
+    /// failed connection.
+    Unanswered,
+    /// An answer came, but not one the commons sends: any other status (a
+    /// redirect, a proxy's or portal's `403` or `404`, the `511` a captive
+    /// portal is meant to send, a `4xx` that is not the commons's own deny),
+    /// or a body that does not parse or is too large. Often a misrouted or
+    /// intercepted address. Classified by the status when one arrived, so a
+    /// busy `503` with an oversized page is still [`Self::Unanswered`].
+    Unusable,
+    /// The commons answered the start with its own uniform `400` deny: it
+    /// was reached, and gave no verdict (not ready, a refused draw, a
+    /// database error). No start answer refuses a login.
+    NoVerdict,
+    /// Nothing was sent: a local failure building the request.
+    Local,
+}
 
-/// Whether the commons did not answer: no response, a server error, or a
-/// rate limit it said was one. A client error with a body, or a body that
-/// does not parse, is an answer.
-fn commons_unanswered(error: &trace_commons_operator_client::Error) -> bool {
+impl std::fmt::Display for FreshCheckFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unanswered => "near_ai_fresh_check_unanswered",
+            Self::Unusable => "near_ai_fresh_check_unusable",
+            Self::NoVerdict => "near_ai_fresh_check_no_verdict",
+            Self::Local => "near_ai_fresh_check_local",
+        })
+    }
+}
+
+impl std::error::Error for FreshCheckFailure {}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CeremonyStage {
+    Start,
+    Finish,
+}
+
+/// A status that says the commons is busy or the request did not get
+/// through: a server error other than `511`, and the retry-later client
+/// statuses #1850 treats as transient.
+fn commons_busy(status: reqwest::StatusCode) -> bool {
+    (status.is_server_error() && status != reqwest::StatusCode::NETWORK_AUTHENTICATION_REQUIRED)
+        || matches!(status.as_u16(), 408 | 421 | 425 | 429)
+}
+
+/// The kind of a fresh check's failure, from the operator client's error
+/// and the status that came with it (`None` when no response arrived).
+fn fresh_failure(
+    error: &trace_commons_operator_client::Error,
+    status: Option<reqwest::StatusCode>,
+    stage: CeremonyStage,
+) -> FreshCheckFailure {
     use trace_commons_operator_client::Error;
     match error {
-        Error::Transport { .. } => true,
-        Error::HttpFailure { status, .. } | Error::ServerLabel { status, .. } => {
-            status.is_server_error() || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
-        }
-        _ => false,
+        Error::BearerMissing { .. }
+        | Error::InvalidEndpoint { .. }
+        | Error::HostNotAllowed { .. }
+        | Error::HeaderMalformed { .. } => FreshCheckFailure::Local,
+        Error::Transport { .. }
+        | Error::ResponseTooLarge { .. }
+        | Error::HttpFailure { .. }
+        | Error::ServerLabel { .. }
+        | Error::MalformedResponse { .. } => match status {
+            None => FreshCheckFailure::Unanswered,
+            Some(status) if commons_busy(status) => FreshCheckFailure::Unanswered,
+            Some(_) if stage == CeremonyStage::Start && is_uniform_finish_deny(error) => {
+                FreshCheckFailure::NoVerdict
+            }
+            Some(_) => FreshCheckFailure::Unusable,
+        },
     }
+}
+
+/// A call's typed result, with the status the commons answered with.
+async fn call_with_status<Resp: serde::de::DeserializeOwned>(
+    commons: &trace_commons_operator_client::Client,
+    path: &str,
+    body: &serde_json::Value,
+) -> (
+    std::result::Result<Resp, trace_commons_operator_client::Error>,
+    Option<reqwest::StatusCode>,
+) {
+    let call = commons
+        .call_json_with_response_header::<serde_json::Value, Resp>(
+            reqwest::Method::POST,
+            path,
+            &[],
+            Some(body),
+            "retry-after",
+        )
+        .await;
+    (call.result, call.status)
 }
 
 /// The ceremony's start and the device proof over its answer.
@@ -643,21 +718,18 @@ async fn start_ceremony(
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(Sha256::digest(verifier.as_bytes()));
 
-    let started: Started = commons
-        .call_json(
-            reqwest::Method::POST,
-            PROVISION_START_PATH,
-            &[],
-            Some(&start_payload(&code_challenge, &identity.public_key_b64)),
-        )
-        .await
-        .map_err(|error| match caller {
-            CeremonyFor::Enrolment => anyhow!("near_ai_enroll_start_failed"),
-            CeremonyFor::FreshLogin if commons_unanswered(&error) => {
-                anyhow!(FRESH_START_UNANSWERED)
-            }
-            CeremonyFor::FreshLogin => anyhow!(FRESH_START_REFUSED),
-        })?;
+    let (started, status) = call_with_status::<Started>(
+        commons,
+        PROVISION_START_PATH,
+        &start_payload(&code_challenge, &identity.public_key_b64),
+    )
+    .await;
+    let started = started.map_err(|error| match caller {
+        CeremonyFor::Enrolment => anyhow!("near_ai_enroll_start_failed"),
+        CeremonyFor::FreshLogin => {
+            anyhow::Error::new(fresh_failure(&error, status, CeremonyStage::Start))
+        }
+    })?;
 
     let device_signature = device_proof_for_ceremony(
         identity,
@@ -705,11 +777,14 @@ async fn finish_ceremony(
     // The commons refuses a finish in exactly two ways: its uniform `400`
     // deny, and the revoked-key `409`. For a fresh sign-in's check, only
     // those are a refusal; any other answer says nothing about the login.
-    let refusal = |error: trace_commons_operator_client::Error| {
+    let refusal = |(error, status): (
+        trace_commons_operator_client::Error,
+        Option<reqwest::StatusCode>,
+    )| {
         let refused =
             is_uniform_finish_deny(&error) || error.server_label() == Some(DEVICE_KEY_REVOKED_WIRE);
         if caller == CeremonyFor::FreshLogin && !refused {
-            anyhow!(FRESH_FINISH_UNANSWERED)
+            anyhow::Error::new(fresh_failure(&error, status, CeremonyStage::Finish))
         } else {
             finish_refusal(&error, "near_ai_enroll_verification_failed")
         }
@@ -725,14 +800,10 @@ async fn finish_ceremony(
         "access_token": access_token,
     });
     let finish = |body: serde_json::Value| async move {
-        commons
-            .call_json::<serde_json::Value, Finished>(
-                reqwest::Method::POST,
-                PROVISION_FINISH_PATH,
-                &[],
-                Some(&body),
-            )
-            .await
+        match call_with_status::<Finished>(commons, PROVISION_FINISH_PATH, &body).await {
+            (Ok(finished), _) => Ok(finished),
+            (Err(error), status) => Err((error, status)),
+        }
     };
     let Some(code) = referral_code else {
         return finish(body).await.map_err(refusal);
@@ -749,7 +820,7 @@ async fn finish_ceremony(
         // it, on the same ceremony and token; the answer then carries no
         // `referral` and the code reads as not applied. A real refusal took
         // the ceremony, so the retry is refused the same way.
-        Err(error) if is_uniform_finish_deny(&error) => finish(body).await,
+        Err((error, _)) if is_uniform_finish_deny(&error) => finish(body).await,
         other => other,
     }
     .map_err(refusal)

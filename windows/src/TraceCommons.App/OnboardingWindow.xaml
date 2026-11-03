@@ -32,7 +32,7 @@
         <StackPanel Spacing="16" Visibility="{x:Bind ViewModel.IsWelcome, Mode=OneWay}">
             <TextBlock Style="{StaticResource TcTitleScreenTextStyle}" Text="Near.ai" />
             <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
-                       Text="Coding agents get better when there are real transcripts to learn from. Almost all of that data is locked inside companies. Trace Commons is a shared pool that isn't." />
+                       Text="Coding agents get better when there are real transcripts to learn from. Almost all of that data is locked inside companies. Your traces go to a shared pool that isn't." />
             <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
                        Text="{x:Bind ViewModel.WelcomeBody}" />
             <!--
@@ -254,7 +254,7 @@
                 screen dishonest in one direction.
             -->
             <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
-                       Text="This means your message text is transmitted to NEAR AI before it reaches Trace Commons. If that scanner is unreachable, nothing is sent at all: traces wait rather than going out unscanned." />
+                       Text="This means your message text is transmitted to NEAR AI before it reaches the server that receives your traces. If that scanner is unreachable, nothing is sent at all: traces wait rather than going out unscanned." />
             <RadioButton x:Name="ScanLocalOnly" GroupName="Scan" Content="Local scrubbing only" IsChecked="True" />
             <RadioButton x:Name="ScanWithNearAi" GroupName="Scan" Content="Local scrubbing + NEAR AI scan"
                          IsChecked="{x:Bind ViewModel.UseNearAiScan, Mode=TwoWay}" />

@@ -48,6 +48,10 @@ struct Commons {
     start_status: Mutex<u16>,
     /// The finish answers 200 with a body that does not parse.
     finish_garbage: Mutex<bool>,
+    /// The finish answers this status, content type and raw body instead.
+    finish_raw: Mutex<Option<(u16, &'static str, String)>>,
+    /// The start answers this status, content type and raw body instead.
+    start_raw: Mutex<Option<(u16, &'static str, String)>>,
     starts: Mutex<u32>,
     finishes: Mutex<u32>,
     refreshes: Mutex<u32>,
@@ -87,6 +91,8 @@ async fn spawn(device_public_key: String) -> Stub {
         refuse_status: Mutex::new(400),
         start_status: Mutex::new(200),
         finish_garbage: Mutex::new(false),
+        finish_raw: Mutex::new(None),
+        start_raw: Mutex::new(None),
         starts: Mutex::new(0),
         finishes: Mutex::new(0),
         refreshes: Mutex::new(0),
@@ -135,12 +141,24 @@ async fn spawn(device_public_key: String) -> Stub {
                     }
                     assert_eq!(body["device_public_key"], state.device_public_key.as_str());
                     *challenge.lock().unwrap() = body["code_challenge"].as_str().unwrap().into();
+                    use axum::response::IntoResponse as _;
+                    if let Some((status, content_type, body)) =
+                        state.start_raw.lock().unwrap().clone()
+                    {
+                        return (
+                            StatusCode::from_u16(status).unwrap(),
+                            [(axum::http::header::CONTENT_TYPE, content_type)],
+                            body,
+                        )
+                            .into_response();
+                    }
                     let status = *state.start_status.lock().unwrap();
                     if status != 200 {
                         return (
                             StatusCode::from_u16(status).unwrap(),
                             Json(json!({"error": "refused"})),
-                        );
+                        )
+                            .into_response();
                     }
                     (
                         StatusCode::OK,
@@ -150,6 +168,7 @@ async fn spawn(device_public_key: String) -> Stub {
                             "expires_at": expires,
                         })),
                     )
+                        .into_response()
                 }
             }),
         )
@@ -180,8 +199,19 @@ async fn spawn(device_public_key: String) -> Stub {
                         .verify(&preimage, &signature)
                         .unwrap();
                     assert!(body["access_token"].as_str().unwrap().starts_with("near-access-"));
+                    use axum::response::IntoResponse as _;
+                    if let Some((status, content_type, body)) =
+                        state.finish_raw.lock().unwrap().clone()
+                    {
+                        return (
+                            StatusCode::from_u16(status).unwrap(),
+                            [(axum::http::header::CONTENT_TYPE, content_type)],
+                            body,
+                        )
+                            .into_response();
+                    }
                     if *state.finish_garbage.lock().unwrap() {
-                        return (StatusCode::OK, Json(json!({"not": "a finish"})));
+                        return (StatusCode::OK, Json(json!({"not": "a finish"}))).into_response();
                     }
                     if *state.refuse.lock().unwrap() {
                         let label = state.refuse_label.lock().unwrap().clone();
@@ -189,7 +219,8 @@ async fn spawn(device_public_key: String) -> Stub {
                         return (
                             StatusCode::from_u16(status).unwrap(),
                             Json(json!({"error": label})),
-                        );
+                        )
+                            .into_response();
                     }
                     let device_key_id =
                         trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
@@ -207,6 +238,7 @@ async fn spawn(device_public_key: String) -> Stub {
                             "anchor_hash": format!("sha256:{}", "cd".repeat(32)),
                         })),
                     )
+                        .into_response()
                 }
             }),
         )
@@ -1475,7 +1507,15 @@ async fn a_signed_out_device_refuses_another_accounts_login() {
 /// closed, still not as another account.
 #[tokio::test]
 async fn a_finish_the_commons_does_not_answer_is_not_another_account() {
-    for status in [503u16, 429] {
+    // A busy maintenance page past the client's size limit is still busy:
+    // classified by its status, not by the failed body read.
+    let fx = Fixture::new(Session::Absent).await;
+    *fx.stub.state.finish_raw.lock().unwrap() = Some((503, "text/html", "x".repeat(300 * 1024)));
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)
+    ));
+    for status in [503u16, 429, 408, 421, 425] {
         let fx = Fixture::new(Session::Absent).await;
         *fx.stub.state.refuse.lock().unwrap() = true;
         *fx.stub.state.refuse_status.lock().unwrap() = status;
@@ -1502,43 +1542,102 @@ async fn a_finish_the_commons_does_not_answer_is_not_another_account() {
     }
 }
 
-/// No start answer refuses a login -- only the finish can -- and the
-/// commons answers its own rate limit at the start with its uniform `400`.
-/// So any start failure leaves a signed-out device's login unchecked,
-/// never refused; a signed-in device fails closed.
+/// No start answer refuses a login -- only the finish can. So any start
+/// failure leaves a signed-out device's login unchecked, never refused, with
+/// the kind of failure; a signed-in device fails closed.
 #[tokio::test]
 async fn a_start_answer_never_refuses_a_login() {
-    for status in [400u16, 503] {
+    let deny = || {
+        serde_json::to_string(&json!({
+            "error": super::super::nearai_onboarding::UNIFORM_FINISH_DENY
+        }))
+        .unwrap()
+    };
+    for (status, content_type, body, reason) in [
+        // #1850's rate limit and an unanswered database.
+        (
+            429u16,
+            "application/json",
+            r#"{"error":"busy"}"#.to_string(),
+            UNCHECKED_COMMONS_UNREACHABLE,
+        ),
+        (
+            503,
+            "application/json",
+            r#"{"error":"busy"}"#.to_string(),
+            UNCHECKED_COMMONS_UNREACHABLE,
+        ),
+        // The commons's own deny: reached, no verdict.
+        (
+            400,
+            "application/json",
+            deny(),
+            UNCHECKED_COMMONS_NO_VERDICT,
+        ),
+        // Answers the commons does not send.
+        (
+            400,
+            "application/json",
+            r#"{"error":"refused"}"#.to_string(),
+            UNCHECKED_COMMONS_ANSWER_UNUSABLE,
+        ),
+        (
+            404,
+            "text/html",
+            "<html><body>Not Found</body></html>".to_string(),
+            UNCHECKED_COMMONS_ANSWER_UNUSABLE,
+        ),
+        (
+            200,
+            "application/json",
+            r#"{"not":"a start"}"#.to_string(),
+            UNCHECKED_COMMONS_ANSWER_UNUSABLE,
+        ),
+    ] {
         let fx = Fixture::new(Session::Absent).await;
-        *fx.stub.state.start_status.lock().unwrap() = status;
+        *fx.stub.state.start_raw.lock().unwrap() = Some((status, content_type, body.clone()));
         assert!(
             matches!(
                 check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
-                FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)
+                FreshLogin::Unchecked(found) if found == reason
             ),
-            "signed out, start {status}"
+            "signed out, start {status} {body}"
         );
         assert_eq!(fx.ceremonies(), (1, 0));
 
         let fx = Fixture::new(Session::Expired).await;
-        *fx.stub.state.start_status.lock().unwrap() = status;
+        *fx.stub.state.start_raw.lock().unwrap() = Some((status, content_type, body.clone()));
         assert!(
             matches!(
                 check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
                 FreshLogin::Unavailable
             ),
-            "signed in, start {status}"
+            "signed in, start {status} {body}"
         );
     }
 }
 
-/// A finish answer that is neither of the commons's two refusals -- a
-/// proxy's or portal's `403`, `404` or `408`, a `200` that does not parse --
+/// A renewal holding the turn past the check's wait: the commons was never
+/// asked, and the reason says so, not that it did not answer.
+#[tokio::test]
+async fn a_turn_held_past_its_wait_is_not_asked() {
+    let fx = Fixture::new(Session::Absent).await;
+    let _held = renewing(fx.shared.store.dir()).lock_owned().await;
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::Unchecked(UNCHECKED_COMMONS_NOT_ASKED)
+    ));
+    assert_eq!(fx.ceremonies(), (0, 0));
+}
+
+/// A finish answer that is neither of the commons's two refusals nor a busy
+/// status -- a proxy's or portal's `403` or `404`, a captive portal's `511`,
+/// a `200` that does not parse --
 /// says nothing about the login: unchecked when signed out, fail closed
 /// when signed in, and never another account.
 #[tokio::test]
 async fn an_unusable_finish_answer_is_not_another_account() {
-    for status in [403u16, 404, 408] {
+    for status in [403u16, 404, 511] {
         for signed_out in [true, false] {
             let fx = Fixture::new(if signed_out {
                 Session::Absent
@@ -1552,7 +1651,10 @@ async fn an_unusable_finish_answer_is_not_another_account() {
             let check = check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await;
             if signed_out {
                 assert!(
-                    matches!(check, FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)),
+                    matches!(
+                        check,
+                        FreshLogin::Unchecked(UNCHECKED_COMMONS_ANSWER_UNUSABLE)
+                    ),
                     "signed out, finish {status}"
                 );
             } else {
@@ -1576,10 +1678,54 @@ async fn an_unusable_finish_answer_is_not_another_account() {
         if signed_out {
             assert!(matches!(
                 check,
-                FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)
+                FreshLogin::Unchecked(UNCHECKED_COMMONS_ANSWER_UNUSABLE)
             ));
         } else {
             assert!(matches!(check, FreshLogin::Unavailable));
+        }
+    }
+    // A proxy's or portal's own page, not the commons's JSON: an HTML or
+    // plain-text 404, and a body past the client's size limit.
+    for (status, content_type, body) in [
+        (
+            404u16,
+            "text/html",
+            "<html><body>Not Found</body></html>".to_string(),
+        ),
+        (404, "text/plain", "Not Found".to_string()),
+        (
+            200,
+            "application/json",
+            format!("\"{}\"", "x".repeat(300 * 1024)),
+        ),
+    ] {
+        // (A busy status with an oversized page is in
+        // `a_finish_the_commons_does_not_answer_is_not_another_account`.)
+        for signed_out in [true, false] {
+            let fx = Fixture::new(if signed_out {
+                Session::Absent
+            } else {
+                Session::Expired
+            })
+            .await;
+            *fx.stub.state.finish_raw.lock().unwrap() = Some((status, content_type, body.clone()));
+            let check = check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await;
+            if signed_out {
+                assert!(
+                    matches!(
+                        check,
+                        FreshLogin::Unchecked(UNCHECKED_COMMONS_ANSWER_UNUSABLE)
+                    ),
+                    "signed out, {status} {content_type} ({} bytes)",
+                    body.len()
+                );
+            } else {
+                assert!(
+                    matches!(check, FreshLogin::Unavailable),
+                    "signed in, {status} {content_type} ({} bytes)",
+                    body.len()
+                );
+            }
         }
     }
 }
@@ -1946,6 +2092,9 @@ mod settle_tests {
             UNCHECKED_ACCOUNT_RECORD_MALFORMED,
             UNCHECKED_COMMONS_ADDRESS_REFUSED,
             UNCHECKED_COMMONS_UNREACHABLE,
+            UNCHECKED_COMMONS_ANSWER_UNUSABLE,
+            UNCHECKED_COMMONS_NO_VERDICT,
+            UNCHECKED_COMMONS_NOT_ASKED,
         ] {
             let fx = Fixture::new(Session::Expired).await;
             let before = (fx.account_record(), fx.renewal_log_text());
