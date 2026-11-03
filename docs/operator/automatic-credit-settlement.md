@@ -5,6 +5,25 @@ payout rail converts finalized awards to NEAR AI credit and pays a confirmed
 organization. Neither operation requires enabling the older on-chain NEAR
 outbox or `TRACE_COMMONS_NEAR_SETTLEMENT_MODE`.
 
+## Before production payouts
+
+Do not turn the `near_ai` payout rail to `live` for production until this
+is done:
+
+- **Legacy and pilot accounts need an anchor a payout proof can match.**
+  Since #1841, a payout link is proved only against the account's own NEAR
+  AI login: a `near_ai_login` anchor, or, for a wallet-origin `near-`
+  account, its wallet anchor through the NEAR AI wallet sign-in.
+  Principal-linked legacy and pilot accounts (tenants outside `near-` and
+  `nearai-`) have neither, so they can link nothing. Migrating the
+  non-pooled ones is fix F11 in
+  [the one-connected-account spec](../superpowers/specs/2026-11-02-one-connected-account-design.md),
+  which names the two candidate designs. Pooled Devfolio tenants
+  (`trace_legacy_invite_pooled_tenants`) are excluded from payouts by
+  design; they need no migration.
+
+## Scheduling
+
 The scheduler defaults to its existing `tenant` scope, authenticated by
 `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN`. That token covers one tenant.
 Deployment operators can explicitly select `all_tenants`, which uses no bearer
