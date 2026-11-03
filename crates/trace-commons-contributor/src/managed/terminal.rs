@@ -564,35 +564,159 @@ fn warp_tab_configs() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".warp").join("tab_configs"))
 }
 
-/// Write `tab`, owner-only, and open it in Warp. The file holds a
-/// single-use launch ticket, so it is removed a minute later, once Warp
-/// has read it, whether or not the launch went ahead.
+/// How long a Tab Config may stay on disk when its launch is never
+/// redeemed: the ticket's life, so a slow Warp start can still find it.
 #[cfg(target_os = "macos")]
-fn open_warp_tab(tab: &WarpTab) -> Result<(), ManagedError> {
+fn warp_tab_backstop() -> std::time::Duration {
+    super::sessions::TICKET_LIFE
+        .to_std()
+        .unwrap_or(std::time::Duration::from_secs(120))
+}
+
+/// The Tab Config files of launches not yet redeemed, by session. Each
+/// holds a single-use ticket, so a redeem removes its own launch's file
+/// ([`remove_launch_files`]) and the backstop removes it otherwise. Unix
+/// only: the files are written owner-only.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+static WARP_TAB_FILES: std::sync::Mutex<Option<std::collections::HashMap<Uuid, PathBuf>>> =
+    std::sync::Mutex::new(None);
+
+/// The record, usable after a panic elsewhere: the map is never left
+/// half-updated, so a poisoned lock is still safe to use.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn with_tab_files<R>(f: impl FnOnce(&mut std::collections::HashMap<Uuid, PathBuf>) -> R) -> R {
+    let mut guard = WARP_TAB_FILES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    f(guard.get_or_insert_with(Default::default))
+}
+
+/// Remove one Tab Config file this module wrote. A file already gone is
+/// fine. `remove_file` unlinks a symlink itself and never follows it.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn remove_tab_file(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+/// Remove the Tab Config `session`'s launch wrote, now that its ticket
+/// can no longer be used. Only the file recorded for that session is
+/// touched.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+pub fn remove_launch_files(session: Uuid) {
+    if let Some(path) = with_tab_files(|files| files.remove(&session)) {
+        remove_tab_file(&path);
+    }
+}
+
+/// Only macOS writes Tab Configs.
+#[cfg(not(any(target_os = "macos", all(test, unix))))]
+pub fn remove_launch_files(_session: Uuid) {}
+
+/// Record a file as `session`'s Tab Config, as a launch does.
+#[cfg(all(test, unix))]
+pub(crate) fn hold_launch_file(session: Uuid, path: PathBuf) {
+    with_tab_files(|files| files.insert(session, path));
+}
+
+/// Remove `path` after `after` unless its launch already cleared it.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn remove_after(session: Uuid, path: PathBuf, after: std::time::Duration) {
+    let _ = std::thread::Builder::new()
+        .name("warp-tab-config".into())
+        .spawn(move || {
+            std::thread::sleep(after);
+            let ours = with_tab_files(|files| {
+                if files.get(&session) == Some(&path) {
+                    files.remove(&session);
+                    true
+                } else {
+                    false
+                }
+            });
+            if ours {
+                remove_tab_file(&path);
+            }
+        });
+}
+
+/// Write `tab` into `folder`, owner-only, record it against its session and
+/// start the backstop removal. Returns the file's path.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn write_warp_tab(
+    folder: &Path,
+    tab: &WarpTab,
+    session: Uuid,
+    backstop: std::time::Duration,
+) -> Result<PathBuf, ManagedError> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let folder = warp_tab_configs().ok_or(ManagedError::LaunchUnknown)?;
-    std::fs::create_dir_all(&folder).map_err(|_| ManagedError::LaunchUnknown)?;
+    std::fs::create_dir_all(folder).map_err(|_| ManagedError::LaunchUnknown)?;
     let path = folder.join(format!("{}.toml", tab.name));
-    let written = std::fs::OpenOptions::new()
+    // `create_new`: a failure to open means something else is at the path,
+    // which is not ours to remove. Only a file this call made is removed.
+    let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&path)
-        .and_then(|mut file| file.write_all(tab.contents.as_bytes()));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&path);
+        .map_err(|_| ManagedError::LaunchUnknown)?;
+    if file.write_all(tab.contents.as_bytes()).is_err() {
+        drop(file);
+        remove_tab_file(&path);
         return Err(ManagedError::LaunchUnknown);
     }
-    let _ = std::thread::Builder::new()
-        .name("warp-tab-config".into())
-        .spawn({
-            let path = path.clone();
-            move || {
-                std::thread::sleep(std::time::Duration::from_secs(60));
-                let _ = std::fs::remove_file(path);
-            }
-        });
+    with_tab_files(|files| files.insert(session, path.clone()));
+    remove_after(session, path.clone(), backstop);
+    Ok(path)
+}
+
+/// Remove the `near-ai-*.toml` regular files in `folder` older than `age`:
+/// the leftovers of a daemon that quit before their launch was redeemed.
+/// A symlink or any other name is left alone.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn sweep_stale_tab_configs(folder: &Path, age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !(name.starts_with("near-ai-") && name.ends_with(".toml")) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        let stale = meta.is_file()
+            && meta
+                .modified()
+                .ok()
+                .and_then(|m| m.elapsed().ok())
+                .is_some_and(|elapsed| elapsed >= age);
+        if stale {
+            remove_tab_file(&entry.path());
+        }
+    }
+}
+
+/// At daemon start: sweep Tab Configs an earlier run left behind.
+#[cfg(target_os = "macos")]
+pub fn sweep_warp_tab_configs() {
+    if let Some(folder) = warp_tab_configs() {
+        sweep_stale_tab_configs(&folder, warp_tab_backstop());
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn sweep_warp_tab_configs() {}
+
+/// Write `tab` and open it in Warp. The file holds a single-use launch
+/// ticket, so the redeem removes it, and a minute later the backstop does
+/// whether or not the launch went ahead.
+#[cfg(target_os = "macos")]
+fn open_warp_tab(tab: &WarpTab, session: Uuid) -> Result<(), ManagedError> {
+    let folder = warp_tab_configs().ok_or(ManagedError::LaunchUnknown)?;
+    write_warp_tab(&folder, tab, session, warp_tab_backstop())?;
     let mut open = std::process::Command::new("/usr/bin/open");
     open.arg(tab.url());
     match super::profiles::bounded_output(open) {
@@ -638,7 +762,7 @@ fn launch_macos(
 /// Run a macOS launch: `osascript` with the script's lines, or `open` with
 /// the plan's argv. Both return as soon as the app has the command.
 #[cfg(target_os = "macos")]
-fn run_macos(how: MacosLaunch) -> Result<Vec<u8>, ManagedError> {
+fn run_macos(how: MacosLaunch, session: Uuid) -> Result<Vec<u8>, ManagedError> {
     let command = match how {
         MacosLaunch::Script(lines) => {
             let mut script = std::process::Command::new("/usr/bin/osascript");
@@ -652,7 +776,7 @@ fn run_macos(how: MacosLaunch) -> Result<Vec<u8>, ManagedError> {
             open.args(&plan.args);
             open
         }
-        MacosLaunch::Warp(tab) => return open_warp_tab(&tab).map(|()| Vec::new()),
+        MacosLaunch::Warp(tab) => return open_warp_tab(&tab, session).map(|()| Vec::new()),
     };
     let output = super::profiles::bounded_output(command)?;
     if output.status.success() {
@@ -1075,7 +1199,8 @@ pub fn launch_tool_setup(
             &command,
             setup_argv(body)?,
             None,
-            run_macos,
+            // A setup holds no launch ticket, so no redeem removes its file.
+            |how| run_macos(how, Uuid::nil()),
         )?;
         Ok(())
     }
@@ -1113,7 +1238,9 @@ pub fn launch(
         let command = shell_command(&helper, config, session, ticket)?;
         let mut argv = vec![helper.into_os_string()];
         argv.extend(helper_args(config, session, ticket));
-        launch_macos(choice, installed, &command, argv, Some(cwd), run_macos)
+        launch_macos(choice, installed, &command, argv, Some(cwd), |how| {
+            run_macos(how, session)
+        })
     }
     #[cfg(any(windows, target_os = "linux"))]
     {
@@ -1242,6 +1369,135 @@ mod tests {
             Err(ManagedError::TerminalNotFound),
             "not installed"
         );
+    }
+
+    // Owner, 2026-11-03: the Tab Config holds the launch ticket, so the
+    // redeem removes that launch's file; the backstop removes it when the
+    // launch is never redeemed. The tests below hold that.
+    #[cfg(unix)]
+    fn warp_tab(command: &str) -> WarpTab {
+        WarpTab::new(command, Some(Path::new("/tmp/p"))).unwrap()
+    }
+
+    #[cfg(unix)]
+    const LONG: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    #[cfg(unix)]
+    #[test]
+    fn a_redeem_removes_its_own_launchs_tab_config_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mine, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let a = write_warp_tab(dir.path(), &warp_tab("a"), mine, LONG).unwrap();
+        let b = write_warp_tab(dir.path(), &warp_tab("b"), other, LONG).unwrap();
+        assert!(a.exists() && b.exists());
+        remove_launch_files(mine);
+        assert!(!a.exists(), "the redeemed launch's file is gone");
+        assert!(b.exists(), "another launch's file is left");
+        remove_launch_files(mine);
+        remove_launch_files(other);
+        assert!(!b.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tab_config_already_gone_is_fine() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Uuid::new_v4();
+        let path = write_warp_tab(dir.path(), &warp_tab("a"), session, LONG).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        remove_launch_files(session);
+        remove_launch_files(session);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_tab_config_never_follows_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Uuid::new_v4();
+        let path = write_warp_tab(dir.path(), &warp_tab("a"), session, LONG).unwrap();
+        let target = dir.path().join("precious");
+        std::fs::write(&target, "keep").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        remove_launch_files(session);
+        assert!(path.symlink_metadata().is_err(), "the link is removed");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_is_not_ours_is_never_removed_by_a_failed_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let tab = warp_tab("a");
+        let theirs = dir.path().join(format!("{}.toml", tab.name));
+        std::fs::write(&theirs, "theirs").unwrap();
+        let session = Uuid::new_v4();
+        assert_eq!(
+            write_warp_tab(dir.path(), &tab, session, LONG),
+            Err(ManagedError::LaunchUnknown)
+        );
+        assert_eq!(std::fs::read_to_string(&theirs).unwrap(), "theirs");
+        remove_launch_files(session);
+        assert!(theirs.exists(), "nothing was recorded for it");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unredeemed_tab_config_is_removed_by_the_backstop() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Uuid::new_v4();
+        let path = write_warp_tab(
+            dir.path(),
+            &warp_tab("a"),
+            session,
+            std::time::Duration::from_millis(50),
+        )
+        .unwrap();
+        for _ in 0..200 {
+            if !path.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(!path.exists());
+        assert!(with_tab_files(|files| !files.contains_key(&session)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_poisoned_record_still_removes_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Uuid::new_v4();
+        let path = write_warp_tab(dir.path(), &warp_tab("a"), session, LONG).unwrap();
+        let _ = std::thread::spawn(|| {
+            let _guard = WARP_TAB_FILES.lock().unwrap();
+            panic!("poison the record");
+        })
+        .join();
+        remove_launch_files(session);
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_startup_sweep_removes_only_old_near_ai_regular_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("near-ai-old.toml");
+        let other = dir.path().join("mine.toml");
+        let link = dir.path().join("near-ai-link.toml");
+        let target = dir.path().join("precious");
+        for f in [&old, &other, &target] {
+            std::fs::write(f, "x").unwrap();
+        }
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        sweep_stale_tab_configs(dir.path(), LONG);
+        assert!(old.exists(), "too new to be stale");
+        sweep_stale_tab_configs(dir.path(), std::time::Duration::from_millis(10));
+        assert!(!old.exists());
+        assert!(other.exists(), "not a near-ai file");
+        assert!(link.symlink_metadata().is_ok(), "a symlink is left alone");
+        assert!(target.exists());
     }
 
     #[test]
