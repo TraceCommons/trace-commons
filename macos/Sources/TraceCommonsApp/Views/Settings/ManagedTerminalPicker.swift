@@ -31,12 +31,11 @@ struct ManagedTerminalPicker: View {
     }
 }
 
-/// "Open sessions in", asked in a launch dialog until the person has chosen
-/// a terminal (`ManagedSnapshot.asksForTerminal`): the same label and the
-/// same installed apps as Settings, starting on the current one. Nothing is
-/// written here; the dialog's Open saves the choice before the launch, so
-/// it is remembered and the row is not drawn again. Settings still changes
-/// it later.
+/// "Open sessions in", asked in a launch dialog on every launch while more
+/// than one terminal is installed (`ManagedSnapshot.asksForTerminal`): the
+/// same label and the same installed apps as Settings, starting on the
+/// current one. Nothing is written here; the dialog's Open saves the pick
+/// before the launch, so it becomes the default. Settings still changes it.
 struct ManagedLaunchTerminalRow: View {
     let snapshot: ManagedSnapshot
     @Binding var selection: String?

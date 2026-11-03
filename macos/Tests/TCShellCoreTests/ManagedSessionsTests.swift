@@ -20,10 +20,11 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(snapshot.terminalChoices, [ManagedTerminalChoice(id: "terminal", name: "Terminal"), ManagedTerminalChoice(id: "ghostty", name: "Ghostty")])
     }
 
-    /// The launch dialog asks for a terminal until one is chosen, only with
-    /// more than one installed, and never for an older daemon that does not
-    /// say; it starts on the current app when installed, else the first.
-    func testTheLaunchDialogAsksForATerminalUntilOneIsChosen() throws {
+    /// The launch dialog asks for a terminal on every launch, chosen or not,
+    /// only with more than one installed, and never for an older daemon that
+    /// does not say; it starts on the current app when installed, else the
+    /// first. What it picks is saved as the default.
+    func testTheLaunchDialogAsksForATerminalOnEveryLaunch() throws {
         func snapshot(chosen: String, current: String, choices: [String]) throws -> ManagedSnapshot {
             let list = choices.map { #"{"id":"\#($0)","name":"\#($0)"}"# }.joined(separator: ",")
             let json = #"{"revision":2,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_current":\#(current),\#(chosen)"terminal_choices":[\#(list)]}}"#
@@ -32,7 +33,14 @@ final class ManagedSessionsTests: XCTestCase {
         let asking = try snapshot(chosen: #""terminal_chosen":false,"#, current: #""ghostty""#, choices: ["terminal", "ghostty"])
         XCTAssertTrue(asking.asksForTerminal)
         XCTAssertEqual(asking.proposedTerminal, "ghostty")
-        XCTAssertFalse(try snapshot(chosen: #""terminal_chosen":true,"#, current: #""ghostty""#, choices: ["terminal", "ghostty"]).asksForTerminal)
+        let chosen = try snapshot(chosen: #""terminal_chosen":true,"#, current: #""ghostty""#, choices: ["terminal", "ghostty"])
+        XCTAssertTrue(chosen.asksForTerminal)
+        XCTAssertEqual(chosen.proposedTerminal, "ghostty")
+        XCTAssertFalse(try snapshot(chosen: #""terminal_chosen":true,"#, current: #""terminal""#, choices: ["terminal"]).asksForTerminal)
+        XCTAssertEqual(chosen.terminalToSave(picked: "terminal"), "terminal")
+        XCTAssertEqual(asking.terminalToSave(picked: "ghostty"), "ghostty")
+        XCTAssertNil(chosen.terminalToSave(picked: nil))
+        XCTAssertNil(try snapshot(chosen: #""terminal_chosen":true,"#, current: #""terminal""#, choices: ["terminal"]).terminalToSave(picked: "terminal"))
         XCTAssertFalse(try snapshot(chosen: "", current: #""ghostty""#, choices: ["terminal", "ghostty"]).asksForTerminal)
         XCTAssertFalse(try snapshot(chosen: #""terminal_chosen":false,"#, current: #""terminal""#, choices: ["terminal"]).asksForTerminal)
         let missing = try snapshot(chosen: #""terminal_chosen":false,"#, current: "null", choices: ["kitty", "wezterm"])
