@@ -57,7 +57,7 @@ async fn exercise_terminal_exit(hangup: bool, setup_hangup: bool) {
     let project = home.path().join("project with spaces");
     std::fs::create_dir(&project).unwrap();
     let native = bin.join("claude");
-    std::fs::write(&native, "#!/bin/sh\ncase \"$1\" in\n--version) if [ \"$FIXTURE_SLOW_SETUP\" = 1 ]; then printf '%s' \"$PPID\" > setup-helper; sleep 0.5; fi; echo '2.1.289 (Claude Code)'; exit 0;;\nauth) echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'; exit 0;;\nesac\nprintf '%s\\n' \"$@\" > received-args\nprintf '%s' \"$CLAUDE_CONFIG_DIR\" > profile-root\nprintf '%s' \"$PPID\" > helper-pid\nwhile [ ! -f finish ]; do sleep 0.05; done\nexit 7\n").unwrap();
+    std::fs::write(&native, "#!/bin/sh\ncase \"$1\" in\n--version) if [ \"$FIXTURE_SLOW_SETUP\" = 1 ]; then printf '%s' \"$PPID\" > setup-helper; n=0; while [ ! -f setup-release ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done; fi; echo '2.1.289 (Claude Code)'; exit 0;;\nauth) echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'; exit 0;;\nesac\nprintf '%s\\n' \"$@\" > received-args\nprintf '%s' \"$CLAUDE_CONFIG_DIR\" > profile-root\nprintf '%s' \"$PPID\" > helper-pid\nwhile [ ! -f finish ]; do sleep 0.05; done\nexit 7\n").unwrap();
     std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut child = Command::new("python3")
         .args([
@@ -90,7 +90,9 @@ async fn exercise_terminal_exit(hangup: bool, setup_hangup: bool) {
             assert!(Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let pid = std::fs::read_to_string(marker).unwrap();
+        let pid = std::fs::read_to_string(&marker).unwrap();
+        // The fixture holds setup open until released, so the process is
+        // alive when the hangup lands, however slow the machine is.
         assert!(
             Command::new("/bin/kill")
                 .args(["-HUP", pid.trim()])
@@ -98,6 +100,7 @@ async fn exercise_terminal_exit(hangup: bool, setup_hangup: bool) {
                 .unwrap()
                 .success()
         );
+        std::fs::write(marker.with_file_name("setup-release"), "").unwrap();
         while child.try_wait().unwrap().is_none() {
             assert!(Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(20)).await;
