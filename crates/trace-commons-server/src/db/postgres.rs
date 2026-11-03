@@ -2066,6 +2066,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "legacy_payout_carry_events",
         include_str!("../../../../migrations/V148__legacy_payout_carry_events.sql"),
     ),
+    // V149: an ingest login that is also the migrator (staging) gets EXECUTE
+    // on the seven guard-owned functions granted to trace_ingest_runtime
+    // alone; without it every live payout pass ended payout_store_failed.
+    (
+        149,
+        "owner_runtime_function_grants",
+        include_str!("../../../../migrations/V149__owner_runtime_function_grants.sql"),
+    ),
 ];
 
 /// The body of `create_or_reuse_account`, inside a transaction already under

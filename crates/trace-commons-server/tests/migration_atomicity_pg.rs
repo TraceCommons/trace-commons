@@ -20,6 +20,9 @@
 //! Everything here lives in a scratch schema of its own and is dropped again,
 //! so the shared test database keeps whatever migration state it already had.
 
+#[path = "support/near_ai_payout_mock.rs"]
+#[allow(dead_code)]
+mod near_ai_payout_mock;
 #[path = "support/pilot_runtime_grants.rs"]
 mod pilot_runtime_grants;
 
@@ -3458,4 +3461,189 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
         !role_exists(&url, OWNER).await,
         "{OWNER} is per server and must not outlive the test (#1335)"
     );
+}
+
+/// Staging's shape (deploy/staging-gcp/README.md): one non-superuser login
+/// owns the database and every table, migrates it, and is the ingest
+/// runtime; it is not a member of `trace_ingest_runtime`, and holds the two
+/// payout roles exactly as the README grants them. A live payout pass over a
+/// NEAR AI tenant with a live link must complete. After #1879 it ended
+/// `payout_store_failed` on staging: the account standing calls V146/V148
+/// definer functions whose EXECUTE was granted to `trace_ingest_runtime`
+/// only.
+#[tokio::test]
+async fn an_owner_run_deployment_completes_a_live_payout_pass() {
+    use std::sync::Arc;
+    use trace_commons_gate_api::pipeline::AtomicUnits;
+    use trace_commons_gate_api::{PayoutRail, RecipientKind};
+    use trace_commons_server::db::{
+        PayoutLinkInsert, PayoutLinkState, PayoutLinkWrite, PayoutStore, SealedRecipient,
+    };
+    use trace_commons_server::payout_pass::{
+        PayoutPass, PayoutPassOutcome, PayoutPassSettings, PayoutRecipientOpener,
+        UnconfiguredRecipientOpener,
+    };
+    use trace_commons_server::payout_rate::PayoutMode;
+    use uuid::Uuid;
+
+    let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+    else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return;
+    };
+    // The pass logs a store error's class; show it when this fails.
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let _turn = VIRGIN_DATABASE.lock().await;
+
+    const OWNER: &str = "trace_payout_owner_probe";
+    const OWNER_DB: &str = "trace_payout_owner_probe_db";
+    let probe = ProbeRole::claim(&url, OWNER, &[OWNER_DB]).await;
+    let admin = owned_database(&url, OWNER, OWNER_DB, Standing::Creator).await;
+    let owner_url = with_user(&with_database(&url, OWNER_DB), OWNER, "probe");
+    let backend = Arc::new(
+        PgBackend::new(&DatabaseConfig {
+            url: SecretString::from(owner_url.clone()),
+            pool_size: 4,
+            ssl_mode: SslMode::Prefer,
+            login_resolver_url: None,
+            gate_driver_url: None,
+            pii_backstop_driver_url: None,
+            invite_registry_url: None,
+        })
+        .await
+        .expect("owner backend"),
+    );
+    backend.run_migrations().await.expect("the owner migrates");
+    // The README's payout grant, as the superuser made it on staging.
+    admin
+        .batch_execute(&format!(
+            "GRANT trace_payout_enumerator, trace_payout_config_writer
+                 TO {OWNER} WITH INHERIT FALSE, SET TRUE;"
+        ))
+        .await
+        .expect("grant the payout roles like the staging README");
+    // A role's creator holds ADMIN on it with no inheritance (PostgreSQL
+    // 16), which `MEMBER` counts; privileges reach a login only through
+    // `USAGE`, and staging's `app` has none.
+    let inherits: bool = admin
+        .query_one(
+            "SELECT pg_has_role($1, 'trace_ingest_runtime', 'USAGE')",
+            &[&OWNER],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        !inherits,
+        "staging's login does not inherit trace_ingest_runtime"
+    );
+    // Every function granted to the runtime role is one the runtime calls,
+    // so a login that serves without that role must hold EXECUTE as well.
+    // `pg_proc` is per database: ask in the migrated one.
+    let catalog = connect(&with_database(&url, OWNER_DB)).await;
+    let unreachable: Vec<String> = catalog
+        .query(
+            "SELECT p.oid::regprocedure::text
+               FROM pg_catalog.pg_proc p, aclexplode(p.proacl) a
+              WHERE a.grantee = 'trace_ingest_runtime'::regrole
+                AND a.privilege_type = 'EXECUTE'
+                AND NOT has_function_privilege($1, p.oid, 'EXECUTE')
+              ORDER BY 1",
+            &[&OWNER],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert!(
+        unreachable.is_empty(),
+        "the owner-runtime login cannot execute: {unreachable:#?}"
+    );
+
+    // A NEAR AI tenant: an account with a recorded login and a live link.
+    let tenant = format!("nearai-{}", "ab".repeat(32));
+    let account = Uuid::new_v4();
+    let seed = connect(&owner_url).await;
+    seed.batch_execute(&format!(
+        "BEGIN;
+         SELECT set_config('trace_commons.trace_tenant_id', '{tenant}', true);
+         INSERT INTO trace_tenants (tenant_id) VALUES ('{tenant}');
+         INSERT INTO trace_accounts (tenant_id, account_id) VALUES ('{tenant}', '{account}');
+         INSERT INTO trace_near_account_anchors
+             (tenant_id, account_id, anchor_hash, sealed_account_name, index_pepper_ref,
+              account_name_key_ref, identity_source, auth_provider)
+         VALUES ('{tenant}', '{account}', 'sha256:{h}', '{{}}', 'p', 'k', 'near_ai_login', 'github');
+         COMMIT;",
+        h = "c".repeat(64)
+    ))
+    .await
+    .expect("seed the NEAR AI account");
+    let mock = near_ai_payout_mock::Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let link_id = Uuid::new_v4();
+    let digest = |label: &str| {
+        use sha2::{Digest, Sha256};
+        format!("sha256:{:x}", Sha256::digest(label.as_bytes()))
+    };
+    assert_eq!(
+        backend
+            .insert_payout_link(
+                &tenant,
+                &PayoutLinkWrite {
+                    account_id: account,
+                    rail_id: rail.descriptor().rail_id.clone(),
+                    link_id,
+                    recipient_kind: RecipientKind::new("near_ai_org").unwrap(),
+                    recipient: SealedRecipient {
+                        sealed: serde_json::json!({"v": 1}),
+                        recipient_index: digest("index"),
+                        recipient_key_ref: "key-test-1".into(),
+                        index_pepper_ref: "pepper-test-1".into(),
+                        subject_index: digest("subject"),
+                        recipient_ref: None,
+                    },
+                    program: rail.program_for_link(link_id),
+                    state: PayoutLinkState::Active,
+                    actor_ref_hash: digest("actor"),
+                },
+            )
+            .await
+            .expect("insert the link"),
+        PayoutLinkInsert::Inserted
+    );
+
+    let report = PayoutPass::new(
+        rail,
+        backend.clone() as Arc<dyn PayoutStore>,
+        backend.clone() as Arc<dyn Database>,
+        Arc::new(UnconfiguredRecipientOpener) as Arc<dyn PayoutRecipientOpener>,
+        PayoutPassSettings {
+            mode: PayoutMode::Live,
+            account_ceiling: AtomicUnits::from_raw(1_000_000),
+            local_send_limit: 10,
+            rate_in_force: true,
+        },
+    )
+    .run_once()
+    .await;
+
+    drop(seed);
+    drop(catalog);
+    drop(backend);
+    let dropped = admin
+        .execute(
+            &format!("DROP DATABASE IF EXISTS {OWNER_DB} WITH (FORCE)"),
+            &[],
+        )
+        .await;
+    assert_eq!(
+        report.outcome,
+        PayoutPassOutcome::Completed,
+        "an owner-run deployment's live pass must complete: {report:?}"
+    );
+    dropped.expect("drop the owner-probe database");
+    probe.release().await;
 }
