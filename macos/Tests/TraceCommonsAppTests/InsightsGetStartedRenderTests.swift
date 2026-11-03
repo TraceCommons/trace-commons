@@ -88,7 +88,9 @@ final class InsightsGetStartedRenderTests: XCTestCase {
                     "analytics_sample_banner", "analytics_sample_banner_detail"] {
             XCTAssertFalse((copy[key] ?? "").isEmpty, key)
         }
-        XCTAssertTrue(copy["analytics_sample_banner"]?.contains("sample data") == true)
+        XCTAssertEqual(copy["analytics_sample_banner"], "Sample data shown below")
+        XCTAssertEqual(copy["analytics_sample_banner_detail"],
+                       "Your own data will replace it once trace activity is provided.")
     }
 
     /// The owner's 2026-11-02 pass: no icon beside the title, each step one

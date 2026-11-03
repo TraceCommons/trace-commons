@@ -980,11 +980,10 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // The API-price note when only one tool was used this week.
     ("analytics_tile_api_prices_claude", "Claude at API prices"),
     ("analytics_tile_api_prices_codex", "Codex at API prices"),
-    // The sample data card, reworded 2026-11-02 with the card above it.
-    // DRAFT, NEEDS APPROVAL.
-    ("analytics_sample_banner", "This is sample data"),
+    // The sample data card, in the product owner's own words (2026-11-02).
+    ("analytics_sample_banner", "Sample data shown below"),
     (
         "analytics_sample_banner_detail",
-        "Your own numbers will replace it as your traces come in.",
+        "Your own data will replace it once trace activity is provided.",
     ),
 ];

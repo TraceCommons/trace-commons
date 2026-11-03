@@ -118,7 +118,7 @@ struct InsightsGetStartedCard: View {
     }
 }
 
-/// "This is sample data", full width above the sample: a tinted card with
+/// "Sample data shown below", full width above the sample: a tinted card with
 /// a test tube for "sample", and no border (product owner, 2026-11-02).
 struct InsightsSampleBanner: View {
     let copy: [String: String]
