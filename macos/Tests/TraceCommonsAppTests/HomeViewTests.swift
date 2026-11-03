@@ -221,16 +221,17 @@ final class HomeViewTests: XCTestCase {
     }
 
     /// The heading's words: the core's "No data", a dash, then the managed
-    /// copy's "Sign in" as a link that begins the NEAR AI sign-in with the
-    /// same logins as the Private AI section's button; the heading draws
-    /// it just after its title.
+    /// copy's "Sign in" as a link that begins the same NEAR AI sign-in as
+    /// the Private AI section's button (the browser lists the logins,
+    /// #1835); the heading draws it just after its title.
     func test_theAccountHeadingSaysNoDataAndLinksTheSignIn() throws {
         XCTAssertEqual(try XCTUnwrap(MonitorWords.table).homeHistory.accountNoData, "No data")
         let home = try Self.flat("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains("HomeSection(words?.sectionAccount, accessory: accountSignIn) {"))
         XCTAssertTrue(home.contains("guard let noData = HomeFormat.cardHeading(words?.accountNoData), "
             + "let signIn = HomeFormat.cardHeading(model.managedText(\"sign_in_near_ai\")),"))
-        XCTAssertTrue(home.contains("NearAiSignIn.begin(model, provider: provider, openURL: openURL)"))
+        XCTAssertTrue(home.contains("NearAiSignIn.begin(model, openURL: openURL)"))
+        XCTAssertFalse(home.contains("NearAiSignInChoice"), "no login menu on Home (#1835)")
         XCTAssertTrue(home.contains("style: GlassButtonStyle(.link), start: start)"))
         XCTAssertTrue(home.contains("HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s5) { "
             + "Text(title) .glassType(Self.titleType) .foregroundStyle(GlassColor.textPrimary) "
