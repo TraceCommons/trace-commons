@@ -1125,8 +1125,12 @@ fn windows_script() -> Vec<String> {
         "repeat with w in windows".into(),
         "try".into(),
         "set line_ to (id of w as text)".into(),
-        "repeat with y in (tty of every tab of w)".into(),
-        "set line_ to line_ & sep & y".into(),
+        // Read into a list first: looping over `tty of every tab of w`
+        // directly hands back references that do not turn into text, and
+        // the `try` then drops every window that has a tab.
+        "set ttys to tty of every tab of w".into(),
+        "repeat with y in ttys".into(),
+        "set line_ to line_ & sep & (y as text)".into(),
         "end repeat".into(),
         "set out to out & line_ & linefeed".into(),
         "end try".into(),
@@ -1677,7 +1681,8 @@ mod tests {
             || l.contains("keystroke")
             || l.contains("contents")
             || l.contains("System Events")));
-        assert!(lines.contains(&"repeat with y in (tty of every tab of w)".to_string()));
+        assert!(lines.contains(&"set ttys to tty of every tab of w".to_string()));
+        assert!(!lines.iter().any(|l| l.contains("in (tty of every tab")));
         assert_eq!(
             parse_windows(b"12\t/dev/ttys001\t/dev/ttys002\n13\n14\t/dev/ttys009\n"),
             vec![

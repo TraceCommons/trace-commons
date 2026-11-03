@@ -211,10 +211,15 @@ final class AppModel: ObservableObject {
                     }
                     // A window picked in the launch dialog is sent by its
                     // session (`beside`); the daemon finds the window. Start
-                    // again and Resume always open a new window (owner,
-                    // 2026-11-02, #1853 decision (b)).
+                    // again and Resume open as a tab in the newest window,
+                    // as the dialog does by default (owner, 2026-11-03),
+                    // and never type into the ended tab (#1853).
                     var launch: [String: Any] = ["session_id": session, "ticket": ticket]
-                    if let beside { launch["beside"] = beside }
+                    let windows = ManagedSurface.opensBesideNewest(method) && beside == nil
+                        ? ManagedSurface.terminalWindows(
+                            (try? client.managedAction("managed_terminal_windows", params: [:])) ?? [:])
+                        : []
+                    if let beside = beside ?? windows.first?.first { launch["beside"] = beside }
                     _ = try client.managedAction("managed_terminal_launch", params: launch)
                 }
                 return response["revision"] as? UInt64
