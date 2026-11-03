@@ -35,17 +35,27 @@ fn native_fixture_child(test: &str) -> bool {
     }
         bin
     });
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test, "--nocapture"])
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &libtest_name!(test), "--nocapture"])
         .env("TRACE_MANAGED_TEST_CHILD", test)
         .env(
             "TRACE_MANAGED_FIXTURE_BAD_VERSION",
             (test == "unsupported_version_refuses_ticket_and_preserves_account").to_string(),
         )
         .env("PATH", bin.path())
-        .status()
+        .output()
         .unwrap();
-    assert!(status.success(), "fixture child failed: {test}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "fixture child failed: {test}\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // A filter that matches nothing also exits 0.
+    assert!(
+        stdout.contains("1 passed"),
+        "fixture child ran no test: {test}\n{stdout}"
+    );
     true
 }
 

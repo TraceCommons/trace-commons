@@ -129,6 +129,20 @@ public enum TCConsentCopy {
         return String(cString: raw)
     }
 
+    /// The account section's status while this app's account needs
+    /// attention (#1836 F1), as a JSON object, from the status keys
+    /// (`AccountAttentionWire.wireJSON`). Decoded by
+    /// `TCShellCore.AccountAttention`.
+    ///
+    /// Nil while there is nothing to show, for an unreadable argument, or on
+    /// a caught panic. Which sentence to show is the ABI's choice.
+    public static func accountAttentionJSON(forStatus wireJSON: String) -> String? {
+        let raw = wireJSON.withCString { tc_account_attention_copy_json($0) }
+        guard let raw else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
     /// The notice for approved sessions held on a busy privacy witness, as a
     /// JSON object, from `status.witness_capacity` (`WitnessCapacity.wireJSON`).
     /// Decoded by `TCShellCore.WitnessCapacityNotice`.

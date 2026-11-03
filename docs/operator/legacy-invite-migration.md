@@ -135,7 +135,8 @@ account, that is a new decision for the invite's owner, not a repair: nothing
 here grants a second invite to a linked account.
 
 Instance-enrolled devices are `invite`-origin in `device_keys` but redeemed no
-invite; they have no `onboarding_invites` row and cannot link.
+invite; they have no `onboarding_invites` row. Since V146 they link through
+`trace_link_legacy_instance_device`, without an invite grant (below).
 
 ## How a device learns its invite
 
@@ -251,6 +252,42 @@ entry from `/etc/tracecommons/allowlist.json` stops new device onboarding but
 is invisible here. To also stop a file invite carrying over to an account,
 set `revoked_at` on its `onboarding_invites` row (tenant context = that
 tenant). Revoking an invite does not revoke devices already onboarded with it.
+
+## Payouts for linked legacy accounts (V146)
+
+A tenant link also decides who is paid the legacy tenant's credit
+(`docs/superpowers/specs/2026-11-03-legacy-account-payout-migration-design.md`):
+
+- **At link time** the signing device's signed-upload principals (both
+  forms for its bare device-key actor) are linked to an account in the
+  legacy tenant, so its past credit is claimable
+  (`legacy_link_principals_claimed`, hash-only). Credit from per-user-subject
+  uploads stays unowned.
+- **Payout links are carried.** When the NEAR AI account confirms a payout
+  link, every open account of each tenant it has linked gets a waiting link
+  to the same org (`trace_legacy_payout_carries`, audit label
+  `legacy_tenant_link`). An unlink, a pooled mark or a closed account
+  releases the carry on the next confirm or tenant link.
+- **Revoking a link releases its carries** in the same transaction (a
+  trigger on `trace_legacy_invite_links`): an active carried link gets an
+  unlink request, a waiting one closes at zero. Paid credit stays paid.
+  **Revoke one tenant link per transaction.** The trigger takes that
+  tenant link's lock, and a carry running at the same time takes the
+  account's links' locks in tenant order; revoking several links in one
+  transaction can deadlock with it, and PostgreSQL then aborts one side
+  (retry it).
+- **Every send re-checks the carry.** The account standing the pass reads
+  before each send holds a live carry (`payout_legacy_carry_invalid`) when
+  its tenant was marked pooled, its tenant link is revoked or deleted, or
+  the NEAR AI account is closed, on an account credit hold, or no longer
+  has the source link live. Marking a tenant pooled therefore stops its
+  carried payouts at once; revoking its link as well releases them.
+- **Instance-enrolled tenants link too** (no `onboarding_invites` row):
+  the link records no invite grant and changes no trust
+  (`legacy_instance_linked`). Only the tenant's earliest live device can
+  link it, and only that device is proven; a second device is refused.
+  The app does not offer instance devices the move yet (its wording says
+  "invite"); the server accepts the link.
 
 ## Readiness under coexistence
 

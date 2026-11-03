@@ -112,5 +112,8 @@ pub(super) async fn link_handler(
     )
     .await
     .map_err(refused)?;
+    // V146: a payout link made before this tenant link reaches the legacy
+    // accounts it now covers.
+    super::payout_link_routes::carry_after_tenant_link(state.as_ref(), &ctx).await;
     Ok((no_store(), Json(response)))
 }

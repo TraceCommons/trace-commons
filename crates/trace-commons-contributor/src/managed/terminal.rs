@@ -31,11 +31,12 @@ pub enum TerminalApp {
     Kitty,
     Wezterm,
     Alacritty,
+    Warp,
 }
 
 impl TerminalApp {
     /// Every app any platform offers.
-    pub const ALL: [TerminalApp; 9] = [
+    pub const ALL: [TerminalApp; 10] = [
         TerminalApp::Terminal,
         TerminalApp::Ghostty,
         TerminalApp::Iterm2,
@@ -45,15 +46,17 @@ impl TerminalApp {
         TerminalApp::Kitty,
         TerminalApp::Wezterm,
         TerminalApp::Alacritty,
+        TerminalApp::Warp,
     ];
     /// macOS, in the order a picker shows them.
-    pub const MACOS: [TerminalApp; 6] = [
+    pub const MACOS: [TerminalApp; 7] = [
         TerminalApp::Terminal,
         TerminalApp::Ghostty,
         TerminalApp::Iterm2,
         TerminalApp::Kitty,
         TerminalApp::Wezterm,
         TerminalApp::Alacritty,
+        TerminalApp::Warp,
     ];
     /// Windows.
     pub const WINDOWS: [TerminalApp; 1] = [TerminalApp::WindowsTerminal];
@@ -93,6 +96,7 @@ impl TerminalApp {
             TerminalApp::Kitty => "kitty",
             TerminalApp::Wezterm => "wezterm",
             TerminalApp::Alacritty => "alacritty",
+            TerminalApp::Warp => "warp",
         }
     }
 
@@ -118,6 +122,7 @@ impl TerminalApp {
             TerminalApp::Kitty => "kitty",
             TerminalApp::Wezterm => "WezTerm",
             TerminalApp::Alacritty => "Alacritty",
+            TerminalApp::Warp => "Warp",
         }
     }
 
@@ -132,6 +137,7 @@ impl TerminalApp {
             TerminalApp::Kitty => Some("net.kovidgoyal.kitty"),
             TerminalApp::Wezterm => Some("com.github.wez.wezterm"),
             TerminalApp::Alacritty => Some("org.alacritty"),
+            TerminalApp::Warp => Some("dev.warp.Warp-Stable"),
             _ => None,
         }
     }
@@ -148,7 +154,7 @@ impl TerminalApp {
             TerminalApp::Kitty => Some("kitty"),
             TerminalApp::Wezterm => Some("wezterm"),
             TerminalApp::Alacritty => Some("alacritty"),
-            TerminalApp::Terminal | TerminalApp::Iterm2 => None,
+            TerminalApp::Terminal | TerminalApp::Iterm2 | TerminalApp::Warp => None,
         }
     }
 
@@ -197,138 +203,6 @@ impl TerminalApp {
             _ => vec![],
         }
     }
-
-    /// Terminal's lines for a launch the person placed in a window they
-    /// picked in the launch dialog: `command` runs in a new tab of
-    /// `place.window`, and that window comes to the front; otherwise in a
-    /// new window, as [`Self::script`]. The window is used only while it
-    /// still holds the tab of the daemon's own session on `place.tty`, read
-    /// in the same script just before. Nothing is ever typed into an
-    /// existing tab: its prompt may hold input not yet run.
-    ///
-    /// The new tab comes from [`new_tab`]. Anything that fails on the way,
-    /// the window gone or no longer holding that session, no new tab, or
-    /// `do script` refused in it, opens a new window instead: a refused
-    /// `do script` types nothing, and the ticket is single-use. A new tab
-    /// left empty by a refused `do script` is closed. Terminal only: no
-    /// other app here can name a window.
-    #[cfg(any(target_os = "macos", test))]
-    fn script_in(self, command: &str, place: &Placement) -> Vec<String> {
-        let literal = applescript_literal(command);
-        let (TerminalApp::Terminal, Some(id), true) =
-            (self, self.bundle_id(), valid_tty(&place.tty))
-        else {
-            return self.script(command);
-        };
-        [
-            vec![
-                format!("tell application id \"{id}\""),
-                "set t to missing value".into(),
-                "set found to \"\"".into(),
-                "try".into(),
-                format!("set tw to window id {}", place.window),
-                "set known to tty of every tab of tw".into(),
-                format!("if known contains \"{}\" then", place.tty),
-                "if miniaturized of tw then set miniaturized of tw to false".into(),
-                "set index of tw to 1".into(),
-                "activate".into(),
-            ],
-            new_tab("tw"),
-            vec![
-                "end if".into(),
-                "end try".into(),
-                "if t is not missing value then".into(),
-                "try".into(),
-                format!("do script \"{literal}\" in t"),
-                "on error".into(),
-                "try".into(),
-                "close t".into(),
-                "end try".into(),
-                "set t to missing value".into(),
-                "end try".into(),
-                "end if".into(),
-                "if t is not missing value then".into(),
-                "try".into(),
-                "set found to (tty of t) & linefeed & (id of tw as text)".into(),
-                "end try".into(),
-                "else".into(),
-            ],
-            open_window(&literal),
-            vec!["end if".into(), "return found".into(), "end tell".into()],
-        ]
-        .concat()
-    }
-}
-
-/// Where the person asked a launch to open: a Terminal window, by its id,
-/// that holds a running session the daemon opened, and that session's tty.
-/// The launch script checks the tty is still in that window before it uses
-/// it ([`TerminalApp::script_in`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Placement {
-    pub window: u32,
-    pub tty: String,
-}
-
-impl Placement {
-    /// A placement in `window`, beside the session on `handle`'s tab.
-    pub fn beside(window: u32, handle: &TerminalHandle) -> Option<Self> {
-        match handle {
-            TerminalHandle::AppleTerminal { tty } => valid_tty(tty).then(|| Placement {
-                window,
-                tty: tty.clone(),
-            }),
-        }
-    }
-}
-
-/// Terminal's lines that open a new tab in `window`, a window already
-/// brought to the front whose tabs' ttys are in `known`, and set `t` to
-/// that tab, or leave `t` `missing value`. The one Command-T builder.
-///
-/// - Terminal has no command for a new tab, so it presses Command-T
-///   through System Events, which macOS allows only with Accessibility
-///   access. Command-T reaches whatever is in front, so it is pressed only
-///   once Terminal is frontmost with `window` as its front window. The
-///   launch checks both permissions, and Secure Keyboard Entry, before it
-///   runs this script ([`tab_access`]), so no launch sends the first event
-///   to System Events.
-/// - The tab used is one Command-T made in `window`: the window's tab
-///   count must go up by exactly one, stay there for a short settle time,
-///   and the window's selected tab must be one whose tty was not there
-///   before, with `window` still in front. A tab the person opened at the
-///   same time makes it two, and none is used. A tab in another window is
-///   never used. Anything else leaves `t` unset, and the launch opens a new
-///   window.
-#[cfg(any(target_os = "macos", test))]
-fn new_tab(window: &str) -> Vec<String> {
-    vec![
-        "set n to count of known".into(),
-        "repeat 20 times".into(),
-        "if frontmost then exit repeat".into(),
-        "delay 0.05".into(),
-        "end repeat".into(),
-        "if frontmost then".into(),
-        format!("if id of front window is id of {window} then"),
-        "with timeout of 2 seconds".into(),
-        "tell application \"System Events\" to keystroke \"t\" using command down".into(),
-        "end timeout".into(),
-        "repeat 60 times".into(),
-        format!("if (count of tabs of {window}) is not n then exit repeat"),
-        "delay 0.05".into(),
-        "end repeat".into(),
-        format!("if (count of tabs of {window}) is n + 1 then"),
-        "delay 0.3".into(),
-        format!(
-            "if (count of tabs of {window}) is n + 1 and frontmost and (id of front window is id of {window}) then"
-        ),
-        format!("set s to selected tab of {window}"),
-        "if known does not contain (tty of s) then set t to s".into(),
-        "end if".into(),
-        "end if".into(),
-        "end if".into(),
-        "end if".into(),
-    ]
 }
 
 /// Terminal's lines that set `wid` to the id of the window holding the tab
@@ -384,7 +258,7 @@ fn raise_tab() -> Vec<String> {
 /// window and set `found` to its tab's tty and, on the next line, the id of
 /// Terminal's front window when its selected tab is this one (no other
 /// window is scanned). If another window is in front by then, the row gets
-/// no window id; #1852 is to treat that as normal. Run after the command is
+/// no window id, which is normal. Run after the command is
 /// typed, so each read is inside a `try`: a failure prints less, the launch
 /// stands, and the session simply cannot be shown.
 #[cfg(any(target_os = "macos", test))]
@@ -450,6 +324,7 @@ pub enum TerminalSetting {
     Kitty,
     Wezterm,
     Alacritty,
+    Warp,
     #[serde(other)]
     Unrecognized,
 }
@@ -479,6 +354,7 @@ impl TerminalSetting {
             TerminalSetting::Kitty => TerminalApp::Kitty,
             TerminalSetting::Wezterm => TerminalApp::Wezterm,
             TerminalSetting::Alacritty => TerminalApp::Alacritty,
+            TerminalSetting::Warp => TerminalApp::Warp,
             TerminalSetting::Unrecognized => return None,
         };
         TerminalApp::offered().contains(&app).then_some(app)
@@ -497,6 +373,7 @@ impl From<TerminalApp> for TerminalSetting {
             TerminalApp::Kitty => TerminalSetting::Kitty,
             TerminalApp::Wezterm => TerminalSetting::Wezterm,
             TerminalApp::Alacritty => TerminalSetting::Alacritty,
+            TerminalApp::Warp => TerminalSetting::Warp,
         }
     }
 }
@@ -614,13 +491,238 @@ fn parse_installed(stdout: &str) -> Vec<TerminalApp> {
 }
 
 /// What a macOS launch runs: a scripted app's `osascript -e` lines
-/// (Terminal, Ghostty, iTerm2), or the `open` plan of an app that takes
-/// its command as argv (kitty, WezTerm, Alacritty).
+/// (Terminal, Ghostty, iTerm2), the `open` plan of an app that takes its
+/// command as argv (kitty, WezTerm, Alacritty), or a Warp Tab Config.
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MacosLaunch {
     Script(Vec<String>),
     Open(Plan),
+    Warp(WarpTab),
+}
+
+/// A Warp launch: a Tab Config, `<name>.toml` in `~/.warp/tab_configs`,
+/// opened with `warp://tab_config/<name>`. Warp opens it as a new tab in
+/// its active window (a new window when it has none) and runs the command
+/// there. A URL, not an Apple Event, so macOS asks for no permission
+/// (owner, 2026-11-03: sessions as tabs in one window, with no prompts).
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WarpTab {
+    /// `near-ai-` and a fresh uuid: only `[a-z0-9-]`, so it is safe in the
+    /// file name and the URL, and no two launches share a file.
+    name: String,
+    contents: String,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl WarpTab {
+    /// The Tab Config that runs `command` in `cwd`, or in Warp's default
+    /// folder when there is none.
+    fn new(command: &str, cwd: Option<&Path>) -> Result<Self, ManagedError> {
+        let name = format!("near-ai-{}", Uuid::new_v4());
+        let directory = match cwd {
+            Some(cwd) => format!(
+                "directory = {}\n",
+                toml_string(cwd.to_str().ok_or(ManagedError::InvalidRequest)?)
+            ),
+            None => String::new(),
+        };
+        let contents = format!(
+            "name = {name}\ntitle = \"Near.ai\"\n\n[[panes]]\nid = \"main\"\ntype = \"terminal\"\n{directory}commands = [{command}]\n",
+            name = toml_string(&name),
+            command = toml_string(command),
+        );
+        Ok(WarpTab { name, contents })
+    }
+
+    fn url(&self) -> String {
+        format!("warp://tab_config/{}", self.name)
+    }
+}
+
+/// A TOML basic string: `\\` and `\"` escaped, and every control
+/// character as `\uXXXX`, so a folder name never becomes TOML.
+#[cfg(any(target_os = "macos", test))]
+fn toml_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Warp's Tab Config folder, `~/.warp/tab_configs`.
+#[cfg(target_os = "macos")]
+fn warp_tab_configs() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".warp").join("tab_configs"))
+}
+
+/// How long a Tab Config may stay on disk when its launch is never
+/// redeemed: the ticket's life, so a slow Warp start can still find it.
+#[cfg(target_os = "macos")]
+fn warp_tab_backstop() -> std::time::Duration {
+    super::sessions::TICKET_LIFE
+        .to_std()
+        .unwrap_or(std::time::Duration::from_secs(120))
+}
+
+/// The Tab Config files of launches not yet redeemed, by session. Each
+/// holds a single-use ticket, so a redeem removes its own launch's file
+/// ([`remove_launch_files`]) and the backstop removes it otherwise. Unix
+/// only: the files are written owner-only.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+static WARP_TAB_FILES: std::sync::Mutex<Option<std::collections::HashMap<Uuid, PathBuf>>> =
+    std::sync::Mutex::new(None);
+
+/// The record, usable after a panic elsewhere: the map is never left
+/// half-updated, so a poisoned lock is still safe to use.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn with_tab_files<R>(f: impl FnOnce(&mut std::collections::HashMap<Uuid, PathBuf>) -> R) -> R {
+    let mut guard = WARP_TAB_FILES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    f(guard.get_or_insert_with(Default::default))
+}
+
+/// Remove one Tab Config file this module wrote. A file already gone is
+/// fine. `remove_file` unlinks a symlink itself and never follows it.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn remove_tab_file(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+/// Remove the Tab Config `session`'s launch wrote, now that its ticket
+/// can no longer be used. Only the file recorded for that session is
+/// touched.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+pub fn remove_launch_files(session: Uuid) {
+    if let Some(path) = with_tab_files(|files| files.remove(&session)) {
+        remove_tab_file(&path);
+    }
+}
+
+/// Only macOS writes Tab Configs.
+#[cfg(not(any(target_os = "macos", all(test, unix))))]
+pub fn remove_launch_files(_session: Uuid) {}
+
+/// Record a file as `session`'s Tab Config, as a launch does.
+#[cfg(all(test, unix))]
+pub(crate) fn hold_launch_file(session: Uuid, path: PathBuf) {
+    with_tab_files(|files| files.insert(session, path));
+}
+
+/// Remove `path` after `after` unless its launch already cleared it.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn remove_after(session: Uuid, path: PathBuf, after: std::time::Duration) {
+    let _ = std::thread::Builder::new()
+        .name("warp-tab-config".into())
+        .spawn(move || {
+            std::thread::sleep(after);
+            let ours = with_tab_files(|files| {
+                if files.get(&session) == Some(&path) {
+                    files.remove(&session);
+                    true
+                } else {
+                    false
+                }
+            });
+            if ours {
+                remove_tab_file(&path);
+            }
+        });
+}
+
+/// Write `tab` into `folder`, owner-only, record it against its session and
+/// start the backstop removal. Returns the file's path.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn write_warp_tab(
+    folder: &Path,
+    tab: &WarpTab,
+    session: Uuid,
+    backstop: std::time::Duration,
+) -> Result<PathBuf, ManagedError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::create_dir_all(folder).map_err(|_| ManagedError::LaunchUnknown)?;
+    let path = folder.join(format!("{}.toml", tab.name));
+    // `create_new`: a failure to open means something else is at the path,
+    // which is not ours to remove. Only a file this call made is removed.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|_| ManagedError::LaunchUnknown)?;
+    if file.write_all(tab.contents.as_bytes()).is_err() {
+        drop(file);
+        remove_tab_file(&path);
+        return Err(ManagedError::LaunchUnknown);
+    }
+    with_tab_files(|files| files.insert(session, path.clone()));
+    remove_after(session, path.clone(), backstop);
+    Ok(path)
+}
+
+/// Remove the `near-ai-*.toml` regular files in `folder` older than `age`:
+/// the leftovers of a daemon that quit before their launch was redeemed.
+/// A symlink or any other name is left alone.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn sweep_stale_tab_configs(folder: &Path, age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !(name.starts_with("near-ai-") && name.ends_with(".toml")) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        let stale = meta.is_file()
+            && meta
+                .modified()
+                .ok()
+                .and_then(|m| m.elapsed().ok())
+                .is_some_and(|elapsed| elapsed >= age);
+        if stale {
+            remove_tab_file(&entry.path());
+        }
+    }
+}
+
+/// At daemon start: sweep Tab Configs an earlier run left behind.
+#[cfg(target_os = "macos")]
+pub fn sweep_warp_tab_configs() {
+    if let Some(folder) = warp_tab_configs() {
+        sweep_stale_tab_configs(&folder, warp_tab_backstop());
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn sweep_warp_tab_configs() {}
+
+/// Write `tab` and open it in Warp. The file holds a single-use launch
+/// ticket, so the redeem removes it, and a minute later the backstop does
+/// whether or not the launch went ahead.
+#[cfg(target_os = "macos")]
+fn open_warp_tab(tab: &WarpTab, session: Uuid) -> Result<(), ManagedError> {
+    let folder = warp_tab_configs().ok_or(ManagedError::LaunchUnknown)?;
+    write_warp_tab(&folder, tab, session, warp_tab_backstop())?;
+    let mut open = std::process::Command::new("/usr/bin/open");
+    open.arg(tab.url());
+    match super::profiles::bounded_output(open) {
+        Ok(output) if output.status.success() => Ok(()),
+        _ => Err(ManagedError::LaunchUnknown),
+    }
 }
 
 /// The macOS launch with its outside effect passed in. Refuses an
@@ -636,17 +738,16 @@ fn launch_macos(
     command: &str,
     argv: Vec<std::ffi::OsString>,
     cwd: Option<&Path>,
-    place: Option<&Placement>,
     run: impl FnOnce(MacosLaunch) -> Result<Vec<u8>, ManagedError>,
 ) -> Result<Option<TerminalTab>, ManagedError> {
     let app = choice.app().ok_or(ManagedError::InvalidRequest)?;
     if !installed.contains(&app) {
         return Err(ManagedError::TerminalNotFound);
     }
-    let how = match (open_plan(app, cwd, argv), place) {
-        (Some(plan), _) => MacosLaunch::Open(plan),
-        (None, Some(place)) => MacosLaunch::Script(app.script_in(command, place)),
-        (None, None) => MacosLaunch::Script(app.script(command)),
+    let how = match open_plan(app, cwd, argv) {
+        _ if app == TerminalApp::Warp => MacosLaunch::Warp(WarpTab::new(command, cwd)?),
+        Some(plan) => MacosLaunch::Open(plan),
+        None => MacosLaunch::Script(app.script(command)),
     };
     // Once the app is asked, anything that goes wrong may follow a typed
     // command, so it reads as `LaunchUnknown`, never as a refusal from
@@ -661,7 +762,7 @@ fn launch_macos(
 /// Run a macOS launch: `osascript` with the script's lines, or `open` with
 /// the plan's argv. Both return as soon as the app has the command.
 #[cfg(target_os = "macos")]
-fn run_macos(how: MacosLaunch) -> Result<Vec<u8>, ManagedError> {
+fn run_macos(how: MacosLaunch, session: Uuid) -> Result<Vec<u8>, ManagedError> {
     let command = match how {
         MacosLaunch::Script(lines) => {
             let mut script = std::process::Command::new("/usr/bin/osascript");
@@ -675,6 +776,7 @@ fn run_macos(how: MacosLaunch) -> Result<Vec<u8>, ManagedError> {
             open.args(&plan.args);
             open
         }
+        MacosLaunch::Warp(tab) => return open_warp_tab(&tab, session).map(|()| Vec::new()),
     };
     let output = super::profiles::bounded_output(command)?;
     if output.status.success() {
@@ -786,7 +888,7 @@ fn terminal_args(app: TerminalApp, cwd: Option<&Path>) -> Option<Vec<std::ffi::O
             }
             args.extend(["--hold".into(), "-e".into()]);
         }
-        TerminalApp::Terminal | TerminalApp::Iterm2 => return None,
+        TerminalApp::Terminal | TerminalApp::Iterm2 | TerminalApp::Warp => return None,
     }
     Some(args)
 }
@@ -906,9 +1008,9 @@ fn tty_path<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalTab {
     pub handle: TerminalHandle,
-    /// Terminal's window id. Recorded on the row by owner decision
-    /// (2026-11-02) for #1852's window picker; nothing in production reads
-    /// it yet.
+    /// Terminal's window id. Kept on the row by owner decision
+    /// (2026-11-03) although the window picker it was recorded for is gone;
+    /// nothing in production reads it.
     pub window: Option<u32>,
 }
 
@@ -966,203 +1068,6 @@ pub fn focus(handle: &TerminalHandle) -> Result<(), ManagedError> {
         #[cfg(not(target_os = "macos"))]
         TerminalHandle::AppleTerminal { .. } => Err(ManagedError::UnsupportedVersion),
     }
-}
-
-/// `place`, kept only for a Terminal launch that `ready` says may press
-/// Command-T now. `ready` is asked only then, so no other launch runs the
-/// permission check.
-#[cfg(any(target_os = "macos", test))]
-fn placeable(
-    choice: TerminalSetting,
-    place: Option<&Placement>,
-    ready: impl FnOnce() -> bool,
-) -> Option<&Placement> {
-    // By setting, not `app()`: the setting reads Terminal only where it is
-    // offered, so this is the same answer on macOS and testable elsewhere.
-    let place = place.filter(|_| choice == TerminalSetting::Terminal)?;
-    ready().then_some(place)
-}
-
-/// A JavaScript for Automation script that prints whether a launch may
-/// press Command-T through System Events: `ready` when macOS has already
-/// granted both Automation of System Events and Accessibility, and Secure
-/// Keyboard Entry is off (it swallows synthetic keystrokes without an
-/// error); otherwise `no`.
-///
-/// With `ask` false nothing here can show a prompt or wait on one:
-/// `AEDeterminePermissionToAutomateTarget` is asked not to ask, and
-/// `AXIsProcessTrusted` only reads. System Events not running (`-600`) is
-/// not a refusal: it is started hidden through LaunchServices, which sends
-/// it no Apple Event, and asked again for up to two seconds.
-///
-/// With `ask` true it asks: the Automation prompt first, which waits for
-/// the person, then, only once that is granted, the Accessibility prompt.
-/// Run only off any launch ([`ask_tab_access`]).
-#[cfg(any(target_os = "macos", test))]
-fn access_probe(ask: bool) -> String {
-    let (ask, accessibility) = if ask {
-        (
-            "if (status !== 0 && status !== -600) { status = automation(true); }",
-            "ObjC.bindFunction('AXIsProcessTrustedWithOptions', ['bool', ['id']]); \
-             var trusted = $.AXIsProcessTrustedWithOptions($({AXTrustedCheckOptionPrompt: true}));",
-        )
-    } else {
-        (
-            "",
-            "ObjC.bindFunction('AXIsProcessTrusted', ['bool', []]); \
-             var trusted = $.AXIsProcessTrusted();",
-        )
-    };
-    format!(
-        "ObjC.import('AppKit'); ObjC.import('Carbon'); \
-         ObjC.bindFunction('AEDeterminePermissionToAutomateTarget', ['int', ['void *', 'unsigned int', 'unsigned int', 'bool']]); \
-         ObjC.bindFunction('IsSecureEventInputEnabled', ['bool', []]); \
-         function automation(ask) {{ return $.AEDeterminePermissionToAutomateTarget(\
-         $.NSAppleEventDescriptor.descriptorWithBundleIdentifier('com.apple.systemevents').aeDesc, \
-         0x2A2A2A2A, 0x2A2A2A2A, ask); }} \
-         var status = automation(false); \
-         if (status === -600) {{ \
-         $.NSWorkspace.sharedWorkspace.launchAppWithBundleIdentifierOptionsAdditionalEventParamDescriptorLaunchIdentifier(\
-         'com.apple.systemevents', $.NSWorkspaceLaunchWithoutActivation | $.NSWorkspaceLaunchAndHide, \
-         $.NSAppleEventDescriptor.nullDescriptor, null); \
-         for (var i = 0; i < 20 && status === -600; i++) {{ delay(0.1); status = automation(false); }} }} \
-         {ask} \
-         var ready = false; \
-         if (status === 0) {{ {accessibility} \
-         ready = trusted && !$.IsSecureEventInputEnabled(); }} \
-         ready ? 'ready' : 'no'"
-    )
-}
-
-/// The probe's answer: only the exact word `ready` is.
-#[cfg(any(target_os = "macos", test))]
-fn parse_access(stdout: &[u8]) -> bool {
-    stdout.strip_suffix(b"\n").unwrap_or(stdout) == b"ready"
-}
-
-/// Whether a launch may press Command-T now, without asking ([`access_probe`]).
-/// False whenever it cannot be told, and off macOS.
-pub fn tab_access(ask: bool) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        let mut probe = std::process::Command::new("/usr/bin/osascript");
-        probe.args(["-l", "JavaScript", "-e", &access_probe(ask)]);
-        if ask {
-            // Waits for the person; never on a launch or under the lock.
-            return probe
-                .output()
-                .is_ok_and(|output| output.status.success() && parse_access(&output.stdout));
-        }
-        super::profiles::bounded_output(probe)
-            .is_ok_and(|output| output.status.success() && parse_access(&output.stdout))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = ask;
-        false
-    }
-}
-
-/// Show macOS's prompts for opening tabs, the first time the person picks a
-/// window, on a thread of its own: the Automation prompt waits for an
-/// answer, and nothing waits for it. One at a time; a request while one is
-/// showing does nothing. Once the person has answered, macOS does not ask
-/// again, and this returns at once.
-pub fn ask_tab_access() {
-    #[cfg(target_os = "macos")]
-    {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        static ASKING: AtomicBool = AtomicBool::new(false);
-        if ASKING.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let spawned = std::thread::Builder::new()
-            .name("terminal-tab-access".into())
-            .spawn(|| {
-                let _ = tab_access(true);
-                ASKING.store(false, Ordering::Release);
-            });
-        if spawned.is_err() {
-            ASKING.store(false, Ordering::Release);
-        }
-    }
-}
-
-/// Terminal's open windows, each by id with the ttys of its tabs, read in
-/// one script that never starts Terminal. Empty when Terminal is not
-/// running, cannot be read, and off macOS.
-pub fn open_windows() -> Vec<(u32, Vec<String>)> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut script = std::process::Command::new("/usr/bin/osascript");
-        for line in windows_script() {
-            script.args(["-e", &line]);
-        }
-        match super::profiles::bounded_output(script) {
-            Ok(output) if output.status.success() => parse_windows(&output.stdout),
-            _ => vec![],
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        vec![]
-    }
-}
-
-/// One line per Terminal window: its id, then a tab and the tty of each of
-/// its tabs. Asks only whether Terminal is running before it addresses it,
-/// so a listing never starts Terminal. Reads no tab's contents.
-#[cfg(any(target_os = "macos", test))]
-fn windows_script() -> Vec<String> {
-    let id = TerminalApp::Terminal
-        .bundle_id()
-        .unwrap_or("com.apple.Terminal");
-    vec![
-        "set out to \"\"".into(),
-        "set sep to character id 9".into(),
-        format!("if application id \"{id}\" is running then"),
-        format!("tell application id \"{id}\""),
-        "repeat with w in windows".into(),
-        "try".into(),
-        "set line_ to (id of w as text)".into(),
-        "repeat with y in (tty of every tab of w)".into(),
-        "set line_ to line_ & sep & y".into(),
-        "end repeat".into(),
-        "set out to out & line_ & linefeed".into(),
-        "end try".into(),
-        "end repeat".into(),
-        "end tell".into(),
-        "end if".into(),
-        "return out".into(),
-    ]
-}
-
-/// The windows [`windows_script`] printed. A line whose id or any tty does
-/// not parse is left out whole: a window is offered only when everything
-/// read for it is what it should be.
-#[cfg(any(target_os = "macos", test))]
-fn parse_windows(stdout: &[u8]) -> Vec<(u32, Vec<String>)> {
-    let Ok(text) = std::str::from_utf8(stdout) else {
-        return vec![];
-    };
-    text.lines()
-        .filter_map(|line| {
-            let mut fields = line.split('\t');
-            let window = window_id(fields.next()?)?;
-            let ttys: Vec<String> = fields.map(str::to_string).collect();
-            ttys.iter()
-                .all(|tty| valid_tty(tty))
-                .then_some((window, ttys))
-        })
-        .collect()
-}
-
-/// A Terminal window id as a script prints it: digits only, at most ten,
-/// and within `u32`.
-#[cfg(any(target_os = "macos", test))]
-fn window_id(text: &str) -> Option<u32> {
-    let digits = !text.is_empty() && text.len() <= 10 && text.bytes().all(|b| b.is_ascii_digit());
-    digits.then(|| text.parse::<u32>().ok()).flatten()
 }
 
 pub fn shell_command(
@@ -1294,8 +1199,8 @@ pub fn launch_tool_setup(
             &command,
             setup_argv(body)?,
             None,
-            None,
-            run_macos,
+            // A setup holds no launch ticket, so no redeem removes its file.
+            |how| run_macos(how, Uuid::nil()),
         )?;
         Ok(())
     }
@@ -1323,7 +1228,6 @@ pub fn launch(
     cwd: &Path,
     session: Uuid,
     ticket: &str,
-    place: Option<&Placement>,
 ) -> Result<Option<TerminalTab>, ManagedError> {
     #[cfg(target_os = "macos")]
     {
@@ -1334,29 +1238,12 @@ pub fn launch(
         let command = shell_command(&helper, config, session, ticket)?;
         let mut argv = vec![helper.into_os_string()];
         argv.extend(helper_args(config, session, ticket));
-        // A placed launch presses Command-T only when macOS already allows
-        // it; otherwise it opens a new window and the prompts are asked for
-        // off the launch (#1853 review).
-        let place = placeable(choice, place, || {
-            let ready = tab_access(false);
-            if !ready {
-                ask_tab_access();
-            }
-            ready
-        });
-        launch_macos(
-            choice,
-            installed,
-            &command,
-            argv,
-            Some(cwd),
-            place,
-            run_macos,
-        )
+        launch_macos(choice, installed, &command, argv, Some(cwd), |how| {
+            run_macos(how, session)
+        })
     }
     #[cfg(any(windows, target_os = "linux"))]
     {
-        let _ = place;
         if !supported() {
             return Err(ManagedError::UnsupportedVersion);
         }
@@ -1383,7 +1270,7 @@ pub fn launch(
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
-        let _ = (choice, installed, config, cwd, session, ticket, place);
+        let _ = (choice, installed, config, cwd, session, ticket);
         Err(ManagedError::UnsupportedVersion)
     }
 }
@@ -1400,146 +1287,238 @@ fn external_terminal(name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    fn place(window: u32) -> Placement {
-        Placement {
-            window,
-            tty: "/dev/ttys011".into(),
-        }
-    }
-
-    /// Owner, 2026-11-02 (#1852): a launch placed in a picked window runs
-    /// in a new tab of that window, by its id, and in a new window
-    /// otherwise; the command is in the script once for each, never typed
-    /// into an existing tab. Other apps open a new window as before, and so
-    /// does a placement whose tty is not a bare tty path.
-    #[cfg(unix)]
+    /// Owner, 2026-11-03: in Warp a session opens as a tab in the window
+    /// already open, through a Tab Config and a `warp://` link, with no
+    /// macOS prompt. The config runs the command in the folder, and a
+    /// folder or command holding quotes, backslashes or newlines stays
+    /// one TOML string.
     #[test]
-    fn a_placed_launch_runs_in_a_new_tab_of_the_picked_window() {
-        let command = hostile_command();
-        let literal = applescript_literal(&command);
-        let lines = TerminalApp::Terminal.script_in(&command, &place(4242));
-        assert!(lines.contains(&"set tw to window id 4242".to_string()));
-        assert!(lines.contains(&format!("do script \"{literal}\" in t")));
-        assert!(lines.contains(&format!("set t to do script \"{literal}\"")));
-        assert_eq!(lines.iter().filter(|l| l.contains(&literal)).count(), 2);
-        assert_eq!(lines.last().unwrap(), "end tell");
-        assert_eq!(
-            TerminalApp::Iterm2.script_in(&command, &place(4242)),
-            TerminalApp::Iterm2.script(&command)
+    fn a_warp_launch_is_a_tab_config_that_runs_the_command_in_the_folder() {
+        let cwd = Path::new("/Users/a/my \"odd\" folder\\x\n");
+        let command = "'/x/near-ai' --config-dir '/c' redeem-launch --ticket 'ab'";
+        let tab = WarpTab::new(command, Some(cwd)).unwrap();
+        assert!(tab.name.starts_with("near-ai-"));
+        assert!(
+            tab.name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         );
-        let hostile = Placement {
-            window: 4242,
-            tty: "/dev/ttys011\" then do shell script \"x".into(),
-        };
-        assert_eq!(
-            TerminalApp::Terminal.script_in(&command, &hostile),
-            TerminalApp::Terminal.script(&command)
+        assert_eq!(tab.url(), format!("warp://tab_config/{}", tab.name));
+        assert_ne!(
+            tab.name,
+            WarpTab::new(command, Some(cwd)).unwrap().name,
+            "one file per launch"
+        );
+
+        let parsed: toml::Value = toml::from_str(&tab.contents).unwrap();
+        assert_eq!(parsed["name"].as_str(), Some(tab.name.as_str()));
+        let pane = &parsed["panes"][0];
+        assert_eq!(pane["type"].as_str(), Some("terminal"));
+        assert_eq!(pane["directory"].as_str(), cwd.to_str());
+        assert_eq!(pane["commands"][0].as_str(), Some(command));
+        assert_eq!(pane["commands"].as_array().unwrap().len(), 1);
+
+        let home =
+            toml::from_str::<toml::Value>(&WarpTab::new(command, None).unwrap().contents).unwrap();
+        assert!(
+            home["panes"][0].get("directory").is_none(),
+            "Warp's own folder"
         );
     }
 
-    /// #1853 review (Kristi, 2026-11-02), findings on `new_tab`: the
-    /// session is never typed into a tab the person opened. The picked
-    /// window is used only while it still holds the session it was picked
-    /// by, read in the same script. Command-T is pressed only once Terminal
-    /// is in front with that window frontmost. The tab used is the picked
-    /// window's selected tab, only when that window's tab count went up by
-    /// exactly one and stayed there through a settle wait, and only when
-    /// its tty was not there before. No other window's tabs are read. A
-    /// refused `do script` closes the new tab, in its own `try`, and falls
-    /// back to a new window.
-    #[test]
-    fn command_t_uses_only_the_one_new_tab_of_the_picked_window() {
-        let lines = TerminalApp::Terminal.script_in("echo ok", &place(7));
-        let at = |text: &str| {
-            lines
-                .iter()
-                .position(|l| l == text)
-                .unwrap_or_else(|| panic!("{text} in {lines:#?}"))
-        };
-        let sets_t: Vec<&String> = lines
-            .iter()
-            .filter(|l| l.contains("set t to") && !l.contains("missing value"))
-            .collect();
-        assert_eq!(
-            sets_t,
-            [
-                "if known does not contain (tty of s) then set t to s",
-                "set t to do script \"echo ok\"",
-            ]
-        );
-        // Read once, from the picked window only.
-        let before = at("set known to tty of every tab of tw");
-        assert_eq!(
-            lines
-                .iter()
-                .filter(|l| l.contains("tty of every tab"))
-                .count(),
-            1
-        );
-        // The placed path scans nothing; only the new-window fallback
-        // finds its window, as every new-window launch does.
-        let fallback = lines.iter().position(|l| l == "else").unwrap();
-        assert!(
-            !lines[..fallback]
-                .iter()
-                .any(|l| l.contains("repeat with w in windows"))
-        );
-        assert!(!lines[..fallback].iter().any(|l| l.contains("tabs of w")));
-        let vouched = at("if known contains \"/dev/ttys011\" then");
-        assert!(at("set tw to window id 7") < before);
-        assert!(before < vouched);
-        assert!(vouched < at("set index of tw to 1"));
-        assert!(at("set index of tw to 1") < at("activate"));
-        let key = at("tell application \"System Events\" to keystroke \"t\" using command down");
-        assert!(at("activate") < key);
-        assert!(at("if frontmost then") < key);
-        assert!(at("if id of front window is id of tw then") < key);
-        assert_eq!(at("with timeout of 2 seconds") + 1, key);
-        assert_eq!(at("end timeout"), key + 1);
-        let counted = at("if (count of tabs of tw) is n + 1 then");
-        assert!(key < at("repeat 60 times"));
-        assert_eq!(at("delay 0.3"), counted + 1);
-        let settled = at(
-            "if (count of tabs of tw) is n + 1 and frontmost and (id of front window is id of tw) then",
-        );
-        assert_eq!(settled, counted + 2);
-        assert_eq!(at("set s to selected tab of tw"), settled + 1);
-        // A refused `do script` closes the new tab and opens a new window.
-        let typed = at("do script \"echo ok\" in t");
-        assert_eq!(lines[typed - 1], "try");
-        assert_eq!(
-            lines[typed + 1..typed + 6],
-            [
-                "on error",
-                "try",
-                "close t",
-                "end try",
-                "set t to missing value"
-            ]
-        );
-        assert!(at("set t to do script \"echo ok\"") > typed);
-        assert!(
-            lines.contains(&"set found to (tty of t) & linefeed & (id of tw as text)".to_string())
-        );
-        let count = |word: &str| lines.iter().filter(|l| l.as_str() == word).count();
-        assert_eq!(count("try"), count("end try"));
-        let opens = lines
-            .iter()
-            .filter(|l| l.starts_with("if ") && l.ends_with(" then"))
-            .count();
-        assert_eq!(opens, count("end if"));
-        // The one shared Command-T builder.
-        for line in new_tab("tw") {
-            assert!(lines.contains(&line), "{line}");
-        }
-    }
-
-    /// The placement reaches Terminal through the same launch as every
-    /// other, behind the same refusals; another app opens a new window as
-    /// before.
+    /// A Warp launch hands `run` the Tab Config, never a script or `open`
+    /// argv, and opens no handle: Warp's tab cannot be found again.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_placed_launch_goes_through_the_one_macos_launch() {
+    fn a_warp_launch_runs_its_tab_config() {
+        let cwd = Path::new("/tmp/project");
+        let mut seen = None;
+        let opened = launch_macos(
+            TerminalSetting::Warp,
+            &[TerminalApp::Warp],
+            "'/x/near-ai'",
+            vec!["/x/near-ai".into()],
+            Some(cwd),
+            |how| {
+                seen = Some(how);
+                Ok(Vec::new())
+            },
+        );
+        assert_eq!(opened, Ok(None));
+        let Some(MacosLaunch::Warp(tab)) = seen else {
+            panic!("a Tab Config");
+        };
+        let parsed: toml::Value = toml::from_str(&tab.contents).unwrap();
+        assert_eq!(
+            parsed["panes"][0]["directory"].as_str(),
+            Some("/tmp/project")
+        );
+        assert_eq!(
+            parsed["panes"][0]["commands"][0].as_str(),
+            Some("'/x/near-ai'")
+        );
+        assert_eq!(
+            launch_macos(
+                TerminalSetting::Warp,
+                &[TerminalApp::Terminal],
+                "'/x'",
+                vec![],
+                None,
+                |_| Ok(vec![])
+            ),
+            Err(ManagedError::TerminalNotFound),
+            "not installed"
+        );
+    }
+
+    // Owner, 2026-11-03: the Tab Config holds the launch ticket, so the
+    // redeem removes that launch's file; the backstop removes it when the
+    // launch is never redeemed. The tests below hold that.
+    #[cfg(unix)]
+    fn warp_tab(command: &str) -> WarpTab {
+        WarpTab::new(command, Some(Path::new("/tmp/p"))).unwrap()
+    }
+
+    #[cfg(unix)]
+    const LONG: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    #[cfg(unix)]
+    #[test]
+    fn a_redeem_removes_its_own_launchs_tab_config_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mine, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let a = write_warp_tab(dir.path(), &warp_tab("a"), mine, LONG).unwrap();
+        let b = write_warp_tab(dir.path(), &warp_tab("b"), other, LONG).unwrap();
+        assert!(a.exists() && b.exists());
+        remove_launch_files(mine);
+        assert!(!a.exists(), "the redeemed launch's file is gone");
+        assert!(b.exists(), "another launch's file is left");
+        remove_launch_files(mine);
+        remove_launch_files(other);
+        assert!(!b.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tab_config_already_gone_is_fine() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Uuid::new_v4();
+        let path = write_warp_tab(dir.path(), &warp_tab("a"), session, LONG).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        remove_launch_files(session);
+        remove_launch_files(session);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_tab_config_never_follows_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Uuid::new_v4();
+        let path = write_warp_tab(dir.path(), &warp_tab("a"), session, LONG).unwrap();
+        let target = dir.path().join("precious");
+        std::fs::write(&target, "keep").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        remove_launch_files(session);
+        assert!(path.symlink_metadata().is_err(), "the link is removed");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_is_not_ours_is_never_removed_by_a_failed_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let tab = warp_tab("a");
+        let theirs = dir.path().join(format!("{}.toml", tab.name));
+        std::fs::write(&theirs, "theirs").unwrap();
+        let session = Uuid::new_v4();
+        assert_eq!(
+            write_warp_tab(dir.path(), &tab, session, LONG),
+            Err(ManagedError::LaunchUnknown)
+        );
+        assert_eq!(std::fs::read_to_string(&theirs).unwrap(), "theirs");
+        remove_launch_files(session);
+        assert!(theirs.exists(), "nothing was recorded for it");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unredeemed_tab_config_is_removed_by_the_backstop() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Uuid::new_v4();
+        let path = write_warp_tab(
+            dir.path(),
+            &warp_tab("a"),
+            session,
+            std::time::Duration::from_millis(50),
+        )
+        .unwrap();
+        for _ in 0..200 {
+            if !path.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(!path.exists());
+        assert!(with_tab_files(|files| !files.contains_key(&session)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_poisoned_record_still_removes_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Uuid::new_v4();
+        let path = write_warp_tab(dir.path(), &warp_tab("a"), session, LONG).unwrap();
+        let _ = std::thread::spawn(|| {
+            let _guard = WARP_TAB_FILES.lock().unwrap();
+            panic!("poison the record");
+        })
+        .join();
+        remove_launch_files(session);
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_startup_sweep_removes_only_old_near_ai_regular_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("near-ai-old.toml");
+        let other = dir.path().join("mine.toml");
+        let link = dir.path().join("near-ai-link.toml");
+        let target = dir.path().join("precious");
+        for f in [&old, &other, &target] {
+            std::fs::write(f, "x").unwrap();
+        }
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        sweep_stale_tab_configs(dir.path(), LONG);
+        assert!(old.exists(), "too new to be stale");
+        sweep_stale_tab_configs(dir.path(), std::time::Duration::from_millis(10));
+        assert!(!old.exists());
+        assert!(other.exists(), "not a near-ai file");
+        assert!(link.symlink_metadata().is_ok(), "a symlink is left alone");
+        assert!(target.exists());
+    }
+
+    #[test]
+    fn warp_is_offered_on_macos_only_and_opened_by_its_bundle() {
+        assert_eq!(TerminalApp::Warp.bundle_id(), Some("dev.warp.Warp-Stable"));
+        assert!(TerminalApp::MACOS.contains(&TerminalApp::Warp));
+        assert!(!TerminalApp::LINUX.contains(&TerminalApp::Warp));
+        assert!(!TerminalApp::WINDOWS.contains(&TerminalApp::Warp));
+        assert!(
+            TerminalApp::Warp.script("'/x/near-ai'").is_empty(),
+            "no Apple Event"
+        );
+        assert_eq!(open_plan(TerminalApp::Warp, None, vec!["/x".into()]), None);
+    }
+
+    /// Every launch opens a window of its own (owner, 2026-11-03): Terminal
+    /// runs the plain window script, with the command once and never typed
+    /// into an existing tab, behind the same refusals as every other app.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_terminal_launch_opens_a_window_of_its_own() {
         let tab = TerminalTab {
             handle: TerminalHandle::AppleTerminal {
                 tty: "/dev/ttys012".into(),
@@ -1556,7 +1535,6 @@ mod tests {
                 "'/x/near-ai'",
                 argv(),
                 cwd,
-                Some(&place(4242)),
                 |how| {
                     ran = Some(how);
                     Ok(b"/dev/ttys012\n4242\n".to_vec())
@@ -1567,7 +1545,7 @@ mod tests {
         assert_eq!(
             ran,
             Some(MacosLaunch::Script(
-                TerminalApp::Terminal.script_in("'/x/near-ai'", &place(4242))
+                TerminalApp::Terminal.script("'/x/near-ai'")
             ))
         );
         assert_eq!(
@@ -1577,7 +1555,6 @@ mod tests {
                 "'/x/near-ai'",
                 argv(),
                 cwd,
-                Some(&place(4242)),
                 |_| panic!("nothing runs when Terminal is missing"),
             ),
             Err(ManagedError::TerminalNotFound)
@@ -1589,7 +1566,6 @@ mod tests {
             "'/x/near-ai'",
             argv(),
             cwd,
-            Some(&place(4242)),
             |how| {
                 ran = Some(how);
                 Ok(vec![])
@@ -1604,102 +1580,11 @@ mod tests {
         );
     }
 
-    /// #1853 review, the consent wait: a placed launch asks whether it may
-    /// press Command-T before its script runs, and only a Terminal launch
-    /// with a placement asks. Anything but yes opens a new window.
-    #[test]
-    fn only_a_placed_terminal_launch_checks_access_and_a_no_opens_a_window() {
-        let picked = place(7);
-        let never = || -> bool { panic!("not asked") };
-        assert_eq!(placeable(TerminalSetting::Terminal, None, never), None);
-        assert_eq!(
-            placeable(TerminalSetting::Iterm2, Some(&picked), never),
-            None
-        );
-        assert_eq!(
-            placeable(TerminalSetting::Unrecognized, Some(&picked), never),
-            None
-        );
-        assert_eq!(
-            placeable(TerminalSetting::Terminal, Some(&picked), || false),
-            None
-        );
-        assert_eq!(
-            placeable(TerminalSetting::Terminal, Some(&picked), || true),
-            Some(&picked)
-        );
-    }
-
-    /// The access check cannot prompt or wait unless asked to: it asks
-    /// macOS not to ask, only reads Accessibility, and starts System
-    /// Events without an Apple Event. Asking is a separate script. Only the
-    /// exact word `ready` is a yes, and Secure Keyboard Entry is a no.
-    #[test]
-    fn the_access_check_never_prompts_unless_asked() {
-        let check = access_probe(false);
-        assert!(check.contains("automation(false)"));
-        assert!(!check.contains("automation(true)"));
-        assert!(check.contains("$.AXIsProcessTrusted()"));
-        assert!(!check.contains("AXTrustedCheckOptionPrompt"));
-        assert!(check.contains("!$.IsSecureEventInputEnabled()"));
-        assert!(check.contains("launchAppWithBundleIdentifier"));
-        assert!(!check.contains("System Events\""));
-        let ask = access_probe(true);
-        assert!(
-            ask.contains("if (status !== 0 && status !== -600) { status = automation(true); }")
-        );
-        assert!(ask.contains("AXTrustedCheckOptionPrompt: true"));
-        // Accessibility is asked only once Automation is granted.
-        assert!(ask.find("automation(true)") < ask.find("AXTrustedCheckOptionPrompt"));
-        assert!(parse_access(b"ready\n"));
-        assert!(parse_access(b"ready"));
-        for no in [&b"no\n"[..], b"", b"ready\nready", b" ready", b"READY"] {
-            assert!(!parse_access(no), "{no:?}");
-        }
-    }
-
-    /// The window list reads Terminal's windows and their tabs' ttys, and
-    /// nothing else, without starting Terminal. A line that does not parse
-    /// whole is left out.
-    #[test]
-    fn the_window_list_reads_ids_and_ttys_without_starting_terminal() {
-        let lines = windows_script();
-        let running = lines
-            .iter()
-            .position(|l| l == "if application id \"com.apple.Terminal\" is running then")
-            .unwrap();
-        let tell = lines
-            .iter()
-            .position(|l| l == "tell application id \"com.apple.Terminal\"")
-            .unwrap();
-        assert!(running < tell);
-        assert!(!lines.iter().any(|l| l.contains("do script")
-            || l.contains("keystroke")
-            || l.contains("contents")
-            || l.contains("System Events")));
-        assert!(lines.contains(&"repeat with y in (tty of every tab of w)".to_string()));
-        assert_eq!(
-            parse_windows(b"12\t/dev/ttys001\t/dev/ttys002\n13\n14\t/dev/ttys009\n"),
-            vec![
-                (12, vec!["/dev/ttys001".to_string(), "/dev/ttys002".into()]),
-                (13, vec![]),
-                (14, vec!["/dev/ttys009".to_string()]),
-            ]
-        );
-        assert_eq!(
-            parse_windows(b"x\t/dev/ttys001\n15\t/dev/ttys001\tbad\n16\t/dev/ttys004\n99999999999\t/dev/ttys005\n"),
-            vec![(16, vec!["/dev/ttys004".to_string()])]
-        );
-        assert!(parse_windows(b"\xff\n").is_empty());
-    }
-
-    /// Every Terminal script here compiles, the permission scripts parse,
-    /// and the access check runs without asking anything (it only reads
-    /// permissions, and may start System Events hidden). Compiling sends no
-    /// Apple Event; nothing here addresses Terminal.
+    /// Every Terminal script here compiles. Compiling sends no Apple Event;
+    /// nothing here addresses Terminal.
     #[cfg(target_os = "macos")]
     #[test]
-    fn the_scripts_compile_and_the_access_check_runs_on_this_mac() {
+    fn the_scripts_compile_on_this_mac() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("compiled.scpt");
         let compile = |language: &str, lines: &[String]| {
@@ -1717,38 +1602,10 @@ mod tests {
         };
         for lines in [
             TerminalApp::Terminal.script("echo ok"),
-            TerminalApp::Terminal.script_in("echo ok", &place(7)),
-            windows_script(),
             focus_script("/dev/ttys011"),
         ] {
             compile("AppleScript", &lines);
         }
-        for ask in [false, true] {
-            compile("JavaScript", &[access_probe(ask)]);
-        }
-        let output = std::process::Command::new("/usr/bin/osascript")
-            .args(["-l", "JavaScript", "-e", &access_probe(false)])
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        assert!(
-            matches!(&output.stdout[..], b"ready\n" | b"no\n"),
-            "{output:?}"
-        );
-    }
-
-    /// A placement holds only a bare tty path.
-    #[test]
-    fn a_placement_is_beside_a_bare_tty_only() {
-        let handle = |tty: &str| TerminalHandle::AppleTerminal { tty: tty.into() };
-        assert_eq!(
-            Placement::beside(9, &handle("/dev/ttys004")),
-            Some(Placement {
-                window: 9,
-                tty: "/dev/ttys004".into()
-            })
-        );
-        assert_eq!(Placement::beside(9, &handle("/dev/ttys004\"")), None);
     }
 
     /// Show scans the windows for its tab's window, by id, stopping at the
@@ -1906,7 +1763,6 @@ mod tests {
             "iTerm2",
             "Windows Terminal",
             "iterm",
-            "warp",
             "/Applications/Ghostty.app",
             "/usr/bin/konsole",
             "ghostty; rm -rf /",
@@ -1923,7 +1779,8 @@ mod tests {
                 "iTerm2",
                 "kitty",
                 "WezTerm",
-                "Alacritty"
+                "Alacritty",
+                "Warp"
             ]
         );
         assert_eq!(
@@ -2043,7 +1900,7 @@ mod tests {
                 "set found to tty of t",
                 "end try",
                 // The window id, from the front window only when its
-                // selected tab is this one (#1853), for #1852.
+                // selected tab is this one (#1853).
                 "try",
                 "if found is not \"\" and tty of selected tab of front window is found then",
                 "set found to found & linefeed & ((id of front window) as text)",
@@ -2106,7 +1963,6 @@ mod tests {
                 "'/x/near-ai'",
                 argv(),
                 cwd,
-                None,
                 never
             ),
             Err(ManagedError::TerminalNotFound)
@@ -2118,7 +1974,6 @@ mod tests {
                 "'/x/near-ai'",
                 argv(),
                 cwd,
-                None,
                 never
             ),
             Err(ManagedError::TerminalNotFound)
@@ -2130,7 +1985,6 @@ mod tests {
                 "'/x/near-ai'",
                 argv(),
                 cwd,
-                None,
                 never
             ),
             Err(ManagedError::TerminalNotFound)
@@ -2142,7 +1996,6 @@ mod tests {
                 "'/x/near-ai'",
                 argv(),
                 cwd,
-                None,
                 never
             ),
             Err(ManagedError::InvalidRequest)
@@ -2154,7 +2007,6 @@ mod tests {
             "'/x/near-ai'",
             argv(),
             cwd,
-            None,
             |how| {
                 ran = Some(how);
                 // Whatever another app printed is never read as a tab.
@@ -2176,7 +2028,6 @@ mod tests {
                 "'/x/near-ai'",
                 argv(),
                 cwd,
-                None,
                 |how| {
                     ran = Some(how);
                     Ok(b"/dev/ttys001\n".to_vec())
@@ -2197,7 +2048,6 @@ mod tests {
                 "'/x/near-ai'",
                 argv(),
                 cwd,
-                None,
                 |_| Ok(b"/dev/ttys001\n".to_vec())
             ),
             Ok(Some(TerminalTab {
@@ -2214,7 +2064,6 @@ mod tests {
                 "'/x/near-ai'",
                 argv(),
                 cwd,
-                None,
                 |_| Ok(b"not a tty".to_vec())
             ),
             Ok(None)
@@ -2239,9 +2088,7 @@ mod tests {
                 (TerminalSetting::Wezterm, TerminalApp::Wezterm),
             ] {
                 assert_eq!(
-                    launch_macos(choice, &[app], "'/x/near-ai'", argv(), cwd, None, |_| Err(
-                        error
-                    )),
+                    launch_macos(choice, &[app], "'/x/near-ai'", argv(), cwd, |_| Err(error)),
                     Err(ManagedError::LaunchUnknown),
                     "{error:?}"
                 );

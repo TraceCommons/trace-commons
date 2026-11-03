@@ -9,21 +9,22 @@
 //!   or an unlink. Local refusals come first (session kind, rail, body,
 //!   account standing, the "changed since shown" version); only then does a
 //!   `link` go to the rail's recipient-proof verifier. That refuses an
-//!   account with no NEAR AI login anchor and no wallet anchor before the
-//!   token is spent, and otherwise spends it (`/users/me`, then a
-//!   zero-target probe): the login must be one of the account's NEAR AI
-//!   login anchors, or a NEAR AI wallet sign-in whose wallet is one of its
-//!   wallet anchors. The verified org is
+//!   account with no recorded NEAR AI login anchor before the token is
+//!   spent, and otherwise spends it (`/users/me`, then a zero-target probe):
+//!   the login must be one of the account's recorded NEAR AI login anchors,
+//!   on every deployment. A NEAR wallet anchor proves nothing. The verified
+//!   org is
 //!   sealed and stored on a request that changes nothing yet, with a 5
 //!   minute expiry and a handle.
 //! - `POST /v1/account/payout-rails/{rail_id}/link-requests/{handle}/confirm`
 //!   takes the request from the same account and, in one transaction, writes
 //!   the `waiting` link (or the unlink mark) and its audit rows, refusing if
 //!   the link changed since the request, a newer request superseded it, or
-//!   it expired. A confirmed change wakes the rail. The confirm does not
-//!   re-read login anchors: no production path deletes or changes one, so
-//!   the anchor the start checked is still there. A path that removes
-//!   anchors must decide then what happens to the account's links.
+//!   it expired, or (for a link) the account has no NEAR AI login anchor
+//!   any more. A confirmed change wakes the rail. The confirm re-reads the
+//!   anchors because a request can outlive the start's check: one started
+//!   by an older service across a deploy (V147 revokes what exists then),
+//!   or before the account lost its login.
 //! - `GET /v1/account/payout-rails` lists each rail that is not `disabled`:
 //!   link state, version and recipient ref, never a recipient or a name.
 //!
@@ -42,6 +43,7 @@
 //! subject.
 
 use super::*;
+use trace_commons_gate_api::PayoutRail;
 use trace_commons_protocol::payout_link::{
     PAYOUT_LINK_CONTRACT_VERSION, PayoutLinkAction as WireAction, PayoutLinkConfirmed,
     PayoutLinkOutcome, PayoutLinkProof, PayoutLinkRequest as WireRequest, PayoutLinkStarted,
@@ -49,8 +51,8 @@ use trace_commons_protocol::payout_link::{
     near_ai_recipient_ref,
 };
 use trace_commons_server::db::{
-    PayoutLinkAction, PayoutLinkConfirm, PayoutLinkConfirmWrite, PayoutLinkRequestInsert,
-    PayoutLinkRequestWrite, PayoutLinkState, PayoutStore, PayoutStream,
+    CarryPrograms, PayoutLinkAction, PayoutLinkConfirm, PayoutLinkConfirmWrite,
+    PayoutLinkRequestInsert, PayoutLinkRequestWrite, PayoutLinkState, PayoutStore, PayoutStream,
 };
 use trace_commons_server::payout_pass::{stream_status_hold_label, stream_waiting};
 use trace_commons_server::payout_rate::PayoutMode;
@@ -146,6 +148,49 @@ fn enabled_rail<'a>(state: &'a AppState, rail_id: &str) -> ApiResult<&'a Arc<Pay
         ));
     }
     Ok(entry)
+}
+
+/// The rail's program for a carried link's own id (V146).
+fn carry_programs(rail: &Arc<dyn PayoutRail>) -> CarryPrograms {
+    let rail = Arc::clone(rail);
+    CarryPrograms(Arc::new(move |link_id| rail.program_for_link(link_id)))
+}
+
+/// After a new tenant link (V81), carry the account's live payout link on
+/// every enabled rail to the legacy accounts it now covers (V146). A
+/// confirm carries in its own transaction; this covers the order "payout
+/// link first, tenant link second". Best effort and idempotent: a failure
+/// carries nothing (no credit is paid to anyone it should not be), is
+/// logged by label, and the next confirm carries again.
+pub(super) async fn carry_after_tenant_link(state: &AppState, ctx: &AccountCtx) {
+    let Some(store) = state.payout_store.as_ref() else {
+        return;
+    };
+    for entry in state.payout_rails.entries() {
+        if entry.mode() == PayoutMode::Disabled {
+            continue;
+        }
+        let Some(rail) = entry.rail() else { continue };
+        if store
+            .carry_legacy_payout_links(
+                &ctx.tenant_id,
+                ctx.account_id.as_uuid(),
+                entry.rail_id(),
+                &carry_programs(rail),
+                &account_actor_hash(ctx),
+            )
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                rail = %entry.rail_id(),
+                label = "legacy_payout_carry_failed",
+                "legacy payout carry after a tenant link failed"
+            );
+        } else {
+            state.payout_rails.notifier().notify_all();
+        }
+    }
 }
 
 fn payout_store(state: &AppState) -> ApiResult<&Arc<dyn PayoutStore>> {
@@ -287,10 +332,10 @@ pub(super) async fn start_handler(
                     organization_id, ..
                 } => *organization_id,
             };
-            // What the proving login must match: a NEAR AI login anchor, or
-            // for a NEAR AI wallet sign-in the account's wallet anchor.
+            // What the proving login must match: one of the account's
+            // recorded NEAR AI login anchors, and nothing else.
             let anchors = store
-                .payout_account_anchors(tenant, account)
+                .payout_account_login_anchors(tenant, account)
                 .await
                 .map_err(store_failed)?;
             // The token becomes a secret here and is dropped inside verify.
@@ -300,15 +345,6 @@ pub(super) async fn start_handler(
                 rail.clone(),
                 identity.clone(),
                 NEAR_AI_USERS_ME_TIMEOUT,
-            )
-            // Wallet anchors are keyed under this deployment's NEAR network;
-            // the verifier matches them only when that is the network NEAR
-            // AI verifies wallet sign-ins on.
-            .with_wallet_network(
-                state
-                    .account_near_config
-                    .as_ref()
-                    .map(|config| config.network.as_str()),
             );
             let verified = match verifier.verify(proof, &anchors).await {
                 Ok(verified) => verified,
@@ -427,6 +463,7 @@ pub(super) async fn confirm_handler(
                 link_id,
                 program: rail.program_for_link(link_id),
                 actor_ref_hash: account_actor_hash(&ctx),
+                carry_programs: Some(carry_programs(&rail)),
             },
         )
         .await
@@ -465,10 +502,19 @@ pub(super) async fn confirm_handler(
             PayoutLinkOutcome::PayoutLinkChangePending,
         ),
         PayoutLinkConfirm::NotLinked => (StatusCode::CONFLICT, PayoutLinkOutcome::PayoutNotLinked),
+        // The generic refusal shipped apps already show, as at the start.
+        PayoutLinkConfirm::NoLoginAnchor => {
+            (StatusCode::FORBIDDEN, PayoutLinkOutcome::SubjectMismatch)
+        }
+    };
+    let reason = match outcome {
+        PayoutLinkConfirm::NoLoginAnchor => "no_near_ai_login",
+        _ => refusal.1.as_str(),
     };
     tracing::info!(
         rail = %entry.rail_id(),
         outcome = refusal.1.as_str(),
+        reason,
         "payout link confirm refused"
     );
     Err(refuse(refusal.0, refusal.1))

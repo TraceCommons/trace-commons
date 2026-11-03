@@ -147,7 +147,7 @@ fn c_api_private_inference_outlives_call_and_cycles() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "c_api_private_inference_outlives_call_and_cycles",
+            &libtest_name!("c_api_private_inference_outlives_call_and_cycles"),
             "--nocapture",
         ])
         .env(CHILD, root.path())
@@ -159,5 +159,11 @@ fn c_api_private_inference_outlives_call_and_cycles() {
         "child failed:\n{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+    // A filter that matches nothing also exits 0.
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "the child ran no test:\n{}",
+        String::from_utf8_lossy(&output.stdout)
     );
 }

@@ -385,7 +385,7 @@ async fn enroll_prepared(
             Some(&expected),
         )?;
         // The account accepted this NEAR AI login: it is the account's login.
-        Login::accepted(signed_in.as_ref(), &store);
+        Login::enrolled(signed_in.as_ref(), &store);
         Ok(value)
     })
     .await
@@ -786,7 +786,11 @@ async fn finish_ceremony(
         if caller == CeremonyFor::FreshLogin && !refused {
             anyhow::Error::new(fresh_failure(&error, status, CeremonyStage::Finish))
         } else {
-            finish_refusal(&error, "near_ai_enroll_verification_failed")
+            finish_refusal(
+                &error,
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
         }
     };
     // The JWT rides in the body, never a header: we are not
@@ -849,14 +853,50 @@ pub(super) const DEVICE_KEY_REVOKED_WIRE: &str = "device_key_revoked";
 /// key, then signing in, which makes a new one.
 pub const ENROLL_DEVICE_KEY_REVOKED: &str = "near_ai_enroll_device_key_revoked";
 
-/// A finish refusal as this module's label: the revoked-key refusal by
-/// name, anything else as `fallback`. Never the remote body.
+/// Whether a finish was not answered: no response, a status
+/// [`commons_busy`] counts as busy (the commons' own `503
+/// near_ai_sign_in_unavailable` and `429 near_ai_sign_in_rate_limited`
+/// among them), a body past the client's cap, or a success whose body was
+/// cut short. The commons' refusals are small JSON bodies, so an oversized
+/// one is an error page in front of it (a proxy's `502`/`503`/`504`), which
+/// carries no status this error keeps.
+///
+/// A `MalformedResponse` follows only a `2xx`. When the body ended early
+/// (empty, or truncated: `is_eof`), the answer was lost in transit and
+/// starting again works. When it is complete JSON of another shape, that is a
+/// commons on another version: deterministic, so "try later" would loop,
+/// and each pass would write a session this client never holds. That case
+/// keeps the caller's fallback label.
+fn finish_unanswered(error: &trace_commons_operator_client::Error) -> bool {
+    use trace_commons_operator_client::Error;
+    match error {
+        Error::Transport { .. } | Error::ResponseTooLarge { .. } => true,
+        Error::MalformedResponse { source, .. } => source.is_eof(),
+        Error::HttpFailure { status, .. } | Error::ServerLabel { status, .. } => {
+            commons_busy(*status)
+        }
+        _ => false,
+    }
+}
+
+/// A finish failure as this module's label: the revoked-key refusal by
+/// name; a commons that did not answer (no response, a server error such as
+/// its `503 near_ai_sign_in_unavailable`, or its `429
+/// near_ai_sign_in_rate_limited`) as `unavailable`, the caller's existing
+/// try-later label; anything else as `fallback`. Never the remote body.
+///
+/// The try-later label leads to a new start, never a resend of this finish:
+/// the commons' wire contract is that after a `503` or `429` at finish the
+/// ceremony may or may not still exist, so a client always starts again.
 pub(super) fn finish_refusal(
     error: &trace_commons_operator_client::Error,
     fallback: &'static str,
+    unavailable: &'static str,
 ) -> anyhow::Error {
     if error.server_label() == Some(DEVICE_KEY_REVOKED_WIRE) {
         anyhow!(ENROLL_DEVICE_KEY_REVOKED)
+    } else if finish_unanswered(error) {
+        anyhow!(unavailable)
     } else {
         anyhow!(fallback)
     }
@@ -877,8 +917,20 @@ impl Login {
     /// off the async runtime.
     fn accepted(login: Option<&Self>, store: &ConfigStore) {
         use super::nearai_credential::login_record;
-        let provider = login.and_then(|login| login_record::stored_login(store, &login.key_id));
-        login_record::accepted_by_commons(store, provider);
+        login_record::accepted_by_commons(store, Self::provider(login, store));
+    }
+
+    /// [`Login::accepted`] for a first enrollment: this is a new account, so
+    /// its login replaces whatever the record held, and an unknown one
+    /// clears it rather than leave an earlier account's login in place.
+    fn enrolled(login: Option<&Self>, store: &ConfigStore) {
+        use super::nearai_credential::login_record;
+        login_record::enrolled_with(store, Self::provider(login, store));
+    }
+
+    fn provider(login: Option<&Self>, store: &ConfigStore) -> Option<&'static str> {
+        use super::nearai_credential::login_record;
+        login.and_then(|login| login_record::stored_login(store, &login.key_id))
     }
 
     fn of(settings: &super::settings::DaemonSettings) -> Option<Self> {
@@ -1408,6 +1460,10 @@ fn persist(
         &serde_json::to_vec(&session)?,
         Some(&config),
     )?;
+    // A new account: no earlier account's login stands as this one's. A NEAR
+    // AI enrollment then records its own (`Login::enrolled`); a device-code
+    // join has none.
+    super::nearai_credential::login_record::enrolled_with(&store, None);
 
     // Deliberately not the account id or anything token-shaped beyond what a
     // shell needs to render "you are enrolled".
@@ -1822,7 +1878,7 @@ mod tests {
             body: format!("{{\"error\":\"{label}\"}}"),
             retry_after: None,
         };
-        let revoked = finish_refusal(&refused(DEVICE_KEY_REVOKED_WIRE), "fallback");
+        let revoked = finish_refusal(&refused(DEVICE_KEY_REVOKED_WIRE), "fallback", "unavailable");
         assert_eq!(revoked.to_string(), ENROLL_DEVICE_KEY_REVOKED);
         assert_eq!(label(&revoked), ENROLL_DEVICE_KEY_REVOKED);
         assert_eq!(
@@ -1830,8 +1886,112 @@ mod tests {
             super::super::account_session_renewal::FAILURE_DEVICE_KEY_REVOKED
         );
         assert_eq!(
-            finish_refusal(&refused("anything_else"), "fallback").to_string(),
+            finish_refusal(&refused("anything_else"), "fallback", "unavailable").to_string(),
             "fallback"
+        );
+    }
+
+    /// A finish the commons did not answer -- its `503
+    /// near_ai_sign_in_unavailable`, its `429 near_ai_sign_in_rate_limited`,
+    /// any other server error, or no response -- is the caller's try-later
+    /// label, never the verification failure. Its uniform `400` deny still is.
+    #[test]
+    fn a_busy_finish_is_unavailable_not_a_verification_failure() {
+        let answer = |status: reqwest::StatusCode, label: &str| {
+            trace_commons_operator_client::Error::ServerLabel {
+                url: "https://commons.example/v1/account/near-ai/provision/finish".into(),
+                status,
+                label: label.into(),
+                body: format!("{{\"error\":\"{label}\"}}"),
+                retry_after: None,
+            }
+        };
+        for (status, label) in [
+            (
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "near_ai_sign_in_unavailable",
+            ),
+            (
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                "near_ai_sign_in_rate_limited",
+            ),
+            (reqwest::StatusCode::BAD_GATEWAY, "anything"),
+        ] {
+            for (fallback, unavailable) in [
+                (
+                    "near_ai_enroll_verification_failed",
+                    "near_ai_enroll_unavailable",
+                ),
+                ("near_signup_verification_failed", "near_signup_unavailable"),
+            ] {
+                assert_eq!(
+                    finish_refusal(&answer(status, label), fallback, unavailable).to_string(),
+                    unavailable,
+                    "{status} {label}"
+                );
+            }
+        }
+        // A success whose body was cut short (here, empty): the answer was
+        // lost in transit.
+        assert_eq!(
+            finish_refusal(
+                &trace_commons_operator_client::Error::MalformedResponse {
+                    url: "https://commons.example/v1/account/near-ai/provision/finish".into(),
+                    body: String::new(),
+                    source: serde_json::from_str::<serde_json::Value>("")
+                        .expect_err("empty input is not JSON"),
+                },
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
+            .to_string(),
+            "near_ai_enroll_unavailable"
+        );
+        // A complete success body of another shape: a commons on another
+        // version, deterministic, so not "try later".
+        assert_eq!(
+            finish_refusal(
+                &trace_commons_operator_client::Error::MalformedResponse {
+                    url: "https://commons.example/v1/account/near-ai/provision/finish".into(),
+                    body: "{\"renamed\":true}".into(),
+                    source: serde_json::from_str::<Finished>("{\"renamed\":true}")
+                        .err()
+                        .expect("a body of another shape does not parse"),
+                },
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
+            .to_string(),
+            "near_ai_enroll_verification_failed"
+        );
+        // An error page too large to be the commons' own refusal.
+        assert_eq!(
+            finish_refusal(
+                &trace_commons_operator_client::Error::ResponseTooLarge { limit: 256 * 1024 },
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
+            .to_string(),
+            "near_ai_enroll_unavailable"
+        );
+        assert_eq!(
+            finish_refusal(
+                &answer(
+                    reqwest::StatusCode::BAD_REQUEST,
+                    "native sign-in could not be completed"
+                ),
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
+            .to_string(),
+            "near_ai_enroll_verification_failed",
+            "the uniform deny is still the refusal"
+        );
+        // The enroll label passes through to the shell as the existing
+        // try-later line, not a new one.
+        assert_eq!(
+            label(&anyhow!("near_ai_enroll_unavailable")),
+            "near_ai_enroll_unavailable"
         );
     }
 }
@@ -2176,7 +2336,19 @@ mod route_tests {
         referral: SignupReferral,
         login: Option<(&str, &str)>,
     ) -> (Stub, DaemonShared, Result<Value>, tempfile::TempDir) {
+        enroll_against_after(commons, referral, login, |_| {}).await
+    }
+
+    /// [`enroll_against_signed_in_with`], with `before` run on the store
+    /// first.
+    async fn enroll_against_after(
+        commons: Commons,
+        referral: SignupReferral,
+        login: Option<(&str, &str)>,
+        before: impl FnOnce(&DaemonShared),
+    ) -> (Stub, DaemonShared, Result<Value>, tempfile::TempDir) {
         let (dir, shared) = shared_with_session();
+        before(&shared);
         // The retained session's sign-in minted "key-enroll"; the record
         // names the login of the sign-in whose key it was given.
         if let Some((login, key_id)) = login {
@@ -2298,6 +2470,23 @@ mod route_tests {
 
         // A session whose login is not known leaves the record as it was.
         let (_stub, shared, result, _dir) = enroll_against(Commons::Production).await;
+        result.expect("enrolled");
+        assert_eq!(login_record::commons_login(&shared.store), None);
+
+        // A new account never inherits an earlier account's login: a
+        // leftover from an unenroll that could not clear it is replaced, and
+        // cleared when this login is not known.
+        let leftover = |shared: &DaemonShared| {
+            shared
+                .store
+                .write_daemon_file(
+                    crate::config::DAEMON_NEAR_AI_LOGIN_FILE,
+                    br#"{"commons_login":"github"}"#,
+                )
+                .unwrap();
+        };
+        let (_stub, shared, result, _dir) =
+            enroll_against_after(Commons::Production, SignupReferral::None, None, leftover).await;
         result.expect("enrolled");
         assert_eq!(login_record::commons_login(&shared.store), None);
     }

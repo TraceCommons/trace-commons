@@ -82,10 +82,10 @@ cat <<PLIST
     <key>CFBundleVersion</key><string>${BUILD_VERSION}</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHumanReadableCopyright</key><string>K&amp;Z Partners LLC</string>
-    <!-- Shown in macOS's Automation prompt for System Events, which a
-         Private AI launch into a Terminal window the person picked needs to
-         press Command-T (#1852). Approved by the owner 2026-11-02. -->
-    <key>NSAppleEventsUsageDescription</key><string>Near.ai opens new Private AI sessions in the Terminal window you choose.</string>
+    <!-- Shown in macOS's Automation prompt for the terminal app a Private
+         AI launch opens a window in. Wording approved by the owner
+         2026-11-03. -->
+    <key>NSAppleEventsUsageDescription</key><string>Near.ai opens Private AI sessions in Terminal.</string>
     <!-- There is no LSUIElement here, and its absence is the decision.
 
          This app was a menu-bar-only utility until a contributor could not

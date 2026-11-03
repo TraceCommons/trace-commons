@@ -153,13 +153,13 @@ else
   cat "$scratch/err" >&2
 fi
 
-# --- Apple Events usage string (owner, 2026-11-02, #1852) ---------------------
+# --- Apple Events usage string (owner, 2026-11-03) ----------------------------
 #
-# macOS shows NSAppleEventsUsageDescription in the Automation prompt for
-# System Events, which a launch placed in a picked Terminal window needs. Both
-# channels carry the owner's approved line, read with a strict parser.
+# macOS shows NSAppleEventsUsageDescription in the Automation prompt for the
+# terminal app a launch opens. Both channels carry the owner's approved line,
+# read with a strict parser.
 
-events_line="Near.ai opens new Private AI sessions in the Terminal window you choose."
+events_line="Near.ai opens Private AI sessions in Terminal."
 for channel in production staging; do
   if render TC_CHANNEL="$channel" >"$scratch/events-$channel.plist" 2>/dev/null \
     && python3 -I -c '

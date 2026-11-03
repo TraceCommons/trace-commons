@@ -237,10 +237,10 @@ fn derive_signup_allowlist(
     Ok(HostAllowlist::from_hosts(hosts))
 }
 
-pub(super) fn client(
-    url: &str,
-    allowed: &HostAllowlist,
-) -> Result<trace_commons_operator_client::Client> {
+/// The address checks [`client`] makes before it builds anything: an
+/// enforcing allowlist that holds `url`, over HTTPS, with no credentials,
+/// query or fragment.
+pub(super) fn check_address(url: &str, allowed: &HostAllowlist) -> Result<()> {
     let parsed = reqwest::Url::parse(url)?;
     if !allowed.is_enforcing()
         || parsed.scheme() != "https"
@@ -252,6 +252,14 @@ pub(super) fn client(
         bail!("near_signup_endpoint_refused");
     }
     allowed.check(&parsed)?;
+    Ok(())
+}
+
+pub(super) fn client(
+    url: &str,
+    allowed: &HostAllowlist,
+) -> Result<trace_commons_operator_client::Client> {
+    check_address(url, allowed)?;
     trace_commons_operator_client::Client::builder(
         url,
         "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
@@ -888,7 +896,7 @@ async fn finish(
     if result.account_id != options.account_id {
         bail!("near_signup_account_changed")
     }
-    client.call_json(reqwest::Method::POST,"/v1/account/near/provision/finish",&[],Some(&serde_json::json!({"ceremony_id":signed.ceremony_id,"account_id":options.account_id,"device_public_key":identity.public_key_b64,"wallet_public_key":result.wallet_public_key,"wallet_signature":result.wallet_signature,"device_signature":device_signature,"code_verifier":verifier}))).await.map_err(|error| super::nearai_onboarding::finish_refusal(&error, "near_signup_verification_failed"))
+    client.call_json(reqwest::Method::POST,"/v1/account/near/provision/finish",&[],Some(&serde_json::json!({"ceremony_id":signed.ceremony_id,"account_id":options.account_id,"device_public_key":identity.public_key_b64,"wallet_public_key":result.wallet_public_key,"wallet_signature":result.wallet_signature,"device_signature":device_signature,"code_verifier":verifier}))).await.map_err(|error| super::nearai_onboarding::finish_refusal(&error, "near_signup_verification_failed", "near_signup_unavailable"))
 }
 
 fn parse_callback(target: &str, state: &str) -> Result<WalletResult> {
@@ -1130,7 +1138,11 @@ fn persist(
         expected,
         &serde_json::to_vec(&session)?,
         Some(&config),
-    )
+    )?;
+    // A new account, joined without a NEAR AI login: no earlier account's
+    // login may stand as this one's.
+    super::nearai_credential::login_record::enrolled_with(&store, None);
+    Ok(())
 }
 
 #[cfg(test)]

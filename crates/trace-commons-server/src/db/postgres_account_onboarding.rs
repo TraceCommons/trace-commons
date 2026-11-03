@@ -175,8 +175,9 @@ impl NearAiAnchorMaterial {
         let anchor_hash = identity.login_index_label(login.subject_id());
         let sealed_subject = identity
             .seal_login_subject(login.subject_id())
-            .map_err(|_| refused())?;
-        let sealed_json = serde_json::to_value(&sealed_subject).map_err(|_| refused())?;
+            .map_err(|_| named_refusal(crate::account_onboarding::SEAL_FAILED))?;
+        let sealed_json = serde_json::to_value(&sealed_subject)
+            .map_err(|_| named_refusal(crate::account_onboarding::SEAL_FAILED))?;
         Ok(Self {
             anchor_hash,
             sealed_json,
@@ -255,7 +256,8 @@ impl PgBackend {
         pending: &T,
         expires_at: i64,
     ) -> Result<(), DatabaseError> {
-        let payload = serde_json::to_value(pending).map_err(|_| refused())?;
+        let payload = serde_json::to_value(pending)
+            .map_err(|_| named_refusal(crate::account_onboarding::CEREMONY_UNWRITABLE))?;
         let mut client = self.trace_pool().get().await?;
         let tx = client.transaction().await?;
         tx.execute(
@@ -315,7 +317,8 @@ impl PgBackend {
         tx.commit().await?;
         match row {
             Some(row) if row.get::<_, bool>("live") => Ok(Some(
-                serde_json::from_value(row.get("payload")).map_err(|_| refused())?,
+                serde_json::from_value(row.get("payload"))
+                    .map_err(|_| named_refusal(crate::account_onboarding::CEREMONY_UNREADABLE))?,
             )),
             _ => Ok(None),
         }
@@ -362,8 +365,9 @@ impl PgBackend {
         // `NearAccountIdentity::context`.
         let (anchor_hash, sealed_account_name) = identity
             .seal(proof.network(), proof.account_id())
-            .map_err(|_| refused())?;
-        let sealed_json = serde_json::to_value(&sealed_account_name).map_err(|_| refused())?;
+            .map_err(|_| named_refusal(crate::account_onboarding::SEAL_FAILED))?;
+        let sealed_json = serde_json::to_value(&sealed_account_name)
+            .map_err(|_| named_refusal(crate::account_onboarding::SEAL_FAILED))?;
         let pepper_ref = identity.pepper_ref_hash().to_string();
         let key_ref = identity.key_ref_hash();
         // A returning contributor keeps their existing tenant; a new one gets a

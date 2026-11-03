@@ -196,8 +196,9 @@ impl Chosen {
 /// back/forward cache posts a second choice; one that did not (the page is
 /// `no-store`) fetches the page's address again. The leg cannot switch, so
 /// the listener says that sign-in has ended ([`STALE_CHOICE_BODY`]) and ends
-/// the attempt, and the app can start a new one at once instead of waiting
-/// out the timeout.
+/// the attempt as cancelled, instead of leaving it to wait out the timeout.
+/// The person signs in again from the app; nothing starts a new attempt for
+/// them.
 ///
 /// Recognized only by this attempt's state: the page's exact address, or a
 /// choice by the same rules as a first one (this listener's origin, a login
@@ -255,7 +256,7 @@ impl StaleChoice {
 /// marked -- a duplicated tab, a restored session, a preload that sends no
 /// such header -- does end it. That is the accepted trade-off: the address
 /// carries this attempt's secret state, so only this person's browser can
-/// send it, and the app starts a new sign-in at once.
+/// send it, and the person signs in again from the app.
 pub(super) async fn receive_choice(
     listener: &TcpListener,
     state: &str,

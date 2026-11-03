@@ -351,8 +351,6 @@ pub const METHODS: &[&str] = &[
     "managed_launch_prepare",
     "managed_launch_redeem",
     "managed_terminal_launch",
-    "managed_terminal_windows",
-    "managed_terminal_tab_access",
     "managed_session_report",
     "managed_session_dismiss",
     "managed_session_focus",
@@ -2625,7 +2623,27 @@ impl DaemonShared {
         let routing = self.routing_value();
         // Taken before the locks below for the same reason as `routing`:
         // one lock order everywhere.
-        let account_scope = super::commons_credentials::account_scope(&self.store).ok();
+        // One account snapshot (the commit lock, then three files) for both
+        // the scope and the account's state, and one config read for every
+        // field below.
+        let account_snapshot = super::commons_credentials::snapshot(
+            &self.store,
+            super::commons_credentials::Kind::Account,
+        )
+        .ok();
+        let account_scope = account_snapshot
+            .as_ref()
+            .and_then(|snapshot| super::commons_credentials::scope_for_snapshot(snapshot).ok());
+        let cfg = self.store.load_config().ok().flatten();
+        // No credential-store read and no write (`account_attention`'s doc).
+        // `holds_near_ai_key` takes the settings lock, before the locks below.
+        let account_attention = super::account_attention::account_attention(
+            &self.store,
+            cfg.as_ref(),
+            account_snapshot.as_ref(),
+        );
+        let near_ai_login_unconfirmed =
+            account_attention.is_some() && self.holds_near_ai_key() == Some(true);
         let private_inference = self.private_inference_value();
         // Before the queue lock too: it takes the policy lock and then the
         // queue lock, the order `list_projects` takes them in.
@@ -2749,7 +2767,6 @@ impl DaemonShared {
             policy.contribution_mode_partial(queue.all().iter().map(|e| e.project_key.as_str()));
         drop(policy);
         let health = self.health.lock().expect("health lock");
-        let cfg = self.store.load_config().ok().flatten();
         let consent_hold = crate::config::consent_hold(cfg.as_ref());
         // One set of inputs for the lead and the mark (nudge A3), so the
         // two can never read different gates, counts or news.
@@ -2855,6 +2872,23 @@ impl DaemonShared {
             "logged_in": logged_in,
             "setup_complete": super::setup_completion::is_complete(&self.store, cfg.as_ref(), logged_in, setup_roots_declared),
             "account_scope": account_scope,
+            // Additive (#1836 F1). `ok`, or `needs_attention` while this
+            // app's account is locally broken in a way signing in again does
+            // not fix; then `account_state_reason` is
+            // `account_record_unreadable` or `account_address_refused`, and
+            // `null` otherwise. `near_ai_login_unconfirmed` is true while
+            // that holds and a NEAR AI login is stored: no Commons check
+            // could run for it. It picks the core's Private AI line.
+            // All three always present, so a shell can tell "nothing to
+            // say" from a daemon too old to say. Words:
+            // `consent_copy::account_attention_for_wire`.
+            "account_state": if account_attention.is_some() {
+                crate::consent_copy::ACCOUNT_STATE_NEEDS_ATTENTION
+            } else {
+                crate::consent_copy::ACCOUNT_STATE_OK
+            },
+            "account_state_reason": account_attention,
+            "near_ai_login_unconfirmed": near_ai_login_unconfirmed,
             "tenant_id": cfg.as_ref().map(|c| c.tenant_id.clone()),
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
             // Additive. `consent-scopes-not-chosen` while nothing may be sent
@@ -3668,6 +3702,12 @@ fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
 /// Labels are explicit because several methods share a label that cannot
 /// be derived from their names, including the onboarding and profile groups.
 const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
+    // It waits for the revoke at NEAR AI and takes the key out of the
+    // running proxy; neither can happen on this dispatcher.
+    (
+        "near_ai_credential_forget",
+        "near-ai-credential-forget-requires-async",
+    ),
     (
         "managed_model_catalogue",
         "managed-model-catalogue-requires-async",
@@ -3842,8 +3882,6 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "managed_select" => super::managed::handle(shared, req),
         "managed_launch_prepare" => super::managed::handle(shared, req),
         "managed_terminal_launch" => super::managed::handle(shared, req),
-        "managed_terminal_windows" => super::managed::handle(shared, req),
-        "managed_terminal_tab_access" => super::managed::handle(shared, req),
         "managed_launch_redeem" => super::managed::handle(shared, req),
         "managed_session_report" => super::managed::handle(shared, req),
         "managed_session_dismiss" => super::managed::handle(shared, req),
@@ -4043,7 +4081,6 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "near_account_cancel" => super::account_onboarding::handle_cancel(shared, req),
         "near_ai_credential_status" => super::nearai_credential::handle_status(shared, req),
         "near_ai_credential_cancel" => super::nearai_credential::handle_cancel(shared, req),
-        "near_ai_credential_forget" => super::nearai_credential::handle_forget(shared, req),
 
         // Unlike the probe, discovery opens no connection: it reads one
         // small file the proxy left on disk. So it answers here, on the
@@ -14734,6 +14771,25 @@ mod tests {
         assert_eq!(r.error.unwrap().code, ERR_UNKNOWN_METHOD);
     }
 
+    /// Owner, 2026-11-03: the window picker's two methods are gone. An app
+    /// built from #1852 still calls them, `try?`-ing the answer: it must
+    /// get the same plain refusal as any unknown method, with nothing
+    /// advertised and nothing run, and its dialog then offers no window.
+    #[test]
+    fn the_removed_window_picker_methods_are_refused_as_unknown() {
+        let s = shared();
+        for method in ["managed_terminal_windows", "managed_terminal_tab_access"] {
+            assert!(!METHODS.contains(&method), "{method}");
+            for params in [serde_json::json!({}), serde_json::Value::Null] {
+                let r = handle_request(&s, &req(method, params));
+                assert!(r.result.is_none(), "{method}");
+                let error = r.error.unwrap();
+                assert_eq!(error.code, ERR_UNKNOWN_METHOD, "{method}");
+                assert_eq!(error.message, "unknown-method", "{method}");
+            }
+        }
+    }
+
     #[test]
     fn hello_advertises_the_schema_and_method_set() {
         let s = shared();
@@ -14867,9 +14923,9 @@ mod tests {
     }
 
     /// The ceremony is reachable over the socket, and forgetting says what it
-    /// actually did rather than implying a revocation it cannot perform.
-    #[test]
-    fn the_credential_ceremony_is_dispatched_and_forgetting_claims_nothing_extra() {
+    /// actually did rather than implying a revocation it did not perform.
+    #[tokio::test]
+    async fn the_credential_ceremony_is_dispatched_and_forgetting_claims_nothing_extra() {
         let s = shared();
         // A machine with nothing on it says so, in one word, to a caller
         // that names no attempt. It refused this once; a shell left to infer
@@ -14915,14 +14971,13 @@ mod tests {
             !serde_json::to_string(&body).unwrap().contains("sk-super"),
             "{body}"
         );
-        let r = handle_request(&s, &req("near_ai_credential_forget", serde_json::json!({})));
+        let r = handle_request_async(&s, &req("near_ai_credential_forget", serde_json::json!({})))
+            .await;
         let body = r.result.unwrap();
         assert_eq!(body["removed"], true);
-        // Local only: forget never calls the service, though the retained
-        // session would let it. `credential_forget_explains` says so, and
-        // `forget_answers_not_revoked_because_the_forget_sentence_says_so`
-        // ties the two together.
-        assert_eq!(body["revoked"], false);
+        // No NEAR AI client in a test build, so the revoke cannot happen,
+        // and the answer says so rather than claiming it.
+        assert_eq!(body["revoked"], false, "{body}");
         assert!(
             DaemonSettings::load(&s.store)
                 .unwrap()
@@ -18843,7 +18898,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 74);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 75);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -19326,7 +19381,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 110, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 107, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 81, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

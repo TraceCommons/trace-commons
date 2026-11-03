@@ -7,17 +7,11 @@
 //! asserts the sidecar captures one row per submission with the expected
 //! gate_decision values.
 
-#[path = "../src/bin/pilot_bootstrap/hf_dataset.rs"]
-mod hf_dataset;
+use crate::pilot_bootstrap::translators;
 
-#[path = "../src/bin/pilot_bootstrap/translators.rs"]
-mod translators;
+use crate::pilot_bootstrap::submitter;
 
-#[path = "../src/bin/pilot_bootstrap/submitter.rs"]
-mod submitter;
-
-#[path = "../src/bin/pilot_bootstrap/sidecar.rs"]
-mod sidecar;
+use crate::pilot_bootstrap::sidecar;
 
 use serde_json::json;
 use sidecar::{Sidecar, SidecarRecord};

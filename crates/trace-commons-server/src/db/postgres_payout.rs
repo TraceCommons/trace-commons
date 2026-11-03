@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 use super::PayoutAccountStanding;
 use super::postgres::PgBackend;
+use super::{CarryPrograms, LegacyCarryReport};
 use super::{
     PayoutAccountLinkView, PayoutAccrual, PayoutAccrualKind, PayoutAccrualWrite, PayoutAuditAction,
     PayoutControl, PayoutHold, PayoutLine, PayoutLineResolution, PayoutLineResolve,
@@ -129,7 +130,7 @@ async fn account_link_version(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn insert_audit(
+pub(super) async fn insert_audit(
     tx: &deadpool_postgres::Transaction<'_>,
     tenant: &str,
     rail: &str,
@@ -1418,32 +1419,23 @@ impl PayoutStore for PgBackend {
         })
     }
 
-    async fn payout_account_anchors(
+    async fn payout_account_login_anchors(
         &self,
         tenant: &str,
         account: Uuid,
-    ) -> Result<crate::payout_recipient_proof::AccountAnchors, DatabaseError> {
+    ) -> Result<Vec<String>, DatabaseError> {
         let mut client = self.payout_tenant_client().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
         let rows = tx
             .query(
-                "SELECT identity_source, anchor_hash FROM trace_near_account_anchors
+                "SELECT anchor_hash FROM trace_near_account_anchors
                   WHERE tenant_id = $1 AND account_id = $2
-                    AND identity_source IN ('near_ai_login', 'wallet')",
+                    AND identity_source = 'near_ai_login'",
                 &[&tenant, &account],
             )
             .await?;
         tx.commit().await?;
-        let mut anchors = crate::payout_recipient_proof::AccountAnchors::default();
-        for row in rows {
-            let source: &str = row.get(0);
-            let hash: String = row.get(1);
-            match source {
-                "near_ai_login" => anchors.login.push(hash),
-                _ => anchors.wallet.push(hash),
-            }
-        }
-        Ok(anchors)
+        Ok(rows.iter().map(|row| row.get(0)).collect())
     }
 
     async fn confirm_payout_link_request(
@@ -1528,6 +1520,28 @@ impl PayoutStore for PgBackend {
                 if waiting {
                     tx.commit().await?;
                     return Ok(PayoutLinkConfirm::ChangePending);
+                }
+                // The start checked the account's NEAR AI login, but a
+                // request can outlive that check: one started by an older
+                // service across a deploy (V147), or before the account
+                // lost its last login. Re-read it here, in the transaction
+                // that writes the link, so no topology lets a link land on
+                // an account with none. This checks for any login, not the
+                // one that proved the request: `subject_index` is a payout
+                // label and cannot be compared with an anchor.
+                let anchored: bool = tx
+                    .query_one(
+                        "SELECT EXISTS (
+                             SELECT 1 FROM trace_near_account_anchors
+                              WHERE tenant_id = $1 AND account_id = $2
+                                AND identity_source = 'near_ai_login')",
+                        &[&tenant, &account],
+                    )
+                    .await?
+                    .get(0);
+                if !anchored {
+                    tx.commit().await?;
+                    return Ok(PayoutLinkConfirm::NoLoginAnchor);
                 }
                 let kind: Option<String> = row.get(2);
                 let kind =
@@ -1622,9 +1636,54 @@ impl PayoutStore for PgBackend {
                 .await?;
             }
         }
+        // V146: the link, or the unlink, reaches the legacy accounts this
+        // account has linked in the same transaction, so a carry never
+        // outlives its source and never lands half-done.
+        if let Some(programs) = confirm.carry_programs.as_ref() {
+            super::postgres_legacy_payout_carry::carry_in_tx(
+                &tx,
+                tenant,
+                account,
+                rail.as_str(),
+                programs,
+                &confirm.actor_ref_hash,
+            )
+            .await?;
+        }
         let version = account_link_version(&tx, tenant, account, rail.as_str()).await?;
         tx.commit().await?;
         Ok(PayoutLinkConfirm::Confirmed { action, version })
+    }
+
+    async fn carry_legacy_payout_links(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        programs: &CarryPrograms,
+        actor_ref_hash: &str,
+    ) -> Result<LegacyCarryReport, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        // The confirm's lock: a carry never interleaves with a confirm of
+        // the same account and rail.
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(
+                 'payout-link-confirm-v1:' || $1 || ':' || $2::UUID::TEXT || ':' || $3, 0))",
+            &[&tenant, &account, &rail.as_str()],
+        )
+        .await?;
+        let report = super::postgres_legacy_payout_carry::carry_in_tx(
+            &tx,
+            tenant,
+            account,
+            rail.as_str(),
+            programs,
+            actor_ref_hash,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(report)
     }
 
     async fn payout_audit_actions(
@@ -1834,7 +1893,8 @@ impl PayoutStore for PgBackend {
                                             AND accrued.credit_account_hash = 'sha256:' ||
                                                 encode(sha256(convert_to(h.credit_account_ref, 'UTF8')), 'hex')))),
                      ARRAY(SELECT credit_account_ref FROM trace_credit_holds
-                            WHERE tenant_id = $1 AND released_at IS NULL)",
+                            WHERE tenant_id = $1 AND released_at IS NULL),
+                     trace_legacy_payout_carry_invalid($1, $2)",
                 &[&tenant, &account],
             )
             .await?;
@@ -1847,6 +1907,7 @@ impl PayoutStore for PgBackend {
                     .get::<_, Vec<String>>(3)
                     .iter()
                     .any(|reference| super::settlement_key_account_id(reference) == Some(account)),
+            carry_invalid: row.get(4),
         })
     }
 

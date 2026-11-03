@@ -1853,6 +1853,22 @@ async fn a_malformed_record_or_refused_address_is_unchecked() {
     assert_eq!(fx.ceremonies(), (0, 0));
 }
 
+/// A record whose OS entry is gone is unreadable for good, like a malformed
+/// one (#1844): unchecked, never "unavailable" on every sign-in, and the
+/// commons is not asked.
+#[tokio::test]
+async fn a_record_whose_os_entry_is_gone_is_unchecked() {
+    let fx = Fixture::new(Session::Expired).await;
+    // Move the fixture's legacy file into the OS store, then lose the entry.
+    commons_credentials::load_account(&fx.shared.store).unwrap();
+    commons_credentials::remove_os_entry_for_test(&fx.shared.store, Kind::Account);
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::Unchecked(UNCHECKED_ACCOUNT_RECORD_MALFORMED)
+    ));
+    assert_eq!(fx.ceremonies(), (0, 0));
+}
+
 /// The commons answered, but the answer fails a local check (here, a
 /// tenant that is not a NEAR AI one): this device cannot verify it as its
 /// account, so the check fails closed.

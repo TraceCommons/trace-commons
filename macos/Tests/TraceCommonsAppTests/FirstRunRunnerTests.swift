@@ -65,11 +65,17 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
     /// What `cancelNearAILogin` answers: whether the daemon took the cancel.
     var cancelAnswer = true
     private(set) var cancels = 0
-    func nearAILogin() async -> Bool {
+    /// When set, the browser sign-in ends this way, overriding `failing`.
+    var loginOutcome: NearAILoginOutcome?
+    func nearAILoginOutcome() async -> NearAILoginOutcome {
+        if let loginOutcome {
+            log.append(.nearAILogin)
+            return loginOutcome
+        }
         let answer = record(.nearAILogin)
-        guard loginHolds else { return answer }
+        guard loginHolds else { return answer ? .signedIn : .failed }
         while !Task.isCancelled { await Task.yield() }
-        return loginAnswerOnCancel
+        return loginAnswerOnCancel ? .signedIn : .failed
     }
     func cancelNearAILogin() async -> Bool {
         cancels += 1
@@ -546,6 +552,50 @@ final class FirstRunRunnerTests: XCTestCase {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         XCTAssertEqual(
             FoldersScreenLayout.notice(for: runner.failure, copy: copy, onboarding: nil), copy.folders.signInFailed)
+    }
+
+    /// A sign-in the daemon reports cancelled -- the wallet's own Cancel, or
+    /// the login page coming back after a pick, which tells the person to
+    /// start again from the app -- is the person's, not a failure: no
+    /// "sign-in didn't finish", the step and the near.ai choice stay, and
+    /// nothing is enrolled. The next Continue signs in afresh.
+    func test_aSignInTheDaemonReportsCancelledIsNotAFailure() async throws {
+        let daemon = RecordingFirstRunDaemon()
+        var state = onFolders()
+        state.invite = ""
+        state.issuerHost = nil
+        state.account = .nearAI
+        daemon.loginOutcome = .cancelled
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+
+        await runner.commit(.signIn)
+
+        XCTAssertNil(runner.failure)
+        XCTAssertFalse(daemon.log.contains(.enrollNearAI))
+        XCTAssertFalse(runner.isCommitting)
+        XCTAssertEqual(runner.state.step, .join)
+        XCTAssertEqual(runner.state.account, .nearAI)
+        XCTAssertFalse(runner.state.nearAIEnrolled)
+
+        daemon.loginOutcome = nil
+        daemon.log = []
+        await runner.commit(.signIn)
+        XCTAssertEqual(daemon.log, [.nearAILogin, .enrollNearAI])
+        XCTAssertTrue(runner.state.nearAIEnrolled)
+    }
+
+    /// A sign-in that failed still says so and returns to Join.
+    func test_aSignInTheDaemonReportsFailedStillFails() async throws {
+        let daemon = RecordingFirstRunDaemon()
+        var state = onFolders()
+        state.invite = ""
+        state.issuerHost = nil
+        state.account = .nearAI
+        daemon.loginOutcome = .failed
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        await runner.commit(.signIn)
+        XCTAssertEqual(runner.failure, .signInFailed)
+        XCTAssertFalse(runner.state.nearAIEnrolled)
     }
 
     /// Only the browser wait offers Cancel: the invite path's sign-in is one
