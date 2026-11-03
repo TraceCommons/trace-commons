@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -130,12 +130,14 @@ struct Namespace {
 ///
 /// Locking is per namespace: the map of namespaces is held only to find
 /// one, and a namespace's lock is held across its own writes and reads, so
-/// one tenant's save never holds up another tenant. Calls are synchronous;
+/// one tenant's save never holds up another tenant. The namespace lock is a
+/// read/write lock: `nearest` and `snapshot` share it, and only writes
+/// (which save the namespace) take it exclusively. Calls are synchronous;
 /// the pipeline runs index calls on the blocking pool.
 pub struct UsearchPipelineIndex {
     root: PathBuf,
     index: Arc<dyn VectorIndex>,
-    namespaces: Mutex<BTreeMap<String, Arc<Mutex<Namespace>>>>,
+    namespaces: Mutex<BTreeMap<String, Arc<RwLock<Namespace>>>>,
     #[cfg(test)]
     pub(super) manifest_bytes_written: std::sync::atomic::AtomicU64,
     #[cfg(test)]
@@ -367,7 +369,7 @@ impl UsearchPipelineIndex {
                     tracing::warn!("pipeline_vector_index_compaction_failed");
                 }
             }
-            namespaces.insert(log.namespace, Arc::new(Mutex::new(state)));
+            namespaces.insert(log.namespace, Arc::new(RwLock::new(state)));
         }
         *opened.namespaces.lock().expect("pipeline index mutex") = namespaces;
         Ok(opened)
@@ -375,12 +377,12 @@ impl UsearchPipelineIndex {
 
     /// The namespace's state, created empty when absent. The map's lock is
     /// released before the caller locks the namespace.
-    fn namespace(&self, namespace: &str) -> Arc<Mutex<Namespace>> {
+    fn namespace(&self, namespace: &str) -> Arc<RwLock<Namespace>> {
         let mut namespaces = self.namespaces.lock().expect("pipeline index mutex");
         Arc::clone(namespaces.entry(namespace.to_string()).or_default())
     }
 
-    fn existing_namespace(&self, namespace: &str) -> Option<Arc<Mutex<Namespace>>> {
+    fn existing_namespace(&self, namespace: &str) -> Option<Arc<RwLock<Namespace>>> {
         let namespaces = self.namespaces.lock().expect("pipeline index mutex");
         namespaces.get(namespace).map(Arc::clone)
     }
@@ -577,7 +579,7 @@ impl VectorIndexReader for UsearchPipelineIndex {
         let mut hasher = Sha256::new();
         let mut cardinality = 0_u64;
         if let Some(slot) = self.existing_namespace(&namespace_of(tenant_storage_ref, index_id)) {
-            let state = slot.lock().expect("pipeline index namespace mutex");
+            let state = slot.read().expect("pipeline index namespace lock");
             for (entry_id, entry) in &state.entries {
                 cardinality += 1;
                 hasher.update(entry_id.as_bytes());
@@ -604,7 +606,7 @@ impl VectorIndexReader for UsearchPipelineIndex {
         let Some(slot) = self.existing_namespace(&namespace) else {
             return Ok(Vec::new());
         };
-        let state = slot.lock().expect("pipeline index namespace mutex");
+        let state = slot.read().expect("pipeline index namespace lock");
         let entries = &state.entries;
         if k == 0 || entries.is_empty() {
             return Ok(Vec::new());
@@ -650,7 +652,7 @@ impl VectorIndexWriter for UsearchPipelineIndex {
         let entry_id = key.entry_id();
         let digest = content_digest(embedding, content_hash);
         let slot = self.namespace(&namespace);
-        let mut state = slot.lock().expect("pipeline index namespace mutex");
+        let mut state = slot.write().expect("pipeline index namespace lock");
         if state.poisoned {
             return Err(IndexWriteError::Uncertain);
         }
@@ -719,7 +721,7 @@ impl VectorIndexWriter for UsearchPipelineIndex {
         let Some(slot) = self.existing_namespace(&namespace) else {
             return Ok(false);
         };
-        let mut state = slot.lock().expect("pipeline index namespace mutex");
+        let mut state = slot.write().expect("pipeline index namespace lock");
         if state.poisoned {
             return Err(IndexWriteError::Uncertain);
         }

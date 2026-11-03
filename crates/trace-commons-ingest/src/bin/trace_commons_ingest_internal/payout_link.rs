@@ -8,15 +8,22 @@
 //! - `POST /v1/account/payout-rails/{rail_id}/link-requests` starts a link
 //!   or an unlink. Local refusals come first (session kind, rail, body,
 //!   account standing, the "changed since shown" version); only then does a
-//!   `link` spend the person's NEAR AI token on the rail's recipient-proof
-//!   verifier (`/users/me`, then a zero-target probe). The verified org is
+//!   `link` go to the rail's recipient-proof verifier. That refuses an
+//!   account with no NEAR AI login anchor and no wallet anchor before the
+//!   token is spent, and otherwise spends it (`/users/me`, then a
+//!   zero-target probe): the login must be one of the account's NEAR AI
+//!   login anchors, or a NEAR AI wallet sign-in whose wallet is one of its
+//!   wallet anchors. The verified org is
 //!   sealed and stored on a request that changes nothing yet, with a 5
 //!   minute expiry and a handle.
 //! - `POST /v1/account/payout-rails/{rail_id}/link-requests/{handle}/confirm`
 //!   takes the request from the same account and, in one transaction, writes
 //!   the `waiting` link (or the unlink mark) and its audit rows, refusing if
 //!   the link changed since the request, a newer request superseded it, or
-//!   it expired. A confirmed change wakes the rail.
+//!   it expired. A confirmed change wakes the rail. The confirm does not
+//!   re-read login anchors: no production path deletes or changes one, so
+//!   the anchor the start checked is still there. A path that removes
+//!   anchors must decide then what happens to the account's links.
 //! - `GET /v1/account/payout-rails` lists each rail that is not `disabled`:
 //!   link state, version and recipient ref, never a recipient or a name.
 //!
@@ -48,7 +55,7 @@ use trace_commons_server::db::{
 use trace_commons_server::payout_pass::{stream_status_hold_label, stream_waiting};
 use trace_commons_server::payout_rate::PayoutMode;
 use trace_commons_server::payout_recipient_proof::{
-    NEAR_AI_USERS_ME_TIMEOUT, NearAiOrgVerifier, RecipientProof, RecipientProofRefusal,
+    NEAR_AI_USERS_ME_TIMEOUT, NearAiOrgVerifier, ProofKind, RecipientProof, RecipientProofRefusal,
     RecipientProofVerifier,
 };
 use trace_commons_server::payout_recipient_seal::{payout_link_handle, seal_payout_recipient};
@@ -272,16 +279,18 @@ pub(super) async fn start_handler(
     let expected_version = body.expected_version();
     let idempotency_key = body.idempotency_key;
     let wire_action = body.action;
-    let (action, recipient, recipient_ref) = match body.proof {
-        None => (PayoutLinkAction::Unlink, None, None),
+    let (action, recipient, recipient_ref, proof_kind) = match body.proof {
+        None => (PayoutLinkAction::Unlink, None, None, None),
         Some(proof) => {
             let organization_id = match &proof {
                 PayoutLinkProof::NearAi {
                     organization_id, ..
                 } => *organization_id,
             };
+            // What the proving login must match: a NEAR AI login anchor, or
+            // for a NEAR AI wallet sign-in the account's wallet anchor.
             let anchors = store
-                .payout_account_login_anchors(tenant, account)
+                .payout_account_anchors(tenant, account)
                 .await
                 .map_err(store_failed)?;
             // The token becomes a secret here and is dropped inside verify.
@@ -291,6 +300,15 @@ pub(super) async fn start_handler(
                 rail.clone(),
                 identity.clone(),
                 NEAR_AI_USERS_ME_TIMEOUT,
+            )
+            // Wallet anchors are keyed under this deployment's NEAR network;
+            // the verifier matches them only when that is the network NEAR
+            // AI verifies wallet sign-ins on.
+            .with_wallet_network(
+                state
+                    .account_near_config
+                    .as_ref()
+                    .map(|config| config.network.as_str()),
             );
             let verified = match verifier.verify(proof, &anchors).await {
                 Ok(verified) => verified,
@@ -298,6 +316,7 @@ pub(super) async fn start_handler(
                     tracing::info!(
                         rail = %rail_id,
                         outcome = refusal.label(),
+                        reason = refusal.log_reason(),
                         "payout link refused"
                     );
                     return Err(proof_refusal(refusal));
@@ -321,6 +340,7 @@ pub(super) async fn start_handler(
                 PayoutLinkAction::Link,
                 Some((rail.descriptor().recipient_kind.clone(), sealed)),
                 Some(recipient_ref),
+                Some(verified.proof),
             )
         }
     };
@@ -339,6 +359,7 @@ pub(super) async fn start_handler(
                 recipient,
                 expires_at,
                 actor_ref_hash: account_actor_hash(&ctx),
+                proof_label: proof_kind.map(ProofKind::label),
             },
         )
         .await
@@ -353,6 +374,7 @@ pub(super) async fn start_handler(
         rail = %rail_id,
         action = action.as_str(),
         replayed = inserted == PayoutLinkRequestInsert::Replayed,
+        proof = proof_kind.map(ProofKind::label).unwrap_or("none"),
         "payout link requested"
     );
     Ok((
