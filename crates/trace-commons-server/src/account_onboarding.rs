@@ -229,6 +229,20 @@ pub fn is_device_key_registered_elsewhere(error: &crate::error::DatabaseError) -
 /// [`is_device_key_revoked`].
 pub const DEVICE_KEY_REVOKED: &str = "near_provisioning_device_key_revoked";
 
+/// Identity material that could not seal an account name or login subject
+/// (the account-name key or its wrapper failed). A fault of this deployment,
+/// the same for every request, never a refusal. Label-only.
+pub const SEAL_FAILED: &str = "near_provisioning_seal_failed";
+
+/// A stored ceremony this process cannot read back: a start on one build and
+/// a finish on another during a rollout, or a row of another ceremony kind
+/// (which only the holder of its secret id can name). Not a refusal: the
+/// client starts again. Label-only.
+pub const CEREMONY_UNREADABLE: &str = "near_provisioning_ceremony_unreadable";
+
+/// A ceremony this process cannot serialize to store. A fault. Label-only.
+pub const CEREMONY_UNWRITABLE: &str = "near_provisioning_ceremony_unwritable";
+
 /// Whether `error` is the [`DEVICE_KEY_REVOKED`] refusal.
 pub fn is_device_key_revoked(error: &crate::error::DatabaseError) -> bool {
     matches!(error, crate::error::DatabaseError::Pool(label) if label == DEVICE_KEY_REVOKED)
@@ -293,7 +307,13 @@ pub fn is_database_unavailable(error: &crate::error::DatabaseError) -> bool {
                     .code()
                     .is_some_and(|code| sqlstate_unavailable(code.code()))
         }
-        DatabaseError::Pool(label) => label.starts_with("missing-control:"),
+        DatabaseError::Pool(label) => {
+            label.starts_with("missing-control:")
+                || matches!(
+                    label.as_str(),
+                    SEAL_FAILED | CEREMONY_UNREADABLE | CEREMONY_UNWRITABLE
+                )
+        }
         _ => false,
     }
 }
@@ -411,13 +431,13 @@ pub fn database_error_label(error: &crate::error::DatabaseError) -> String {
 pub fn is_decided_refusal(error: &crate::error::DatabaseError) -> bool {
     use crate::error::DatabaseError;
     match error {
-        // Not `near_provisioning_refused`: the database layer also returns it
-        // for faults (identity material that cannot seal, a stored ceremony a
-        // replica cannot read), so it logs at `warn` until those get labels
-        // of their own.
+        // `near_provisioning_refused` is a decided refusal only: the faults
+        // that used to share it carry their own labels ([`SEAL_FAILED`],
+        // [`CEREMONY_UNREADABLE`], [`CEREMONY_UNWRITABLE`]).
         DatabaseError::Pool(label) => matches!(
             label.as_str(),
-            "near_provisioning_wallet_key_registered_elsewhere"
+            "near_provisioning_refused"
+                | "near_provisioning_wallet_key_registered_elsewhere"
                 | "near_provisioning_device_bound_to_other_account"
                 | DEVICE_KEY_REGISTERED_ELSEWHERE
                 | DEVICE_KEY_REVOKED
@@ -750,6 +770,16 @@ mod tests {
         assert!(is_database_unavailable(&DatabaseError::Pool(
             "missing-control: login-resolver-pool-unconfigured".into()
         )));
+        // Faults the provisioning code used to report as a refusal.
+        for fault in [SEAL_FAILED, CEREMONY_UNREADABLE, CEREMONY_UNWRITABLE] {
+            assert!(
+                is_database_unavailable(&DatabaseError::Pool(fault.into())),
+                "{fault}"
+            );
+        }
+        assert!(!is_database_unavailable(&DatabaseError::Pool(
+            "near_provisioning_refused".into()
+        )));
     }
 
     /// Only the provisioning code's own refusal labels log quietly; a trait
@@ -758,6 +788,7 @@ mod tests {
     fn only_the_listed_refusals_are_decided() {
         use crate::error::DatabaseError;
         for label in [
+            "near_provisioning_refused",
             "near_provisioning_wallet_key_registered_elsewhere",
             "near_provisioning_device_bound_to_other_account",
             DEVICE_KEY_REGISTERED_ELSEWHERE,
@@ -772,8 +803,9 @@ mod tests {
             "near_provisioning_ambiguous".into()
         )));
         for fault in [
-            // Also returned for faults, so not quiet.
-            DatabaseError::Pool("near_provisioning_refused".into()),
+            DatabaseError::Pool(SEAL_FAILED.into()),
+            DatabaseError::Pool(CEREMONY_UNREADABLE.into()),
+            DatabaseError::Pool(CEREMONY_UNWRITABLE.into()),
             DatabaseError::Pool("near_provisioning_unconfigured".into()),
             DatabaseError::Pool("near_ai_login_provisioning_unconfigured".into()),
             DatabaseError::Pool("connection reset by peer".into()),
