@@ -147,7 +147,7 @@ impl VerifiedNearProvisioning {
 
 /// Hash-only durable ceremony payload. Raw account/key identities are supplied
 /// again at finish and checked against these server-stored commitments.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StoredProvisioningCeremony {
     callback_hash: Option<[u8; 32]>,
     nonce: [u8; 32],
@@ -171,7 +171,7 @@ pub struct StoredProvisioningCeremony {
     expires_at: i64,
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NativeProvisioningPending {
     pub ceremony: StoredProvisioningCeremony,
     pub code_challenge: String,
@@ -430,14 +430,6 @@ pub struct ProvisionedNearAccount {
     pub account_id: uuid::Uuid,
     pub device_key_id: String,
     pub anchor_hash: String,
-}
-
-impl StoredProvisioningCeremony {
-    /// Unix seconds after which the ceremony is unusable; the row is stored
-    /// with this expiry, and a put-back keeps it.
-    pub fn expires_at(&self) -> i64 {
-        self.expires_at
-    }
 }
 
 impl PendingNearProvisioning {

@@ -870,6 +870,10 @@ fn finish_unanswered(error: &trace_commons_operator_client::Error) -> bool {
     }
 }
 
+/// A finish the commons did not answer consumed its ceremony anyway (the
+/// commons' wire contract: a `503` or `429` at finish means start again), so
+/// the caller's try-later label leads to a new start, never a resend.
+///
 /// A finish failure as this module's label: the revoked-key refusal by
 /// name; a commons that did not answer (no response, a server error such as
 /// its `503 near_ai_sign_in_unavailable`, or its `429

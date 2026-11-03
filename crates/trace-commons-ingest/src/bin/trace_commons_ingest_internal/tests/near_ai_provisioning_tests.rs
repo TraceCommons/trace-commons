@@ -1849,10 +1849,11 @@ async fn pg_a_near_ai_sign_in_whose_database_does_not_answer_answers_503() {
 }
 
 /// NEAR AI not answering -- nothing listening, or a `503` or `429` of its own
-/// -- is `503` at finish, and writes nothing. The ceremony is not consumed:
-/// the same finish again, still unanswered, is `503` again, and once NEAR AI
-/// answers it succeeds on its merits. After that success, the same finish is
-/// a replay and is refused.
+/// -- is `503` at finish, and writes nothing. The ceremony is consumed all the
+/// same (the wire contract: a `503` at finish means start again), so the same
+/// finish again is refused even once NEAR AI answers: a finish body is a
+/// complete credential and must not complete a sign-in after the owner gave
+/// up on it.
 #[tokio::test]
 async fn pg_a_near_ai_finish_whose_near_ai_does_not_answer_answers_503() {
     let Some(h) = harness().await else {
@@ -1901,19 +1902,8 @@ async fn pg_a_near_ai_finish_whose_near_ai_does_not_answer_answers_503() {
             devices_before,
             "{cause}: an unanswered finish registered the device"
         );
-        // Not consumed: the retry is still unanswered, not refused.
-        let retried = finish(
-            &state,
-            PROVISION_FINISH,
-            None,
-            &started,
-            &device,
-            &signature,
-        )
-        .await;
-        assert_unavailable(&retried, &format!("{cause}, retried while still down"));
-        // NEAR AI answers again: the same ceremony is decided on its merits.
-        let answered = finish(
+        // Consumed: the same finish, even with NEAR AI answering, is refused.
+        let resent = finish(
             &h.state,
             PROVISION_FINISH,
             None,
@@ -1922,28 +1912,7 @@ async fn pg_a_near_ai_finish_whose_near_ai_does_not_answer_answers_503() {
             &signature,
         )
         .await;
-        assert_eq!(
-            answered.status,
-            StatusCode::OK,
-            "{cause}, retried once NEAR AI answers: {:?}",
-            answered.json()
-        );
-        let tenant = answered.json()["tenant_id"]
-            .as_str()
-            .expect("tenant")
-            .to_string();
-        // Decided: now the same finish is a replay, and a replay is refused.
-        let replay = finish(
-            &h.state,
-            PROVISION_FINISH,
-            None,
-            &started,
-            &device,
-            &signature,
-        )
-        .await;
-        assert_uniform_deny(&replay, &format!("{cause}, replayed after success"));
-        drop_tenants(&admin, &[&tenant]).await;
+        assert_uniform_deny(&resent, &format!("{cause}, resent after the 503"));
     }
     reset_account_rate_limiter_for_db_test().await;
 }
@@ -2244,10 +2213,9 @@ async fn pg_a_near_ai_finish_without_the_resolver_pool_answers_503() {
         0,
         "an unanswered finish registered the device"
     );
-    // The provisioning failed after the ceremony was taken and the token
-    // spent; the ceremony was put back, so once the registry is whole the
-    // same finish succeeds on its merits.
-    let retried = finish(
+    // The ceremony was consumed: once the registry is whole, the same finish
+    // is still refused; the client starts again.
+    let resent = finish(
         &h.state,
         PROVISION_FINISH,
         None,
@@ -2256,11 +2224,6 @@ async fn pg_a_near_ai_finish_without_the_resolver_pool_answers_503() {
         &signature,
     )
     .await;
-    assert_eq!(retried.status, StatusCode::OK, "{:?}", retried.json());
-    let tenant = retried.json()["tenant_id"]
-        .as_str()
-        .expect("tenant")
-        .to_string();
-    drop_tenants(&admin, &[&tenant]).await;
+    assert_uniform_deny(&resent, "resent after the 503");
     reset_account_rate_limiter_for_db_test().await;
 }

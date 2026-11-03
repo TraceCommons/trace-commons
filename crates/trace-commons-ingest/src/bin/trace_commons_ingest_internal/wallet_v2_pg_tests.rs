@@ -853,62 +853,35 @@ async fn wallet_v2_answers_busy_and_unready_with_429_or_503() {
         "no busy or unready answer writes an account, identity, device, principal or session"
     );
 
-    // An unanswered finish leaves its ceremony in place: once the RPC answers,
-    // the same finish succeeds on its merits; after that, it is a replay. One
-    // RPC address throughout, switched from down to answering, because the
-    // ceremony binds the NEAR config it started under.
-    //
-    // Its own account: the suite shares one database, and the completion test
-    // counts one new anchor for `WALLET_ACCOUNT`.
-    const RETRY_ACCOUNT: &str = "wallet-v2-retry-fixture.testnet";
-    let rpc_down = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let rpc_url = {
-        let down = rpc_down.clone();
-        let public_key = wallet_key(&wallet);
-        let router = axum::Router::new().route(
-            "/",
-            axum::routing::post(move || {
-                let down = down.clone();
-                let public_key = public_key.clone();
-                async move {
-                    if down.load(std::sync::atomic::Ordering::SeqCst) {
-                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-                    }
-                    Json(serde_json::json!({
-                        "jsonrpc":"2.0","id":"tc",
-                        "result":{"keys":[{"public_key":public_key,
-                            "access_key":{"permission":"FullAccess"}}]}
-                    }))
-                    .into_response()
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        url
-    };
-    let mut recovering = state.clone();
-    Arc::make_mut(&mut recovering).account_near_config =
+    // An unanswered finish consumes its ceremony all the same (the wire
+    // contract: a `503` at finish means start again), so the same finish is
+    // refused, and still writes nothing.
+    let mut down_rpc = state.clone();
+    Arc::make_mut(&mut down_rpc).account_near_config =
         Some(Arc::new(trace_commons_server::config::NearConfig {
-            rpc_url,
+            rpc_url: rpc_status_fixture(StatusCode::SERVICE_UNAVAILABLE).await,
             network: "testnet".into(),
             recipient: WALLET_RECIPIENT.into(),
         }));
     let device = keypair();
     let public_key = base64::engine::general_purpose::STANDARD.encode(device.public_key().as_ref());
-    let started = start(&recovering, RETRY_ACCOUNT, &public_key, &challenge).await;
-    let body = finish_body(&started, RETRY_ACCOUNT, &device, &wallet, &verifier);
-    let (status, unanswered) = finish(&recovering, body.clone()).await;
-    assert_wallet_unavailable(status, &unanswered, "rpc 503 before the retry");
-    rpc_down.store(false, std::sync::atomic::Ordering::SeqCst);
-    let (status, finished) = finish(&recovering, body.clone()).await;
+    let started = start(&down_rpc, WALLET_ACCOUNT, &public_key, &challenge).await;
+    let body = finish_body(&started, WALLET_ACCOUNT, &device, &wallet, &verifier);
+    let (status, unanswered) = finish(&down_rpc, body.clone()).await;
+    assert_wallet_unavailable(status, &unanswered, "rpc 503");
+    let (status, resent) = finish(&down_rpc, body).await;
     assert_eq!(
-        status,
-        StatusCode::OK,
-        "retried once the RPC answers: {finished}"
+        (status, resent),
+        (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": "native sign-in could not be completed" })
+        ),
+        "resent after the 503"
     );
-    let (status, _) = finish(&recovering, body).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "a replay after success");
+    assert_eq!(
+        global_provisioned_counts(&admin).await,
+        before,
+        "an unanswered finish and its resend write nothing"
+    );
     reset_account_rate_limiter_for_db_test().await;
 }

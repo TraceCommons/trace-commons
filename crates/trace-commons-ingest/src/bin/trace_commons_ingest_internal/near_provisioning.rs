@@ -715,21 +715,15 @@ async fn finish(
         Ok(record) => record?,
         Err(error) => return near_ai_database_failure(&error),
     };
-    let kept = record.clone();
-    let expires_at = record.ceremony.expires_at();
-    let answer = finish_taken(
+    finish_taken(
         &state, &headers, body, device, &cfg, &db, &origin, &identity, record,
     )
-    .await;
-    if unanswered(&answer) {
-        keep_ceremony(db.store_near_provisioning_ceremony(&hash, kept, expires_at)).await;
-    }
-    answer
+    .await
 }
 
 /// A wallet finish after its ceremony was taken: every check that decides
-/// it, and the provisioning. A `503` from here means the finish was not
-/// decided, and the caller puts the ceremony back for a retry.
+/// it, and the provisioning. The take consumed the ceremony whatever this
+/// answers, a `503` included; see [`NEAR_AI_SIGN_IN_UNAVAILABLE`].
 #[allow(clippy::too_many_arguments)]
 async fn finish_taken(
     state: &AppState,
@@ -1500,10 +1494,19 @@ async fn near_ai_introspect(
 /// the caller's address, or the deployment as a whole, is over its rate limit.
 pub(super) const NEAR_AI_SIGN_IN_RATE_LIMITED: &str = "near_ai_sign_in_rate_limited";
 
-/// The wire label of a NEAR AI sign-in ceremony this commons cannot answer
-/// now: it is not ready to offer the ceremony, or the database or NEAR AI did
-/// not answer. One label for every cause, so the body never says which; the
-/// cause is logged.
+/// The wire label of a NEAR sign-in ceremony this commons cannot answer now:
+/// it is not ready to run the ceremony, or the database, NEAR AI or the NEAR
+/// RPC did not answer. One label for every cause, so the body never says
+/// which; the cause is logged.
+///
+/// **Wire contract: a `503` (or `429`) at finish means start again.** A
+/// finish takes its single-use ceremony before anything that can be
+/// unavailable, and the ceremony is gone whatever the finish answers. A
+/// client retries with a new start, never by resending the same finish.
+/// The ceremony is deliberately not kept for a retry: a finish body is a
+/// complete credential (the device signature, the PKCE verifier, and on the
+/// NEAR AI route the access token), and a kept ceremony would let whoever
+/// holds a copy of that body complete the sign-in after the owner gave up.
 pub(super) const NEAR_AI_SIGN_IN_UNAVAILABLE: &str = "near_ai_sign_in_unavailable";
 
 /// `429`, with `Retry-After`: a NEAR AI sign-in start or finish over the
@@ -1552,32 +1555,6 @@ fn unavailable_response() -> axum::response::Response {
         StatusCode::SERVICE_UNAVAILABLE,
         NEAR_AI_SIGN_IN_UNAVAILABLE,
     ))
-}
-
-/// After a finish took its single-use ceremony, it puts it back when the
-/// answer is `503`: the finish was not decided (a dependency or the database
-/// did not answer), and a client that obeys "try again later" must find its
-/// ceremony there, not have the retry read as the uniform deny. A decided
-/// answer -- success, the uniform deny, the revoked-key `409` -- never puts
-/// it back, so a replayed finish is still refused. Same hash, same expiry;
-/// the per-ceremony attempt cap still bounds retries.
-fn unanswered(answer: &Option<axum::response::Response>) -> bool {
-    answer
-        .as_ref()
-        .is_some_and(|response| response.status() == StatusCode::SERVICE_UNAVAILABLE)
-}
-
-/// The put-back. Best effort: if the database cannot take the row back
-/// either, that is logged and the client's retry starts a new ceremony.
-async fn keep_ceremony(
-    put_back: impl std::future::Future<Output = Result<(), trace_commons_server::error::DatabaseError>>,
-) {
-    if let Err(error) = put_back.await {
-        tracing::warn!(
-            database_error = %trace_commons_server::account_onboarding::database_error_label(&error),
-            "NEAR sign-in could not keep its ceremony for a retry"
-        );
-    }
 }
 
 /// A database error on a NEAR AI sign-in: `503` when the database cannot
@@ -1642,23 +1619,17 @@ async fn near_ai_finish(
         return Some(near_ai_sign_in_unavailable("database"));
     };
     // Single use: the take deletes the row, so a replayed finish finds
-    // nothing -- unless the finish was not decided, in which case the
-    // ceremony is put back below so a retry is decided on its merits.
+    // nothing, whatever the first finish answered.
     let pending = match db.take_near_ai_login_ceremony(&hash).await {
         Ok(pending) => pending?,
         Err(error) => return near_ai_database_failure(&error),
     };
-    let kept = pending.clone();
-    let answer = near_ai_finish_taken(&state, &headers, body, device, &db, pending).await;
-    if unanswered(&answer) {
-        keep_ceremony(db.store_near_ai_login_ceremony(&hash, &kept, kept.expires_at)).await;
-    }
-    answer
+    near_ai_finish_taken(&state, &headers, body, device, &db, pending).await
 }
 
 /// A NEAR AI finish after its ceremony was taken: every check that decides
-/// it, and the provisioning. A `503` from here means the finish was not
-/// decided, and the caller puts the ceremony back for a retry.
+/// it, and the provisioning. The take consumed the ceremony whatever this
+/// answers, a `503` included; see [`NEAR_AI_SIGN_IN_UNAVAILABLE`].
 async fn near_ai_finish_taken(
     state: &AppState,
     headers: &HeaderMap,
