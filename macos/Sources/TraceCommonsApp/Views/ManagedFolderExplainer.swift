@@ -25,6 +25,9 @@ struct ManagedFolderExplainerSheet: View {
     /// The terminal picked in the dialog while it asks for one
     /// (`ManagedSnapshot.asksForTerminal`); nil otherwise.
     @Binding var terminal: String?
+    /// The window picked in the dialog's window list, by its session; nil
+    /// for a new window.
+    @Binding var beside: String?
     @EnvironmentObject private var model: AppModel
     @State private var path: String?
     @State private var draft = ManagedFolderDraft()
@@ -40,12 +43,13 @@ struct ManagedFolderExplainerSheet: View {
 
     init(tool: String, onCancel: @escaping () -> Void, onOpen: @escaping (String?) -> Void,
          onOpenWithSettings: ((String?, ManagedFolderDraft) -> Void)? = nil,
-         terminal: Binding<String?> = .constant(nil)) {
+         terminal: Binding<String?> = .constant(nil), beside: Binding<String?> = .constant(nil)) {
         self.tool = tool
         self.onCancel = onCancel
         self.onOpen = onOpen
         self.onOpenWithSettings = onOpenWithSettings
         _terminal = terminal
+        _beside = beside
     }
 
     /// The dialog's Open button: "Open Claude Code".
@@ -99,6 +103,8 @@ struct ManagedFolderExplainerSheet: View {
                 // The first launch asks which terminal to open in.
                 if let snapshot = model.managedSnapshot, snapshot.asksForTerminal {
                     ManagedLaunchTerminalRow(snapshot: snapshot, selection: $terminal)
+                } else {
+                    ManagedLaunchWindowRow(beside: $beside)
                 }
                 if supportsFolderSettings {
                     ManagedFolderOptions(tool: tool, connection: "near_ai_signin", draft: $draft,
