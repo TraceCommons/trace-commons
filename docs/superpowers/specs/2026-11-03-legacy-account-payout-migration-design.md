@@ -710,19 +710,29 @@ Where the implementation differs from, or adds to, sections 3 to 5:
 - **Runbook:** revoke one tenant link per transaction (a multi-row revoke
   can deadlock with a concurrent carry; PostgreSQL aborts one side).
 
+### Owner decisions on #1879 (2026-11-03)
+
+1. **A credit hold on the NEAR AI account pauses its carried payouts and
+   does not release the carry.** The send-time standing check holds
+   payment while the hold lasts, and payment resumes when the hold lifts.
+   A close, a pooled mark, a revocation and a tenant-link delete still
+   release.
+2. **Carry only at events, never on every pass.** The events are the
+   NEAR AI account's confirm, the tenant link, and an account opening in a
+   linked legacy tenant (the login-link path), each in its own
+   transaction. The payout pass does not carry.
+
 ### Known limits, not fixed here
 
 - **Accounts created after a carry by a later login link** are carried
   only at the NEAR AI account's next confirm or tenant link. Their credit
   accrues but is not paid until then. (A claim at a V91 attestation goes
   through the tenant-link route, which carries after it.) **Fixed by V148
-  (#1873):** in live mode the payout pass, visiting a NEAR AI tenant whose
-  source link is live, carries each of its accounts that has live tenant
-  links again (`PayoutStore::carry_legacy_payout_links_from`). A later
-  account is carried at the next pass, whether or not its legacy tenant
-  has a live link of its own; a closed source account carries nothing.
-  Whether the pass should carry automatically at all is an open owner
-  question (review of #1879).
+  (#1873):** opening an account in a legacy tenant linked through V81 (the
+  login-link path, `PayoutStore::create_or_reuse_account_carrying`)
+  carries the NEAR AI account's live link to it in the same transaction,
+  through the guard-owned `trace_legacy_payout_source_account`. The
+  payout pass never carries. A closed source account carries nothing.
 - **An invalid carry is held, not released.** A pooled mark, a closed or
   held NEAR AI account, or a deleted tenant link holds the legacy
   account's sends at once (fail closed), but the carried link is released
@@ -736,8 +746,8 @@ Where the implementation differs from, or adds to, sections 3 to 5:
   `legacy_source_account_closed` and `legacy_tenant_link_deleted`. The
   send-time check stays as the backstop and still holds a live carry while
   its source account is on a credit hold or its source link is unlinked
-  outside a confirm. Whether a credit hold should release instead is an
-  open owner question (review of #1879).
+  outside a confirm. A credit hold pauses and does not release (owner
+  decision below).
 - **The hash formulas** (`legacy-invite-link-v1:`, `payout-link-v1:`,
   `payout-account-v1:`) are written inline in V146 and mirrored in Rust;
   the tests catch a drift that breaks a match. Follow-up, #1874: small

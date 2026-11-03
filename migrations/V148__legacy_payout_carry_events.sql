@@ -17,8 +17,10 @@
 -- 2. Triggers: a pooled mark, an account closing (a NEAR AI account's
 --    carries in every tenant it linked, or a legacy account's own), and a
 --    tenant link deleted rather than revoked.
--- (#1873 needs no SQL: the payout pass carries from the source side, for
--- each NEAR AI account in a tenant it visits that has live tenant links.)
+-- 3. trace_legacy_payout_source_account (#1873): which open NEAR AI account
+--    a legacy tenant is linked to, so opening an account in that tenant
+--    carries the source's link to it in the same transaction (owner,
+--    2026-11-03: carry only at events, never on every pass).
 --
 -- Every function is owned by V146's NOLOGIN, NOBYPASSRLS guard and reaches
 -- a legacy tenant only by setting the tenant context, so forced RLS applies
@@ -161,6 +163,46 @@ REVOKE ALL ON FUNCTION public.trace_legacy_invite_link_delete_releases_carries()
 CREATE TRIGGER trace_legacy_invite_link_delete_releases_carries
     AFTER DELETE ON trace_legacy_invite_links
     FOR EACH ROW EXECUTE FUNCTION public.trace_legacy_invite_link_delete_releases_carries();
+
+-- 3. The open NEAR AI account a legacy tenant is linked to (#1873). Asked
+-- under the legacy tenant's own context by the transaction that opens an
+-- account there; refused under any other. No row when the tenant has no
+-- live tenant link or the account is closed.
+CREATE FUNCTION public.trace_legacy_payout_source_account(p_legacy_tenant TEXT)
+RETURNS TABLE (tenant_id TEXT, account_id UUID)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+DECLARE
+    v_prior TEXT := current_setting('trace_commons.trace_tenant_id', true);
+    v_link RECORD;
+BEGIN
+    IF p_legacy_tenant IS NULL
+        OR p_legacy_tenant IS DISTINCT FROM public.trace_current_tenant_id() THEN
+        RAISE EXCEPTION 'legacy_payout_source_refused' USING ERRCODE = '42501';
+    END IF;
+    IF p_legacy_tenant ~ '^(near-|nearai-)' THEN
+        RETURN;
+    END IF;
+    SELECT l.tenant_id, l.account_id INTO v_link
+      FROM public.trace_legacy_invite_links l
+     WHERE l.legacy_tenant_id = p_legacy_tenant AND l.revoked_at IS NULL;
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+    PERFORM set_config('trace_commons.trace_tenant_id', v_link.tenant_id, true);
+    IF EXISTS (SELECT 1 FROM public.trace_accounts a
+                WHERE a.tenant_id = v_link.tenant_id AND a.account_id = v_link.account_id
+                  AND a.closed_at IS NULL) THEN
+        PERFORM set_config('trace_commons.trace_tenant_id', coalesce(v_prior, ''), true);
+        RETURN QUERY SELECT v_link.tenant_id, v_link.account_id;
+        RETURN;
+    END IF;
+    PERFORM set_config('trace_commons.trace_tenant_id', coalesce(v_prior, ''), true);
+END $$;
+ALTER FUNCTION public.trace_legacy_payout_source_account(TEXT)
+    OWNER TO trace_legacy_payout_carry_guard;
+REVOKE ALL ON FUNCTION public.trace_legacy_payout_source_account(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.trace_legacy_payout_source_account(TEXT)
+    TO trace_ingest_runtime;
 
 REVOKE CREATE ON SCHEMA public FROM trace_legacy_payout_carry_guard;
 REVOKE trace_legacy_payout_carry_guard FROM CURRENT_USER;

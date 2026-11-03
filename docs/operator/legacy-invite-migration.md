@@ -280,15 +280,16 @@ A tenant link also decides who is paid the legacy tenant's credit
   closing an account (a legacy account's own carry, or every carry of a
   NEAR AI account), and deleting a tenant link rather than revoking it
   each release the carries they invalidate, in the same transaction. A
-  legacy account opened later (a new login link) is carried at the next
-  live payout pass over its tenant.
+  legacy account opened later (a new login link) is carried when it is
+  opened, in the same transaction. The payout pass never carries.
 - **Every send re-checks the carry.** The account standing the pass reads
   before each send holds a live carry (`payout_legacy_carry_invalid`) when
   its tenant was marked pooled, its tenant link is revoked or deleted, or
   the NEAR AI account is closed, on an account credit hold, or no longer
   has the source link live. It is the backstop now that the events above
   release carries themselves; it still holds while the NEAR AI account is
-  on a credit hold.
+  on a credit hold, which pauses payment and releases nothing (owner,
+  2026-11-03).
 - **Instance-enrolled tenants link too** (no `onboarding_invites` row):
   the link records no invite grant and changes no trust
   (`legacy_instance_linked`). Only the tenant's earliest live device can

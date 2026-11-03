@@ -3289,6 +3289,21 @@ impl std::fmt::Debug for CarryPrograms {
     }
 }
 
+/// A store error's class, safe to log: a SQLSTATE, or the error's kind.
+/// Never its message, which can quote a value.
+pub fn database_error_class(error: &DatabaseError) -> String {
+    match error {
+        DatabaseError::Postgres(error) => error.code().map_or_else(
+            || "postgres".to_owned(),
+            |code| format!("sqlstate_{}", code.code()),
+        ),
+        DatabaseError::Pool(_) | DatabaseError::PoolBuild(_) | DatabaseError::PoolRuntime(_) => {
+            "pool".to_owned()
+        }
+        _ => "store".to_owned(),
+    }
+}
+
 /// What one carry call did across the account's linked legacy tenants
 /// (V146). Counts only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -3854,20 +3869,21 @@ pub trait PayoutStore: Send + Sync {
         actor_ref_hash: &str,
     ) -> Result<LegacyCarryReport, DatabaseError>;
 
-    /// The pass's side of [`Self::carry_legacy_payout_links`] (#1873): for
-    /// each account in this NEAR AI tenant that has live tenant links, carry
-    /// its live link on `rail` again, so a legacy account opened after the
-    /// last carry (a later login link) is carried too, whether or not its
-    /// legacy tenant has a live link of its own. Driven from the source
-    /// side, so each source account is carried once per pass. Nothing for a
-    /// tenant outside `near-` / `nearai-`. Idempotent.
-    async fn carry_legacy_payout_links_from(
+    /// Create or reuse the account for `principal_ref` in `tenant`, as
+    /// [`Database::create_or_reuse_account`] does, and, in the same
+    /// transaction, carry the linked NEAR AI account's live link on each of
+    /// `rails` to it when `tenant` is a legacy tenant linked through V81
+    /// (#1873; owner, 2026-11-03: carry only at events, and opening an
+    /// account in a linked tenant is one). Nothing is carried for a tenant
+    /// outside a live tenant link, or from a closed source account. A
+    /// failure rolls the whole transaction back, the account included.
+    async fn create_or_reuse_account_carrying(
         &self,
         tenant: &str,
-        rail: &RailId,
-        programs: &CarryPrograms,
+        principal_ref: &str,
+        rails: &[(RailId, CarryPrograms)],
         actor_ref_hash: &str,
-    ) -> Result<LegacyCarryReport, DatabaseError>;
+    ) -> Result<Uuid, DatabaseError>;
 
     /// The audit actions on `rail` in this tenant, oldest first.
     async fn payout_audit_actions(

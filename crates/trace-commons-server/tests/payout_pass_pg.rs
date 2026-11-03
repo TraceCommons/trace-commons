@@ -2568,11 +2568,12 @@ fn carry_programs(rail: &Arc<dyn PayoutRail>) -> trace_commons_server::db::Carry
     trace_commons_server::db::CarryPrograms(Arc::new(move |id| rail.program_for_link(id)))
 }
 
-/// #1873: a legacy account opened after its tenant's payout link was carried
-/// (a later login link) is carried by the next live pass, so its credit is
-/// not left accruing unpaid until the NEAR AI account confirms again.
+/// Owner decision, 2026-11-03 (review of #1879): the pass never carries.
+/// Carries happen only at events (a confirm, a tenant link, an account
+/// opened in a linked tenant), so a legacy account that appears without one
+/// of those is left for its event, not picked up by a pass.
 #[tokio::test]
-async fn the_pass_carries_to_a_legacy_account_opened_after_the_carry() {
+async fn the_pass_does_not_carry() {
     let Some(fixture) = fixture().await else {
         return;
     };
@@ -2593,105 +2594,17 @@ async fn the_pass_carries_to_a_legacy_account_opened_after_the_carry() {
         .await
         .unwrap();
     assert_eq!(carried.carried, 1);
+    // An account inserted with no event behind it.
+    let other = open_legacy_account(&fixture, &legacy).await;
+    completed(
+        &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
+            .run_once()
+            .await,
+    );
     assert_eq!(live_carries(&fixture, &legacy, first).await, 1);
-
-    let later = open_legacy_account(&fixture, &legacy).await;
-    completed(
-        &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
-            .run_once()
-            .await,
-    );
     assert_eq!(
-        live_carries(&fixture, &legacy, later).await,
-        1,
-        "the account opened after the carry is carried by the pass"
-    );
-}
-
-/// Review of #1879: the pass carries from the source side, so a legacy
-/// tenant with no live payout link of its own (linked before it had an open
-/// account) is still reached.
-#[tokio::test]
-async fn the_pass_carries_into_a_legacy_tenant_with_no_live_link_yet() {
-    let Some(fixture) = fixture().await else {
-        return;
-    };
-    let mock = Mock::start().await;
-    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
-    let opener = Arc::new(TestOpener::default());
-    let (_, _, legacy) = legacy_pair(&fixture, &rail, &opener).await;
-    let account = open_legacy_account(&fixture, &legacy).await;
-    completed(
-        &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
-            .run_once()
-            .await,
-    );
-    assert_eq!(live_carries(&fixture, &legacy, account).await, 1);
-}
-
-/// Review of #1879: once the NEAR AI account closes, its carries are
-/// released and a later live pass carries nothing again from it, so no
-/// carry is left held, and nothing is paid to a closed account's link.
-#[tokio::test]
-async fn the_pass_does_not_carry_again_from_a_closed_source_account() {
-    let Some(fixture) = fixture().await else {
-        return;
-    };
-    let mock = Mock::start().await;
-    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
-    let opener = Arc::new(TestOpener::default());
-    let (near, source, legacy) = legacy_pair(&fixture, &rail, &opener).await;
-    let account = open_legacy_account(&fixture, &legacy).await;
-    fixture
-        .runtime
-        .carry_legacy_payout_links(
-            &near,
-            source,
-            &rail.descriptor().rail_id,
-            &carry_programs(&rail),
-            ACTOR,
-        )
-        .await
-        .unwrap();
-    assert_eq!(live_carries(&fixture, &legacy, account).await, 1);
-    // The carry went active: once released it is only unlink-requested, so
-    // the legacy tenant still has a live link and is still enumerated.
-    owner_exec(
-        &fixture,
-        &legacy,
-        "UPDATE trace_payout_links SET state = 'active'
-          WHERE tenant_id = $1 AND account_id = $2 AND state = 'waiting'",
-        &[&legacy, &account],
-    )
-    .await;
-    owner_exec(
-        &fixture,
-        &near,
-        "UPDATE trace_accounts SET closed_at = now() WHERE tenant_id = $1 AND account_id = $2",
-        &[&near, &source],
-    )
-    .await;
-    assert_eq!(
-        live_carries(&fixture, &legacy, account).await,
+        live_carries(&fixture, &legacy, other).await,
         0,
-        "released by the close"
-    );
-    completed(
-        &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
-            .run_once()
-            .await,
-    );
-    assert_eq!(
-        live_carries(&fixture, &legacy, account).await,
-        0,
-        "not carried again"
-    );
-    assert!(
-        !fixture
-            .runtime
-            .payout_account_standing(&legacy, account)
-            .await
-            .unwrap()
-            .carry_invalid
+        "the pass carries nothing"
     );
 }

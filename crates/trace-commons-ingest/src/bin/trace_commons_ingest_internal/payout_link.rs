@@ -155,6 +155,27 @@ fn carry_programs(rail: &Arc<dyn PayoutRail>) -> CarryPrograms {
     CarryPrograms(Arc::new(move |link_id| rail.program_for_link(link_id)))
 }
 
+/// The carries an account opened in a legacy tenant takes in its own
+/// transaction (V148, #1873): one per enabled rail, with that rail's
+/// program for the carried link's id. Empty without a payout store.
+pub(super) fn enabled_carry_rails(
+    state: &AppState,
+) -> Vec<(trace_commons_gate_api::RailId, CarryPrograms)> {
+    if state.payout_store.is_none() {
+        return Vec::new();
+    }
+    state
+        .payout_rails
+        .entries()
+        .filter(|entry| entry.mode() != PayoutMode::Disabled)
+        .filter_map(|entry| {
+            entry
+                .rail()
+                .map(|rail| (entry.rail_id().clone(), carry_programs(rail)))
+        })
+        .collect()
+}
+
 /// After a new tenant link (V81), carry the account's live payout link on
 /// every enabled rail to the legacy accounts it now covers (V146). A
 /// confirm carries in its own transaction; this covers the order "payout
@@ -170,7 +191,7 @@ pub(super) async fn carry_after_tenant_link(state: &AppState, ctx: &AccountCtx) 
             continue;
         }
         let Some(rail) = entry.rail() else { continue };
-        if store
+        match store
             .carry_legacy_payout_links(
                 &ctx.tenant_id,
                 ctx.account_id.as_uuid(),
@@ -179,15 +200,14 @@ pub(super) async fn carry_after_tenant_link(state: &AppState, ctx: &AccountCtx) 
                 &account_actor_hash(ctx),
             )
             .await
-            .is_err()
         {
-            tracing::warn!(
+            Ok(_) => state.payout_rails.notifier().notify_all(),
+            Err(error) => tracing::warn!(
                 rail = %entry.rail_id(),
                 label = "legacy_payout_carry_failed",
+                error_class = trace_commons_server::db::database_error_class(&error),
                 "legacy payout carry after a tenant link failed"
-            );
-        } else {
-            state.payout_rails.notifier().notify_all();
+            ),
         }
     }
 }

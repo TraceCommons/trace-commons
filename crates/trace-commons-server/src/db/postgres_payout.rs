@@ -1664,40 +1664,58 @@ impl PayoutStore for PgBackend {
         Ok(report)
     }
 
-    async fn carry_legacy_payout_links_from(
+    async fn create_or_reuse_account_carrying(
         &self,
         tenant: &str,
-        rail: &RailId,
-        programs: &CarryPrograms,
+        principal_ref: &str,
+        rails: &[(RailId, CarryPrograms)],
         actor_ref_hash: &str,
-    ) -> Result<LegacyCarryReport, DatabaseError> {
-        if !trace_commons_protocol::admission::is_anchored_tenant(tenant) {
-            return Ok(LegacyCarryReport::default());
-        }
-        let accounts: Vec<Uuid> = {
-            let mut client = self.payout_tenant_client().await?;
-            let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
-            let rows = tx
-                .query(
-                    "SELECT DISTINCT account_id FROM trace_legacy_invite_links
-                      WHERE tenant_id = $1 AND revoked_at IS NULL
-                      ORDER BY account_id",
+    ) -> Result<Uuid, DatabaseError> {
+        self.ensure_trace_tenant(tenant).await?;
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let account = super::postgres::create_or_reuse_account_in_tx(&tx, principal_ref).await?;
+        if !rails.is_empty() && !trace_commons_protocol::admission::is_anchored_tenant(tenant) {
+            let source = tx
+                .query_opt(
+                    "SELECT tenant_id, account_id FROM trace_legacy_payout_source_account($1)",
+                    &[&tenant],
+                )
+                .await?
+                .map(|row| (row.get::<_, String>(0), row.get::<_, Uuid>(1)));
+            if let Some((source_tenant, source_account)) = source {
+                tx.execute(
+                    "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+                    &[&source_tenant],
+                )
+                .await?;
+                for (rail, programs) in rails {
+                    // The confirm's lock, as every carry takes it.
+                    tx.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(
+                             'payout-link-confirm-v1:' || $1 || ':' || $2::UUID::TEXT || ':' || $3, 0))",
+                        &[&source_tenant, &source_account, &rail.as_str()],
+                    )
+                    .await?;
+                    super::postgres_legacy_payout_carry::carry_in_tx(
+                        &tx,
+                        &source_tenant,
+                        source_account,
+                        rail.as_str(),
+                        programs,
+                        actor_ref_hash,
+                    )
+                    .await?;
+                }
+                tx.execute(
+                    "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
                     &[&tenant],
                 )
                 .await?;
-            tx.commit().await?;
-            rows.iter().map(|row| row.get(0)).collect()
-        };
-        let mut total = LegacyCarryReport::default();
-        for account in accounts {
-            let report = self
-                .carry_legacy_payout_links(tenant, account, rail, programs, actor_ref_hash)
-                .await?;
-            total.carried += report.carried;
-            total.released += report.released;
-            total.skipped += report.skipped;
+            }
         }
-        Ok(total)
+        tx.commit().await?;
+        Ok(account)
     }
 
     async fn payout_audit_actions(

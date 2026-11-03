@@ -2059,6 +2059,77 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
     ),
 ];
 
+/// The body of `create_or_reuse_account`, inside a transaction already under
+/// the tenant's context, so a caller can do more in the same transaction
+/// (V148: carrying a payout link to an account opened in a linked legacy
+/// tenant).
+pub(super) async fn create_or_reuse_account_in_tx(
+    tx: &deadpool_postgres::Transaction<'_>,
+    principal_ref: &str,
+) -> Result<Uuid, DatabaseError> {
+    // Fast path: an active link for this principal already maps to an account.
+    if let Some(row) = tx
+        .query_opt(
+            "SELECT account_id FROM trace_account_principals
+              WHERE tenant_id = trace_current_tenant_id()
+                AND principal_ref = $1
+                AND unlinked_at IS NULL",
+            &[&principal_ref],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?
+    {
+        return Ok(row.get("account_id"));
+    }
+
+    // No active link: mint a fresh account and link the principal. The link
+    // insert is ON CONFLICT DO NOTHING against the UNIQUE (tenant_id,
+    // principal_ref) constraint so a concurrent mint that won the race does
+    // not error us out; we re-select the authoritative account below.
+    let new_account_id = Uuid::new_v4();
+    tx.execute(
+        "INSERT INTO trace_accounts (tenant_id, account_id)
+         VALUES (trace_current_tenant_id(), $1)",
+        &[&new_account_id],
+    )
+    .await
+    .map_err(DatabaseError::Postgres)?;
+    tx.execute(
+        "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+         VALUES (trace_current_tenant_id(), $1, $2)
+         ON CONFLICT (tenant_id, principal_ref) DO NOTHING",
+        &[&new_account_id, &principal_ref],
+    )
+    .await
+    .map_err(|error| {
+        if error.as_db_error().is_some_and(|db_error| {
+            db_error.code() == &tokio_postgres::error::SqlState::CHECK_VIOLATION
+                && db_error.message() == "device_upload_principal_namespace_conflict"
+        }) {
+            DatabaseError::UploadPrincipalAuthenticationDenied
+        } else {
+            DatabaseError::Postgres(error)
+        }
+    })?;
+
+    // Re-select the authoritative account for this principal. If a
+    // concurrent mint inserted the link first, this returns ITS account_id
+    // and our freshly-inserted (now orphaned) trace_accounts row is harmless
+    // (no principal links to it). If we won, it returns new_account_id.
+    let row = tx
+        .query_one(
+            "SELECT account_id FROM trace_account_principals
+              WHERE tenant_id = trace_current_tenant_id()
+                AND principal_ref = $1
+                AND unlinked_at IS NULL",
+            &[&principal_ref],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+    let account_id: Uuid = row.get("account_id");
+    Ok(account_id)
+}
+
 /// Shared by verified claim issuance and the explicit historical repair.
 async fn bind_device_upload_principal_tx(
     tx: &deadpool_postgres::Transaction<'_>,
@@ -3959,69 +4030,7 @@ impl Database for PgBackend {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-
-        // Fast path: an active link for this principal already maps to an account.
-        if let Some(row) = tx
-            .query_opt(
-                "SELECT account_id FROM trace_account_principals
-                  WHERE tenant_id = trace_current_tenant_id()
-                    AND principal_ref = $1
-                    AND unlinked_at IS NULL",
-                &[&principal_ref],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?
-        {
-            let account_id: Uuid = row.get("account_id");
-            tx.commit().await.map_err(DatabaseError::Postgres)?;
-            return Ok(account_id);
-        }
-
-        // No active link: mint a fresh account and link the principal. The link
-        // insert is ON CONFLICT DO NOTHING against the UNIQUE (tenant_id,
-        // principal_ref) constraint so a concurrent mint that won the race does
-        // not error us out; we re-select the authoritative account below.
-        let new_account_id = Uuid::new_v4();
-        tx.execute(
-            "INSERT INTO trace_accounts (tenant_id, account_id)
-             VALUES (trace_current_tenant_id(), $1)",
-            &[&new_account_id],
-        )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.execute(
-            "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
-             VALUES (trace_current_tenant_id(), $1, $2)
-             ON CONFLICT (tenant_id, principal_ref) DO NOTHING",
-            &[&new_account_id, &principal_ref],
-        )
-        .await
-        .map_err(|error| {
-            if error.as_db_error().is_some_and(|db_error| {
-                db_error.code() == &tokio_postgres::error::SqlState::CHECK_VIOLATION
-                    && db_error.message() == "device_upload_principal_namespace_conflict"
-            }) {
-                DatabaseError::UploadPrincipalAuthenticationDenied
-            } else {
-                DatabaseError::Postgres(error)
-            }
-        })?;
-
-        // Re-select the authoritative account for this principal. If a
-        // concurrent mint inserted the link first, this returns ITS account_id
-        // and our freshly-inserted (now orphaned) trace_accounts row is harmless
-        // (no principal links to it). If we won, it returns new_account_id.
-        let row = tx
-            .query_one(
-                "SELECT account_id FROM trace_account_principals
-                  WHERE tenant_id = trace_current_tenant_id()
-                    AND principal_ref = $1
-                    AND unlinked_at IS NULL",
-                &[&principal_ref],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        let account_id: Uuid = row.get("account_id");
+        let account_id = create_or_reuse_account_in_tx(&tx, principal_ref).await?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(account_id)
     }

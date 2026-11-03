@@ -21573,16 +21573,31 @@ async fn mint_login_link_handler(
     }
 
     // 2. Create-or-reuse the durable account for this principal.
-    let account_id = db
-        .create_or_reuse_account(tenant_id, principal_ref)
-        .await
-        .map_err(|error| match error {
-            DatabaseError::UploadPrincipalAuthenticationDenied => api_error(
-                StatusCode::FORBIDDEN,
-                "upload-only credentials cannot create account login links",
-            ),
-            other => internal_error(other),
-        })?;
+    // V148 (#1873): opening an account in a legacy tenant linked through
+    // V81 carries the NEAR AI account's payout link to it, in the same
+    // transaction. Without a payout store, or with no rail enabled, this is
+    // the plain create-or-reuse.
+    let carry_rails = payout_link_routes::enabled_carry_rails(state.as_ref());
+    let account_id = match (state.payout_store.as_ref(), carry_rails.is_empty()) {
+        (Some(store), false) => {
+            store
+                .create_or_reuse_account_carrying(
+                    tenant_id,
+                    principal_ref,
+                    &carry_rails,
+                    &sha256_prefixed(&format!("legacy-account-open-v1:{principal_ref}")),
+                )
+                .await
+        }
+        _ => db.create_or_reuse_account(tenant_id, principal_ref).await,
+    }
+    .map_err(|error| match error {
+        DatabaseError::UploadPrincipalAuthenticationDenied => api_error(
+            StatusCode::FORBIDDEN,
+            "upload-only credentials cannot create account login links",
+        ),
+        other => internal_error(other),
+    })?;
 
     // 3. Mint the single-use code; store ONLY its hash.
     let code = generate_login_code();

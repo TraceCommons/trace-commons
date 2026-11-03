@@ -140,6 +140,8 @@ async fn fixture() -> Option<Fixture> {
              THEN CREATE ROLE tc_legacy_carry_payout LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
              GRANT trace_ingest_runtime TO tc_legacy_carry_payout;
              GRANT SELECT ON trace_accounts, trace_near_account_anchors, trace_credit_holds, trace_account_principals TO trace_ingest_runtime;
+             GRANT INSERT ON trace_accounts, trace_account_principals TO trace_ingest_runtime;
+             GRANT SELECT, INSERT, UPDATE ON trace_tenants TO trace_ingest_runtime;
              GRANT INSERT ON trace_account_audit TO trace_ingest_runtime;
              GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_ingest_runtime;
              DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tc_legacy_carry_operator')
@@ -1660,4 +1662,91 @@ async fn a_database_that_ran_an_earlier_v146_is_refused() {
         assert!(refused.to_string().contains("V146"), "{refused}");
         tx.rollback().await.unwrap();
     }
+}
+
+impl Fixture {
+    /// Opens (or reuses) the account for `principal` in `tenant` the way the
+    /// login-link mint does since V148: carrying in the same transaction.
+    async fn open_account(&self, tenant: &str, principal: &str) -> Uuid {
+        self.payout_runtime
+            .create_or_reuse_account_carrying(tenant, principal, &[(rail(), programs())], ACTOR)
+            .await
+            .unwrap()
+    }
+}
+
+/// #1873, owner decision 2026-11-03: opening an account in a linked legacy
+/// tenant (the login-link path) carries the NEAR AI account's link to it in
+/// the same transaction, whether or not the tenant had a carry before; a
+/// repeat reuses the account and carries nothing twice.
+#[tokio::test]
+async fn opening_an_account_in_a_linked_tenant_carries_to_it() {
+    let Some(fx) = fixture().await else { return };
+    // A tenant already carried.
+    let (_, _, legacy, _, _) = fx.carried_pair("org-o1").await;
+    let opened = fx
+        .open_account(&legacy, "principal_sha256:opened-later")
+        .await;
+    assert_eq!(fx.live_carries(&legacy, opened).await, 1);
+    assert_eq!(
+        fx.open_account(&legacy, "principal_sha256:opened-later")
+            .await,
+        opened
+    );
+    assert_eq!(
+        fx.live_carries(&legacy, opened).await,
+        1,
+        "nothing carried twice"
+    );
+
+    // A tenant linked before it had any account: no carry yet, so no live
+    // link of its own. Its first account is carried at opening.
+    let device = new_device();
+    let (fresh, invite) = fx.legacy_invite_tenant(&device).await;
+    let (near, account) = fx.near_ai_account().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-o2")
+        .await;
+    fx.link(&near, account, &fresh, &invite, &device)
+        .await
+        .unwrap();
+    let first = fx
+        .open_account(&fresh, "principal_sha256:first-account")
+        .await;
+    assert_eq!(fx.live_carries(&fresh, first).await, 1);
+}
+
+/// Review of #1879: a closed NEAR AI account carries nothing, at any event.
+#[tokio::test]
+async fn opening_an_account_carries_nothing_from_a_closed_source() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, legacy, _, _) = fx.carried_pair("org-o3").await;
+    fx.exec(
+        "UPDATE trace_accounts SET closed_at = now() WHERE tenant_id = $1 AND account_id = $2",
+        &[&near, &account],
+    )
+    .await;
+    let opened = fx
+        .open_account(&legacy, "principal_sha256:after-close")
+        .await;
+    assert_eq!(fx.live_carries(&legacy, opened).await, 0);
+    assert!(!fx.carry_invalid(&legacy, opened).await);
+}
+
+/// An account opened in a legacy tenant with no tenant link is just an
+/// account: nothing is carried, and nothing is written outside the tenant.
+#[tokio::test]
+async fn opening_an_account_in_an_unlinked_tenant_carries_nothing() {
+    let Some(fx) = fixture().await else { return };
+    let device = new_device();
+    let (legacy, _) = fx.legacy_invite_tenant(&device).await;
+    let opened = fx.open_account(&legacy, "principal_sha256:unlinked").await;
+    assert_eq!(fx.live_carries(&legacy, opened).await, 0);
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_payout_links WHERE tenant_id = $1",
+            &[&legacy],
+        )
+        .await,
+        0
+    );
 }

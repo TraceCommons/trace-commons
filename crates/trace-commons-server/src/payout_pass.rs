@@ -98,25 +98,6 @@ pub const PAYOUT_RECOVERY_UNMATCHED: &str = "payout_recovery_unmatched";
 pub const PAYOUT_LINK_CLOSE_BLOCKED: &str = "payout_link_close_blocked";
 pub const PAYOUT_RECEIPT_UNRECORDED: &str = "payout_receipt_unrecorded";
 const PAYOUT_SEND_WINDOW_EXHAUSTED: &str = "payout_send_window_exhausted";
-/// The pass could not carry a legacy tenant's link to its newer accounts
-/// (#1873). Nothing was carried; the tenant's sends go on.
-const LEGACY_PAYOUT_CARRY_FAILED: &str = "legacy_payout_carry_failed";
-
-/// A failed carry's class, safe to log: a SQLSTATE, or the store's error
-/// kind. Never a message, which can quote a value.
-fn carry_error_class(error: &crate::error::DatabaseError) -> String {
-    use crate::error::DatabaseError;
-    match error {
-        DatabaseError::Postgres(error) => error.code().map_or_else(
-            || "postgres".to_owned(),
-            |code| format!("sqlstate_{}", code.code()),
-        ),
-        DatabaseError::Pool(_) | DatabaseError::PoolBuild(_) | DatabaseError::PoolRuntime(_) => {
-            "pool".to_owned()
-        }
-        _ => "store".to_owned(),
-    }
-}
 const PAYOUT_STORE_FAILED: &str = "payout_store_failed";
 const PAYOUT_RAIL_SENDING_DISABLED: &str = "payout_rail_sending_disabled";
 pub const PAYOUT_RATE_UNAVAILABLE: &str = "payout_rate_unavailable";
@@ -796,32 +777,6 @@ impl PayoutPass {
         referral: &mut ReferralRun,
         report: &mut PayoutPassReport,
     ) -> Step<()> {
-        // #1873: a NEAR AI account's live link reaches the legacy accounts
-        // opened in its linked tenants since the last carry. Driven from the
-        // source side (this tenant is visited because its source link is
-        // live), so a legacy tenant with no live link of its own is reached
-        // too, and each source account is carried once per pass. Not in a
-        // dry run, which moves no link. A failure carries nothing (no one is
-        // paid wrongly) and never stops this tenant's sends.
-        if self.settings.mode != PayoutMode::DryRun
-            && trace_commons_protocol::admission::is_anchored_tenant(tenant)
-        {
-            let rail = Arc::clone(&self.rail);
-            let programs =
-                crate::db::CarryPrograms(Arc::new(move |link_id| rail.program_for_link(link_id)));
-            if let Err(error) = self
-                .payouts
-                .carry_legacy_payout_links_from(tenant, self.rail_id(), &programs, &self.actor)
-                .await
-            {
-                tracing::warn!(
-                    label = LEGACY_PAYOUT_CARRY_FAILED,
-                    error_class = carry_error_class(&error),
-                    "legacy payout carry failed; nothing was carried"
-                );
-                report.skip(LEGACY_PAYOUT_CARRY_FAILED);
-            }
-        }
         match accrue_rail(
             self.payouts.as_ref(),
             self.corpus.as_ref(),
