@@ -30,7 +30,13 @@ pub const GROUP_LABEL: &str = "Near.ai";
 /// launch.
 pub const NAME: &str = "herdr";
 
-/// How long a launch waits for a herdr it started to answer.
+/// The oldest herdr socket protocol this build speaks: the one its
+/// `layout.apply` pane `env` and `workspace.create` replies were read from
+/// (herdr 0.9.5). An older herdr is refused before the ticket is sent.
+const MIN_PROTOCOL: u64 = 22;
+
+/// How long a launch waits for a herdr it started to answer, counted on the
+/// clock from the first try, so slow tries do not stretch it.
 const ATTACH_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 const ATTACH_STEP: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -39,11 +45,20 @@ const ATTACH_STEP: std::time::Duration = std::time::Duration::from_millis(200);
 #[cfg(unix)]
 const REPLY_LIMIT: u64 = 8 * 1024 * 1024;
 
+/// Held while a launch finds or creates the group workspace and opens its
+/// tab in it.
+#[cfg(unix)]
+static GROUP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// What went wrong talking to herdr.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CallError {
-    /// No socket, a socket this account does not own, or no answer.
+    /// No socket, or no answer on it.
     Unreachable,
+    /// Something is at herdr's socket path that this account cannot trust:
+    /// another owner, open to others, or not a socket. Refused rather than
+    /// attached around, since starting herdr would not replace it.
+    Untrusted,
     /// herdr answered with an error.
     Refused,
     /// herdr answered with something this build cannot read.
@@ -110,6 +125,25 @@ fn socket_path() -> Option<PathBuf> {
     Some(config.join("herdr").join("herdr.sock"))
 }
 
+/// What is at herdr's socket path.
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum SocketState {
+    Absent,
+    Trusted,
+    Untrusted,
+}
+
+#[cfg(unix)]
+fn socket_state(path: &Path) -> SocketState {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SocketState::Absent,
+        Err(_) => SocketState::Untrusted,
+        Ok(_) if trusted_socket(path) => SocketState::Trusted,
+        Ok(_) => SocketState::Untrusted,
+    }
+}
+
 /// herdr's socket, when it is a socket this account owns that nobody else
 /// can open. herdr creates it 0600; anything looser is not herdr's.
 #[cfg(unix)]
@@ -134,8 +168,10 @@ struct Socket {
 impl Socket {
     fn connect() -> Result<Self, CallError> {
         let path = socket_path().ok_or(CallError::Unreachable)?;
-        if !trusted_socket(&path) {
-            return Err(CallError::Unreachable);
+        match socket_state(&path) {
+            SocketState::Absent => return Err(CallError::Unreachable),
+            SocketState::Untrusted => return Err(CallError::Untrusted),
+            SocketState::Trusted => {}
         }
         let stream =
             std::os::unix::net::UnixStream::connect(&path).map_err(|_| CallError::Unreachable)?;
@@ -187,10 +223,14 @@ fn result_of(reply: &[u8], id: &str) -> Result<Value, CallError> {
     reply.get("result").cloned().ok_or(CallError::Malformed)
 }
 
-/// `ping`, answered by a `pong`.
+/// `ping`, answered by a `pong` from a herdr that speaks at least
+/// [`MIN_PROTOCOL`].
 fn ping(herdr: &mut dyn Exchange) -> Result<(), CallError> {
     let pong = herdr.call("ping", json!({}))?;
-    if pong.get("type").and_then(Value::as_str) == Some("pong") {
+    let protocol = pong.get("protocol").and_then(Value::as_u64);
+    if pong.get("type").and_then(Value::as_str) == Some("pong")
+        && protocol.is_some_and(|p| p >= MIN_PROTOCOL)
+    {
         Ok(())
     } else {
         Err(CallError::Malformed)
@@ -339,7 +379,9 @@ fn reach<E: Exchange>(connect: &mut impl FnMut() -> Result<E, CallError>) -> Res
 
 /// Open `pane` as a tab in the group workspace. `connect` reaches herdr;
 /// `attach` starts a herdr client in the chosen terminal when none answers;
-/// `sleep` waits between tries.
+/// `elapsed` reads the time since the launch began and `sleep` waits between
+/// tries, so the wait for herdr ends [`ATTACH_WAIT`] after it began however
+/// long each try took.
 ///
 /// Only the `layout.apply` request carries the ticket. Anything that fails
 /// before it is sent is a refusal that releases the held launch
@@ -349,26 +391,31 @@ fn reach<E: Exchange>(connect: &mut impl FnMut() -> Result<E, CallError>) -> Res
 pub(crate) fn launch_with<E: Exchange>(
     mut connect: impl FnMut() -> Result<E, CallError>,
     attach: impl FnOnce() -> Result<(), ManagedError>,
+    mut elapsed: impl FnMut() -> std::time::Duration,
     mut sleep: impl FnMut(std::time::Duration),
     pane: &Pane,
 ) -> Result<Option<TerminalTab>, ManagedError> {
+    let refusal = |error: CallError| match error {
+        CallError::Unreachable | CallError::Untrusted => ManagedError::TerminalNotFound,
+        CallError::Refused | CallError::Malformed => ManagedError::UnsupportedVersion,
+    };
     let mut herdr = match reach(&mut connect) {
         Ok(herdr) => herdr,
         Err(CallError::Unreachable) => {
             attach().map_err(|_| ManagedError::TerminalNotFound)?;
-            let mut waited = std::time::Duration::ZERO;
             loop {
-                if let Ok(herdr) = reach(&mut connect) {
-                    break herdr;
+                match reach(&mut connect) {
+                    Ok(herdr) => break herdr,
+                    Err(CallError::Unreachable) => {}
+                    Err(error) => return Err(refusal(error)),
                 }
-                if waited >= ATTACH_WAIT {
+                if elapsed() >= ATTACH_WAIT {
                     return Err(ManagedError::TerminalNotFound);
                 }
                 sleep(ATTACH_STEP);
-                waited += ATTACH_STEP;
             }
         }
-        Err(_) => return Err(ManagedError::UnsupportedVersion),
+        Err(error) => return Err(refusal(error)),
     };
     let before = snapshot(&mut herdr).map_err(|_| ManagedError::UnsupportedVersion)?;
     let target = match group_workspace(&before) {
@@ -429,9 +476,16 @@ pub fn launch(
             cwd,
             ticket,
         )?;
+        // One launch at a time finds or creates the group, so two at once
+        // cannot each create a "Near.ai" workspace, or each start a herdr.
+        let _group = GROUP_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let began = std::time::Instant::now();
         launch_with(
             Socket::connect,
             || super::terminal::open_program(host, installed, &program, cwd),
+            || began.elapsed(),
             std::thread::sleep,
             &pane,
         )
@@ -561,6 +615,7 @@ mod tests {
         let tab = launch_with(
             || script.take().ok_or(CallError::Unreachable),
             || panic!("herdr was running"),
+            || std::time::Duration::ZERO,
             |_| {},
             &pane(),
         )
@@ -632,6 +687,7 @@ mod tests {
         let tab = launch_with(
             || script.take().ok_or(CallError::Unreachable),
             || panic!("running"),
+            || std::time::Duration::ZERO,
             |_| {},
             &pane(),
         );
@@ -674,6 +730,7 @@ mod tests {
                 attached = true;
                 Ok(())
             },
+            || std::time::Duration::ZERO,
             |_| {},
             &pane(),
         );
@@ -681,23 +738,99 @@ mod tests {
         assert!(attached);
         assert_eq!(tries, 4);
 
-        let mut slept = std::time::Duration::ZERO;
+        let clock = std::cell::Cell::new(std::time::Duration::ZERO);
         let never = launch_with(
             || Err::<Script, _>(CallError::Unreachable),
             || Ok(()),
-            |step| slept += step,
+            || clock.get(),
+            |step| clock.set(clock.get() + step),
             &pane(),
         );
         assert_eq!(never, Err(ManagedError::TerminalNotFound));
-        assert_eq!(slept, ATTACH_WAIT);
+        assert_eq!(clock.get(), ATTACH_WAIT);
 
         let no_host = launch_with(
             || Err::<Script, _>(CallError::Unreachable),
             || Err(ManagedError::TerminalNotFound),
+            || panic!("no wait without a terminal"),
             |_| panic!("no wait without a terminal"),
             &pane(),
         );
         assert_eq!(no_host, Err(ManagedError::TerminalNotFound));
+    }
+
+    /// The wait ends on the clock, counting the time each try took (a try
+    /// can sit on a socket timeout), not only the sleeps between them.
+    #[test]
+    fn the_wait_for_herdr_is_bounded_by_the_clock() {
+        let clock = std::cell::Cell::new(std::time::Duration::ZERO);
+        let mut tries = 0;
+        let never = launch_with(
+            || {
+                tries += 1;
+                clock.set(clock.get() + std::time::Duration::from_secs(4));
+                Err::<Script, _>(CallError::Unreachable)
+            },
+            || Ok(()),
+            || clock.get(),
+            |step| clock.set(clock.get() + step),
+            &pane(),
+        );
+        assert_eq!(never, Err(ManagedError::TerminalNotFound));
+        assert_eq!(tries, 3, "two slow tries after the first pass the wait");
+    }
+
+    /// A herdr too old to read, or a socket path held by something this
+    /// account cannot trust, is refused before anything is attached or the
+    /// ticket is sent; neither is waited around.
+    #[test]
+    fn an_old_herdr_or_an_untrusted_socket_is_refused() {
+        let old = |protocol: Value| {
+            let mut script = Some(Script {
+                replies: VecDeque::from([Ok(
+                    json!({"type":"pong","version":"0.8.0","protocol":protocol}),
+                )]),
+                ..Default::default()
+            });
+            launch_with(
+                || script.take().ok_or(CallError::Unreachable),
+                || panic!("herdr was running"),
+                || std::time::Duration::ZERO,
+                |_| {},
+                &pane(),
+            )
+        };
+        assert_eq!(old(json!(21)), Err(ManagedError::UnsupportedVersion));
+        assert_eq!(old(Value::Null), Err(ManagedError::UnsupportedVersion));
+
+        let untrusted = launch_with(
+            || Err::<Script, _>(CallError::Untrusted),
+            || panic!("not attached around"),
+            || std::time::Duration::ZERO,
+            |_| {},
+            &pane(),
+        );
+        assert_eq!(untrusted, Err(ManagedError::TerminalNotFound));
+
+        let mut tries = 0;
+        let became_old = launch_with(
+            || {
+                tries += 1;
+                if tries == 1 {
+                    return Err(CallError::Unreachable);
+                }
+                Ok(Script {
+                    replies: VecDeque::from([Ok(json!({"type":"pong","protocol":3}))]),
+                    ..Default::default()
+                })
+            },
+            || Ok(()),
+            || std::time::Duration::ZERO,
+            |_| {},
+            &pane(),
+        );
+        assert_eq!(became_old, Err(ManagedError::UnsupportedVersion));
+        assert_eq!(tries, 2, "not waited around");
     }
 
     /// A refusal from `layout.apply`, or no answer to it, may follow a
@@ -713,6 +846,7 @@ mod tests {
             launch_with(
                 || script.take().ok_or(CallError::Unreachable),
                 || Err(ManagedError::TerminalNotFound),
+                || std::time::Duration::ZERO,
                 |_| {},
                 &pane(),
             )
@@ -872,6 +1006,10 @@ mod tests {
         let link = dir.path().join("link.sock");
         std::os::unix::fs::symlink(&path, &link).unwrap();
         assert!(!trusted_socket(&link), "a link is not followed");
+        assert_eq!(socket_state(&path), SocketState::Untrusted, "0666");
+        assert_eq!(socket_state(&dir.path().join("none")), SocketState::Absent);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(socket_state(&path), SocketState::Trusted);
     }
 
     /// One request and reply over a real unix socket, NDJSON as herdr

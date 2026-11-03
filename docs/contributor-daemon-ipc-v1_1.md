@@ -6036,8 +6036,12 @@ managed sessions open as tabs of herdr's "Near.ai" workspace, with
 / `settings-invalid-value`; `set_managed_herdr` writes the same setting. The
 managed snapshot's `capabilities` carries `herdr_available` (herdr was found
 and a terminal can host it) and `herdr_grouping` (the setting). With the
-setting on, `managed_terminal_launch` answers `destination: "herdr"`, and a
-launch with no herdr found is refused with `managed-terminal-not-found`.
+setting on, `managed_terminal_launch` answers `destination: "herdr"`,
+`terminal_destination` is "herdr" (so a refusal names herdr), and a launch
+with no herdr found, with herdr not answering within 10 s, or with
+something at herdr's socket path this account cannot trust, is refused with
+`managed-terminal-not-found`. A herdr older than socket protocol 22 is
+refused with `managed-unsupported-version`.
 
 `managed_favorite_models` (object) stars or unstars NEAR AI models for the
 Launch sheet's model picker, merging like `notify`: `{"<model id>": true}`

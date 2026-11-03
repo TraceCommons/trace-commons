@@ -767,10 +767,14 @@ fn launch_macos(
     // Once the app is asked, anything that goes wrong may follow a typed
     // command, so it reads as `LaunchUnknown`, never as a refusal from
     // before anything ran; only the refusals above release a held launch.
-    // The one exception is Rex's CLI not being found, which is known before
-    // Rex is asked anything.
+    // The exception is Rex, whose launch sends the ticket only in its last
+    // request: a refusal it reports came before that request was sent.
     let printed = run(how).map_err(|error| match error {
-        ManagedError::TerminalNotFound if app == TerminalApp::Rex => error,
+        ManagedError::TerminalNotFound | ManagedError::UnsupportedVersion
+            if app == TerminalApp::Rex =>
+        {
+            error
+        }
         _ => ManagedError::LaunchUnknown,
     })?;
     Ok(match app {
@@ -1556,9 +1560,9 @@ mod tests {
     }
 
     /// A Rex launch hands `run` the tab's request, with the argv as the
-    /// command and the folder, and keeps the tab its output names. Only a
-    /// missing CLI stays a refusal once Rex is asked; anything else is
-    /// `LaunchUnknown`.
+    /// command and the folder, and keeps the tab its output names. Only the
+    /// refusals Rex's launch reports from before the ticket was sent stay
+    /// refusals; anything else is `LaunchUnknown`.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_rex_launch_runs_its_tab_and_keeps_the_ids_it_printed() {
@@ -1609,6 +1613,10 @@ mod tests {
         assert_eq!(
             refused(ManagedError::TerminalNotFound),
             Err(ManagedError::TerminalNotFound)
+        );
+        assert_eq!(
+            refused(ManagedError::UnsupportedVersion),
+            Err(ManagedError::UnsupportedVersion)
         );
         assert_eq!(
             refused(ManagedError::InvalidRequest),

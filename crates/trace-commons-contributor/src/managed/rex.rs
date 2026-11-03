@@ -174,10 +174,84 @@ pub fn tab(output: &[u8]) -> Option<TerminalTab> {
     })
 }
 
+/// How long a launch waits for Rex's server to answer after the app was
+/// opened, counted on the clock from the launch's start.
+#[cfg(any(target_os = "macos", test))]
+const SERVER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(any(target_os = "macos", test))]
+const SERVER_STEP: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// The Rex API revision the calls here were recorded against (`rex
+/// version`: "api: revision 10 (supports 0 to 10)"). A Rex that no longer
+/// supports it is refused before the ticket is sent.
+#[cfg(any(target_os = "macos", test))]
+const API_REVISION: u64 = 10;
+
+/// Whether `rex version`'s output says this Rex supports [`API_REVISION`]:
+/// its "supports A to B" range holds it.
+#[cfg(any(target_os = "macos", test))]
+fn supports_revision(output: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(output) else {
+        return false;
+    };
+    text.lines()
+        .filter_map(|line| line.trim().strip_prefix("api:"))
+        .filter_map(|api| {
+            let range = api.split("(supports ").nth(1)?.split(')').next()?;
+            let (low, high) = range.split_once(" to ")?;
+            Some((
+                low.trim().parse::<u64>().ok()?,
+                high.trim().parse::<u64>().ok()?,
+            ))
+        })
+        .any(|(low, high)| (low..=high).contains(&API_REVISION))
+}
+
+/// Whether `rex client ls --json`'s output lists a connected app: an object
+/// whose `kind` is "app". The server can run headless (the CLI starts one
+/// on its own), and a tab opened there is shown by nobody.
+#[cfg(any(target_os = "macos", test))]
+fn app_connected(clients: &[u8]) -> bool {
+    fn walk(value: &Value) -> bool {
+        match value {
+            Value::Object(fields) => {
+                fields.get("kind").and_then(Value::as_str) == Some("app")
+                    || fields.values().any(walk)
+            }
+            Value::Array(items) => items.iter().any(walk),
+            _ => false,
+        }
+    }
+    serde_json::from_slice(clients).is_ok_and(|value: Value| walk(&value))
+}
+
+/// Held while a launch finds or makes the group session and opens its tab
+/// in it, so two launches at once cannot each make a "Near.ai" session.
+#[cfg(target_os = "macos")]
+static GROUP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The `rex` CLI found last, checked again before each use. A miss is not
+/// kept, so a Rex installed later is found.
+#[cfg(target_os = "macos")]
+static CLI: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
 /// The `rex` CLI: inside the app bundle LaunchServices names, else the copy
 /// the app keeps under Application Support. Never looked up on `PATH`.
 #[cfg(target_os = "macos")]
 fn cli() -> Option<std::path::PathBuf> {
+    let mut cached = CLI
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(path) = cached.as_ref().filter(|path| path.is_file()) {
+        return Some(path.clone());
+    }
+    let found = find_cli();
+    cached.clone_from(&found);
+    found
+}
+
+#[cfg(target_os = "macos")]
+fn find_cli() -> Option<std::path::PathBuf> {
     let mut probe = std::process::Command::new("/usr/bin/osascript");
     probe.args([
         "-l",
@@ -207,52 +281,67 @@ fn cli() -> Option<std::path::PathBuf> {
 }
 
 /// Run `rex` with `args` (and `input` on stdin), bounded like every other
-/// helper process; its stdout when it succeeds.
+/// helper process; its stdout when it succeeds, none when it fails. Never
+/// with `--autostart` (on by default), which would start a headless server
+/// the app does not show: the app starts its own.
 #[cfg(target_os = "macos")]
-fn rex(cli: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>, ManagedError> {
+fn rex(cli: &Path, args: &[&str], input: Option<&[u8]>) -> Option<Vec<u8>> {
     let mut command = std::process::Command::new(cli);
-    command.args(args);
+    command.arg("--autostart=false").args(args);
     let output = match input {
-        Some(input) => super::profiles::bounded_output_with_input(command, input)?,
-        None => super::profiles::bounded_output(command)?,
-    };
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        Err(ManagedError::LaunchUnknown)
+        Some(input) => super::profiles::bounded_output_with_input(command, input),
+        None => super::profiles::bounded_output(command),
     }
+    .ok()?;
+    output.status.success().then_some(output.stdout)
 }
 
 /// Bring Rex.app forward through LaunchServices, starting it when it is not
 /// running. No Apple Event, so macOS asks for no permission.
 #[cfg(target_os = "macos")]
-fn raise_app() -> Result<(), ManagedError> {
+fn raise_app() -> bool {
     let mut open = std::process::Command::new("/usr/bin/open");
     open.args(["-b", BUNDLE_ID]);
-    match super::profiles::bounded_output(open) {
-        Ok(output) if output.status.success() => Ok(()),
-        _ => Err(ManagedError::LaunchUnknown),
-    }
+    super::profiles::bounded_output(open).is_ok_and(|output| output.status.success())
 }
 
-/// Open `tab` in Rex: start or raise the app, find the "Near.ai" session or
-/// make it, open the tab there and select it. Prints the ids for [`tab`].
-/// `TerminalNotFound` only when the CLI is missing, before Rex is asked
-/// anything.
-#[cfg(target_os = "macos")]
-pub fn open_tab(tab: &RexTab) -> Result<Vec<u8>, ManagedError> {
-    let cli = cli().ok_or(ManagedError::TerminalNotFound)?;
-    raise_app()?;
-    // The server may still be starting with the app: wait for a listing.
-    let mut listing = Err(ManagedError::LaunchUnknown);
-    for _ in 0..50 {
-        listing = rex(&cli, &["ls", "--json"], None);
-        if listing.is_ok() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
+/// Open `tab` in Rex with its outside effects passed in: `rex` runs the CLI
+/// (stdout, or none on failure), `raise` opens the app, `elapsed` reads the
+/// time since the launch began and `sleep` waits between tries.
+///
+/// The app is opened, and the launch waits for it to connect to its server
+/// as a client, so the tab opens where it is shown.
+///
+/// Only `session.new_window` carries the ticket. A failure before it is
+/// sent is a refusal that releases the held launch: `TerminalNotFound`
+/// when the app does not open or never connects, `UnsupportedVersion` when
+/// Rex does not support the API revision used here or answers in a way
+/// this build cannot read.
+/// A failure of that request may follow a started helper: `LaunchUnknown`.
+/// A tab whose ids cannot be read back is still a launch, printing nothing.
+#[cfg(any(target_os = "macos", test))]
+fn open_tab_with(
+    mut rex: impl FnMut(&[&str], Option<&[u8]>) -> Option<Vec<u8>>,
+    raise: impl FnOnce() -> bool,
+    mut elapsed: impl FnMut() -> std::time::Duration,
+    mut sleep: impl FnMut(std::time::Duration),
+    tab: &RexTab,
+) -> Result<Vec<u8>, ManagedError> {
+    if !raise() {
+        return Err(ManagedError::TerminalNotFound);
     }
-    let session = match group_session(&listing?) {
+    // The app may still be starting: wait for it to connect.
+    while !rex(&["client", "ls", "--json"], None).is_some_and(|c| app_connected(&c)) {
+        if elapsed() >= SERVER_WAIT {
+            return Err(ManagedError::TerminalNotFound);
+        }
+        sleep(SERVER_STEP);
+    }
+    if !rex(&["version"], None).is_some_and(|v| supports_revision(&v)) {
+        return Err(ManagedError::UnsupportedVersion);
+    }
+    let listing = rex(&["ls", "--json"], None).ok_or(ManagedError::UnsupportedVersion)?;
+    let session = match group_session(&listing) {
         Some(session) => session,
         None => {
             let mut args = vec!["new", GROUP_LABEL, "--json"];
@@ -260,20 +349,40 @@ pub fn open_tab(tab: &RexTab) -> Result<Vec<u8>, ManagedError> {
             if let Some(cwd) = cwd {
                 args.extend(["-c", cwd]);
             }
-            first_id("session", &rex(&cli, &args, None)?).ok_or(ManagedError::LaunchUnknown)?
+            rex(&args, None)
+                .and_then(|made| first_id("session", &made))
+                .ok_or(ManagedError::UnsupportedVersion)?
         }
     };
     let reply = rex(
-        &cli,
         &["api", "call", "-s", &session, "session.new_window", "-"],
         Some(&tab.request),
-    )?;
+    )
+    .ok_or(ManagedError::LaunchUnknown)?;
     let Some((window, block)) = new_window_reply(&reply) else {
         // The tab may be open; it simply cannot be shown.
         return Ok(Vec::new());
     };
-    let _ = rex(&cli, &["focus", "-s", &session, &block], None);
+    let _ = rex(&["focus", "-s", &session, &block], None);
     Ok(printed(&session, &window, &block))
+}
+
+/// Open `tab` in Rex: start or raise the app, find the "Near.ai" session or
+/// make it, open the tab there and select it. Prints the ids for [`tab`].
+#[cfg(target_os = "macos")]
+pub fn open_tab(tab: &RexTab) -> Result<Vec<u8>, ManagedError> {
+    let cli = cli().ok_or(ManagedError::TerminalNotFound)?;
+    let _group = GROUP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let began = std::time::Instant::now();
+    open_tab_with(
+        |args, input| rex(&cli, args, input),
+        raise_app,
+        || began.elapsed(),
+        std::thread::sleep,
+        tab,
+    )
 }
 
 /// Show: select the block's tab in its session, then raise the app. A
@@ -284,8 +393,12 @@ pub fn focus(session: &str, block: &str) -> Result<(), ManagedError> {
         return Err(ManagedError::InvalidRequest);
     }
     let cli = cli().ok_or(ManagedError::NotFound)?;
-    rex(&cli, &["focus", "-s", session, block], None).map_err(|_| ManagedError::NotFound)?;
-    raise_app().map_err(|_| ManagedError::NotFound)
+    rex(&cli, &["focus", "-s", session, block], None).ok_or(ManagedError::NotFound)?;
+    if raise_app() {
+        Ok(())
+    } else {
+        Err(ManagedError::NotFound)
+    }
 }
 
 #[cfg(test)]
@@ -429,6 +542,237 @@ mod tests {
         assert!(serde_json::from_value::<TerminalHandle>(good).is_ok());
         let bad = json!({"kind":"rex","session":SESSION,"window":WINDOW,"block":"block:1; rm"});
         assert!(serde_json::from_value::<TerminalHandle>(bad).is_err());
+    }
+
+    /// A `rex` that answers each command from a table (none for a command
+    /// it does not hold, or once a reply runs out), and records each call:
+    /// its args and its input.
+    #[derive(Default)]
+    struct FakeRex {
+        replies: std::collections::HashMap<&'static str, Vec<Option<String>>>,
+        calls: Vec<(Vec<String>, Option<Vec<u8>>)>,
+    }
+
+    impl FakeRex {
+        /// A Rex with its app connected, revision 10, and `listing`.
+        fn ready(listing: Option<String>) -> Self {
+            let mut fake = FakeRex::default();
+            fake.set("client", vec![Some(r#"[{"id":"c1","kind":"app"}]"#.into())]);
+            fake.set(
+                "version",
+                vec![Some(
+                    "rex 0.0.1\napi: revision 10 (supports 0 to 10)\n".into(),
+                )],
+            );
+            fake.set("ls", vec![listing]);
+            fake.set("api", vec![reply()]);
+            fake.set("focus", vec![Some(String::new())]);
+            fake
+        }
+
+        fn set(&mut self, command: &'static str, replies: Vec<Option<String>>) {
+            self.replies.insert(command, replies);
+        }
+
+        fn call(&mut self, args: &[&str], input: Option<&[u8]>) -> Option<Vec<u8>> {
+            self.calls.push((
+                args.iter().map(|a| a.to_string()).collect(),
+                input.map(<[u8]>::to_vec),
+            ));
+            let replies = self.replies.get_mut(*args.first()?)?;
+            if replies.is_empty() {
+                return None;
+            }
+            replies.remove(0).map(String::into_bytes)
+        }
+
+        fn commands(&self) -> Vec<String> {
+            self.calls.iter().map(|(args, _)| args.join(" ")).collect()
+        }
+    }
+
+    fn rex_tab() -> RexTab {
+        let argv: Vec<std::ffi::OsString> =
+            vec!["/x/near-ai".into(), "--ticket".into(), "ab12".into()];
+        RexTab::new(&argv, Some(Path::new("/tmp/project"))).unwrap()
+    }
+
+    fn run(fake: &mut FakeRex) -> Result<Vec<u8>, ManagedError> {
+        open_tab_with(
+            |args, input| fake.call(args, input),
+            || true,
+            || std::time::Duration::ZERO,
+            |_| {},
+            &rex_tab(),
+        )
+    }
+
+    fn reply() -> Option<String> {
+        Some(format!(
+            r#"{{"window_id":"{WINDOW}","block_ids":["{BLOCK}"]}}"#
+        ))
+    }
+
+    fn group() -> Option<String> {
+        Some(format!(r#"[{{"id":"{SESSION}","label":"Near.ai"}}]"#))
+    }
+
+    /// The launch waits for the app to connect, checks the API revision,
+    /// opens the tab in the existing group session with the request (and
+    /// with it the ticket) only on stdin of `session.new_window`, and
+    /// selects the tab and prints its ids.
+    #[test]
+    fn a_launch_opens_its_tab_in_the_group_session() {
+        let mut fake = FakeRex::ready(group());
+        fake.set(
+            "client",
+            vec![
+                None,
+                Some(r#"[{"id":"c0","kind":"cli"}]"#.into()),
+                Some(r#"{"clients":[{"id":"c1","kind":"app"}]}"#.into()),
+            ],
+        );
+        assert_eq!(run(&mut fake), Ok(printed(SESSION, WINDOW, BLOCK)));
+        assert_eq!(
+            fake.commands(),
+            [
+                "client ls --json".to_string(),
+                "client ls --json".into(),
+                "client ls --json".into(),
+                "version".into(),
+                "ls --json".into(),
+                format!("api call -s {SESSION} session.new_window -"),
+                format!("focus -s {SESSION} {BLOCK}"),
+            ]
+        );
+        for (args, input) in &fake.calls {
+            assert!(!args.iter().any(|a| a.contains("ab12")), "{args:?}");
+            assert_eq!(input.is_some(), args[0] == "api", "{args:?}");
+        }
+        let (_, input) = fake
+            .calls
+            .iter()
+            .find(|(args, _)| args[0] == "api")
+            .unwrap();
+        assert_eq!(input.as_deref(), Some(rex_tab().request.as_slice()));
+    }
+
+    /// With no "Near.ai" session, one is made in the folder.
+    #[test]
+    fn a_missing_group_session_is_made_in_the_folder() {
+        let mut fake = FakeRex::ready(Some("[]".into()));
+        fake.set(
+            "new",
+            vec![Some(format!(r#"{{"session_id":"{SESSION}"}}"#))],
+        );
+        assert_eq!(run(&mut fake), Ok(printed(SESSION, WINDOW, BLOCK)));
+        assert!(
+            fake.commands()
+                .contains(&"new Near.ai --json -c /tmp/project".to_string())
+        );
+    }
+
+    /// Anything that fails before `session.new_window` is a refusal, so the
+    /// launch can be tried again; a failure of that request, which may have
+    /// started the helper, is `LaunchUnknown`.
+    #[test]
+    fn only_a_failure_after_the_ticket_is_sent_is_launch_unknown() {
+        let sent = |fake: &FakeRex| fake.calls.iter().any(|(args, _)| args[0] == "api");
+
+        let mut made_nothing = FakeRex::ready(Some("[]".into()));
+        made_nothing.set("new", vec![Some("made".into())]);
+        assert_eq!(
+            run(&mut made_nothing),
+            Err(ManagedError::UnsupportedVersion)
+        );
+        assert!(!sent(&made_nothing));
+
+        let mut new_failed = FakeRex::ready(Some("[]".into()));
+        new_failed.set("new", vec![None]);
+        assert_eq!(run(&mut new_failed), Err(ManagedError::UnsupportedVersion));
+
+        let mut no_listing = FakeRex::ready(None);
+        assert_eq!(run(&mut no_listing), Err(ManagedError::UnsupportedVersion));
+        assert!(!sent(&no_listing));
+
+        for version in [
+            "api: revision 12 (supports 11 to 12)",
+            "api: revision 10",
+            "rex 0.1",
+        ] {
+            let mut newer = FakeRex::ready(group());
+            newer.set("version", vec![Some(version.into())]);
+            assert_eq!(
+                run(&mut newer),
+                Err(ManagedError::UnsupportedVersion),
+                "{version}"
+            );
+            assert!(!sent(&newer), "{version}");
+        }
+
+        let mut call_failed = FakeRex::ready(group());
+        call_failed.set("api", vec![None]);
+        assert_eq!(run(&mut call_failed), Err(ManagedError::LaunchUnknown));
+
+        let mut unreadable = FakeRex::ready(group());
+        unreadable.set("api", vec![Some("{}".into())]);
+        assert_eq!(run(&mut unreadable), Ok(Vec::new()), "open, not shown");
+        assert!(
+            !unreadable.calls.iter().any(|(args, _)| args[0] == "focus"),
+            "nothing to select"
+        );
+
+        let mut called = false;
+        let closed = open_tab_with(
+            |_, _| {
+                called = true;
+                None
+            },
+            || false,
+            || std::time::Duration::ZERO,
+            |_| {},
+            &rex_tab(),
+        );
+        assert_eq!(closed, Err(ManagedError::TerminalNotFound));
+        assert!(!called, "the CLI is not run when the app does not open");
+    }
+
+    /// The wait for the app ends on the clock, counting the time each try
+    /// took, not only the sleeps between them. A server with no app (one
+    /// the CLI started headless) is waited past, never launched into.
+    #[test]
+    fn the_wait_for_the_app_is_bounded_by_the_clock() {
+        let clock = std::cell::Cell::new(std::time::Duration::ZERO);
+        let mut tries = 0;
+        let never = open_tab_with(
+            |args, _| {
+                assert_eq!(args, ["client", "ls", "--json"], "nothing else is asked");
+                tries += 1;
+                clock.set(clock.get() + std::time::Duration::from_secs(3));
+                Some(br#"[{"id":"c0","kind":"cli"}]"#.to_vec())
+            },
+            || true,
+            || clock.get(),
+            |step| clock.set(clock.get() + step),
+            &rex_tab(),
+        );
+        assert_eq!(never, Err(ManagedError::TerminalNotFound));
+        assert_eq!(tries, 4, "three slow tries pass the wait, a fourth ends it");
+        assert!(clock.get() < SERVER_WAIT + std::time::Duration::from_secs(4));
+    }
+
+    #[test]
+    fn the_api_revision_and_the_app_client_are_read_from_rex() {
+        assert!(supports_revision(
+            b"rex 0.0.1793645657-gd018d2\napi: revision 10 (supports 0 to 10)\n"
+        ));
+        assert!(supports_revision(b"api: revision 14 (supports 8 to 14)"));
+        assert!(!supports_revision(b"api: revision 14 (supports 11 to 14)"));
+        assert!(!supports_revision(b""));
+        assert!(app_connected(br#"[{"kind":"cli"},{"kind":"app"}]"#));
+        assert!(!app_connected(br#"[{"kind":"cli"}]"#));
+        assert!(!app_connected(br#"[{"name":"app"}]"#));
+        assert!(!app_connected(b"app"));
     }
 
     /// The request reaches the CLI on stdin, never in its argv.

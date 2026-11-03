@@ -144,6 +144,22 @@ impl ManagedService {
             .get(std::time::Instant::now(), launching, probe)
     }
 
+    /// The terminal a `managed_session_focus` request shows, and how to show
+    /// it. Read under the lock; the showing runs after it is released.
+    fn focus_target(
+        &self,
+        request: &Request,
+    ) -> Result<
+        (
+            TerminalHandle,
+            fn(&TerminalHandle) -> Result<(), ManagedError>,
+        ),
+        ManagedError,
+    > {
+        let p: SessionParams = parse(request)?;
+        Ok((self.sessions.terminal_for(p.session_id)?, self.focus))
+    }
+
     /// Check a `managed_terminal_launch` request and hold its session's
     /// launch, so a second launch with the same ticket is refused while
     /// this one opens its terminal.
@@ -540,8 +556,15 @@ impl ManagedService {
                 // "Group sessions in herdr" is offered only where herdr is
                 // found and a terminal can host it.
                 let herdr_available = terminal_launch && (self.herdr_available)();
+                // A grouped launch opens in herdr, and its refusals are
+                // herdr's, so `{terminal}` names herdr while grouping is on.
+                let destination = if terminal.herdr {
+                    Some(herdr::NAME)
+                } else {
+                    terminal::destination(choice)
+                };
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices,"herdr_available":herdr_available,"herdr_grouping":terminal.herdr}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":destination,"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices,"herdr_available":herdr_available,"herdr_grouping":terminal.herdr}}),
                 )
             }
             "managed_tool_setup" => {
@@ -609,12 +632,9 @@ impl ManagedService {
                 // Additive: an older launcher reads only `accepted`.
                 Ok(json!({"accepted":true,"stop":self.sessions.stop_requested(id)}))
             }
-            "managed_session_focus" => {
-                let p: SessionParams = parse(request)?;
-                let window = self.sessions.terminal_for(p.session_id)?;
-                (self.focus)(&window)?;
-                Ok(json!({"focused":true}))
-            }
+            // Shown with the service unlocked; `handle` and `handle_async`
+            // route it there before reaching this.
+            "managed_session_focus" => Err(ManagedError::InvalidRequest),
             "managed_session_stop" => {
                 let p: SessionParams = parse(request)?;
                 self.sessions.request_stop(p.session_id)?;
@@ -992,6 +1012,9 @@ pub fn handle(shared: &DaemonShared, request: &Request) -> Response {
     if request.method == "managed_terminal_launch" {
         return terminal_launch(shared, request);
     }
+    if request.method == "managed_session_focus" {
+        return session_focus(shared, request);
+    }
     let sign_in = sign_in_present(shared);
     let choice = terminal_choice(shared);
     let mut ended = vec![];
@@ -1036,6 +1059,9 @@ where
     }
     if request.method == "managed_terminal_launch" {
         return terminal_launch(shared, request);
+    }
+    if request.method == "managed_session_focus" {
+        return session_focus(shared, request);
     }
     // A launch that would prepare a new session on the sign-in waits for
     // the balance before anything is committed: a refusal, a cancelled
@@ -1086,6 +1112,22 @@ fn terminal_launch(shared: &DaemonShared, request: &Request) -> Response {
     let result = with_service(shared, |service| {
         service.finish_terminal_launch(&launch, opened)
     });
+    respond(request, result)
+}
+
+/// `managed_session_focus` (Show) with the service locked only to read the
+/// session's terminal: Show runs `osascript`, `rex` or a herdr request,
+/// each of which can take seconds, so it runs unlocked and off the async
+/// workers, as a launch does.
+fn session_focus(shared: &DaemonShared, request: &Request) -> Response {
+    let found = with_service(shared, |service| service.focus_target(request));
+    let (window, focus) = match found {
+        Ok(found) => found,
+        Err(refusal) => return respond(request, Err(refusal)),
+    };
+    let result = crate::daemon::run_blocking(|| focus(&window))
+        .map(|()| json!({"focused":true}))
+        .map_err(Refusal::from);
     respond(request, result)
 }
 
@@ -2030,12 +2072,18 @@ mod tests {
         setting: TerminalSetting,
         chosen: bool,
     ) -> Result<Value, ManagedError> {
+        let request = Request {
+            id: 1,
+            method: method.into(),
+            params,
+        };
+        // Show runs outside the service, as `session_focus` runs it.
+        if method == "managed_session_focus" {
+            let (window, focus) = service.focus_target(&request)?;
+            return focus(&window).map(|()| json!({"focused":true}));
+        }
         service.handle(
-            &Request {
-                id: 1,
-                method: method.into(),
-                params,
-            },
+            &request,
             sign_in,
             TerminalChoice {
                 setting,
@@ -3214,14 +3262,18 @@ mod tests {
         locked(&shared, |service| {
             let context = service.sessions.redeem(id, &ticket).unwrap();
             report(service, id, &context.proof, "running", None).unwrap();
-            call(
-                service,
-                "managed_session_focus",
-                json!({"session_id": id}),
-                false,
-            )
-            .unwrap();
         });
+        // Show, through the socket's entry, which shows with the service
+        // unlocked.
+        let shown = handle(
+            &shared,
+            &Request {
+                id: 7,
+                method: "managed_session_focus".into(),
+                params: json!({"session_id": id}),
+            },
+        );
+        assert!(shown.error.is_none(), "{shown:?}");
         assert!(FOCUSED.lock().unwrap().contains(&TerminalHandle::Herdr {
             terminal: "term_19af3".into()
         }));
@@ -3272,6 +3324,14 @@ mod tests {
         }
         let found = snapshot(&mut service, false);
         assert_eq!(found["herdr_available"], found["terminal_launch"]);
+        assert_eq!(
+            found["terminal_destination"],
+            terminal::destination(TerminalSetting::default()).map_or(Value::Null, Value::from)
+        );
+        assert_eq!(
+            snapshot(&mut service, true)["terminal_destination"],
+            "herdr"
+        );
         service.herdr_available = || false;
         assert_eq!(snapshot(&mut service, true)["herdr_available"], false);
     }
