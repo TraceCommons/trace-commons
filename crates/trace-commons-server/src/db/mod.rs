@@ -3292,6 +3292,10 @@ pub enum PayoutLinkConfirm {
     ChangePending,
     /// An unlink with no active link.
     NotLinked,
+    /// A link on an account that has no NEAR AI login anchor at confirm:
+    /// only a recorded NEAR AI login proves a link, so it links nothing.
+    /// Unlinks are never refused this way.
+    NoLoginAnchor,
 }
 
 /// One account's link state on one rail, for the link routes.

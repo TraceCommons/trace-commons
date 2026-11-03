@@ -22,15 +22,25 @@
 -- only goes up, and every state change still goes through the pass.
 -- `closing` and `closed` links are already ending and are left alone.
 --
+-- SCOPE. The predicate is "no `near_ai_login` anchor", not "proved by a
+-- wallet": per the owner's instruction it revokes every live link on such
+-- an account, including principal-linked legacy and pilot accounts (their
+-- path back is F11) and links made before #1841 whatever proved them. It
+-- cannot see one case: a link proved through #1841's wallet path on an
+-- account that also holds a `near_ai_login` anchor (for example after a V82
+-- merge) is kept, because `subject_index` is a payout-domain label and
+-- cannot be compared with `anchor_hash`. Only the `near_ai` rail is
+-- touched; the rule is that rail's proof.
+--
 -- THE WINDOW AFTER DEPLOY. A link request started under the old code waits
--- up to five minutes for its confirm, and the confirm does not re-read
--- anchors. Every pending `link` request of such an account is deleted here,
--- so its confirm answers `not_found`. This migration runs when the new
--- service starts, before it serves; after it, a start for such an account
--- is refused by the new check. This assumes the old service is stopped
--- before the new one migrates (the pilot's single-process restart); a
--- deployment that keeps an old process serving across the migration must
--- stop it first.
+-- up to five minutes for its confirm. The new service's confirm re-reads
+-- the account's NEAR AI login and refuses a link without one, whatever the
+-- deploy topology, so that window is closed in code. Every pending request
+-- (link or unlink) of such an account is also deleted here: a link request
+-- would be refused anyway, and an unlink request would fail its version
+-- check, since the unlink mark below moves the account's link version. A
+-- pass run by an old process that loaded links before this commits can
+-- still act on them once; stop the old service before the new one starts.
 --
 -- AUDIT. One `trace_payout_audit` row per revoked link, hash-only, in the
 -- shapes the service writes: action `unlink_requested`, the link's state as
@@ -38,7 +48,13 @@
 -- link as `payout-account-v1:` / `payout-link-v1:` SHA-256 hashes (as
 -- `account_id_hash` / `link_id_hash` in `postgres_payout.rs`), and a fixed
 -- actor hash for this migration. Deleted requests get no row: no request
--- audit action fits, and the request's own `link_requested` row stays.
+-- audit action fits (adding one changes V132's CHECK), and the request's
+-- own `link_requested` / `unlink_requested` row stays.
+--
+-- LOCKS. Lifting FORCE takes an ACCESS EXCLUSIVE lock on each table for the
+-- whole migration, which stalls NEAR sign-ins (they read the anchors). A
+-- `lock_timeout` makes a deploy that cannot get the locks fail and retry
+-- rather than queue every login behind it.
 --
 -- IDEMPOTENT. A link already carrying both marks is not selected again, so a
 -- re-run changes nothing and writes no second audit row.
@@ -47,6 +63,8 @@
 -- DELETE here, run by the non-superuser migrator, would silently touch zero
 -- rows in every tenant (V144). FORCE is lifted for the tables this file reads
 -- and writes and put straight back.
+
+SET LOCAL lock_timeout = '10s';
 
 ALTER TABLE trace_near_account_anchors NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE trace_payout_links NO FORCE ROW LEVEL SECURITY;
@@ -59,7 +77,8 @@ WITH revoked AS (
            unlink_requested_at = COALESCE(l.unlink_requested_at, clock_timestamp()),
            version = l.version + 1,
            updated_at = clock_timestamp()
-     WHERE l.state IN ('waiting', 'active')
+     WHERE l.rail_id = 'near_ai'
+       AND l.state IN ('waiting', 'active')
        AND (l.recipient_unavailable_at IS NULL OR l.unlink_requested_at IS NULL)
        AND NOT EXISTS (
            SELECT 1 FROM trace_near_account_anchors a
@@ -85,7 +104,7 @@ SELECT r.tenant_id,
   FROM revoked r;
 
 DELETE FROM trace_payout_link_requests AS q
- WHERE q.action = 'link'
+ WHERE q.rail_id = 'near_ai'
    AND NOT EXISTS (
        SELECT 1 FROM trace_near_account_anchors a
         WHERE a.tenant_id = q.tenant_id

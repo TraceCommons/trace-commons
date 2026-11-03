@@ -3026,10 +3026,11 @@ async fn v145_cluster_table(seed: &tokio_postgres::Client) -> Vec<(uuid::Uuid, i
 /// - accounts with only a `wallet` anchor or none, holding an active link, a
 ///   waiting link and a closing link;
 /// - pending link and unlink requests.
-/// After V147 the live links of unanchored accounts carry both marks with
-/// one hash-only audit row each, closing links and the anchored account's
-/// link are untouched, the unanchored accounts' pending link requests are
-/// gone, and a second run changes nothing.
+/// After V147 the live `near_ai` links of unanchored accounts carry both
+/// marks with one hash-only audit row each; closing links, another rail's
+/// link and the anchored account's link are untouched; the unanchored
+/// accounts' pending requests (link and unlink) are gone; and a second run
+/// changes nothing.
 #[tokio::test]
 async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
     let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
@@ -3130,14 +3131,17 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
         link(wallet_active, "active"),
         link(bare_waiting, "waiting"),
         link(bare_closing, "closing"),
+        // Another rail's link on an unanchored account: not V147's rule.
+        link(bare_waiting, "active"),
     ];
-    for (tenant, account, id, state) in links {
+    for (index, (tenant, account, id, state)) in links.into_iter().enumerate() {
+        let rail = if index == 4 { "other_rail" } else { "near_ai" };
         seed.execute(
             "INSERT INTO trace_payout_links (
                  tenant_id, account_id, rail_id, link_id, recipient_kind, state,
                  sealed_recipient, recipient_index, recipient_key_ref, index_pepper_ref,
                  subject_index, program
-             ) VALUES ($1, $2, 'near_ai', $3, 'near_ai_org', $4, '{\"v\": 1}', $5, 'key',
+             ) VALUES ($1, $2, $8, $3, 'near_ai_org', $4, '{\"v\": 1}', $5, 'key',
                        'pepper', $6, $7)",
             &[
                 &tenant,
@@ -3147,6 +3151,7 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
                 &sha(&format!("index:{id}")),
                 &sha(&format!("subject:{id}")),
                 &format!("tc1-{}", id.simple()),
+                &rail,
             ],
         )
         .await
@@ -3268,6 +3273,7 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
             expected_link(links[1], true),
             expected_link(links[2], true),
             expected_link(links[3], false),
+            expected_link(links[4], false),
         ];
         expected.sort();
         let after = read_links().await;
@@ -3293,12 +3299,12 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
             problems.push(format!("audit read {audit:?}, not {expected:?}"));
         }
 
-        let mut expected = vec![requests[0].2, requests[2].2];
-        expected.sort();
+        let expected = vec![requests[0].2];
         let kept = read_requests().await;
         if kept != expected {
             problems.push(format!(
-                "requests read {kept:?}, not {expected:?} (the unanchored link request must go)"
+                "requests read {kept:?}, not {expected:?} (the unanchored accounts' link and \
+                 unlink requests must go)"
             ));
         }
 

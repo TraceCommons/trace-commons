@@ -718,9 +718,44 @@ async fn a_wallet_account_with_no_recorded_login_links_nothing_through_a_wallet_
     assert_eq!(h.request_rows(&account).await, 0);
 }
 
-/// A link an unanchored account made before this check existed is left as
-/// it is: status still reports it and the pass still pays it. A change to
-/// another org is refused; stopping payouts is not.
+/// A link request started while the account had a NEAR AI login, confirmed
+/// after the login is gone, writes no link. This is what closes the deploy
+/// window V147 relies on: a request the old code started for an account
+/// with no login (or one whose login was later removed) cannot confirm
+/// under the new code, whatever the deploy topology. The request is
+/// consumed, as every other confirm refusal does.
+#[tokio::test]
+async fn a_link_confirmed_after_the_login_is_gone_is_refused() {
+    let Some(h) = harness().await else { return };
+    let account = h.account().await;
+    let (status, body) = h
+        .start(&account, link_body(Uuid::new_v4(), org(1), 0))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let handle = body["handle"].as_str().unwrap().to_owned();
+    h.drop_login_anchors(&account).await;
+    let (status, body) = h.confirm(&account, &handle).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "subject_mismatch", "{body}");
+    assert!(
+        h.links(
+            &account,
+            &[PayoutLinkState::Waiting, PayoutLinkState::Active]
+        )
+        .await
+        .is_empty()
+    );
+    assert_eq!(h.request_rows(&account).await, 0);
+    assert_eq!(h.version(&account).await, 0);
+}
+
+/// Runtime behaviour for a link that already exists on an account with no
+/// NEAR AI login: the pass does not re-check logins, so such a link keeps
+/// its state until something revokes it. V147 revokes the ones that exist
+/// at deploy, once; a link whose account loses its login later is not
+/// revoked by the runtime (no production path removes a login anchor
+/// today). Status reports it, a change to another org is refused, and
+/// stopping payouts is not.
 #[tokio::test]
 async fn an_existing_link_without_a_login_is_kept_and_can_only_be_unlinked() {
     let Some(h) = harness().await else { return };

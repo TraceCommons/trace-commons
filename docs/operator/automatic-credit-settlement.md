@@ -32,13 +32,31 @@ have landed (owner, 2026-11-03):
     excluded from payouts by design; they need no migration.
 
 Links already made on accounts with no recorded NEAR AI login are revoked
-at deploy by migration V147: each live link is marked recipient-unavailable
-and unlink-requested, so the pass sends nothing more and closes it, with a
-`trace_payout_audit` row labelled `near_ai_login_required`. The same
-migration drops those accounts' pending link requests. Stop the old service
-before the new one starts, so no old-code confirm lands after V147. To see
-what it revoked (hash-only; RLS is forced, so use a cross-tenant role or
-run per tenant):
+at deploy by migration V147, on the `near_ai` rail. This covers every such
+account, principal-linked legacy and pilot accounts included, which stop
+being paid until F11. Each live link is marked recipient-unavailable and
+unlink-requested, so the pass sends nothing more and closes it (one zero
+send per link out of the pass's send window), with a `trace_payout_audit`
+row labelled `near_ai_login_required`. The same migration drops those
+accounts' pending link and unlink requests, with no audit row of their own.
+The new service's confirm also refuses a link on an account with no NEAR AI
+login, so a request started before the deploy cannot land after it. Stop
+the old service before the new one starts: an old pass can still act on
+links it loaded before V147 committed.
+
+Before deploying, count what V147 will revoke (hash-only; RLS is forced, so
+use a cross-tenant role or run per tenant):
+
+```sql
+SELECT tenant_id, state, count(*) FROM trace_payout_links l
+ WHERE l.rail_id = 'near_ai' AND l.state IN ('waiting', 'active')
+   AND NOT EXISTS (SELECT 1 FROM trace_near_account_anchors a
+                    WHERE a.tenant_id = l.tenant_id AND a.account_id = l.account_id
+                      AND a.identity_source = 'near_ai_login')
+ GROUP BY tenant_id, state;
+```
+
+After it, see what it revoked:
 
 ```sql
 SELECT tenant_id, prior_state, count(*) FROM trace_payout_audit
