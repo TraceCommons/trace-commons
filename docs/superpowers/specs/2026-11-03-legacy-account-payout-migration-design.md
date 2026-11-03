@@ -717,10 +717,20 @@ Where the implementation differs from, or adds to, sections 3 to 5:
    payment while the hold lasts, and payment resumes when the hold lifts.
    A close, a pooled mark, a revocation and a tenant-link delete still
    release.
-2. **Carry only at events, never on every pass.** The events are the
-   NEAR AI account's confirm, the tenant link, and an account opening in a
-   linked legacy tenant (the login-link path), each in its own
-   transaction. The payout pass does not carry.
+2. **Carry only at events, never on every pass, and only to proven
+   accounts.** The events are the NEAR AI account's confirm, the tenant
+   link, and an account opening in a linked legacy tenant (the login-link
+   path), each in its own transaction. The payout pass does not carry. At
+   every event the carry reaches only accounts whose principals a signed
+   device proved: the linking device or a V91-attested one
+   (`trace_legacy_payout_proven_accounts`, V148, with the decision-5
+   derivation). An account opened by an unproven device, such as one the
+   instance key enrolled later, waits; a live carry on an account that no
+   longer qualifies is released.
+3. **A legacy account whose own payout link V147 (#1868) revoked** gets its
+   carry at the next of those events, if it is proven, as the waiting
+   successor of the revoked link. The pilot had 0 links on 2026-11-02;
+   the pre-deploy count below confirms it.
 
 ### Known limits, not fixed here
 
@@ -774,7 +784,12 @@ beside F10 and F11 in the settlement runbook's "Before production payouts"
    revokes payout links that have no recorded NEAR AI login, at deploy;
    the check is re-run after V147 and must then find none on accounts
    with a live tenant link.
-2. **Q5 is run and reviewed.** Q5 (section 8) must be run and its result
+2. **Legacy own links (V147).** Q4 (live payout links in legacy tenants)
+   is re-run before deploy and reported with the source-provenance count.
+   Each such link is revoked by V147, and its account gets a carry at the
+   next carry event only if a signed device proved it. Expected 0 (pilot,
+   2026-11-02).
+3. **Q5 is run and reviewed.** Q5 (section 8) must be run and its result
    reviewed by the owner. It need not come back zero: credit from
    contributor-label subjects stays unowned and unpaid by design
    (section 3.5).

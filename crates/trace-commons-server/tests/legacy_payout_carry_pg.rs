@@ -422,12 +422,58 @@ impl Fixture {
             .collect()
     }
 
-    async fn add_account(&self, tenant: &str, closed: bool) -> Uuid {
+    /// An account in `tenant` with no principal: opened by nobody the tenant
+    /// link proved.
+    async fn add_unproven_account(&self, tenant: &str, closed: bool) -> Uuid {
         let account = Uuid::new_v4();
         self.exec(
             "INSERT INTO trace_accounts (tenant_id, account_id, closed_at)
              VALUES ($1, $2, CASE WHEN $3 THEN now() END)",
             &[&tenant, &account, &closed],
+        )
+        .await;
+        account
+    }
+
+    /// A signed-upload principal of the tenant's linking device that no
+    /// account holds yet: the device's actor under a fresh instance
+    /// enrollment subject for the tenant, so the carry can derive it.
+    async fn proven_principal(&self, tenant: &str) -> String {
+        let device: String = self
+            .admin
+            .query_one(
+                "SELECT device_key_id FROM trace_legacy_invite_links
+                  WHERE legacy_tenant_id = $1 AND revoked_at IS NULL",
+                &[&tenant],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        let subject = hash(&format!("enrolled-user:{}", Uuid::new_v4()));
+        self.exec(
+            "INSERT INTO trace_instance_enrollments (instance_subject_hash, user_subject_hash, tenant_id)
+             VALUES ($1, $2, $3)",
+            &[&hash(&format!("instance:{subject}")), &subject, &tenant],
+        )
+        .await;
+        device_upload_principal_refs(
+            tenant,
+            &device,
+            &device_claim_actor(tenant, &device, Some(&subject)),
+        )
+        .unwrap()[0]
+            .clone()
+    }
+
+    /// An account in a linked tenant holding a principal of the linking
+    /// device, so the carry treats it as proven (owner, 2026-11-03).
+    async fn add_account(&self, tenant: &str, closed: bool) -> Uuid {
+        let account = self.add_unproven_account(tenant, closed).await;
+        let principal = self.proven_principal(tenant).await;
+        self.exec(
+            "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+             VALUES ($1, $2, $3)",
+            &[&tenant, &account, &principal],
         )
         .await;
         account
@@ -1684,15 +1730,10 @@ async fn opening_an_account_in_a_linked_tenant_carries_to_it() {
     let Some(fx) = fixture().await else { return };
     // A tenant already carried.
     let (_, _, legacy, _, _) = fx.carried_pair("org-o1").await;
-    let opened = fx
-        .open_account(&legacy, "principal_sha256:opened-later")
-        .await;
+    let later = fx.proven_principal(&legacy).await;
+    let opened = fx.open_account(&legacy, &later).await;
     assert_eq!(fx.live_carries(&legacy, opened).await, 1);
-    assert_eq!(
-        fx.open_account(&legacy, "principal_sha256:opened-later")
-            .await,
-        opened
-    );
+    assert_eq!(fx.open_account(&legacy, &later).await, opened);
     assert_eq!(
         fx.live_carries(&legacy, opened).await,
         1,
@@ -1709,9 +1750,8 @@ async fn opening_an_account_in_a_linked_tenant_carries_to_it() {
     fx.link(&near, account, &fresh, &invite, &device)
         .await
         .unwrap();
-    let first = fx
-        .open_account(&fresh, "principal_sha256:first-account")
-        .await;
+    let principal = fx.proven_principal(&fresh).await;
+    let first = fx.open_account(&fresh, &principal).await;
     assert_eq!(fx.live_carries(&fresh, first).await, 1);
 }
 
@@ -1725,9 +1765,8 @@ async fn opening_an_account_carries_nothing_from_a_closed_source() {
         &[&near, &account],
     )
     .await;
-    let opened = fx
-        .open_account(&legacy, "principal_sha256:after-close")
-        .await;
+    let principal = fx.proven_principal(&legacy).await;
+    let opened = fx.open_account(&legacy, &principal).await;
     assert_eq!(fx.live_carries(&legacy, opened).await, 0);
     assert!(!fx.carry_invalid(&legacy, opened).await);
 }
@@ -1748,5 +1787,43 @@ async fn opening_an_account_in_an_unlinked_tenant_carries_nothing() {
         )
         .await,
         0
+    );
+}
+
+/// Owner decision, 2026-11-03 (#1879): at every carry event, carry only to
+/// accounts whose principals a signed device proved (the linking device or a
+/// V91-attested one). An account opened by an unproven device, such as one
+/// the instance key enrolled later, waits: not at its own opening, and not
+/// at the NEAR AI account's next confirm.
+#[tokio::test]
+async fn an_account_no_signed_device_proved_is_not_carried() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, legacy, claimed, proven) = fx.carried_pair("org-u1").await;
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 1);
+    assert_eq!(fx.live_carries(&legacy, proven).await, 1);
+    // Opened through the login-link path by a principal no proven device
+    // derives.
+    let opened = fx
+        .open_account(&legacy, "principal_sha256:unproven-device")
+        .await;
+    assert_eq!(
+        fx.live_carries(&legacy, opened).await,
+        0,
+        "not at its opening"
+    );
+    // Nor at the next confirm.
+    let bare = fx.add_unproven_account(&legacy, false).await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-u2")
+        .await;
+    assert_eq!(
+        fx.live_carries(&legacy, opened).await,
+        0,
+        "not at a confirm"
+    );
+    assert_eq!(fx.live_carries(&legacy, bare).await, 0);
+    assert_eq!(
+        fx.live_carries(&legacy, claimed).await,
+        1,
+        "the proven ones move to the new link"
     );
 }

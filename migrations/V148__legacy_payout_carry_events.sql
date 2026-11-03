@@ -17,6 +17,8 @@
 -- 2. Triggers: a pooled mark, an account closing (a NEAR AI account's
 --    carries in every tenant it linked, or a legacy account's own), and a
 --    tenant link deleted rather than revoked.
+-- 4. trace_legacy_payout_proven_accounts: the accounts a signed device
+--    proved; every carry reaches only these (owner, 2026-11-03).
 -- 3. trace_legacy_payout_source_account (#1873): which open NEAR AI account
 --    a legacy tenant is linked to, so opening an account in that tenant
 --    carries the source's link to it in the same transaction (owner,
@@ -202,6 +204,83 @@ ALTER FUNCTION public.trace_legacy_payout_source_account(TEXT)
     OWNER TO trace_legacy_payout_carry_guard;
 REVOKE ALL ON FUNCTION public.trace_legacy_payout_source_account(TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.trace_legacy_payout_source_account(TEXT)
+    TO trace_ingest_runtime;
+
+-- 4. The accounts a signed device proved (owner, 2026-11-03, #1879). At
+-- every carry event the carry reaches only these: open accounts of the
+-- legacy tenant that hold a signed-upload principal derivable from a device
+-- the live tenant link proved, which is the linking device or a V91-attested
+-- one. The derivation is the decision-5 claim's
+-- (`trace_legacy_link_claim_device_principals`, V146): the bare device-key
+-- actor, the app's `user_subject_hash(device_key_id)` subject, and each
+-- instance enrollment subject of the tenant, both forms each. An account
+-- opened by any other device, for example one the instance key enrolled
+-- later, waits. Asked under the legacy tenant's own context; refused under
+-- any other.
+CREATE FUNCTION public.trace_legacy_payout_proven_accounts(p_legacy_tenant TEXT)
+RETURNS SETOF UUID
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+DECLARE
+    v_link RECORD;
+    v_devices TEXT[];
+    v_device TEXT;
+    v_subjects TEXT[];
+    v_subject TEXT;
+    v_actor TEXT;
+    v_material TEXT;
+    v_principals TEXT[] := ARRAY[]::TEXT[];
+BEGIN
+    IF p_legacy_tenant IS NULL
+        OR p_legacy_tenant IS DISTINCT FROM public.trace_current_tenant_id() THEN
+        RAISE EXCEPTION 'legacy_payout_proven_refused' USING ERRCODE = '42501';
+    END IF;
+    IF p_legacy_tenant ~ '^(near-|nearai-)' THEN
+        RETURN;
+    END IF;
+    SELECT l.link_id, l.tenant_id, l.device_key_id INTO v_link
+      FROM public.trace_legacy_invite_links l
+     WHERE l.legacy_tenant_id = p_legacy_tenant AND l.revoked_at IS NULL;
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+    -- The attested devices live under the NEAR AI account's tenant.
+    PERFORM set_config('trace_commons.trace_tenant_id', v_link.tenant_id, true);
+    SELECT ARRAY[v_link.device_key_id] || coalesce(array_agg(d.device_key_id), ARRAY[]::TEXT[])
+      INTO v_devices
+      FROM public.trace_legacy_invite_link_devices d
+     WHERE d.link_id = v_link.link_id;
+    PERFORM set_config('trace_commons.trace_tenant_id', p_legacy_tenant, true);
+    SELECT coalesce(array_agg(DISTINCT e.user_subject_hash), ARRAY[]::TEXT[]) INTO v_subjects
+      FROM public.trace_instance_enrollments e
+     WHERE e.tenant_id = p_legacy_tenant;
+    FOREACH v_device IN ARRAY v_devices LOOP
+        FOREACH v_subject IN ARRAY ARRAY['',
+                'sha256:' || encode(sha256(convert_to('user_subject:' || v_device, 'UTF8')), 'hex')]
+                || v_subjects LOOP
+            IF v_subject = '' THEN
+                v_actor := v_device;
+            ELSE
+                v_actor := 'instance:' || p_legacy_tenant || ':' || v_device || ':user:' || v_subject;
+            END IF;
+            v_material := 'signed:' || p_legacy_tenant || ':' || v_actor;
+            v_principals := v_principals || ARRAY[
+                'principal_sha256:' || encode(sha256(convert_to(
+                    '12:signed_claim:' || octet_length(v_material)::TEXT || ':' || v_material, 'UTF8')), 'hex'),
+                'principal_sha256:' || encode(sha256(convert_to(v_material, 'UTF8')), 'hex')
+            ];
+        END LOOP;
+    END LOOP;
+    RETURN QUERY
+        SELECT DISTINCT p.account_id
+          FROM public.trace_account_principals p
+          JOIN public.trace_accounts a ON a.tenant_id = p.tenant_id AND a.account_id = p.account_id
+         WHERE p.tenant_id = p_legacy_tenant AND p.unlinked_at IS NULL
+           AND a.closed_at IS NULL AND p.principal_ref = ANY (v_principals);
+END $$;
+ALTER FUNCTION public.trace_legacy_payout_proven_accounts(TEXT)
+    OWNER TO trace_legacy_payout_carry_guard;
+REVOKE ALL ON FUNCTION public.trace_legacy_payout_proven_accounts(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.trace_legacy_payout_proven_accounts(TEXT)
     TO trace_ingest_runtime;
 
 REVOKE CREATE ON SCHEMA public FROM trace_legacy_payout_carry_guard;

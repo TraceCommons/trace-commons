@@ -2541,6 +2541,34 @@ async fn open_legacy_account(fixture: &Fixture, legacy: &str) -> Uuid {
     account
 }
 
+/// A legacy account holding the app-form signed-upload principal of the
+/// tenant's linking device (`legacy_pair`'s), so a carry treats it as
+/// proven (owner, 2026-11-03).
+async fn open_proven_legacy_account(fixture: &Fixture, legacy: &str) -> Uuid {
+    let account = open_legacy_account(fixture, legacy).await;
+    let device = format!("sha256:{}", "d".repeat(64));
+    let actor = trace_commons_server::account_trust::device_claim_actor(
+        legacy,
+        &device,
+        Some(&trace_commons_protocol::onboarding::user_subject_hash(
+            &device,
+        )),
+    );
+    let principal =
+        trace_commons_server::account_trust::device_upload_principal_refs(legacy, &device, &actor)
+            .unwrap()[0]
+            .clone();
+    owner_exec(
+        fixture,
+        legacy,
+        "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+         VALUES ($1, $2, $3)",
+        &[&legacy, &account, &principal],
+    )
+    .await;
+    account
+}
+
 async fn live_carries(fixture: &Fixture, legacy: &str, account: Uuid) -> i64 {
     let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
     let tx = client.transaction().await.unwrap();
@@ -2581,7 +2609,7 @@ async fn the_pass_does_not_carry() {
     let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
     let opener = Arc::new(TestOpener::default());
     let (near, source, legacy) = legacy_pair(&fixture, &rail, &opener).await;
-    let first = open_legacy_account(&fixture, &legacy).await;
+    let first = open_proven_legacy_account(&fixture, &legacy).await;
     let carried = fixture
         .runtime
         .carry_legacy_payout_links(

@@ -221,6 +221,18 @@ async fn carry_tenant(
         .await?
         .get(0);
     let source_hash = source.map(|source| link_id_hash(source.link_id));
+    // Owner, 2026-11-03 (#1879): carry only to accounts a signed device
+    // proved (the linking device or a V91-attested one). Any other account
+    // waits, and a live carry on one that no longer qualifies is released.
+    let proven: std::collections::HashSet<Uuid> = tx
+        .query(
+            "SELECT * FROM trace_legacy_payout_proven_accounts($1)",
+            &[&legacy],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
     let accounts = tx
         .query(
             "SELECT account_id, closed_at IS NOT NULL FROM trace_accounts
@@ -243,9 +255,13 @@ async fn carry_tenant(
                 &[&legacy, &account, &rail, &legacy_hash],
             )
             .await?;
-        let (Some(source), Some(source_hash), false, false) =
-            (source, source_hash.as_deref(), pooled, closed)
-        else {
+        let (Some(source), Some(source_hash), false, false, true) = (
+            source,
+            source_hash.as_deref(),
+            pooled,
+            closed,
+            proven.contains(&account),
+        ) else {
             for carry in &live {
                 release(tx, carry.get(0)).await?;
                 report.released += 1;

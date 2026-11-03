@@ -282,6 +282,13 @@ A tenant link also decides who is paid the legacy tenant's credit
   each release the carries they invalidate, in the same transaction. A
   legacy account opened later (a new login link) is carried when it is
   opened, in the same transaction. The payout pass never carries.
+- **Only proven accounts are carried** (owner, 2026-11-03). At every carry
+  event (a confirm, a tenant link, an account opening) the carry reaches
+  only accounts holding a signed-upload principal of a device the tenant
+  link proved: the linking device or a V91-attested one. An account opened
+  by any other device, such as one enrolled later with the instance key,
+  waits. A legacy account whose own payout link V147 revoked is carried at
+  the next event, if proven.
 - **Every send re-checks the carry.** The account standing the pass reads
   before each send holds a live carry (`payout_legacy_carry_invalid`) when
   its tenant was marked pooled, its tenant link is revoked or deleted, or

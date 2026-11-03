@@ -56,6 +56,10 @@ is done:
     Any links it finds are handled by #1868's V147 (payout links without a
     recorded NEAR AI login are revoked at deploy). Run it again after V147;
     it must then find none with `carries = true`.
+  - **Legacy own links.** Re-run Q4 from the same spec (live payout links
+    in legacy tenants; the pilot had 0 on 2026-11-02) and report it with
+    the provenance count. V147 revokes each; its account is carried at the
+    next carry event, and only if a signed device proved it.
   - **Q5.** Run Q5 from the
     [legacy payout migration spec](../superpowers/specs/2026-11-03-legacy-account-payout-migration-design.md),
     section 8 (unowned accruals in non-pooled legacy tenants), and give the

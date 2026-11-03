@@ -1454,6 +1454,30 @@ async fn a_confirmed_link_reaches_a_linked_legacy_account_and_opens_to_the_same_
         )
         .await
         .unwrap();
+    // The legacy account holds the app-form upload principal of the linking
+    // device, so the carry treats it as proven (owner, 2026-11-03).
+    let device = hex("device");
+    let principal = trace_commons_server::account_trust::device_upload_principal_refs(
+        &legacy.tenant,
+        &device,
+        &trace_commons_server::account_trust::device_claim_actor(
+            &legacy.tenant,
+            &device,
+            Some(&trace_commons_protocol::onboarding::user_subject_hash(
+                &device,
+            )),
+        ),
+    )
+    .unwrap()[0]
+        .clone();
+    admin
+        .execute(
+            "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+             VALUES ($1, $2, $3)",
+            &[&legacy.tenant, &legacy.id, &principal],
+        )
+        .await
+        .unwrap();
 
     // The legacy account cannot link for itself: it has no login anchor.
     let (status, body) = h.start(&legacy, link_body(Uuid::new_v4(), org(1), 0)).await;
