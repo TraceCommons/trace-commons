@@ -42,7 +42,7 @@ use std::sync::Mutex;
 #[path = "login_record_tests.rs"]
 mod tests;
 
-#[derive(Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct LoginRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stored: Option<StoredLogin>,
@@ -50,7 +50,7 @@ struct LoginRecord {
     commons_login: Option<String>,
 }
 
-#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct StoredLogin {
     provider: String,
     /// [`sign_in_digest`] of the inference key minted with the session.
@@ -87,14 +87,31 @@ fn sign_in_digest(key_id: &str) -> String {
     format!("{:x}", hash.finalize())
 }
 
+/// What is on disk, read once.
+enum OnDisk {
+    Missing,
+    Parsed(LoginRecord),
+    /// There, but not readable as a record: an I/O error, oversized, or not
+    /// one this build parses. A reader treats it as empty; a writer never
+    /// treats it as already holding what it would write.
+    Unreadable,
+}
+
+fn read(store: &ConfigStore) -> OnDisk {
+    match store.read_daemon_file(DAEMON_NEAR_AI_LOGIN_FILE) {
+        Ok(None) => OnDisk::Missing,
+        Ok(Some(bytes)) if bytes.len() <= 2048 => serde_json::from_slice(&bytes)
+            .map(OnDisk::Parsed)
+            .unwrap_or(OnDisk::Unreadable),
+        Ok(Some(_)) | Err(_) => OnDisk::Unreadable,
+    }
+}
+
 fn load(store: &ConfigStore) -> LoginRecord {
-    store
-        .read_daemon_file(DAEMON_NEAR_AI_LOGIN_FILE)
-        .ok()
-        .flatten()
-        .filter(|bytes| bytes.len() <= 2048)
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    match read(store) {
+        OnDisk::Parsed(record) => record,
+        OnDisk::Missing | OnDisk::Unreadable => LoginRecord::default(),
+    }
 }
 
 /// Change the record under [`WRITE`]. A change that leaves nothing to keep
@@ -115,15 +132,19 @@ fn update_checked(
 }
 
 fn write_locked(store: &ConfigStore, change: impl FnOnce(&mut LoginRecord)) -> anyhow::Result<()> {
-    let before = load(store);
-    let mut record = load(store);
+    let on_disk = read(store);
+    let mut record = match &on_disk {
+        OnDisk::Parsed(before) => before.clone(),
+        OnDisk::Missing | OnDisk::Unreadable => LoginRecord::default(),
+    };
     change(&mut record);
-    // Nothing changed, or nothing to keep where there was no file: no write.
-    if record == before
-        || (record == LoginRecord::default()
-            && !store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE).exists())
-    {
-        return Ok(());
+    // No write only when the file provably already says this: a record read
+    // and unchanged, or no file and nothing to keep. An unreadable file is
+    // always rewritten, so a caller that must clear it learns when it cannot.
+    match &on_disk {
+        OnDisk::Parsed(before) if *before == record => return Ok(()),
+        OnDisk::Missing if record == LoginRecord::default() => return Ok(()),
+        OnDisk::Parsed(_) | OnDisk::Missing | OnDisk::Unreadable => {}
     }
     let bytes = serde_json::to_vec_pretty(&record)?;
     store.write_daemon_file(DAEMON_NEAR_AI_LOGIN_FILE, &bytes)
@@ -180,6 +201,23 @@ pub(crate) fn accepted_by_commons(store: &ConfigStore, provider: Option<&str>) {
     }
 }
 
+/// This device just enrolled in an account through a NEAR AI login made
+/// with `provider`. A new account: its login replaces whatever the record
+/// held, and `None` clears it, so an earlier account's login is never shown
+/// as this one's. The stored session's login is kept.
+pub(crate) fn enrolled_with(store: &ConfigStore, provider: Option<&str>) {
+    let tag = offered(provider);
+    let _write = write_turn();
+    if enrolled(store)
+        && write_locked(store, |record| {
+            record.commons_login = tag.map(str::to_owned)
+        })
+        .is_err()
+    {
+        tracing::warn!(target: "near_ai_login_record", "near_ai_login_record_unsaved");
+    }
+}
+
 /// The device is leaving its account (unenroll): no login goes with one any
 /// more. The stored session's login stays with the session. An error means
 /// the old account's login may still be on disk, so unenroll fails on it
@@ -210,7 +248,14 @@ pub(crate) fn remove(store: &ConfigStore) -> anyhow::Result<()> {
     store.remove_files_and_temps(&[DAEMON_NEAR_AI_LOGIN_FILE], |_| false)
 }
 
-/// The login the account last accepted, if known.
+/// The login the account last accepted, if known -- and only while this
+/// device is enrolled. A leftover from an earlier account (an unenroll whose
+/// clear failed, followed by a new enrollment before anything rewrote it) is
+/// never shown: the next account's acceptance overwrites it, and until then
+/// nothing reads it. Unenrolled, there is no account whose login to show.
 pub(crate) fn commons_login(store: &ConfigStore) -> Option<&'static str> {
+    if !enrolled(store) {
+        return None;
+    }
     offered(load(store).commons_login.as_deref())
 }

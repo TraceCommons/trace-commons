@@ -907,7 +907,11 @@ async fn unenroll_forgets_the_accounts_login_and_keeps_the_sessions() {
     let r = call(&s).await;
     assert!(r.error.is_none(), "{:?}", r.error);
 
-    assert_eq!(login_record::commons_login(&s.store), None);
+    assert!(
+        !record_text(&s).contains("commons_login"),
+        "{}",
+        record_text(&s)
+    );
     assert_eq!(login_record::stored_login(&s.store, "key-1"), Some(login));
 }
 
@@ -934,7 +938,6 @@ async fn unenroll_goes_ahead_when_the_login_record_cannot_be_cleared() {
 /// cleared by the next unenroll call, enrolled or not.
 #[tokio::test]
 async fn a_later_unenroll_clears_a_leftover_accounts_login() {
-    use crate::daemon::nearai_credential::login_record;
     let s = shared();
     let login = crate::channel::NEAR_AI_SIGN_IN_PROVIDERS[0];
     s.store
@@ -943,9 +946,23 @@ async fn a_later_unenroll_clears_a_leftover_accounts_login() {
             format!(r#"{{"commons_login":"{login}"}}"#).as_bytes(),
         )
         .unwrap();
-    assert_eq!(login_record::commons_login(&s.store), Some(login));
+    assert!(record_text(&s).contains("commons_login"));
 
     let r = call(&s).await;
     assert!(r.error.is_none(), "{:?}", r.error);
-    assert_eq!(login_record::commons_login(&s.store), None);
+    assert!(
+        !record_text(&s).contains("commons_login"),
+        "{}",
+        record_text(&s)
+    );
+}
+
+/// The login record as written, read past `commons_login`'s enrolled-only
+/// rule: what is on disk is what a next account could be shown.
+fn record_text(s: &DaemonShared) -> String {
+    std::fs::read_to_string(
+        s.store
+            .daemon_path(crate::config::DAEMON_NEAR_AI_LOGIN_FILE),
+    )
+    .unwrap_or_default()
 }

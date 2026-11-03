@@ -42,10 +42,15 @@ pub(super) struct Head {
     pub origin: Option<String>,
     pub content_type: Option<String>,
     pub fetch_site: Option<String>,
-    /// `Sec-Purpose` / `Purpose`: set by a browser that fetches ahead of the
-    /// person (prefetch, prerender, a preloaded top hit).
+    /// `Sec-Purpose`, `Purpose`, and the older `X-Purpose` (Safari's
+    /// `preview`) and `X-Moz` (Firefox's `prefetch`): set by a browser that
+    /// fetches ahead of the person (prefetch, prerender, a preloaded top
+    /// hit). Each in its own slot, so a request carrying more than one is not
+    /// refused as a repeated header.
     pub sec_purpose: Option<String>,
     pub purpose: Option<String>,
+    pub x_purpose: Option<String>,
+    pub x_moz: Option<String>,
     /// `None` when the request sent no `Content-Length`.
     pub length: Option<usize>,
 }
@@ -58,7 +63,10 @@ impl Head {
     /// Whether the browser fetched this ahead of the person rather than
     /// because they asked for it.
     pub fn speculative(&self) -> bool {
-        self.sec_purpose.is_some() || self.purpose.is_some()
+        self.sec_purpose.is_some()
+            || self.purpose.is_some()
+            || self.x_purpose.is_some()
+            || self.x_moz.is_some()
     }
 }
 
@@ -108,6 +116,8 @@ pub(super) fn parse_head(bytes: &[u8], authority: &str, max_body: usize) -> Resu
             "sec-fetch-site" => &mut head.fetch_site,
             "sec-purpose" => &mut head.sec_purpose,
             "purpose" => &mut head.purpose,
+            "x-purpose" => &mut head.x_purpose,
+            "x-moz" => &mut head.x_moz,
             "transfer-encoding" | "expect" | "trailer" => return Err(Invalid),
             _ => continue,
         };
@@ -232,6 +242,43 @@ mod tests {
         assert_eq!(parsed.origin.as_deref(), Some("http://127.0.0.1:54321"));
         assert_eq!(parsed.fetch_site.as_deref(), Some("same-origin"));
         assert_eq!(parsed.length, Some(3));
+    }
+
+    /// Every header a browser marks a speculative fetch with is read, each
+    /// in its own slot, so two together are not refused as a repeat.
+    #[test]
+    fn speculative_fetches_are_recognised_by_every_marker() {
+        for marker in [
+            "Sec-Purpose: prefetch;prerender",
+            "Purpose: prefetch",
+            "X-Purpose: preview",
+            "X-Moz: prefetch",
+        ] {
+            let parsed = parse_head(
+                head(&format!("GET /x HTTP/1.1\r\nHost: {AUTHORITY}\r\n{marker}")).as_bytes(),
+                AUTHORITY,
+                0,
+            )
+            .unwrap();
+            assert!(parsed.speculative(), "{marker}");
+        }
+        let both = parse_head(
+            head(&format!(
+                "GET /x HTTP/1.1\r\nHost: {AUTHORITY}\r\nPurpose: prefetch\r\nX-Purpose: preview\r\nX-Moz: prefetch"
+            ))
+            .as_bytes(),
+            AUTHORITY,
+            0,
+        )
+        .unwrap();
+        assert!(both.speculative());
+        let plain = parse_head(
+            head(&format!("GET /x HTTP/1.1\r\nHost: {AUTHORITY}")).as_bytes(),
+            AUTHORITY,
+            0,
+        )
+        .unwrap();
+        assert!(!plain.speculative());
     }
 
     #[test]

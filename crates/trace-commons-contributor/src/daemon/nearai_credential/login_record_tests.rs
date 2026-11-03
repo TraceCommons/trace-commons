@@ -226,3 +226,72 @@ fn a_poisoned_lock_still_lets_the_record_be_written() {
     forget_commons_login(&store).unwrap();
     remove(&store).unwrap();
 }
+
+/// An unreadable record is never taken as already holding what a clear
+/// would write: clearing it tries the write and reports the failure, so the
+/// caller can fall back to removing it.
+#[test]
+fn clearing_an_unreadable_record_reports_it_rather_than_skipping() {
+    let (_dir, store) = enrolled();
+    // A directory where the record goes: it can be neither read nor written.
+    std::fs::create_dir_all(store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE).join("blocked")).unwrap();
+    assert!(forget_commons_login(&store).is_err());
+    assert!(forget_commons_login_or_remove(&store).is_err());
+
+    // One that exists but does not parse is rewritten, not skipped.
+    let (_dir, store) = enrolled();
+    store
+        .write_daemon_file(DAEMON_NEAR_AI_LOGIN_FILE, b"not json")
+        .unwrap();
+    forget_commons_login(&store).unwrap();
+    let text = String::from_utf8(
+        store
+            .read_daemon_file(DAEMON_NEAR_AI_LOGIN_FILE)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_ne!(text, "not json");
+}
+
+/// The account's login is shown only while the device is enrolled: a
+/// leftover on an unenrolled device is never read back.
+#[test]
+fn the_accounts_login_reads_as_unknown_unless_enrolled() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    store
+        .write_daemon_file(
+            DAEMON_NEAR_AI_LOGIN_FILE,
+            format!(r#"{{"commons_login":"{}"}}"#, login()).as_bytes(),
+        )
+        .unwrap();
+    assert_eq!(commons_login(&store), None);
+    std::fs::write(store.dir().join(CONFIG_FILE), b"{}").unwrap();
+    assert_eq!(commons_login(&store), Some(login()));
+}
+
+/// A new enrollment's login replaces the record's account login, and an
+/// unknown one clears it: an earlier account's login is never shown as the
+/// new one's. The stored session's login is kept.
+#[test]
+fn a_new_enrollment_replaces_or_clears_the_accounts_login() {
+    let (_dir, store) = enrolled();
+    record_stored_login(&store, login(), "key-1");
+    store
+        .write_daemon_file(
+            DAEMON_NEAR_AI_LOGIN_FILE,
+            format!(
+                r#"{{"stored":{{"provider":"{}","sign_in":"{}"}},"commons_login":"{}"}}"#,
+                login(),
+                sign_in_digest("key-1"),
+                login()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    enrolled_with(&store, None);
+    assert_eq!(commons_login(&store), None);
+    assert_eq!(stored_login(&store, "key-1"), Some(login()));
+    enrolled_with(&store, Some(login()));
+    assert_eq!(commons_login(&store), Some(login()));
+}
