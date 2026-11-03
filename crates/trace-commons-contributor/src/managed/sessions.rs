@@ -790,7 +790,8 @@ impl SessionRegistry {
 
     /// Fail unredeemed launches whose ticket expired, and lapse redeemed
     /// sessions unheard for longer than [`LEASE`], as of `now`.
-    pub fn sweep(&mut self, now: DateTime<Utc>) -> Result<(), ManagedError> {
+    /// Ends what has lapsed and returns the ids of the sessions it ended.
+    pub fn sweep(&mut self, now: DateTime<Utc>) -> Result<Vec<Uuid>, ManagedError> {
         let expired = |e: &Entry| {
             e.view.state == SessionState::Starting
                 && e.proof_hash.is_none()
@@ -803,10 +804,11 @@ impl SessionRegistry {
         };
         // Runs on every lease tick: copy the registry only to change it.
         if !self.data.entries.iter().any(|e| expired(e) || lapses(e)) {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let mut next = self.data.clone();
         let mut changed = false;
+        let mut ended = Vec::new();
         for entry in &mut next.entries {
             if expired(entry) {
                 entry.view.state = SessionState::Failed;
@@ -815,23 +817,26 @@ impl SessionRegistry {
                 }
                 entry.ticket_hash = None;
                 changed = true;
+                ended.push(entry.view.id);
             } else if lapses(entry) {
                 entry.view.state = lapsed(entry.view.connection);
                 changed = true;
+                ended.push(entry.view.id);
             }
         }
         if changed {
             self.commit(next)?;
         }
-        Ok(())
+        Ok(ended)
     }
 
     /// The NEAR AI sign-in is gone: every session on it has lost its proxy,
     /// so none is running any more. Failed, the state for a session that
     /// ended without an exit code from its tool.
-    pub fn end_sign_in_sessions(&mut self) -> Result<(), ManagedError> {
+    pub fn end_sign_in_sessions(&mut self) -> Result<Vec<Uuid>, ManagedError> {
         let mut next = self.data.clone();
         let mut changed = false;
+        let mut ended = Vec::new();
         for entry in &mut next.entries {
             if entry.view.connection == ConnectionKind::NearAiSignIn
                 && entry.view.state.holds_profile()
@@ -839,12 +844,13 @@ impl SessionRegistry {
                 entry.view.state = SessionState::Failed;
                 entry.ticket_hash = None;
                 changed = true;
+                ended.push(entry.view.id);
             }
         }
         if changed {
             self.commit(next)?;
         }
-        Ok(())
+        Ok(ended)
     }
 
     pub fn holds_profile(&self, id: AccountId) -> bool {
