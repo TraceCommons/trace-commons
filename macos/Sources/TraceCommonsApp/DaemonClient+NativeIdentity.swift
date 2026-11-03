@@ -9,34 +9,38 @@ extension DaemonClient {
         try identityCall("account_sign_in")
     }
 
-    /// Answers whether the NEAR AI key was left at NEAR AI: stored, cleared
-    /// here, and not revoked there (`CredentialSurface.signOutLeftKeyAtService`).
+    /// Answers what happened to the NEAR AI sign-in that goes with it
+    /// (`CredentialSurface.signOutNearAi`).
     @discardableResult
-    func accountSignOut() throws -> Bool {
-        struct Reply: Decodable { let signedOut: Bool; let nearAiRevoked: Bool?
+    func accountSignOut() throws -> CredentialSurface.SignOutNearAi {
+        struct Reply: Decodable { let signedOut: Bool; let nearAiCleared: Bool?; let nearAiRevoked: Bool?
             enum CodingKeys: String, CodingKey {
-                case signedOut = "signed_out", nearAiRevoked = "near_ai_revoked"
+                case signedOut = "signed_out", nearAiCleared = "near_ai_cleared"
+                case nearAiRevoked = "near_ai_revoked"
             }
         }
         let reply: Reply = try identityCall("account_sign_out")
         guard reply.signedOut else { throw Failure(code: "refused", message: "account-sign-out-failed") }
-        return CredentialSurface.signOutLeftKeyAtService(nearAiRevoked: reply.nearAiRevoked)
+        return CredentialSurface.signOutNearAi(
+            nearAiCleared: reply.nearAiCleared, nearAiRevoked: reply.nearAiRevoked)
     }
 
     /// `unenroll`: the daemon drops this Mac's enrollment, locally only, and
     /// the NEAR AI sign-in with it. Checked against `hello` first, so a daemon
     /// without the call refuses (`native-identity-unsupported`) and the
-    /// caller stays as it was. Answers whether the NEAR AI key was left at
-    /// NEAR AI, as `accountSignOut` does.
-    func unenroll() throws -> Bool {
-        struct Reply: Decodable { let unenrolled: Bool; let nearAiRevoked: Bool?
+    /// caller stays as it was. Answers what happened to the NEAR AI sign-in,
+    /// as `accountSignOut` does.
+    func unenroll() throws -> CredentialSurface.SignOutNearAi {
+        struct Reply: Decodable { let unenrolled: Bool; let nearAiCleared: Bool?; let nearAiRevoked: Bool?
             enum CodingKeys: String, CodingKey {
-                case unenrolled, nearAiRevoked = "near_ai_revoked"
+                case unenrolled, nearAiCleared = "near_ai_cleared"
+                case nearAiRevoked = "near_ai_revoked"
             }
         }
         let reply: Reply = try identityCall("unenroll")
         guard reply.unenrolled else { throw Failure(code: "refused", message: "unenroll-failed") }
-        return CredentialSurface.signOutLeftKeyAtService(nearAiRevoked: reply.nearAiRevoked)
+        return CredentialSurface.signOutNearAi(
+            nearAiCleared: reply.nearAiCleared, nearAiRevoked: reply.nearAiRevoked)
     }
 
     private func identityCall<T: Decodable>(_ method: String, params: [String: Any] = [:]) throws -> T {

@@ -455,14 +455,33 @@ pub(crate) async fn disconnect_with(
     shared: &DaemonShared,
     api: Option<&api::CloudApi>,
 ) -> Result<Disconnected, &'static str> {
+    clear_and_withdraw(shared, Some(api)).await
+}
+
+/// The clear, the proxy withdrawal and the OS cleanup, without a revoke:
+/// for a dangling reference the contributor did not ask to sign out of
+/// (`handle_migrate` finding nothing to move), where no session is readable
+/// and a revoke could only log a failure nobody caused.
+pub(crate) async fn clear_without_revoke(
+    shared: &DaemonShared,
+) -> Result<Disconnected, &'static str> {
+    clear_and_withdraw(shared, None).await
+}
+
+/// `revoke`: `None` for no revoke at all; `Some(api)` to revoke with that
+/// client (itself `None` when this build has none).
+async fn clear_and_withdraw(
+    shared: &DaemonShared,
+    revoke: Option<Option<&api::CloudApi>>,
+) -> Result<Disconnected, &'static str> {
     let (removed, revocation) =
         clear_local(shared).map_err(|_| "near_ai_credential_unavailable")?;
     // Withdrawing must not wait on NEAR AI: the proxy lets go of the key
     // before the revoke is sent.
     shared.reconcile_private_inference().await;
-    let revoked = match revocation {
-        Some(revocation) => revocation.run(api).await,
-        None => None,
+    let revoked = match (revocation, revoke) {
+        (Some(revocation), Some(api)) => revocation.run(api).await,
+        _ => None,
     };
     let store = shared.store.clone();
     let cleaned = tokio::task::spawn_blocking(move || {
@@ -486,17 +505,22 @@ pub(crate) async fn disconnect_with(
 /// withdrawing something is the half of this pair that must not wait: a
 /// contributor who forgets a credential has said stop using it, and
 /// "stopped, at some point in the next minute" is not that.
+///
+/// An OS entry left to delete does not hide the revoke's answer: the clear
+/// and the revoke have happened, so the answer is ok and says
+/// `cleanup_pending: true`. The entry stays journaled for the next
+/// credential operation, and `near_ai_credential_status` reports
+/// `cleanup_required` until then.
 pub async fn handle_forget_async(shared: &DaemonShared, req: &Request) -> Response {
     match disconnect(shared).await {
         Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
-        Ok(done) if done.cleanup_pending => Response::err(
-            req.id,
-            ERR_UNAVAILABLE,
-            "near_ai_credential_cleanup_required",
-        ),
         Ok(done) => Response::ok(
             req.id,
-            serde_json::json!({ "removed": done.removed, "revoked": done.revoked }),
+            serde_json::json!({
+                "removed": done.removed,
+                "revoked": done.revoked,
+                "cleanup_pending": done.cleanup_pending,
+            }),
         ),
     }
 }
@@ -534,9 +558,18 @@ pub async fn handle_migrate(shared: &DaemonShared, req: &Request) -> Response {
             true
         }
         Ok(Ok(LegacyMigration::NothingToMigrate)) => {
-            let forgot = handle_forget_async(shared, req).await;
-            if let Some(error) = forgot.error {
-                return Response::err(req.id, &error.code, &error.message);
+            // A dangling reference, not a sign-out: cleared without a
+            // revoke. An OS entry left to delete is the error it always was.
+            match clear_without_revoke(shared).await {
+                Err(label) => return Response::err(req.id, ERR_UNAVAILABLE, label),
+                Ok(done) if done.cleanup_pending => {
+                    return Response::err(
+                        req.id,
+                        ERR_UNAVAILABLE,
+                        "near_ai_credential_cleanup_required",
+                    );
+                }
+                Ok(_) => {}
             }
             false
         }

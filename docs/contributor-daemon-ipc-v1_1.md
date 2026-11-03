@@ -6914,9 +6914,12 @@ from this computer and revokes the key at NEAR AI with the sign-in being
 removed, best effort (owner decision 2026-11-02). `near_ai_credential_forget`
 answers `revoked: true` when the key is gone at NEAR AI, `false` when a key
 was stored and the revoke did not happen (including when its secret could not
-be read), and `null` when no key was stored. It is async-only: the sync
-dispatcher refuses it with `near-ai-credential-forget-requires-async`. A shell
-draws `credential_forget_not_revoked` only on `removed: true, revoked: false`.
+be read), and `null` when no key was stored. It also answers
+`cleanup_pending: true` when an OS entry is left to delete; it stays
+journaled, and `near_ai_credential_status` reports `cleanup_required` until a
+later credential operation deletes it. It is async-only: the sync dispatcher
+refuses it with `near-ai-credential-forget-requires-async`. A shell draws
+`credential_forget_not_revoked` only on `removed: true, revoked: false`.
 
 Unenroll and `account_sign_out` clear the same NEAR AI sign-in and revoke the
 same way. Each answers `near_ai_revoked` with the same three values, and

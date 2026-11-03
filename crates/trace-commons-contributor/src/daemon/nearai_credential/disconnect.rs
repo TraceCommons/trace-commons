@@ -28,9 +28,26 @@ use super::loopback::SessionTokens;
 use crate::config::ConfigStore;
 use crate::daemon::settings::DaemonSettings;
 
-/// How long a revoke may take in all, exchange included. A sign-out waits for
-/// it, and the clear it follows has already happened.
+/// How long the stored key's revoke may take, exchange included. A sign-out
+/// waits for it, and the clear it follows has already happened.
 const REVOKE_BUDGET: Duration = Duration::from_secs(10);
+
+/// How long tidying older pending keys may take after that. Its own budget,
+/// so a slow tidy never turns a stored key already revoked into "not
+/// revoked".
+#[cfg(not(test))]
+const PENDING_BUDGET: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const PENDING_BUDGET: Duration = Duration::from_millis(500);
+
+/// How long a caller with no daemon waits to read the secret bundle. An OS
+/// store can prompt (macOS) or block on a locked keyring (Linux); past this
+/// the clear goes on without the session, and the revoke answers "stored,
+/// not revoked".
+#[cfg(not(test))]
+const SECRET_READ_BUDGET: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const SECRET_READ_BUDGET: Duration = Duration::from_millis(500);
 
 /// The one log label a revoke that did not happen writes.
 pub(crate) const LABEL_NOT_REVOKED: &str = "near_ai_sign_out_key_not_revoked";
@@ -63,8 +80,12 @@ impl std::fmt::Debug for Revocation {
 }
 
 impl Revocation {
-    /// `None` when there is nothing to revoke: no stored key and no pending
-    /// one.
+    /// What a revoke needs, and the pending entries it must not send: those
+    /// tagged with another NEAR AI identity, or with one this cannot tell is
+    /// the stored login's (spec 2026-11-02 B8, #1842). The caller keeps
+    /// those in the record rather than dropping them, so they are revoked
+    /// when their identity signs in again. The revocation is `None` when
+    /// there is nothing to revoke: no stored key and no sendable pending one.
     ///
     /// `disk` is the settings file as it is now; `current` the resolved
     /// secrets the caller could read, already checked against `disk`.
@@ -72,7 +93,7 @@ impl Revocation {
         store: &ConfigStore,
         disk: &DaemonSettings,
         current: Option<&DaemonSettings>,
-    ) -> Option<Self> {
+    ) -> (Option<Self>, Vec<super::spend_org::PendingRevocation>) {
         let metadata_ids = disk
             .cloud_credentials
             .as_ref()
@@ -88,19 +109,17 @@ impl Revocation {
             || disk.near_ai_inference.is_some();
         let active = metadata_ids.or(plaintext_ids);
         let mut pending = Vec::new();
-        // An unreadable record names nothing this can act on. Only entries
-        // the stored login's session may revoke: those tagged with its
-        // recorded identity, or untagged (spec 2026-11-02 B8, #1842). Another
-        // identity's keys are never sent with this session.
+        let mut kept = Vec::new();
+        // An unreadable record names nothing this can act on.
         if let Ok(record) = super::spend_org::load(store) {
             let identity = active
                 .as_ref()
                 .and_then(|(_, key_id)| super::spend_org::recorded_identity(&record, key_id));
-            for entry in record
-                .pending_revocations
-                .into_iter()
-                .filter(|entry| entry.belongs_to(identity.as_deref()))
-            {
+            for entry in record.pending_revocations {
+                if !entry.belongs_to(identity.as_deref()) {
+                    kept.push(entry);
+                    continue;
+                }
                 let pair = (entry.workspace_id, entry.key_id);
                 if active.as_ref() != Some(&pair) && !pending.contains(&pair) {
                     pending.push(pair);
@@ -108,20 +127,23 @@ impl Revocation {
             }
         }
         if !stored && pending.is_empty() {
-            return None;
+            return (None, kept);
         }
         // A legacy plaintext document carries its own session.
         let session = current
             .and_then(|current| current.near_ai_session.as_ref())
             .or(disk.near_ai_session.as_ref())
             .map(|s| (s.refresh_token.clone(), s.user_agent.clone()));
-        Some(Self {
-            dir: store.dir().to_path_buf(),
-            stored,
-            active,
-            session,
-            pending,
-        })
+        (
+            Some(Self {
+                dir: store.dir().to_path_buf(),
+                stored,
+                active,
+                session,
+                pending,
+            }),
+            kept,
+        )
     }
 
     /// Revoke, best effort. Answers whether the stored key is gone at NEAR
@@ -129,12 +151,35 @@ impl Revocation {
     /// tidied). A stored key that could not be revoked -- including one whose
     /// secret could not be read -- is `Some(false)`, never `None`. Never
     /// fails: a stored key not revoked is one label line.
+    ///
+    /// The stored key's answer is settled before the pending keys are
+    /// touched, and they have their own budget, so nothing they do changes
+    /// it.
     pub(crate) async fn run(self, api: Option<&CloudApi>) -> Option<bool> {
         let stored = self.stored;
-        let reason = match tokio::time::timeout(REVOKE_BUDGET, self.attempt(api)).await {
-            Ok(Ok(())) => return stored.then_some(true),
-            Ok(Err(reason)) => reason,
-            Err(_) => "timed_out",
+        let pending = self.pending.clone();
+        let settled = tokio::time::timeout(REVOKE_BUDGET, self.revoke_stored(api)).await;
+        let (outcome, tokens) = match settled {
+            Ok((outcome, tokens)) => (outcome, tokens),
+            Err(_) => (Err("timed_out"), None),
+        };
+        if let (Some(api), Some(tokens)) = (api, tokens) {
+            if !pending.is_empty() {
+                let tidy = async {
+                    for (workspace_id, key_id) in &pending {
+                        // Tidied where this session can; another account's
+                        // (`403`) never can.
+                        let _ = api
+                            .revoke_inference_key(&tokens, workspace_id, key_id)
+                            .await;
+                    }
+                };
+                let _ = tokio::time::timeout(PENDING_BUDGET, tidy).await;
+            }
+        }
+        let reason = match outcome {
+            Ok(()) => return stored.then_some(true),
+            Err(reason) => reason,
         };
         if stored {
             tracing::warn!(target: "near_ai_credential", "near_ai_sign_out_key_not_revoked");
@@ -147,51 +192,53 @@ impl Revocation {
         stored.then_some(false)
     }
 
-    async fn attempt(self, api: Option<&CloudApi>) -> Result<(), &'static str> {
-        let api = api.ok_or("unavailable")?;
-        let (refresh_token, user_agent) = self.session.ok_or("no_session")?;
+    /// The exchange and the stored key's delete. Answers the stored key's
+    /// outcome and, when the exchange worked, the tokens the pending tidy
+    /// reuses.
+    async fn revoke_stored(
+        self,
+        api: Option<&CloudApi>,
+    ) -> (Result<(), &'static str>, Option<SessionTokens>) {
+        let Some(api) = api else {
+            return (Err("unavailable"), None);
+        };
+        let Some((refresh_token, user_agent)) = self.session else {
+            return (Err("no_session"), None);
+        };
         // NEAR AI rotates the refresh token on use, so this exchange takes the
         // same per-directory lock as every other one. An exchange that copied
         // the session before the clear and is still in flight finishes first;
         // its rotation then cannot be stored (the session it expected is
         // gone), and this one presents a token NEAR AI no longer accepts and
         // answers `session`. Never two uses of one token at once.
-        let access_token = {
+        let exchanged = async {
             let locks = super::session::coordination(&self.dir).map_err(|_| "unavailable")?;
             let _refresh = locks.refresh_lock().await;
             api.refresh_session(&refresh_token, &user_agent)
                 .await
-                .map_err(|_| "session")?
-                .session
-                .access_token
+                .map_err(|_| "session")
+        };
+        let access_token = match exchanged.await {
+            Ok(session) => session.session.access_token,
+            Err(reason) => return (Err(reason), None),
         };
         let tokens = SessionTokens {
             access_token,
             refresh_token: String::new(),
         };
-        let mut outcome = if self.stored && self.active.is_none() {
-            Err("no_key_ids")
-        } else {
-            Ok(())
-        };
-        if let Some((workspace_id, key_id)) = &self.active {
-            match api
+        let outcome = match &self.active {
+            Some((workspace_id, key_id)) => match api
                 .revoke_inference_key(&tokens, workspace_id, key_id)
                 .await
             {
-                Ok(RevokeOutcome::Revoked | RevokeOutcome::AlreadyGone) => {}
-                Ok(RevokeOutcome::NotThisAccount) => outcome = Err("not_this_account"),
-                Err(_) => outcome = Err("refused"),
-            }
-        }
-        // Older keys: tidied where this session can, never a reason the
-        // stored key's answer changes. Another account's (`403`) never can.
-        for (workspace_id, key_id) in &self.pending {
-            let _ = api
-                .revoke_inference_key(&tokens, workspace_id, key_id)
-                .await;
-        }
-        outcome
+                Ok(RevokeOutcome::Revoked | RevokeOutcome::AlreadyGone) => Ok(()),
+                Ok(RevokeOutcome::NotThisAccount) => Err("not_this_account"),
+                Err(_) => Err("refused"),
+            },
+            None if self.stored => Err("no_key_ids"),
+            None => Ok(()),
+        };
+        (outcome, Some(tokens))
     }
 }
 
@@ -210,8 +257,11 @@ pub(crate) fn clear_locked(
     let current = current.filter(|current| {
         crate::daemon::cloud_credential_lifecycle::ensure_current(&disk, current).is_ok()
     });
-    let revocation = Revocation::capture(store, &disk, current);
+    let (revocation, kept) = Revocation::capture(store, &disk, current);
     let removed = super::ceremony::forget_locked(store)?;
+    // The record goes with the login, but entries this session may not send
+    // stay, so the identity that recorded them can still revoke them.
+    super::spend_org::keep_pending_locked(store, kept);
     Ok((removed, revocation))
 }
 
@@ -233,9 +283,11 @@ pub(crate) struct StoreCleared {
 /// [`clear_locked`] for a caller with no running daemon (CLI `logout`, which
 /// stops the daemon first, and `account logout` when none answers).
 ///
-/// The secret is read before the commit lock: an OS read may prompt, and the
-/// commit lock covers local publication only. A read that fails or is
-/// declined still clears, and the revoke then answers "stored, not revoked".
+/// The secret is read before the commit lock, and for at most
+/// [`SECRET_READ_BUDGET`]: an OS read may prompt or block, and the commit
+/// lock covers local publication only. A read that fails, is declined or
+/// takes too long still clears, and the revoke then answers "stored, not
+/// revoked". Blocking: an async caller runs it on a blocking worker.
 ///
 /// The legacy sweep runs before `cleanup_native`, and the order matters.
 /// `clear_locked` has already cleared `cloud_credentials`, so every journal
@@ -244,7 +296,7 @@ pub(crate) struct StoreCleared {
 /// contributor-initiated moment, the only kind that may spend an
 /// authorization prompt on the legacy store.
 pub(crate) fn clear_store(store: &ConfigStore) -> Result<StoreCleared> {
-    let current = resolve_stored(store);
+    let current = resolve_stored_bounded(store);
     let locks = super::session::coordination(store.dir())?;
     let commit = locks
         .commit
@@ -259,6 +311,24 @@ pub(crate) fn clear_store(store: &ConfigStore) -> Result<StoreCleared> {
         revocation,
         cleaned,
     })
+}
+
+/// [`resolve_stored`] on its own thread, waited for at most
+/// [`SECRET_READ_BUDGET`]. A read still waiting then (a prompt nobody has
+/// answered, a locked keyring) is left to finish on its own and its answer
+/// dropped; the caller goes on as if the secret could not be read. A
+/// detached thread, not the async runtime's blocking pool, so a CLI process
+/// is never kept from exiting by it.
+fn resolve_stored_bounded(store: &ConfigStore) -> Option<DaemonSettings> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let owned = store.clone();
+    std::thread::Builder::new()
+        .name("near-ai-secret-read".into())
+        .spawn(move || {
+            let _ = sender.send(resolve_stored(&owned));
+        })
+        .ok()?;
+    receiver.recv_timeout(SECRET_READ_BUDGET).ok().flatten()
 }
 
 /// The stored credential with its secrets, for a caller with no running

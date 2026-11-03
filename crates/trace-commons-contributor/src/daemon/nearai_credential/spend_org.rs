@@ -444,6 +444,28 @@ pub(crate) fn clear_locked(store: &ConfigStore) {
 /// Record `entries`. An entry already held keeps its place; one held
 /// untagged takes the incoming tag, so a later sweep under another
 /// identity parks it instead of sending it.
+/// After a sign-out removed the record: write back the pending entries the
+/// sign-out's session could not send (another identity's, or one it cannot
+/// tell), and nothing else -- no choice, no identity binding, both of which
+/// belonged to the login just removed. The caller holds the commit lock.
+/// Best effort, as `clear_locked`: a lost write loses only those entries,
+/// and a label line says so.
+pub(crate) fn keep_pending_locked(store: &ConfigStore, kept: Vec<PendingRevocation>) {
+    if kept.is_empty() {
+        return;
+    }
+    let record = SpendOrgRecord {
+        pending_revocations: kept,
+        ..SpendOrgRecord::default()
+    };
+    let written = serde_json::to_vec_pretty(&record)
+        .ok()
+        .is_some_and(|bytes| store.write_daemon_file(SPEND_ORG_FILE, &bytes).is_ok());
+    if !written {
+        tracing::warn!(target: "near_ai_spend_org", "near_ai_spend_org_parked_revocations_lost");
+    }
+}
+
 pub(crate) fn record_pending(store: &ConfigStore, entries: &[PendingRevocation]) -> Result<()> {
     update(store, |record| {
         for entry in entries {

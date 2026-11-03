@@ -639,9 +639,18 @@ pub async fn account_logout(store: &ConfigStore) -> Result<()> {
     let outcome = match answered {
         Some(response) => match daemon_sign_out_outcome(response) {
             DaemonSignOut::Answered(outcome) => outcome,
-            // A developer dry-run daemon serves only its local allowlist and
-            // refuses this; sign out here, as before there was a daemon path.
-            DaemonSignOut::DryRun => account_logout_local(store, &cfg, api.as_ref()).await,
+            // A developer dry-run daemon refuses `account_sign_out` (it
+            // reaches ingest and NEAR AI, which a dry run never does) and still
+            // holds the state directory, with the NEAR AI key in memory.
+            // Clearing the files under it is what this command avoids, so it
+            // stops here and says how to go on.
+            DaemonSignOut::DryRun => AccountLogoutOutcome {
+                near_ai_revoked: None,
+                result: Err(anyhow::anyhow!(
+                    "the running daemon is a developer dry run, which does not sign out: \
+                     stop it and run `account logout` again"
+                )),
+            },
         },
         None => account_logout_local(store, &cfg, api.as_ref()).await,
     };
@@ -949,7 +958,13 @@ pub(crate) async fn logout_with(
     // The NEAR AI half first, through its cleanup journal, so the keychain
     // bundle is never orphaned by the wipe below. Then the revoke, with the
     // session just cleared; it never stops the logout.
-    let cleared = crate::daemon::nearai_credential::disconnect::clear_store(store)?;
+    // Blocking (an OS read and deletes), so on a blocking worker.
+    let owned = store.clone();
+    let cleared = tokio::task::spawn_blocking(move || {
+        crate::daemon::nearai_credential::disconnect::clear_store(&owned)
+    })
+    .await
+    .context("reaching the credential store")??;
     if let Some(revocation) = cleared.revocation {
         if revocation.run(near_ai).await == Some(false) {
             writeln!(

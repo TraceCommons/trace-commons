@@ -214,10 +214,19 @@ final class CredentialSurfaceTests: XCTestCase {
     /// The failure sentence is for `removed: true, revoked: false` only: not
     /// for a revoke that happened, nothing stored, an outcome not known
     /// (`null`), or an answer that cannot be read.
-    func testOnlyASignOutsFailedRevokeLeavesTheKeyAtTheService() {
-        XCTAssertTrue(CredentialSurface.signOutLeftKeyAtService(nearAiRevoked: false))
-        XCTAssertFalse(CredentialSurface.signOutLeftKeyAtService(nearAiRevoked: true))
-        XCTAssertFalse(CredentialSurface.signOutLeftKeyAtService(nearAiRevoked: nil))
+    /// A sign-out's NEAR AI half: not cleared outranks not revoked, and a
+    /// daemon that says neither reads as done.
+    func testASignOutSaysWhatHappenedToTheNearAiSignIn() {
+        typealias Outcome = CredentialSurface.SignOutNearAi
+        XCTAssertEqual(CredentialSurface.signOutNearAi(nearAiCleared: true, nearAiRevoked: true), Outcome.done)
+        XCTAssertEqual(CredentialSurface.signOutNearAi(nearAiCleared: true, nearAiRevoked: nil), Outcome.done)
+        XCTAssertEqual(CredentialSurface.signOutNearAi(nearAiCleared: nil, nearAiRevoked: nil), Outcome.done)
+        XCTAssertEqual(
+            CredentialSurface.signOutNearAi(nearAiCleared: true, nearAiRevoked: false), Outcome.notRevoked)
+        XCTAssertEqual(
+            CredentialSurface.signOutNearAi(nearAiCleared: false, nearAiRevoked: nil), Outcome.notCleared)
+        XCTAssertEqual(
+            CredentialSurface.signOutNearAi(nearAiCleared: false, nearAiRevoked: false), Outcome.notCleared)
     }
 
     func testOnlyAFailedRevokeLeavesTheKeyAtTheService() {

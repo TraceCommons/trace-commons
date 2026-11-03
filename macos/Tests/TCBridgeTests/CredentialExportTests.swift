@@ -113,14 +113,16 @@ final class CredentialExportTests: XCTestCase {
         XCTAssertEqual(CredentialSurface.actionExplains(.obtain, copy: copy), cost)
     }
 
-    /// Forgetting says it is local. `handle_forget` answers `revoked: false`
-    /// and always will; this is that fact in words, beside the button.
-    func testForgettingSaysTheKeyStaysValidElsewhere() throws {
+    /// Forgetting says what it does: removes the key here and revokes it at
+    /// NEAR AI. The forget answer's `revoked: false` (a revoke that did not
+    /// happen) has its own sentence, `credentialForgetNotRevoked`.
+    func testForgettingSaysWhatItDoes() throws {
         let copy = try XCTUnwrap(copy())
         XCTAssertEqual(
             CredentialSurface.actionExplains(.forget, copy: copy),
             copy.credentialForgetExplains)
         XCTAssertFalse(copy.credentialForgetExplains.isEmpty)
+        XCTAssertFalse(copy.credentialForgetNotRevoked.isEmpty)
     }
 
     /// The tri-state crosses as three values, and only the middle one draws

@@ -309,7 +309,9 @@ pub(super) async fn handle_unenroll(shared: &DaemonShared, req: &Request) -> Res
             let (near_ai_cleared, near_ai_revoked) =
                 match super::nearai_credential::disconnect(shared).await {
                     Ok(near_ai) => {
-                        if near_ai.removed {
+                        // Once per call: the enrollment's removal above
+                        // already said status changed.
+                        if near_ai.removed && !done.removed {
                             shared.publish(EVENT_STATUS_CHANGED, json!({}));
                         }
                         (true, near_ai.revoked)

@@ -182,7 +182,11 @@ async fn revoke_at_server(
             })
         })
         .and_then(|v| canonical_origin(&v).ok());
-    let session = serde_json::from_slice::<account_auth::AccountSession>(&raw).ok()?;
+    // A stored session that does not parse was still a session, cleared
+    // here and never revoked there: not "nothing to revoke".
+    let Ok(session) = serde_json::from_slice::<account_auth::AccountSession>(&raw) else {
+        return Some(false);
+    };
     let Some(origin) = origin else {
         return Some(false);
     };

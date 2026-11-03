@@ -539,3 +539,183 @@ async fn another_identitys_pending_key_is_not_sent() {
         "{seen:?}"
     );
 }
+
+/// Older pending keys are tidied after the stored key's answer is settled,
+/// under their own budget: a tidy that never finishes leaves a revoked key
+/// reading as revoked.
+#[tokio::test]
+async fn a_slow_pending_tidy_does_not_turn_a_revoke_into_not_revoked() {
+    use axum::{
+        Json, Router,
+        extract::Path,
+        routing::{delete, post},
+    };
+    let (_dir, store) = temp_store();
+    seed(&store);
+    let router = Router::new()
+        .route(
+            "/v1/users/me/access-tokens",
+            post(|| async {
+                Json(serde_json::json!({
+                    "access_token": ACCESS,
+                    "refresh_token": "rt_rotated-secret",
+                    "refresh_token_expiration": "2030-01-01T00:00:00Z",
+                }))
+            }),
+        )
+        .route(
+            "/v1/workspaces/{workspace}/api-keys/{key}",
+            delete(
+                |Path((_workspace, key)): Path<(String, String)>| async move {
+                    if key == "key-old" {
+                        // The pending key's delete never answers.
+                        std::future::pending::<()>().await;
+                    }
+                    StatusCode::NO_CONTENT
+                },
+            ),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let api = CloudApi::for_test(&format!("http://{address}")).unwrap();
+    let revocation = clear_store(&store).unwrap().revocation.unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(revocation.run(Some(&api)).await, Some(true));
+    // Bounded by the pending budget, not the request timeout.
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// A pending key the sign-out may not send stays in the record, so the
+/// identity that recorded it can still revoke it; the login's own choice
+/// and identity binding go.
+#[tokio::test]
+async fn a_pending_key_not_sent_stays_for_its_own_identity() {
+    let (_dir, store) = temp_store();
+    seed(&store);
+    super::super::spend_org::record_identity(&store, "key-1", "sha256:mine");
+    let mut theirs = super::super::spend_org::PendingRevocation::new("ws-9", "key-theirs");
+    theirs.identity = Some("sha256:theirs".into());
+    super::super::spend_org::record_pending(&store, &[theirs]).unwrap();
+    clear_store(&store).unwrap().cleaned.unwrap();
+    let record = super::super::spend_org::load(&store).unwrap();
+    assert_eq!(record.pending_revocations.len(), 1);
+    assert_eq!(record.pending_revocations[0].key_id, "key-theirs");
+    assert_eq!(
+        record.pending_revocations[0].identity.as_deref(),
+        Some("sha256:theirs")
+    );
+    assert!(record.chosen_organization_id.is_none());
+    assert!(record.session_identity.is_none());
+}
+
+/// A secret read that does not come back (a prompt nobody answers, a locked
+/// keyring) does not hold up the clear: it goes on without the session, and
+/// the stored key answers "not revoked".
+#[tokio::test]
+async fn a_secret_read_that_blocks_is_bounded() {
+    use crate::daemon::credential_store::{CredentialError, CredentialReference, SecretBackend};
+    struct Blocking(std::sync::Arc<dyn SecretBackend>);
+    impl SecretBackend for Blocking {
+        fn read(&self, _: &CredentialReference) -> Result<Vec<u8>, CredentialError> {
+            std::thread::sleep(Duration::from_secs(30));
+            Err(CredentialError::NoEntry)
+        }
+        fn write(&self, r: &CredentialReference, b: &[u8]) -> Result<(), CredentialError> {
+            self.0.write(r, b)
+        }
+        fn delete(&self, r: &CredentialReference) -> Result<(), CredentialError> {
+            self.0.delete(r)
+        }
+    }
+    let (_dir, store) = temp_store();
+    let reference = seed(&store);
+    let inner = crate::daemon::cloud_credential_test_support::backend(store.dir()).unwrap();
+    crate::daemon::cloud_credential_test_support::install_backend(
+        &store,
+        std::sync::Arc::new(Blocking(inner.clone())),
+    );
+    let (origin, seen) = stub(StatusCode::OK, StatusCode::NO_CONTENT).await;
+    let api = CloudApi::for_test(&origin).unwrap();
+    let started = std::time::Instant::now();
+    let owned = store.clone();
+    let cleared = tokio::task::spawn_blocking(move || clear_store(&owned))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    cleared.cleaned.unwrap();
+    assert_eq!(
+        cleared.revocation.unwrap().run(Some(&api)).await,
+        Some(false)
+    );
+    assert!(seen.lock().unwrap().is_empty());
+    crate::daemon::cloud_credential_test_support::install_backend(&store, inner);
+    assert_cleared(&store, &reference);
+}
+
+/// A dangling reference cleared by a migrate that found nothing is not a
+/// sign-out: no revoke, so no "not revoked" answer or label for a key the
+/// contributor never asked to sign out of. A forget of the same reference
+/// does say it.
+#[tokio::test]
+async fn a_dangling_reference_cleared_without_a_revoke_claims_nothing() {
+    for revoke in [false, true] {
+        let (_dir, store) = temp_store();
+        let reference = seed(&store);
+        crate::daemon::cloud_credential_test_support::backend(store.dir())
+            .unwrap()
+            .delete(&reference)
+            .unwrap();
+        let shared = crate::daemon::ipc::DaemonShared::load(store).unwrap();
+        let done = if revoke {
+            super::super::disconnect(&shared).await.unwrap()
+        } else {
+            super::super::clear_without_revoke(&shared).await.unwrap()
+        };
+        assert!(done.removed);
+        assert_eq!(done.revoked, revoke.then_some(false), "revoke={revoke}");
+    }
+}
+
+/// Native sign-out with a stored account session that does not parse:
+/// cleared here and never revoked there, so `server_revoked: false`.
+#[tokio::test]
+async fn an_unparseable_account_session_is_not_reported_as_none() {
+    let (_dir, store) = temp_store();
+    let fresh = crate::daemon::commons_credentials::snapshot(
+        &store,
+        crate::daemon::commons_credentials::Kind::Account,
+    )
+    .unwrap();
+    crate::daemon::commons_credentials::replace(&store, &fresh, b"{\"not\":\"a session\"}", None)
+        .unwrap();
+    let shared = crate::daemon::ipc::DaemonShared::load(store).unwrap();
+    let response =
+        crate::daemon::ipc::handle_request_async(&shared, &request("account_sign_out")).await;
+    let body = response.result.expect("sign-out answers");
+    assert_eq!(body["server_revoked"], false, "{body}");
+}
+
+/// `account logout` against a developer dry-run daemon stops rather than
+/// clearing files under a daemon that still holds them.
+#[test]
+fn account_logout_stops_at_a_dry_run_daemon() {
+    use crate::daemon::ipc::Response;
+    assert!(matches!(
+        crate::commands::daemon_sign_out_outcome(Response::err(
+            1,
+            crate::daemon::ipc::ERR_BAD_PARAMS,
+            crate::daemon::ipc::ERR_DEV_DRY_RUN,
+        )),
+        crate::commands::DaemonSignOut::DryRun
+    ));
+}

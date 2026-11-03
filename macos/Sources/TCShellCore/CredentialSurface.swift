@@ -170,11 +170,27 @@ public enum CredentialSurface {
     public static let forgetMethod = "near_ai_credential_forget"
     public static let migrateMethod = "near_ai_credential_migrate"
 
-    /// The same question about an `unenroll` or `account_sign_out` answer,
-    /// whose `near_ai_revoked` carries it: only `false` is a stored key left
-    /// at NEAR AI. `nil` is no key stored, or a daemon that does not say.
-    public static func signOutLeftKeyAtService(nearAiRevoked: Bool?) -> Bool {
-        nearAiRevoked == false
+    /// What an `unenroll` or `account_sign_out` answer says about the NEAR AI
+    /// sign-in that went with it.
+    public enum SignOutNearAi: Equatable, Sendable {
+        /// Cleared, and revoked at NEAR AI or nothing was stored.
+        case done
+        /// Cleared here, but the stored key was not revoked at NEAR AI
+        /// (`near_ai_revoked: false`): `credentialForgetNotRevoked`.
+        case notRevoked
+        /// Not cleared here (`near_ai_cleared: false`): the key, session and
+        /// record are still on this Mac. Calling again clears them, so the
+        /// shell says the change is unconfirmed and to try again.
+        case notCleared
+    }
+
+    /// Reads `near_ai_cleared` and `near_ai_revoked`. Not cleared outranks
+    /// not revoked: nothing was attempted. A daemon that answers neither
+    /// field is `.done`, as before these fields existed.
+    public static func signOutNearAi(nearAiCleared: Bool?, nearAiRevoked: Bool?) -> SignOutNearAi {
+        if nearAiCleared == false { return .notCleared }
+        if nearAiRevoked == false { return .notRevoked }
+        return .done
     }
 
     /// Whether a forget's answer says the key was removed here but not
