@@ -70,6 +70,18 @@ pub struct SettingsView {
     /// §5.4 draws it as a status pill, and §7.3 requires colour AND glyph
     /// AND words, which is what `style::tag` is.
     connection_chip: gtk::Box,
+    /// This app's account needs to be set up again (#1836 F1): the core's
+    /// status block and its "Set up again" button, empty otherwise. A
+    /// status in this section, never a banner or notification.
+    account_attention: gtk::Box,
+    /// What "Set up again" is doing. Kept here, not on the button: the block
+    /// is rebuilt on every daemon event, and a fresh button must not start a
+    /// second unenroll while one is running.
+    set_up_again: std::cell::Cell<SetUpAgain>,
+    /// The block last drawn ([`attention_block`]): a refusal belongs to it,
+    /// so a block that goes, comes back or changes its reason starts without
+    /// one.
+    attention_shown: std::cell::RefCell<Option<AttentionBlock>>,
     /// The three check rows of §5.4's Connection section. Filled from
     /// `get_settings`, never from a guess.
     connection_checks: gtk::Box,
@@ -263,6 +275,9 @@ impl SettingsView {
         let connection_chip = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
         connection_chip.set_halign(gtk::Align::Start);
         state_card.append(&connection_chip);
+        let account_attention = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+        account_attention.set_visible(false);
+        state_card.append(&account_attention);
         let connection = gtk::Label::builder().xalign(0.0).wrap(true).build();
         connection.add_css_class("tc-body");
         state_card.append(&connection);
@@ -683,6 +698,9 @@ impl SettingsView {
             root,
             connection,
             connection_chip,
+            account_attention,
+            set_up_again: std::cell::Cell::new(SetUpAgain::Idle),
+            attention_shown: std::cell::RefCell::new(None),
             connection_checks,
             pause_button,
             projects,
@@ -1005,7 +1023,7 @@ pub fn render_status(app: &Rc<App>, status: &Status) {
         "A background watcher is running separately. It keeps going when this window closes."
     };
     let connected = if status.logged_in {
-        concat!("Connected to ", copy::commons_name!(), ".")
+        "Connected."
     } else {
         "Not connected. Traces are still being queued; nothing can be sent yet, and nothing \
          has been lost."
@@ -1033,7 +1051,178 @@ pub fn render_status(app: &Rc<App>, status: &Status) {
         style::tag(copy::NOT_CONNECTED, Tone::Attention)
     });
 
+    render_account_attention(app, status);
     render_routing_status(app, status);
+}
+
+/// What the account status's "Set up again" is doing (#1836 F1), across
+/// the block's rebuilds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SetUpAgain {
+    #[default]
+    Idle,
+    /// `unenroll` is in flight: the button is insensitive and a second
+    /// confirmation runs nothing.
+    Running,
+    /// The daemon refused: the core's `failed` line shows until the next try.
+    Failed,
+}
+
+impl SetUpAgain {
+    /// Start a run; `false` while one is already running.
+    pub(crate) fn begin(&mut self) -> bool {
+        if *self == Self::Running {
+            return false;
+        }
+        *self = Self::Running;
+        true
+    }
+
+    /// The daemon answered.
+    pub(crate) fn finish(&mut self, unenrolled: bool) {
+        *self = if unenrolled { Self::Idle } else { Self::Failed };
+    }
+
+    /// The block went away (the account no longer needs attention): a
+    /// refusal belongs to it, so one that comes back starts without it. A
+    /// run in flight is kept.
+    pub(crate) fn block_gone(&mut self) {
+        if *self == Self::Failed {
+            *self = Self::Idle;
+        }
+    }
+
+    pub(crate) fn button_sensitive(self) -> bool {
+        self != Self::Running
+    }
+
+    pub(crate) fn shows_failure(self) -> bool {
+        self == Self::Failed
+    }
+}
+
+/// Which block a status draws: its reason and whether the Private AI line
+/// shows, or `None` while there is no block.
+pub(crate) type AttentionBlock = (Option<String>, bool);
+
+pub(crate) fn attention_block(status: &Status) -> Option<AttentionBlock> {
+    status.account_attention().map(|_| {
+        (
+            status.account_state_reason.clone(),
+            status.near_ai_login_unconfirmed,
+        )
+    })
+}
+
+/// The account's status while it needs to be set up again (#1836 F1), in
+/// the core's words. "Set up again" asks first (`confirm_*`); only the
+/// confirmation unenrolls this device, then opens the first run, which
+/// starts with a NEAR AI sign-in. The daemon never unenrolls on its own;
+/// only this button asks it to.
+fn render_account_attention(app: &Rc<App>, status: &Status) {
+    let view = &app.settings.account_attention;
+    while let Some(child) = view.first_child() {
+        view.remove(&child);
+    }
+    let now = attention_block(status);
+    if app.settings.attention_shown.replace(now.clone()) != now {
+        let mut state = app.settings.set_up_again.get();
+        state.block_gone();
+        app.settings.set_up_again.set(state);
+    }
+    let Some(copy) = status.account_attention() else {
+        view.set_visible(false);
+        return;
+    };
+    let title = gtk::Label::builder().xalign(0.0).wrap(true).build();
+    title.set_text(copy.title);
+    title.add_css_class("tc-card-title");
+    view.append(&title);
+    if let Some(body) = copy.body {
+        style::append_body(view, body);
+    }
+    if let Some(private_ai) = copy.private_ai {
+        style::append_body(view, private_ai);
+    }
+    let state = app.settings.set_up_again.get();
+    let set_up_again = gtk::Button::with_label(copy.action);
+    set_up_again.set_halign(gtk::Align::Start);
+    set_up_again.set_sensitive(state.button_sensitive());
+    let a = Rc::clone(app);
+    set_up_again.connect_clicked(move |button| confirm_set_up_again(&a, button, copy));
+    view.append(&set_up_again);
+    if state.shows_failure() {
+        style::append_body(view, copy.failed);
+    }
+    view.set_visible(true);
+}
+
+/// The confirmation before "Set up again" runs, in the core's words.
+fn confirm_set_up_again(
+    app: &Rc<App>,
+    button: &gtk::Button,
+    copy: trace_commons_contributor::consent_copy::AccountAttentionCopy,
+) {
+    let dialog = adw::MessageDialog::new(
+        Some(&app.window),
+        Some(copy.confirm_title),
+        Some(copy.confirm_body),
+    );
+    dialog.add_responses(&[
+        ("cancel", copy.confirm_cancel),
+        ("confirm", copy.confirm_action),
+    ]);
+    dialog.set_close_response("cancel");
+    let a = Rc::clone(app);
+    let button = button.clone();
+    dialog.connect_response(None, move |dialog, response| {
+        dialog.close();
+        if response == "confirm" {
+            set_up_again(&a, &button);
+        }
+    });
+    dialog.present();
+}
+
+/// What an `unenroll` answer says about the NEAR AI sign-in that went with
+/// it, as a sentence, or `None` when it went (or the daemon predates the
+/// fields). Not cleared here outranks not revoked: nothing was attempted.
+pub(crate) fn near_ai_left_behind(answer: &serde_json::Value) -> Option<&'static str> {
+    use trace_commons_contributor::private_inference_copy as pi;
+    if answer.get("near_ai_cleared") == Some(&serde_json::Value::Bool(false)) {
+        return Some(pi::NEAR_AI_STILL_SIGNED_IN);
+    }
+    if answer.get("near_ai_revoked") == Some(&serde_json::Value::Bool(false)) {
+        return Some(pi::CREDENTIAL_FORGET_NOT_REVOKED);
+    }
+    None
+}
+
+/// Unenroll, then open the first run. One run at a time, whatever buttons
+/// the block's rebuilds made meanwhile.
+fn set_up_again(app: &Rc<App>, button: &gtk::Button) {
+    let mut state = app.settings.set_up_again.get();
+    if !state.begin() {
+        return;
+    }
+    app.settings.set_up_again.set(state);
+    button.set_sensitive(false);
+    app.call("unenroll", serde_json::json!({}), move |app, result| {
+        let mut state = app.settings.set_up_again.get();
+        state.finish(result.is_ok());
+        app.settings.set_up_again.set(state);
+        if let Ok(answer) = &result {
+            // The NEAR AI sign-in goes with the enrollment (#1843): say so
+            // only when it did not, as macOS does.
+            if let Some(line) = near_ai_left_behind(answer) {
+                app.toast(line);
+            }
+            super::onboarding::present_after_unenroll(app);
+        }
+        // Re-renders the block: the button sensitive again, and the
+        // failure line on a refusal.
+        app.refresh();
+    });
 }
 
 /// The two session-source rows: the sentence, and whether the tone is the
@@ -3540,6 +3729,104 @@ fn wire_witness(app: &Rc<App>) {
         }
         render_witness(&a);
     });
+}
+
+#[cfg(test)]
+mod set_up_again_tests {
+    use super::SetUpAgain;
+
+    /// One run at a time: a second confirmation while `unenroll` is in
+    /// flight runs nothing, and the rebuilt button stays insensitive.
+    #[test]
+    fn a_second_press_while_running_runs_nothing() {
+        let mut state = SetUpAgain::default();
+        assert!(state.button_sensitive());
+        assert!(state.begin());
+        assert!(!state.button_sensitive());
+        assert!(!state.begin(), "a second run while one is in flight");
+        state.finish(true);
+        assert_eq!(state, SetUpAgain::Idle);
+        assert!(state.button_sensitive());
+        assert!(!state.shows_failure());
+    }
+
+    /// A refusal shows the core's failure line until the next attempt.
+    #[test]
+    fn a_refusal_shows_the_failure_until_the_next_try() {
+        let mut state = SetUpAgain::default();
+        assert!(state.begin());
+        state.finish(false);
+        assert!(state.shows_failure());
+        assert!(state.button_sensitive());
+        assert!(state.begin());
+        assert!(!state.shows_failure());
+    }
+
+    /// The NEAR AI half of an unenroll answer (#1843): a sentence only when
+    /// the sign-in was not cleared, or its key not revoked at NEAR AI.
+    #[test]
+    fn the_near_ai_half_of_set_up_again_is_said_only_when_left_behind() {
+        use super::near_ai_left_behind;
+        use serde_json::json;
+        use trace_commons_contributor::private_inference_copy as pi;
+        assert_eq!(
+            near_ai_left_behind(
+                &json!({"unenrolled": true, "near_ai_cleared": true, "near_ai_revoked": true})
+            ),
+            None
+        );
+        assert_eq!(
+            near_ai_left_behind(
+                &json!({"unenrolled": true, "near_ai_cleared": true, "near_ai_revoked": null})
+            ),
+            None
+        );
+        assert_eq!(near_ai_left_behind(&json!({"unenrolled": true})), None);
+        assert_eq!(
+            near_ai_left_behind(&json!({"near_ai_cleared": true, "near_ai_revoked": false})),
+            Some(pi::CREDENTIAL_FORGET_NOT_REVOKED)
+        );
+        assert_eq!(
+            near_ai_left_behind(&json!({"near_ai_cleared": false, "near_ai_revoked": false})),
+            Some(pi::NEAR_AI_STILL_SIGNED_IN)
+        );
+    }
+
+    /// The block a status draws changes with its reason, so a refusal shown
+    /// under one reason does not carry over to another.
+    #[test]
+    fn the_block_changes_with_its_reason() {
+        let status = |reason: Option<&str>| {
+            serde_json::from_value::<crate::model::Status>(serde_json::json!({
+                "account_state": if reason.is_some() { "needs_attention" } else { "ok" },
+                "account_state_reason": reason,
+                "near_ai_login_unconfirmed": false,
+            }))
+            .unwrap()
+        };
+        let unreadable = super::attention_block(&status(Some("account_record_unreadable")));
+        let refused = super::attention_block(&status(Some("account_address_refused")));
+        assert!(unreadable.is_some());
+        assert_ne!(unreadable, refused);
+        assert_eq!(super::attention_block(&status(None)), None);
+    }
+
+    /// A refusal goes with its block: one that comes back later starts
+    /// without the failure line. A run in flight survives the block going.
+    #[test]
+    fn a_refusal_goes_with_its_block() {
+        let mut state = SetUpAgain::default();
+        assert!(state.begin());
+        state.finish(false);
+        state.block_gone();
+        assert!(!state.shows_failure());
+        assert_eq!(state, SetUpAgain::Idle);
+
+        let mut running = SetUpAgain::default();
+        assert!(running.begin());
+        running.block_gone();
+        assert_eq!(running, SetUpAgain::Running);
+    }
 }
 
 #[cfg(test)]

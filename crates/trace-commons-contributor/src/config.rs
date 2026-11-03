@@ -109,6 +109,15 @@ pub const JOINED_BY_CODE_FILE: &str = "joined-by-device-code";
 /// new key) starts clean; sign-out keeps the key, and so keeps the marker.
 pub const DEVICE_KEY_REVOKED_FILE: &str = "device-key-revoked";
 
+/// Which NEAR AI login this device's account was last accepted with, and
+/// which one the stored session came from
+/// (`daemon::nearai_credential::login_record`). Tags only. Not one of the
+/// [`ENROLLMENT_FILES`]: each half is cleared with what it describes, through
+/// `login_record` under its own lock. Unenrolling clears the account's half,
+/// and its NEAR AI clear (#1843) clears the session's half with the session;
+/// logging out removes the file.
+pub const DAEMON_NEAR_AI_LOGIN_FILE: &str = "near-ai-login.json";
+
 /// The plain files that belong to one enrollment, apart from the credential
 /// references `commons_credentials` owns (device key, account session,
 /// staged device key). `unenroll` removes exactly these, with the stored
@@ -1479,7 +1488,23 @@ impl ConfigStore {
     /// under the same commit lock -- see `daemon::unenroll` for why that
     /// order is the fail-closed one.
     pub(crate) fn remove_enrollment_files(&self) -> Result<()> {
-        for name in ENROLLMENT_FILES {
+        // Stored envelopes are stamped with this enrollment's identity, so
+        // they go with it -- see `wipe_files` below.
+        self.remove_files_and_temps(&ENROLLMENT_FILES, |file_name| {
+            file_name.starts_with(DAEMON_APPROVED_ENVELOPE_PREFIX)
+                || file_name.starts_with(&format!(".{DAEMON_APPROVED_ENVELOPE_PREFIX}"))
+        })
+    }
+
+    /// Remove `names` from this directory, with the temp files an atomic
+    /// write of any of them left behind (`.{name}.tmp-*`), and every other
+    /// entry `also` names. Missing is not an error.
+    pub(crate) fn remove_files_and_temps(
+        &self,
+        names: &[&str],
+        also: impl Fn(&str) -> bool,
+    ) -> Result<()> {
+        for name in names {
             let path = self.dir.join(name);
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
@@ -1487,10 +1512,7 @@ impl ConfigStore {
                 Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
             }
         }
-        let tmp_prefixes: Vec<String> = ENROLLMENT_FILES
-            .iter()
-            .map(|name| format!(".{name}.tmp-"))
-            .collect();
+        let tmp_prefixes: Vec<String> = names.iter().map(|name| format!(".{name}.tmp-")).collect();
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1502,11 +1524,7 @@ impl ConfigStore {
             let entry = entry.with_context(|| format!("reading dir {}", self.dir.display()))?;
             let file_name = entry.file_name();
             let file_name = file_name.to_string_lossy();
-            // Stored envelopes are stamped with this enrollment's identity, so
-            // they go with it -- see `wipe_files` below.
-            let is_approved_envelope = file_name.starts_with(DAEMON_APPROVED_ENVELOPE_PREFIX)
-                || file_name.starts_with(&format!(".{DAEMON_APPROVED_ENVELOPE_PREFIX}"));
-            if is_approved_envelope
+            if also(&file_name)
                 || tmp_prefixes
                     .iter()
                     .any(|prefix| file_name.starts_with(prefix))
@@ -1523,6 +1541,9 @@ impl ConfigStore {
         // Everything an enrollment owns goes first, through the one list
         // `unenroll` uses, so a file added there can never survive a logout.
         self.remove_enrollment_files()?;
+        // The NEAR AI login record, under its own lock, so a write in flight
+        // cannot bring it back.
+        crate::daemon::nearai_credential::login_record::remove(self)?;
         // Token review payloads belong to this enrollment. Never traverse a
         // substituted link into an agent's session directory. Remaining raw
         // capture leases expire independently in Ironwire's bounded spool.
@@ -2367,6 +2388,7 @@ mod tests {
             DAEMON_PAYOUT_ORG_NAMES_FILE,
             JOINED_BY_CODE_FILE,
             DEVICE_KEY_REVOKED_FILE,
+            DAEMON_NEAR_AI_LOGIN_FILE,
         ];
         for name in names {
             store.write_daemon_file(name, b"{}").unwrap();

@@ -48,6 +48,10 @@ struct Commons {
     start_status: Mutex<u16>,
     /// The finish answers 200 with a body that does not parse.
     finish_garbage: Mutex<bool>,
+    /// The finish answers this status, content type and raw body instead.
+    finish_raw: Mutex<Option<(u16, &'static str, String)>>,
+    /// The start answers this status, content type and raw body instead.
+    start_raw: Mutex<Option<(u16, &'static str, String)>>,
     starts: Mutex<u32>,
     finishes: Mutex<u32>,
     refreshes: Mutex<u32>,
@@ -87,6 +91,8 @@ async fn spawn(device_public_key: String) -> Stub {
         refuse_status: Mutex::new(400),
         start_status: Mutex::new(200),
         finish_garbage: Mutex::new(false),
+        finish_raw: Mutex::new(None),
+        start_raw: Mutex::new(None),
         starts: Mutex::new(0),
         finishes: Mutex::new(0),
         refreshes: Mutex::new(0),
@@ -135,12 +141,24 @@ async fn spawn(device_public_key: String) -> Stub {
                     }
                     assert_eq!(body["device_public_key"], state.device_public_key.as_str());
                     *challenge.lock().unwrap() = body["code_challenge"].as_str().unwrap().into();
+                    use axum::response::IntoResponse as _;
+                    if let Some((status, content_type, body)) =
+                        state.start_raw.lock().unwrap().clone()
+                    {
+                        return (
+                            StatusCode::from_u16(status).unwrap(),
+                            [(axum::http::header::CONTENT_TYPE, content_type)],
+                            body,
+                        )
+                            .into_response();
+                    }
                     let status = *state.start_status.lock().unwrap();
                     if status != 200 {
                         return (
                             StatusCode::from_u16(status).unwrap(),
                             Json(json!({"error": "refused"})),
-                        );
+                        )
+                            .into_response();
                     }
                     (
                         StatusCode::OK,
@@ -150,6 +168,7 @@ async fn spawn(device_public_key: String) -> Stub {
                             "expires_at": expires,
                         })),
                     )
+                        .into_response()
                 }
             }),
         )
@@ -180,8 +199,19 @@ async fn spawn(device_public_key: String) -> Stub {
                         .verify(&preimage, &signature)
                         .unwrap();
                     assert!(body["access_token"].as_str().unwrap().starts_with("near-access-"));
+                    use axum::response::IntoResponse as _;
+                    if let Some((status, content_type, body)) =
+                        state.finish_raw.lock().unwrap().clone()
+                    {
+                        return (
+                            StatusCode::from_u16(status).unwrap(),
+                            [(axum::http::header::CONTENT_TYPE, content_type)],
+                            body,
+                        )
+                            .into_response();
+                    }
                     if *state.finish_garbage.lock().unwrap() {
-                        return (StatusCode::OK, Json(json!({"not": "a finish"})));
+                        return (StatusCode::OK, Json(json!({"not": "a finish"}))).into_response();
                     }
                     if *state.refuse.lock().unwrap() {
                         let label = state.refuse_label.lock().unwrap().clone();
@@ -189,7 +219,8 @@ async fn spawn(device_public_key: String) -> Stub {
                         return (
                             StatusCode::from_u16(status).unwrap(),
                             Json(json!({"error": label})),
-                        );
+                        )
+                            .into_response();
                     }
                     let device_key_id =
                         trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
@@ -207,6 +238,7 @@ async fn spawn(device_public_key: String) -> Stub {
                             "anchor_hash": format!("sha256:{}", "cd".repeat(32)),
                         })),
                     )
+                        .into_response()
                 }
             }),
         )
@@ -1210,6 +1242,80 @@ async fn a_revoked_key_runs_no_further_ceremony_and_a_new_key_is_not_held_back()
     assert!(!super::key_revoked(&fx.shared.store));
 }
 
+/// The stored session came from `login`, minted beside the key `key_id`,
+/// as a sign-in's commit records it.
+fn signed_in_with(fx: &Fixture, login: &str, key_id: &str) {
+    fx.shared.settings.lock().unwrap().near_ai_inference =
+        Some(crate::daemon::settings::NearAiInferenceCredential {
+            key: "sk-synthetic-renewal".into(),
+            key_id: "key-renewal".into(),
+            key_prefix: "sk-syn".into(),
+            organization_id: "org-renewal".into(),
+            workspace_id: "ws-renewal".into(),
+            minted_at: Utc::now(),
+        });
+    crate::daemon::nearai_credential::login_record::record_stored_login(
+        &fx.shared.store,
+        login,
+        key_id,
+    );
+}
+
+/// A renewal the Commons accepted remembers the stored NEAR AI login as the
+/// account's; one it refused, or answered for another account, does not.
+#[tokio::test]
+async fn only_an_accepted_renewal_remembers_the_accounts_login() {
+    use crate::daemon::nearai_credential::login_record;
+    let login = *crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.last().unwrap();
+
+    let fx = Fixture::new(Session::Expired).await;
+    signed_in_with(&fx, login, "key-renewal");
+    assert_eq!(refusal(&fx.payout_status().await), None);
+    assert_eq!(login_record::commons_login(&fx.shared.store), Some(login));
+
+    let fx = Fixture::new(Session::Expired).await;
+    signed_in_with(&fx, login, "key-renewal");
+    *fx.stub.state.refuse.lock().unwrap() = true;
+    assert_eq!(
+        refusal(&fx.payout_status().await),
+        Some("account-session-required")
+    );
+    assert_eq!(login_record::commons_login(&fx.shared.store), None);
+
+    let fx = Fixture::new(Session::Expired).await;
+    signed_in_with(&fx, login, "key-renewal");
+    *fx.stub.state.account.lock().unwrap() = uuid::Uuid::new_v4().to_string();
+    assert_eq!(
+        refusal(&fx.payout_status().await),
+        Some("account-session-required")
+    );
+    assert_eq!(login_record::commons_login(&fx.shared.store), None);
+}
+
+/// A tag written for another sign-in -- a newer one whose session the
+/// daemon has not picked up, or one whose own write was lost -- is never
+/// credited to the session this renewal spent.
+#[tokio::test]
+async fn a_renewal_never_credits_another_sign_ins_login() {
+    use crate::daemon::nearai_credential::login_record;
+    let login = *crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.last().unwrap();
+    let fx = Fixture::new(Session::Expired).await;
+    signed_in_with(&fx, login, "key-of-another-sign-in");
+    assert_eq!(refusal(&fx.payout_status().await), None);
+    assert_eq!(login_record::commons_login(&fx.shared.store), None);
+}
+
+/// Sign in again records the account's login on acceptance too.
+#[tokio::test]
+async fn sign_in_again_remembers_the_accounts_login_when_accepted() {
+    use crate::daemon::nearai_credential::login_record;
+    let login = *crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.last().unwrap();
+    let fx = Fixture::new(Session::Expired).await;
+    signed_in_with(&fx, login, "key-renewal");
+    assert_eq!(refusal(&sign_in_again(&fx).await), None);
+    assert_eq!(login_record::commons_login(&fx.shared.store), Some(login));
+}
+
 // ---- A fresh NEAR AI sign-in, checked before it is stored (owner, 2026-11-02) ----
 
 /// The access token a sign-in's browser leg handed over, not yet stored.
@@ -1401,7 +1507,15 @@ async fn a_signed_out_device_refuses_another_accounts_login() {
 /// closed, still not as another account.
 #[tokio::test]
 async fn a_finish_the_commons_does_not_answer_is_not_another_account() {
-    for status in [503u16, 429] {
+    // A busy maintenance page past the client's size limit is still busy:
+    // classified by its status, not by the failed body read.
+    let fx = Fixture::new(Session::Absent).await;
+    *fx.stub.state.finish_raw.lock().unwrap() = Some((503, "text/html", "x".repeat(300 * 1024)));
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)
+    ));
+    for status in [503u16, 429, 408, 421, 425] {
         let fx = Fixture::new(Session::Absent).await;
         *fx.stub.state.refuse.lock().unwrap() = true;
         *fx.stub.state.refuse_status.lock().unwrap() = status;
@@ -1428,43 +1542,102 @@ async fn a_finish_the_commons_does_not_answer_is_not_another_account() {
     }
 }
 
-/// No start answer refuses a login -- only the finish can -- and the
-/// commons answers its own rate limit at the start with its uniform `400`.
-/// So any start failure leaves a signed-out device's login unchecked,
-/// never refused; a signed-in device fails closed.
+/// No start answer refuses a login -- only the finish can. So any start
+/// failure leaves a signed-out device's login unchecked, never refused, with
+/// the kind of failure; a signed-in device fails closed.
 #[tokio::test]
 async fn a_start_answer_never_refuses_a_login() {
-    for status in [400u16, 503] {
+    let deny = || {
+        serde_json::to_string(&json!({
+            "error": super::super::nearai_onboarding::UNIFORM_FINISH_DENY
+        }))
+        .unwrap()
+    };
+    for (status, content_type, body, reason) in [
+        // #1850's rate limit and an unanswered database.
+        (
+            429u16,
+            "application/json",
+            r#"{"error":"busy"}"#.to_string(),
+            UNCHECKED_COMMONS_UNREACHABLE,
+        ),
+        (
+            503,
+            "application/json",
+            r#"{"error":"busy"}"#.to_string(),
+            UNCHECKED_COMMONS_UNREACHABLE,
+        ),
+        // The commons's own deny: reached, no verdict.
+        (
+            400,
+            "application/json",
+            deny(),
+            UNCHECKED_COMMONS_NO_VERDICT,
+        ),
+        // Answers the commons does not send.
+        (
+            400,
+            "application/json",
+            r#"{"error":"refused"}"#.to_string(),
+            UNCHECKED_COMMONS_ANSWER_UNUSABLE,
+        ),
+        (
+            404,
+            "text/html",
+            "<html><body>Not Found</body></html>".to_string(),
+            UNCHECKED_COMMONS_ANSWER_UNUSABLE,
+        ),
+        (
+            200,
+            "application/json",
+            r#"{"not":"a start"}"#.to_string(),
+            UNCHECKED_COMMONS_ANSWER_UNUSABLE,
+        ),
+    ] {
         let fx = Fixture::new(Session::Absent).await;
-        *fx.stub.state.start_status.lock().unwrap() = status;
+        *fx.stub.state.start_raw.lock().unwrap() = Some((status, content_type, body.clone()));
         assert!(
             matches!(
                 check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
-                FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)
+                FreshLogin::Unchecked(found) if found == reason
             ),
-            "signed out, start {status}"
+            "signed out, start {status} {body}"
         );
         assert_eq!(fx.ceremonies(), (1, 0));
 
         let fx = Fixture::new(Session::Expired).await;
-        *fx.stub.state.start_status.lock().unwrap() = status;
+        *fx.stub.state.start_raw.lock().unwrap() = Some((status, content_type, body.clone()));
         assert!(
             matches!(
                 check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
                 FreshLogin::Unavailable
             ),
-            "signed in, start {status}"
+            "signed in, start {status} {body}"
         );
     }
 }
 
-/// A finish answer that is neither of the commons's two refusals -- a
-/// proxy's or portal's `403`, `404` or `408`, a `200` that does not parse --
+/// A renewal holding the turn past the check's wait: the commons was never
+/// asked, and the reason says so, not that it did not answer.
+#[tokio::test]
+async fn a_turn_held_past_its_wait_is_not_asked() {
+    let fx = Fixture::new(Session::Absent).await;
+    let _held = renewing(fx.shared.store.dir()).lock_owned().await;
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::Unchecked(UNCHECKED_COMMONS_NOT_ASKED)
+    ));
+    assert_eq!(fx.ceremonies(), (0, 0));
+}
+
+/// A finish answer that is neither of the commons's two refusals nor a busy
+/// status -- a proxy's or portal's `403` or `404`, a captive portal's `511`,
+/// a `200` that does not parse --
 /// says nothing about the login: unchecked when signed out, fail closed
 /// when signed in, and never another account.
 #[tokio::test]
 async fn an_unusable_finish_answer_is_not_another_account() {
-    for status in [403u16, 404, 408] {
+    for status in [403u16, 404, 511] {
         for signed_out in [true, false] {
             let fx = Fixture::new(if signed_out {
                 Session::Absent
@@ -1478,7 +1651,10 @@ async fn an_unusable_finish_answer_is_not_another_account() {
             let check = check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await;
             if signed_out {
                 assert!(
-                    matches!(check, FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)),
+                    matches!(
+                        check,
+                        FreshLogin::Unchecked(UNCHECKED_COMMONS_ANSWER_UNUSABLE)
+                    ),
                     "signed out, finish {status}"
                 );
             } else {
@@ -1502,10 +1678,54 @@ async fn an_unusable_finish_answer_is_not_another_account() {
         if signed_out {
             assert!(matches!(
                 check,
-                FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)
+                FreshLogin::Unchecked(UNCHECKED_COMMONS_ANSWER_UNUSABLE)
             ));
         } else {
             assert!(matches!(check, FreshLogin::Unavailable));
+        }
+    }
+    // A proxy's or portal's own page, not the commons's JSON: an HTML or
+    // plain-text 404, and a body past the client's size limit.
+    for (status, content_type, body) in [
+        (
+            404u16,
+            "text/html",
+            "<html><body>Not Found</body></html>".to_string(),
+        ),
+        (404, "text/plain", "Not Found".to_string()),
+        (
+            200,
+            "application/json",
+            format!("\"{}\"", "x".repeat(300 * 1024)),
+        ),
+    ] {
+        // (A busy status with an oversized page is in
+        // `a_finish_the_commons_does_not_answer_is_not_another_account`.)
+        for signed_out in [true, false] {
+            let fx = Fixture::new(if signed_out {
+                Session::Absent
+            } else {
+                Session::Expired
+            })
+            .await;
+            *fx.stub.state.finish_raw.lock().unwrap() = Some((status, content_type, body.clone()));
+            let check = check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await;
+            if signed_out {
+                assert!(
+                    matches!(
+                        check,
+                        FreshLogin::Unchecked(UNCHECKED_COMMONS_ANSWER_UNUSABLE)
+                    ),
+                    "signed out, {status} {content_type} ({} bytes)",
+                    body.len()
+                );
+            } else {
+                assert!(
+                    matches!(check, FreshLogin::Unavailable),
+                    "signed in, {status} {content_type} ({} bytes)",
+                    body.len()
+                );
+            }
         }
     }
 }
@@ -1633,6 +1853,22 @@ async fn a_malformed_record_or_refused_address_is_unchecked() {
     assert_eq!(fx.ceremonies(), (0, 0));
 }
 
+/// A record whose OS entry is gone is unreadable for good, like a malformed
+/// one (#1844): unchecked, never "unavailable" on every sign-in, and the
+/// commons is not asked.
+#[tokio::test]
+async fn a_record_whose_os_entry_is_gone_is_unchecked() {
+    let fx = Fixture::new(Session::Expired).await;
+    // Move the fixture's legacy file into the OS store, then lose the entry.
+    commons_credentials::load_account(&fx.shared.store).unwrap();
+    commons_credentials::remove_os_entry_for_test(&fx.shared.store, Kind::Account);
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::Unchecked(UNCHECKED_ACCOUNT_RECORD_MALFORMED)
+    ));
+    assert_eq!(fx.ceremonies(), (0, 0));
+}
+
 /// The commons answered, but the answer fails a local check (here, a
 /// tenant that is not a NEAR AI one): this device cannot verify it as its
 /// account, so the check fails closed.
@@ -1688,7 +1924,21 @@ mod settle_tests {
     }
 
     async fn run(fx: &Fixture, check: FreshLogin) -> anyhow::Result<()> {
+        run_picked(fx, check, None).await
+    }
+
+    /// [`run`], with the attempt's login picked as `provider` first, on the
+    /// attempt's own progress as `finish` does.
+    async fn run_picked(
+        fx: &Fixture,
+        check: FreshLogin,
+        provider: Option<&'static str>,
+    ) -> anyhow::Result<()> {
         mark_waiting_for_test(fx.shared.store.dir(), "attempt-fresh");
+        let progress = crate::daemon::nearai_credential::ceremony::Progress::new();
+        if let Some(provider) = provider {
+            progress.set_provider(provider);
+        }
         let unstored = crate::daemon::nearai_credential::ceremony::UnstoredKey::new(
             &fx.api,
             &fresh_session(),
@@ -1705,7 +1955,7 @@ mod settle_tests {
             false,
             crate::daemon::nearai_credential::ceremony::SignInIdentities::default(),
             check,
-            &crate::daemon::nearai_credential::ceremony::Progress::new(),
+            &progress,
             unstored,
         )
         .await
@@ -1858,6 +2108,9 @@ mod settle_tests {
             UNCHECKED_ACCOUNT_RECORD_MALFORMED,
             UNCHECKED_COMMONS_ADDRESS_REFUSED,
             UNCHECKED_COMMONS_UNREACHABLE,
+            UNCHECKED_COMMONS_ANSWER_UNUSABLE,
+            UNCHECKED_COMMONS_NO_VERDICT,
+            UNCHECKED_COMMONS_NOT_ASKED,
         ] {
             let fx = Fixture::new(Session::Expired).await;
             let before = (fx.account_record(), fx.renewal_log_text());
@@ -1873,6 +2126,52 @@ mod settle_tests {
                 "{reason}"
             );
             assert_eq!(fx.ceremonies(), (0, 0));
+        }
+    }
+
+    /// Only a login the commons accepted (Accepted, or Verified on a
+    /// signed-out device) is remembered as the account's, and
+    /// it is the attempt's own login (picked on the chooser page or named),
+    /// never the one stored before it. Unchecked, refused and unasked
+    /// logins change nothing.
+    #[tokio::test]
+    async fn only_an_accepted_or_verified_login_is_remembered_with_the_attempts_provider() {
+        use crate::daemon::nearai_credential::login_record;
+        let offered = crate::channel::NEAR_AI_SIGN_IN_PROVIDERS;
+        let (old, fresh) = (offered[0], *offered.last().unwrap());
+
+        let fx = Fixture::new(Session::Expired).await;
+        login_record::accepted_by_commons(&fx.shared.store, Some(old));
+        let check = check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await;
+        assert!(matches!(check, FreshLogin::Accepted(_)));
+        run_picked(&fx, check, Some(fresh)).await.unwrap();
+        assert_eq!(login_record::commons_login(&fx.shared.store), Some(fresh));
+
+        // Verified on a signed-out device: the commons accepted this login
+        // for the account too, with no session to store. Remembered alike.
+        let fx = Fixture::new(Session::Absent).await;
+        login_record::accepted_by_commons(&fx.shared.store, Some(old));
+        let check = check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await;
+        assert!(matches!(check, FreshLogin::Verified));
+        run_picked(&fx, check, Some(fresh)).await.unwrap();
+        assert_eq!(login_record::commons_login(&fx.shared.store), Some(fresh));
+
+        // A verified login whose provider is not known changes nothing.
+        let fx = Fixture::new(Session::Absent).await;
+        login_record::accepted_by_commons(&fx.shared.store, Some(old));
+        run_picked(&fx, FreshLogin::Verified, None).await.unwrap();
+        assert_eq!(login_record::commons_login(&fx.shared.store), Some(old));
+
+        for check in [
+            FreshLogin::Unchecked(UNCHECKED_ACCOUNT_RECORD_MALFORMED),
+            FreshLogin::Unchecked(UNCHECKED_COMMONS_ADDRESS_REFUSED),
+            FreshLogin::Refused,
+            FreshLogin::Unavailable,
+        ] {
+            let fx = Fixture::new(Session::Expired).await;
+            login_record::accepted_by_commons(&fx.shared.store, Some(old));
+            let _ = run_picked(&fx, check, Some(fresh)).await;
+            assert_eq!(login_record::commons_login(&fx.shared.store), Some(old));
         }
     }
 

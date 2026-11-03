@@ -1924,6 +1924,30 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The dedup clusters whose representative simhash is within
+    /// `max_hamming` bits of `simhash`, cross-tenant, each with its
+    /// representative's stamp and its member count. What the inline gate path
+    /// assigns a new decision against.
+    ///
+    /// Postgres answers from `trace_dedup_cluster_representatives` (V145), one
+    /// row per cluster kept in step by trigger. Default: the pre-V145 fold over
+    /// a full [`Database::list_dedup_signals`] enumeration, which is also the
+    /// reference the table is tested against.
+    async fn list_dedup_cluster_candidates(
+        &self,
+        simhash: i64,
+        max_hamming: u32,
+    ) -> Result<Vec<crate::trace_corpus_storage::DedupClusterCandidateRow>, DatabaseError> {
+        let signals = self.list_dedup_signals(i64::MAX).await?;
+        Ok(
+            crate::trace_corpus_storage::dedup_cluster_candidates_from_signals(
+                &signals,
+                simhash,
+                max_hamming,
+            ),
+        )
+    }
+
     /// Enumerate every decision row for the dedup re-derivation pass,
     /// cross-tenant, ordered `decided_at ASC, decision_id ASC`, capped at
     /// `limit`. Not filtered by stamp: the pass reuses rows already on its
@@ -3209,6 +3233,11 @@ pub struct PayoutLinkRequestWrite {
     pub recipient: Option<(RecipientKind, SealedRecipient)>,
     pub expires_at: chrono::DateTime<chrono::Utc>,
     pub actor_ref_hash: String,
+    /// For a link, which anchor its proof matched
+    /// ([`crate::payout_recipient_proof::ProofKind::label`]). Written as the
+    /// `label` of the request's audit row, so links proved one way can be
+    /// found later. `None` for an unlink.
+    pub proof_label: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3744,14 +3773,14 @@ pub trait PayoutStore: Send + Sync {
         rail: &RailId,
     ) -> Result<PayoutAccountLinkView, DatabaseError>;
 
-    /// The account's NEAR AI login anchors (`trace_near_account_anchors`
-    /// rows with `identity_source = 'near_ai_login'`), which a `near_ai`
-    /// proof's subject must match. Empty for an account with none.
-    async fn payout_account_login_anchors(
+    /// The account's anchors a `near_ai` proof can match, in one read: its
+    /// `near_ai_login` anchors (a NEAR AI subject) and its `wallet` anchors
+    /// (a NEAR AI wallet sign-in). Both empty for an account with none.
+    async fn payout_account_anchors(
         &self,
         tenant: &str,
         account: Uuid,
-    ) -> Result<Vec<String>, DatabaseError>;
+    ) -> Result<crate::payout_recipient_proof::AccountAnchors, DatabaseError>;
 
     /// Takes the account's request on `rail` with that handle hash and, in
     /// the same transaction, writes what it asks for: a `waiting` link
@@ -4676,6 +4705,7 @@ mod payout_debug_tests {
                 recipient: Some((kind.clone(), sealed())),
                 expires_at: expires,
                 actor_ref_hash: ACCOUNT_HASH.into(),
+                proof_label: Some("near_wallet"),
             }
         ));
         assert_redacted(format!(

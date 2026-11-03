@@ -29,11 +29,7 @@
 /// why the macro exists. The name appears as a literal nowhere in this file
 /// except through that macro; what is left is prose in comments, which no
 /// contributor reads.
-pub use trace_commons_contributor::{
-    app_name,
-    brand::{APP_NAME, COMMONS_NAME},
-    commons_name,
-};
+pub use trace_commons_contributor::{app_name, brand::APP_NAME};
 
 // --- Queue -------------------------------------------------------------
 
@@ -435,11 +431,8 @@ pub const BODY_NOT_AVAILABLE_HERE: &str = concat!(
 
 pub const PERMISSIONS_INTRO: &str =
     "If you contribute this trace, it will carry these permissions:";
-pub const PERMISSIONS_REQUESTED_NOTE: &str = concat!(
-    "These are the permissions this device requests. ",
-    commons_name!(),
-    " can narrow them, never widen them."
-);
+pub const PERMISSIONS_REQUESTED_NOTE: &str =
+    "These are the permissions this device requests. The server can narrow them, never widen them.";
 pub const UNENROLLED_PREVIEW: &str = "This is an illustration. This device isn't connected yet, so this was built without your \
      identity and nothing here can be contributed.";
 
@@ -1019,7 +1012,7 @@ pub fn profile_failure_sentence(label: &str) -> String {
         // or a string -- and handled anyway, so a contract change surfaces
         // as a sentence rather than as the fallback below.
         "bio-required-or-null" | "bio-invalid" => "The bio wasn't sent in a form the roster takes.",
-        "not-logged-in" => concat!("This device isn't connected to ", commons_name!(), "."),
+        "not-logged-in" => "This device isn't connected.",
         // The underlying failure is never forwarded by the daemon -- it can
         // carry a server response body or a URL -- so there is nothing more
         // specific to say than that it did not go through.
@@ -1037,7 +1030,7 @@ pub fn profile_failure_sentence(label: &str) -> String {
 /// roster when they are still on it.
 pub fn roster_leave_failure_sentence(label: &str) -> String {
     let reason = match label {
-        "not-logged-in" => concat!("This device isn't connected to ", commons_name!(), "."),
+        "not-logged-in" => "This device isn't connected.",
         _ => "The request didn't go through.",
     };
     format!(
@@ -1243,11 +1236,7 @@ pub fn health_sentence(label: &str) -> &'static str {
              NEAR AI. Confirm you're OK with that and contributions resume."
         }
         "claim-mint-failed" | "ingest-unreachable" => {
-            concat!(
-                "Can't reach ",
-                commons_name!(),
-                " right now. Your queue is safe; it'll retry on its own."
-            )
+            "Can't reach the server right now. Your queue is safe; it'll retry on its own."
         }
         "queue-full" => {
             concat!(
@@ -1428,12 +1417,9 @@ pub const UPDATE_UNAVAILABLE_BODY: &str = "Updates cannot be offered here: this 
 // change it there first.
 
 pub const ONBOARD_WELCOME_TITLE: &str = APP_NAME;
-pub const ONBOARD_WELCOME_BODY_1: &str = concat!(
-    "Coding agents get better when there are real transcripts to learn from. Almost all of \
-     that data is locked inside companies. ",
-    commons_name!(),
-    " is a shared pool that isn't."
-);
+pub const ONBOARD_WELCOME_BODY_1: &str = "Coding agents get better when there are real transcripts \
+     to learn from. Almost all of that data is locked inside companies. Your traces go to a shared \
+     pool that isn't.";
 /// The bold half of screen 1. Split from the paragraph around it because it
 /// is the promise the whole product is judged against.
 pub const ONBOARD_WELCOME_DECIDES: &str =
@@ -1949,9 +1935,9 @@ pub use trace_commons_contributor::private_inference_copy::{
 // connecting a tool they could connect right now.
 pub use trace_commons_contributor::private_inference_copy::{
     CREDENTIAL_CANCEL, CREDENTIAL_COST, CREDENTIAL_FORGET, CREDENTIAL_FORGET_EXPLAINS,
-    CREDENTIAL_MIGRATE, CREDENTIAL_MIGRATE_EXPLAINS, CREDENTIAL_OBTAIN, CREDENTIAL_TITLE,
-    CREDENTIAL_WHAT, CredentialAction, credential_action, credential_state_line,
-    credential_state_tone, harness_credential_notice,
+    CREDENTIAL_FORGET_NOT_REVOKED, CREDENTIAL_MIGRATE, CREDENTIAL_MIGRATE_EXPLAINS,
+    CREDENTIAL_OBTAIN, CREDENTIAL_TITLE, CREDENTIAL_WHAT, CredentialAction, credential_action,
+    credential_state_line, credential_state_tone, harness_credential_notice,
 };
 
 // --- What is left in the account ---------------------------------------

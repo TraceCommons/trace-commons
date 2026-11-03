@@ -1521,7 +1521,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         history_actions: MonitorHistoryActionsCopy {
             request_refresh: "Refresh",
             requesting: "Requesting\u{2026}",
-            refresh_requested: "Asked Trace Commons for the latest results. Changes show here when they arrive.",
+            refresh_requested: "Asked for the latest results. Changes show here when they arrive.",
             refresh_failed: "Could not ask for updates. Nothing changed; try again.",
             checking_account: "Checking account session\u{2026}",
             sign_in_to_withdraw: "Sign in",
@@ -1681,7 +1681,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             section_account: "Account",
             private_ai_sign_in: "Sign in to NEAR AI to get started.",
             traces_hero_title: "Contribute traces, earn credit, use Private AI",
-            traces_hero_body: "Share the sessions from your AI coding tools with Trace Commons. Each accepted trace earns you credit.",
+            traces_hero_body: "Share the sessions from your AI coding tools. Each accepted trace earns you credit.",
             traces_hero_action: "Start earning",
             traces_hero_step_contribute: "Contribute traces",
             traces_hero_step_contribute_detail: "Share the sessions from your AI coding tools",

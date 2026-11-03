@@ -4684,6 +4684,193 @@ async fn pg_store_list_dedup_signals_round_trips_the_stamp() {
     cleanup_tenant(&backend, &tenant_id).await;
 }
 
+/// The cluster table (V145) must hand the inline gate path exactly the
+/// candidates the full `list_dedup_signals` fold it replaces would have, and
+/// keep doing so as decisions join, move between, and leave clusters, across
+/// tenants. Run on the NARROW gate-driver pool, so the V145 grant and policy
+/// are what authorize the read, and every write goes through the store's own
+/// tenant-scoped methods, so the trigger is what keeps the table in step.
+#[tokio::test]
+async fn pg_store_dedup_cluster_table_matches_the_full_enumeration_fold() {
+    use trace_commons_server::dedup_assign::{ClusterCandidate, assign_cluster};
+    use trace_commons_server::dedup_simhash::ACTIVE_DEDUP_ALGORITHM;
+    use trace_commons_server::trace_corpus_storage::{
+        DedupAssignmentWrite, DedupClusterCandidateRow, dedup_cluster_candidates_from_signals,
+    };
+
+    let Some(backend) = gate_driver_backend().await else {
+        return;
+    };
+    let constants = ACTIVE_DEDUP_ALGORITHM.constants();
+    let tau = constants.tau_hamming;
+    let stamp = "events.v2+fnv1a-3shingle-set.v2";
+    let query: i64 = 0x0123_4567_89ab_cdef;
+    let near = |bits: u32| query ^ ((1i64 << bits) - 1); // `bits` low bits flipped
+    let far = !query;
+
+    let tenant_a = format!("pg-dedup-table-a-{}", Uuid::new_v4());
+    let tenant_b = format!("pg-dedup-table-b-{}", Uuid::new_v4());
+    let (c1, c2, c3) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let ours = [c1, c2, c3];
+    let t0 = Utc::now().trunc_subsecs(0) - chrono::Duration::hours(1);
+
+    // (tenant, seconds after t0, cluster, simhash, stamp); `None` cluster =
+    // never clustered, so not a member.
+    let seed: [(&str, i64, Option<Uuid>, i64, Option<&str>); 5] = [
+        (&tenant_a, 1, Some(c1), near(1), Some(stamp)), // C1 representative
+        (&tenant_b, 2, Some(c1), far, Some(stamp)),     // C1 second member, other tenant
+        (&tenant_b, 3, Some(c2), near(3), None),        // C2: empty stamp, reads as legacy
+        (&tenant_a, 4, Some(c3), far, Some(stamp)),     // C3: outside tau
+        (&tenant_a, 5, None, near(0), Some(stamp)),     // no cluster: not a member
+    ];
+    let mut decisions = Vec::new();
+    for (tenant, offset, cluster, simhash, version) in seed {
+        let submission_id = Uuid::new_v4();
+        backend
+            .upsert_trace_submission(sample_submission(tenant, submission_id))
+            .await
+            .expect("insert submission");
+        let mut decision = sample_gate_decision(submission_id);
+        decision.decided_at = t0 + chrono::Duration::seconds(offset);
+        backend
+            .insert_trace_gate_decision(tenant, decision.clone())
+            .await
+            .expect("insert gate decision");
+        if let Some(cluster) = cluster {
+            backend
+                .update_trace_gate_decision_dedup(
+                    tenant,
+                    decision.decision_id,
+                    DedupAssignmentWrite {
+                        dedup_simhash: simhash,
+                        dedup_cluster_id: cluster,
+                        dedup_cluster_size: 1,
+                        dedup_signal_version: version.unwrap_or_default().to_string(),
+                    },
+                )
+                .await
+                .expect("dedup write");
+        }
+        decisions.push((tenant.to_string(), submission_id, decision.decision_id));
+    }
+
+    // Both sides restricted to this test's clusters: the database is shared
+    // with every other test in the suite.
+    let mine = |mut rows: Vec<DedupClusterCandidateRow>| {
+        rows.retain(|r| ours.contains(&r.dedup_cluster_id));
+        rows.sort_by_key(|r| r.dedup_cluster_id);
+        rows
+    };
+    let assign = |rows: &[DedupClusterCandidateRow]| {
+        let candidates: Vec<ClusterCandidate<'_>> = rows
+            .iter()
+            .map(|r| ClusterCandidate {
+                cluster_id: r.dedup_cluster_id,
+                size: r.member_count,
+                simhash: r.representative_simhash as u64,
+                embed_cosine_micros: None,
+                signal_version: r.effective_signal_version(),
+            })
+            .collect();
+        assign_cluster(query as u64, stamp, &candidates, constants)
+    };
+    let check = |label: &'static str| {
+        let backend = &backend;
+        async move {
+            let table = mine(
+                backend
+                    .list_dedup_cluster_candidates(query, tau)
+                    .await
+                    .unwrap_or_else(|e| panic!("{label}: cluster table read: {e:?}")),
+            );
+            let signals = backend
+                .list_dedup_signals(i64::MAX)
+                .await
+                .unwrap_or_else(|e| panic!("{label}: enumeration: {e:?}"));
+            let fold = mine(dedup_cluster_candidates_from_signals(&signals, query, tau));
+            assert_eq!(table, fold, "{label}: the table and the fold disagree");
+            assert_eq!(
+                assign(&table),
+                assign(&fold),
+                "{label}: different assignment"
+            );
+            table
+        }
+    };
+
+    // Seeded: C1 (representative from tenant A, two members across tenants)
+    // and C2 (legacy stamp) are within tau; C3 is not.
+    let table = check("seeded").await;
+    assert_eq!(table.len(), 2, "C1 and C2 only: {table:?}");
+    let row_c1 = table
+        .iter()
+        .find(|r| r.dedup_cluster_id == c1)
+        .expect("C1 listed");
+    assert_eq!(row_c1.member_count, 2, "C1 counts both tenants' members");
+    assert_eq!(row_c1.representative_simhash, near(1));
+    let row_c2 = table
+        .iter()
+        .find(|r| r.dedup_cluster_id == c2)
+        .expect("C2 listed");
+    // Stored raw (the empty stamp the write sent), decoded only on read.
+    assert_eq!(row_c2.representative_signal_version.as_deref(), Some(""));
+    assert_ne!(row_c2.effective_signal_version(), stamp);
+    // The new decision joins C1: the only same-stamped cluster within tau.
+    assert_eq!(
+        assign(&table),
+        trace_commons_server::dedup_assign::ClusterAssignment::Existing(c1)
+    );
+
+    // The recluster pass moves C1's representative into C3. C1's
+    // representative becomes tenant B's far member, so C1 leaves the radius;
+    // C3 gains an earlier, near representative and enters it.
+    let (tenant, _, decision_id) = &decisions[0];
+    backend
+        .update_trace_gate_decision_dedup_cluster(tenant, *decision_id, c3, 2)
+        .await
+        .expect("move the representative");
+    let table = check("representative moved").await;
+    let ids: Vec<Uuid> = table.iter().map(|r| r.dedup_cluster_id).collect();
+    assert!(!ids.contains(&c1) && ids.contains(&c3), "{table:?}");
+    let row_c3 = table
+        .iter()
+        .find(|r| r.dedup_cluster_id == c3)
+        .expect("C3 listed");
+    assert_eq!(
+        (row_c3.member_count, row_c3.representative_simhash),
+        (2, near(1))
+    );
+
+    // A withdrawal clears C2's only member: the cluster is gone.
+    let (tenant, submission_id, _) = &decisions[2];
+    backend
+        .clear_trace_dedup_cluster_for_submission(tenant, *submission_id)
+        .await
+        .expect("clear dedup columns");
+    let table = check("only member cleared").await;
+    assert!(table.iter().all(|r| r.dedup_cluster_id != c2), "{table:?}");
+
+    // Deleting the tenants deletes their decisions, and with them every row
+    // of the table this test produced.
+    cleanup_tenant(&backend, &tenant_a).await;
+    cleanup_tenant(&backend, &tenant_b).await;
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("diagnostics connection");
+    let left: i64 = client
+        .query_one(
+            "SELECT count(*) FROM trace_dedup_cluster_representatives
+             WHERE dedup_cluster_id = ANY($1)",
+            &[&ours.to_vec()],
+        )
+        .await
+        .expect("count leftover cluster rows")
+        .get(0);
+    assert_eq!(left, 0, "deleting every member deletes the cluster row");
+}
+
 /// The re-derivation pass enumerates through the NARROW trace_gate_driver
 /// pool: every column it selects (`tenant_id, submission_id, decision_id,
 /// decided_at, dedup_cluster_id, dedup_simhash, dedup_cluster_size` from V45

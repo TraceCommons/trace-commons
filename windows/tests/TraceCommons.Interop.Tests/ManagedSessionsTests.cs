@@ -174,6 +174,7 @@ public sealed class ManagedSessionsTests
         Assert.Equal("sign_in_needed", ManagedSignIn.ErrorKey("managed-near-ai-sign-in-required"));
         Assert.Equal("balance_too_low", ManagedSignIn.ErrorKey("managed-near-ai-balance-too-low"));
         Assert.Equal("project_chooses_model", ManagedSignIn.ErrorKey("managed-project-chooses-model"));
+        Assert.Equal("project_sets_auto_mode_server", ManagedSignIn.ErrorKey("managed-project-sets-auto-mode-server"));
         Assert.Equal("action_failed", ManagedSignIn.ErrorKey("managed-conflict"));
         Assert.Equal("action_failed", ManagedSignIn.ErrorKey(null));
         Assert.Equal("terminal_not_found", ManagedSignIn.ErrorKey("managed-terminal-not-found"));

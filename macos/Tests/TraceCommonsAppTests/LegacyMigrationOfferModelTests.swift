@@ -274,7 +274,7 @@ final class LegacyMigrationOfferModelTests: XCTestCase {
         model.legacyMigrationNearAILoginStep = { [weak model] in
             steps += 1
             waitingDuringStep = model?.legacyMigrationAwaitingNearAILogin ?? false
-            return true
+            return .signedIn
         }
 
         await model.migrateLegacyInvite()
@@ -301,7 +301,7 @@ final class LegacyMigrationOfferModelTests: XCTestCase {
         var cancelled = 0
         model.legacyMigrationNearAILoginStep = {
             while !Task.isCancelled { try? await Task.sleep(nanoseconds: 5_000_000) }
-            return false
+            return .failed
         }
         model.legacyMigrationNearAILoginCancel = { cancelled += 1 }
 
@@ -320,6 +320,27 @@ final class LegacyMigrationOfferModelTests: XCTestCase {
         XCTAssertTrue(model.isLegacyMigrationOffered)
     }
 
+    /// A NEAR AI login the daemon reports cancelled -- the wallet's own
+    /// Cancel, or the login page coming back after a pick -- is not the step
+    /// failing: nothing is moved, nothing is said, and the offer stays.
+    func testANearAILoginTheDaemonCancelledIsNotAFailedStep() async throws {
+        let tenant = freshTenant()
+        let daemon = MigrationDaemon(
+            answers: [refusal("legacy_migration_no_near_ai_session")],
+            statusJSON: statusJSON(tenant: tenant, offered: true))
+        let model = AppModel()
+        defer { model.shutdown() }
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        model.setStatusForTesting(try status(tenant: tenant, offered: true))
+        model.legacyMigrationNearAILoginStep = { .cancelled }
+
+        await model.migrateLegacyInvite()
+        XCTAssertFalse(model.legacyMigrationNearAILoginFailed)
+        XCTAssertNil(model.legacyMigrationRefusal)
+        XCTAssertEqual(daemon.calls.filter { $0.0 == "legacy_invite_migrate" }.count, 1)
+        XCTAssertTrue(model.isLegacyMigrationOffered)
+    }
+
     /// A NEAR AI login step that ends without finishing: the core's line, the
     /// move is not retried, and the offer stays.
     func testAFailedNearAILoginStepSaysTheCoresLine() async throws {
@@ -331,7 +352,7 @@ final class LegacyMigrationOfferModelTests: XCTestCase {
         defer { model.shutdown() }
         model.setClientForTesting(DaemonClient(daemon: daemon))
         model.setStatusForTesting(try status(tenant: tenant, offered: true))
-        model.legacyMigrationNearAILoginStep = { false }
+        model.legacyMigrationNearAILoginStep = { .failed }
 
         await model.migrateLegacyInvite()
         XCTAssertTrue(model.legacyMigrationNearAILoginFailed)
@@ -357,7 +378,7 @@ final class LegacyMigrationOfferModelTests: XCTestCase {
         model.setClientForTesting(DaemonClient(daemon: daemon))
         model.setStatusForTesting(try status(tenant: tenant, offered: true))
         var steps = 0
-        model.legacyMigrationNearAILoginStep = { steps += 1; return true }
+        model.legacyMigrationNearAILoginStep = { steps += 1; return .signedIn }
 
         await model.migrateLegacyInvite()
         XCTAssertEqual(steps, 1)

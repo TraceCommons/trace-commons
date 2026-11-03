@@ -71,6 +71,14 @@ impl Drop for CredentialFileGuard<'_> {
     }
 }
 
+impl Coordination {
+    /// The refresh lock alone, for an exchange that does not go through
+    /// [`exchange`]: the sign-out revoke, whose session is already cleared.
+    pub(crate) async fn refresh_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.refresh.lock().await
+    }
+}
+
 pub(crate) fn coordination(dir: &Path) -> Result<Arc<Coordination>> {
     static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<Coordination>>>> = OnceLock::new();
     let mut registry = REGISTRY
