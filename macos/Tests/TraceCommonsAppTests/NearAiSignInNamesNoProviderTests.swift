@@ -106,10 +106,10 @@ final class NearAiSignInNamesNoProviderTests: XCTestCase {
         let model = try Self.source("AppModel.swift")
         XCTAssertFalse(model.contains("nearAiBrowserProvider"))
         for signature in ["func startNearAiCredential() async -> URL?", "func signInAgain() async {",
-                          "func signInToNearAI() async {", "func nearAILogin(fresh: Bool) async -> Bool {",
+                          "func signInToNearAI() async {", "func nearAILoginOutcome(fresh: Bool) async -> NearAILoginOutcome {",
                           "private func restartNearAIBrowserSignIn() async {",
                           // The first run and the legacy move go through this.
-                          "func nearAILogin() async -> Bool { await nearAILogin(fresh: false) }"] {
+                          "func nearAILoginOutcome() async -> NearAILoginOutcome { await nearAILoginOutcome(fresh: false) }"] {
             XCTAssertTrue(model.contains(signature), "AppModel.swift lacks \(signature)")
         }
         XCTAssertFalse(model.contains("nearAiCredentialStart(provider:"))

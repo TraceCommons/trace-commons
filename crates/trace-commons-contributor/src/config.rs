@@ -112,11 +112,10 @@ pub const DEVICE_KEY_REVOKED_FILE: &str = "device-key-revoked";
 /// Which NEAR AI login this device's account was last accepted with, and
 /// which one the stored session came from
 /// (`daemon::nearai_credential::login_record`). Tags only. Not one of the
-/// [`ENROLLMENT_FILES`]: half of it describes the NEAR AI session, which
-/// unenrolling keeps. Unenrolling clears the account's half, logging out
-/// removes the file, both through `login_record` under its own lock. Once
-/// unenrolling clears the NEAR AI session as well (#1843), the two cases are
-/// the same.
+/// [`ENROLLMENT_FILES`]: each half is cleared with what it describes, through
+/// `login_record` under its own lock. Unenrolling clears the account's half,
+/// and its NEAR AI clear (#1843) clears the session's half with the session;
+/// logging out removes the file.
 pub const DAEMON_NEAR_AI_LOGIN_FILE: &str = "near-ai-login.json";
 
 /// The plain files that belong to one enrollment, apart from the credential

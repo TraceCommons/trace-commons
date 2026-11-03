@@ -39,13 +39,11 @@ protocol FirstRunDaemon: AnyObject {
     func firstRunEstimate() async -> DaemonData.FirstRunEstimate?
     func enrollInvite(_ invite: String) async -> Bool
     func signInNearAI() async -> Bool
-    /// The near.ai login: true once the daemon keeps a near.ai session,
-    /// after the browser sign-in when it kept none.
-    func nearAILogin() async -> Bool
-    /// [`nearAILogin`], telling a sign-in the person ended (the wallet's own
-    /// Cancel, or the browser's login page coming back after a pick) apart
-    /// from one that did not finish. The first run reports no failure for
-    /// the first.
+    /// The near.ai login: signed in once the daemon keeps a near.ai
+    /// session, after the browser sign-in when it kept none; cancelled when
+    /// the daemon ended the attempt as the person's (see
+    /// `NearAILoginPoll.cancelled`), which the first run does not report as a
+    /// failure; failed otherwise.
     func nearAILoginOutcome() async -> NearAILoginOutcome
     /// End the browser sign-in `nearAILogin` is waiting on
     /// (`near_ai_credential_cancel`). True only once the daemon took it.
@@ -76,14 +74,6 @@ protocol FirstRunDaemon: AnyObject {
     /// the first-run host, with its runner, leaves the screen at the next
     /// render; whoever is told must outlive it.
     func firstRunFinished(notice: String?)
-}
-
-extension FirstRunDaemon {
-    /// A daemon that cannot tell a cancel apart reports every unfinished
-    /// sign-in as failed, as before.
-    func nearAILoginOutcome() async -> NearAILoginOutcome {
-        await nearAILogin() ? .signedIn : .failed
-    }
 }
 
 extension FirstRunDaemon {

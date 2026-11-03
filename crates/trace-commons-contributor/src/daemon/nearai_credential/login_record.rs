@@ -20,12 +20,12 @@
 //!   AI login -- first enrollment, a renewal with the stored login, or a
 //!   sign-in checked before it was stored ([`accepted_by_commons`]).
 //!
-//! Unenrolling clears the account's login ([`forget_commons_login_or_remove`])
-//! and keeps the stored session's, because it keeps that session. Logging out
-//! removes the file ([`remove`]). Both go through this module's lock, and the
-//! account's login is written only while this device is enrolled, so a write
-//! in flight cannot bring a removed account's login back. Once unenrolling
-//! clears the NEAR AI session too (#1843), the two cases are the same.
+//! Unenrolling clears the account's login ([`forget_commons_login_or_remove`]),
+//! and its NEAR AI clear (#1843, `ceremony::forget_locked`) clears the stored
+//! session's login with the session. Logging out removes the file
+//! ([`remove`]). All of it goes through this module's lock, and the account's
+//! login is written only while this device is enrolled, so a write in flight
+//! cannot bring a removed account's login back.
 //!
 //! It is its own file, not part of the settings document, for `spend_org`'s
 //! reason: preference writers save the in-memory settings snapshot they hold,
@@ -91,10 +91,14 @@ fn sign_in_digest(key_id: &str) -> String {
 enum OnDisk {
     Missing,
     Parsed(LoginRecord),
-    /// There, but not readable as a record: an I/O error, oversized, or not
-    /// one this build parses. A reader treats it as empty; a writer never
-    /// treats it as already holding what it would write.
+    /// There, but not a record this build reads: oversized, or not one it
+    /// parses. A reader treats it as empty; a writer rewrites it.
     Unreadable,
+    /// The read itself failed. What is there is not known, so a writer does
+    /// not write over it: it may be a valid record whose other half would be
+    /// lost. The change fails instead, and a caller that must clear the
+    /// record falls back to removing it (`forget_commons_login_or_remove`).
+    ReadFailed,
 }
 
 fn read(store: &ConfigStore) -> OnDisk {
@@ -103,14 +107,15 @@ fn read(store: &ConfigStore) -> OnDisk {
         Ok(Some(bytes)) if bytes.len() <= 2048 => serde_json::from_slice(&bytes)
             .map(OnDisk::Parsed)
             .unwrap_or(OnDisk::Unreadable),
-        Ok(Some(_)) | Err(_) => OnDisk::Unreadable,
+        Ok(Some(_)) => OnDisk::Unreadable,
+        Err(_) => OnDisk::ReadFailed,
     }
 }
 
 fn load(store: &ConfigStore) -> LoginRecord {
     match read(store) {
         OnDisk::Parsed(record) => record,
-        OnDisk::Missing | OnDisk::Unreadable => LoginRecord::default(),
+        OnDisk::Missing | OnDisk::Unreadable | OnDisk::ReadFailed => LoginRecord::default(),
     }
 }
 
@@ -136,15 +141,17 @@ fn write_locked(store: &ConfigStore, change: impl FnOnce(&mut LoginRecord)) -> a
     let mut record = match &on_disk {
         OnDisk::Parsed(before) => before.clone(),
         OnDisk::Missing | OnDisk::Unreadable => LoginRecord::default(),
+        OnDisk::ReadFailed => anyhow::bail!("near_ai_login_record_unreadable"),
     };
     change(&mut record);
     // No write only when the file provably already says this: a record read
-    // and unchanged, or no file and nothing to keep. An unreadable file is
-    // always rewritten, so a caller that must clear it learns when it cannot.
+    // and unchanged, or no file and nothing to keep. A file that is there
+    // but does not parse is rewritten, so a caller that must clear it learns
+    // when it cannot.
     match &on_disk {
         OnDisk::Parsed(before) if *before == record => return Ok(()),
         OnDisk::Missing if record == LoginRecord::default() => return Ok(()),
-        OnDisk::Parsed(_) | OnDisk::Missing | OnDisk::Unreadable => {}
+        OnDisk::Parsed(_) | OnDisk::Missing | OnDisk::Unreadable | OnDisk::ReadFailed => {}
     }
     let bytes = serde_json::to_vec_pretty(&record)?;
     store.write_daemon_file(DAEMON_NEAR_AI_LOGIN_FILE, &bytes)

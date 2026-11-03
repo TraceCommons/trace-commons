@@ -2565,12 +2565,12 @@ final class AppModel: ObservableObject {
     /// where the person signs in to NEAR AI and the daemon keeps the
     /// session the move provisions the account with. True once it finished.
     /// Replaced only by tests.
-    var legacyMigrationNearAILoginStep: (() async -> Bool)?
+    var legacyMigrationNearAILoginStep: (() async -> NearAILoginOutcome)?
     /// Ends the browser step the NEAR AI login step began (`cancelNearAILogin`).
     /// Replaced only by tests.
     var legacyMigrationNearAILoginCancel: (() async -> Void)?
     /// The running NEAR AI login step, so Cancel can stop it.
-    private var legacyMigrationNearAILoginTask: Task<Bool, Never>?
+    private var legacyMigrationNearAILoginTask: Task<NearAILoginOutcome, Never>?
 
     /// Cancel while waiting on the NEAR AI login: stop waiting and end the
     /// browser step. Nothing is moved, and the offer stays.
@@ -2585,15 +2585,17 @@ final class AppModel: ObservableObject {
     /// True when it finished; false when it failed, ran out of time or was
     /// cancelled (then `legacyMigrationNearAILoginFailed` stays false).
     private func runLegacyMigrationNearAILoginStep() async -> Bool {
-        let step = legacyMigrationNearAILoginStep ?? { [weak self] in await self?.nearAILogin() ?? false }
+        let step = legacyMigrationNearAILoginStep ?? { [weak self] in await self?.nearAILoginOutcome() ?? .failed }
         legacyMigrationAwaitingNearAILogin = true
         let task = Task { await step() }
         legacyMigrationNearAILoginTask = task
-        let finished = await task.value
+        let outcome = await task.value
         legacyMigrationNearAILoginTask = nil
         legacyMigrationAwaitingNearAILogin = false
-        if !finished && !task.isCancelled { legacyMigrationNearAILoginFailed = true }
-        return finished && !task.isCancelled
+        // A cancel -- this card's own, or one the daemon reports -- is not
+        // the step failing: nothing is moved, and nothing is said.
+        if outcome == .failed && !task.isCancelled { legacyMigrationNearAILoginFailed = true }
+        return outcome == .signedIn && !task.isCancelled
     }
 
     /// Move: `legacy_invite_migrate`, which the contributor chose. A refusal
@@ -3761,7 +3763,7 @@ final class AppModel: ObservableObject {
            failure.message == "near_ai_sign_in_required" {
             switch await nearAILoginOutcome(fresh: true) {
             case .signedIn: break
-            // The person ended it; the browser already said so.
+            // Cancelled (see `NearAILoginPoll.cancelled`): not a failure.
             case .cancelled: return
             case .failed:
                 accountSignInFailure = .failed
@@ -3786,6 +3788,9 @@ final class AppModel: ObservableObject {
         }
         guard !nearAiSigningIn, !accountSigningIn else { return }
         nearAiSigningIn = true
+        // Kept for a cancel below: an earlier failure is what may be keeping
+        // Sign in on screen, and a cancel does not settle it.
+        let failedBefore = nearAiSignInFailed
         nearAiSignInFailed = false
         defer { nearAiSigningIn = false }
         if accountSignInPath == nil,
@@ -3795,10 +3800,12 @@ final class AppModel: ObservableObject {
         }
         switch await nearAILoginOutcome(fresh: true) {
         case .signedIn: break
-        // The person ended it (the wallet's Cancel, or Back to the login page
-        // after a pick): the browser already said to start again from the
-        // app, so no "Sign-in didn't finish" here.
-        case .cancelled: return
+        // Cancelled (see `NearAILoginPoll.cancelled` for every source): not
+        // a failure, so no "Sign-in didn't finish". An earlier failure stays
+        // as it was, so the Sign in it kept on screen stays for a retry.
+        case .cancelled:
+            nearAiSignInFailed = failedBefore
+            return
         case .failed:
             nearAiSignInFailed = true
             return
@@ -4392,23 +4399,15 @@ extension AppModel: FirstRunDaemon {
     /// until it ends (`NearAILoginPoll`). Called directly rather than
     /// through `startNearAiCredential`, whose failure writes the Settings
     /// notice; the first run says its own (`folders.sign_in_failed`).
-    func nearAILogin() async -> Bool { await nearAILogin(fresh: false) }
+    func nearAILoginOutcome() async -> NearAILoginOutcome { await nearAILoginOutcome(fresh: false) }
 
     /// `fresh`: sign in even when a NEAR AI login is stored, because NEAR AI
     /// refused it (Sign in again's `near_ai_sign_in_required`). It names no
     /// provider; the daemon's browser page offers the build's logins.
-    func nearAILogin(fresh: Bool) async -> Bool {
-        await nearAILoginOutcome(fresh: fresh) == .signedIn
-    }
-
-    /// The first run's login, with how it ended (`FirstRunDaemon`).
-    func nearAILoginOutcome() async -> NearAILoginOutcome { await nearAILoginOutcome(fresh: false) }
-
-    /// [`nearAILogin(fresh:)`], telling an attempt the person ended
-    /// (`.cancelled`: the wallet's own Cancel, or the browser's login page
-    /// coming back after a pick, which already says to start again from the
-    /// app) apart from one that did not finish, so no caller reports a
-    /// failure for it.
+    ///
+    /// `.cancelled` is an attempt the daemon ended as cancelled
+    /// (`NearAILoginPoll.cancelled` lists where that comes from); no caller
+    /// reports it as a failure.
     func nearAILoginOutcome(fresh: Bool) async -> NearAILoginOutcome {
         guard let client, !nearAiBrowserSignInWaiting else { return .failed }
         if !fresh {
