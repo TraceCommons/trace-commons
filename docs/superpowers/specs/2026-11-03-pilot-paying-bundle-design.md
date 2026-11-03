@@ -1,6 +1,8 @@
 # A pipeline bundle that pays trace credit on the pilot
 
-Status: design proposal, for owner review. No code yet.
+Status: approved 2026-11-03. The owner accepted all ten recommendations in
+section 9 and asked for deployment in the three stages of section 7.2.
+Stage 1 (the code, with the rule off) is being implemented.
 Date: 2026-11-03. Code read at `main` 96ba35043. The pilot runs 0eea14e2c.
 
 ## 1. Summary
@@ -359,7 +361,18 @@ and the current signed package. Its key id is `pilot-package-20261009`.
 
 ### 7.2 Sequence
 
-Each step names what it changes and why uploads keep working.
+Each step names what it changes and why uploads keep working. The owner's
+approval splits the steps into three stages:
+
+- **Stage 1, the code (step 0).** Ship option C and D6 with the rule off:
+  `flat`, delta 0, package hash unchanged.
+- **Stage 2, the rule, checked before anything is sent (steps 1-8).** The
+  pilot's NEAR AI rail went `live` on 2026-11-03, before this design. So
+  stage 2 begins by returning the rail to `dry_run` (step 1), and the first
+  graded awards are batched, priced and checked (step 8) while nothing can
+  be sent.
+- **Stage 3, payment (step 9).** Only after step 8 passes does the rail go
+  back to `live`.
 
 **Step 0. Ship the code with the rule off.**
 - Deploy the option C build with the env unchanged: `flat`, delta 0.
@@ -368,9 +381,12 @@ Each step names what it changes and why uploads keep working.
   operator scripts' "signed package unchanged" check passes as is.
 - This keeps the risky change (code) apart from the credit switch.
 
-**Step 1. Pre-flight, read-only.**
-- The rail is in `dry_run`, or `live` and halted through its control-token
-  halt route (`payout_rails.rs`).
+**Step 1. Return the rail to `dry_run`, then pre-flight.**
+- The rail is `live` today. Set `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE=dry_run`
+  and `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_DRY_RUN=true`, and restart
+  (or halt through the control-token route first, then restart). Readiness
+  must show `near_ai` `"mode":"dry_run"` before step 2. Nothing below may
+  run while the rail can send.
 - Count the accepted pipeline submissions that carry `model_training`, per
   tenant (D9).
 - Record `GET /v1/admin/config-status`: armed, routed tenant count.
@@ -461,7 +477,7 @@ TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM=<RFC 3339 UTC, the edit time>
   account.
 - A trace without `model_training` shows `withheld` / `policy_mismatch`.
 
-**Step 9. Go live.**
+**Step 9 (stage 3). Go live**, only after step 8 passed.
 - Resume the rail, or set `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE=live` with
   `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_DRY_RUN=false`, and restart.
 - Confirm one real payout end to end on the owner's own linked account.
@@ -536,6 +552,8 @@ A correction is an operator-raised reversal, which the rail prices against
 the line it reverses.
 
 ## 9. Owner decisions
+
+All ten were approved as recommended by the owner on 2026-11-03.
 
 D1. **Which option.** Recommend C: graded, batched, in the compatibility
 family. A' is the fallback if a flat award is wanted first. It is the same
