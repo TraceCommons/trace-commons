@@ -267,6 +267,9 @@ path = "tests/legacy_invite_counts.rs"
 name = "legacy_invite_link_pg"
 path = "tests/legacy_invite_link_pg.rs"
 [[test]]
+name = "legacy_payout_carry_pg"
+path = "tests/legacy_payout_carry_pg.rs"
+[[test]]
 name = "migration_atomicity_pg"
 path = "tests/migration_atomicity_pg.rs"
 [[test]]

@@ -1,6 +1,7 @@
 # Legacy account payout migration
 
-Status: DRAFT design, for owner review. Nothing here is implemented.
+Status: APPROVED design (owner, 2026-11-03: all eleven recommendations in
+section 12, "looks good"). Implementation on the same branch.
 Date: 2026-11-03. Fix F11 of
 `2026-11-02-one-connected-account-design.md` (section 4).
 
@@ -545,6 +546,14 @@ any shell shows it.
   turn payouts on.
 
 ## 12. Owner decisions
+
+**Decided 2026-11-03.** The owner approved every recommendation below as
+written ("looks good"): (C) carry; a carried link satisfies "NEAR AI
+login only"; a device-signed instance link; carry to all open accounts;
+link proven devices' principals, subject to the section 3.5 check; skip
+and audit an account with its own link; own ceilings; coexistence credit
+is paid; **no new user-facing text at all** (the section 10 line is not
+added); a database trigger on revocation; the section 8 rollout.
 
 1. **Approach.** (C) carry the NEAR AI account's payout link to its
    linked legacy accounts (this spec); (a) move accounts across tenants;
