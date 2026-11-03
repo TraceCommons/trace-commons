@@ -212,8 +212,9 @@ The ceremony spans two browser legs (a wallet approval or NEAR AI
 sign-in, then a NEAR AI sign-in), so its expiry is set for that, not
 copied from the sign-up ceremony's, which covers one leg. The server's
 expiry is published in the start answer; the daemon starts the ceremony
-only once the held-aside login, if any, is in hand, and restarts it on
-expiry without asking the person to repeat a leg that already finished.
+only once the held-aside login, if any, is in hand. An expired ceremony
+starts again from the current-identity leg, since a wallet signature is
+bound to the old nonce; a new login held aside is kept.
 
 Status gains `login_change_available: bool` (the server publishes the
 routes, the account's tenant is in an anchor namespace, the device did not
