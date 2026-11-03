@@ -464,7 +464,11 @@ impl ManagedService {
             self.sessions.fail_unredeemed(session_id, ticket)?;
             return Err(ManagedError::NearAiSignInRequired);
         }
-        Ok((self.sessions.redeem(session_id, ticket)?, on_sign_in))
+        let redeemed = self.sessions.redeem(session_id, ticket)?;
+        // The launch has used its ticket; a Tab Config that still holds it
+        // has nothing left to do (the backstop would remove it later).
+        terminal::remove_launch_files(session_id);
+        Ok((redeemed, on_sign_in))
     }
 
     #[cfg(test)]
@@ -2554,6 +2558,28 @@ mod tests {
         assert!(host);
         assert_eq!(context.session.tool, ToolId::Opencode);
         assert_eq!(context.session.model, None);
+    }
+
+    /// Owner, 2026-11-03: a Warp launch's Tab Config holds the launch
+    /// ticket, so redeeming the ticket removes that launch's file.
+    #[test]
+    fn redeeming_a_launch_removes_its_tab_config() {
+        let (home, _store, mut service) = service();
+        let prepared = prepare(&mut service, ToolId::Opencode, home.path());
+        let file = home.path().join("near-ai-test.toml");
+        std::fs::write(&file, "ticket").unwrap();
+        terminal::hold_launch_file(prepared.session_id, file.clone());
+        // A refused redeem leaves the file for the backstop.
+        let _ = service.redeem(prepared.session_id, "wrong", true);
+        assert!(file.exists());
+        service
+            .redeem(
+                prepared.session_id,
+                prepared.ticket.as_deref().unwrap(),
+                true,
+            )
+            .unwrap();
+        assert!(!file.exists());
     }
 
     #[test]
