@@ -1388,6 +1388,8 @@ fn spawn_plan(plan: &Plan) -> Result<(), ManagedError> {
 /// Open `program`, with no arguments and nothing secret, in the chosen
 /// terminal with `cwd` as its folder: how a herdr client is started when
 /// none is running. The same refusals as [`launch`]; nothing is recorded.
+/// Only unix speaks herdr's socket, so Windows has no caller yet.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn open_program(
     choice: TerminalSetting,
     installed: &[TerminalApp],
@@ -1407,8 +1409,9 @@ pub(crate) fn open_program(
             &command,
             vec![program.as_os_str().to_owned()],
             Some(cwd),
-            // herdr alone holds no launch ticket, so no redeem removes its file.
-            |how| run_macos(how, Uuid::nil()),
+            // herdr alone holds no launch ticket, so no redeem removes a
+            // Warp Tab Config for it: a key of its own lets the backstop.
+            |how| run_macos(how, Uuid::new_v4()),
         )
         .map(|_| ())
     }
@@ -1615,6 +1618,7 @@ mod tests {
 
     /// herdr's attach step (D4) opens the herdr program alone in the chosen
     /// terminal, in the folder: no helper and no ticket.
+    #[cfg(unix)]
     #[test]
     fn a_program_opens_alone_in_the_terminal() {
         let cwd = Path::new("/home/a/project");

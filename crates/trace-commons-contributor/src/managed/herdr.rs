@@ -14,6 +14,9 @@
 //! herdr is a separate program the daemon talks to; no herdr code is linked.
 //! Only unix sockets are spoken here: herdr's Windows named pipe is left for
 //! when the Windows shell leaves its freeze (#1173 D13).
+// Off unix only the refusals in `launch` and `focus` run, so the protocol
+// below is compiled there but never called.
+#![cfg_attr(not(unix), allow(dead_code))]
 use super::ManagedError;
 use super::terminal::{TerminalHandle, TerminalTab};
 use serde_json::{Value, json};
@@ -477,7 +480,8 @@ pub fn available() -> bool {
     cfg!(unix) && executable().is_some()
 }
 
-#[cfg(test)]
+// herdr is spoken only on unix, and these tests use unix paths.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::collections::VecDeque;

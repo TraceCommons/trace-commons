@@ -315,6 +315,7 @@ mod tests {
     /// The request runs the argv with no shell, in the folder, keeps the
     /// tab after the program exits, and asks for focus: what the research
     /// ran against the installed beta.
+    #[cfg(unix)]
     #[test]
     fn the_request_runs_the_argv_with_no_shell_in_the_folder() {
         let argv: Vec<std::ffi::OsString> = vec![
