@@ -853,14 +853,16 @@ pub(super) const DEVICE_KEY_REVOKED_WIRE: &str = "device_key_revoked";
 /// key, then signing in, which makes a new one.
 pub const ENROLL_DEVICE_KEY_REVOKED: &str = "near_ai_enroll_device_key_revoked";
 
-/// Whether a finish was not answered: no response, or a status
+/// Whether a finish was not answered: no response, a status
 /// [`commons_busy`] counts as busy (the commons' own `503
 /// near_ai_sign_in_unavailable` and `429 near_ai_sign_in_rate_limited`
-/// among them).
+/// among them), or a body past the client's cap. The commons' refusals are
+/// small JSON bodies, so an oversized one is an error page in front of it (a
+/// proxy's `502`/`503`/`504`), which carries no status this error keeps.
 fn finish_unanswered(error: &trace_commons_operator_client::Error) -> bool {
     use trace_commons_operator_client::Error;
     match error {
-        Error::Transport { .. } => true,
+        Error::Transport { .. } | Error::ResponseTooLarge { .. } => true,
         Error::HttpFailure { status, .. } | Error::ServerLabel { status, .. } => {
             commons_busy(*status)
         }
@@ -1916,6 +1918,16 @@ mod tests {
                 );
             }
         }
+        // An error page too large to be the commons' own refusal.
+        assert_eq!(
+            finish_refusal(
+                &trace_commons_operator_client::Error::ResponseTooLarge { limit: 256 * 1024 },
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
+            .to_string(),
+            "near_ai_enroll_unavailable"
+        );
         assert_eq!(
             finish_refusal(
                 &answer(

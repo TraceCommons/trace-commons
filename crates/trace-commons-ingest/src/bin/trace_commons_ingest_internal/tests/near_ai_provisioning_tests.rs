@@ -2135,18 +2135,36 @@ async fn pg_a_near_ai_commons_that_is_not_ready_answers_503() {
         .await;
         assert_unavailable(&finished, &format!("finish, {cause}"));
     }
-    // A path the operator switched off is not "unavailable": it will not
-    // start working on retry, so it answers the uniform deny, like a route
-    // that is not there.
+    // A path the operator switched off is not "unavailable" at start: it will
+    // not start working on retry, so the start answers the uniform deny, like
+    // a route that is not there. A finish only follows a start that answered,
+    // so a finish meeting the same state is the deployment in flux (a rollout,
+    // a replica that disagrees) and answers `503`, never the deny the #1840
+    // check reads as "another account".
     let mut off = h.state.clone();
     Arc::make_mut(&mut off).near_provisioning_enabled = false;
     assert_uniform_deny(
         &post(&off, PROVISION_START, &start_body).await,
         "start, off",
     );
-    assert_uniform_deny(
+    assert_unavailable(
         &post(&off, PROVISION_FINISH, &well_formed_unknown_finish(&device)).await,
         "finish, off",
+    );
+    // The v1 routes need an enrollment witness this harness does not publish:
+    // the same rule, on the route a production client calls.
+    assert_uniform_deny(
+        &post(&h.state, "/v1/account/near-ai/provision/start", &start_body).await,
+        "v1 start, no witness",
+    );
+    assert_unavailable(
+        &post(
+            &h.state,
+            "/v1/account/near-ai/provision/finish",
+            &well_formed_unknown_finish(&device),
+        )
+        .await,
+        "v1 finish, no witness",
     );
     reset_account_rate_limiter_for_db_test().await;
 }

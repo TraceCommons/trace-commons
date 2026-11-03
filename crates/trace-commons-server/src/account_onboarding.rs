@@ -403,14 +403,25 @@ pub fn database_error_label(error: &crate::error::DatabaseError) -> String {
 /// Whether `error` is a decided refusal: one of the provisioning code's own
 /// refusal labels, rather than a fault. A caller logs these quietly; any
 /// requester holding a device key can produce one per request.
+///
+/// An explicit list, not "any `Pool` label": a `Pool` can also carry a trait
+/// default that means this backend cannot provision at all
+/// (`near_provisioning_unconfigured`), or free text from a wrapped error,
+/// and those are faults an operator must see.
 pub fn is_decided_refusal(error: &crate::error::DatabaseError) -> bool {
-    matches!(
-        error,
-        crate::error::DatabaseError::Pool(label) if !label.starts_with("missing-control:")
-    ) || matches!(
-        error,
-        crate::error::DatabaseError::Query(label) if label == "near_provisioning_ambiguous"
-    )
+    use crate::error::DatabaseError;
+    match error {
+        DatabaseError::Pool(label) => matches!(
+            label.as_str(),
+            "near_provisioning_refused"
+                | "near_provisioning_wallet_key_registered_elsewhere"
+                | "near_provisioning_device_bound_to_other_account"
+                | DEVICE_KEY_REGISTERED_ELSEWHERE
+                | DEVICE_KEY_REVOKED
+        ),
+        DatabaseError::Query(label) => label == "near_provisioning_ambiguous",
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -744,6 +755,37 @@ mod tests {
         assert!(is_database_unavailable(&DatabaseError::Pool(
             "missing-control: login-resolver-pool-unconfigured".into()
         )));
+    }
+
+    /// Only the provisioning code's own refusal labels log quietly; a trait
+    /// default or free text in a `Pool` is a fault.
+    #[test]
+    fn only_the_listed_refusals_are_decided() {
+        use crate::error::DatabaseError;
+        for label in [
+            "near_provisioning_refused",
+            "near_provisioning_wallet_key_registered_elsewhere",
+            "near_provisioning_device_bound_to_other_account",
+            DEVICE_KEY_REGISTERED_ELSEWHERE,
+            DEVICE_KEY_REVOKED,
+        ] {
+            assert!(
+                is_decided_refusal(&DatabaseError::Pool(label.into())),
+                "{label}"
+            );
+        }
+        assert!(is_decided_refusal(&DatabaseError::Query(
+            "near_provisioning_ambiguous".into()
+        )));
+        for fault in [
+            DatabaseError::Pool("near_provisioning_unconfigured".into()),
+            DatabaseError::Pool("near_ai_login_provisioning_unconfigured".into()),
+            DatabaseError::Pool("connection reset by peer".into()),
+            DatabaseError::Pool("missing-control: login-resolver-pool-unconfigured".into()),
+            DatabaseError::Query("other".into()),
+        ] {
+            assert!(!is_decided_refusal(&fault), "{fault:?}");
+        }
     }
 
     /// A log label never carries the error's text: a refusal label is kept,

@@ -277,25 +277,40 @@ fn ready_or_declined(
     })
 }
 
+/// Which half of a ceremony is asking about readiness.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CeremonyHalf {
+    Start,
+    Finish,
+}
+
 /// What a ceremony route answers when the commons is not ready to run it.
 ///
-/// A path the operator did not offer answers the uniform deny (`None`), as a
-/// route that is not there would: it will not start working on retry, so
-/// "unavailable" would be wrong. Not offered: NEAR provisioning switched off
-/// (the default), the wallet ceremony closed on a staging build, and a v1
-/// route on a commons that publishes no enrollment witness (v1 needs one;
-/// such a commons serves only v2, and a v1 client is told no for good). A
-/// path that is offered but whose configuration is incomplete (no account
-/// registry, no identity material, no issuer, a malformed witness, no
-/// origin) is a commons mid deploy or misconfigured, answered `503`. Both
-/// are deployment state, the same for every request.
-fn not_ready_answer(control: &'static str) -> Option<axum::response::Response> {
-    if matches!(
+/// At **start**, a path the operator did not offer answers the uniform deny
+/// (`None`), as a route that is not there would: it will not start working on
+/// retry, so "unavailable" would be wrong. Not offered: NEAR provisioning
+/// switched off (the default), the wallet ceremony closed on a staging build,
+/// and a v1 route on a commons that publishes no enrollment witness (v1 needs
+/// one; such a commons serves only v2). A path that is offered but whose
+/// configuration is incomplete (no account registry, no identity material, no
+/// issuer, a malformed witness, no origin) is a commons mid deploy or
+/// misconfigured, answered `503`.
+///
+/// At **finish**, every not-ready cause is `503`. A finish only exists because
+/// a start answered, which said the path was offered; if the finish then
+/// reaches a process that disagrees (a rollout, or one replica missing the
+/// witness secret), that is the deployment in flux, not a refusal. The
+/// uniform deny there would read to the #1840 check as "this login belongs to
+/// another account". All of this is deployment state, the same for every
+/// request.
+fn not_ready_answer(control: &'static str, half: CeremonyHalf) -> Option<axum::response::Response> {
+    let not_offered = matches!(
         control,
         control::PROVISIONING_ENABLED
             | control::STAGING_WALLET_CLOSED
             | control::WITNESS_JSON_ABSENT
-    ) {
+    );
+    if half == CeremonyHalf::Start && not_offered {
         None
     } else {
         Some(near_ai_not_ready())
@@ -577,7 +592,7 @@ async fn start(
     contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
     if let Err(control) = ready_or_declined(&state, contract, true) {
-        return not_ready_answer(control);
+        return not_ready_answer(control, CeremonyHalf::Start);
     }
     if limited(&headers, "start") {
         return Some(near_ai_sign_in_rate_limited());
@@ -664,7 +679,7 @@ async fn finish(
     contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
     if let Err(control) = ready_or_declined(&state, contract, true) {
-        return not_ready_answer(control);
+        return not_ready_answer(control, CeremonyHalf::Finish);
     }
     if limited(&headers, "finish") {
         return Some(near_ai_sign_in_rate_limited());
@@ -1350,7 +1365,7 @@ async fn near_ai_start(
     // refuses without the NEP-413 sign-in config and the wallet redirect
     // origin, neither of which this ceremony has or needs.
     if let Err(control) = ready_or_declined(&state, contract, false) {
-        return not_ready_answer(control);
+        return not_ready_answer(control, CeremonyHalf::Start);
     }
     if limited(&headers, "near-ai-start") {
         return Some(near_ai_sign_in_rate_limited());
@@ -1513,8 +1528,18 @@ fn near_ai_sign_in_rate_limited() -> axum::response::Response {
 /// `near_rpc`). Used by both NEAR sign-in ceremonies, NEAR AI login and
 /// wallet.
 fn near_ai_sign_in_unavailable(cause: &'static str) -> axum::response::Response {
+    near_ai_sign_in_unavailable_with(cause, None)
+}
+
+/// [`near_ai_sign_in_unavailable`], with the database error's label on the
+/// same line when the cause is the database.
+fn near_ai_sign_in_unavailable_with(
+    cause: &'static str,
+    database_error: Option<&str>,
+) -> axum::response::Response {
     tracing::warn!(
         cause,
+        database_error,
         "NEAR sign-in answered unavailable; the commons cannot answer it now"
     );
     unavailable_response()
@@ -1523,13 +1548,9 @@ fn near_ai_sign_in_unavailable(cause: &'static str) -> axum::response::Response 
 /// The `503` body and headers, with no log line: for a caller that has
 /// already logged its one line.
 fn unavailable_response() -> axum::response::Response {
-    no_store((
+    no_store(api_error_unlogged(
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(ApiError {
-            error: NEAR_AI_SIGN_IN_UNAVAILABLE.to_string(),
-            retry_after_seconds: None,
-            blockers: None,
-        }),
+        NEAR_AI_SIGN_IN_UNAVAILABLE,
     ))
 }
 
@@ -1578,12 +1599,7 @@ fn near_ai_database_failure(
     };
     let label = database_error_label(error);
     if is_database_unavailable(error) {
-        tracing::warn!(
-            cause = "database",
-            database_error = %label,
-            "NEAR sign-in answered unavailable; the commons cannot answer it now"
-        );
-        Some(unavailable_response())
+        Some(near_ai_sign_in_unavailable_with("database", Some(&label)))
     } else if is_decided_refusal(error) {
         tracing::info!(database_error = %label, "NEAR sign-in refused");
         None
@@ -1611,7 +1627,7 @@ async fn near_ai_finish(
     contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
     if let Err(control) = ready_or_declined(&state, contract, false) {
-        return not_ready_answer(control);
+        return not_ready_answer(control, CeremonyHalf::Finish);
     }
     if limited(&headers, "near-ai-finish") {
         return Some(near_ai_sign_in_rate_limited());

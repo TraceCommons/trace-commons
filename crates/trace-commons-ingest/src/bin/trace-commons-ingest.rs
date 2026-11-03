@@ -79784,10 +79784,19 @@ fn log_api_error(status: StatusCode, message: &str) {
 fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
     let message = message.into();
     log_api_error(status, &message);
+    api_error_unlogged(status, message)
+}
+
+/// [`api_error`] without its log line, for a caller that has already logged
+/// its one label-only line for this request.
+fn api_error_unlogged(
+    status: StatusCode,
+    message: impl Into<String>,
+) -> (StatusCode, Json<ApiError>) {
     (
         status,
         Json(ApiError {
-            error: message,
+            error: message.into(),
             retry_after_seconds: None,
             blockers: None,
         }),
