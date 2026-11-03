@@ -1848,9 +1848,12 @@ async fn pg_a_near_ai_sign_in_whose_database_does_not_answer_answers_503() {
     reset_account_rate_limiter_for_db_test().await;
 }
 
-/// NEAR AI not answering -- nothing listening, or a `503` of its own -- is
-/// `503` at finish, and writes nothing. The ceremony is still consumed, so
-/// a retry starts a new one.
+/// NEAR AI not answering -- nothing listening, or a `503` or `429` of its own
+/// -- is `503` at finish, and writes nothing. The ceremony is consumed all the
+/// same (the wire contract: a `503` at finish means start again), so the same
+/// finish again is refused even once NEAR AI answers: a finish body is a
+/// complete credential and must not complete a sign-in after the owner gave
+/// up on it.
 #[tokio::test]
 async fn pg_a_near_ai_finish_whose_near_ai_does_not_answer_answers_503() {
     let Some(h) = harness().await else {
@@ -1899,9 +1902,9 @@ async fn pg_a_near_ai_finish_whose_near_ai_does_not_answer_answers_503() {
             devices_before,
             "{cause}: an unanswered finish registered the device"
         );
-        // Consumed: the same finish again is a replay, and a replay is refused.
-        let replay = finish(
-            &state,
+        // Consumed: the same finish, even with NEAR AI answering, is refused.
+        let resent = finish(
+            &h.state,
             PROVISION_FINISH,
             None,
             &started,
@@ -1909,7 +1912,8 @@ async fn pg_a_near_ai_finish_whose_near_ai_does_not_answer_answers_503() {
             &signature,
         )
         .await;
-        assert_uniform_deny(&replay, &format!("{cause}, replayed"));
+        assert_uniform_deny(&resent, &format!("{cause}, resent after the 503"));
+        signs_in_after_starting_again(&h, &admin, &device, cause).await;
     }
     reset_account_rate_limiter_for_db_test().await;
 }
@@ -2101,18 +2105,36 @@ async fn pg_a_near_ai_commons_that_is_not_ready_answers_503() {
         .await;
         assert_unavailable(&finished, &format!("finish, {cause}"));
     }
-    // A path the operator switched off is not "unavailable": it will not
-    // start working on retry, so it answers the uniform deny, like a route
-    // that is not there.
+    // A path the operator switched off is not "unavailable" at start: it will
+    // not start working on retry, so the start answers the uniform deny, like
+    // a route that is not there. A finish only follows a start that answered,
+    // so a finish meeting the same state is the deployment in flux (a rollout,
+    // a replica that disagrees) and answers `503`, never the deny the #1840
+    // check reads as "another account".
     let mut off = h.state.clone();
     Arc::make_mut(&mut off).near_provisioning_enabled = false;
     assert_uniform_deny(
         &post(&off, PROVISION_START, &start_body).await,
         "start, off",
     );
-    assert_uniform_deny(
+    assert_unavailable(
         &post(&off, PROVISION_FINISH, &well_formed_unknown_finish(&device)).await,
         "finish, off",
+    );
+    // The v1 routes need an enrollment witness this harness does not publish:
+    // the same rule, on the route a production client calls.
+    assert_uniform_deny(
+        &post(&h.state, "/v1/account/near-ai/provision/start", &start_body).await,
+        "v1 start, no witness",
+    );
+    assert_unavailable(
+        &post(
+            &h.state,
+            "/v1/account/near-ai/provision/finish",
+            &well_formed_unknown_finish(&device),
+        )
+        .await,
+        "v1 finish, no witness",
     );
     reset_account_rate_limiter_for_db_test().await;
 }
@@ -2191,6 +2213,96 @@ async fn pg_a_near_ai_finish_without_the_resolver_pool_answers_503() {
         .await,
         0,
         "an unanswered finish registered the device"
+    );
+    // The ceremony was consumed: once the registry is whole, the same finish
+    // is still refused; the client starts again.
+    let resent = finish(
+        &h.state,
+        PROVISION_FINISH,
+        None,
+        &started,
+        &device,
+        &signature,
+    )
+    .await;
+    assert_uniform_deny(&resent, "resent after the 503");
+    // The 503 came after introspection, at provisioning's first step (the
+    // resolver pool), so the attempt wrote nothing; starting again signs in.
+    signs_in_after_starting_again(&h, &admin, &device, "no resolver pool").await;
+    reset_account_rate_limiter_for_db_test().await;
+}
+
+/// What the client does after a `503` at finish: a new start and finish for
+/// the same device, against a commons that answers again. It must succeed and
+/// leave exactly one device row, whatever the failed finish did first.
+async fn signs_in_after_starting_again(
+    h: &Harness,
+    admin: &deadpool_postgres::Object,
+    device: &Device,
+    cause: &str,
+) {
+    let again = start(&h.state, PROVISION_START, None, device).await;
+    let signature = device.sign(&again.signing_bytes);
+    let answered = finish(&h.state, PROVISION_FINISH, None, &again, device, &signature).await;
+    assert_eq!(
+        answered.status,
+        StatusCode::OK,
+        "{cause}, started again: {:?}",
+        answered.json()
+    );
+    assert_eq!(
+        count(
+            admin,
+            "SELECT count(*)::bigint FROM device_keys WHERE public_key = $1",
+            &[&device.public_b64()],
+        )
+        .await,
+        1,
+        "{cause}: one device row after starting again"
+    );
+    let tenant = answered.json()["tenant_id"]
+        .as_str()
+        .expect("tenant")
+        .to_string();
+    drop_tenants(admin, &[&tenant]).await;
+}
+
+/// A stored ceremony the finishing process cannot read -- a start on one
+/// build and a finish on another during a rollout, or a row of another
+/// ceremony kind -- is deployment state, not a refusal: `503`, never the
+/// uniform deny the #1840 check reads as "another account". The take still
+/// consumed the row, so the client starts again.
+#[tokio::test]
+async fn pg_an_unreadable_stored_ceremony_answers_503() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_db_test().await;
+    let admin = h.admin().await;
+    let device = Device::new();
+    let body = well_formed_unknown_finish(&device);
+    let ceremony_id = body["ceremony_id"].as_str().expect("id").to_string();
+    // A payload no ceremony type reads, as a build that stored another shape
+    // would leave it.
+    admin
+        .execute(
+            "INSERT INTO trace_near_provisioning_ceremonies(ceremony_hash, payload, expires_at)
+             VALUES ($1, $2, now() + interval '5 minutes')",
+            &[
+                &hash_secret(&ceremony_id),
+                &serde_json::json!({"shape": "from another build"}),
+            ],
+        )
+        .await
+        .expect("seed an unreadable ceremony");
+    assert_unavailable(
+        &post(&h.state, PROVISION_FINISH, &body).await,
+        "unreadable ceremony",
+    );
+    // Consumed by the take: the same finish is now an unknown ceremony.
+    assert_uniform_deny(
+        &post(&h.state, PROVISION_FINISH, &body).await,
+        "resent after the unreadable ceremony",
     );
     reset_account_rate_limiter_for_db_test().await;
 }

@@ -446,11 +446,11 @@ async fn wallet_v2_signed_completion_and_refusal_boundaries() {
         None,
     )
     .await;
-    // Not ready (no witness for v1) is deployment state, answered `503`
-    // rather than the refusal a client reads as an answer about the account.
+    // v1 needs a witness this commons does not publish: a path it does not
+    // offer, which will not start working on retry, so the uniform deny.
     assert_eq!(
         status,
-        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::BAD_REQUEST,
         "v1 start still needs a witness"
     );
 
@@ -851,6 +851,37 @@ async fn wallet_v2_answers_busy_and_unready_with_429_or_503() {
         global_provisioned_counts(&admin).await,
         before,
         "no busy or unready answer writes an account, identity, device, principal or session"
+    );
+
+    // An unanswered finish consumes its ceremony all the same (the wire
+    // contract: a `503` at finish means start again), so the same finish is
+    // refused, and still writes nothing.
+    let mut down_rpc = state.clone();
+    Arc::make_mut(&mut down_rpc).account_near_config =
+        Some(Arc::new(trace_commons_server::config::NearConfig {
+            rpc_url: rpc_status_fixture(StatusCode::SERVICE_UNAVAILABLE).await,
+            network: "testnet".into(),
+            recipient: WALLET_RECIPIENT.into(),
+        }));
+    let device = keypair();
+    let public_key = base64::engine::general_purpose::STANDARD.encode(device.public_key().as_ref());
+    let started = start(&down_rpc, WALLET_ACCOUNT, &public_key, &challenge).await;
+    let body = finish_body(&started, WALLET_ACCOUNT, &device, &wallet, &verifier);
+    let (status, unanswered) = finish(&down_rpc, body.clone()).await;
+    assert_wallet_unavailable(status, &unanswered, "rpc 503");
+    let (status, resent) = finish(&down_rpc, body).await;
+    assert_eq!(
+        (status, resent),
+        (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": "native sign-in could not be completed" })
+        ),
+        "resent after the 503"
+    );
+    assert_eq!(
+        global_provisioned_counts(&admin).await,
+        before,
+        "an unanswered finish and its resend write nothing"
     );
     reset_account_rate_limiter_for_db_test().await;
 }
