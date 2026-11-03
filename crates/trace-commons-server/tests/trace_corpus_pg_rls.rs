@@ -1447,6 +1447,9 @@ fn force_rls_migration_covers_every_trace_rls_table() {
         "../../../migrations/V140__account_device_codes.sql"
     ));
     sql.push_str(include_str!(
+        "../../../migrations/V150__near_ai_login_change.sql"
+    ));
+    sql.push_str(include_str!(
         "../../../migrations/V141__trace_model_training_consent_grants.sql"
     ));
     sql.push_str(include_str!(
@@ -1582,6 +1585,9 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
     ));
     sql.push_str(include_str!(
         "../../../migrations/V140__account_device_codes.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V150__near_ai_login_change.sql"
     ));
     sql.push_str(include_str!(
         "../../../migrations/V141__trace_model_training_consent_grants.sql"

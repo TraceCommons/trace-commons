@@ -8547,6 +8547,7 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
+            include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
             include_str!("../../../../migrations/V142__referral_rewards.sql"),
             include_str!("../../../../migrations/V141__trace_model_training_consent_grants.sql"),
             include_str!("../../../../migrations/V140__account_device_codes.sql"),
@@ -8597,6 +8598,7 @@ mod tests {
             include_str!("../../../../migrations/V131__starter_plausibility_features.sql"),
         ];
         let force_rls_migrations = [
+            include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
             include_str!("../../../../migrations/V142__referral_rewards.sql"),
             include_str!("../../../../migrations/V141__trace_model_training_consent_grants.sql"),
             include_str!("../../../../migrations/V140__account_device_codes.sql"),
