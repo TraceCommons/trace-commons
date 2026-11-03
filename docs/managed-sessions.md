@@ -40,12 +40,11 @@ front) and stopped from its row; a CLI launch cannot, because the app neither
 opened its window nor started its launcher. An ended session can be started
 again in the same folder with the same account while both still exist.
 Every launch, Start again and Resume included, opens a window of its own; none
-types into an existing tab. The macOS app no longer offers to open a session in
-a window already open: placing a tab in Terminal needed macOS's Automation and
-Accessibility prompts, which the owner does not want (2026-11-03). The daemon's
-`managed_terminal_windows`, `managed_terminal_tab_access` and `beside` remain
-until they are removed, but the app no longer calls or sends them. See
-`docs/contributor-daemon-ipc-v1_1.md` for the checks.
+types into an existing tab. Opening a session in a window already open needed
+macOS's Automation and Accessibility prompts, which the owner does not want
+(2026-11-03), so the app does not offer it and the daemon has no such path: an
+older app's `beside` is accepted and ignored, and its two window-list methods
+are refused as unknown. See `docs/contributor-daemon-ipc-v1_1.md`.
 Stop signals only the tool process the launcher supervises: SIGTERM, then
 SIGKILL after a bounded wait. Processes the tool itself started (a shell
 command, a dev server) are not signalled and can outlive it.

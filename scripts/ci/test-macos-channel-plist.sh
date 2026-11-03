@@ -153,23 +153,17 @@ else
   cat "$scratch/err" >&2
 fi
 
-# --- Apple Events usage string (owner, 2026-11-02, #1852) ---------------------
+# --- no Apple Events usage string (owner, 2026-11-03) -------------------------
 #
-# macOS shows NSAppleEventsUsageDescription in the Automation prompt for
-# System Events, which a launch placed in a picked Terminal window needs. Both
-# channels carry the owner's approved line, read with a strict parser.
+# The app asks macOS for no Automation permission, so neither channel carries
+# NSAppleEventsUsageDescription (#1852 added it for the window picker, and the
+# picker is gone).
 
-events_line="Near.ai opens new Private AI sessions in the Terminal window you choose."
 for channel in production staging; do
-  if render TC_CHANNEL="$channel" >"$scratch/events-$channel.plist" 2>/dev/null \
-    && python3 -I -c '
-import plistlib, sys
-with open(sys.argv[1], "rb") as f:
-    sys.exit(0 if plistlib.load(f).get("NSAppleEventsUsageDescription") == sys.argv[2] else 1)
-' "$scratch/events-$channel.plist" "$events_line"; then
-    pass "$channel: NSAppleEventsUsageDescription is the approved line"
+  if render TC_CHANNEL="$channel" >"$scratch/events-$channel.plist" 2>/dev/null; then
+    lacks "$channel" "$scratch/events-$channel.plist" 'NSAppleEventsUsageDescription'
   else
-    fail "$channel: NSAppleEventsUsageDescription is missing or not the approved line"
+    fail "$channel: did not render"
   fi
 done
 
