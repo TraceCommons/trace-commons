@@ -34,7 +34,7 @@ have landed (owner, 2026-11-03):
     tenant link it rides on. Roll it out before going live.
   - **Pooled Devfolio tenants** (`trace_legacy_invite_pooled_tenants`) are
     excluded from payouts by design; they need no migration.
-- **Run the two legacy rollout checks and have the owner review them**
+- **Run the four legacy rollout checks and have the owner review them**
   (owner, 2026-11-03; spec section 13, "Production-payout gates"). Both
   are read-only and return counts only. RLS is forced, so run them as the
   migration owner or once per tenant.
@@ -66,8 +66,24 @@ have landed (owner, 2026-11-03):
     finds any such rows, stop and ask the owner before going live (owner,
     2026-11-03).
   - **Legacy own links.** Re-run Q4 from the same spec (live payout links
-    in legacy tenants; the pilot had 0 on 2026-11-02) and report it to the
-    owner together with the provenance count.
+    in legacy tenants). Expected 0 (the pilot had 0 on 2026-11-02). Report
+    it to the owner together with the provenance count. If it is not 0,
+    stop and ask the owner before going live: each such link is revoked by
+    V147 and its account is paid again only through a carry.
+  - **Carries on unproven accounts.** Count live carries whose account no
+    signed device proves; the first carry event after deploy releases each
+    (a waiting one closes at zero, an active one is unlinked and stops
+    being paid). Run per legacy tenant, under its tenant context:
+
+    ```sql
+    SELECT count(*) FROM trace_legacy_payout_carries c
+     WHERE c.tenant_id = current_setting('trace_commons.trace_tenant_id')
+       AND c.released_at IS NULL
+       AND c.account_id NOT IN (SELECT * FROM trace_legacy_payout_proven_accounts(c.tenant_id));
+    ```
+
+    Expected 0 (the pilot had no payout links, so no carries). If it is
+    not 0, stop and ask the owner before going live.
   - **Q5.** Run Q5 from the
     [legacy payout migration spec](../superpowers/specs/2026-11-03-legacy-account-payout-migration-design.md),
     section 8 (unowned accruals in non-pooled legacy tenants), and give the

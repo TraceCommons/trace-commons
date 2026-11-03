@@ -724,13 +724,25 @@ Where the implementation differs from, or adds to, sections 3 to 5:
    every event the carry reaches only accounts whose principals a signed
    device proved: the linking device or a V91-attested one
    (`trace_legacy_payout_proven_accounts`, V148, with the decision-5
-   derivation). An account opened by an unproven device, such as one the
-   instance key enrolled later, waits; a live carry on an account that no
-   longer qualifies is released.
+   derivation in one helper shared with the claim). Only devices still live
+   in the tenant prove (unrevoked, `invite` origin, not NEAR-provisioned).
+   An account opened by an unproven device waits. A live carry on an
+   account that stops qualifying is held at send time
+   (`trace_legacy_payout_carry_unproven` in the account standing) and
+   released at the next carry event; the first event after deploy does the
+   same to any V146-era carry on an unproven account, which the pre-deploy
+   checks count. Still open for the owner (review of #1879): the proof set
+   takes the tenant's instance-enrollment subjects at the time of the
+   event, so a subject enrolled after the link proves a new account of the
+   linking device.
 3. **A legacy account whose own payout link V147 (#1868) revoked** gets its
    carry at the next of those events, if it is proven, as the waiting
    successor of the revoked link. The pilot had 0 links on 2026-11-02;
    the pre-deploy count below confirms it.
+4. **Carry failures never fail a sign-in** (review of #1879). The
+   account-opening carry runs in a savepoint of the login-link mint, for
+   the opened account only and only when the call opened it; a failure is
+   logged by class and carries nothing.
 
 ### Known limits, not fixed here
 
@@ -772,7 +784,7 @@ Where the implementation differs from, or adds to, sections 3 to 5:
 
 ### Production-payout gates (owner, 2026-11-03)
 
-Two read-only checks run on the pilot, and the owner reviews their
+Four read-only checks run on the pilot, and the owner reviews their
 results, before the `near_ai` rail goes `live` for production. They sit
 beside F10 and F11 in the settlement runbook's "Before production payouts"
 (`docs/operator/automatic-credit-settlement.md`).
@@ -789,7 +801,11 @@ beside F10 and F11 in the settlement runbook's "Before production payouts"
    Each such link is revoked by V147, and its account gets a carry at the
    next carry event only if a signed device proved it. Expected 0 (pilot,
    2026-11-02).
-3. **Q5 is run and reviewed.** Q5 (section 8) must be run and its result
+3. **Carries on unproven accounts.** A count of live carries whose
+   account no signed device proves (the query is in the settlement
+   runbook). The first carry event after deploy releases each. Expected 0;
+   if not, stop and ask the owner.
+4. **Q5 is run and reviewed.** Q5 (section 8) must be run and its result
    reviewed by the owner. It need not come back zero: credit from
    contributor-label subjects stays unowned and unpaid by design
    (section 3.5).

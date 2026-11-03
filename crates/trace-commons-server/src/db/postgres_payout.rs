@@ -1695,45 +1695,40 @@ impl PayoutStore for PgBackend {
     ) -> Result<Uuid, DatabaseError> {
         self.ensure_trace_tenant(tenant).await?;
         let mut client = self.payout_tenant_client().await?;
-        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
-        let account = super::postgres::create_or_reuse_account_in_tx(&tx, principal_ref).await?;
-        if !rails.is_empty() && !trace_commons_protocol::admission::is_anchored_tenant(tenant) {
-            let source = tx
-                .query_opt(
-                    "SELECT tenant_id, account_id FROM trace_legacy_payout_source_account($1)",
-                    &[&tenant],
-                )
-                .await?
-                .map(|row| (row.get::<_, String>(0), row.get::<_, Uuid>(1)));
-            if let Some((source_tenant, source_account)) = source {
-                tx.execute(
-                    "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-                    &[&source_tenant],
-                )
-                .await?;
-                for (rail, programs) in rails {
-                    // The confirm's lock, as every carry takes it.
+        let mut tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let (account, opened) =
+            super::postgres::create_or_reuse_account_in_tx_opened(&tx, principal_ref).await?;
+        // Only an account this call opened is the event (a reuse is not),
+        // and only that account is carried. The carry runs in a savepoint:
+        // a failure carries nothing, is logged by class, and never fails the
+        // sign-in this account is opened for (review of #1879).
+        if opened && !rails.is_empty() {
+            let savepoint = tx.savepoint("legacy_payout_carry").await?;
+            let carried = super::postgres_legacy_payout_carry::carry_opened_account_in_tx(
+                &savepoint,
+                tenant,
+                account,
+                rails,
+                actor_ref_hash,
+            )
+            .await;
+            match carried {
+                Ok(_) => savepoint.commit().await?,
+                Err(error) => {
+                    tracing::warn!(
+                        label = "legacy_payout_carry_failed",
+                        error_class = crate::account_onboarding::database_error_label(&error),
+                        "legacy payout carry at account opening failed; nothing was carried"
+                    );
+                    savepoint.rollback().await?;
+                    // The rollback restored the tenant context too, but say
+                    // so rather than rely on it.
                     tx.execute(
-                        "SELECT pg_advisory_xact_lock(hashtextextended(
-                             'payout-link-confirm-v1:' || $1 || ':' || $2::UUID::TEXT || ':' || $3, 0))",
-                        &[&source_tenant, &source_account, &rail.as_str()],
-                    )
-                    .await?;
-                    super::postgres_legacy_payout_carry::carry_in_tx(
-                        &tx,
-                        &source_tenant,
-                        source_account,
-                        rail.as_str(),
-                        programs,
-                        actor_ref_hash,
+                        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+                        &[&tenant],
                     )
                     .await?;
                 }
-                tx.execute(
-                    "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-                    &[&tenant],
-                )
-                .await?;
             }
         }
         tx.commit().await?;
@@ -1948,7 +1943,8 @@ impl PayoutStore for PgBackend {
                                                 encode(sha256(convert_to(h.credit_account_ref, 'UTF8')), 'hex')))),
                      ARRAY(SELECT credit_account_ref FROM trace_credit_holds
                             WHERE tenant_id = $1 AND released_at IS NULL),
-                     trace_legacy_payout_carry_invalid($1, $2)",
+                     trace_legacy_payout_carry_invalid($1, $2)
+                         OR trace_legacy_payout_carry_unproven($1, $2)",
                 &[&tenant, &account],
             )
             .await?;

@@ -206,7 +206,7 @@ pub(super) async fn carry_after_tenant_link(state: &AppState, ctx: &AccountCtx) 
             Err(error) => tracing::warn!(
                 rail = %entry.rail_id(),
                 label = "legacy_payout_carry_failed",
-                error_class = trace_commons_server::db::database_error_class(&error),
+                error_class = trace_commons_server::account_onboarding::database_error_label(&error),
                 "legacy payout carry after a tenant link failed"
             ),
         }

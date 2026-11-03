@@ -2076,6 +2076,17 @@ pub(super) async fn create_or_reuse_account_in_tx(
     tx: &deadpool_postgres::Transaction<'_>,
     principal_ref: &str,
 ) -> Result<Uuid, DatabaseError> {
+    Ok(create_or_reuse_account_in_tx_opened(tx, principal_ref)
+        .await?
+        .0)
+}
+
+/// [`create_or_reuse_account_in_tx`], also saying whether this call opened
+/// the account (`true`) or found the principal's existing one.
+pub(super) async fn create_or_reuse_account_in_tx_opened(
+    tx: &deadpool_postgres::Transaction<'_>,
+    principal_ref: &str,
+) -> Result<(Uuid, bool), DatabaseError> {
     // Fast path: an active link for this principal already maps to an account.
     if let Some(row) = tx
         .query_opt(
@@ -2088,7 +2099,7 @@ pub(super) async fn create_or_reuse_account_in_tx(
         .await
         .map_err(DatabaseError::Postgres)?
     {
-        return Ok(row.get("account_id"));
+        return Ok((row.get("account_id"), false));
     }
 
     // No active link: mint a fresh account and link the principal. The link
@@ -2122,9 +2133,11 @@ pub(super) async fn create_or_reuse_account_in_tx(
     })?;
 
     // Re-select the authoritative account for this principal. If a
-    // concurrent mint inserted the link first, this returns ITS account_id
-    // and our freshly-inserted (now orphaned) trace_accounts row is harmless
-    // (no principal links to it). If we won, it returns new_account_id.
+    // concurrent mint inserted the link first, this returns ITS account_id,
+    // and the row this call inserted is deleted: an open account with no
+    // principal would otherwise be one more account in the tenant (V148
+    // carries reach open accounts; review of #1879). If we won, it returns
+    // new_account_id.
     let row = tx
         .query_one(
             "SELECT account_id FROM trace_account_principals
@@ -2136,7 +2149,17 @@ pub(super) async fn create_or_reuse_account_in_tx(
         .await
         .map_err(DatabaseError::Postgres)?;
     let account_id: Uuid = row.get("account_id");
-    Ok(account_id)
+    if account_id != new_account_id {
+        tx.execute(
+            "DELETE FROM trace_accounts
+              WHERE tenant_id = trace_current_tenant_id() AND account_id = $1",
+            &[&new_account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        return Ok((account_id, false));
+    }
+    Ok((account_id, true))
 }
 
 /// Shared by verified claim issuance and the explicit historical repair.

@@ -3289,21 +3289,6 @@ impl std::fmt::Debug for CarryPrograms {
     }
 }
 
-/// A store error's class, safe to log: a SQLSTATE, or the error's kind.
-/// Never its message, which can quote a value.
-pub fn database_error_class(error: &DatabaseError) -> String {
-    match error {
-        DatabaseError::Postgres(error) => error.code().map_or_else(
-            || "postgres".to_owned(),
-            |code| format!("sqlstate_{}", code.code()),
-        ),
-        DatabaseError::Pool(_) | DatabaseError::PoolBuild(_) | DatabaseError::PoolRuntime(_) => {
-            "pool".to_owned()
-        }
-        _ => "store".to_owned(),
-    }
-}
-
 /// What one carry call did across the account's linked legacy tenants
 /// (V146). Counts only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

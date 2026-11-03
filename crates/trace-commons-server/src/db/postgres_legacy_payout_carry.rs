@@ -6,17 +6,28 @@
 //! section 3.3).
 //!
 //! The source is the account's live link on the rail, proved by its own
-//! `near_ai_login` anchor. For each legacy tenant the account has linked
-//! through V81, every open account there gets a `waiting` link to the same
-//! sealed recipient (the seal is bound to the rail and recipient, not to a
-//! tenant), recorded in `trace_legacy_payout_carries`. Each legacy account
-//! is then paid its own credit from its own tenant by the ordinary pass.
+//! `near_ai_login` anchor, on an open account. For each legacy tenant the
+//! account has linked through V81, each open account a signed device proved
+//! (V148 `trace_legacy_payout_proven_accounts`) gets a `waiting` link to the
+//! same sealed recipient (the seal is bound to the rail and recipient, not
+//! to a tenant), recorded in `trace_legacy_payout_carries`. Each legacy
+//! account is then paid its own credit from its own tenant by the ordinary
+//! pass.
 //!
-//! Runs inside the caller's transaction. It reads the account's tenant
-//! links under the account's own tenant context, then sets the context to
-//! each legacy tenant in turn (forced RLS applies to every statement) and
-//! restores it before returning. Nothing here writes the account's tenant
-//! except one hash-only account audit row.
+//! Carries run only at events (owner, 2026-11-03): the NEAR AI account's
+//! confirm and a tenant link ([`carry_in_tx`]), and an account opening in a
+//! linked legacy tenant ([`carry_opened_account_in_tx`]). The pass never
+//! carries.
+//!
+//! Locks, in one global order: the source's confirm locks, by rail; then the
+//! tenant-link locks, by legacy tenant. The revocation and close triggers
+//! take only tenant-link locks. Every check that decides a carry (the tenant
+//! link live, the source open) is re-read after the tenant-link lock.
+//!
+//! Runs inside the caller's transaction, setting the tenant context to each
+//! tenant it touches (forced RLS applies to every statement) and restoring
+//! it before returning. Nothing here writes the source's tenant except one
+//! hash-only account audit row.
 
 use uuid::Uuid;
 
@@ -86,33 +97,7 @@ pub(super) async fn carry_in_tx(
     if !anchored_tenant(tenant) {
         return Ok(report);
     }
-    // The newest live generation not being unlinked, on an account with a
-    // recorded NEAR AI login: the gate proved it, and nothing else may be
-    // carried.
-    let source = tx
-        .query_opt(
-            "SELECT l.link_id, l.recipient_kind, l.sealed_recipient, l.recipient_index,
-                    l.recipient_key_ref, l.index_pepper_ref, l.subject_index, l.recipient_ref
-               FROM trace_payout_links l
-              WHERE l.tenant_id = $1 AND l.account_id = $2 AND l.rail_id = $3
-                AND l.state IN ('waiting', 'active') AND l.unlink_requested_at IS NULL
-                -- A closed account carries nothing (review of #1879): its
-                -- close released its carries, and they must not come back.
-                AND EXISTS (SELECT 1 FROM trace_accounts a
-                             WHERE a.tenant_id = l.tenant_id AND a.account_id = l.account_id
-                               AND a.closed_at IS NULL)
-                AND EXISTS (SELECT 1 FROM trace_near_account_anchors n
-                             WHERE n.tenant_id = l.tenant_id AND n.account_id = l.account_id
-                               AND n.identity_source = 'near_ai_login')
-              ORDER BY (l.state = 'waiting') DESC, l.created_at DESC
-              LIMIT 1",
-            &[&tenant, &account, &rail],
-        )
-        .await?
-        .map(|row| Source {
-            link_id: row.get(0),
-            row,
-        });
+    let source = source_link(tx, tenant, account, rail).await?;
     let tenant_links = tx
         .query(
             "SELECT link_id, legacy_tenant_id FROM trace_legacy_invite_links
@@ -143,7 +128,11 @@ pub(super) async fn carry_in_tx(
             )
             .await?
             .is_some();
-        if !still_live {
+        // The source, too, is re-read under the lock: a close that committed
+        // in between released its carries, and they must not come back
+        // (review of #1879). A close that commits after this waits on the
+        // lock in its trigger and then releases what this writes.
+        if !still_live || !source_open(tx, tenant, account).await? {
             continue;
         }
         let legacy_hash = legacy_link_hash(tenant_link_id);
@@ -155,15 +144,26 @@ pub(super) async fn carry_in_tx(
             source.as_ref(),
             rail,
             programs,
+            None,
             &mut report,
         )
         .await;
         set_tenant(tx, tenant).await?;
         outcome?;
     }
-    // Only a carry that changed something is audited: the pass carries on
-    // every run, and an account keeping its own link is skipped each time
-    // (review of #1879).
+    audit_carry(tx, tenant, actor_ref_hash, &report).await?;
+    Ok(report)
+}
+
+/// The NEAR AI tenant's account audit row for a carry, written only when
+/// it changed something (review of #1879): an account keeping its own link
+/// is skipped at every event, and that is no news. `tx` is under `tenant`.
+async fn audit_carry(
+    tx: &deadpool_postgres::Transaction<'_>,
+    tenant: &str,
+    actor_ref_hash: &str,
+    report: &LegacyCarryReport,
+) -> Result<(), DatabaseError> {
     if report.carried + report.released > 0 {
         tx.execute(
             "INSERT INTO trace_account_audit (tenant_id, action, actor_ref, outcome, safe_metadata)
@@ -185,6 +185,150 @@ pub(super) async fn carry_in_tx(
             skipped = report.skipped,
             "legacy payout carry"
         );
+    }
+    Ok(())
+}
+
+/// The newest live generation of the account's link on `rail` not being
+/// unlinked, on an open account with a recorded NEAR AI login: the gate
+/// proved it, and nothing else may be carried. `tx` is under `tenant`.
+async fn source_link(
+    tx: &deadpool_postgres::Transaction<'_>,
+    tenant: &str,
+    account: Uuid,
+    rail: &str,
+) -> Result<Option<Source>, DatabaseError> {
+    Ok(tx
+        .query_opt(
+            "SELECT l.link_id, l.recipient_kind, l.sealed_recipient, l.recipient_index,
+                    l.recipient_key_ref, l.index_pepper_ref, l.subject_index, l.recipient_ref
+               FROM trace_payout_links l
+              WHERE l.tenant_id = $1 AND l.account_id = $2 AND l.rail_id = $3
+                AND l.state IN ('waiting', 'active') AND l.unlink_requested_at IS NULL
+                AND EXISTS (SELECT 1 FROM trace_accounts a
+                             WHERE a.tenant_id = l.tenant_id AND a.account_id = l.account_id
+                               AND a.closed_at IS NULL)
+                AND EXISTS (SELECT 1 FROM trace_near_account_anchors n
+                             WHERE n.tenant_id = l.tenant_id AND n.account_id = l.account_id
+                               AND n.identity_source = 'near_ai_login')
+              ORDER BY (l.state = 'waiting') DESC, l.created_at DESC
+              LIMIT 1",
+            &[&tenant, &account, &rail],
+        )
+        .await?
+        .map(|row| Source {
+            link_id: row.get(0),
+            row,
+        }))
+}
+
+/// Whether the source account is open. `tx` is under `tenant`.
+async fn source_open(
+    tx: &deadpool_postgres::Transaction<'_>,
+    tenant: &str,
+    account: Uuid,
+) -> Result<bool, DatabaseError> {
+    Ok(tx
+        .query_opt(
+            "SELECT 1 FROM trace_accounts
+              WHERE tenant_id = $1 AND account_id = $2 AND closed_at IS NULL",
+            &[&tenant, &account],
+        )
+        .await?
+        .is_some())
+}
+
+/// The account-opening event (#1873; owner, 2026-11-03): `account` was just
+/// created in legacy tenant `legacy`. Carry the linked NEAR AI account's
+/// live link on each of `rails` to that account alone, if a signed device
+/// proved it. `tx` is under `legacy`'s context and is left under it. Locks
+/// in the global order: the source's confirm locks by rail, then this
+/// tenant's link lock.
+pub(super) async fn carry_opened_account_in_tx(
+    tx: &deadpool_postgres::Transaction<'_>,
+    legacy: &str,
+    account: Uuid,
+    rails: &[(trace_commons_gate_api::RailId, CarryPrograms)],
+    actor_ref_hash: &str,
+) -> Result<LegacyCarryReport, DatabaseError> {
+    let mut report = LegacyCarryReport::default();
+    if rails.is_empty() || anchored_tenant(legacy) {
+        return Ok(report);
+    }
+    let Some((source_tenant, source_account)) = tx
+        .query_opt(
+            "SELECT tenant_id, account_id FROM trace_legacy_payout_source_account($1)",
+            &[&legacy],
+        )
+        .await?
+        .map(|row| (row.get::<_, String>(0), row.get::<_, Uuid>(1)))
+    else {
+        return Ok(report);
+    };
+    let mut rails: Vec<&(trace_commons_gate_api::RailId, CarryPrograms)> = rails.iter().collect();
+    rails.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+    for (rail, _) in &rails {
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(
+                 'payout-link-confirm-v1:' || $1 || ':' || $2::UUID::TEXT || ':' || $3, 0))",
+            &[&source_tenant, &source_account, &rail.as_str()],
+        )
+        .await?;
+    }
+    tx.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || $1, 0))",
+        &[&legacy],
+    )
+    .await?;
+    // Under the lock: the tenant link still live, the source still open,
+    // and its live link on each rail.
+    set_tenant(tx, &source_tenant).await?;
+    let read = async {
+        let tenant_link: Option<Uuid> = tx
+            .query_opt(
+                "SELECT link_id FROM trace_legacy_invite_links
+                  WHERE tenant_id = $1 AND account_id = $2 AND legacy_tenant_id = $3
+                    AND revoked_at IS NULL",
+                &[&source_tenant, &source_account, &legacy],
+            )
+            .await?
+            .map(|row| row.get(0));
+        let Some(tenant_link) = tenant_link else {
+            return Ok::<_, DatabaseError>(None);
+        };
+        if !source_open(tx, &source_tenant, source_account).await? {
+            return Ok(None);
+        }
+        let mut sources = Vec::with_capacity(rails.len());
+        for (rail, _) in &rails {
+            sources.push(source_link(tx, &source_tenant, source_account, rail.as_str()).await?);
+        }
+        Ok(Some((tenant_link, sources)))
+    }
+    .await;
+    set_tenant(tx, legacy).await?;
+    let Some((tenant_link, sources)) = read? else {
+        return Ok(report);
+    };
+    let legacy_hash = legacy_link_hash(tenant_link);
+    for ((rail, programs), source) in rails.iter().zip(sources.iter()) {
+        carry_tenant(
+            tx,
+            legacy,
+            &legacy_hash,
+            source.as_ref(),
+            rail.as_str(),
+            programs,
+            Some(account),
+            &mut report,
+        )
+        .await?;
+    }
+    if report.carried + report.released > 0 {
+        set_tenant(tx, &source_tenant).await?;
+        let audited = audit_carry(tx, &source_tenant, actor_ref_hash, &report).await;
+        set_tenant(tx, legacy).await?;
+        audited?;
     }
     Ok(report)
 }
@@ -209,6 +353,7 @@ async fn carry_tenant(
     source: Option<&Source>,
     rail: &str,
     programs: &CarryPrograms,
+    only: Option<Uuid>,
     report: &mut LegacyCarryReport,
 ) -> Result<(), DatabaseError> {
     // Re-checked on every call: a tenant can be marked pooled after it was
@@ -223,21 +368,28 @@ async fn carry_tenant(
     let source_hash = source.map(|source| link_id_hash(source.link_id));
     // Owner, 2026-11-03 (#1879): carry only to accounts a signed device
     // proved (the linking device or a V91-attested one). Any other account
-    // waits, and a live carry on one that no longer qualifies is released.
-    let proven: std::collections::HashSet<Uuid> = tx
-        .query(
+    // waits, and a live carry on one that no longer qualifies is released
+    // here; the send-time standing holds it until then. Asked only when
+    // something could be carried: with no source or a pooled tenant every
+    // carry is released whatever the answer.
+    let proven: std::collections::HashSet<Uuid> = if source.is_some() && !pooled {
+        tx.query(
             "SELECT * FROM trace_legacy_payout_proven_accounts($1)",
             &[&legacy],
         )
         .await?
         .iter()
         .map(|row| row.get(0))
-        .collect();
+        .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     let accounts = tx
         .query(
             "SELECT account_id, closed_at IS NOT NULL FROM trace_accounts
-              WHERE tenant_id = $1 ORDER BY account_id",
-            &[&legacy],
+              WHERE tenant_id = $1 AND ($2::UUID IS NULL OR account_id = $2)
+              ORDER BY account_id",
+            &[&legacy, &only],
         )
         .await?;
     for row in accounts {

@@ -1480,8 +1480,9 @@ async fn deleting_a_linked_legacy_tenant_with_live_carries_succeeds() {
 }
 
 /// Review of #1879: the send-time check is still the backstop for each
-/// event V148 now releases from. With an event's trigger disabled, the
-/// carry stays live, and the standing holds it.
+/// event V148 releases from. Each event runs with its trigger disabled
+/// inside one transaction that is rolled back, so no other test ever sees
+/// the trigger off; the check, asked in that transaction, holds the carry.
 #[tokio::test]
 async fn the_send_time_check_backs_up_each_release_event() {
     let Some(fx) = fixture().await else { return };
@@ -1500,48 +1501,65 @@ async fn the_send_time_check_backs_up_each_release_event() {
         ),
     ] {
         let (near, account, legacy, active, _) = fx.carried_pair("org-b1").await;
-        fx.admin
-            .batch_execute(&format!("ALTER TABLE {table} DISABLE TRIGGER {trigger}"))
+        let mut client = fx
+            .owner
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap();
+        let tx = client.transaction().await.unwrap();
+        tx.batch_execute(&format!("ALTER TABLE {table} DISABLE TRIGGER {trigger}"))
             .await
             .unwrap();
         match table {
-            "trace_legacy_invite_pooled_tenants" => {
-                fx.exec(
+            "trace_legacy_invite_pooled_tenants" => tx
+                .execute(
                     "INSERT INTO trace_legacy_invite_pooled_tenants (tenant_id, reason_label)
                      VALUES ($1, 'shared event invite')",
                     &[&legacy],
                 )
                 .await
-            }
-            "trace_accounts" => {
-                fx.exec(
+                .unwrap(),
+            "trace_accounts" => tx
+                .execute(
                     "UPDATE trace_accounts SET closed_at = now()
                       WHERE tenant_id = $1 AND account_id = $2",
                     &[&near, &account],
                 )
                 .await
-            }
-            _ => {
-                fx.exec(
+                .unwrap(),
+            _ => tx
+                .execute(
                     "DELETE FROM trace_legacy_invite_links WHERE legacy_tenant_id = $1",
                     &[&legacy],
                 )
                 .await
-            }
-        }
-        fx.admin
-            .batch_execute(&format!("ALTER TABLE {table} ENABLE TRIGGER {trigger}"))
+                .unwrap(),
+        };
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&legacy],
+        )
+        .await
+        .unwrap();
+        let row = tx
+            .query_one(
+                "SELECT (SELECT count(*) FROM trace_legacy_payout_carries
+                          WHERE tenant_id = $1 AND account_id = $2 AND released_at IS NULL),
+                        trace_legacy_payout_carry_invalid($1, $2)",
+                &[&legacy, &active],
+            )
             .await
             .unwrap();
         assert_eq!(
-            fx.live_carries(&legacy, active).await,
+            row.get::<_, i64>(0),
             1,
-            "{trigger} disabled"
+            "{trigger} disabled: the carry stays live"
         );
-        assert!(
-            fx.carry_invalid(&legacy, active).await,
-            "{trigger}: the backstop holds"
-        );
+        assert!(row.get::<_, bool>(1), "{trigger}: the backstop holds");
+        tx.rollback().await.unwrap();
+        // Rolled back: the trigger is on again for everyone.
+        assert_eq!(fx.live_carries(&legacy, active).await, 1);
     }
 }
 
@@ -1851,4 +1869,138 @@ async fn an_account_no_signed_device_proved_is_not_carried() {
         1,
         "the proven ones move to the new link"
     );
+}
+
+/// Review of #1879: a carry failure at account opening never fails the
+/// sign-in. The carry runs in a savepoint; here the rail's program for the
+/// carried link breaks the link's CHECK, so the carry fails, nothing is
+/// carried, and the account is still opened.
+#[tokio::test]
+async fn a_failed_carry_never_fails_the_account_opening() {
+    let Some(fx) = fixture().await else { return };
+    let (_, _, legacy, _, _) = fx.carried_pair("org-f1").await;
+    let principal = fx.proven_principal(&legacy).await;
+    let broken = CarryPrograms(Arc::new(|_| "not a valid program!".to_owned()));
+    let opened = fx
+        .payout_runtime
+        .create_or_reuse_account_carrying(&legacy, &principal, &[(rail(), broken)], ACTOR)
+        .await
+        .expect("the account opens even though its carry failed");
+    assert_eq!(fx.live_carries(&legacy, opened).await, 0);
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_account_principals
+              WHERE tenant_id = $1 AND account_id = $2",
+            &[&legacy, &opened],
+        )
+        .await,
+        1,
+        "the account and its principal committed"
+    );
+}
+
+/// Review of #1879: opening an account carries that account alone. Another
+/// proven account in the tenant that is not yet carried stays as it is until
+/// its own event, and reusing an existing account is not an event.
+#[tokio::test]
+async fn opening_an_account_carries_only_that_account() {
+    let Some(fx) = fixture().await else { return };
+    let (_, _, legacy, _, _) = fx.carried_pair("org-s1").await;
+    let waiting_its_turn = fx.add_account(&legacy, false).await;
+    let principal = fx.proven_principal(&legacy).await;
+    let opened = fx.open_account(&legacy, &principal).await;
+    assert_eq!(fx.live_carries(&legacy, opened).await, 1);
+    assert_eq!(fx.live_carries(&legacy, waiting_its_turn).await, 0);
+}
+
+/// Review of #1879: proof is checked at send time too. A carried, active
+/// account whose proving principal is unlinked, or whose proving device is
+/// revoked, is held by the standing at once, and the next carry event
+/// releases it (its active link gets an unlink request). This is also what
+/// the first event after deploy does to any V146-era carry on an account no
+/// signed device proved.
+#[tokio::test]
+async fn a_carried_account_that_stops_being_proven_is_held_then_released() {
+    let Some(fx) = fixture().await else { return };
+    // Its principal unlinked.
+    let (near, account, legacy, _, proven) = fx.carried_pair("org-r1").await;
+    fx.activate(&legacy, proven).await;
+    assert!(!fx.carry_invalid(&legacy, proven).await);
+    fx.exec(
+        "UPDATE trace_account_principals SET unlinked_at = now()
+          WHERE tenant_id = $1 AND account_id = $2",
+        &[&legacy, &proven],
+    )
+    .await;
+    assert!(fx.carry_invalid(&legacy, proven).await, "held at send time");
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-r2")
+        .await;
+    assert_eq!(
+        fx.live_carries(&legacy, proven).await,
+        0,
+        "released at the next event"
+    );
+    let unlinked: bool = fx
+        .admin
+        .query_one(
+            "SELECT bool_and(unlink_requested_at IS NOT NULL) FROM trace_payout_links
+              WHERE tenant_id = $1 AND account_id = $2 AND state = 'active'",
+            &[&legacy, &proven],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(unlinked, "the active carried link is unlinked");
+
+    // The proving device revoked: every account it proved stops qualifying.
+    let (_, _, legacy, claimed, proven) = fx.carried_pair("org-r3").await;
+    fx.exec(
+        "UPDATE device_keys SET revoked_at = now() WHERE tenant_id = $1",
+        &[&legacy],
+    )
+    .await;
+    assert!(fx.carry_invalid(&legacy, claimed).await);
+    assert!(fx.carry_invalid(&legacy, proven).await);
+}
+
+/// Review of #1879: the decision-5 derivation lives in one SQL function,
+/// shared by the claim and the proof set, so the two cannot drift. No other
+/// function in the database spells the signed-claim formula.
+#[tokio::test]
+async fn only_one_function_derives_signed_upload_principals() {
+    let Some(fx) = fixture().await else { return };
+    let spellers: Vec<String> = fx
+        .admin
+        .query(
+            "SELECT p.proname::TEXT FROM pg_proc p
+               JOIN pg_namespace n ON n.oid = p.pronamespace
+              WHERE n.nspname = 'public' AND p.prosrc LIKE '%12:signed_claim:%'
+              ORDER BY 1",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(
+        spellers,
+        vec!["trace_legacy_device_upload_principals".to_owned()]
+    );
+    for caller in [
+        "trace_legacy_link_claim_device_principals",
+        "trace_legacy_payout_proven_accounts",
+    ] {
+        let calls: bool = fx
+            .admin
+            .query_one(
+                "SELECT bool_or(prosrc LIKE '%trace_legacy_device_upload_principals(%')
+                   FROM pg_proc WHERE proname = $1",
+                &[&caller],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(calls, "{caller} calls the shared derivation");
+    }
 }

@@ -1451,7 +1451,7 @@ async fn a_confirmed_link_reaches_a_linked_legacy_account_and_opens_to_the_same_
                 &near.tenant,
                 &near.id,
                 &legacy.tenant,
-                &hex("device"),
+                &hex(&format!("device:{}", legacy.tenant)),
                 &hex("invite"),
                 &hex("nonce")[7..].to_string(),
             ],
@@ -1460,7 +1460,17 @@ async fn a_confirmed_link_reaches_a_linked_legacy_account_and_opens_to_the_same_
         .unwrap();
     // The legacy account holds the app-form upload principal of the linking
     // device, so the carry treats it as proven (owner, 2026-11-03).
-    let device = hex("device");
+    // The linking device, live in the legacy tenant: only a live device
+    // proves accounts (V148).
+    let device = hex(&format!("device:{}", legacy.tenant));
+    admin
+        .execute(
+            "INSERT INTO device_keys (device_key_id, tenant_id, public_key, invite_subject_hash)
+             VALUES ($1, $2, 'test', $1)",
+            &[&device, &legacy.tenant],
+        )
+        .await
+        .unwrap();
     let principal = trace_commons_server::account_trust::device_upload_principal_refs(
         &legacy.tenant,
         &device,

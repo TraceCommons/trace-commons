@@ -2453,6 +2453,16 @@ async fn ledger_event(
     .await;
 }
 
+/// The device that signed `legacy`'s tenant link in these fixtures: one per
+/// tenant, since device key ids are unique across the database.
+fn linking_device(legacy: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "sha256:{:x}",
+        Sha256::digest(format!("device:{legacy}").as_bytes())
+    )
+}
+
 /// A NEAR AI account with a recorded login and an active payout link, and
 /// a legacy tenant linked to it through V81 with no account yet.
 async fn legacy_pair(
@@ -2508,6 +2518,16 @@ async fn legacy_pair(
         &[&legacy],
     )
     .await;
+    // The linking device, live in the legacy tenant: only a live device
+    // proves accounts (V148).
+    owner_exec(
+        fixture,
+        &legacy,
+        "INSERT INTO device_keys (device_key_id, tenant_id, public_key, invite_subject_hash)
+         VALUES ($1, $2, 'test', $1)",
+        &[&linking_device(&legacy), &legacy],
+    )
+    .await;
     owner_exec(
         fixture,
         &near,
@@ -2521,7 +2541,7 @@ async fn legacy_pair(
             &near,
             &source,
             &legacy,
-            &format!("sha256:{}", "d".repeat(64)),
+            &linking_device(&legacy),
             &"e".repeat(64),
         ],
     )
@@ -2546,7 +2566,7 @@ async fn open_legacy_account(fixture: &Fixture, legacy: &str) -> Uuid {
 /// proven (owner, 2026-11-03).
 async fn open_proven_legacy_account(fixture: &Fixture, legacy: &str) -> Uuid {
     let account = open_legacy_account(fixture, legacy).await;
-    let device = format!("sha256:{}", "d".repeat(64));
+    let device = linking_device(legacy);
     let actor = trace_commons_server::account_trust::device_claim_actor(
         legacy,
         &device,

@@ -21585,7 +21585,10 @@ async fn mint_login_link_handler(
                     tenant_id,
                     principal_ref,
                     &carry_rails,
-                    &sha256_prefixed(&format!("legacy-account-open-v1:{principal_ref}")),
+                    // A random actor per call: nothing derived from the
+                    // legacy principal reaches the NEAR AI tenant's audit row
+                    // (review of #1879).
+                    &sha256_prefixed(&format!("legacy-carry-actor-v1:{}", Uuid::new_v4())),
                 )
                 .await
         }
