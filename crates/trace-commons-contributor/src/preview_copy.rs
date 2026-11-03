@@ -1521,7 +1521,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         history_actions: MonitorHistoryActionsCopy {
             request_refresh: "Refresh",
             requesting: "Requesting\u{2026}",
-            refresh_requested: "Asked the server for the latest results. Changes show here when they arrive.",
+            refresh_requested: "Asked for the latest results. Changes show here when they arrive.",
             refresh_failed: "Could not ask for updates. Nothing changed; try again.",
             checking_account: "Checking account session\u{2026}",
             sign_in_to_withdraw: "Sign in",
