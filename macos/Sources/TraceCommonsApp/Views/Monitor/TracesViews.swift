@@ -185,7 +185,7 @@ struct TracesTreeView: View, Equatable {
                         // so, with its way out: the idle filter's Clear, or
                         // Show ignored folders when it hides every folder.
                         if Self.keepsControlsWhenEmpty(idleOnly: store.idleOnly, hiddenIgnored: store.tree.hiddenIgnored) {
-                            TracesListControls(store: store, openHistory: openHistory)
+                            TracesListControls(store: store, openHistory: openHistory, automatic: automaticToggle)
                         }
                         if store.phase == .loaded { emptyTree }
                     }
@@ -193,13 +193,9 @@ struct TracesTreeView: View, Equatable {
                 .scrollIndicators(.never)
             } else {
                 VStack(spacing: 0) {
-                    TracesListControls(store: store, openHistory: openHistory)
+                    TracesListControls(store: store, openHistory: openHistory, automatic: automaticToggle)
                         .padding(.bottom, GlassTokens.Space.s2)
-                    if let automatic = automaticSwitch {
-                        SharingChoiceCard(asSwitch: automatic)
-                            .padding(.bottom, GlassTokens.Space.s2)
-                    }
-                    if automaticSwitch != nil, let tree = store.words?.tree,
+                    if automaticToggle != nil, let tree = store.words?.tree,
                         let folders = tree.columnFolders, let submit = tree.columnSubmit, let auto = tree.columnAutomatic {
                         TracesColumnTitles(folders: folders, submit: submit, automatic: auto)
                     }
@@ -379,15 +375,16 @@ struct TracesTreeView: View, Equatable {
         }
     }
 
-    /// Automatic for every folder, over the tree (owner, 2026-10-30): the
-    /// Settings choice as one switch, with its count. Nil without the
-    /// core's words.
-    private var automaticSwitch: SharingChoiceCard.Switch? {
+    /// Automatic for every folder (owner, 2026-10-30): the Settings choice
+    /// as one toggle, an eye in the toolbar left of History (owner,
+    /// 2026-11-02), with its count in the tooltip. Nil without the core's
+    /// words.
+    private var automaticToggle: SharingChoiceCard.ToolbarToggle? {
         guard let tree = store.words?.tree, let name = tree.automaticAll, let line = tree.automaticCount else {
             return nil
         }
         let store = store
-        return SharingChoiceCard.Switch(
+        return SharingChoiceCard.ToolbarToggle(
             accessibleName: name,
             line: SharingChoice.automaticCount(store.tree.folders, words: line),
             saved: { await store.load() })

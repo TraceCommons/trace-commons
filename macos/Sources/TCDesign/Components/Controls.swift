@@ -278,10 +278,17 @@ private struct GlassIconView: View {
 /// A round glass button with an icon. Icon-only, so `label` names it.
 /// Under the pointer the control hover replaces its fill (#1146
 /// `.tc-btn--round:hover`).
+///
+/// Given `isOn`, it is a toggle (owner, 2026-11-02: the Traces toolbar's
+/// Automatic eye): on, it sits on the selected fill with the selected ink;
+/// off, it is the plain button. It says it is a toggle, and which way, to
+/// assistive tech. `help` is its tooltip, the label when nil.
 public struct GlassRoundButton: View {
     private let label: String
     private let icon: GlassIcon
     private let small: Bool
+    private let isOn: Bool?
+    private let help: String?
     /// A nudge, at the large size, that puts a lopsided glyph's weight on
     /// the circle's centre rather than its bounding box's (scaled down for
     /// the small size).
@@ -289,20 +296,17 @@ public struct GlassRoundButton: View {
     private let symbolRotation: Angle
     private let action: () -> Void
 
-    public init(_ label: String, systemImage: String, small: Bool = false, action: @escaping () -> Void) {
-        self.init(label, icon: .symbol(systemImage), small: small, action: action)
-    }
-
-    public init(_ label: String, icon: GlassIcon, small: Bool = false, action: @escaping () -> Void) {
-        self.init(label, icon: icon, small: small, opticalOffset: .zero, action: action)
-    }
-
-    init(_ label: String, icon: GlassIcon, small: Bool, opticalOffset: CGSize, symbolRotation: Angle = .zero, action: @escaping () -> Void) {
+    init(
+        _ label: String, icon: GlassIcon, small: Bool, opticalOffset: CGSize, symbolRotation: Angle = .zero,
+        isOn: Bool? = nil, help: String? = nil, action: @escaping () -> Void
+    ) {
         self.label = label
         self.icon = icon
         self.small = small
         self.opticalOffset = opticalOffset
         self.symbolRotation = symbolRotation
+        self.isOn = isOn
+        self.help = help
         self.action = action
     }
 
@@ -316,13 +320,50 @@ public struct GlassRoundButton: View {
             GlassIconView(icon: icon, symbolSize: Self.symbolSize(small: small), weight: .medium)
                 .rotationEffect(symbolRotation)
                 .offset(x: opticalOffset.width * scale, y: opticalOffset.height * scale)
-                .foregroundStyle(GlassColor.textPrimary)
+                .foregroundStyle(Self.onGlyph(isOn: isOn)?.color ?? GlassColor.textPrimary)
                 .frame(width: side, height: side)
+                .background(Circle().fill(Self.fill(isOn: isOn)?.color ?? .clear))
                 .glassSurface(.control, radius: side / 2, hover: GlassTokens.Color.controlHover)
         }
         .buttonStyle(GlassPressStyle())
         .accessibilityLabel(label)
-        .help(label)
+        .accessibilityAddTraits(Self.traits(isOn: isOn))
+        .help(help ?? label)
+    }
+}
+
+/// A round button's public initializers and its toggle state (`isOn`),
+/// kept apart so the button's own body reads first.
+extension GlassRoundButton {
+    public init(
+        _ label: String, systemImage: String, small: Bool = false, isOn: Bool? = nil, help: String? = nil,
+        action: @escaping () -> Void
+    ) {
+        self.init(label, icon: .symbol(systemImage), small: small, isOn: isOn, help: help, action: action)
+    }
+
+    public init(
+        _ label: String, icon: GlassIcon, small: Bool = false, isOn: Bool? = nil, help: String? = nil,
+        action: @escaping () -> Void
+    ) {
+        self.init(label, icon: icon, small: small, opticalOffset: .zero, isOn: isOn, help: help, action: action)
+    }
+
+    /// The fill under the glyph: the selected fill while a toggle is on,
+    /// none otherwise (the control surface shows).
+    static func fill(isOn: Bool?) -> GlassRGBA? {
+        isOn == true ? GlassTokens.Color.controlSelected : nil
+    }
+
+    /// The glyph's ink on the selected fill; nil keeps the plain ink.
+    static func onGlyph(isOn: Bool?) -> GlassRGBA? {
+        isOn == true ? GlassTokens.Color.textOnSelected : nil
+    }
+
+    /// What assistive tech is told: a toggle, selected while on.
+    static func traits(isOn: Bool?) -> AccessibilityTraits {
+        guard let isOn else { return [] }
+        return isOn ? [.isToggle, .isSelected] : .isToggle
     }
 }
 
