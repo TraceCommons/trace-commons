@@ -4,6 +4,17 @@ use trace_commons_contributor::{
     daemon::ipc::{DaemonShared, Request, handle_request},
 };
 
+/// `name` as libtest knows it in this test binary. Every tests/*.rs file is a
+/// module of one binary (tests/it.rs), so its tests are named
+/// `<module>::<name>`, and `--exact` with the bare name runs nothing and
+/// still exits 0.
+fn libtest_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_owned(),
+    }
+}
+
 // Each IPC launch test runs in a child with version-only executable fixtures on PATH.
 // This exercises discovery without requiring installed tools or changing the
 // parent test process environment while other tests are running.
@@ -36,7 +47,7 @@ fn native_fixture_child(test: &str) -> bool {
         bin
     });
     let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test, "--nocapture"])
+        .args(["--exact", &libtest_name(test), "--nocapture"])
         .env("TRACE_MANAGED_TEST_CHILD", test)
         .env(
             "TRACE_MANAGED_FIXTURE_BAD_VERSION",

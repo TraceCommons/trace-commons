@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+# The integration tests are listed as [[test]] targets at the end of this file.
+autotests = false
 
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
@@ -32,3 +34,9 @@ test-keep-panic-messages = []
 [dev-dependencies]
 trace-commons-contributor-ffi = { path = ".", features = ["test-keep-panic-messages"] }
 tempfile = "3"
+
+# Integration tests. `it` holds every tests/*.rs file as a module, so the
+# dependency graph links once rather than once per file; see tests/it.rs.
+[[test]]
+name = "it"
+path = "tests/it.rs"

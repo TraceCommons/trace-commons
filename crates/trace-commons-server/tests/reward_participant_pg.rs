@@ -20,7 +20,7 @@ use trace_commons_server::{
 };
 use uuid::Uuid;
 
-use crate::fixture::{RewardPgFixture, cli, digest, role_url};
+use self::fixture::{RewardPgFixture, cli, digest, role_url};
 
 struct ParticipantFixture {
     ledger: RewardPgFixture,

@@ -76,11 +76,24 @@ cargo clippy -p trace-commons-server -p trace-commons-ingest --all-targets -- \
   -A clippy::type_complexity -A clippy::collapsible_if \
   -A clippy::manual_option_as_slice -A clippy::useless_vec \
   -A clippy::redundant_pattern_matching
-cargo test -p trace-commons-server --test trace_corpus_storage_contract
-cargo test -p trace-commons-server --test trace_corpus_pg_store   # requires PostgreSQL
+cargo test -p trace-commons-server --test it -- trace_corpus_storage_contract::
+cargo test -p trace-commons-server --test it -- trace_corpus_pg_store::   # requires PostgreSQL
 RUSTFLAGS="-D warnings" cargo check -p trace-commons-ingest --bins
 RUSTFLAGS="-D warnings" cargo test -p trace-commons-ingest --no-run
 ```
+
+The server, contributor, FFI and protocol crates build their integration
+tests as one binary each, `tests/it.rs`, with every `tests/<name>.rs` as a
+module (`autotests = false`), so the dependency graph links once per crate
+instead of once per file. Run one file's tests with `--test it --
+<name>::`. A new `tests/*.rs` file needs a `mod <name>;` line in
+`tests/it.rs`; `wiring::every_test_file_is_built` fails until it has one.
+A file that cannot share a process with the others (process-wide env vars,
+a global tracing subscriber, signals to its own pid) gets its own `[[test]]`
+in the crate's Cargo.toml with the reason beside it. Workspace crates build
+with `debug = "line-tables-only"` (root Cargo.toml): backtraces keep
+file:line, but a debugger has no variables; set `debug = true` locally to
+step through.
 
 For client work, select the client packages rather than the whole workspace:
 

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // INTEGRATION: pins the reward table privilege matrix against the deployed catalog.
 
-use crate::fixture::RewardPgFixture;
+use super::fixture::RewardPgFixture;
 
 // The six tables V69 creates. Every other reward table is discovered from the
 // catalog below, so a later migration cannot add one that nothing checks.

@@ -153,7 +153,7 @@ before you add them.
 
 - New `.rs` files in the four AGPL crates carry the header.
 - No permissive crate gained a dependency on an AGPL crate.
-- `cargo test -p trace-commons-server --test license_boundary` passes, without
+- `cargo test -p trace-commons-server --test it -- license_boundary::` passes, without
   editing the test's expected sets.
 - `cargo deny check licenses` passes under all four invocations above, if you
   touched dependencies. CI runs the same check, plus advisories and sources,

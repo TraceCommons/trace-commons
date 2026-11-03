@@ -3,7 +3,7 @@
 //! for key-shaped strings. Counts and structural shapes only; never prints
 //! secret values.
 //!
-//! Run: `cargo test --test local_redaction_audit -- --ignored --nocapture`
+//! Run: `cargo test --test it -- local_redaction_audit:: --ignored --nocapture`
 //!
 //! `#[ignore]`d because it reads whatever sessions happen to exist under
 //! `~/.claude/projects`, so it is machine-dependent and cannot gate CI as

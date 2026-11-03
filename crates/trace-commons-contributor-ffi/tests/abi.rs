@@ -808,6 +808,17 @@ fn concurrent_tc_call_and_tc_daemon_stop_do_not_crash() {
 
 // --- Allocation-registry double-free / cross-type-free detection -------
 
+/// `name` as libtest knows it in this test binary. Every tests/*.rs file is a
+/// module of one binary (tests/it.rs), so its tests are named
+/// `<module>::<name>`, and `--exact` with the bare name runs nothing and
+/// still exits 0.
+fn libtest_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_owned(),
+    }
+}
+
 /// A freed address is rejected only until another allocation of the same kind
 /// reuses it (see the public header's registry caveat). Run misuse probes alone
 /// in a child process, so parallel tests cannot turn their stale pointer into a
@@ -821,7 +832,7 @@ fn isolated_stale_pointer_probe(test_name: &str, probe: impl FnOnce()) {
         return;
     }
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test_name, "--nocapture"])
+        .args(["--exact", &libtest_name(test_name), "--nocapture"])
         .env(CHILD, test_name)
         .output()
         .expect("spawn isolated stale-pointer probe");

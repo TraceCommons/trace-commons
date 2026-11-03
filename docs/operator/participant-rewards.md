@@ -79,7 +79,7 @@ Capacity and awarded totals are calculated from the ledger on each request. Thei
 Use separate disposable loopback databases named `reward_test_*`. The selected integration tests fail when their required URL is missing; CI explicitly runs the ignored tests and checks that reservation rows were created.
 
 ```sh
-cargo test -p trace-commons-server --test reward_participant_pg -- --ignored --test-threads=1
+cargo test -p trace-commons-server --test it -- reward_participant_pg:: --ignored --test-threads=1
 cargo test -p trace-commons-ingest --lib \
   reward_participant_http_contract -- --ignored --test-threads=1
 ```

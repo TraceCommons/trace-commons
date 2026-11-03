@@ -292,21 +292,21 @@ jobs:
       # that variable job-wide for `migration_atomicity_pg` silently repoints
       # another suite at the wrong database.
       - name: account_onboarding_pg
-        run: cargo test -p trace-commons-server --test account_onboarding_pg
+        run: cargo test -p trace-commons-server --test it -- account_onboarding_pg::
         env:
           TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_onboarding
       - name: account_trust_pg
-        run: cargo test -p trace-commons-server --test account_trust_pg
+        run: cargo test -p trace-commons-server --test it -- account_trust_pg::
         env:
           TRACE_COMMONS_ACCOUNT_TRUST_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust
       # Earned account trust (shadow): fact recording, the worker's
       # least-privilege roles and the one cross-tenant enumeration seam.
       - name: account_trust_growth_pg
-        run: cargo test -p trace-commons-server --test account_trust_growth_pg
+        run: cargo test -p trace-commons-server --test it -- account_trust_growth_pg::
         env:
           TRACE_COMMONS_ACCOUNT_TRUST_GROWTH_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_growth
       - name: bounded upload-trust frontier query plans
-        run: cargo test -p trace-commons-server --test upload_trust_frontier_plan_pg
+        run: cargo test -p trace-commons-server --test it -- upload_trust_frontier_plan_pg::
         env:
           TRACE_COMMONS_UPLOAD_TRUST_PLAN_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_upload_trust_plan_ci
       - name: deployed upload-trust migration upgrade
@@ -321,7 +321,7 @@ jobs:
       # features, the account read's filters, the ingest runtime's grants,
       # and the dry-run report over the earned-trust enumeration seam.
       - name: starter_plausibility_pg
-        run: cargo test -p trace-commons-server --test starter_plausibility_pg
+        run: cargo test -p trace-commons-server --test it -- starter_plausibility_pg::
         env:
           TRACE_COMMONS_STARTER_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_starter
       # Earned account trust, live (V126): the attested_submission fact, the
@@ -330,7 +330,7 @@ jobs:
       # when stale or invalidated. Turns external growth on, which nothing
       # turns off, so it has a database of its own.
       - name: account_trust_live_pg
-        run: cargo test -p trace-commons-server --test account_trust_live_pg
+        run: cargo test -p trace-commons-server --test it -- account_trust_live_pg::
         env:
           TRACE_COMMONS_ACCOUNT_TRUST_LIVE_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_live
       - name: account invite HTTP session and authority guards
@@ -341,18 +341,18 @@ jobs:
       # holding only trace_account_invite_runtime, and readiness under
       # coexistence. One sequential test, because readiness is fleet-wide.
       - name: legacy_invite_link_pg
-        run: cargo test -p trace-commons-server --test legacy_invite_link_pg
+        run: cargo test -p trace-commons-server --test it -- legacy_invite_link_pg::
         env:
           TRACE_COMMONS_LEGACY_INVITE_LINK_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_legacy_invite_link
       # A device reading back its own invite subject hash from the issuer,
       # onboarded through the real /v1/onboard path, with the named refusals
       # against real rows. Feeds the legacy invite link statement.
       - name: device_invite_subject_pg
-        run: cargo test -p trace-commons-server --test device_invite_subject_pg
+        run: cargo test -p trace-commons-server --test it -- device_invite_subject_pg::
         env:
           TRACE_COMMONS_DEVICE_INVITE_SUBJECT_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_device_invite_subject
       - name: inference_connection_pg
-        run: cargo test -p trace-commons-server --test inference_connection_pg
+        run: cargo test -p trace-commons-server --test it -- inference_connection_pg::
         env:
           TRACE_COMMONS_INFERENCE_CONNECTION_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_inference_connection
       # V142: the referral tables. Forced RLS, one referrer per account, one
@@ -360,7 +360,7 @@ jobs:
       # narrow cross-tenant read, append-only bonus and audit rows, and the
       # referral payout stream, each refusal checked as trace_ingest_runtime.
       - name: referral_rewards_pg
-        run: cargo test --locked -p trace-commons-server --test referral_rewards_pg -- --test-threads=1
+        run: cargo test --locked -p trace-commons-server --test it -- referral_rewards_pg:: --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_rewards
       # The referral code store: five live codes per account, the code index
@@ -369,7 +369,7 @@ jobs:
       # refusal rate limit and the two-tenant apply, as a real LOGIN role
       # with the resolver role granted INHERIT FALSE.
       - name: referral_codes_pg
-        run: cargo test --locked -p trace-commons-server --test referral_codes_pg -- --test-threads=1
+        run: cargo test --locked -p trace-commons-server --test it -- referral_codes_pg:: --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_codes
       # The referral bonus pass: a tenth of each referee credit written in the
@@ -378,7 +378,7 @@ jobs:
       # dry_run trip, and voids taking back only unsent bonus, as
       # trace_ingest_runtime.
       - name: referral_bonus_pg
-        run: cargo test --locked -p trace-commons-server --test referral_bonus_pg -- --test-threads=1
+        run: cargo test --locked -p trace-commons-server --test it -- referral_bonus_pg:: --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_bonus
       # The payout rail tables (V132): forced RLS, the one-link-per-state and
@@ -386,7 +386,7 @@ jobs:
       # enumerator and config-writer grants, each exercised as a real LOGIN
       # role the suite provisions, never this job's superuser.
       - name: payout_rails_pg
-        run: cargo test -p trace-commons-server --test payout_rails_pg -- --test-threads=1
+        run: cargo test -p trace-commons-server --test it -- payout_rails_pg:: --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_payout_rails
       # The per-rail payout pass (payout spec sections 3, 4 and 7): exactly
@@ -395,7 +395,7 @@ jobs:
       # row, closing by reads, relinks and netting. Against a loopback mock of
       # cloud-api #1271 and the keyed test rail, as a real LOGIN role.
       - name: payout_pass_pg
-        run: cargo test -p trace-commons-server --test payout_pass_pg -- --test-threads=1
+        run: cargo test -p trace-commons-server --test it -- payout_pass_pg:: --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_payout_pass
       # The referral payout stream (V142 lines and links): the second
@@ -404,7 +404,7 @@ jobs:
       # and the referral mode. Bonus rows seeded by the migrator; the pass
       # runs as a real LOGIN role against the #1271 loopback mock.
       - name: referral_stream_pg
-        run: cargo test --locked -p trace-commons-server --test referral_stream_pg -- --test-threads=1
+        run: cargo test --locked -p trace-commons-server --test it -- referral_stream_pg:: --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_stream
       - name: inference connection HTTP session selection
@@ -412,15 +412,15 @@ jobs:
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_inference_connection_route
       - name: migration_atomicity_pg
-        run: cargo test -p trace-commons-server --test migration_atomicity_pg
+        run: cargo test -p trace-commons-server --test it -- migration_atomicity_pg::
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_migration
       - name: trace_invite_registry_pg
-        run: cargo test -p trace-commons-server --test trace_invite_registry_pg
+        run: cargo test -p trace-commons-server --test it -- trace_invite_registry_pg::
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_invite
       - name: account_merge_pg
-        run: cargo test -p trace-commons-server --test account_merge_pg
+        run: cargo test -p trace-commons-server --test it -- account_merge_pg::
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_merge
       # This suite used to have a skip INSIDE its tests, not just around them.
@@ -439,7 +439,7 @@ jobs:
       # The URL still names `trace` on purpose: the migrations need an owner,
       # and it is the assertions, not the suite, that change roles.
       - name: trace_corpus_pg_rls
-        run: cargo test -p trace-commons-server --test trace_corpus_pg_rls
+        run: cargo test -p trace-commons-server --test it -- trace_corpus_pg_rls::
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_rls
       # Nothing above proves the suite took that path. The role is created the
@@ -465,7 +465,7 @@ jobs:
       - name: synthetic token qualification matrix
         run: python3 -m unittest discover -s scripts/token-distributions
       - name: token bundle durability and withdrawal
-        run: cargo test --locked -p trace-commons-server --test token_bundle_pg
+        run: cargo test --locked -p trace-commons-server --test it -- token_bundle_pg::
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_tokens
       - name: token bundle HTTP lost-response recovery
@@ -474,7 +474,7 @@ jobs:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_tokens
           TRACE_COMMONS_BUNDLE_SERVER_ID: journey-server
       - name: trace_corpus_pg_store
-        run: cargo test -p trace-commons-server --test trace_corpus_pg_store
+        run: cargo test -p trace-commons-server --test it -- trace_corpus_pg_store::
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_store
       # V76 witness evidence: forced tenant RLS, the runtime role's column
@@ -482,17 +482,17 @@ jobs:
       # remediation replacing a submission's evidence. Self-skips without a
       # URL, so the no-activity guard below covers it.
       - name: witness_evidence_pg
-        run: cargo test -p trace-commons-server --test witness_evidence_pg
+        run: cargo test -p trace-commons-server --test it -- witness_evidence_pg::
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_witness_evidence
       # Source-session withdrawal: account-scoped tombstones, merge carry-over,
       # terminal-status no-ops for retention, and a least-privilege claim role.
       - name: trace_session_withdrawal_pg
-        run: cargo test -p trace-commons-server --test trace_session_withdrawal_pg
+        run: cargo test -p trace-commons-server --test it -- trace_session_withdrawal_pg::
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_source_sessions
       - name: upload_principal_ownership_pg
-        run: cargo test -p trace-commons-server --test upload_principal_ownership_pg
+        run: cargo test -p trace-commons-server --test it -- upload_principal_ownership_pg::
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_upload_ownership
       - name: credit_hold_ownership_pg
@@ -504,14 +504,14 @@ jobs:
       # the reader SET ROLEs to trace_ingest_runtime and asserts NOBYPASSRLS,
       # no superuser privileges, and no rows without tenant context.
       - name: activity_missions_pg
-        run: cargo test --locked -p trace-commons-server --test activity_missions_pg -- --nocapture
+        run: cargo test --locked -p trace-commons-server --test it -- activity_missions_pg:: --nocapture
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_activity_missions
       # V141: the model-training grant's eligibility read, add-only write and
       # withheld-award lookup, run as trace_ingest_runtime (NOBYPASSRLS) on
       # the migration's own grants.
       - name: model_training_consent_pg
-        run: cargo test --locked -p trace-commons-server --test model_training_consent_pg
+        run: cargo test --locked -p trace-commons-server --test it -- model_training_consent_pg::
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_model_training_consent
       # The R1 measurement script (scripts/operator/r1-pipeline-measurement.sql)
@@ -521,7 +521,7 @@ jobs:
       - name: r1_pipeline_measurement
         run: |
           set -euo pipefail
-          cargo test -p trace-commons-server --test r1_pipeline_measurement -- --nocapture 2>&1 | tee r1-measurement.log
+          cargo test -p trace-commons-server --test it -- r1_pipeline_measurement:: --nocapture 2>&1 | tee r1-measurement.log
           if grep -q '^skipping:' r1-measurement.log; then
             echo "r1_pipeline_measurement skipped its PostgreSQL tests" >&2
             exit 1
@@ -535,7 +535,7 @@ jobs:
       - name: legacy_invite_counts
         run: |
           set -euo pipefail
-          cargo test -p trace-commons-server --test legacy_invite_counts -- --nocapture 2>&1 | tee legacy-invite-counts.log
+          cargo test -p trace-commons-server --test it -- legacy_invite_counts:: --nocapture 2>&1 | tee legacy-invite-counts.log
           if grep -q '^skipping:' legacy-invite-counts.log; then
             echo "legacy_invite_counts skipped its PostgreSQL tests" >&2
             exit 1
@@ -548,7 +548,7 @@ jobs:
         env:
           TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL: postgres://trace@127.0.0.1:5432/pipeline_test_upgrade
       - name: versioned pipeline runtime
-        run: cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg
+        run: cargo test -p trace-commons-server --test it -- versioned_pipeline_runtime_pg::
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline
       - name: Refuse a pipeline run that never used its NOBYPASSRLS role
@@ -599,7 +599,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo test -p trace-commons-server --test mission_rewards_pg -- --ignored --test-threads=1
+          cargo test -p trace-commons-server --test it -- mission_rewards_pg:: --ignored --test-threads=1
           # Prove the full migrator and ignored award workflows executed.
           test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_missions \
             -c 'SELECT count(*) > 0 FROM trace_reward_awards;')" = t
@@ -624,7 +624,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo test -p trace-commons-server --test reward_participant_pg -- --ignored --test-threads=1
+          cargo test -p trace-commons-server --test it -- reward_participant_pg:: --ignored --test-threads=1
           test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_participants \
             -c 'SELECT count(*) > 0 FROM trace_reward_participant_reservations;')" = t
         env:
@@ -642,7 +642,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo test -p trace-commons-server --test mission_publication_pg -- --ignored --test-threads=1
+          cargo test -p trace-commons-server --test it -- mission_publication_pg:: --ignored --test-threads=1
           test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_mission_packages \
             -c 'SELECT count(*) > 0 FROM trace_reward_mission_packages;')" = t
           test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_mission_packages \
@@ -664,12 +664,12 @@ jobs:
       # `ignored`, the step passes having run nothing, and this job becomes the
       # thing it was built to replace.
       - name: admission_ledger_pg
-        run: cargo test -p trace-commons-server --test admission_ledger_pg -- --ignored
+        run: cargo test -p trace-commons-server --test it -- admission_ledger_pg:: --ignored
         env:
           TRACE_COMMONS_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ledger
           TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_account_ledger
       - name: account_trust_external_pg
-        run: cargo test -p trace-commons-server --test account_trust_external_pg -- --ignored --test-threads=1
+        run: cargo test -p trace-commons-server --test it -- account_trust_external_pg:: --ignored --test-threads=1
         env:
           TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_external
       - name: the invite-free path, end to end
@@ -1692,11 +1692,12 @@ jobs:
         run: |
           dbus-run-session -- sh -eu -c '
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets
-            cargo test --locked -p trace-commons-contributor --features near-ai-staging --test channel_hosts --test credential_store_isolation --test preflight --test version_channel
+            cargo test --locked -p trace-commons-contributor --features near-ai-staging --test it -- channel_hosts:: credential_store_isolation:: preflight:: version_channel::
             cargo test --locked -p trace-commons-contributor --features near-ai-staging --lib -- other_channel the_config_dir_help the_default_inbox private_inference config::tests:: deep_link invite_tests ironwire_pointer discover ironwire_folder a_staging_probe_of a_staging_channel_shows_the_label proof_attestor pin_refusal reconcile_never_fetches_the_signed_pins
-            cargo test --locked -p trace-commons-contributor-ffi --features trace-commons-contributor/near-ai-staging --test abi --test build_channel
+            cargo test --locked -p trace-commons-contributor-ffi --features trace-commons-contributor/near-ai-staging --test it -- abi:: build_channel::
             cargo test --locked -p trace-commons-attestation --features near-ai-staging
-            cargo test --locked -p trace-commons-server --features near-ai-staging --bin trace-commons-staging-pins --test staging_pins_tool
+            cargo test --locked -p trace-commons-server --features near-ai-staging --bin trace-commons-staging-pins
+            cargo test --locked -p trace-commons-server --features near-ai-staging --test it -- staging_pins_tool::
           '
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why, and for why only a push to main saves.

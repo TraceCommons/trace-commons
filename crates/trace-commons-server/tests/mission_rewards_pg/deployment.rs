@@ -12,7 +12,7 @@ use trace_commons_server::{
 };
 use uuid::Uuid;
 
-use crate::fixture::{
+use super::fixture::{
     RewardPgFixture, assert_refusal, award_submission, create_program, digest, history_entry,
     reserve_and_submit, terms,
 };

@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use trace_commons_server::mission_rewards::{RewardActivityKind, RewardError};
 use uuid::Uuid;
 
-use crate::fixture::{
+use self::fixture::{
     RewardPgFixture, assert_refusal, award_submission, create_program, digest, history_entry,
     race_for_slot, reserve_and_submit, terms,
 };

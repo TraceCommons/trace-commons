@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 license = "AGPL-3.0-or-later"
 repository.workspace = true
+# The integration tests are listed as [[test]] targets at the end of this file.
+autotests = false
 
 [dependencies]
 aes-gcm = "0.10"
@@ -199,3 +201,17 @@ tower = { version = "0.5", features = ["util"] }
 # promoted to a normal dependency.
 trace-commons-contributor = { path = "../trace-commons-contributor" }
 wiremock = "0.6"
+
+# Integration tests. `it` holds every tests/*.rs file as a module, so the
+# dependency graph links once rather than once per file; see tests/it.rs.
+[[test]]
+name = "it"
+path = "tests/it.rs"
+
+# Its own binary: it installs a process-wide tracing subscriber at TRACE
+# level and asserts on everything it captures, which would also capture
+# every other test's logs, and `trace_invite_registry_pg` installs its own
+# process-wide subscriber, which only one per process can do.
+[[test]]
+name = "near_ai_rail_mock"
+path = "tests/near_ai_rail_mock.rs"
