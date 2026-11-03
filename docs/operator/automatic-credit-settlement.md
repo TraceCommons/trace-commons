@@ -71,15 +71,16 @@ Links already made on accounts with no recorded NEAR AI login are revoked
 at deploy by migration V147, on the `near_ai` rail. This covers every such
 account, a legacy or pilot account's own links included, but not a link
 carried to it from a NEAR AI account (V146), which the NEAR AI login
-proved. Each live link is marked recipient-unavailable and
-unlink-requested, so the pass sends nothing more and closes it (one zero
-send per link out of the pass's send window), with a `trace_payout_audit`
-row labelled `near_ai_login_required`. The same migration drops those
-accounts' pending link and unlink requests, with no audit row of their own.
-The new service's confirm also refuses a link on an account with no NEAR AI
-login, so a request started before the deploy cannot land after it. Stop
-the old service before the new one starts: an old pass can still act on
-links it loaded before V147 committed.
+proved. It makes the moves V146's carry release makes: a waiting link,
+which has never sent, closes at zero; an active link gets an unlink
+request, so the next pass closes it before paying anything (one zero send
+per link out of that run's send window). Each gets a `trace_payout_audit`
+row labelled `near_ai_login_required`. Pending requests are left to expire:
+the new service's confirm refuses a link on an account with no NEAR AI
+login, so a request started before the deploy cannot land after it, and a
+pending unlink of a revoked link fails its version check. Stop the old
+service before the new one starts: an old pass can still act on links it
+loaded before V147 committed.
 
 Before deploying, count what V147 will revoke (hash-only; RLS is forced, so
 use a cross-tenant role or run per tenant):

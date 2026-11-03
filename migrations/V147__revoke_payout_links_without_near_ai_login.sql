@@ -10,18 +10,6 @@
 -- revoke them at deploy rather than keep paying them. A migration, so the
 -- revocation cannot be forgotten and runs before the new code serves.
 --
--- WHAT A REVOCATION IS. The two marks the payout pass already honours, set
--- on every `waiting` or `active` link of such an account:
---   * `recipient_unavailable_at`: the pass sends nothing to the link, own or
---     referral credit (`payout_pass.rs`, `pay` and the referral stream);
---   * `unlink_requested_at`: the pass moves an active link to `closing` and
---     closes it with a zero send that reads the program total, as for a
---     person's own unlink. A waiting link it may still activate, but it pays
---     nothing (it is unavailable) and is closed on the next pass.
--- No row is deleted, so the account's link version (links plus unlinks)
--- only goes up, and every state change still goes through the pass.
--- `closing` and `closed` links are already ending and are left alone.
---
 -- SCOPE. The predicate is "no `near_ai_login` anchor", not "proved by a
 -- wallet": per the owner's instruction it revokes every live link on such
 -- an account, including a principal-linked legacy or pilot account's own
@@ -35,55 +23,65 @@
 -- cannot be compared with `anchor_hash`. Only the `near_ai` rail is
 -- touched; the rule is that rail's proof.
 --
--- THE WINDOW AFTER DEPLOY. A link request started under the old code waits
--- up to five minutes for its confirm. The new service's confirm re-reads
--- the account's NEAR AI login and refuses a link without one, whatever the
--- deploy topology, so that window is closed in code. Every pending request
--- (link or unlink) of such an account is also deleted here: a link request
--- would be refused anyway, and an unlink request would fail its version
--- check, since the unlink mark below moves the account's link version. A
--- pass run by an old process that loaded links before this commits can
--- still act on them once; stop the old service before the new one starts.
+-- WHAT A REVOCATION IS. The same two moves V146's carry release makes
+-- (`trace_legacy_payout_release_carry`):
+--   * a `waiting` link, which has never sent (only an active link is paid),
+--     closes at `final_paid` 0, so the pass never activates it. V146's
+--     guard allows that only for a carried link, so this file sets the
+--     trigger aside for that one UPDATE and applies the guard's own
+--     condition itself: the link has no payout line at all.
+--   * an `active` link gets `unlink_requested_at`, exactly as a person's
+--     own unlink: on its next run the pass moves it to `closing`, before
+--     anything is paid, and closes it with the zero send that reads the
+--     program total (one zero send out of that run's send window).
+-- `closing` and `closed` links are already ending and are left alone. No
+-- recipient is marked unavailable, so status reports an unlink, not an
+-- unavailable organization.
+--
+-- REQUESTS. Pending link and unlink requests are left to expire (five
+-- minutes); nothing is deleted. The new service's confirm re-reads the
+-- account's NEAR AI login and refuses a link without one, whatever the
+-- deploy topology, logging `no_near_ai_login`. A pending unlink request of
+-- a revoked active link fails its version check, since the unlink mark
+-- moves the account's link version, and that link is being closed anyway.
+-- A pass run by an old process that loaded links before this commits can
+-- still act on them once: stop the old service before the new one starts.
 --
 -- AUDIT. One `trace_payout_audit` row per revoked link, hash-only, in the
--- shapes the service writes: action `unlink_requested`, the link's state as
--- both prior and new state, label `near_ai_login_required`, the account and
--- link as `payout-account-v1:` / `payout-link-v1:` SHA-256 hashes (as
--- `account_id_hash` / `link_id_hash` in `postgres_payout.rs`), and a fixed
--- actor hash for this migration. Deleted requests get no row: no request
--- audit action fits (adding one changes V132's CHECK), and the request's
--- own `link_requested` / `unlink_requested` row stays.
+-- shapes V146's release writes: `link_closed` (waiting to closed) or
+-- `unlink_requested` (active to active), label `near_ai_login_required`,
+-- the account and link as `payout-account-v1:` / `payout-link-v1:` SHA-256
+-- hashes (as `account_id_hash` / `link_id_hash` in `postgres_payout.rs`),
+-- and a fixed actor hash for this migration.
 --
--- LOCKS. Lifting FORCE takes an ACCESS EXCLUSIVE lock on each table for the
--- whole migration, which stalls NEAR sign-ins (they read the anchors). A
--- `lock_timeout` makes a deploy that cannot get the locks fail and retry
--- rather than queue every login behind it.
+-- IDEMPOTENT. A revoked waiting link is closed and a revoked active link
+-- carries the unlink mark, so neither is selected again; a re-run changes
+-- nothing and writes no second audit row.
 --
--- IDEMPOTENT. A link already carrying both marks is not selected again, so a
--- re-run changes nothing and writes no second audit row.
+-- LOCKS. Lifting FORCE and setting the trigger aside take an ACCESS
+-- EXCLUSIVE lock on each table for the whole migration, which stalls NEAR
+-- sign-ins (they read the anchors). A `lock_timeout` makes a deploy that
+-- cannot get the locks fail and retry rather than queue every login.
 --
--- FORCED ROW SECURITY applies to the table owner too, so a plain UPDATE or
--- DELETE here, run by the non-superuser migrator, would silently touch zero
--- rows in every tenant (V144). FORCE is lifted for the tables this file reads
+-- FORCED ROW SECURITY applies to the table owner too, so a plain UPDATE
+-- here, run by the non-superuser migrator, would silently touch zero rows
+-- in every tenant (V144). FORCE is lifted for the tables this file reads
 -- and writes and put straight back.
 
 SET LOCAL lock_timeout = '10s';
 
 ALTER TABLE trace_near_account_anchors NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE trace_payout_links NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE trace_payout_link_requests NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE trace_payout_lines NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE trace_payout_audit NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE trace_legacy_payout_carries NO FORCE ROW LEVEL SECURITY;
 
-WITH revoked AS (
-    UPDATE trace_payout_links AS l
-       SET recipient_unavailable_at = COALESCE(l.recipient_unavailable_at, clock_timestamp()),
-           unlink_requested_at = COALESCE(l.unlink_requested_at, clock_timestamp()),
-           version = l.version + 1,
-           updated_at = clock_timestamp()
+CREATE TEMPORARY TABLE v147_revoked ON COMMIT DROP AS
+    SELECT l.tenant_id, l.rail_id, l.account_id, l.link_id, l.state
+      FROM trace_payout_links l
      WHERE l.rail_id = 'near_ai'
-       AND l.state IN ('waiting', 'active')
-       AND (l.recipient_unavailable_at IS NULL OR l.unlink_requested_at IS NULL)
+       AND (l.state = 'waiting'
+            OR (l.state = 'active' AND l.unlink_requested_at IS NULL))
        AND NOT EXISTS (
            SELECT 1 FROM trace_near_account_anchors a
             WHERE a.tenant_id = l.tenant_id
@@ -94,8 +92,30 @@ WITH revoked AS (
             WHERE c.tenant_id = l.tenant_id
               AND c.link_id = l.link_id
               AND c.released_at IS NULL)
-    RETURNING l.tenant_id, l.rail_id, l.account_id, l.link_id, l.state
-)
+       -- The guard's own condition for closing a waiting link at zero: it
+       -- never had a line. One that had is not closed here.
+       AND NOT (l.state = 'waiting' AND EXISTS (
+           SELECT 1 FROM trace_payout_lines p
+            WHERE p.tenant_id = l.tenant_id AND p.link_id = l.link_id));
+
+ALTER TABLE trace_payout_links DISABLE TRIGGER trace_payout_links_guard_update;
+UPDATE trace_payout_links AS l
+   SET state = 'closed', final_paid = 0, version = l.version + 1,
+       updated_at = clock_timestamp()
+  FROM v147_revoked r
+ WHERE r.state = 'waiting'
+   AND l.tenant_id = r.tenant_id AND l.link_id = r.link_id
+   AND l.state = 'waiting';
+ALTER TABLE trace_payout_links ENABLE TRIGGER trace_payout_links_guard_update;
+
+UPDATE trace_payout_links AS l
+   SET unlink_requested_at = clock_timestamp(), version = l.version + 1,
+       updated_at = clock_timestamp()
+  FROM v147_revoked r
+ WHERE r.state = 'active'
+   AND l.tenant_id = r.tenant_id AND l.link_id = r.link_id
+   AND l.state = 'active' AND l.unlink_requested_at IS NULL;
+
 INSERT INTO trace_payout_audit (
     tenant_id, audit_id, rail_id, action, actor_ref_hash, account_id_hash,
     link_id_hash, prior_state, new_state, label
@@ -103,25 +123,17 @@ INSERT INTO trace_payout_audit (
 SELECT r.tenant_id,
        gen_random_uuid(),
        r.rail_id,
-       'unlink_requested',
+       CASE r.state WHEN 'waiting' THEN 'link_closed' ELSE 'unlink_requested' END,
        'sha256:' || encode(sha256(convert_to('payout-migration-actor-v1:V147', 'UTF8')), 'hex'),
        'sha256:' || encode(sha256(convert_to('payout-account-v1:' || r.account_id::text, 'UTF8')), 'hex'),
        'sha256:' || encode(sha256(convert_to('payout-link-v1:' || r.link_id::text, 'UTF8')), 'hex'),
        r.state,
-       r.state,
+       CASE r.state WHEN 'waiting' THEN 'closed' ELSE 'active' END,
        'near_ai_login_required'
-  FROM revoked r;
-
-DELETE FROM trace_payout_link_requests AS q
- WHERE q.rail_id = 'near_ai'
-   AND NOT EXISTS (
-       SELECT 1 FROM trace_near_account_anchors a
-        WHERE a.tenant_id = q.tenant_id
-          AND a.account_id = q.account_id
-          AND a.identity_source = 'near_ai_login');
+  FROM v147_revoked r;
 
 ALTER TABLE trace_near_account_anchors FORCE ROW LEVEL SECURITY;
 ALTER TABLE trace_payout_links FORCE ROW LEVEL SECURITY;
-ALTER TABLE trace_payout_link_requests FORCE ROW LEVEL SECURITY;
+ALTER TABLE trace_payout_lines FORCE ROW LEVEL SECURITY;
 ALTER TABLE trace_payout_audit FORCE ROW LEVEL SECURITY;
 ALTER TABLE trace_legacy_payout_carries FORCE ROW LEVEL SECURITY;

@@ -3026,11 +3026,12 @@ async fn v145_cluster_table(seed: &tokio_postgres::Client) -> Vec<(uuid::Uuid, i
 /// - accounts with only a `wallet` anchor or none, holding an active link, a
 ///   waiting link and a closing link;
 /// - pending link and unlink requests.
-/// After V147 the live `near_ai` links of unanchored accounts carry both
-/// marks with one hash-only audit row each; closing links, another rail's
-/// link, a link V146 carried to a legacy account and the anchored account's
-/// link are untouched; the unanchored
-/// accounts' pending requests (link and unlink) are gone; and a second run
+/// After V147, on the `near_ai` rail, an unanchored account's waiting link
+/// is closed at zero and its active link carries the unlink mark, each with
+/// one hash-only audit row in V146's release shapes; no recipient is marked
+/// unavailable; closing links, another rail's link, a link V146 carried to
+/// a legacy account and the anchored account's link are untouched; pending
+/// requests are left to expire; the guard trigger is back; and a second run
 /// changes nothing.
 #[tokio::test]
 async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
@@ -3235,7 +3236,8 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
     let read_links = || async {
         let mut rows: Vec<(uuid::Uuid, String, bool, bool)> = seed
             .query(
-                "SELECT link_id, state, recipient_unavailable_at IS NOT NULL,
+                "SELECT link_id, state || ':' || COALESCE(final_paid::text, '-'),
+                        recipient_unavailable_at IS NOT NULL,
                         unlink_requested_at IS NOT NULL
                    FROM trace_payout_links",
                 &[],
@@ -3283,16 +3285,17 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
     if let Err(error) = &applied {
         problems.push(format!("V147 failed for the non-superuser owner: {error}"));
     } else {
-        let expected_link = |(_, _, id, state): (&str, uuid::Uuid, uuid::Uuid, &str), revoked| {
-            (id, state.to_owned(), revoked, revoked)
+        // (link, state:final_paid, unavailable, unlink requested) after V147.
+        let row = |link: (&str, uuid::Uuid, uuid::Uuid, &str), state: &str, unlink: bool| {
+            (link.2, state.to_owned(), false, unlink)
         };
         let mut expected = vec![
-            expected_link(links[0], false),
-            expected_link(links[1], true),
-            expected_link(links[2], true),
-            expected_link(links[3], false),
-            expected_link(links[4], false),
-            expected_link(links[5], false),
+            row(links[0], "active:-", false),
+            row(links[1], "active:-", true),
+            row(links[2], "closed:0", false),
+            row(links[3], "closing:-", false),
+            row(links[4], "active:-", false),
+            row(links[5], "active:-", false),
         ];
         expected.sort();
         let after = read_links().await;
@@ -3301,37 +3304,55 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
         }
 
         let actor = sha("payout-migration-actor-v1:V147");
-        let audit_row = |(tenant, account, id, state): (&str, uuid::Uuid, uuid::Uuid, &str)| {
+        let audit_row = |(tenant, account, id, _): (&str, uuid::Uuid, uuid::Uuid, &str),
+                         action: &str,
+                         moved: &str| {
             (
                 tenant.to_owned(),
-                "unlink_requested".to_owned(),
+                action.to_owned(),
                 trace_commons_server::db::payout_account_id_hash(account),
                 trace_commons_server::db::payout_link_id_hash(id),
-                format!("{state}>{state}"),
+                moved.to_owned(),
                 format!("near_ai_login_required {actor}"),
             )
         };
-        let mut expected = vec![audit_row(links[1]), audit_row(links[2])];
+        let mut expected = vec![
+            audit_row(links[1], "unlink_requested", "active>active"),
+            audit_row(links[2], "link_closed", "waiting>closed"),
+        ];
         expected.sort();
         let audit = read_audit().await;
         if audit != expected {
             problems.push(format!("audit read {audit:?}, not {expected:?}"));
         }
 
-        let expected = vec![requests[0].2];
+        let mut expected: Vec<uuid::Uuid> = requests.iter().map(|request| request.2).collect();
+        expected.sort();
         let kept = read_requests().await;
         if kept != expected {
             problems.push(format!(
-                "requests read {kept:?}, not {expected:?} (the unanchored accounts' link and \
-                 unlink requests must go)"
+                "requests read {kept:?}, not {expected:?} (V147 deletes no request)"
             ));
+        }
+
+        let guard_enabled: bool = seed
+            .query_one(
+                "SELECT tgenabled <> 'D' FROM pg_trigger
+                  WHERE tgname = 'trace_payout_links_guard_update'",
+                &[],
+            )
+            .await
+            .expect("read the guard trigger")
+            .get(0);
+        if !guard_enabled {
+            problems.push("the link guard trigger was left disabled".into());
         }
 
         let unforced: Vec<String> = seed
             .query(
                 "SELECT relname::text FROM pg_class
                   WHERE relname IN ('trace_near_account_anchors', 'trace_payout_links',
-                                    'trace_payout_link_requests', 'trace_payout_audit',
+                                    'trace_payout_lines', 'trace_payout_audit',
                                     'trace_legacy_payout_carries')
                     AND NOT relforcerowsecurity",
                 &[],
