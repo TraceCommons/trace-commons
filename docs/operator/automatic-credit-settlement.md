@@ -20,9 +20,13 @@ is done:
     [the one-connected-account spec](../superpowers/specs/2026-11-02-one-connected-account-design.md)).
     Until then they are refused.
   - **Principal-linked legacy and pilot accounts** (tenants outside
-    `near-` and `nearai-`) have no NEAR AI login anchor either. Migrating
-    the non-pooled ones is fix F11 in the same spec, which names the two
-    candidate designs.
+    `near-` and `nearai-`) have no NEAR AI login anchor either. They are
+    paid through a payout link carried from the holder's NEAR AI account
+    to the legacy accounts its tenant link covers (fix F11, V146); see
+    [the legacy account payout migration spec](../superpowers/specs/2026-11-03-legacy-account-payout-migration-design.md),
+    section 8, for the pilot queries and rollout order, and
+    [legacy-invite-migration.md](./legacy-invite-migration.md) for the
+    tenant link it rides on. Roll it out before going live.
   - **Pooled Devfolio tenants** (`trace_legacy_invite_pooled_tenants`) are
     excluded from payouts by design; they need no migration.
 

@@ -42,6 +42,7 @@
 //! subject.
 
 use super::*;
+use trace_commons_gate_api::PayoutRail;
 use trace_commons_protocol::payout_link::{
     PAYOUT_LINK_CONTRACT_VERSION, PayoutLinkAction as WireAction, PayoutLinkConfirmed,
     PayoutLinkOutcome, PayoutLinkProof, PayoutLinkRequest as WireRequest, PayoutLinkStarted,
@@ -49,8 +50,8 @@ use trace_commons_protocol::payout_link::{
     near_ai_recipient_ref,
 };
 use trace_commons_server::db::{
-    PayoutLinkAction, PayoutLinkConfirm, PayoutLinkConfirmWrite, PayoutLinkRequestInsert,
-    PayoutLinkRequestWrite, PayoutLinkState, PayoutStore, PayoutStream,
+    CarryPrograms, PayoutLinkAction, PayoutLinkConfirm, PayoutLinkConfirmWrite,
+    PayoutLinkRequestInsert, PayoutLinkRequestWrite, PayoutLinkState, PayoutStore, PayoutStream,
 };
 use trace_commons_server::payout_pass::{stream_status_hold_label, stream_waiting};
 use trace_commons_server::payout_rate::PayoutMode;
@@ -146,6 +147,49 @@ fn enabled_rail<'a>(state: &'a AppState, rail_id: &str) -> ApiResult<&'a Arc<Pay
         ));
     }
     Ok(entry)
+}
+
+/// The rail's program for a carried link's own id (V146).
+fn carry_programs(rail: &Arc<dyn PayoutRail>) -> CarryPrograms {
+    let rail = Arc::clone(rail);
+    CarryPrograms(Arc::new(move |link_id| rail.program_for_link(link_id)))
+}
+
+/// After a new tenant link (V81), carry the account's live payout link on
+/// every enabled rail to the legacy accounts it now covers (V146). A
+/// confirm carries in its own transaction; this covers the order "payout
+/// link first, tenant link second". Best effort and idempotent: a failure
+/// carries nothing (no credit is paid to anyone it should not be), is
+/// logged by label, and the next confirm carries again.
+pub(super) async fn carry_after_tenant_link(state: &AppState, ctx: &AccountCtx) {
+    let Some(store) = state.payout_store.as_ref() else {
+        return;
+    };
+    for entry in state.payout_rails.entries() {
+        if entry.mode() == PayoutMode::Disabled {
+            continue;
+        }
+        let Some(rail) = entry.rail() else { continue };
+        if store
+            .carry_legacy_payout_links(
+                &ctx.tenant_id,
+                ctx.account_id.as_uuid(),
+                entry.rail_id(),
+                &carry_programs(rail),
+                &account_actor_hash(ctx),
+            )
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                rail = %entry.rail_id(),
+                label = "legacy_payout_carry_failed",
+                "legacy payout carry after a tenant link failed"
+            );
+        } else {
+            state.payout_rails.notifier().notify_all();
+        }
+    }
 }
 
 fn payout_store(state: &AppState) -> ApiResult<&Arc<dyn PayoutStore>> {
@@ -418,6 +462,7 @@ pub(super) async fn confirm_handler(
                 link_id,
                 program: rail.program_for_link(link_id),
                 actor_ref_hash: account_actor_hash(&ctx),
+                carry_programs: Some(carry_programs(&rail)),
             },
         )
         .await
