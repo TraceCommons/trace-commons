@@ -19,14 +19,14 @@ struct MonitorWindowView: View {
     static let openFirstRun = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.frame.continueButton ?? ""
     /// The window's tabs, in their default order. Home is always first;
     /// the person drags the other three into any order (owner, 2026-10-30,
-    /// `ordered(_:)`).
+    /// `ordered(_:)`), holding a tab to lift it (owner, 2026-11-02).
     enum Tab: String, CaseIterable, Identifiable {
         case home = "Home"
-        /// Traces second and Private AI third by default (owner,
-        /// 2026-10-28: the macOS MVP is "contribute traces, earn credit";
-        /// kept 2026-10-30 while the default is decided).
-        case traces = "Traces"
+        /// Private AI second and Traces third by default (owner,
+        /// 2026-11-02, deciding the default left open on 2026-10-30). An
+        /// order the person dragged into is theirs and is kept.
         case inference = "Inference"
+        case traces = "Traces"
         /// Insights' own tab (2026-10-15), no longer a Home page.
         case insights = "Insights"
 
