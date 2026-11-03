@@ -661,10 +661,8 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// Removes the stored key from this machine.
     /// </summary>
     /// <remarks>
-    /// Local, and the page says so beside the button:
-    /// <see cref="CredentialActionPreamble"/> is the sentence saying the key
-    /// stays valid at the service until the contributor removes it in their
-    /// own account. This shell cannot do that for them and does not claim to.
+    /// The daemon also revokes the key at NEAR AI. When that did not happen,
+    /// the status text says so (<see cref="NearAiCredentialSurface.ForgetNotice"/>).
     /// </remarks>
     public async Task ForgetCredentialAsync()
     {
@@ -673,7 +671,9 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
             return;
         }
 
-        await CallThenRefreshAsync(DaemonProtocol.Methods.NearAiCredentialForget)
+        await CallThenRefreshAsync(
+                DaemonProtocol.Methods.NearAiCredentialForget,
+                notice: NearAiCredentialSurface.ForgetNotice)
             .ConfigureAwait(true);
     }
 
@@ -707,7 +707,10 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// the reply: what this machine holds afterwards is a question only the
     /// next status answers.
     /// </summary>
-    private async Task CallThenRefreshAsync(string method, string? parameters = null)
+    private async Task CallThenRefreshAsync(
+        string method,
+        string? parameters = null,
+        Func<DaemonResponse, PrivateInferenceCopy?, string>? notice = null)
     {
         _credentialBusy = true;
         Funding.CredentialChanged(_credential.SessionState, true);
@@ -718,7 +721,9 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
                     ? _host.CallAsync(method)
                     : _host.CallAsync(method, parameters))
                 .ConfigureAwait(true);
-            Notice = response.IsError && _copy is not null ? _copy.WriteUnconfirmed : string.Empty;
+            Notice = response.IsError && _copy is not null
+                ? _copy.WriteUnconfirmed
+                : notice?.Invoke(response, _copy) ?? string.Empty;
         }
         catch
         {

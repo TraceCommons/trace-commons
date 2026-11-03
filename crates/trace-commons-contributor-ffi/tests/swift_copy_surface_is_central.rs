@@ -657,6 +657,21 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
         legacy.push(consent::legacy_migration_refusal_line(label).to_owned());
     }
     add("consent_copy::legacy_migration_*", legacy);
+    // The account needs attention (#1836 F1).
+    add(
+        "consent_copy::ACCOUNT_ATTENTION_*",
+        [
+            consent::ACCOUNT_ATTENTION_TITLE,
+            consent::ACCOUNT_ATTENTION_RECORD_UNREADABLE_BODY,
+            consent::ACCOUNT_ATTENTION_ADDRESS_REFUSED_BODY,
+            consent::ACCOUNT_ATTENTION_PRIVATE_AI,
+            consent::ACCOUNT_ATTENTION_ACTION,
+            consent::ACCOUNT_ATTENTION_CONFIRM_TITLE,
+            consent::ACCOUNT_ATTENTION_CONFIRM_BODY,
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+    );
     // The Missions disclosure (M4, #1173): not built in macOS yet, pinned
     // so the Missions tab arrives with the core's words.
     add(
@@ -903,6 +918,13 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCConsentCopy.legacyMigrationNoticeJSON",
         "TCBridge/TCConsentCopy.swift",
         "tc_legacy_migration_notice",
+    ),
+    (
+        "account attention",
+        "TraceCommonsApp/AppModel.swift",
+        "TCConsentCopy.accountAttentionJSON",
+        "TCBridge/TCConsentCopy.swift",
+        "tc_account_attention_copy_json",
     ),
     // The offer to move, in Settings and as a card above the tabs, and a
     // refused move's sentence, both worded by the model.

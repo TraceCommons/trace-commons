@@ -651,6 +651,8 @@ pub struct PrivateInferenceCopy {
     pub credential_cancel: &'static str,
     pub credential_forget: &'static str,
     pub credential_forget_explains: &'static str,
+    pub credential_forget_not_revoked: &'static str,
+    pub near_ai_still_signed_in: &'static str,
     pub credential_migrate: &'static str,
     pub credential_migrate_explains: &'static str,
     pub credential_absent: &'static str,
@@ -1279,9 +1281,9 @@ pub(crate) fn wallet_browser_copy() -> serde_json::Value {
 /// behalf.
 ///
 /// The last clause is the part a contributor needs later rather than now:
-/// the key is theirs, it is listed in their own account, and removing it
-/// there is the thing this app cannot do for them --
-/// [`CREDENTIAL_FORGET_EXPLAINS`] says so again at the moment it matters.
+/// the key is theirs and it is listed in their own account. Forget revokes
+/// it ([`CREDENTIAL_FORGET_EXPLAINS`]), and when that fails,
+/// [`CREDENTIAL_FORGET_NOT_REVOKED`] sends them there.
 pub const CREDENTIAL_COST: &str = "Sign in through your browser. The app creates an API key in your NEAR AI account for your tools. You can revoke this key in NEAR AI.\n\nThe app also keeps you signed in to check your balance and, when you ask, join a commons. This saved sign-in can read your account and create more keys.\n\nYour key and saved sign-in are stored in this computer's system credential store. You may be asked to allow access when the app starts.";
 
 /// The button that starts the ceremony.
@@ -1298,15 +1300,27 @@ pub const CREDENTIAL_CANCEL: &str = "Cancel";
 /// The button that removes a stored key from this machine.
 pub const CREDENTIAL_FORGET: &str = "Forget";
 
-/// What forgetting does, and the larger part it does not do.
+/// What forgetting does.
 ///
-/// **Local only, and the sentence says so.** The key stays valid at the
-/// service until the contributor removes it there. This action removes both
-/// locally stored credentials without revoking either at Private AI. A
-/// confirmation that said "removed" and let it
-/// be read as "revoked" would be the claim this codebase does not make --
-/// `handle_forget` answers `revoked: false` for the same reason.
-pub const CREDENTIAL_FORGET_EXPLAINS: &str = "Removes the key and saved sign-in from this computer only. This does not revoke them at NEAR AI. Delete the key in your NEAR AI account to stop it working elsewhere.";
+/// Forgetting removes the key and saved sign-in from this computer and asks
+/// NEAR AI to revoke the key with the sign-in being removed (owner decision
+/// and wording, 2026-11-02). The revoke is best effort, so this sentence is
+/// paired with [`CREDENTIAL_FORGET_NOT_REVOKED`], which a shell draws only
+/// when `handle_forget` answers `removed: true, revoked: false`.
+pub const CREDENTIAL_FORGET_EXPLAINS: &str =
+    "Removes the key from this computer and revokes it at NEAR AI.";
+
+/// Drawn only after a forget whose revoke at NEAR AI did not happen
+/// (`removed: true, revoked: false`): the key may still work, and the
+/// contributor is the one who can delete it. Owner wording, 2026-11-02.
+pub const CREDENTIAL_FORGET_NOT_REVOKED: &str =
+    "Couldn't revoke the key. Delete it in your NEAR AI account.";
+
+/// Drawn after an unenroll that removed the enrollment but could not clear
+/// the NEAR AI sign-in (`near_ai_cleared: false`): the key and session are
+/// still on this computer, and Forget in Private AI removes them. Owner
+/// wording, approved 2026-11-03.
+pub const NEAR_AI_STILL_SIGNED_IN: &str = "NEAR AI is still signed in. Use Forget in Private AI.";
 
 /// The button behind `migration_available`: copy the sign-in an earlier
 /// build kept in the login keychain into the store this build uses.
@@ -2523,6 +2537,8 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         credential_cancel: CREDENTIAL_CANCEL,
         credential_forget: CREDENTIAL_FORGET,
         credential_forget_explains: CREDENTIAL_FORGET_EXPLAINS,
+        credential_forget_not_revoked: CREDENTIAL_FORGET_NOT_REVOKED,
+        near_ai_still_signed_in: NEAR_AI_STILL_SIGNED_IN,
         credential_migrate: CREDENTIAL_MIGRATE,
         credential_migrate_explains: CREDENTIAL_MIGRATE_EXPLAINS,
         credential_absent: CREDENTIAL_ABSENT,
@@ -4116,32 +4132,23 @@ mod tests {
         );
     }
 
-    /// Forgetting is local, and the sentence says so rather than letting
-    /// "removed" be read as "revoked". `handle_forget` answers
-    /// `revoked: false` for the same reason.
+    /// Forgetting revokes, and the sentence says so; the failure sentence
+    /// sends the contributor to their NEAR AI account, where the key is.
     #[test]
-    fn forgetting_never_claims_a_revocation_it_cannot_perform() {
-        let explains = private_inference_copy().credential_forget_explains;
-        assert!(
-            explains.contains("from this computer"),
-            "the forget sentence stopped saying it is local: {explains}"
+    fn forgetting_says_it_revokes_and_names_where_a_failure_is_fixed() {
+        let copy = private_inference_copy();
+        assert_eq!(
+            copy.credential_forget_explains,
+            "Removes the key from this computer and revokes it at NEAR AI."
         );
-        assert!(
-            explains.contains("stop it working elsewhere"),
-            "the forget sentence stopped saying the key stays valid: {explains}"
+        assert_eq!(
+            copy.credential_forget_not_revoked,
+            "Couldn't revoke the key. Delete it in your NEAR AI account."
         );
-        assert!(
-            explains.contains("does not revoke them at NEAR AI"),
-            "the forget sentence stopped distinguishing removal from revocation: {explains}"
+        assert_eq!(
+            copy.near_ai_still_signed_in,
+            "NEAR AI is still signed in. Use Forget in Private AI."
         );
-        assert!(explains.contains("saved sign-in"));
-        assert!(!explains.contains("thrown away as soon"));
-        for word in ["revoked", "cancelled", "deleted everywhere"] {
-            assert!(
-                !explains.to_lowercase().contains(word),
-                "the forget sentence reads as {word}: {explains}"
-            );
-        }
     }
 
     /// NOTHING ON THIS SURFACE RENDERS A KEY. Hash-only and label-only, in
@@ -4158,6 +4165,8 @@ mod tests {
             copy.credential_cancel,
             copy.credential_forget,
             copy.credential_forget_explains,
+            copy.credential_forget_not_revoked,
+            copy.near_ai_still_signed_in,
             copy.credential_absent,
             copy.credential_obtaining,
             copy.credential_failed,
@@ -5004,7 +5013,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            182,
+            184,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );

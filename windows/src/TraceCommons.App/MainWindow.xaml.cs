@@ -1127,6 +1127,13 @@ public sealed partial class MainWindow : Window
             // pointer at the destination that does, and this is what turns
             // that pointer into navigation.
             settings.OpenPrivateInferenceRequested += (_, _) => ShowPrivateInferencePane();
+            // Set up again unenrolled this device: the first run starts,
+            // with a fresh NEAR AI sign-in, as on a device never set up.
+            settings.SetUpAgainRequested += async (_, _) =>
+            {
+                OpenOnboarding(OnboardingState.Default()).Activate();
+                await ViewModel.RefreshAsync();
+            };
             SettingsPane.Content = settings;
         }
 

@@ -130,7 +130,7 @@ pub(crate) struct SessionIdentity {
 }
 
 /// The recorded identity of the login whose key is `key_id`, if any.
-fn recorded_identity(record: &SpendOrgRecord, key_id: &str) -> Option<String> {
+pub(super) fn recorded_identity(record: &SpendOrgRecord, key_id: &str) -> Option<String> {
     record
         .session_identity
         .as_ref()
@@ -259,7 +259,7 @@ impl PendingRevocation {
 
     /// Whether the sweep may run this entry with a session of `identity`:
     /// an untagged entry, or one tagged with that identity.
-    fn belongs_to(&self, identity: Option<&str>) -> bool {
+    pub(super) fn belongs_to(&self, identity: Option<&str>) -> bool {
         match (&self.identity, identity) {
             (None, _) => true,
             (Some(tag), Some(current)) => tag == current,
@@ -438,6 +438,28 @@ pub(crate) fn clear_locked(store: &ConfigStore) {
         Err(_) => {
             tracing::warn!(target: "near_ai_spend_org", "near_ai_spend_org_record_not_cleared")
         }
+    }
+}
+
+/// After a sign-out removed the record: write back the pending entries the
+/// sign-out's session could not send (another identity's, or one it cannot
+/// tell), and nothing else -- no choice, no identity binding, both of which
+/// belonged to the login just removed. The caller holds the commit lock.
+/// Best effort, as `clear_locked`: a lost write loses only those entries,
+/// and a label line says so.
+pub(crate) fn keep_pending_locked(store: &ConfigStore, kept: Vec<PendingRevocation>) {
+    if kept.is_empty() {
+        return;
+    }
+    let record = SpendOrgRecord {
+        pending_revocations: kept,
+        ..SpendOrgRecord::default()
+    };
+    let written = serde_json::to_vec_pretty(&record)
+        .ok()
+        .is_some_and(|bytes| store.write_daemon_file(SPEND_ORG_FILE, &bytes).is_ok());
+    if !written {
+        tracing::warn!(target: "near_ai_spend_org", "near_ai_spend_org_parked_revocations_lost");
     }
 }
 

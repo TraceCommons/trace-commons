@@ -385,7 +385,7 @@ async fn enroll_prepared(
             Some(&expected),
         )?;
         // The account accepted this NEAR AI login: it is the account's login.
-        Login::accepted(signed_in.as_ref(), &store);
+        Login::enrolled(signed_in.as_ref(), &store);
         Ok(value)
     })
     .await
@@ -877,8 +877,20 @@ impl Login {
     /// off the async runtime.
     fn accepted(login: Option<&Self>, store: &ConfigStore) {
         use super::nearai_credential::login_record;
-        let provider = login.and_then(|login| login_record::stored_login(store, &login.key_id));
-        login_record::accepted_by_commons(store, provider);
+        login_record::accepted_by_commons(store, Self::provider(login, store));
+    }
+
+    /// [`Login::accepted`] for a first enrollment: this is a new account, so
+    /// its login replaces whatever the record held, and an unknown one
+    /// clears it rather than leave an earlier account's login in place.
+    fn enrolled(login: Option<&Self>, store: &ConfigStore) {
+        use super::nearai_credential::login_record;
+        login_record::enrolled_with(store, Self::provider(login, store));
+    }
+
+    fn provider(login: Option<&Self>, store: &ConfigStore) -> Option<&'static str> {
+        use super::nearai_credential::login_record;
+        login.and_then(|login| login_record::stored_login(store, &login.key_id))
     }
 
     fn of(settings: &super::settings::DaemonSettings) -> Option<Self> {
@@ -1408,6 +1420,10 @@ fn persist(
         &serde_json::to_vec(&session)?,
         Some(&config),
     )?;
+    // A new account: no earlier account's login stands as this one's. A NEAR
+    // AI enrollment then records its own (`Login::enrolled`); a device-code
+    // join has none.
+    super::nearai_credential::login_record::enrolled_with(&store, None);
 
     // Deliberately not the account id or anything token-shaped beyond what a
     // shell needs to render "you are enrolled".
@@ -2176,7 +2192,19 @@ mod route_tests {
         referral: SignupReferral,
         login: Option<(&str, &str)>,
     ) -> (Stub, DaemonShared, Result<Value>, tempfile::TempDir) {
+        enroll_against_after(commons, referral, login, |_| {}).await
+    }
+
+    /// [`enroll_against_signed_in_with`], with `before` run on the store
+    /// first.
+    async fn enroll_against_after(
+        commons: Commons,
+        referral: SignupReferral,
+        login: Option<(&str, &str)>,
+        before: impl FnOnce(&DaemonShared),
+    ) -> (Stub, DaemonShared, Result<Value>, tempfile::TempDir) {
         let (dir, shared) = shared_with_session();
+        before(&shared);
         // The retained session's sign-in minted "key-enroll"; the record
         // names the login of the sign-in whose key it was given.
         if let Some((login, key_id)) = login {
@@ -2298,6 +2326,23 @@ mod route_tests {
 
         // A session whose login is not known leaves the record as it was.
         let (_stub, shared, result, _dir) = enroll_against(Commons::Production).await;
+        result.expect("enrolled");
+        assert_eq!(login_record::commons_login(&shared.store), None);
+
+        // A new account never inherits an earlier account's login: a
+        // leftover from an unenroll that could not clear it is replaced, and
+        // cleared when this login is not known.
+        let leftover = |shared: &DaemonShared| {
+            shared
+                .store
+                .write_daemon_file(
+                    crate::config::DAEMON_NEAR_AI_LOGIN_FILE,
+                    br#"{"commons_login":"github"}"#,
+                )
+                .unwrap();
+        };
+        let (_stub, shared, result, _dir) =
+            enroll_against_after(Commons::Production, SignupReferral::None, None, leftover).await;
         result.expect("enrolled");
         assert_eq!(login_record::commons_login(&shared.store), None);
     }

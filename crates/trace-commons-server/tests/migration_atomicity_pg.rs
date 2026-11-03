@@ -2280,3 +2280,737 @@ async fn v144_removes_unbound_and_closed_passkey_accounts_as_a_non_superuser_own
         "{OWNER} is per server and must not outlive the test (#1335)"
     );
 }
+
+/// V145 keeps one row per dedup cluster by trigger and backfills it. Run as
+/// the non-superuser owner it runs as in production: forced row security
+/// applies to the owner, and the trigger runs as a NOBYPASSRLS guard, so a
+/// superuser run could not tell a backfill that reads every tenant from one
+/// that silently reads none, or a trigger that sees one tenant's members from
+/// one that sees them all.
+///
+/// Seeded before V145, across two tenants: a cluster with a member in each,
+/// a single-member cluster, and a decision with no cluster. Then the owner
+/// writes the way the runtime does, inside a tenant-scoped transaction: a new
+/// earlier member joins from the second tenant, the first tenant's member is
+/// cleared, and the single-member cluster's row is deleted.
+#[tokio::test]
+async fn v145_tracks_dedup_clusters_across_tenants_as_a_non_superuser_owner() {
+    let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+    else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return;
+    };
+    let _turn = VIRGIN_DATABASE.lock().await;
+
+    const OWNER: &str = "tc_v145_owner_probe";
+    const DB: &str = "trace_v145_owner_probe_db";
+    let probe = ProbeRole::claim(&url, OWNER, &[DB]).await;
+    let admin = owned_database(&url, OWNER, DB, Standing::Creator).await;
+    let mut owner = connect(&with_user(&with_database(&url, DB), OWNER, "probe")).await;
+    owner
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS _trace_commons_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );",
+        )
+        .await
+        .expect("create the recording table");
+    for (version, name, sql) in registered_migrations()
+        .iter()
+        .filter(|(version, ..)| *version < 145)
+    {
+        apply_and_record_migration(&mut owner, *version, name, sql)
+            .await
+            .unwrap_or_else(|error| panic!("V{version} before V145: {error:?}"));
+    }
+
+    // Seeded as the superuser, which row security does not apply to.
+    let seed = connect(&with_database(&url, DB)).await;
+    let insert = "INSERT INTO trace_gate_decisions
+            (tenant_id, decision_id, submission_id, gate_policy_version, gate_version_hash,
+             perplexity_micros, tail_fraction_micros, perplexity_passed, novelty_score_micros,
+             nearest_neighbor_hash, novelty_passed, embedding_evidence_hash,
+             attestation_chain_hash, decided_at, dedup_cluster_id, dedup_simhash,
+             dedup_signal_version)
+         VALUES ($1, $2, $3, 'v', 'sha256:v', 1, 1, TRUE, 1, 'sha256:n', TRUE, 'sha256:e',
+                 'sha256:a', TIMESTAMPTZ '2026-01-01T00:00:00Z' + make_interval(secs => $4),
+                 $5, $6, $7)";
+    let (t1, t2) = ("v145-tenant-1", "v145-tenant-2");
+    for tenant in [t1, t2] {
+        seed.execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+            &[&tenant],
+        )
+        .await
+        .expect("seed tenant");
+    }
+    let (c1, c2) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let t1_c1 = uuid::Uuid::new_v4();
+    let t2_c2 = uuid::Uuid::new_v4();
+    let rows: [(
+        &str,
+        uuid::Uuid,
+        f64,
+        Option<uuid::Uuid>,
+        Option<i64>,
+        Option<&str>,
+    ); 4] = [
+        (t1, t1_c1, 10.0, Some(c1), Some(5), Some("stamp")),
+        (t2, uuid::Uuid::new_v4(), 20.0, Some(c1), Some(6), None),
+        (t2, t2_c2, 30.0, Some(c2), Some(7), Some("stamp")),
+        (t1, uuid::Uuid::new_v4(), 40.0, None, Some(8), Some("stamp")),
+    ];
+    for (tenant, decision, secs, cluster, simhash, stamp) in rows {
+        seed.execute(
+            insert,
+            &[
+                &tenant,
+                &decision,
+                &uuid::Uuid::new_v4(),
+                &secs,
+                &cluster,
+                &simhash,
+                &stamp,
+            ],
+        )
+        .await
+        .expect("seed gate decision");
+    }
+
+    let (version, name, sql) = registered_migrations()
+        .iter()
+        .find(|(version, ..)| *version == 145)
+        .expect("V145 is wired into the runner");
+    let applied = apply_and_record_migration(&mut owner, *version, name, sql)
+        .await
+        .map_err(|error| format!("{error:?}"));
+
+    // (cluster, representative simhash, member count), read as the superuser.
+    let sorted = |mut v: Vec<(uuid::Uuid, i64, i64)>| {
+        v.sort();
+        v
+    };
+
+    let mut problems: Vec<String> = Vec::new();
+    if let Err(error) = &applied {
+        problems.push(format!("V145 failed for the non-superuser owner: {error}"));
+    } else {
+        let backfilled = v145_cluster_table(&seed).await;
+        let expected = sorted(vec![(c1, 5, 2), (c2, 7, 1)]);
+        if backfilled != expected {
+            problems.push(format!(
+                "backfill read {backfilled:?}, not {expected:?} (both tenants' members)"
+            ));
+        }
+
+        // The owner writing as the runtime does: one tenant per transaction,
+        // forced row security on.
+        // A new member of C1 from tenant 2, decided before any other.
+        let joined = v145_as_tenant(
+            &mut owner,
+            t2,
+            "INSERT INTO trace_gate_decisions
+                (tenant_id, decision_id, submission_id, gate_policy_version, gate_version_hash,
+                 perplexity_micros, tail_fraction_micros, perplexity_passed, novelty_score_micros,
+                 nearest_neighbor_hash, novelty_passed, embedding_evidence_hash,
+                 attestation_chain_hash, decided_at, dedup_cluster_id, dedup_simhash,
+                 dedup_signal_version)
+             VALUES ('v145-tenant-2', $1, $2, 'v', 'sha256:v', 1, 1, TRUE, 1, 'sha256:n', TRUE,
+                     'sha256:e', 'sha256:a', TIMESTAMPTZ '2025-12-31T00:00:00Z', $3, 99,
+                     'stamp')",
+            vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), c1],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let expected = sorted(vec![(c1, 99, 3), (c2, 7, 1)]);
+        if joined.is_err() || now != expected {
+            problems.push(format!(
+                "after an earlier member joined from tenant 2: {joined:?}, read {now:?}, \
+                 not {expected:?}"
+            ));
+        }
+
+        // Tenant 1 clears its C1 member, as a withdrawal does.
+        let cleared = v145_as_tenant(
+            &mut owner,
+            t1,
+            "UPDATE trace_gate_decisions
+                SET dedup_simhash = NULL, dedup_cluster_id = NULL,
+                    dedup_cluster_size = NULL, dedup_signal_version = NULL
+              WHERE decision_id = $1",
+            vec![t1_c1],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let expected = sorted(vec![(c1, 99, 2), (c2, 7, 1)]);
+        if cleared.is_err() || now != expected {
+            problems.push(format!(
+                "after tenant 1 cleared its member: {cleared:?}, read {now:?}, not {expected:?}"
+            ));
+        }
+
+        // Tenant 2 deletes C2's only member.
+        let deleted = v145_as_tenant(
+            &mut owner,
+            t2,
+            "DELETE FROM trace_gate_decisions WHERE decision_id = $1",
+            vec![t2_c2],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let expected = vec![(c1, 99, 2)];
+        if deleted.is_err() || now != expected {
+            problems.push(format!(
+                "after C2's only member was deleted: {deleted:?}, read {now:?}, not {expected:?}"
+            ));
+        }
+
+        // Tenant 2 deletes C1's representative: the next earliest member
+        // (tenant 2's simhash 6) takes over.
+        let rep_deleted = v145_as_tenant(
+            &mut owner,
+            t2,
+            "DELETE FROM trace_gate_decisions WHERE dedup_simhash = 99",
+            vec![],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let expected = vec![(c1, 6, 1)];
+        if rep_deleted.is_err() || now != expected {
+            problems.push(format!(
+                "after C1's representative was deleted: {rep_deleted:?}, read {now:?}, \
+                 not {expected:?}"
+            ));
+        }
+
+        // One statement touching several clusters, as a recluster sweep or a
+        // bulk import would: five new members across three clusters, then
+        // one UPDATE that moves two of them and changes nothing about a third.
+        let c3 = uuid::Uuid::new_v4();
+        let bulk = v145_as_tenant(
+            &mut owner,
+            t2,
+            "INSERT INTO trace_gate_decisions
+                (tenant_id, decision_id, submission_id, gate_policy_version, gate_version_hash,
+                 perplexity_micros, tail_fraction_micros, perplexity_passed, novelty_score_micros,
+                 nearest_neighbor_hash, novelty_passed, embedding_evidence_hash,
+                 attestation_chain_hash, decided_at, dedup_cluster_id, dedup_simhash,
+                 dedup_signal_version)
+             SELECT 'v145-tenant-2', gen_random_uuid(), gen_random_uuid(), 'v', 'sha256:v',
+                    1, 1, TRUE, 1, 'sha256:n', TRUE, 'sha256:e', 'sha256:a',
+                    TIMESTAMPTZ '2026-02-01T00:00:00Z' + make_interval(secs => i),
+                    (ARRAY[$1::uuid, $2::uuid, $3::uuid])[1 + i % 3], 200 + i, 'stamp'
+               FROM generate_series(0, 4) i",
+            vec![c1, c2, c3],
+        )
+        .await;
+        let moved = v145_as_tenant(
+            &mut owner,
+            t2,
+            "UPDATE trace_gate_decisions
+                SET dedup_cluster_id = CASE WHEN dedup_simhash IN (201, 202) THEN $1::uuid
+                                            ELSE dedup_cluster_id END,
+                    dedup_cluster_size = 1
+              WHERE dedup_simhash IN (200, 201, 202)",
+            vec![c3],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        if bulk.is_err() || moved.is_err() || now != truth {
+            problems.push(format!(
+                "after multi-cluster statements: {bulk:?} {moved:?}, read {now:?}, \
+                 a full recompute reads {truth:?}"
+            ));
+        }
+
+        // An UPDATE of members that leaves the dedup columns alone changes
+        // nothing, and one of non-members returns early.
+        let untouched = v145_as_tenant(
+            &mut owner,
+            t2,
+            "UPDATE trace_gate_decisions SET perplexity_micros = perplexity_micros + 1",
+            vec![],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        if untouched.is_err() || now != truth {
+            problems.push(format!(
+                "after an UPDATE of non-dedup columns: {untouched:?}, read {now:?}, \
+                 not {truth:?}"
+            ));
+        }
+
+        // Concurrent writers, each on its own owner connection. `holder`
+        // writes and keeps its transaction open; `waiter` must queue behind
+        // it on the cluster row and then apply its own change on top.
+        let owner_url = with_user(&with_database(&url, DB), OWNER, "probe");
+        let holder = connect(&owner_url).await;
+        let waiter = connect(&owner_url).await;
+
+        // Two READ COMMITTED writers joining one existing cluster.
+        let raced = v145_race(
+            &seed,
+            &holder,
+            waiter,
+            OWNER,
+            &v145_insert(t1, c1, 300, 1),
+            &v145_insert(t2, c1, 301, 2),
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        if raced.is_err() || now != truth {
+            problems.push(format!(
+                "after two writers joined one cluster at once: {raced:?}, read {now:?}, \
+                 a full recompute reads {truth:?}"
+            ));
+        }
+
+        // Two writers creating the same new cluster: the second one's insert
+        // waits on the first's, finds the row, and locks it.
+        let c4 = uuid::Uuid::new_v4();
+        let waiter = connect(&owner_url).await;
+        let created = v145_race(
+            &seed,
+            &holder,
+            waiter,
+            OWNER,
+            &v145_insert(t1, c4, 400, 3),
+            &v145_insert(t2, c4, 401, 4),
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        let c4_row = now.iter().find(|row| row.0 == c4).copied();
+        if created.is_err() || now != truth || c4_row != Some((c4, 400, 2)) {
+            problems.push(format!(
+                "after two writers created one cluster at once: {created:?}, read {now:?}, \
+                 a full recompute reads {truth:?}"
+            ));
+        }
+
+        // A REPEATABLE READ writer whose snapshot predates another writer's
+        // commit to the same cluster fails instead of building on it.
+        let stale = v145_stale_snapshot(
+            &holder,
+            &mut owner,
+            t1,
+            &v145_insert(t2, c1, 500, 5),
+            &v145_insert(t1, c1, 501, 6),
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        if stale.as_deref() != Some(SERIALIZATION_FAILURE) || now != truth {
+            problems.push(format!(
+                "a REPEATABLE READ writer with a stale snapshot got {stale:?}, not a \
+                 serialization failure; read {now:?}, a full recompute reads {truth:?}"
+            ));
+        }
+        drop(holder);
+
+        // A write that skips the triggers leaves the count behind until the
+        // next statement changes the cluster, which recounts it: here a later
+        // member joins and the representative stays.
+        seed.batch_execute(&format!(
+            "SET session_replication_role = replica; {}; SET session_replication_role = origin;",
+            v145_insert(t2, c4, 402, 7)
+        ))
+        .await
+        .expect("insert a member with the triggers skipped");
+        let drifted = v145_cluster_table(&seed).await;
+        let healed = v145_as_tenant(
+            &mut owner,
+            t1,
+            &format!(
+                "INSERT INTO trace_gate_decisions
+                    (tenant_id, decision_id, submission_id, gate_policy_version,
+                     gate_version_hash, perplexity_micros, tail_fraction_micros,
+                     perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                     novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+                     decided_at, dedup_cluster_id, dedup_simhash, dedup_signal_version)
+                 VALUES ('{t1}', gen_random_uuid(), gen_random_uuid(), 'v', 'sha256:v', 1, 1,
+                         TRUE, 1, 'sha256:n', TRUE, 'sha256:e', 'sha256:a',
+                         TIMESTAMPTZ '2026-03-01T00:00:08Z', $1, 403, 'stamp')"
+            ),
+            vec![c4],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        let c4_row = now.iter().find(|row| row.0 == c4).copied();
+        if healed.is_err() || now != truth || c4_row != Some((c4, 400, 4)) {
+            problems.push(format!(
+                "after a trigger-skipping insert ({drifted:?}) and a later member \
+                 joining: {healed:?}, read {now:?}, a full recompute reads {truth:?}"
+            ));
+        }
+
+        // Trigger-skipping deletes take a cluster's representative and all but
+        // one member; a triggered delete of the last member must then drop the
+        // cluster's row, not write a zero count.
+        let c5 = uuid::Uuid::new_v4();
+        let mut seeded = Ok(0);
+        for (simhash, secs) in [(600, 10), (601, 11), (602, 12)] {
+            seeded = seeded.and(
+                v145_as_tenant(&mut owner, t1, &v145_insert(t1, c5, simhash, secs), vec![]).await,
+            );
+        }
+        seed.batch_execute(
+            "SET session_replication_role = replica;
+             DELETE FROM trace_gate_decisions WHERE dedup_simhash IN (600, 601);
+             SET session_replication_role = origin;",
+        )
+        .await
+        .expect("delete members with the triggers skipped");
+        let emptied = v145_as_tenant(
+            &mut owner,
+            t1,
+            "DELETE FROM trace_gate_decisions WHERE dedup_simhash = 602",
+            vec![],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        if seeded.is_err() || emptied.is_err() || now != truth || now.iter().any(|r| r.0 == c5) {
+            problems.push(format!(
+                "after trigger-skipping deletes left one member and it was deleted: \
+                 {seeded:?} {emptied:?}, read {now:?}, a full recompute reads {truth:?}"
+            ));
+        }
+
+        // Trigger-skipping writes remove a small cluster's representative and
+        // add 1100 members. The next triggered change finds its delta count
+        // (3) wrong, counts past the cap in full, and finds the new earliest.
+        let c6 = uuid::Uuid::new_v4();
+        let mut seeded = Ok(0);
+        for (simhash, secs) in [(700, 20), (701, 21)] {
+            seeded = seeded.and(
+                v145_as_tenant(&mut owner, t2, &v145_insert(t2, c6, simhash, secs), vec![]).await,
+            );
+        }
+        seed.batch_execute(&format!(
+            "SET session_replication_role = replica;
+             DELETE FROM trace_gate_decisions WHERE dedup_simhash = 700;
+             INSERT INTO trace_gate_decisions
+                (tenant_id, decision_id, submission_id, gate_policy_version, gate_version_hash,
+                 perplexity_micros, tail_fraction_micros, perplexity_passed, novelty_score_micros,
+                 nearest_neighbor_hash, novelty_passed, embedding_evidence_hash,
+                 attestation_chain_hash, decided_at, dedup_cluster_id, dedup_simhash,
+                 dedup_signal_version)
+             SELECT '{t2}', gen_random_uuid(), gen_random_uuid(), 'v', 'sha256:v', 1, 1, TRUE, 1,
+                    'sha256:n', TRUE, 'sha256:e', 'sha256:a',
+                    TIMESTAMPTZ '2026-03-01T00:00:00Z' + make_interval(secs => 100 + i),
+                    '{c6}', 800, 'stamp'
+               FROM generate_series(1, 1100) i;
+             SET session_replication_role = origin;"
+        ))
+        .await
+        .expect("change a cluster with the triggers skipped");
+        let recounted = v145_as_tenant(&mut owner, t2, &v145_insert(t2, c6, 702, 30), vec![]).await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        let c6_row = now.iter().find(|row| row.0 == c6).copied();
+        if seeded.is_err() || recounted.is_err() || now != truth || c6_row != Some((c6, 701, 1102))
+        {
+            problems.push(format!(
+                "after trigger-skipping writes past the recount cap: {seeded:?} {recounted:?}, \
+                 read {c6_row:?}, a full recompute reads {truth:?}"
+            ));
+        }
+
+        // A trigger-skipping update moves the representative behind another
+        // member without changing the count. The next triggered change to the
+        // small cluster must still find the new earliest member.
+        let c7 = uuid::Uuid::new_v4();
+        let mut seeded = Ok(0);
+        for (simhash, secs) in [(900, 40), (901, 41)] {
+            seeded = seeded.and(
+                v145_as_tenant(&mut owner, t1, &v145_insert(t1, c7, simhash, secs), vec![]).await,
+            );
+        }
+        seed.batch_execute(
+            "SET session_replication_role = replica;
+             UPDATE trace_gate_decisions
+                SET decided_at = TIMESTAMPTZ '2026-03-01T00:00:50Z'
+              WHERE dedup_simhash = 900;
+             SET session_replication_role = origin;",
+        )
+        .await
+        .expect("move the representative with the triggers skipped");
+        let reprobed = v145_as_tenant(&mut owner, t1, &v145_insert(t1, c7, 902, 60), vec![]).await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        let c7_row = now.iter().find(|row| row.0 == c7).copied();
+        if seeded.is_err() || reprobed.is_err() || now != truth || c7_row != Some((c7, 901, 3)) {
+            problems.push(format!(
+                "after a trigger-skipping update moved the representative: {seeded:?} \
+                 {reprobed:?}, read {c7_row:?}, a full recompute reads {truth:?}"
+            ));
+        }
+
+        // Nobody but the guard and the gate driver sees the table, and the
+        // migrator gave the guard back.
+        let visible: i64 = owner
+            .query_one(
+                "SELECT count(*) FROM trace_dedup_cluster_representatives",
+                &[],
+            )
+            .await
+            .map(|r| r.get(0))
+            .unwrap_or(-1);
+        if visible > 0 {
+            problems.push(format!(
+                "the owner sees {visible} cluster rows through row security"
+            ));
+        }
+        let still_member: bool = seed
+            .query_one(
+                // ADMIN from CREATE ROLE stays (see `Standing::Creator`); what
+                // must not stay is the right to act as the guard.
+                "SELECT pg_has_role($1, 'trace_dedup_cluster_guard', 'USAGE')
+                     OR pg_has_role($1, 'trace_dedup_cluster_guard', 'SET')",
+                &[&OWNER],
+            )
+            .await
+            .expect("read guard membership")
+            .get(0);
+        if still_member {
+            problems.push("the migrator can still act as the guard role".into());
+        }
+
+        // TRUNCATE skips row and statement DML triggers; its own trigger
+        // must empty the table.
+        let truncated = owner
+            .batch_execute("TRUNCATE trace_gate_decisions CASCADE")
+            .await
+            .map_err(|e| format!("{e:?}"));
+        let now = v145_cluster_table(&seed).await;
+        if truncated.is_err() || !now.is_empty() {
+            problems.push(format!(
+                "after TRUNCATE: {truncated:?}, read {now:?}, not an empty table"
+            ));
+        }
+    }
+
+    drop(seed);
+    drop(owner);
+    admin
+        .execute(&format!("DROP DATABASE IF EXISTS {DB} WITH (FORCE)"), &[])
+        .await
+        .expect("drop the probe database");
+    assert!(
+        problems.is_empty(),
+        "V145 must backfill every tenant's clusters and keep them in step with \
+         tenant-scoped writes:\n  {}",
+        problems.join("\n  ")
+    );
+    probe.release().await;
+    assert!(
+        !role_exists(&url, OWNER).await,
+        "{OWNER} is per server and must not outlive the test (#1335)"
+    );
+}
+
+const SERIALIZATION_FAILURE: &str = "40001";
+
+/// A member insert as SQL with literals, for the raw-transaction helpers.
+fn v145_insert(tenant: &str, cluster: uuid::Uuid, simhash: i64, secs: i64) -> String {
+    format!(
+        "INSERT INTO trace_gate_decisions
+            (tenant_id, decision_id, submission_id, gate_policy_version, gate_version_hash,
+             perplexity_micros, tail_fraction_micros, perplexity_passed, novelty_score_micros,
+             nearest_neighbor_hash, novelty_passed, embedding_evidence_hash,
+             attestation_chain_hash, decided_at, dedup_cluster_id, dedup_simhash,
+             dedup_signal_version)
+         VALUES ('{tenant}', gen_random_uuid(), gen_random_uuid(), 'v', 'sha256:v', 1, 1, TRUE,
+                 1, 'sha256:n', TRUE, 'sha256:e', 'sha256:a',
+                 TIMESTAMPTZ '2026-03-01T00:00:00Z' + make_interval(secs => {secs}),
+                 '{cluster}', {simhash}, 'stamp')"
+    )
+}
+
+fn v145_tenant_tx(tenant: &str, isolation: &str, statement: &str) -> String {
+    format!(
+        "BEGIN ISOLATION LEVEL {isolation};
+         SELECT set_config('trace_commons.trace_tenant_id', '{tenant}', true);
+         {statement};"
+    )
+}
+
+fn v145_tenant_of(statement: &str) -> &str {
+    statement
+        .split("VALUES ('")
+        .nth(1)
+        .and_then(|rest| rest.split('\'').next())
+        .expect("the insert names its tenant")
+}
+
+/// `holder` runs `first` and keeps its transaction open; `waiter` runs
+/// `second` in its own transaction, which must block on a lock (seen from
+/// `seed` in pg_stat_activity) until `holder` commits, then succeed.
+async fn v145_race(
+    seed: &tokio_postgres::Client,
+    holder: &tokio_postgres::Client,
+    waiter: tokio_postgres::Client,
+    owner: &str,
+    first: &str,
+    second: &str,
+) -> Result<(), String> {
+    holder
+        .batch_execute(&v145_tenant_tx(
+            v145_tenant_of(first),
+            "READ COMMITTED",
+            first,
+        ))
+        .await
+        .map_err(|e| format!("holder: {e:?}"))?;
+    let second = format!(
+        "{} COMMIT;",
+        v145_tenant_tx(v145_tenant_of(second), "READ COMMITTED", second)
+    );
+    let blocked = tokio::spawn(async move {
+        let result = waiter.batch_execute(&second).await;
+        drop(waiter);
+        result.map_err(|e| format!("waiter: {e:?}"))
+    });
+    // Poll until the waiter is seen blocked or finishes. A slow runner only
+    // makes this take longer; finishing without ever waiting is the failure.
+    let mut waited = false;
+    for _ in 0..1200 {
+        let n: i64 = seed
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity
+                  WHERE usename = $1 AND wait_event_type = 'Lock'",
+                &[&owner],
+            )
+            .await
+            .expect("read pg_stat_activity")
+            .get(0);
+        if n > 0 {
+            waited = true;
+            break;
+        }
+        if blocked.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    holder
+        .batch_execute("COMMIT")
+        .await
+        .map_err(|e| format!("holder commit: {e:?}"))?;
+    blocked.await.map_err(|e| format!("join: {e:?}"))??;
+    if waited {
+        Ok(())
+    } else {
+        Err("the second writer never waited on the first".into())
+    }
+}
+
+/// `stale` opens a REPEATABLE READ transaction and takes its snapshot; then
+/// `other` commits `first`; then `stale` runs `second`. Returns the SQLSTATE
+/// `second` failed with, or None if it succeeded.
+async fn v145_stale_snapshot(
+    other: &tokio_postgres::Client,
+    stale: &mut tokio_postgres::Client,
+    stale_tenant: &str,
+    first: &str,
+    second: &str,
+) -> Option<String> {
+    stale
+        .batch_execute(&format!(
+            "BEGIN ISOLATION LEVEL REPEATABLE READ;
+             SELECT set_config('trace_commons.trace_tenant_id', '{stale_tenant}', true);"
+        ))
+        .await
+        .expect("open the REPEATABLE READ transaction");
+    other
+        .batch_execute(&format!(
+            "{} COMMIT;",
+            v145_tenant_tx(v145_tenant_of(first), "READ COMMITTED", first)
+        ))
+        .await
+        .expect("commit the other writer");
+    let result = stale.batch_execute(second).await;
+    let code = match &result {
+        Ok(()) => None,
+        Err(e) => Some(e.code().map(|c| c.code().to_string()).unwrap_or_default()),
+    };
+    stale
+        .batch_execute(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })
+        .await
+        .expect("end the REPEATABLE READ transaction");
+    code
+}
+
+/// One statement in a tenant-scoped transaction, the way the runtime writes.
+async fn v145_as_tenant(
+    owner: &mut tokio_postgres::Client,
+    tenant: &str,
+    statement: &str,
+    args: Vec<uuid::Uuid>,
+) -> Result<u64, String> {
+    let tx = owner.transaction().await.expect("begin tenant transaction");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .expect("set the tenant");
+    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = args
+        .iter()
+        .map(|a| a as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
+    let result = tx.execute(statement, &params).await;
+    tx.commit().await.expect("commit tenant transaction");
+    result.map_err(|e| format!("{e:?}"))
+}
+
+/// What a full recompute of trace_gate_decisions gives, in the same shape.
+async fn v145_cluster_truth(seed: &tokio_postgres::Client) -> Vec<(uuid::Uuid, i64, i64)> {
+    seed.query(
+        "SELECT DISTINCT ON (dedup_cluster_id) dedup_cluster_id, dedup_simhash,
+                count(*) OVER (PARTITION BY dedup_cluster_id)
+           FROM trace_gate_decisions
+          WHERE dedup_cluster_id IS NOT NULL AND dedup_simhash IS NOT NULL
+          ORDER BY dedup_cluster_id, decided_at, decision_id",
+        &[],
+    )
+    .await
+    .expect("recompute the cluster table")
+    .iter()
+    .map(|r| {
+        (
+            r.get::<_, uuid::Uuid>(0),
+            r.get::<_, i64>(1),
+            r.get::<_, i64>(2),
+        )
+    })
+    .collect()
+}
+
+/// (cluster, representative simhash, member count), read as the superuser.
+async fn v145_cluster_table(seed: &tokio_postgres::Client) -> Vec<(uuid::Uuid, i64, i64)> {
+    seed.query(
+        "SELECT dedup_cluster_id, representative_simhash, member_count
+         FROM trace_dedup_cluster_representatives ORDER BY dedup_cluster_id",
+        &[],
+    )
+    .await
+    .expect("read the cluster table")
+    .iter()
+    .map(|r| {
+        (
+            r.get::<_, uuid::Uuid>(0),
+            r.get::<_, i64>(1),
+            r.get::<_, i64>(2),
+        )
+    })
+    .collect()
+}

@@ -507,6 +507,15 @@ extension DaemonData {
         /// or the unidentified bucket does not upload (#1208): draw the core's
         /// `auto_partial` line under the label.
         public let contributionModePartial: Bool?
+        /// #1836 F1: `ok`, or `needs_attention` while this app's account
+        /// needs setting up again. Words: `TCConsentCopy.accountAttentionJSON`.
+        public let accountState: String?
+        /// `account_record_unreadable` or `account_address_refused` while
+        /// `accountState` is `needs_attention`. A label, never shown as text.
+        public let accountStateReason: String?
+        /// A NEAR AI login is stored while the account needs attention, so
+        /// no Commons check ran for it. The core's words read it.
+        public let nearAILoginUnconfirmed: Bool?
         /// K2 (#1173): `true` while a debug daemon runs a developer dry
         /// run. A release daemon never sends it. The app's notice reads it
         /// rather than the environment.
@@ -541,6 +550,9 @@ extension DaemonData {
             case contributionOverride = "contribution_override"
             case contributionMode = "contribution_mode"
             case contributionModePartial = "contribution_mode_partial"
+            case accountState = "account_state"
+            case accountStateReason = "account_state_reason"
+            case nearAILoginUnconfirmed = "near_ai_login_unconfirmed"
             case devDryRun = "dev_dry_run"
         }
     }

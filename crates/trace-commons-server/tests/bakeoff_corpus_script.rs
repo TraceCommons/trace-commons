@@ -9,8 +9,7 @@
 //! through `bakeoff_corpus::load_corpus` and asserts the slice counts +
 //! the pinned synthetic strings.
 
-#[path = "../src/bin/gate_calibrate/bakeoff_corpus.rs"]
-mod bakeoff_corpus;
+use crate::gate_calibrate::bakeoff_corpus;
 
 use std::path::PathBuf;
 use std::process::Command;

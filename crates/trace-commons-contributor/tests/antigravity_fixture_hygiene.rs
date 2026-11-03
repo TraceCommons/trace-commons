@@ -14,7 +14,7 @@
 //! that rule is applied recursively into any string value that itself
 //! parses as JSON.
 //!
-//! Run: `cargo test -p trace-commons-contributor --test antigravity_fixture_hygiene`
+//! Run: `cargo test -p trace-commons-contributor --test it -- 'antigravity_fixture_hygiene::'`
 
 use serde_json::Value;
 use std::collections::BTreeSet;

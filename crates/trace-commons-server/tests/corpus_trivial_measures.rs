@@ -10,18 +10,8 @@
 //! a known-bad corpus's failure is not evidence about a good one, so the
 //! fixture case is a permanent regression test rather than a one-off audit.
 
-// The `#[path]` modules below are compiled whole into this test target, so
-// every helper they carry for the gate-calibrate binary reads as dead code
-// here. CI builds with `-D warnings`, so silence it at the target rather than
-// scattering per-item allows through shared modules.
-#![allow(dead_code)]
-
-#[path = "../src/bin/gate_calibrate/bakeoff_corpus.rs"]
-mod bakeoff_corpus;
-#[path = "../src/bin/gate_calibrate/bakeoff_metrics.rs"]
-mod bakeoff_metrics;
-#[path = "../src/bin/gate_calibrate/trivial_measures.rs"]
-mod trivial_measures;
+use crate::gate_calibrate::bakeoff_corpus;
+use crate::gate_calibrate::trivial_measures;
 
 use std::path::PathBuf;
 

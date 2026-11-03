@@ -224,12 +224,12 @@ enum Route {
     Deposit,
     /// The login page's address or its choice path: judged by the chooser's
     /// rules once the body is read.
-    StaleChoice(loopback_http::Head),
+    StaleChoice(Box<loopback_http::Head>),
     Asset(String),
 }
 
 enum Request {
-    StaleChoice(loopback_http::Head, Vec<u8>),
+    StaleChoice(Box<loopback_http::Head>, Vec<u8>),
     Callback,
     Deposit(String),
     Asset(String),
@@ -244,10 +244,10 @@ fn parse_head(bytes: &[u8], authority: &str) -> Result<(Route, usize), NearWalle
         ("GET", target) if target == CALLBACK_PATH => Route::Callback,
         ("POST", target) if target == DEPOSIT_PATH => Route::Deposit,
         ("POST", target) if target == super::chooser::CHOOSE_PATH => {
-            Route::StaleChoice(head.clone())
+            Route::StaleChoice(Box::new(head.clone()))
         }
         ("GET", target) if target.starts_with(super::chooser::PAGE_PATH) => {
-            Route::StaleChoice(head.clone())
+            Route::StaleChoice(Box::new(head.clone()))
         }
         ("GET", target) => Route::Asset(
             near_wallet_page::asset_path(target)
