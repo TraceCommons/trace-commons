@@ -723,8 +723,8 @@ Where the implementation differs from, or adds to, sections 3 to 5:
    path), each in its own transaction. The payout pass does not carry. At
    every event the carry reaches only accounts whose principals a signed
    device proved: the linking device or a V91-attested one
-   (`trace_legacy_payout_proven_accounts`, V148, with the decision-5
-   derivation in one helper shared with the claim). Only devices still live
+   (`trace_legacy_payout_proven_accounts`, V148, a join over what the
+   claims recorded; see decision 3). Only devices still live
    in the tenant prove (unrevoked, `invite` origin, not NEAR-provisioned).
    An account opened by an unproven device waits. A live carry on an
    account that stops qualifying is held at send time
@@ -732,18 +732,23 @@ Where the implementation differs from, or adds to, sections 3 to 5:
    released at the next carry event; the first event after deploy does the
    same to any V146-era carry on an unproven account, which the pre-deploy
    checks count.
-5. **Instance-enrollment subjects prove only if enrolled by the link**
+3. **Instance-enrollment subjects prove only if enrolled by the link**
    (owner, 2026-11-03, review of #1879 at V148:253). A subject counts
    toward the proof set only if it was enrolled no later than the tenant
    link (for the linking device) or the V91 attestation (for an attested
-   device), matching the claim's own snapshot. An account under a subject
-   the instance key enrolls after the link is not proven and is not
-   carried.
-3. **A legacy account whose own payout link V147 (#1868) revoked** gets its
+   device). The claim records the principals it links, once per device
+   under the tenant link (`trace_legacy_link_claimed_principals`, V148),
+   and reuses that record on any repeat; the proof set is a join over those
+   records, so the claim and the proof cannot differ and no two clocks are
+   compared (review of #1879). An account under a subject the instance key
+   enrolls after the link is not proven and is not carried. Links made
+   before V148 are recorded once by V148, bounded by the stored link and
+   attestation times.
+4. **A legacy account whose own payout link V147 (#1868) revoked** gets its
    carry at the next of those events, if it is proven, as the waiting
    successor of the revoked link. The pilot had 0 links on 2026-11-02;
    the pre-deploy count below confirms it.
-4. **Carry failures never fail a sign-in** (review of #1879). The
+5. **Carry failures never fail a sign-in** (review of #1879). The
    account-opening carry runs in a savepoint of the login-link mint, for
    the opened account only and only when the call opened it; a failure is
    logged by class and carries nothing.

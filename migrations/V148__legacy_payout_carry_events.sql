@@ -210,10 +210,11 @@ GRANT EXECUTE ON FUNCTION public.trace_legacy_payout_source_account(TEXT)
 -- of each actor derivable from `p_device` in `p_tenant`: the bare device
 -- key, the app's `user_subject_hash(device_key_id)` subject, and each
 -- instance enrollment subject of the tenant enrolled before
--- `p_enrolled_before` (NULL: up to now). Sorted and distinct. Asked under
+-- `p_enrolled_before` (NULL: so far). Sorted and distinct. Asked under
 -- `p_tenant`'s context (instance enrollments are read through the guard's
--- tenant policy). The claim (redefined below) and the proof set both call
--- it, so they cannot drift.
+-- tenant policy). The claim calls it with NULL (it runs at the link or
+-- attestation itself); only V148's one-time backfill passes a bound.
+-- Nothing else in the database spells the formula.
 CREATE FUNCTION public.trace_legacy_device_upload_principals(
     p_tenant TEXT, p_device TEXT, p_enrolled_before TIMESTAMPTZ
 )
@@ -250,20 +251,40 @@ REVOKE ALL ON FUNCTION public.trace_legacy_device_upload_principals(TEXT, TEXT, 
     FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.trace_legacy_device_upload_principals(TEXT, TEXT, TIMESTAMPTZ)
     TO trace_legacy_payout_carry_guard;
--- What the proof set reads to bound each device's subjects: when the tenant
--- link was made, when each device attested, and when each subject enrolled.
-GRANT SELECT (linked_at) ON trace_legacy_invite_links TO trace_legacy_payout_carry_guard;
-GRANT SELECT (attested_at) ON trace_legacy_invite_link_devices TO trace_legacy_payout_carry_guard;
 GRANT SELECT (created_at) ON trace_instance_enrollments TO trace_legacy_payout_carry_guard;
 
--- V146's decision-5 claim, unchanged but for its derivation, which is now
--- the helper above.
+-- What each claim linked: the principals derived for one device under one
+-- tenant link, at that device's first claim (the link, or its V91
+-- attestation). The row lives in the legacy tenant; the tenant link is
+-- named by hash only (`trace_legacy_link_hash`). Owner decision,
+-- 2026-11-03: only subjects enrolled by the link or attestation prove, and
+-- this record is that snapshot, taken by the database itself.
+CREATE TABLE trace_legacy_link_claimed_principals (
+    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    legacy_link_hash TEXT NOT NULL CHECK (legacy_link_hash ~ '^sha256:[0-9a-f]{64}$'),
+    device_key_id TEXT NOT NULL CHECK (device_key_id ~ '^sha256:[0-9a-f]{64}$'),
+    principal_ref TEXT NOT NULL CHECK (principal_ref ~ '^principal_sha256:[0-9a-f]{64}$'),
+    claimed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (tenant_id, legacy_link_hash, device_key_id, principal_ref),
+    CHECK (tenant_id !~ '^(near-|nearai-)')
+);
+ALTER TABLE trace_legacy_link_claimed_principals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_legacy_link_claimed_principals FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_legacy_link_claimed_principals;
+CREATE POLICY trace_corpus_tenant_isolation ON trace_legacy_link_claimed_principals
+    USING (tenant_id = trace_current_tenant_id())
+    WITH CHECK (tenant_id = trace_current_tenant_id());
+GRANT SELECT, INSERT ON trace_legacy_link_claimed_principals TO trace_legacy_payout_carry_guard;
+
+-- V146's decision-5 claim, now recording its snapshot and reusing it.
 CREATE OR REPLACE FUNCTION public.trace_legacy_link_claim_device_principals(
     p_account_tenant TEXT, p_account UUID, p_legacy_tenant TEXT, p_device_key_id TEXT
 ) RETURNS INTEGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
     v_principals TEXT[];
+    v_link_id UUID;
+    v_link_hash TEXT;
     v_free TEXT[];
     v_principal TEXT;
     v_account UUID;
@@ -277,16 +298,17 @@ BEGIN
         OR p_device_key_id IS NULL OR p_device_key_id !~ '^sha256:[0-9a-f]{64}$' THEN
         RAISE EXCEPTION 'legacy_link_claim_refused' USING ERRCODE = '42501';
     END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM public.trace_legacy_invite_links l
-         WHERE l.tenant_id = p_account_tenant AND l.account_id = p_account
-           AND l.legacy_tenant_id = p_legacy_tenant AND l.revoked_at IS NULL
-           AND (l.device_key_id = p_device_key_id
-                OR EXISTS (SELECT 1 FROM public.trace_legacy_invite_link_devices d
-                            WHERE d.link_id = l.link_id AND d.device_key_id = p_device_key_id))
-    ) THEN
+    SELECT l.link_id INTO v_link_id
+      FROM public.trace_legacy_invite_links l
+     WHERE l.tenant_id = p_account_tenant AND l.account_id = p_account
+       AND l.legacy_tenant_id = p_legacy_tenant AND l.revoked_at IS NULL
+       AND (l.device_key_id = p_device_key_id
+            OR EXISTS (SELECT 1 FROM public.trace_legacy_invite_link_devices d
+                        WHERE d.link_id = l.link_id AND d.device_key_id = p_device_key_id));
+    IF NOT FOUND THEN
         RETURN 0;
     END IF;
+    v_link_hash := public.trace_legacy_link_hash(v_link_id);
 
     PERFORM set_config('trace_commons.trace_tenant_id', p_legacy_tenant, true);
     IF EXISTS (SELECT 1 FROM public.trace_legacy_invite_pooled_tenants p
@@ -300,10 +322,24 @@ BEGIN
         RETURN 0;
     END IF;
 
-    -- The claim runs at the link or attestation itself: every subject
-    -- enrolled so far is one enrolled by then.
-    v_principals := public.trace_legacy_device_upload_principals(
-        p_legacy_tenant, p_device_key_id, NULL);
+    -- The claim's snapshot (review of #1879). The first claim for this
+    -- device under this tenant link derives its principals and records
+    -- them; every later claim (a repeated link or attestation) uses that
+    -- record, so a subject enrolled after it never joins. The proof set is
+    -- a join over these records, so the claim and the proof cannot differ,
+    -- and no clock is compared with another.
+    SELECT array_agg(c.principal_ref ORDER BY c.principal_ref) INTO v_principals
+      FROM public.trace_legacy_link_claimed_principals c
+     WHERE c.tenant_id = p_legacy_tenant AND c.legacy_link_hash = v_link_hash
+       AND c.device_key_id = p_device_key_id;
+    IF v_principals IS NULL THEN
+        v_principals := public.trace_legacy_device_upload_principals(
+            p_legacy_tenant, p_device_key_id, NULL);
+        INSERT INTO public.trace_legacy_link_claimed_principals
+            (tenant_id, legacy_link_hash, device_key_id, principal_ref)
+        SELECT p_legacy_tenant, v_link_hash, p_device_key_id, x FROM unnest(v_principals) AS x
+        ON CONFLICT DO NOTHING;
+    END IF;
     -- The same lock both V135 namespace-guard triggers take per principal.
     FOREACH v_principal IN ARRAY v_principals LOOP
         PERFORM pg_advisory_xact_lock(hashtextextended(p_legacy_tenant || ':' || v_principal, 135));
@@ -349,29 +385,18 @@ BEGIN
     RETURN v_linked;
 END $$;
 
--- 5. The accounts a signed device proved (owner, 2026-11-03, #1879). At
--- every carry event the carry reaches only these: open accounts of the
--- legacy tenant holding a principal the helper above derives from a device
--- the live tenant link proved (the linking device or a V91-attested one)
--- that is still live in the tenant: unrevoked, `invite` origin, and not
--- NEAR-provisioned, the same test the claim applies (review of #1879). Each
--- device's instance-enrollment subjects count only if enrolled no later
--- than the tenant link (the linking device) or its V91 attestation (an
--- attested device): owner decision, 2026-11-03, so a subject the instance
--- key enrolls after the link proves nothing. Link and attestation times
--- are whole seconds, so "no later than" is "before the next second". An
--- account opened by any other device or subject waits. Asked under the
--- legacy tenant's own context; refused under any other.
+-- 5. The accounts a signed device proved (owner, 2026-11-03, #1879): open
+-- accounts of the legacy tenant holding a principal that a claim under the
+-- live tenant link recorded for a device still live in the tenant
+-- (unrevoked, `invite` origin, not NEAR-provisioned; the claim's own device
+-- test). A join over the claims' records: what a claim linked is exactly
+-- what proves. An account opened by any other device or subject waits.
+-- Asked under the legacy tenant's own context; refused under any other.
 CREATE FUNCTION public.trace_legacy_payout_proven_accounts(p_legacy_tenant TEXT)
 RETURNS SETOF UUID
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
-    v_link RECORD;
-    v_devices TEXT[];
-    v_bounds TIMESTAMPTZ[];
-    v_index INTEGER;
-    v_device TEXT;
-    v_principals TEXT[] := ARRAY[]::TEXT[];
+    v_link_id UUID;
 BEGIN
     IF p_legacy_tenant IS NULL
         OR p_legacy_tenant IS DISTINCT FROM public.trace_current_tenant_id() THEN
@@ -380,46 +405,85 @@ BEGIN
     IF p_legacy_tenant ~ '^(near-|nearai-)' THEN
         RETURN;
     END IF;
-    SELECT l.link_id, l.tenant_id, l.device_key_id, l.linked_at INTO v_link
+    SELECT l.link_id INTO v_link_id
       FROM public.trace_legacy_invite_links l
      WHERE l.legacy_tenant_id = p_legacy_tenant AND l.revoked_at IS NULL;
     IF NOT FOUND THEN
         RETURN;
     END IF;
-    -- The attested devices live under the NEAR AI account's tenant.
-    PERFORM set_config('trace_commons.trace_tenant_id', v_link.tenant_id, true);
-    SELECT ARRAY[v_link.device_key_id] || coalesce(array_agg(d.device_key_id ORDER BY d.device_key_id), ARRAY[]::TEXT[]),
-           ARRAY[to_timestamp(v_link.linked_at + 1)]
-               || coalesce(array_agg(to_timestamp(d.attested_at + 1) ORDER BY d.device_key_id),
-                           ARRAY[]::TIMESTAMPTZ[])
-      INTO v_devices, v_bounds
-      FROM public.trace_legacy_invite_link_devices d
-     WHERE d.link_id = v_link.link_id;
-    PERFORM set_config('trace_commons.trace_tenant_id', p_legacy_tenant, true);
-    FOR v_index IN 1 .. cardinality(v_devices) LOOP
-        v_device := v_devices[v_index];
-        IF EXISTS (SELECT 1 FROM public.device_keys d
-                    WHERE d.tenant_id = p_legacy_tenant AND d.device_key_id = v_device
-                      AND d.revoked_at IS NULL AND d.onboarding_origin = 'invite')
-           AND NOT EXISTS (SELECT 1 FROM public.trace_near_provisioned_devices n
-                            WHERE n.tenant_id = p_legacy_tenant AND n.device_key_id = v_device) THEN
-            v_principals := v_principals
-                || public.trace_legacy_device_upload_principals(
-                    p_legacy_tenant, v_device, v_bounds[v_index]);
-        END IF;
-    END LOOP;
     RETURN QUERY
         SELECT DISTINCT p.account_id
-          FROM public.trace_account_principals p
-          JOIN public.trace_accounts a ON a.tenant_id = p.tenant_id AND a.account_id = p.account_id
-         WHERE p.tenant_id = p_legacy_tenant AND p.unlinked_at IS NULL
-           AND a.closed_at IS NULL AND p.principal_ref = ANY (v_principals);
+          FROM public.trace_legacy_link_claimed_principals c
+          JOIN public.trace_account_principals p
+            ON p.tenant_id = c.tenant_id AND p.principal_ref = c.principal_ref
+           AND p.unlinked_at IS NULL
+          JOIN public.trace_accounts a
+            ON a.tenant_id = p.tenant_id AND a.account_id = p.account_id AND a.closed_at IS NULL
+         WHERE c.tenant_id = p_legacy_tenant
+           AND c.legacy_link_hash = public.trace_legacy_link_hash(v_link_id)
+           AND EXISTS (SELECT 1 FROM public.device_keys d
+                        WHERE d.tenant_id = c.tenant_id AND d.device_key_id = c.device_key_id
+                          AND d.revoked_at IS NULL AND d.onboarding_origin = 'invite')
+           AND NOT EXISTS (SELECT 1 FROM public.trace_near_provisioned_devices n
+                            WHERE n.tenant_id = c.tenant_id AND n.device_key_id = c.device_key_id);
 END $$;
 ALTER FUNCTION public.trace_legacy_payout_proven_accounts(TEXT)
     OWNER TO trace_legacy_payout_carry_guard;
 REVOKE ALL ON FUNCTION public.trace_legacy_payout_proven_accounts(TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.trace_legacy_payout_proven_accounts(TEXT)
     TO trace_ingest_runtime;
+
+-- Links made before V148 have no record: their claims ran under V146. Record
+-- them once now, for each live tenant link's device and attested devices,
+-- with the subjects enrolled by the link or attestation as nearly as the
+-- stored times allow (whole seconds from the app host; one-time only, every
+-- later claim records itself). Run as the guard, then dropped.
+GRANT SELECT (linked_at) ON trace_legacy_invite_links TO trace_legacy_payout_carry_guard;
+GRANT SELECT (attested_at) ON trace_legacy_invite_link_devices TO trace_legacy_payout_carry_guard;
+CREATE FUNCTION public.trace_legacy_link_claimed_principals_backfill()
+RETURNS INTEGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+DECLARE
+    v_prior TEXT := current_setting('trace_commons.trace_tenant_id', true);
+    v_link RECORD;
+    v_device RECORD;
+    v_principals TEXT[];
+    v_rows INTEGER := 0;
+    v_count INTEGER;
+BEGIN
+    FOR v_link IN
+        SELECT l.link_id, l.tenant_id, l.legacy_tenant_id, l.device_key_id, l.linked_at
+          FROM public.trace_legacy_invite_links l
+         WHERE l.revoked_at IS NULL AND l.legacy_tenant_id !~ '^(near-|nearai-)'
+    LOOP
+        PERFORM set_config('trace_commons.trace_tenant_id', v_link.tenant_id, true);
+        FOR v_device IN
+            SELECT v_link.device_key_id AS device_key_id, v_link.linked_at AS at
+            UNION
+            SELECT d.device_key_id, d.attested_at FROM public.trace_legacy_invite_link_devices d
+             WHERE d.link_id = v_link.link_id
+        LOOP
+            PERFORM set_config('trace_commons.trace_tenant_id', v_link.legacy_tenant_id, true);
+            v_principals := public.trace_legacy_device_upload_principals(
+                v_link.legacy_tenant_id, v_device.device_key_id, to_timestamp(v_device.at + 1));
+            INSERT INTO public.trace_legacy_link_claimed_principals
+                (tenant_id, legacy_link_hash, device_key_id, principal_ref)
+            SELECT v_link.legacy_tenant_id, public.trace_legacy_link_hash(v_link.link_id),
+                   v_device.device_key_id, x
+              FROM unnest(v_principals) AS x
+            ON CONFLICT DO NOTHING;
+            GET DIAGNOSTICS v_count = ROW_COUNT;
+            v_rows := v_rows + v_count;
+            PERFORM set_config('trace_commons.trace_tenant_id', v_link.tenant_id, true);
+        END LOOP;
+    END LOOP;
+    PERFORM set_config('trace_commons.trace_tenant_id', coalesce(v_prior, ''), true);
+    RETURN v_rows;
+END $$;
+ALTER FUNCTION public.trace_legacy_link_claimed_principals_backfill()
+    OWNER TO trace_legacy_payout_carry_guard;
+SELECT public.trace_legacy_link_claimed_principals_backfill();
+DROP FUNCTION public.trace_legacy_link_claimed_principals_backfill();
 
 -- The send-time half of the proof rule (review of #1879): TRUE when the
 -- account holds a live carry but is no longer proven (its proving principal

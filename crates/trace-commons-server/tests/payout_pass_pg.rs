@@ -2586,6 +2586,37 @@ async fn open_proven_legacy_account(fixture: &Fixture, legacy: &str) -> Uuid {
         &[&legacy, &account, &principal],
     )
     .await;
+    // What the tenant link's claim would have recorded for the device
+    // (V148 proves only by those records); these fixtures insert the link
+    // row directly, so no claim ran.
+    let link: Uuid = fixture
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT link_id FROM trace_legacy_invite_links
+              WHERE legacy_tenant_id = $1 AND revoked_at IS NULL",
+            &[&legacy],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    owner_exec(
+        fixture,
+        legacy,
+        "INSERT INTO trace_legacy_link_claimed_principals
+             (tenant_id, legacy_link_hash, device_key_id, principal_ref)
+         VALUES ($1, $2, $3, $4)",
+        &[
+            &legacy,
+            &trace_commons_server::db::payout_legacy_link_hash(link),
+            &device,
+            &principal,
+        ],
+    )
+    .await;
     account
 }
 

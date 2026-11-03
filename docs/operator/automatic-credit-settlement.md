@@ -35,8 +35,8 @@ have landed (owner, 2026-11-03):
   - **Pooled Devfolio tenants** (`trace_legacy_invite_pooled_tenants`) are
     excluded from payouts by design; they need no migration.
 - **Run the four legacy rollout checks and have the owner review them**
-  (owner, 2026-11-03; spec section 13, "Production-payout gates"). Both
-  are read-only and return counts only. RLS is forced, so run them as the
+  (owner, 2026-11-03; spec section 13, "Production-payout gates"). All
+  four are read-only and return counts only. RLS is forced, so run them as the
   migration owner or once per tenant.
   - **Source provenance.** Live payout links that may have been proved by
     a wallet anchor before #1862, split by whether the account holds a
@@ -73,7 +73,11 @@ have landed (owner, 2026-11-03):
   - **Carries on unproven accounts.** Count live carries whose account no
     signed device proves; the first carry event after deploy releases each
     (a waiting one closes at zero, an active one is unlinked and stops
-    being paid). Run per legacy tenant, under its tenant context:
+    being paid). It needs V148's functions, so run it right after V148 is
+    applied and before any carry event can happen: with every payout rail
+    `disabled` (a `shadow` or `dry_run` rail still carries), or before
+    ingest restarts on the new build. Run per legacy tenant, under its
+    tenant context:
 
     ```sql
     SELECT count(*) FROM trace_legacy_payout_carries c

@@ -1439,6 +1439,7 @@ async fn a_confirmed_link_reaches_a_linked_legacy_account_and_opens_to_the_same_
         .await
         .unwrap();
     let hex = |label: &str| sha256_prefixed(label);
+    let tenant_link = Uuid::new_v4();
     admin
         .execute(
             "INSERT INTO trace_legacy_invite_links
@@ -1447,7 +1448,7 @@ async fn a_confirmed_link_reaches_a_linked_legacy_account_and_opens_to_the_same_
                  server_kid, server_signature)
              VALUES ($1, $2, $3, $4, $5, $6, $7, 1, 'sig', 2, 'kid', 'sig')",
             &[
-                &Uuid::new_v4(),
+                &tenant_link,
                 &near.tenant,
                 &near.id,
                 &legacy.tenant,
@@ -1489,6 +1490,23 @@ async fn a_confirmed_link_reaches_a_linked_legacy_account_and_opens_to_the_same_
             "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
              VALUES ($1, $2, $3)",
             &[&legacy.tenant, &legacy.id, &principal],
+        )
+        .await
+        .unwrap();
+    // What the tenant link's claim would have recorded for the device
+    // (V148 proves only by those records); the link row is inserted
+    // directly here, so no claim ran.
+    admin
+        .execute(
+            "INSERT INTO trace_legacy_link_claimed_principals
+                 (tenant_id, legacy_link_hash, device_key_id, principal_ref)
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &legacy.tenant,
+                &trace_commons_server::db::payout_legacy_link_hash(tenant_link),
+                &device,
+                &principal,
+            ],
         )
         .await
         .unwrap();

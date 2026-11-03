@@ -312,6 +312,19 @@ pub(super) async fn carry_opened_account_in_tx(
     };
     let legacy_hash = legacy_link_hash(tenant_link);
     for ((rail, programs), source) in rails.iter().zip(sources.iter()) {
+        // The repair path (review of #1879): a tenant link with no carry at
+        // all on this rail means its best-effort carry after the tenant
+        // link failed, or never ran. This event then carries the whole
+        // tenant, not only the account it opened.
+        let uncarried: bool = tx
+            .query_one(
+                "SELECT NOT EXISTS (SELECT 1 FROM trace_legacy_payout_carries
+                                     WHERE tenant_id = $1 AND legacy_link_hash = $2
+                                       AND rail_id = $3)",
+                &[&legacy, &legacy_hash, &rail.as_str()],
+            )
+            .await?
+            .get(0);
         carry_tenant(
             tx,
             legacy,
@@ -319,7 +332,7 @@ pub(super) async fn carry_opened_account_in_tx(
             source.as_ref(),
             rail.as_str(),
             programs,
-            Some(account),
+            (!uncarried).then_some(account),
             &mut report,
         )
         .await?;

@@ -2134,10 +2134,11 @@ pub(super) async fn create_or_reuse_account_in_tx_opened(
 
     // Re-select the authoritative account for this principal. If a
     // concurrent mint inserted the link first, this returns ITS account_id,
-    // and the row this call inserted is deleted: an open account with no
-    // principal would otherwise be one more account in the tenant (V148
-    // carries reach open accounts; review of #1879). If we won, it returns
-    // new_account_id.
+    // and the row this call inserted is closed: an open account with no
+    // principal would otherwise be one more open account in the tenant
+    // (review of #1879). Closed, not deleted: the runtime's documented writes
+    // to trace_accounts are INSERT and UPDATE (closed_at) (V90), never
+    // DELETE. If we won, it returns new_account_id.
     let row = tx
         .query_one(
             "SELECT account_id FROM trace_account_principals
@@ -2151,7 +2152,7 @@ pub(super) async fn create_or_reuse_account_in_tx_opened(
     let account_id: Uuid = row.get("account_id");
     if account_id != new_account_id {
         tx.execute(
-            "DELETE FROM trace_accounts
+            "UPDATE trace_accounts SET closed_at = now()
               WHERE tenant_id = trace_current_tenant_id() AND account_id = $1",
             &[&new_account_id],
         )
@@ -5363,6 +5364,20 @@ impl Database for PgBackend {
         )
         .await
         .map_err(DatabaseError::Postgres)?;
+        // A legacy tenant's tenant-link lock (V81, V148), also before any
+        // account row lock: a link or attestation holds it while its claim
+        // writes principals referencing an account, and closing the absorbed
+        // account below takes it in the release trigger. Taken here first,
+        // the order is always tenant link, then account row (review of
+        // #1879).
+        if !trace_commons_protocol::admission::is_anchored_tenant(tenant_id) {
+            tx.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || $1, 0))",
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        }
 
         // Load + consume the proposal atomically. The conditional UPDATE
         // re-validates OWNERSHIP (surviving_account_id = A, the auth-derived
