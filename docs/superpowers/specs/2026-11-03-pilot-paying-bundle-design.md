@@ -266,6 +266,10 @@ rulings as they are.
 - `main`'s settlement never selects a graded pipeline row.
 - `matches_main_gate` refuses a rule mismatch.
 - The PostgreSQL runtime suite covers a held account and a duplicate.
+- `f` and `a` feed a signed, audited award now, not only shadow evidence.
+  So the factors are either computed in fixed point or pinned by test
+  vectors, and the qualification harness and production agree to the
+  microcredit. The implementation plan decides which.
 
 ### Comparison
 
@@ -365,7 +369,8 @@ Each step names what it changes and why uploads keep working.
 - This keeps the risky change (code) apart from the credit switch.
 
 **Step 1. Pre-flight, read-only.**
-- The rail is in `dry_run`, or `live` and halted (`pay.sh halt`).
+- The rail is in `dry_run`, or `live` and halted through its control-token
+  halt route (`payout_rails.rs`).
 - Count the accepted pipeline submissions that carry `model_training`, per
   tenant (D9).
 - Record `GET /v1/admin/config-status`: armed, routed tenant count.
@@ -393,8 +398,9 @@ python3 scripts/operator/pipeline.py package --bundle production \
 
 **Step 4. Phase A on the new package.**
 - Run the phase A promotion with `promote init --package PKG-graded.json`.
-- The operator's phase A script pins the old package's path, so it needs a
-  package argument or a pinned copy. The owner runs that edit.
+- The host's promotion wrapper (not in the repository) pins the old
+  package's path, so it needs a package argument or a pinned copy. The owner
+  runs that edit.
 - `promote package-checks` reads the gate settings and the delta back from
   the package itself (`CompatibilityBundleConfig::main_gate`,
   `versioned_pipeline_compat.rs:216-219`), so the checks run against the
@@ -424,10 +430,14 @@ TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM=<RFC 3339 UTC, the edit time>
   configuration (`pipeline-activation.md:3457-3480`). Those bundles are the
   old delta-0 package, so **without D6 this start is refused**
   (`pipeline_runtime_main_gate_config_mismatch`). See section 7.3.
-- With D6, the old bundle is tolerated, because it differs only by a lower
-  award, and the start proceeds.
+- With D6, the old bundle is tolerated, because a tenant already selected it
+  and it differs only by a lower award, and the start proceeds.
+- D6 never applies to the armed set. Arming runs the tenant-bundle checks on
+  the set's package, which still names the old package, so it fails and
+  default routing stays unarmed until R3 swaps in the graded set. No new
+  tenant lands on the delta-0 package in the window.
 - The old bundle is still qualified on this revision, so routed tenants keep
-  uploading on it, at delta 0, while default routing is unarmed.
+  uploading on it, at delta 0, until R3 moves them.
 
 **Step 7. R2 and R3.**
 - R2: `promote adapters`, `sign` and `assemble`. The adapters result written
@@ -452,8 +462,8 @@ TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM=<RFC 3339 UTC, the edit time>
 - A trace without `model_training` shows `withheld` / `policy_mismatch`.
 
 **Step 9. Go live.**
-- Resume the rail, or set `NEAR_AI_PAYOUT_MODE=live` with the scheduler's
-  dry run off, as in the 2026-11-03 payout commands, step 9.
+- Resume the rail, or set `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE=live` with
+  `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_DRY_RUN=false`, and restart.
 - Confirm one real payout end to end on the owner's own linked account.
 
 ### 7.3 Without D6: moving each tenant by hand
@@ -488,16 +498,23 @@ the graded bundle, a restart with delta 0 is refused for the same reason as
 in step 6.
 
 - **Stop paying, instantly, no restart.**
-  - `pay.sh halt`, the payout control token's kill switch. Undo it with
-    `pay.sh resume`.
-  - Then set `NEAR_AI_PAYOUT_MODE=disabled` at the next restart, with the
-    delta and the rule unchanged.
+  - Halt the rail through the payout control token's halt route
+    (`payout_rails.rs`). Undo it with the matching resume.
+  - Then set `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE=disabled` at the next
+    restart, with the delta and the rule unchanged.
   - Awards keep being written and batched, and accruals are priced, but
     nothing is sent.
 - **Stop awarding.**
   1. For each tenant, roll back to the old delta-0 bundle with
-     `POST /v1/admin/pipeline/rollback`. It must still be qualified on the
-     running revision, inside its 7-day evidence age.
+     `POST /v1/admin/pipeline/rollback`.
+     - The route selects a bundle that an earlier `activate` or `rollback`
+       of this tenant selected (`pipeline-activation.md:495-504`). The
+       default-routing activation counts.
+     - It runs the gate on fresh evidence: a signed check set for the old
+       package on the running revision. That is the 2026-11-03 set while it
+       is inside its 7-day maximum age, or a new set after that.
+     - Under the graded configuration, D6's tolerance is what lets the gate
+       pass on the old package.
   2. Wait until no graded run is in flight.
   3. Set the delta to 0 and the rule to `flat`.
   4. Restart.
@@ -542,8 +559,11 @@ trace then earns about 0.68 points and the 80-point ceiling takes about 118
 passing traces.
 
 D6. **Tolerate and move old bundles.** Two parts:
-- Startup tolerates a routed tenant's compatibility bundle that differs from
-  `main`'s gate configuration only by a lower award (delta 0, rule `flat`).
+- Startup tolerates a compatibility bundle that a tenant already selected,
+  or that a run in flight is bound to, when it differs from `main`'s gate
+  configuration only by a lower award (delta 0, rule `flat`). The tolerance
+  never reaches the default package or the armed set, which must match
+  exactly.
 - The default-routing requalify loop moves such a tenant to the armed
   bundle.
 
@@ -580,5 +600,7 @@ That puts two restarts and one re-arm between now and the first payout.
   range instead.
 - How many pilot submissions carry `model_training`.
 - The package key's file name. It is confirmed on the host before step 3.
-- Whether the rollback route accepts the old bundle once the graded bundle
-  is the default package. The rehearsal on staging confirms it.
+- That D6's tolerance covers every path that checks a tenant bundle (startup,
+  the activation and rollback gates, the requalify loop) and no path that
+  checks the armed set. The staging rehearsal of steps 0-8 and of the
+  rollback confirms it.
