@@ -208,6 +208,13 @@ Two IPC verbs and the matching C ABI functions (both header copies):
 - `account_login_change_cancel`: drops the ceremony and the held-aside
   login, revoking any key minted in it.
 
+The ceremony spans two browser legs (a wallet approval or NEAR AI
+sign-in, then a NEAR AI sign-in), so its expiry is set for that, not
+copied from the sign-up ceremony's, which covers one leg. The server's
+expiry is published in the start answer; the daemon starts the ceremony
+only once the held-aside login, if any, is in hand, and restarts it on
+expiry without asking the person to repeat a leg that already finished.
+
 Status gains `login_change_available: bool` (the server publishes the
 routes, the account's tenant is in an anchor namespace, the device did not
 join by code, decision 8) and, for a wallet-origin account,
@@ -220,6 +227,14 @@ login is now the retired one, so their next NEAR AI sign-in or renewal is
 refused as a different account, and they see the existing approved
 mismatch body. "Sign in" there opens the chooser with the new provider
 marked, once the server's answer tells them what it is (section 4.3).
+
+A wallet-origin account's other devices have no NEAR AI login stored, and
+their wallet anchor is now retired, so they can renew neither way. They
+land in the existing needs-sign-in state, and their Sign in opens the
+NEAR AI chooser. That works because the recorded identity kind (4.4), read
+from the server's answer at their next sign-in, routes a `near-` tenant to
+the NEAR AI path; until the daemon has it, the server's `identity` field
+in the sign-in answer sets it.
 
 ### 2.6 Notices that need explicit approval
 
@@ -356,6 +371,19 @@ GRANT SELECT, INSERT ON trace_account_login_changes TO trace_ingest_runtime;
   the count. It does not pick one to retire: which identity a merged
   account keeps is an owner call. Pilot count expected 0 (to run before
   deploy; section 7).
+- **Merges.** `trace_near_account_merge` (V82, owned by
+  `trace_near_account_merge_guard`) moves the absorbed account's anchors
+  onto the survivor and documents that "a survivor that already holds an
+  anchor ends up holding both". Under the one-live-anchor index that merge
+  would fail. V150 replaces the function, as its guard role (the V64/V81
+  ownership pattern; never under the migration role), so that an absorbed
+  anchor lands on a survivor that already holds a live anchor as
+  retired: the row moves, so its `UNIQUE (anchor_hash)` still blocks a
+  fresh sign-up (T5), but it no longer signs in. The guard role gains
+  `UPDATE (retired_at)`. Which identity survives a merge is then the
+  survivor's, which is decision 3's rule applied to merges. The
+  alternative, enforcing one live anchor only in the change route and
+  dropping the index, leaves merges as they are.
 - `trace_account_login_changes` holds no anchor, subject or provider. It
   exists for the cooldown (decision 9) and to count changes per account;
   `trace_account_audit` remains the audit record.
@@ -383,8 +411,9 @@ login. Added since:
 | Wallet sign-in account lookup (`postgres_account_onboarding.rs:493`) | A retired wallet anchor resolves to "retired", answered with the uniform deny on the wallet path. It must not mint a fresh account: the row still holds the index (T5) |
 | `payout_account_login_anchors` (`postgres_payout.rs`, after #1862) | `AND retired_at IS NULL`. A retired login cannot prove a new link |
 | `trace_account_admission_linkage_ready()` (V81) | No change needed: it reads provisioned-device rows, which the change re-keys. A test asserts it stays true across a change in both namespaces |
-| V146 carry source check ("source holds a `near_ai_login` anchor") | `AND retired_at IS NULL`, so a carry source must hold a live login |
-| V147-style "account has no NEAR AI login" predicates | Live anchors only |
+| Payout link confirm's re-read ("the account holds a `near_ai_login` anchor", `postgres_payout.rs:1533-1541`), which is also what a V146 carry rides on | `AND retired_at IS NULL`, so a link, and so a carry source, needs a live login |
+| `trace_link_legacy_instance_device` (V146, owned by `trace_legacy_invite_link_guard`): "the account holds an anchor" | No change needed: after a change the account always holds a live anchor. If it is ever narrowed to live anchors, the replacement runs as its guard role |
+| V147's predicate | A one-off at deploy; nothing to change. Any later "no NEAR AI login" check reads live anchors only |
 
 `auth_provider` stays recorded-only on the anchor. The sign-in answer gains
 it (companion 3.5, "Sign-in answer") so a device can mark the right
