@@ -829,6 +829,31 @@ async fn pooled_closed_and_own_link_accounts_are_not_carried() {
     assert_eq!(fx.live_carries(&legacy, claimed).await, 0);
 }
 
+/// An own link that is already ending does not block a carry: V147 revokes
+/// a legacy account's own link (no NEAR AI login proved it) by requesting its
+/// unlink, and the carried link is how that account is paid from then on.
+/// The carry lands as the waiting successor; the pass closes the own link
+/// and activates it. A live own link is still never replaced (above).
+#[tokio::test]
+async fn an_own_link_being_unlinked_does_not_block_a_carry() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, legacy, claimed) = fx.linked_pair().await;
+    let revoked = fx.add_account(&legacy, false).await;
+    fx.exec(
+        "INSERT INTO trace_payout_links (tenant_id, account_id, rail_id, link_id, recipient_kind,
+             state, sealed_recipient, recipient_index, recipient_key_ref, index_pepper_ref,
+             subject_index, program, unlink_requested_at)
+         VALUES ($1, $2, $3, $4, 'near_ai_org', 'active', '{}', $5, 'k', 'p', $5, 'tc1-revoked',
+                 now())",
+        &[&legacy, &revoked, &RAIL, &Uuid::new_v4(), &hash("revoked")],
+    )
+    .await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-r")
+        .await;
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 1);
+    assert_eq!(fx.live_carries(&legacy, revoked).await, 1);
+}
+
 /// The carry needs the source account's own recorded NEAR AI login. A link
 /// on an account without one (written before #1841) carries nothing.
 #[tokio::test]

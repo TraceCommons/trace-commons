@@ -20,10 +20,11 @@
 //!   takes the request from the same account and, in one transaction, writes
 //!   the `waiting` link (or the unlink mark) and its audit rows, refusing if
 //!   the link changed since the request, a newer request superseded it, or
-//!   it expired. A confirmed change wakes the rail. The confirm does not
-//!   re-read login anchors: no production path deletes or changes one, so
-//!   the anchor the start checked is still there. A path that removes
-//!   anchors must decide then what happens to the account's links.
+//!   it expired, or (for a link) the account has no NEAR AI login anchor
+//!   any more. A confirmed change wakes the rail. The confirm re-reads the
+//!   anchors because a request can outlive the start's check: one started
+//!   by an older service across a deploy (V147 revokes what exists then),
+//!   or before the account lost its login.
 //! - `GET /v1/account/payout-rails` lists each rail that is not `disabled`:
 //!   link state, version and recipient ref, never a recipient or a name.
 //!
@@ -521,10 +522,19 @@ pub(super) async fn confirm_handler(
             PayoutLinkOutcome::PayoutLinkChangePending,
         ),
         PayoutLinkConfirm::NotLinked => (StatusCode::CONFLICT, PayoutLinkOutcome::PayoutNotLinked),
+        // The generic refusal shipped apps already show, as at the start.
+        PayoutLinkConfirm::NoLoginAnchor => {
+            (StatusCode::FORBIDDEN, PayoutLinkOutcome::SubjectMismatch)
+        }
+    };
+    let reason = match outcome {
+        PayoutLinkConfirm::NoLoginAnchor => "no_near_ai_login",
+        _ => refusal.1.as_str(),
     };
     tracing::info!(
         rail = %entry.rail_id(),
         outcome = refusal.1.as_str(),
+        reason,
         "payout link confirm refused"
     );
     Err(refuse(refusal.0, refusal.1))

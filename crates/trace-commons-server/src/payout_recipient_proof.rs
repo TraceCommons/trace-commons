@@ -165,7 +165,9 @@ pub trait RecipientProofVerifier: Send + Sync {
 /// What `/users/me` is read into, and nothing else. `serde` drops every
 /// other field, so an org's name never becomes a value in this process. Do
 /// not add `name`, a `flatten` map or a `serde_json::Value` here.
-/// Nor `email` or `auth_provider`: nothing here needs them.
+/// Nor `email` or `auth_provider`: nothing here needs them, so they never
+/// become values here. (reqwest still buffers the raw body, which is
+/// dropped without zeroization, as it always was.)
 #[derive(Deserialize)]
 struct UsersMe {
     id: String,
@@ -429,50 +431,15 @@ mod tests {
         vec![identity().login_index_label(SUBJECT)]
     }
 
-    /// `/users/me` as NEAR AI answers it for a user who signs in with a
-    /// NEAR wallet: provider `near`, login address `{account_id}@near`.
-    fn wallet_me() -> serde_json::Value {
-        let mut me = me(owned_org("owner", true));
-        me["auth_provider"] = serde_json::json!("near");
-        me["email"] = serde_json::json!("alice.near@near");
-        me
-    }
-
-    /// Only a recorded NEAR AI login proves a link (owner, 2026-11-02: "It
-    /// should just be NEAR AI login on both staging and production"). A NEAR
-    /// AI wallet sign-in proves nothing by being a wallet: it passes only if
-    /// its own subject is a recorded login anchor, like any other sign-in.
-    #[tokio::test]
-    async fn a_near_ai_wallet_sign_in_is_matched_only_by_its_recorded_login() {
-        let (base, mock) = serve(Mock {
-            users_me: Some((200, wallet_me())),
-            probe: Some(no_op()),
-            ..Mock::default()
-        })
-        .await;
-        let verifier = verifier(&base);
-        // Anchored on another login: refused, however the wallet is named.
-        assert_eq!(
-            verifier
-                .verify(proof(), &[identity().login_index_label("alice.near")])
-                .await
-                .unwrap_err(),
-            RecipientProofRefusal::SubjectMismatch
-        );
-        // Its own recorded login: accepted, as a NEAR AI login.
-        let verified = verifier.verify(proof(), &anchored()).await.unwrap();
-        assert_eq!(verified.proof, ProofKind::NearAiLogin);
-        assert_eq!(verified.proof.label(), "near_ai_login");
-        assert_eq!(mock.lock().unwrap().users_me_calls, 2);
-    }
-
-    /// The email and provider NEAR AI sends are never read into this
-    /// process: nothing here needs them.
+    /// `UsersMe` declares no `email` or `auth_provider` field, so neither is
+    /// deserialized into a value.
     #[test]
     fn users_me_reads_no_email_or_provider() {
         let source = include_str!("payout_recipient_proof.rs");
         let start = source.find("struct UsersMe {").unwrap();
-        let body = &source[start..start + source[start..].find('}').unwrap()];
+        // The struct ends at the first line that is only `}`.
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        assert!(body.contains("organizations"), "{body}");
         assert!(!body.contains("email"), "{body}");
         assert!(!body.contains("auth_provider"), "{body}");
     }

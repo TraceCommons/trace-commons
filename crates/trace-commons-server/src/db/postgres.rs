@@ -2047,11 +2047,20 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "legacy_payout_carries",
         include_str!("../../../../migrations/V146__legacy_payout_carries.sql"),
     ),
+    // V147 revokes every live payout link on an account with no recorded
+    // NEAR AI login (owner, 2026-11-03, on #1862): a waiting one closes at
+    // zero, an active one gets an unlink request for the pass to close.
+    // Carried links (V146) are kept.
+    (
+        147,
+        "revoke_payout_links_without_near_ai_login",
+        include_str!("../../../../migrations/V147__revoke_payout_links_without_near_ai_login.sql"),
+    ),
     // V148: legacy payout carries follow their events. A pooled mark, an
     // account closing and a tenant link deleted each release the carries
-    // they invalidate, in their own transaction (#1872); and the pass can
-    // ask which NEAR AI account a legacy tenant is linked to, to carry to
-    // legacy accounts opened after the last carry (#1873). V147 is #1868's.
+    // they invalidate, in their own transaction (#1872); opening an account
+    // in a linked legacy tenant carries to it (#1873); and every carry
+    // reaches only accounts a signed device proved (owner, 2026-11-03).
     (
         148,
         "legacy_payout_carry_events",

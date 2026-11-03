@@ -22,6 +22,9 @@ const FIRST_LAUNCH_FILE: &str = "managed-first-launch.json";
 /// missed reports; it is also inside the 120-second launch ticket.
 pub const LEASE: Duration = Duration::seconds(45);
 
+/// How long a launch ticket can be redeemed.
+pub const TICKET_LIFE: Duration = Duration::seconds(120);
+
 /// The state a session reaches when its lease runs out. A session on the
 /// NEAR AI sign-in has lost its daemon-hosted proxy by then, so it has
 /// ended whatever its tool is doing; any other session is unknown.
@@ -948,7 +951,7 @@ impl SessionRegistry {
             collection_by_daemon: false,
             request,
             ticket_hash: Some(digest(&ticket)),
-            ticket_expires: now + Duration::seconds(120),
+            ticket_expires: now + TICKET_LIFE,
             proof_hash: None,
             process_id: None,
             process_identity: None,
