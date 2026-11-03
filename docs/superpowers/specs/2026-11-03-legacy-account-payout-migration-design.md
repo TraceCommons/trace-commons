@@ -715,26 +715,46 @@ Where the implementation differs from, or adds to, sections 3 to 5:
 - **Accounts created after a carry by a later login link** are carried
   only at the NEAR AI account's next confirm or tenant link. Their credit
   accrues but is not paid until then. (A claim at a V91 attestation goes
-  through the tenant-link route, which carries after it.) Product call
-  for the owner: is accrued-but-unpaid acceptable at launch, or should the
-  pass carry on its next run?
+  through the tenant-link route, which carries after it.) Tracked in
+  #1873.
 - **An invalid carry is held, not released.** A pooled mark, a closed or
   held NEAR AI account, or a deleted tenant link holds the legacy
   account's sends at once (fail closed), but the carried link is released
   only at the next carry or a revocation. The hold is per account, so it
-  also pauses that account's referral stream. Follow-up: release from the
-  event itself (triggers on the pooled marker, account close and link
-  delete) and keep the check as the backstop.
+  also pauses that account's referral stream. Follow-up, #1872: release
+  from the event itself (triggers on the pooled marker, account close and
+  link delete) and keep the check as the backstop.
 - **The hash formulas** (`legacy-invite-link-v1:`, `payout-link-v1:`,
   `payout-account-v1:`) are written inline in V146 and mirrored in Rust;
-  the tests catch a drift that breaks a match. Follow-up: small
+  the tests catch a drift that breaks a match. Follow-up, #1874: small
   `IMMUTABLE` SQL helpers.
 - **Links proved before #1862.** The carry requires the source account to
   hold a `near_ai_login` anchor, not that the source link was proved by
   one. A link proved through a wallet anchor before #1862 would be carried
-  once that account records a login. Rollout check: before enabling
-  payouts, Q4 plus a count of live links created before #1862's deploy on
-  accounts with a live tenant link must both be 0.
+  once that account records a login. Covered by the rollout gate below
+  (owner, 2026-11-03).
+- **Offering the move to instance-enrolled devices** waits for approved
+  wording (owner decision 3 after review). Tracked in #1875.
+
+### Production-payout gates (owner, 2026-11-03)
+
+Two read-only checks run on the pilot, and the owner reviews their
+results, before the `near_ai` rail goes `live` for production. They sit
+beside F10 and F11 in the settlement runbook's "Before production payouts"
+(`docs/operator/automatic-credit-settlement.md`).
+
+1. **Source provenance.** A read-only count of live payout links that may
+   have been proved by a wallet anchor before #1862: links created before
+   #1862's deploy, and links whose request audit row is labelled
+   `near_wallet` (#1841). Any it finds are handled by #1868's V147, which
+   revokes payout links that have no recorded NEAR AI login, at deploy;
+   the check is re-run after V147 and must then find none on accounts
+   with a live tenant link.
+2. **Q5 is run and reviewed.** Q5 (section 8) must be run and its result
+   reviewed by the owner. It need not come back zero: credit from
+   contributor-label subjects stays unowned and unpaid by design
+   (section 3.5).
+
 
 ## 14. Follow-ups outside this PR
 
