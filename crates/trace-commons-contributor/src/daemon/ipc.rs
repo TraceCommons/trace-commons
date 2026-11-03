@@ -2625,7 +2625,27 @@ impl DaemonShared {
         let routing = self.routing_value();
         // Taken before the locks below for the same reason as `routing`:
         // one lock order everywhere.
-        let account_scope = super::commons_credentials::account_scope(&self.store).ok();
+        // One account snapshot (the commit lock, then three files) for both
+        // the scope and the account's state, and one config read for every
+        // field below.
+        let account_snapshot = super::commons_credentials::snapshot(
+            &self.store,
+            super::commons_credentials::Kind::Account,
+        )
+        .ok();
+        let account_scope = account_snapshot
+            .as_ref()
+            .and_then(|snapshot| super::commons_credentials::scope_for_snapshot(snapshot).ok());
+        let cfg = self.store.load_config().ok().flatten();
+        // No credential-store read and no write (`account_attention`'s doc).
+        // `holds_near_ai_key` takes the settings lock, before the locks below.
+        let account_attention = super::account_attention::account_attention(
+            &self.store,
+            cfg.as_ref(),
+            account_snapshot.as_ref(),
+        );
+        let near_ai_login_unconfirmed =
+            account_attention.is_some() && self.holds_near_ai_key() == Some(true);
         let private_inference = self.private_inference_value();
         // Before the queue lock too: it takes the policy lock and then the
         // queue lock, the order `list_projects` takes them in.
@@ -2749,7 +2769,6 @@ impl DaemonShared {
             policy.contribution_mode_partial(queue.all().iter().map(|e| e.project_key.as_str()));
         drop(policy);
         let health = self.health.lock().expect("health lock");
-        let cfg = self.store.load_config().ok().flatten();
         let consent_hold = crate::config::consent_hold(cfg.as_ref());
         // One set of inputs for the lead and the mark (nudge A3), so the
         // two can never read different gates, counts or news.
@@ -2855,6 +2874,23 @@ impl DaemonShared {
             "logged_in": logged_in,
             "setup_complete": super::setup_completion::is_complete(&self.store, cfg.as_ref(), logged_in, setup_roots_declared),
             "account_scope": account_scope,
+            // Additive (#1836 F1). `ok`, or `needs_attention` while this
+            // app's account is locally broken in a way signing in again does
+            // not fix; then `account_state_reason` is
+            // `account_record_unreadable` or `account_address_refused`, and
+            // `null` otherwise. `near_ai_login_unconfirmed` is true while
+            // that holds and a NEAR AI login is stored: no Commons check
+            // could run for it. It picks the core's Private AI line.
+            // All three always present, so a shell can tell "nothing to
+            // say" from a daemon too old to say. Words:
+            // `consent_copy::account_attention_for_wire`.
+            "account_state": if account_attention.is_some() {
+                crate::consent_copy::ACCOUNT_STATE_NEEDS_ATTENTION
+            } else {
+                crate::consent_copy::ACCOUNT_STATE_OK
+            },
+            "account_state_reason": account_attention,
+            "near_ai_login_unconfirmed": near_ai_login_unconfirmed,
             "tenant_id": cfg.as_ref().map(|c| c.tenant_id.clone()),
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
             // Additive. `consent-scopes-not-chosen` while nothing may be sent

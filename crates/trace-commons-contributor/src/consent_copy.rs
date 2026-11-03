@@ -2657,6 +2657,208 @@ pub fn account_devices_copy() -> AccountDevicesCopy {
 }
 
 // ---------------------------------------------------------------------------
+// The account needs attention (#1836 section 3.2a, fix F1). The daemon puts
+// `account_state`, `account_state_reason` and `near_ai_login_unconfirmed` in
+// every status; a shell passes them to `account_attention_for_wire` and
+// draws what comes back in its account section. A status there, never a
+// banner, notification or tray state. Every string approved by the owner
+// 2026-11-02.
+
+/// `status.account_state` while nothing about the account needs saying.
+pub const ACCOUNT_STATE_OK: &str = "ok";
+/// `status.account_state` while this app's account is locally broken: its
+/// record cannot be read, or the address it was set up with is refused.
+/// Signing in again does not fix it; setting up again does.
+pub const ACCOUNT_STATE_NEEDS_ATTENTION: &str = "needs_attention";
+/// `status.account_state_reason`: the stored account record is unreadable.
+pub const ACCOUNT_ATTENTION_RECORD_UNREADABLE: &str = "account_record_unreadable";
+/// `status.account_state_reason`: this build refuses the address the
+/// account was set up with.
+pub const ACCOUNT_ATTENTION_ADDRESS_REFUSED: &str = "account_address_refused";
+
+/// Approved 2026-11-02. The heading of the status.
+pub const ACCOUNT_ATTENTION_TITLE: &str = "This app's account needs attention";
+/// Approved 2026-11-02. For [`ACCOUNT_ATTENTION_RECORD_UNREADABLE`].
+pub const ACCOUNT_ATTENTION_RECORD_UNREADABLE_BODY: &str = "This app can't read its account details on this computer. Set it up again to keep sending traces.";
+/// Approved 2026-11-02. For [`ACCOUNT_ATTENTION_ADDRESS_REFUSED`].
+pub const ACCOUNT_ATTENTION_ADDRESS_REFUSED_BODY: &str = "This app can no longer reach the service it was set up with. Update the app, or set it up again.";
+/// Approved 2026-11-02. Only while a NEAR AI login is stored
+/// (`near_ai_login_unconfirmed`).
+pub const ACCOUNT_ATTENTION_PRIVATE_AI: &str = "Private AI still works with your NEAR AI account.";
+/// Approved 2026-11-02. The button: asks [`ACCOUNT_ATTENTION_CONFIRM_TITLE`]
+/// first, then unenrolls and opens the first run.
+pub const ACCOUNT_ATTENTION_ACTION: &str = "Set up again";
+/// Approved 2026-11-02. The confirmation before setting up again runs.
+pub const ACCOUNT_ATTENTION_CONFIRM_TITLE: &str = "Set up this app again?";
+/// Approved 2026-11-02. Under [`ACCOUNT_ATTENTION_CONFIRM_TITLE`].
+pub const ACCOUNT_ATTENTION_CONFIRM_BODY: &str =
+    "This signs out of NEAR AI on this computer. You'll sign in again to keep sending traces.";
+/// Approved 2026-11-02. The confirmation's button that goes ahead.
+pub const ACCOUNT_ATTENTION_CONFIRM_ACTION: &str = ACCOUNT_ATTENTION_ACTION;
+/// Approved 2026-11-02. The confirmation's button that changes nothing.
+pub const ACCOUNT_ATTENTION_CONFIRM_CANCEL: &str = ACCOUNT_DEVICES_CANCEL_BUTTON;
+/// Approved 2026-11-02 for this use. Shown under the button when the
+/// daemon refused to set up again. Its own constant, so a change to another
+/// surface's failure line does not change it.
+pub const ACCOUNT_ATTENTION_FAILED: &str = "Nothing changed. Try again.";
+
+/// What the account section shows while `status.account_state` is
+/// `needs_attention` (`tc_account_attention_copy_json`). The branch is the
+/// core's: a shell draws the fields it gets and chooses no words.
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct AccountAttentionCopy {
+    pub title: &'static str,
+    /// The reason's sentence; `None` for a reason this build does not know,
+    /// which is then shown with the title and button alone.
+    pub body: Option<&'static str>,
+    /// Present only while a NEAR AI login is stored.
+    pub private_ai: Option<&'static str>,
+    pub action: &'static str,
+    /// The confirmation [`Self::action`] opens; nothing runs until
+    /// [`Self::confirm_action`] is pressed.
+    pub confirm_title: &'static str,
+    pub confirm_body: &'static str,
+    pub confirm_action: &'static str,
+    pub confirm_cancel: &'static str,
+    /// Shown when the daemon refused to set up again.
+    pub failed: &'static str,
+}
+
+/// The account section's status for a `status` object (or any object with
+/// its `account_state`, `account_state_reason` and
+/// `near_ai_login_unconfirmed` keys). `None` while there is nothing to
+/// show: `account_state` is `ok`, absent (a daemon too old to say) or any
+/// other value, or the argument is not an object.
+#[must_use]
+pub fn account_attention_for_wire(status: &serde_json::Value) -> Option<AccountAttentionCopy> {
+    let object = status.as_object()?;
+    if object.get("account_state")?.as_str()? != ACCOUNT_STATE_NEEDS_ATTENTION {
+        return None;
+    }
+    let body = match object
+        .get("account_state_reason")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(ACCOUNT_ATTENTION_RECORD_UNREADABLE) => Some(ACCOUNT_ATTENTION_RECORD_UNREADABLE_BODY),
+        Some(ACCOUNT_ATTENTION_ADDRESS_REFUSED) => Some(ACCOUNT_ATTENTION_ADDRESS_REFUSED_BODY),
+        _ => None,
+    };
+    let unconfirmed = object
+        .get("near_ai_login_unconfirmed")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    Some(AccountAttentionCopy {
+        title: ACCOUNT_ATTENTION_TITLE,
+        body,
+        private_ai: unconfirmed.then_some(ACCOUNT_ATTENTION_PRIVATE_AI),
+        action: ACCOUNT_ATTENTION_ACTION,
+        confirm_title: ACCOUNT_ATTENTION_CONFIRM_TITLE,
+        confirm_body: ACCOUNT_ATTENTION_CONFIRM_BODY,
+        confirm_action: ACCOUNT_ATTENTION_CONFIRM_ACTION,
+        confirm_cancel: ACCOUNT_ATTENTION_CONFIRM_CANCEL,
+        failed: ACCOUNT_ATTENTION_FAILED,
+    })
+}
+
+#[cfg(test)]
+mod account_attention_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn each_reason_gets_its_own_sentence() {
+        let unreadable = account_attention_for_wire(&json!({
+            "account_state": "needs_attention",
+            "account_state_reason": "account_record_unreadable",
+            "near_ai_login_unconfirmed": false,
+        }))
+        .unwrap();
+        assert_eq!(unreadable.title, "This app's account needs attention");
+        assert_eq!(
+            unreadable.body,
+            Some(
+                "This app can't read its account details on this computer. Set it up again to keep sending traces."
+            )
+        );
+        assert_eq!(unreadable.private_ai, None);
+        assert_eq!(unreadable.action, "Set up again");
+
+        let refused = account_attention_for_wire(&json!({
+            "account_state": "needs_attention",
+            "account_state_reason": "account_address_refused",
+            "near_ai_login_unconfirmed": true,
+        }))
+        .unwrap();
+        assert_eq!(
+            refused.body,
+            Some(
+                "This app can no longer reach the service it was set up with. Update the app, or set it up again."
+            )
+        );
+        assert_eq!(
+            refused.private_ai,
+            Some("Private AI still works with your NEAR AI account.")
+        );
+    }
+
+    /// A healthy account, an old daemon's status (no keys), and anything
+    /// that is not an object show nothing.
+    #[test]
+    fn nothing_to_show_is_none() {
+        assert_eq!(
+            account_attention_for_wire(&json!({
+                "account_state": "ok",
+                "account_state_reason": null,
+                "near_ai_login_unconfirmed": false,
+            })),
+            None
+        );
+        assert_eq!(
+            account_attention_for_wire(&json!({"logged_in": true})),
+            None
+        );
+        assert_eq!(account_attention_for_wire(&json!(null)), None);
+        assert_eq!(account_attention_for_wire(&json!("needs_attention")), None);
+    }
+
+    /// Every shell asks before it unenrolls, in the owner's words, and the
+    /// unreadable-record sentence names no platform.
+    #[test]
+    fn setting_up_again_is_confirmed_first_and_names_no_platform() {
+        let copy = account_attention_for_wire(&json!({
+            "account_state": "needs_attention",
+            "account_state_reason": "account_record_unreadable",
+        }))
+        .unwrap();
+        assert_eq!(copy.confirm_title, "Set up this app again?");
+        assert_eq!(
+            copy.confirm_body,
+            "This signs out of NEAR AI on this computer. You'll sign in again to keep sending traces."
+        );
+        assert_eq!(copy.confirm_action, "Set up again");
+        assert_eq!(copy.confirm_cancel, "Cancel");
+        assert_eq!(copy.failed, "Nothing changed. Try again.");
+        for sentence in [copy.title, copy.body.unwrap(), copy.confirm_body] {
+            assert!(!sentence.contains("Mac"), "{sentence}");
+        }
+    }
+
+    /// A reason this build does not know still shows the state, with no
+    /// sentence the core did not choose.
+    #[test]
+    fn an_unknown_reason_shows_the_title_and_button_alone() {
+        let copy = account_attention_for_wire(&json!({
+            "account_state": "needs_attention",
+            "account_state_reason": "something_new",
+        }))
+        .unwrap();
+        assert_eq!(copy.body, None);
+        assert_eq!(copy.private_ai, None);
+        assert_eq!(copy.action, ACCOUNT_ATTENTION_ACTION);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Adding Train coding models to traces already sent (owner decisions
 // 2026-10-28). A trace sent without it earned no scoring award; the person
 // may add the use afterwards, to all of those traces or to one.

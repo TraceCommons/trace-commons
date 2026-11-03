@@ -377,11 +377,29 @@ final class AppModel: ObservableObject {
                     .flatMap(legacyMigrationWording)
                     .flatMap(LegacyMigrationNotice.decode(fromJSON:))
             }
+            if status.accountAttention != oldValue.accountAttention {
+                accountAttention = status.accountAttention.wireJSON
+                    .flatMap(accountAttentionWording)
+                    .flatMap(AccountAttention.decode(fromJSON:))
+                // A refusal belongs to the block it was shown in: one that
+                // goes, comes back, or changes its reason starts without it.
+                setUpAgainFailed = false
+            }
         }
     }
     /// The notice after a legacy invite identity moved to a NEAR AI account,
     /// in the Rust's words, or nil when there is none or it cannot be read.
     @Published private(set) var legacyMigrationNotice: LegacyMigrationNotice?
+    /// The account section's status while this app's account needs
+    /// attention (#1836 F1), in the Rust's words, or nil.
+    @Published private(set) var accountAttention: AccountAttention?
+    /// Words the account-attention status keys. The ABI in the app; replaced
+    /// only by tests.
+    var accountAttentionWording: (String) -> String? = TCConsentCopy.accountAttentionJSON(forStatus:)
+    /// "Set up again" is running.
+    @Published private(set) var settingUpAgain = false
+    /// The daemon refused the last "Set up again"; cleared by the next one.
+    @Published private(set) var setUpAgainFailed = false
     /// Words `status.legacy_invite_migration.notice`. The ABI in the app;
     /// replaced only by tests.
     var legacyMigrationWording: (String) -> String? = TCConsentCopy.legacyMigrationNoticeJSON(
@@ -4696,7 +4714,28 @@ extension AppModel: FirstRunDaemon {
         if case .success(let fresh) = await firstRunCall({ try $0.status() }) {
             publishIfChanged(\.status, fresh)
         }
+        // The daemon confirmed it: when the read after it failed (or answered
+        // from before), say so anyway, or `requiresOnboarding` stays false
+        // and the first run closes itself on appear.
+        if status.loggedIn {
+            publishIfChanged(\.status, status.unenrolled())
+        }
         return true
+    }
+
+    /// "Set up again" (#1836 F1), once confirmed: the daemon drops this Mac's
+    /// enrollment. True when it did; the caller then opens the first run
+    /// window itself, which does not depend on the status read after the
+    /// unenroll answering. A second call while one runs does nothing. The
+    /// daemon never does this on its own; only the confirmed button asks.
+    func setUpAgain() async -> Bool {
+        guard !settingUpAgain else { return false }
+        settingUpAgain = true
+        setUpAgainFailed = false
+        defer { settingUpAgain = false }
+        let done = await unenroll()
+        setUpAgainFailed = !done
+        return done
     }
 
     /// One blocking client call off the main actor. Nil without a daemon.

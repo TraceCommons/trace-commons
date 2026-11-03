@@ -237,10 +237,10 @@ fn derive_signup_allowlist(
     Ok(HostAllowlist::from_hosts(hosts))
 }
 
-pub(super) fn client(
-    url: &str,
-    allowed: &HostAllowlist,
-) -> Result<trace_commons_operator_client::Client> {
+/// The address checks [`client`] makes before it builds anything: an
+/// enforcing allowlist that holds `url`, over HTTPS, with no credentials,
+/// query or fragment.
+pub(super) fn check_address(url: &str, allowed: &HostAllowlist) -> Result<()> {
     let parsed = reqwest::Url::parse(url)?;
     if !allowed.is_enforcing()
         || parsed.scheme() != "https"
@@ -252,6 +252,14 @@ pub(super) fn client(
         bail!("near_signup_endpoint_refused");
     }
     allowed.check(&parsed)?;
+    Ok(())
+}
+
+pub(super) fn client(
+    url: &str,
+    allowed: &HostAllowlist,
+) -> Result<trace_commons_operator_client::Client> {
+    check_address(url, allowed)?;
     trace_commons_operator_client::Client::builder(
         url,
         "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",

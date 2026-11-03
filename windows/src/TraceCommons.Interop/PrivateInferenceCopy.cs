@@ -393,6 +393,13 @@ public sealed record PrivateInferenceCopy
     public string CredentialForgetNotRevoked { get; init; } = string.Empty;
 
     /// <summary>
+    /// Drawn after an unenroll or sign-out that answered
+    /// <c>near_ai_cleared: false</c>: the NEAR AI sign-in is still here.
+    /// </summary>
+    [JsonPropertyName("near_ai_still_signed_in")]
+    public string NearAiStillSignedIn { get; init; } = string.Empty;
+
+    /// <summary>
     /// The button behind <c>migration_available</c>, and the sentence drawn
     /// beside it. Only macOS produces that state; decoded here so the payload
     /// is read whole and no field is invented or dropped.
@@ -837,6 +844,7 @@ public sealed record PrivateInferenceCopy
             CredentialForget,
             CredentialForgetExplains,
             CredentialForgetNotRevoked,
+            NearAiStillSignedIn,
             CredentialMigrate,
             CredentialMigrateExplains,
             CredentialAbsent,
