@@ -5,7 +5,9 @@ import XCTest
 
 /// The dithered pixel field (owner, 2026-11-02): lit densest in the bottom
 /// trailing corner and gone before the far side, a real ordered dither, a
-/// colour for every cell from the palette, and slow.
+/// colour for every cell from the palette, and slow. On the main actor:
+/// the field is a view, so its rules are main-actor isolated.
+@MainActor
 final class PixelFieldTests: XCTestCase {
     /// The Bayer matrix holds each of its 16 thresholds once, all inside (0, 1).
     func test_theDitherIsABayerMatrix() {
