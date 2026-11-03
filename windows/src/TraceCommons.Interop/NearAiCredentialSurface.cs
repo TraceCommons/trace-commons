@@ -195,9 +195,8 @@ public static class NearAiCredentialSurface
     /// <remarks>
     /// NOT A DECORATION AND NOT OPTIONAL. Obtain opens a browser, signs the
     /// contributor in with a company that is not this app, and mints a key
-    /// that is then kept here; forget removes a key locally while leaving it
-    /// valid at the service until the contributor removes it in their own
-    /// account. Pairing each consequence with its own button HERE, once, is
+    /// that is then kept here; forget removes the key here and revokes it at
+    /// NEAR AI. Pairing each consequence with its own button HERE, once, is
     /// what stops three shells each deciding that a button reads well enough
     /// on its own.
     /// </remarks>
@@ -210,6 +209,35 @@ public static class NearAiCredentialSurface
                 CredentialAction.Forget => copy.CredentialForgetExplains,
                 _ => null,
             };
+
+    /// <summary>
+    /// Whether a forget's answer says the key was removed here but not
+    /// revoked at NEAR AI: <c>removed: true, revoked: false</c>, the one
+    /// answer <see cref="PrivateInferenceCopy.CredentialForgetNotRevoked"/> is
+    /// shown for. <c>revoked: null</c> (no key was stored), a revoke that
+    /// happened, an error and anything unreadable show nothing.
+    /// </summary>
+    public static bool ForgetLeftKeyAtService(JsonElement? result)
+    {
+        if (result is not JsonElement value || value.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        return value.TryGetProperty("removed", out JsonElement removed)
+            && removed.ValueKind == JsonValueKind.True
+            && value.TryGetProperty("revoked", out JsonElement revoked)
+            && revoked.ValueKind == JsonValueKind.False;
+    }
+
+    /// <summary>
+    /// The status text a forget leaves: the failed-revoke sentence when the
+    /// key was removed here but not revoked at NEAR AI, otherwise nothing.
+    /// </summary>
+    public static string ForgetNotice(DaemonResponse response, PrivateInferenceCopy? copy) =>
+        copy is not null && !response.IsError && ForgetLeftKeyAtService(response.Result)
+            ? copy.CredentialForgetNotRevoked
+            : string.Empty;
 
     /// <summary>
     /// The <c>near_ai_credential_cancel</c> body: the attempt id when this

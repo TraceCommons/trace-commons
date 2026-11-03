@@ -36,6 +36,7 @@ pub mod arrivals;
 pub mod balance;
 pub mod ceremony;
 pub(crate) mod chooser;
+pub(crate) mod disconnect;
 pub mod funding;
 pub(crate) mod login_record;
 pub mod loopback;
@@ -350,10 +351,10 @@ pub fn handle_cancel(shared: &DaemonShared, req: &Request) -> Response {
 
 /// Forget the stored credential, and the session stored beside it.
 ///
-/// `revoked: false` is not a placeholder. Forgetting is local: the key stays
-/// valid at the service until the contributor revokes it there, and this does
-/// not do it for them. Saying `removed` and meaning "revoked" would be the
-/// kind of claim this codebase does not make.
+/// `revoked` says whether the stored key is gone at NEAR AI: [`disconnect`]
+/// waits for the revoke and answers what happened (`null` when no key was
+/// stored). Only the async dispatcher answers this method. A revoke that could not happen is
+/// best effort by owner decision (2026-11-02) and never undoes the clear.
 ///
 /// The running daemon's own copy is cleared too, not just the file. The
 /// settings on disk are what survive a restart, but the in-memory copy is what
@@ -366,102 +367,166 @@ pub fn handle_cancel(shared: &DaemonShared, req: &Request) -> Response {
 /// The memory clear is conditional on the disk write having succeeded. The
 /// other order -- clear memory, then fail to write -- reports a removal that
 /// the next start silently undoes.
-fn forget_local(shared: &DaemonShared, req: &Request) -> Response {
-    let Ok(locks) = session::coordination(shared.store.dir()) else {
-        return Response::err(req.id, ERR_UNAVAILABLE, "near_ai_credential_unavailable");
-    };
-    let Ok(_commit) = locks.commit.lock() else {
-        return Response::err(req.id, ERR_UNAVAILABLE, "near_ai_credential_unavailable");
-    };
-    match ceremony::forget_locked(&shared.store) {
-        Ok(removed) => {
-            {
-                // The session only. NOT `near_ai_inference`, and the
-                // difference is load-bearing: #718's
-                // `absorb_near_ai_credential_change` detects a credential
-                // change by COMPARING this in-memory copy against the file,
-                // and advances the generation that stops and restarts the
-                // proxy only when they differ. Clearing the key here makes
-                // both sides `None`, the comparison finds nothing, the
-                // generation never advances -- and the running proxy goes on
-                // answering with the key the contributor just withdrew.
-                //
-                // `reconcile_private_inference`, which `handle_forget_async`
-                // calls, is what clears the key from this document and from
-                // the proxy together. Nothing absorbs the session, so it is
-                // cleared here.
-                let mut settings = shared.settings.lock().expect("settings lock");
-                settings.near_ai_session = None;
-                settings.cloud_credentials = None;
-                settings.cloud_storage_unavailable = false;
-                settings.cloud_storage_failure =
-                    crate::daemon::settings::CloudStorageFailure::default();
-            }
-            // Any balance this directory had cached was read with the session
-            // just removed. Serving it again would put a figure from a
-            // forgotten account on screen.
-            balance::invalidate(shared.store.dir());
-            // The org names this process read with that session.
-            crate::daemon::payout_link::forget_listing(shared);
-            Response::ok(
-                req.id,
-                serde_json::json!({ "removed": removed, "revoked": false }),
-            )
-        }
-        Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "near_ai_credential_unavailable"),
+fn clear_local(shared: &DaemonShared) -> anyhow::Result<(bool, Option<disconnect::Revocation>)> {
+    let locks = session::coordination(shared.store.dir())?;
+    let commit = locks
+        .commit
+        .lock()
+        .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
+    // What the revoke needs, as this process holds it. A daemon whose memory
+    // and disk disagree revokes nothing, and still clears.
+    let current = session::runtime_snapshot(shared, &commit).ok();
+    let (removed, revocation) = disconnect::clear_locked(&shared.store, current.as_ref())?;
+    {
+        // The session only. NOT `near_ai_inference`, and the
+        // difference is load-bearing: #718's
+        // `absorb_near_ai_credential_change` detects a credential
+        // change by COMPARING this in-memory copy against the file,
+        // and advances the generation that stops and restarts the
+        // proxy only when they differ. Clearing the key here makes
+        // both sides `None`, the comparison finds nothing, the
+        // generation never advances -- and the running proxy goes on
+        // answering with the key the contributor just withdrew.
+        //
+        // `reconcile_private_inference`, which `disconnect` calls, is
+        // what clears the key from this document and from the proxy
+        // together. Nothing absorbs the session, so it is cleared here.
+        let mut settings = shared.settings.lock().expect("settings lock");
+        settings.near_ai_session = None;
+        settings.cloud_credentials = None;
+        settings.cloud_storage_unavailable = false;
+        settings.cloud_storage_failure = crate::daemon::settings::CloudStorageFailure::default();
     }
+    // Any balance this directory had cached was read with the session
+    // just removed. Serving it again would put a figure from a
+    // forgotten account on screen.
+    balance::invalidate(shared.store.dir());
+    // The org names this process read with that session.
+    crate::daemon::payout_link::forget_listing(shared);
+    drop(commit);
+    Ok((removed, revocation))
 }
 
-pub fn handle_forget(shared: &DaemonShared, req: &Request) -> Response {
-    let response = forget_local(shared, req);
-    if response.error.is_none() {
-        // Contributor-initiated, so a legacy-store prompt here is explicable.
-        crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(&shared.store);
-    }
-    if response.error.is_none()
-        && crate::daemon::cloud_credential_lifecycle::cleanup_native(&shared.store).is_err()
-    {
+/// The local clear, synchronously and without the revoke or the proxy
+/// reconcile, for tests that race a clear against a read in flight. The
+/// socket answers `near_ai_credential_forget` with [`handle_forget_async`]
+/// only; the sync dispatcher refuses it.
+#[cfg(test)]
+pub(crate) fn handle_forget(shared: &DaemonShared, req: &Request) -> Response {
+    let Ok((removed, _revocation)) = clear_local(shared) else {
+        return Response::err(req.id, ERR_UNAVAILABLE, "near_ai_credential_unavailable");
+    };
+    crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(&shared.store);
+    if crate::daemon::cloud_credential_lifecycle::cleanup_native(&shared.store).is_err() {
         return Response::err(
             req.id,
             ERR_UNAVAILABLE,
             "near_ai_credential_cleanup_required",
         );
     }
-    response
+    Response::ok(
+        req.id,
+        serde_json::json!({ "removed": removed, "revoked": null }),
+    )
 }
 
-/// `handle_forget`, plus the one thing it cannot do synchronously: take the
-/// key back out of the running proxy.
+/// What [`disconnect`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Disconnected {
+    /// A credential or session was stored and is gone.
+    pub removed: bool,
+    /// Whether the stored key is gone at NEAR AI too. `None` when no key was
+    /// stored, so there was nothing to revoke.
+    pub revoked: Option<bool>,
+    /// The local clear stands, but an OS entry could not be deleted yet. It
+    /// is journaled, and the next credential operation retries it.
+    pub cleanup_pending: bool,
+}
+
+/// The NEAR AI half of every sign-out: forget, unenroll, native sign-out.
+///
+/// Clears the stored key, its session and the spending-organization record
+/// through the cleanup journal, takes the key out of the running proxy (a
+/// managed session then reads as needing sign-in, as after a forget), and
+/// revokes the key at NEAR AI with the session just cleared, best effort.
+/// `Err` only when nothing could be cleared.
+pub(crate) async fn disconnect(shared: &DaemonShared) -> Result<Disconnected, &'static str> {
+    let api = disconnect::api(&shared.store);
+    disconnect_with(shared, api.as_ref()).await
+}
+
+pub(crate) async fn disconnect_with(
+    shared: &DaemonShared,
+    api: Option<&api::CloudApi>,
+) -> Result<Disconnected, &'static str> {
+    clear_and_withdraw(shared, Some(api)).await
+}
+
+/// The clear, the proxy withdrawal and the OS cleanup, without a revoke:
+/// for a dangling reference the contributor did not ask to sign out of
+/// (`handle_migrate` finding nothing to move), where no session is readable
+/// and a revoke could only log a failure nobody caused.
+pub(crate) async fn clear_without_revoke(
+    shared: &DaemonShared,
+) -> Result<Disconnected, &'static str> {
+    clear_and_withdraw(shared, None).await
+}
+
+/// `revoke`: `None` for no revoke at all; `Some(api)` to revoke with that
+/// client (itself `None` when this build has none).
+async fn clear_and_withdraw(
+    shared: &DaemonShared,
+    revoke: Option<Option<&api::CloudApi>>,
+) -> Result<Disconnected, &'static str> {
+    let (removed, revocation) =
+        clear_local(shared).map_err(|_| "near_ai_credential_unavailable")?;
+    // Withdrawing must not wait on NEAR AI: the proxy lets go of the key
+    // before the revoke is sent.
+    shared.reconcile_private_inference().await;
+    let revoked = match (revocation, revoke) {
+        (Some(revocation), Some(api)) => revocation.run(api).await,
+        _ => None,
+    };
+    let store = shared.store.clone();
+    let cleaned = tokio::task::spawn_blocking(move || {
+        // Contributor-initiated, so a legacy-store prompt here is
+        // explicable. Blocking with the cleanup it sits beside.
+        crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(&store);
+        crate::daemon::cloud_credential_lifecycle::cleanup_native(&store)
+    })
+    .await;
+    Ok(Disconnected {
+        removed,
+        revoked,
+        cleanup_pending: !matches!(cleaned, Ok(Ok(()))),
+    })
+}
+
+/// `handle_forget`, plus what it cannot do synchronously: take the key back
+/// out of the running proxy, and wait for the revoke.
 ///
 /// The same shape as `handle_set_settings_async`, and for the same reason --
-/// the sync handler is what defines the answer, and the async wrapper is only
-/// what makes it true of the machine before it is returned. Withdrawing
-/// something is the half of this pair that must not wait: a contributor who
-/// forgets a credential has said stop using it, and "stopped, at some point
-/// in the next minute" is not that.
+/// withdrawing something is the half of this pair that must not wait: a
+/// contributor who forgets a credential has said stop using it, and
+/// "stopped, at some point in the next minute" is not that.
+///
+/// An OS entry left to delete does not hide the revoke's answer: the clear
+/// and the revoke have happened, so the answer is ok and says
+/// `cleanup_pending: true`. The entry stays journaled for the next
+/// credential operation, and `near_ai_credential_status` reports
+/// `cleanup_required` until then.
 pub async fn handle_forget_async(shared: &DaemonShared, req: &Request) -> Response {
-    let response = forget_local(shared, req);
-    if response.error.is_none() {
-        shared.reconcile_private_inference().await;
-        let store = shared.store.clone();
-        if !matches!(
-            tokio::task::spawn_blocking(move || {
-                // Contributor-initiated, so a legacy-store prompt here is
-                // explicable. Blocking with the cleanup it sits beside.
-                crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(&store);
-                crate::daemon::cloud_credential_lifecycle::cleanup_native(&store)
-            })
-            .await,
-            Ok(Ok(()))
-        ) {
-            return Response::err(
-                req.id,
-                ERR_UNAVAILABLE,
-                "near_ai_credential_cleanup_required",
-            );
-        }
+    match disconnect(shared).await {
+        Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
+        Ok(done) => Response::ok(
+            req.id,
+            serde_json::json!({
+                "removed": done.removed,
+                "revoked": done.revoked,
+                "cleanup_pending": done.cleanup_pending,
+            }),
+        ),
     }
-    response
 }
 
 /// Move the sign-in an earlier build kept in the legacy keychain into the
@@ -497,9 +562,18 @@ pub async fn handle_migrate(shared: &DaemonShared, req: &Request) -> Response {
             true
         }
         Ok(Ok(LegacyMigration::NothingToMigrate)) => {
-            let forgot = handle_forget_async(shared, req).await;
-            if let Some(error) = forgot.error {
-                return Response::err(req.id, &error.code, &error.message);
+            // A dangling reference, not a sign-out: cleared without a
+            // revoke. An OS entry left to delete is the error it always was.
+            match clear_without_revoke(shared).await {
+                Err(label) => return Response::err(req.id, ERR_UNAVAILABLE, label),
+                Ok(done) if done.cleanup_pending => {
+                    return Response::err(
+                        req.id,
+                        ERR_UNAVAILABLE,
+                        "near_ai_credential_cleanup_required",
+                    );
+                }
+                Ok(_) => {}
             }
             false
         }
@@ -947,66 +1021,6 @@ mod tests {
         // reading the wrong field.
         assert_eq!(ATTEMPT_STATUS_FIELD, "attempt_status");
         assert_eq!(ceremony::STATUS_COMPLETE, "complete");
-    }
-
-    /// `handle_forget` answers `revoked: false`, and the reason is a sentence.
-    ///
-    /// No shell reads `revoked`. What tells a contributor that forgetting is
-    /// local is `credential_forget_explains`, drawn beside the Forget button
-    /// in every shell: "This does not revoke them at NEAR AI." The coupling
-    /// between that sentence and this answer runs through prose alone, so
-    /// nothing else would fail if the two drifted apart.
-    ///
-    /// And the reason they could drift is real. `ceremony::forget` now keeps
-    /// the session beside the key, so a revoke is reachable in principle. If
-    /// this ever answers `revoked: true`, every shell goes on saying the key
-    /// stays valid at the service, and the sentence is false with no test
-    /// red. Changing this answer must mean rewriting that sentence in the
-    /// same change -- this test is where that is forced.
-    #[tokio::test]
-    async fn forget_answers_not_revoked_because_the_forget_sentence_says_so() {
-        let (_directory, store) = crate::config::tests_support::temp_store();
-        let shared = DaemonShared::load(store).unwrap();
-        shared.settings.lock().unwrap().near_ai_inference =
-            Some(crate::daemon::settings::NearAiInferenceCredential {
-                key: "sk-forget-pin".into(),
-                key_id: "key-1".into(),
-                key_prefix: "sk-for".into(),
-                organization_id: "org-1".into(),
-                workspace_id: "ws-1".into(),
-                minted_at: chrono::Utc::now(),
-            });
-        shared
-            .settings
-            .lock()
-            .unwrap()
-            .save_for_test(&shared.store)
-            .unwrap();
-
-        let explains =
-            crate::private_inference_copy::private_inference_copy().credential_forget_explains;
-        let request = Request {
-            id: 29,
-            method: "near_ai_credential_forget".into(),
-            params: serde_json::json!({}),
-        };
-        let body = handle_forget(&shared, &request)
-            .result
-            .expect("forgetting a stored key is answered");
-        assert_eq!(body["removed"], true, "{body}");
-        assert_eq!(
-            body["revoked"], false,
-            "forget now claims a revocation, so this sentence beside the Forget \
-             button in every shell is false and must change in the same \
-             commit: {explains}"
-        );
-        // The sentence still says what the answer means. If it stops saying
-        // it, the answer above is no longer explained anywhere a contributor
-        // can read.
-        assert!(
-            explains.contains("does not revoke"),
-            "credential_forget_explains no longer explains revoked: false: {explains}"
-        );
     }
 
     /// An unnamed cancel answers only for a sign-in that is running.
