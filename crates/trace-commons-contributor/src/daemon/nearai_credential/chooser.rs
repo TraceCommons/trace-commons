@@ -221,7 +221,11 @@ impl StaleChoice {
     /// page fetched again or another choice from it.
     pub(super) fn matches(&self, head: &Head, body: &[u8], authority: &str) -> bool {
         if head.method == "GET" {
-            return body.is_empty() && head.target == format!("{PAGE_PATH}?state={}", self.state);
+            // A fetch the browser made ahead of the person (prefetch,
+            // prerender, a preloaded top hit) is not them coming back.
+            return body.is_empty()
+                && !head.speculative()
+                && head.target == format!("{PAGE_PATH}?state={}", self.state);
         }
         head.method == "POST"
             && head.target == CHOOSE_PATH
@@ -243,6 +247,15 @@ impl StaleChoice {
 /// Like the other loopback listeners, an unrelated or refused request is
 /// answered and the listener keeps waiting: a prefetch, a probe, or a forged
 /// post must not end the sign-in. The caller bounds the total wait.
+///
+/// After a pick, the listener that moves on to the chosen login ends the
+/// attempt when this page comes back ([`StaleChoice`]): its own choice
+/// posted again, or its own address fetched again. A fetch the browser marks
+/// as speculative (`Sec-Purpose`/`Purpose`) is excluded. One that is not
+/// marked -- a duplicated tab, a restored session, a preload that sends no
+/// such header -- does end it. That is the accepted trade-off: the address
+/// carries this attempt's secret state, so only this person's browser can
+/// send it, and the app starts a new sign-in at once.
 pub(super) async fn receive_choice(
     listener: &TcpListener,
     state: &str,
@@ -289,7 +302,7 @@ pub(super) async fn receive_choice(
                     &mut stream,
                     "400 Bad Request",
                     "text/plain; charset=utf-8",
-                    "Not accepted.",
+                    loopback_http::NOT_ACCEPTED,
                 )
                 .await;
             }

@@ -155,7 +155,7 @@ fn an_acceptance_after_leaving_the_account_writes_nothing() {
 fn removal_is_ordered_against_a_write_in_flight() {
     let (_dir, store) = enrolled();
     accepted_by_commons(&store, Some(login()));
-    let held = WRITE.lock().unwrap();
+    let held = write_turn();
     let remover = std::thread::spawn({
         let store = store.clone();
         move || remove(&store).unwrap()
@@ -176,4 +176,53 @@ fn an_empty_change_creates_no_file() {
     forget_commons_login(&store).unwrap();
     clear_stored_login(&store);
     assert!(!store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE).exists());
+}
+
+/// When the record cannot be rewritten, clearing the account's login falls
+/// back to removing the record: the old login is gone either way.
+#[test]
+fn a_record_that_cannot_be_rewritten_is_removed_instead() {
+    let (_dir, store) = enrolled();
+    record_stored_login(&store, login(), "key-1");
+    accepted_by_commons(&store, Some(login()));
+    forget_or_remove_with(&store, |_| Err(anyhow::anyhow!("unwritable"))).unwrap();
+    assert!(!store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE).exists());
+    assert_eq!(commons_login(&store), None);
+}
+
+/// A change that changes nothing writes nothing: a record holding only the
+/// stored session's login is left byte for byte as it was.
+#[test]
+fn a_no_op_change_does_not_rewrite_the_record() {
+    let (_dir, store) = enrolled();
+    let compact = format!(
+        r#"{{"stored":{{"provider":"{}","sign_in":"{}"}}}}"#,
+        login(),
+        sign_in_digest("key-1")
+    );
+    store
+        .write_daemon_file(DAEMON_NEAR_AI_LOGIN_FILE, compact.as_bytes())
+        .unwrap();
+    forget_commons_login(&store).unwrap();
+    let bytes = store
+        .read_daemon_file(DAEMON_NEAR_AI_LOGIN_FILE)
+        .unwrap()
+        .unwrap();
+    assert_eq!(bytes, compact.as_bytes());
+}
+
+/// A panic while the record's lock was held does not make the record
+/// unwritable for the rest of the daemon's life.
+#[test]
+fn a_poisoned_lock_still_lets_the_record_be_written() {
+    let _ = std::thread::spawn(|| {
+        let _held = WRITE.lock();
+        panic!("poison the record's lock");
+    })
+    .join();
+    let (_dir, store) = enrolled();
+    accepted_by_commons(&store, Some(login()));
+    assert_eq!(commons_login(&store), Some(login()));
+    forget_commons_login(&store).unwrap();
+    remove(&store).unwrap();
 }

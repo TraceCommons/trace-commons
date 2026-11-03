@@ -590,18 +590,10 @@ pub(crate) fn failure_fields(
     error: &anyhow::Error,
     provider: &'static str,
 ) -> Option<[(&'static str, String); 3]> {
-    // A cancel, and a second pick on the login page after the first, are
-    // the person's own doing, not faults.
-    if matches!(
-        error.downcast_ref::<NearWalletError>(),
-        Some(NearWalletError::Cancelled | NearWalletError::StaleChoice)
-    ) {
+    if ended_by_person(error) {
         return None;
     }
     let root = error.root_cause().to_string();
-    if root == "near_ai_credential_cancelled" || root == chooser::STALE_CHOICE {
-        return None;
-    }
     let step = error
         .downcast_ref::<FailedStep>()
         .copied()
@@ -611,6 +603,21 @@ pub(crate) fn failure_fields(
         ("reason", failure_reason(&root).to_owned()),
         ("provider", provider.to_owned()),
     ])
+}
+
+/// A sign-in that ended by the person's own doing, not a fault: the
+/// wallet's own cancel, a cancel or forget that won the race with the
+/// persist (`near_ai_credential_cancelled`), or the login page coming back
+/// after a pick (`chooser::STALE_CHOICE`, the root of the wallet's
+/// `StaleChoice` too). Its status is `cancelled`, as a cancel's is, so the
+/// app adds no failure notice to the browser's own sentence, and it writes
+/// no failure line. One rule for both, so they cannot drift.
+pub(crate) fn ended_by_person(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<NearWalletError>() == Some(&NearWalletError::Cancelled)
+        || matches!(
+            error.root_cause().to_string().as_str(),
+            "near_ai_credential_cancelled" | chooser::STALE_CHOICE
+        )
 }
 
 /// The line [`record_failure`] writes for `error`, without its timestamp.
@@ -866,7 +873,6 @@ pub(crate) async fn settle(
             return Err(refused(COMMONS_UNAVAILABLE));
         }
     };
-    let accepted_was_some = accepted.is_some();
     progress.set(FailedStep::Persist);
     let persisted = progress.persisting();
     // The session is kept, not dropped. Inference does not need it -- the
@@ -924,21 +930,22 @@ pub(crate) async fn settle(
     // Best effort: the NEAR AI login is stored, so the sign-in has landed
     // whatever happens here, and Sign in again renews the account session
     // with it if this write is lost.
+    // `None` when nothing was accepted, so nothing was to be committed.
     let committed = match accepted {
-        Some(accepted) => match ConfigStore::open(dir.to_path_buf()) {
+        Some(accepted) => Some(match ConfigStore::open(dir.to_path_buf()) {
             Ok(store) => commit_fresh_login(&store, *accepted).await.is_ok(),
             Err(_) => false,
-        },
-        None => false,
+        }),
+        None => None,
     };
-    if accepted_was_some && !committed {
+    if committed == Some(false) {
         tracing::warn!(target: "near_ai_credential", "near_ai_account_session_not_stored");
     }
     // The one place a sign-in records the account's login: the commons
     // accepted this attempt's login (Accepted, its session stored, or
     // Verified). The sign-in page lists it first next time. Label only, off
     // this runtime's one worker.
-    if verified || committed {
+    if verified || committed == Some(true) {
         if let Ok(store) = ConfigStore::open(dir.to_path_buf()) {
             let _ = tokio::task::spawn_blocking(move || {
                 super::login_record::accepted_by_commons(&store, login);
@@ -1095,12 +1102,7 @@ async fn begin_with(store: &ConfigStore, named: Option<&'static str>) -> Result<
         }) {
             entry.state.status = match outcome {
                 Ok(()) => STATUS_COMPLETE,
-                Err(error)
-                    if error.downcast_ref::<NearWalletError>()
-                        == Some(&NearWalletError::Cancelled) =>
-                {
-                    "cancelled"
-                }
+                Err(error) if ended_by_person(&error) => "cancelled",
                 Err(error) if error.root_cause().to_string() == DIFFERENT_ACCOUNT => {
                     STATUS_DIFFERENT_ACCOUNT
                 }

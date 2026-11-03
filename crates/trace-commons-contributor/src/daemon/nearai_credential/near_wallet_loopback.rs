@@ -145,7 +145,7 @@ impl NearWalletListener {
                                 deadline,
                                 false,
                                 "text/plain; charset=utf-8",
-                                "Not accepted.",
+                                loopback_http::NOT_ACCEPTED,
                             )
                             .await
                         }
@@ -163,7 +163,7 @@ impl NearWalletListener {
                         if accepted {
                             "Received."
                         } else {
-                            "Not accepted."
+                            loopback_http::NOT_ACCEPTED
                         },
                     )
                     .await;
@@ -187,7 +187,7 @@ impl NearWalletListener {
                         if ends {
                             super::chooser::STALE_CHOICE_BODY
                         } else {
-                            "Not accepted."
+                            loopback_http::NOT_ACCEPTED
                         },
                     )
                     .await;
@@ -201,7 +201,7 @@ impl NearWalletListener {
                         deadline,
                         false,
                         "text/plain; charset=utf-8",
-                        "Not accepted.",
+                        loopback_http::NOT_ACCEPTED,
                     )
                     .await;
                 }

@@ -20,8 +20,8 @@
 //!   AI login -- first enrollment, a renewal with the stored login, or a
 //!   sign-in checked before it was stored ([`accepted_by_commons`]).
 //!
-//! Unenrolling clears the account's login ([`forget_commons_login`]) and
-//! keeps the stored session's, because it keeps that session. Logging out
+//! Unenrolling clears the account's login ([`forget_commons_login_or_remove`])
+//! and keeps the stored session's, because it keeps that session. Logging out
 //! removes the file ([`remove`]). Both go through this module's lock, and the
 //! account's login is written only while this device is enrolled, so a write
 //! in flight cannot bring a removed account's login back. Once unenrolling
@@ -58,8 +58,17 @@ struct StoredLogin {
 }
 
 /// One writer at a time in this process. Not the credential commit lock: a
-/// caller may already hold that one.
+/// caller may already hold that one. It guards order, not data, so a panic
+/// that poisoned it leaves nothing inconsistent: [`write_turn`] takes it
+/// regardless, and the record never becomes unwritable for the rest of the
+/// daemon's life.
 static WRITE: Mutex<()> = Mutex::new(());
+
+fn write_turn() -> std::sync::MutexGuard<'static, ()> {
+    WRITE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// The build's tag for `tag`, or `None` when this build does not offer it.
 fn offered(tag: Option<&str>) -> Option<&'static str> {
@@ -101,16 +110,19 @@ fn update_checked(
     store: &ConfigStore,
     change: impl FnOnce(&mut LoginRecord),
 ) -> anyhow::Result<()> {
-    let _write = WRITE
-        .lock()
-        .map_err(|_| anyhow::anyhow!("near_ai_login_record_unavailable"))?;
+    let _write = write_turn();
     write_locked(store, change)
 }
 
 fn write_locked(store: &ConfigStore, change: impl FnOnce(&mut LoginRecord)) -> anyhow::Result<()> {
+    let before = load(store);
     let mut record = load(store);
     change(&mut record);
-    if record == LoginRecord::default() && !store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE).exists() {
+    // Nothing changed, or nothing to keep where there was no file: no write.
+    if record == before
+        || (record == LoginRecord::default()
+            && !store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE).exists())
+    {
         return Ok(());
     }
     let bytes = serde_json::to_vec_pretty(&record)?;
@@ -160,9 +172,7 @@ pub(crate) fn accepted_by_commons(store: &ConfigStore, provider: Option<&str>) {
     let Some(tag) = offered(provider) else {
         return;
     };
-    let Ok(_write) = WRITE.lock() else {
-        return;
-    };
+    let _write = write_turn();
     if enrolled(store)
         && write_locked(store, |record| record.commons_login = Some(tag.to_owned())).is_err()
     {
@@ -178,12 +188,25 @@ pub(crate) fn forget_commons_login(store: &ConfigStore) -> anyhow::Result<()> {
     update_checked(store, |record| record.commons_login = None)
 }
 
+/// [`forget_commons_login`], or, when the record cannot be rewritten,
+/// [`remove`] it: it is only a label, and losing the stored session's half
+/// costs a reminder, while keeping the old account's login would show it to
+/// the next account. An error means neither worked.
+pub(crate) fn forget_commons_login_or_remove(store: &ConfigStore) -> anyhow::Result<()> {
+    forget_or_remove_with(store, forget_commons_login)
+}
+
+fn forget_or_remove_with(
+    store: &ConfigStore,
+    forget: impl FnOnce(&ConfigStore) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    forget(store).or_else(|_| remove(store))
+}
+
 /// Remove the whole record (logout), under the record's lock so a write in
 /// flight finishes first and cannot recreate it afterwards.
 pub(crate) fn remove(store: &ConfigStore) -> anyhow::Result<()> {
-    let _write = WRITE
-        .lock()
-        .map_err(|_| anyhow::anyhow!("near_ai_login_record_unavailable"))?;
+    let _write = write_turn();
     store.remove_files_and_temps(&[DAEMON_NEAR_AI_LOGIN_FILE], |_| false)
 }
 

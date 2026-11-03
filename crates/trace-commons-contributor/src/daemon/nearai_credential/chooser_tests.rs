@@ -653,7 +653,8 @@ async fn a_second_pick_after_the_first_ends_the_attempt_at_once() {
             stale.ends_with(crate::private_inference_copy::NEAR_AI_SIGN_IN_ENDED),
             "{first}: {stale}"
         );
-        assert_eq!(settled_status(&store, &id).await, "failed", "{first}");
+        // The person's own doing, like a cancel: no failure notice in the app.
+        assert_eq!(settled_status(&store, &id).await, "cancelled", "{first}");
     }
 }
 
@@ -685,20 +686,37 @@ async fn the_page_fetched_again_after_a_pick_ends_the_attempt_at_once() {
             "{first}"
         );
 
-        let again = send(
+        // A fetch the browser made ahead of the person is not them coming
+        // back: refused, and the sign-in goes on.
+        let page_target = format!("{}?{}", url.path(), url.query().unwrap());
+        let prefetch = send(
             address,
-            get(
-                &authority,
-                &format!("{}?{}", url.path(), url.query().unwrap()),
+            format!(
+                "GET {page_target} HTTP/1.1\r\nHost: {authority}\r\nSec-Purpose: prefetch;prerender\r\n\r\n"
             ),
         )
         .await;
+        assert!(
+            status(&prefetch).starts_with("HTTP/1.1 4"),
+            "{first}: {prefetch}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            crate::daemon::nearai_credential::ceremony::status(store.dir(), Some(&id))
+                .unwrap()
+                .status,
+            "waiting_for_browser",
+            "{first}"
+        );
+
+        let again = send(address, get(&authority, &page_target)).await;
         assert_eq!(status(&again), "HTTP/1.1 400 Bad Request", "{first}");
         assert!(
             again.ends_with(crate::private_inference_copy::NEAR_AI_SIGN_IN_ENDED),
             "{first}: {again}"
         );
-        assert_eq!(settled_status(&store, &id).await, "failed", "{first}");
+        // The person's own doing, like a cancel: no failure notice in the app.
+        assert_eq!(settled_status(&store, &id).await, "cancelled", "{first}");
     }
 }
 
@@ -718,7 +736,7 @@ fn the_ended_sign_in_sentence_is_the_approved_one() {
 }
 
 /// A second pick is the person's own doing, like a cancel: it ends the
-/// attempt and writes no failure line.
+/// attempt as `cancelled` and writes no failure line -- one rule for both.
 #[test]
 fn a_second_pick_is_not_logged_as_a_failure() {
     use crate::daemon::nearai_credential::ceremony::failure_fields;
@@ -726,4 +744,13 @@ fn a_second_pick_is_not_logged_as_a_failure() {
     assert!(failure_fields(&anyhow!(STALE_CHOICE), "github").is_none());
     assert!(failure_fields(&anyhow::Error::from(NearWalletError::StaleChoice), "near").is_none());
     assert!(failure_fields(&anyhow!("near_ai_credential_unavailable"), "github").is_some());
+    use crate::daemon::nearai_credential::ceremony::ended_by_person;
+    assert!(ended_by_person(&anyhow!(STALE_CHOICE)));
+    assert!(ended_by_person(&anyhow::Error::from(
+        NearWalletError::StaleChoice
+    )));
+    assert!(ended_by_person(&anyhow::Error::from(
+        NearWalletError::Cancelled
+    )));
+    assert!(!ended_by_person(&anyhow!("near_ai_credential_unavailable")));
 }

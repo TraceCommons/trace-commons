@@ -911,20 +911,41 @@ async fn unenroll_forgets_the_accounts_login_and_keeps_the_sessions() {
     assert_eq!(login_record::stored_login(&s.store, "key-1"), Some(login));
 }
 
-/// A record of the account's login that cannot be cleared fails the
-/// unenroll before anything is removed: the device stays enrolled rather
-/// than leave the old account's login for a next one.
+/// A record of the account's login that can be neither rewritten nor
+/// removed never blocks the unenroll: it is only a label, and the person
+/// would have nothing to try in the app.
 #[tokio::test]
-async fn unenroll_fails_closed_when_the_accounts_login_cannot_be_cleared() {
+async fn unenroll_goes_ahead_when_the_login_record_cannot_be_cleared() {
     let s = shared();
     enroll_fixture(&s);
-    // A directory where the record goes: it can be neither read nor written.
+    // A directory where the record goes: it can be neither written nor
+    // removed as a file.
     let record = s
         .store
         .daemon_path(crate::config::DAEMON_NEAR_AI_LOGIN_FILE);
     std::fs::create_dir_all(record.join("blocked")).unwrap();
 
     let r = call(&s).await;
-    assert!(r.error.is_some(), "unenroll went ahead");
-    assert!(s.store.load_config().unwrap().is_some(), "still enrolled");
+    assert!(r.error.is_none(), "{:?}", r.error);
+    assert!(s.store.load_config().unwrap().is_none());
+}
+
+/// A leftover account login -- from an unenroll whose clear failed -- is
+/// cleared by the next unenroll call, enrolled or not.
+#[tokio::test]
+async fn a_later_unenroll_clears_a_leftover_accounts_login() {
+    use crate::daemon::nearai_credential::login_record;
+    let s = shared();
+    let login = crate::channel::NEAR_AI_SIGN_IN_PROVIDERS[0];
+    s.store
+        .write_daemon_file(
+            crate::config::DAEMON_NEAR_AI_LOGIN_FILE,
+            format!(r#"{{"commons_login":"{login}"}}"#).as_bytes(),
+        )
+        .unwrap();
+    assert_eq!(login_record::commons_login(&s.store), Some(login));
+
+    let r = call(&s).await;
+    assert!(r.error.is_none(), "{:?}", r.error);
+    assert_eq!(login_record::commons_login(&s.store), None);
 }

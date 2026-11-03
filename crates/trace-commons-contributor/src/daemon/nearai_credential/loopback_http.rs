@@ -24,6 +24,11 @@ use tokio::net::TcpStream;
 /// Header bytes accepted from one connection before it is abandoned.
 pub(super) const MAX_HEADER_BYTES: usize = 8192;
 
+/// The sign-in pages' one refusal for a request they do not take: the
+/// chooser's and the wallet page's. One name, so "every other refusal keeps
+/// Not accepted." holds in one place.
+pub(super) const NOT_ACCEPTED: &str = "Not accepted.";
+
 /// A request this reader refused. Carries nothing: a refusal is answered
 /// with a fixed body and never explained.
 #[derive(Debug, PartialEq, Eq)]
@@ -37,6 +42,10 @@ pub(super) struct Head {
     pub origin: Option<String>,
     pub content_type: Option<String>,
     pub fetch_site: Option<String>,
+    /// `Sec-Purpose` / `Purpose`: set by a browser that fetches ahead of the
+    /// person (prefetch, prerender, a preloaded top hit).
+    pub sec_purpose: Option<String>,
+    pub purpose: Option<String>,
     /// `None` when the request sent no `Content-Length`.
     pub length: Option<usize>,
 }
@@ -44,6 +53,12 @@ pub(super) struct Head {
 impl Head {
     pub fn body_len(&self) -> usize {
         self.length.unwrap_or(0)
+    }
+
+    /// Whether the browser fetched this ahead of the person rather than
+    /// because they asked for it.
+    pub fn speculative(&self) -> bool {
+        self.sec_purpose.is_some() || self.purpose.is_some()
     }
 }
 
@@ -91,6 +106,8 @@ pub(super) fn parse_head(bytes: &[u8], authority: &str, max_body: usize) -> Resu
             "content-length" => &mut length,
             "content-type" => &mut head.content_type,
             "sec-fetch-site" => &mut head.fetch_site,
+            "sec-purpose" => &mut head.sec_purpose,
+            "purpose" => &mut head.purpose,
             "transfer-encoding" | "expect" | "trailer" => return Err(Invalid),
             _ => continue,
         };
