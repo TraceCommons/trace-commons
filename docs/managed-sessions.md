@@ -239,16 +239,15 @@ Decided in #1406 (design owner, 2026-10-14): the choice lives in Settings >
 Private AI on every shell, the Start buttons are unchanged, and Windows and
 Linux get the same choice as macOS, as an exception to the #1173 D13 freeze.
 
-**The first launch asks.** Until the person has chosen a terminal
-(`managed_terminal_chosen`, set by any write of `managed_terminal` and
-never cleared), the snapshot's `capabilities.terminal_chosen` is false, and
-the macOS launch dialogs (the sign-in card's and Launch managed session)
-draw the same "Open sessions in" picker as Settings, over the installed
-apps, starting on the current choice. Open saves the choice, then
-launches, so the session opens there and later dialogs do not ask. With
-one terminal installed nothing is asked. A settings file written before
-the key existed counts as not chosen, so a person who has launched before
-is asked once too.
+**Every launch asks.** On macOS the launch dialogs (the sign-in card's and
+Launch managed session) draw the same "Open sessions in" picker as
+Settings, over the installed apps, starting on the current choice
+(`managed_terminal`), on every launch once the daemon reports
+`capabilities.terminal_chosen` (true or false; an older daemon that omits it
+never asks). Open saves the pick as the default (`set_managed_terminal`),
+then launches, so the session opens there and the next dialog starts on it.
+With one terminal installed nothing is asked. Windows, Linux and Tauri pick
+only in Settings today.
 
 **The test.** A terminal is offered only if it accepts both a command and a
 working directory from its scripting interface or command line, documented

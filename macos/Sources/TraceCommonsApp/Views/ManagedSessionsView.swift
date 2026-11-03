@@ -186,7 +186,7 @@ struct ManagedSessionsSection: View {
         }
         // A dialog that asked for a terminal saves it first, so this launch
         // opens there and later ones do not ask again.
-        let terminal = model.managedSnapshot?.asksForTerminal == true ? launchTerminal : nil
+        let terminal = model.managedSnapshot?.terminalToSave(picked: launchTerminal)
         model.managedAction("managed_launch_prepare", params: params, openTerminal: true, terminal: terminal)
     }
 
@@ -700,7 +700,7 @@ struct ManagedLaunchSheet: View {
             params = folderDraft.applying(to: params, daemonKeepsSavedModel: snapshot.capabilities.keepSavedModel == true,
                                           daemonReadsBackground: snapshot.capabilities.backgroundModel == true)
         }
-        let terminal = snapshot.asksForTerminal ? launchTerminal : nil
+        let terminal = snapshot.terminalToSave(picked: launchTerminal)
         model.managedAction("managed_launch_prepare", params: params, openTerminal: true, terminal: terminal)
         onClose()
     }

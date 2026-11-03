@@ -930,11 +930,17 @@ public extension ManagedSnapshot {
         capabilities.herdrAvailable == true || capabilities.herdrGrouping == true
     }
 
-    /// Whether a launch dialog asks which terminal to open in: until the
-    /// person has chosen one, and only when more than one is installed.
-    /// An older daemon that does not say never asks.
+    /// Whether a launch dialog asks which terminal to open in: on every
+    /// launch, whether or not one was chosen before, and only when more than
+    /// one is installed. An older daemon that does not say never asks.
     var asksForTerminal: Bool {
-        capabilities.terminalChosen == false && terminalChoices.count > 1
+        capabilities.terminalChosen != nil && terminalChoices.count > 1
+    }
+
+    /// The terminal a launch saves as the default before it starts: the
+    /// one picked in a dialog that asked, else none.
+    func terminalToSave(picked: String?) -> String? {
+        asksForTerminal ? picked : nil
     }
 
     /// The terminal a launch dialog that asks starts on: the current one
