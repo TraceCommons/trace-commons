@@ -9472,7 +9472,10 @@ window of its own, in the chosen terminal. Every launch does, Start again and
 Resume included (owner, 2026-11-03); nothing is ever typed into an existing
 tab, whose prompt may hold input not yet run, and the daemon no longer asks
 macOS for the System Events and Accessibility permissions that a new tab
-needed. A launch still sends Apple Events to the terminal app it opens.
+needed. A launch still sends Apple Events to the terminal app it opens, so
+macOS may still ask once to let the app control that terminal; the bundle's
+`NSAppleEventsUsageDescription` for that prompt is "Near.ai opens Private AI
+sessions in Terminal." (owner, 2026-11-03; both channels).
 
 An older app may still send two fields, which are accepted so that app keeps
 launching, and ignored: `in_window_of` (the app built from #1839) and `beside`
