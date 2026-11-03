@@ -9,7 +9,7 @@ import TCShellCore
 /// (`managed_terminal_windows`), never from reading Terminal here. Drawn
 /// only when there is a window to offer. Picking one asks macOS for the
 /// permissions a tab needs, so its prompts come now and not during the
-/// launch. The words are the core's, DRAFT until approved.
+/// launch. The words are the core's, approved by the owner 2026-11-02.
 struct ManagedLaunchWindowRow: View {
     /// The windows offered now, read by the dialog when it opens
     /// ([`load`]); none until the daemon answers.

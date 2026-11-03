@@ -39,7 +39,8 @@
 //!
 //! The launch dialog's window list, on macOS while Terminal is the chosen
 //! app and a running session's window can be offered (owner, 2026-11-02,
-//! #1852). DRAFT, NEEDS APPROVAL:
+//! #1852). Approved by the owner 2026-11-02. A launch that falls back to a
+//! new window says nothing (owner, same day):
 //! - `open_in_window` "Open in" -- the list's label and accessible name.
 //! - `new_window` "New window" -- the first option, and the default.
 //! - `window_option` "{tool} · {folder}" -- each other option: a session

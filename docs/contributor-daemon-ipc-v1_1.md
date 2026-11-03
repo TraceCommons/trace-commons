@@ -9517,8 +9517,11 @@ typed into an existing tab, whose prompt may hold input not yet run.
   (`near-ai daemon run` in a terminal, or one under a service manager) is
   attributed to whatever started it: Terminal, or that daemon's own binary. A
   grant is tied to the code signature it was given to, so a differently
-  signed build asks again. Refusing either permission opens the launch in a
-  new window; nothing in the app says so.
+  signed build asks again. The Automation prompt shows the bundle's
+  `NSAppleEventsUsageDescription`, "Near.ai opens new Private AI sessions in
+  the Terminal window you choose." (owner, 2026-11-02; both channels).
+  Refusing either permission opens the launch in a new window; nothing in
+  the app says so (owner, 2026-11-02).
 - The tab used is one Command-T made in that window: the window's tab count
   goes up by exactly one within 3 seconds, is still one more after a further
   0.3 seconds with the window still in front, and the window's selected tab
