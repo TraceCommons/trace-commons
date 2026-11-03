@@ -401,9 +401,7 @@ async fn postgres_backend_in_zone(zone: &str) -> Option<Arc<PgBackend>> {
     let encoded: String = format!("-c TimeZone={zone}")
         .bytes()
         .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
-                (b as char).to_string()
-            }
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => (b as char).to_string(),
             other => format!("%{other:02X}"),
         })
         .collect();

@@ -4414,7 +4414,8 @@ impl Database for PgBackend {
                         &new_hash,
                         &crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND,
                         &(crate::account_native_auth::NATIVE_SESSION_TTL_HOURS as i32),
-                        &((crate::account_native_auth::NATIVE_SESSION_MAX_LIFETIME_DAYS * 24) as i32),
+                        &((crate::account_native_auth::NATIVE_SESSION_MAX_LIFETIME_DAYS * 24)
+                            as i32),
                     ],
                 )
                 .await
