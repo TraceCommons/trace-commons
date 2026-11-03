@@ -17,7 +17,7 @@ use crate::{
             SessionRegistry, SessionState, SessionView,
         },
         signin,
-        terminal::{self, TerminalApp, TerminalHandle, TerminalSetting, TerminalTab},
+        terminal::{self, Placement, TerminalApp, TerminalHandle, TerminalSetting, TerminalTab},
         tool_setup::{self, ToolSetupAction},
     },
 };
@@ -50,6 +50,12 @@ pub struct ManagedService {
     /// Opens a session in a terminal ([`terminal::launch`]). A field so
     /// tests record the call rather than open a real terminal.
     launch_terminal: LaunchTerminal,
+    /// Terminal's open windows with their tabs' ttys
+    /// ([`terminal::open_windows`]). A field so tests answer it.
+    open_windows: fn() -> Vec<(u32, Vec<String>)>,
+    /// Shows macOS's prompts for opening tabs, off any launch
+    /// ([`terminal::ask_tab_access`]). A field so tests record it.
+    ask_tab_access: fn(),
 }
 
 /// [`terminal::launch`]'s shape.
@@ -60,6 +66,7 @@ type LaunchTerminal = fn(
     &std::path::Path,
     Uuid,
     &str,
+    Option<&Placement>,
 ) -> Result<Option<TerminalTab>, ManagedError>;
 
 /// A terminal launch the daemon holds ([`ManagedService::begin_terminal_launch`]),
@@ -72,6 +79,8 @@ struct TerminalLaunch {
     cwd: std::path::PathBuf,
     session_id: Uuid,
     ticket: String,
+    /// The window the person picked, checked against the daemon's own rows.
+    place: Option<Placement>,
 }
 
 impl TerminalLaunch {
@@ -86,6 +95,7 @@ impl TerminalLaunch {
             &self.cwd,
             self.session_id,
             &self.ticket,
+            self.place.as_ref(),
         )
     }
 }
@@ -119,7 +129,22 @@ impl ManagedService {
             focus: crate::managed::terminal::focus,
             setup_terminal: terminal::launch_tool_setup,
             launch_terminal: terminal::launch,
+            open_windows: terminal::open_windows,
+            ask_tab_access: terminal::ask_tab_access,
         })
+    }
+
+    /// The sessions whose windows the launch dialog may list: the running
+    /// sessions the daemon opened in a Terminal window it can name, newest
+    /// first, while Terminal is the chosen app. Each is listed only once
+    /// the live window is seen to hold its tab ([`vouched_windows`]).
+    fn window_candidates(&self, choice: TerminalSetting) -> Vec<(Uuid, TerminalHandle, u32)> {
+        // By setting, not by `app()`: the setting reads Terminal only where
+        // Terminal is offered, and tests run on every platform.
+        if choice != TerminalSetting::Terminal {
+            return vec![];
+        }
+        self.sessions.placeable_sessions()
     }
 
     /// The installed terminal apps, from the cache when it is fresh and
@@ -150,13 +175,25 @@ impl ManagedService {
             /// sends it.
             #[serde(default, rename = "in_window_of")]
             _in_window_of: Option<serde::de::IgnoredAny>,
+            /// The running session whose Terminal window the person picked
+            /// in the launch dialog (owner, 2026-11-02, #1852). The daemon
+            /// finds that session's window and tab itself, and only for a
+            /// session it opened that runs; anything else opens a new
+            /// window.
+            #[serde(default)]
+            beside: Option<Uuid>,
         }
         let p: Params = parse(request)?;
         let cwd = self
             .sessions
             .begin_terminal_launch(p.session_id, &p.ticket)?;
-        // Start again and Resume open a new window like any launch (owner,
-        // 2026-11-02): nothing is typed into, or opened in, an existing one.
+        // The window list is the only way a session opens in an existing
+        // window; Start again and Resume open a new one (owner, 2026-11-02).
+        // By setting, not `app()`: the setting reads Terminal only where
+        // Terminal is offered, and tests run on every platform.
+        let place = (choice == TerminalSetting::Terminal)
+            .then(|| p.beside.and_then(|id| self.sessions.placement_beside(id)))
+            .flatten();
         Ok(TerminalLaunch {
             launch: self.launch_terminal,
             choice,
@@ -165,6 +202,7 @@ impl ManagedService {
             cwd,
             session_id: p.session_id,
             ticket: p.ticket,
+            place,
         })
     }
 
@@ -550,6 +588,24 @@ impl ManagedService {
             // Only through [`terminal_launch`], which opens the terminal
             // with the service unlocked; `handle` and `handle_async` route
             // it there before reaching this.
+            "managed_terminal_windows" => {
+                no_params(request)?;
+                let candidates = self.window_candidates(choice);
+                let live = if candidates.is_empty() {
+                    vec![]
+                } else {
+                    (self.open_windows)()
+                };
+                Ok(windows_answer(&candidates, &live))
+            }
+            "managed_terminal_tab_access" => {
+                no_params(request)?;
+                let asked = choice == TerminalSetting::Terminal;
+                if asked {
+                    (self.ask_tab_access)();
+                }
+                Ok(json!({"asked": asked}))
+            }
             "managed_terminal_launch" => Err(ManagedError::InvalidRequest),
             "managed_launch_redeem" => {
                 let p: RedeemParams = parse(request)?;
@@ -949,6 +1005,9 @@ pub fn handle(shared: &DaemonShared, request: &Request) -> Response {
     if request.method == "managed_terminal_launch" {
         return terminal_launch(shared, request);
     }
+    if request.method == "managed_terminal_windows" {
+        return terminal_windows(shared, request);
+    }
     let sign_in = sign_in_present(shared);
     let choice = terminal_choice(shared);
     let mut ended = vec![];
@@ -994,6 +1053,9 @@ where
     if request.method == "managed_terminal_launch" {
         return terminal_launch(shared, request);
     }
+    if request.method == "managed_terminal_windows" {
+        return terminal_windows(shared, request);
+    }
     // A launch that would prepare a new session on the sign-in waits for
     // the balance before anything is committed: a refusal, a cancelled
     // request or a sign-out during the wait leaves no session behind, and
@@ -1026,6 +1088,77 @@ where
         route.shutdown().await;
     }
     respond(request, remember_prepared(shared, request, result))
+}
+
+/// A request that takes no parameters: none, or an empty object.
+fn no_params(request: &Request) -> Result<(), ManagedError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {}
+    if request.params.is_null() {
+        return Ok(());
+    }
+    parse::<Params>(request).map(|_| ())
+}
+
+/// The windows the launch dialog lists, as session ids grouped by window:
+/// a candidate is kept only when `live`, Terminal's windows read just now,
+/// has its window holding its tab's tty. Windows are in the order of their
+/// newest session, and so are the sessions in each. Window ids stay in the
+/// daemon: a launch names a session ([`ManagedService::begin_terminal_launch`]).
+fn vouched_windows(
+    candidates: &[(Uuid, TerminalHandle, u32)],
+    live: &[(u32, Vec<String>)],
+) -> Vec<Vec<Uuid>> {
+    let mut windows: Vec<(u32, Vec<Uuid>)> = vec![];
+    for (id, handle, window) in candidates {
+        let TerminalHandle::AppleTerminal { tty } = handle;
+        let holds = live
+            .iter()
+            .any(|(live_window, ttys)| live_window == window && ttys.contains(tty));
+        if !holds {
+            continue;
+        }
+        match windows.iter_mut().find(|(w, _)| w == window) {
+            Some((_, sessions)) => sessions.push(*id),
+            None => windows.push((*window, vec![*id])),
+        }
+    }
+    windows.into_iter().map(|(_, sessions)| sessions).collect()
+}
+
+/// `managed_terminal_windows`' answer.
+fn windows_answer(
+    candidates: &[(Uuid, TerminalHandle, u32)],
+    live: &[(u32, Vec<String>)],
+) -> Value {
+    let windows: Vec<Value> = vouched_windows(candidates, live)
+        .into_iter()
+        .map(|sessions| json!({"sessions": sessions}))
+        .collect();
+    json!({"windows": windows})
+}
+
+/// `managed_terminal_windows` with the service locked only to read the
+/// candidate sessions: Terminal is read unlocked and off the async worker.
+fn terminal_windows(shared: &DaemonShared, request: &Request) -> Response {
+    if let Err(refusal) = no_params(request) {
+        return respond(request, Err(refusal.into()));
+    }
+    let choice = terminal_choice(shared).setting;
+    let read = with_service(shared, |service| {
+        Ok::<_, ManagedError>((service.window_candidates(choice), service.open_windows))
+    });
+    let (candidates, open_windows) = match read {
+        Ok(read) => read,
+        Err(refusal) => return respond(request, Err(refusal)),
+    };
+    let live = if candidates.is_empty() {
+        vec![]
+    } else {
+        crate::daemon::run_blocking(open_windows)
+    };
+    respond(request, Ok(windows_answer(&candidates, &live)))
 }
 
 /// `managed_terminal_launch` with the service locked only to hold the
@@ -2913,6 +3046,7 @@ mod tests {
         _: &std::path::Path,
         session: Uuid,
         _: &str,
+        _: Option<&Placement>,
     ) -> Result<Option<TerminalTab>, ManagedError> {
         Ok(Some(TerminalTab {
             handle: TerminalHandle::AppleTerminal {
@@ -3039,6 +3173,308 @@ mod tests {
         });
     }
 
+    static PLACED: std::sync::Mutex<Vec<(Uuid, Option<Placement>)>> = std::sync::Mutex::new(vec![]);
+
+    fn tty_of(session: Uuid) -> String {
+        format!("/dev/ttys{:03}", session.as_bytes()[0])
+    }
+
+    /// Records where each launch was placed and answers with a new tab in
+    /// that window, or a new window of its own (#1852).
+    fn record_placed(
+        _: TerminalSetting,
+        _: &[TerminalApp],
+        _: &std::path::Path,
+        _: &std::path::Path,
+        session: Uuid,
+        _: &str,
+        place: Option<&Placement>,
+    ) -> Result<Option<TerminalTab>, ManagedError> {
+        PLACED.lock().unwrap().push((session, place.cloned()));
+        Ok(Some(TerminalTab {
+            handle: TerminalHandle::AppleTerminal {
+                tty: tty_of(session),
+            },
+            window: Some(place.map_or(window_of(session), |place| place.window)),
+        }))
+    }
+
+    fn placed(session: Uuid) -> Option<Placement> {
+        let launched = PLACED.lock().unwrap();
+        let (_, place) = launched.iter().find(|(id, _)| *id == session).unwrap();
+        place.clone()
+    }
+
+    /// A daemon placing launches through [`record_placed`], with Terminal
+    /// chosen on every platform.
+    fn placing() -> (tempfile::TempDir, DaemonShared) {
+        let (home, shared) = launching(record_placed);
+        shared.settings.lock().unwrap().managed_terminal = TerminalSetting::Terminal;
+        (home, shared)
+    }
+
+    /// Launch `prepared` through the daemon with `extra` launch fields and
+    /// start it: a running session the daemon opened. Returns its proof.
+    fn opened_and_running(
+        shared: &DaemonShared,
+        prepared: PreparedLaunch,
+        extra: Value,
+    ) -> (Uuid, String) {
+        let id = prepared.session_id;
+        let ticket = prepared.ticket.unwrap();
+        let mut params = json!({"session_id":id,"ticket":ticket});
+        for (key, value) in extra.as_object().unwrap() {
+            params[key] = value.clone();
+        }
+        terminal(shared, params).unwrap();
+        let proof = locked(shared, |service| {
+            let context = service.sessions.redeem(id, &ticket).unwrap();
+            report(service, id, &context.proof, "running", None).unwrap();
+            context.proof
+        });
+        (id, proof)
+    }
+
+    thread_local! {
+        /// What [`live_windows`] answers: Terminal's windows as a test has
+        /// them.
+        static LIVE: std::cell::RefCell<Vec<(u32, Vec<String>)>> =
+            const { std::cell::RefCell::new(vec![]) };
+        static ASKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn live_windows() -> Vec<(u32, Vec<String>)> {
+        LIVE.with(|live| live.borrow().clone())
+    }
+
+    fn set_live(windows: Vec<(u32, Vec<String>)>) {
+        LIVE.with(|live| *live.borrow_mut() = windows);
+    }
+
+    fn record_ask() {
+        ASKED.with(|asked| asked.set(asked.get() + 1));
+    }
+
+    /// `managed_terminal_windows` through the daemon.
+    fn windows_listed(shared: &DaemonShared, params: Value) -> Result<Value, String> {
+        let response = terminal_windows(
+            shared,
+            &Request {
+                id: 1,
+                method: "managed_terminal_windows".into(),
+                params,
+            },
+        );
+        match response.error {
+            Some(error) => Err(error.message),
+            None => Ok(response.result.unwrap()),
+        }
+    }
+
+    /// Owner, 2026-11-02 (#1852): the launch dialog lists only windows
+    /// holding a running session the daemon opened, checked against
+    /// Terminal's live windows: a session whose tty is no longer in its
+    /// recorded window is left out, and so is one whose window is gone.
+    /// Sessions sharing a window are listed together, newest first. Window
+    /// ids never leave the daemon. Another terminal app lists none, and
+    /// Terminal is not read when there is nothing to check.
+    #[test]
+    fn the_window_list_holds_only_running_sessions_the_daemon_can_vouch_for() {
+        let (home, shared) = placing();
+        locked(&shared, |service| {
+            service.open_windows = || panic!("nothing to check")
+        });
+        assert_eq!(
+            windows_listed(&shared, json!({})),
+            Ok(json!({"windows": []}))
+        );
+        locked(&shared, |service| service.open_windows = live_windows);
+
+        let (first, _) = opened_and_running(&shared, prepared(&shared, home.path()), json!({}));
+        let (second, _) = opened_and_running(
+            &shared,
+            prepared(&shared, home.path()),
+            json!({"beside": first}),
+        );
+        let (other, _) = opened_and_running(&shared, prepared(&shared, home.path()), json!({}));
+        // Prepared and launched but never started: not listed.
+        let unstarted = prepared(&shared, home.path());
+        terminal(
+            &shared,
+            json!({"session_id":unstarted.session_id,"ticket":unstarted.ticket.unwrap()}),
+        )
+        .unwrap();
+
+        let window = window_of(first);
+        set_live(vec![
+            (window, vec![tty_of(first), tty_of(second)]),
+            // The other session's tty now sits in another window.
+            (window_of(other) + 1000, vec![tty_of(other)]),
+            (
+                window_of(unstarted.session_id),
+                vec![tty_of(unstarted.session_id)],
+            ),
+        ]);
+        let together: Vec<Uuid> = locked(&shared, |service| {
+            service
+                .sessions
+                .placeable_sessions()
+                .into_iter()
+                .map(|(id, _, _)| id)
+                .filter(|id| *id == first || *id == second)
+                .collect()
+        });
+        assert_eq!(together.len(), 2, "newest first, as the daemon orders rows");
+        assert_eq!(
+            windows_listed(&shared, json!({})),
+            Ok(json!({"windows": [{"sessions": together}]}))
+        );
+
+        set_live(vec![(window, vec![tty_of(first)])]);
+        assert_eq!(
+            windows_listed(&shared, json!({})),
+            Ok(json!({"windows": [{"sessions": [first]}]})),
+            "a tab that is gone takes its session off"
+        );
+        set_live(vec![]);
+        assert_eq!(
+            windows_listed(&shared, json!({})),
+            Ok(json!({"windows": []})),
+            "Terminal closed"
+        );
+        set_live(vec![(window, vec![tty_of(first)])]);
+        assert_eq!(
+            windows_listed(&shared, json!({"window": 1})),
+            Err("managed-invalid-request".into())
+        );
+        shared.settings.lock().unwrap().managed_terminal = TerminalSetting::Iterm2;
+        assert_eq!(
+            windows_listed(&shared, json!({})),
+            Ok(json!({"windows": []}))
+        );
+    }
+
+    /// Owner, 2026-11-02 (#1852, and #1853's decision that Start again and
+    /// Resume open a new window): a launch opens in an existing window only
+    /// when the person picked one, by a running session the daemon opened,
+    /// and the daemon finds that session's window and tab itself. A session
+    /// that ended, an unknown id, Start again, an app built from #1839
+    /// naming a row (`in_window_of`, accepted and ignored), and another
+    /// terminal app all open a new window.
+    #[test]
+    fn a_launch_opens_beside_only_a_running_session_the_daemon_opened() {
+        let (home, shared) = placing();
+        let (first, _) = opened_and_running(&shared, prepared(&shared, home.path()), json!({}));
+        assert_eq!(placed(first), None, "a launch opens a new window");
+
+        let (second, _) = opened_and_running(
+            &shared,
+            prepared(&shared, home.path()),
+            json!({"beside": first}),
+        );
+        assert_eq!(
+            placed(second),
+            Some(Placement {
+                window: window_of(first),
+                tty: tty_of(first)
+            })
+        );
+        let (third, _) = opened_and_running(
+            &shared,
+            prepared(&shared, home.path()),
+            json!({"beside": Uuid::new_v4()}),
+        );
+        assert_eq!(placed(third), None, "an unknown session");
+        let (fourth, _) = opened_and_running(
+            &shared,
+            prepared(&shared, home.path()),
+            json!({"in_window_of": first}),
+        );
+        assert_eq!(placed(fourth), None, "what an old app names is ignored");
+
+        // A session that ended: a launch beside it, and its Start again,
+        // open a new window.
+        let (ended, proof) = opened_and_running(&shared, prepared(&shared, home.path()), json!({}));
+        locked(&shared, |service| {
+            report(service, ended, &proof, "exited", Some(0)).unwrap();
+        });
+        let (beside_ended, _) = opened_and_running(
+            &shared,
+            prepared(&shared, home.path()),
+            json!({"beside": ended}),
+        );
+        assert_eq!(placed(beside_ended), None, "an ended session");
+        let again: PreparedLaunch = locked(&shared, |service| {
+            serde_json::from_value(
+                call(
+                    service,
+                    "managed_session_start_again",
+                    json!({"session_id":ended,"request_id":Uuid::new_v4()}),
+                    false,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        });
+        let again_id = again.session_id;
+        terminal(
+            &shared,
+            json!({"session_id":again_id,"ticket":again.ticket.unwrap()}),
+        )
+        .unwrap();
+        assert_eq!(placed(again_id), None, "Start again");
+
+        shared.settings.lock().unwrap().managed_terminal = TerminalSetting::Ghostty;
+        let other = prepared(&shared, home.path());
+        terminal(
+            &shared,
+            json!({"session_id":other.session_id,"ticket":other.ticket.unwrap(),"beside":first}),
+        )
+        .unwrap();
+        assert_eq!(placed(other.session_id), None, "not Terminal");
+    }
+
+    /// Owner, 2026-11-02: macOS's prompts appear when the person picks a
+    /// window, not on a launch; only while Terminal is the chosen app.
+    #[test]
+    fn picking_a_window_asks_for_tab_access_only_in_terminal() {
+        let (_home, _store, mut service) = service();
+        service.ask_tab_access = record_ask;
+        let before = ASKED.with(std::cell::Cell::get);
+        assert_eq!(
+            call_with(
+                &mut service,
+                "managed_terminal_tab_access",
+                json!({}),
+                false,
+                TerminalSetting::Terminal
+            ),
+            Ok(json!({"asked": true}))
+        );
+        assert_eq!(ASKED.with(std::cell::Cell::get), before + 1);
+        assert_eq!(
+            call_with(
+                &mut service,
+                "managed_terminal_tab_access",
+                json!({}),
+                false,
+                TerminalSetting::Ghostty
+            ),
+            Ok(json!({"asked": false}))
+        );
+        assert_eq!(
+            call_with(
+                &mut service,
+                "managed_terminal_tab_access",
+                json!({"x": 1}),
+                false,
+                TerminalSetting::Terminal
+            ),
+            Err(ManagedError::InvalidRequest)
+        );
+        assert_eq!(ASKED.with(std::cell::Cell::get), before + 1);
+    }
+
     fn refuse_unknown(
         _: TerminalSetting,
         _: &[TerminalApp],
@@ -3046,6 +3482,7 @@ mod tests {
         _: &std::path::Path,
         _: Uuid,
         _: &str,
+        _: Option<&Placement>,
     ) -> Result<Option<TerminalTab>, ManagedError> {
         Err(ManagedError::LaunchUnknown)
     }
@@ -3057,6 +3494,7 @@ mod tests {
         _: &std::path::Path,
         _: Uuid,
         _: &str,
+        _: Option<&Placement>,
     ) -> Result<Option<TerminalTab>, ManagedError> {
         Err(ManagedError::TerminalNotFound)
     }
@@ -3070,6 +3508,7 @@ mod tests {
         _: &std::path::Path,
         _: Uuid,
         _: &str,
+        _: Option<&Placement>,
     ) -> Result<Option<TerminalTab>, ManagedError> {
         Err(ManagedError::StorageUnavailable)
     }

@@ -37,6 +37,17 @@
 //!   `managed-terminal-not-found` ("not found", never "not installed");
 //!   it fills `{terminal}` from `capabilities.terminal_destination`.
 //!
+//! The launch dialog's window list, on macOS while Terminal is the chosen
+//! app and a running session's window can be offered (owner, 2026-11-02,
+//! #1852). Approved by the owner 2026-11-02. A launch that falls back to a
+//! new window says nothing (owner, same day):
+//! - `open_in_window` "Open in" -- the list's label and accessible name.
+//! - `new_window` "New window" -- the first option, and the default.
+//! - `window_option` "{tool} · {folder}" -- each other option: a session
+//!   in that window, named as its row names it (the tool, then the
+//!   folder's label). A window holding several sessions joins them with
+//!   ", ", newest first.
+//!
 //! A session row's actions (Ron, #1407, 2026-10-14):
 //! - `show` "Show" and `stop` "Stop" -- the row menu's items and the row's
 //!   accessibility actions. Clicking a running row also shows it.
@@ -308,6 +319,9 @@ pub fn copy() -> serde_json::Value {
             "sign_in_near_ai_accessibility": "Sign in to NEAR AI",
             "terminal_choice": "Open sessions in",
             "terminal_not_found": "{terminal} wasn't found on this computer. Choose another in Settings.",
+            "open_in_window": "Open in",
+            "new_window": "New window",
+            "window_option": "{tool} \u00b7 {folder}",
             "show": "Show",
             "stop": "Stop",
             "stop_question": "Stop this session?",

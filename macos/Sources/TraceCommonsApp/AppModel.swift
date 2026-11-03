@@ -60,6 +60,27 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The Terminal windows a new session can open in, each as its running
+    /// sessions' ids (`managed_terminal_windows`). Empty when the daemon
+    /// lists none, or could not be asked.
+    func managedTerminalWindows(done: @escaping @MainActor ([[String]]) -> Void) {
+        guard let client else { return done([]) }
+        Task.detached(priority: .userInitiated) {
+            let response = (try? client.managedAction("managed_terminal_windows", params: [:])) ?? [:]
+            let windows = ManagedSurface.terminalWindows(response)
+            await MainActor.run { done(windows) }
+        }
+    }
+
+    /// The person picked a window: the daemon asks macOS for the
+    /// permissions a tab needs, off any launch. Nothing waits for it.
+    func managedTerminalTabAccess() {
+        guard let client else { return }
+        Task.detached(priority: .utility) {
+            _ = try? client.managedAction("managed_terminal_tab_access", params: [:])
+        }
+    }
+
     /// Read or reset one folder/agent profile without choosing an account.
     /// A nil `cwd` is the home folder, which the daemon resolves.
     func managedFolderSettings(tool: String, cwd: String?, reset: Bool = false,
@@ -146,7 +167,7 @@ final class AppModel: ObservableObject {
     /// request, in the same task, so a launch dialog that asked for one
     /// opens in it.
     func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil,
-                       terminal: String? = nil) {
+                       terminal: String? = nil, beside: String? = nil) {
         guard let client, !managedBusy else { return }
         managedBusy = true
         managedErrorKey = nil
@@ -188,10 +209,13 @@ final class AppModel: ObservableObject {
                           let ticket = response["ticket"] as? String else {
                         throw DaemonClient.Failure(code: "launch-unknown", message: "managed-launch-unknown")
                     }
-                    // Start again and Resume open a new window like any
-                    // launch (owner, 2026-11-02). The daemon knows which row
-                    // the session came from; the app names nothing.
-                    _ = try client.managedAction("managed_terminal_launch", params: ["session_id": session, "ticket": ticket])
+                    // A window picked in the launch dialog is sent by its
+                    // session (`beside`); the daemon finds the window. Start
+                    // again and Resume always open a new window (owner,
+                    // 2026-11-02, #1853 decision (b)).
+                    var launch: [String: Any] = ["session_id": session, "ticket": ticket]
+                    if let beside { launch["beside"] = beside }
+                    _ = try client.managedAction("managed_terminal_launch", params: launch)
                 }
                 return response["revision"] as? UInt64
             }

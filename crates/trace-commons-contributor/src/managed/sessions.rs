@@ -2,7 +2,7 @@
 
 use super::{
     AccountId, AccountView, ConnectionKind, Generation, ManagedError, ToolId,
-    terminal::TerminalHandle,
+    terminal::{Placement, TerminalHandle},
 };
 use crate::config::ConfigStore;
 use chrono::{DateTime, Duration, Utc};
@@ -602,6 +602,35 @@ impl SessionRegistry {
         }
         source.terminal.as_ref()?;
         source.terminal_window
+    }
+
+    /// The running sessions the daemon opened in a Terminal window it can
+    /// name, newest first: each one's id, tab and window. Only these can be
+    /// offered in the launch dialog's window list, and each only once the
+    /// live window is seen to hold its tab still.
+    pub fn placeable_sessions(&self) -> Vec<(Uuid, TerminalHandle, u32)> {
+        let mut rows: Vec<&Entry> = self
+            .data
+            .entries
+            .iter()
+            .filter(|e| e.owned_running() && e.terminal.is_some() && e.terminal_window.is_some())
+            .collect();
+        rows.sort_by_key(|e| std::cmp::Reverse(e.view.started_at));
+        rows.into_iter()
+            .filter_map(|e| Some((e.view.id, e.terminal.clone()?, e.terminal_window?)))
+            .collect()
+    }
+
+    /// Where a launch the person placed beside session `beside` opens: that
+    /// session's window and tab, while it is among
+    /// [`Self::placeable_sessions`]. None otherwise, and the launch opens a
+    /// new window.
+    pub fn placement_beside(&self, beside: Uuid) -> Option<Placement> {
+        let entry = self.data.entries.iter().find(|e| e.view.id == beside)?;
+        if !entry.owned_running() {
+            return None;
+        }
+        Placement::beside(entry.terminal_window?, entry.terminal.as_ref()?)
     }
 
     /// The window of a running session the daemon opened, or a refusal.
