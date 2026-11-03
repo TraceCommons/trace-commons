@@ -39,6 +39,8 @@ A session the app opened in Terminal can be shown (its tab brought to the
 front) and stopped from its row; a CLI launch cannot, because the app neither
 opened its window nor started its launcher. An ended session can be started
 again in the same folder with the same account while both still exist.
+Start again and Resume open in a new window, as any launch does; nothing is
+typed into, or opened in, an existing terminal window.
 Stop signals only the tool process the launcher supervises: SIGTERM, then
 SIGKILL after a bounded wait. Processes the tool itself started (a shell
 command, a dev server) are not signalled and can outlive it.

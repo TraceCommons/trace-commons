@@ -9450,6 +9450,33 @@ focusable or stoppable.
   folder, `managed-not-found` for a removed account, and
   `managed-near-ai-sign-in-required` for a sign-in session while signed out.
 
+`managed_terminal_launch {session_id, ticket}` opens a session prepared by
+`managed_session_start_again` or `managed_session_resume` in a new window, as
+any launch does (owner, 2026-11-02). Nothing is typed into, or opened in, an
+existing terminal window or tab, and the launch asks macOS for no permission
+beyond the Automation of Terminal every Terminal launch already needs.
+
+- The daemon records, when it prepares the session, which row it came from.
+  The shell names nothing: the macOS app built from #1839 sent an
+  `in_window_of` field, which is still accepted so that app keeps launching,
+  and ignored.
+- Every Terminal launch reads back its tab's tty and, on the next line, the
+  id of Terminal's front window when that window's selected tab is the
+  launch's (no other window is scanned), and the row keeps both. The window
+  id is recorded by owner decision for #1852's window picker; nothing reads
+  it yet. Output that is not a tty, optionally followed by a window id,
+  names no tab.
+
+The terminal opens with the daemon's managed state unlocked and off its async
+workers: the launch is held first (a second `managed_terminal_launch` with the
+same ticket is refused with `managed-conflict`), and recorded after. Only a
+refusal that comes before anything runs (the terminal app not found, an
+invalid request, an unsupported build) releases the launch, and its ticket can
+launch again while it lasts. Anything that goes wrong once the terminal is
+asked is `managed-launch-unknown`, since the command may already have been
+typed, and that, like any other error, keeps the launch held until its tool
+reports or the ticket lapses.
+
 When `managed_launch_prepare` or `managed_session_start_again` passes the
 checks that come before preparing, other than the tool's version, and would
 prepare a new session on `near_ai_signin`, the daemon first reads the
