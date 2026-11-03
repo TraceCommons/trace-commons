@@ -6045,10 +6045,17 @@ and a terminal can host it) and `herdr_grouping` (the setting). With the
 setting on, `managed_terminal_launch` answers `destination: "herdr"`,
 `launch_destination` is "herdr" (so a launch refusal names herdr, while
 `terminal_destination` stays the chosen terminal), and a launch
-with no herdr found, with herdr not answering within 10 s, or with
-something at herdr's socket path this account cannot trust, is refused with
-`managed-terminal-not-found`. A herdr older than socket protocol 22 is
-refused with `managed-unsupported-version`.
+with no herdr found, or with herdr not answering within 10 s, is refused with
+`managed-terminal-not-found`. Something at herdr's socket path this account
+cannot trust is refused with `managed-herdr-socket-untrusted`. A herdr older
+than socket protocol 22 is refused with `managed-unsupported-version`.
+
+With `managed_terminal` set to `rex`, a launch whose Rex app does not connect
+within 10 s is refused with `managed-rex-not-ready`, and one whose `rex`
+call fails or gives nothing before the tab is opened with
+`managed-terminal-call-failed` (shells show the general failure line); a
+reply this build cannot read is `managed-unsupported-version`. Each of these
+comes before the ticket is sent and releases the launch.
 
 `managed_favorite_models` (object) stars or unstars NEAR AI models for the
 Launch sheet's model picker, merging like `notify`: `{"<model id>": true}`

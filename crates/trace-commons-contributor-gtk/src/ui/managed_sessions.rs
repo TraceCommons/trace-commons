@@ -136,16 +136,19 @@ fn session_destination(snapshot: &Value) -> Option<&str> {
 }
 
 /// The line for a refused terminal launch. A chosen terminal that was not
-/// found has its own, naming it and pointing at Settings; anything else is
-/// the generic launch line.
+/// found has its own, naming it and pointing at Settings, as does an
+/// untrusted herdr socket (owner, 2026-11-03); anything else is the generic
+/// launch line.
 fn launch_refusal(label: &str, destination: Option<&str>) -> String {
-    if label == "managed-terminal-not-found" {
-        let terminal = destination
-            .map(str::to_owned)
-            .unwrap_or_else(|| text("terminal"));
-        text("terminal_not_found").replace("{terminal}", &terminal)
-    } else {
-        text("launch_unknown")
+    match label {
+        "managed-terminal-not-found" => {
+            let terminal = destination
+                .map(str::to_owned)
+                .unwrap_or_else(|| text("terminal"));
+            text("terminal_not_found").replace("{terminal}", &terminal)
+        }
+        "managed-herdr-socket-untrusted" => text("herdr_socket_untrusted"),
+        _ => text("launch_unknown"),
     }
 }
 
@@ -553,6 +556,16 @@ mod tests {
         assert_eq!(
             launch_refusal("managed-launch-unknown", Some("Konsole")),
             super::text("launch_unknown")
+        );
+    }
+
+    /// Owner, 2026-11-03: something at herdr's socket path this account
+    /// cannot trust has its own line, as on macOS.
+    #[test]
+    fn an_untrusted_herdr_socket_has_its_own_line() {
+        assert_eq!(
+            launch_refusal("managed-herdr-socket-untrusted", Some("herdr")),
+            "herdr's connection file can't be trusted. Remove it or check its permissions."
         );
     }
 

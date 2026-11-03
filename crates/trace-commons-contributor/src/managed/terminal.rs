@@ -813,7 +813,10 @@ fn launch_macos(
     // The exception is Rex, whose launch sends the ticket only in its last
     // request: a refusal it reports came before that request was sent.
     let printed = run(how).map_err(|error| match error {
-        ManagedError::TerminalNotFound | ManagedError::UnsupportedVersion
+        ManagedError::TerminalNotFound
+        | ManagedError::UnsupportedVersion
+        | ManagedError::RexNotReady
+        | ManagedError::TerminalCallFailed
             if app == TerminalApp::Rex =>
         {
             error
