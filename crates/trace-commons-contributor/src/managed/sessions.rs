@@ -587,11 +587,11 @@ impl SessionRegistry {
     /// The Terminal window the row session `id` was started again or
     /// resumed from ran in: only for a row the daemon opened, that started,
     /// and that has ended. None otherwise, and for any session not prepared
-    /// by Start again or Resume. Start again and Resume still open a new
-    /// window (owner, 2026-11-02); this is kept for a launch that places
-    /// itself beside an earlier one (#1852). Terminal may have given the id
-    /// to another window since.
-    pub fn again_window(&self, id: Uuid) -> Option<u32> {
+    /// by Start again or Resume. Nothing in production reads it: Start
+    /// again and Resume open a new window (owner, 2026-11-02). It is how
+    /// the tests see what each row records (`again_of`, `terminal_window`).
+    #[cfg(test)]
+    pub(crate) fn again_window(&self, id: Uuid) -> Option<u32> {
         let entries = &self.data.entries;
         let source_id = entries.iter().find(|e| e.view.id == id)?.again_of?;
         let source = entries.iter().find(|e| e.view.id == source_id)?;
@@ -869,8 +869,7 @@ impl SessionRegistry {
     }
 
     /// [`Self::prepare`], for Start again and Resume: `again_of` is the
-    /// ended row the request came from, kept on the new row
-    /// ([`Self::again_window`]). A replay
+    /// ended row the request came from, kept on the new row. A replay
     /// returns the row first prepared, unchanged.
     pub fn prepare_again(
         &mut self,

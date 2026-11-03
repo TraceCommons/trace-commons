@@ -778,17 +778,19 @@ pub struct TerminalTab {
 }
 
 /// The tab a launch script printed: a bare tty path, then optionally a line
-/// holding only a window id. A tty that is not one is none; a window line
-/// that is not one is only no window, and the tab is kept.
+/// of digits, the window id. A second line of digits that is not a window
+/// id (too long) keeps the tab with no window, so Show and Stop never hang
+/// on it. Anything else, a second tty or any other text, is not what the
+/// script prints, and names no tab.
 pub fn terminal_tab(output: &[u8]) -> Option<TerminalTab> {
     let text = std::str::from_utf8(output).ok()?;
     let text = text.strip_suffix('\n').unwrap_or(text);
     let (tty, window) = match text.split_once('\n') {
         Some((tty, window)) => {
-            let digits = !window.is_empty()
-                && window.len() <= 10
-                && window.bytes().all(|b| b.is_ascii_digit());
-            (tty, digits.then(|| window.parse::<u32>().ok()).flatten())
+            if window.is_empty() || !window.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            (tty, window.parse::<u32>().ok())
         }
         None => (text, None),
     };
@@ -1116,13 +1118,10 @@ mod tests {
                 window: None
             })
         );
-        // A window line that is not one keeps the tab, with no window.
+        // A window id too long to be one keeps the tab, with no window.
         for output in [
-            &b"/dev/ttys003\n\n"[..],
-            b"/dev/ttys003\n42 x",
-            b"/dev/ttys003\n99999999999",
-            b"/dev/ttys003\n/dev/ttys004",
-            b"/dev/ttys003\n42\n43",
+            &b"/dev/ttys003\n99999999999"[..],
+            b"/dev/ttys003\n99999999999\n",
         ] {
             assert_eq!(
                 terminal_tab(output),
@@ -1133,7 +1132,16 @@ mod tests {
                 "{output:?}"
             );
         }
-        for output in [&b""[..], b"4242\n/dev/ttys003", b"ttys003\n42"] {
+        // Anything else is not what the script prints: no tab.
+        for output in [
+            &b""[..],
+            b"/dev/ttys003\n\n",
+            b"/dev/ttys003\n42 x",
+            b"/dev/ttys003\n/dev/ttys004",
+            b"/dev/ttys003\n42\n43",
+            b"4242\n/dev/ttys003",
+            b"ttys003\n42",
+        ] {
             assert_eq!(terminal_tab(output), None, "{output:?}");
         }
     }
