@@ -385,7 +385,7 @@ async fn enroll_prepared(
             Some(&expected),
         )?;
         // The account accepted this NEAR AI login: it is the account's login.
-        Login::accepted(signed_in.as_ref(), &store);
+        Login::enrolled(signed_in.as_ref(), &store);
         Ok(value)
     })
     .await
@@ -877,8 +877,20 @@ impl Login {
     /// off the async runtime.
     fn accepted(login: Option<&Self>, store: &ConfigStore) {
         use super::nearai_credential::login_record;
-        let provider = login.and_then(|login| login_record::stored_login(store, &login.key_id));
-        login_record::accepted_by_commons(store, provider);
+        login_record::accepted_by_commons(store, Self::provider(login, store));
+    }
+
+    /// [`Login::accepted`] for a first enrollment: this is a new account, so
+    /// its login replaces whatever the record held, and an unknown one
+    /// clears it rather than leave an earlier account's login in place.
+    fn enrolled(login: Option<&Self>, store: &ConfigStore) {
+        use super::nearai_credential::login_record;
+        login_record::enrolled_with(store, Self::provider(login, store));
+    }
+
+    fn provider(login: Option<&Self>, store: &ConfigStore) -> Option<&'static str> {
+        use super::nearai_credential::login_record;
+        login.and_then(|login| login_record::stored_login(store, &login.key_id))
     }
 
     fn of(settings: &super::settings::DaemonSettings) -> Option<Self> {

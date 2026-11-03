@@ -126,7 +126,6 @@ fn holds_enrollment(store: &ConfigStore) -> bool {
             .any(|name| store.daemon_path(name).exists())
 }
 
-/// The blocking body. Errors are `(code, label)`.
 /// No account any more, so no login goes with one: the next account on this
 /// machine is never shown this one's. Run once the config is gone, so an
 /// acceptance in flight either landed before (and is cleared here) or finds
@@ -143,6 +142,7 @@ fn forget_accounts_login(shared: &DaemonShared) {
     }
 }
 
+/// The blocking body. Errors are `(code, label)`.
 pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static str, &'static str)> {
     // Pass lock, then policy before queue, as everywhere: the same order
     // the watcher and the upload pass's claim take them in.
