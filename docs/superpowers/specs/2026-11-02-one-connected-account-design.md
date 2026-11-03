@@ -243,7 +243,7 @@ Each fits in one PR.
 | F7 | The connected-account record and the `needs_sign_in` status check | Invariant detection | Medium, client and IPC | #1835's `commons_login` folds into it |
 | F8 | `commit_connected`, with #1837's ceremony moved onto it | Single commit point | Medium, client | #1837 is its first caller |
 | F9 | `account_disconnect` replacing forget, native sign-out and CLI logout's partial clears, with NEAR AI key revocation | B4, B6, B7 | Medium, client and every shell's sign-out | None |
-| F10 | The change-account flow (companion spec, slice 1) on top of F7 and F8. It is also how a wallet-origin `near-` account records a NEAR AI login and so reaches payouts; that needs a wallet-capable proof of the account's current identity (a NEAR wallet), since the NEAR AI wallet-placeholder match was removed from the payout check (#1862) | Deliberate change | Large | This PR's other spec. **Prerequisite for turning production payouts on** (owner, 2026-11-03) |
+| F10 | The change-account flow (companion spec, slice 1) on top of F7 and F8. It is also how a wallet-origin `near-` account records a NEAR AI login and so reaches payouts; that needs a wallet-capable proof of the account's current identity (a NEAR wallet), since the NEAR AI wallet-placeholder match was removed from the payout check (#1862). Known gap until then: a person whose link V147 revoked sees only the existing status (an unlink, then no link) and the generic refusal; a proper status comes with F10 (owner, 2026-11-03) | Deliberate change | Large | This PR's other spec. **Prerequisite for turning production payouts on** (owner, 2026-11-03) |
 | F11 | Give non-pooled, principal-linked legacy and pilot accounts (tenants outside `near-` / `nearai-`) a recorded NEAR AI login, the only anchor a payout proof can match. (Wallet-origin `near-` accounts get theirs through F10.) Two candidate designs: **(a)** move each account onto a NEAR AI tenant, carrying its history, devices and credit, so it holds a `near_ai_login` anchor like any NEAR AI account; or **(b)** change `trace_account_admission_linkage_ready()` (V81) so a `near_ai` device in a legacy tenant does not fail readiness for the whole deployment, then let such an account record its NEAR AI login. Pooled Devfolio tenants (`trace_legacy_invite_pooled_tenants`) are excluded from payouts by design and need nothing | B9's remainder | Large, server and migration | **Built by #1865 (V146) as a third design**: the NEAR AI account's payout link is carried to the legacy accounts its tenant link covers, so a legacy account gets no anchor and no NEAR AI device; see `docs/superpowers/specs/2026-11-03-legacy-account-payout-migration-design.md`. V147 leaves carried links alone. **Prerequisite for turning production payouts on** (owner, 2026-11-02). See `docs/operator/automatic-credit-settlement.md`, "Before production payouts" |
 
 F1 should land with or straight after #1837, since #1837 is what makes B12 reachable silently. F2, F3 and F5 are independent and can land in any order. F8 depends on
@@ -252,7 +252,11 @@ payouts are turned on.
 
 ## 5. Wording
 
-No new user-facing text is required. `needs_sign_in` uses the existing
+One new string ships, owner-approved on 2026-11-03 (#1868): the wallet
+sign-up disclosure (`witness_copy().wallet.disclosure`, shown by GTK,
+Windows and Tauri) ends "Payouts need a NEAR AI login, which joining with
+a NEAR account doesn't set up." Otherwise no new user-facing text is
+required. `needs_sign_in` uses the existing
 sign-in prompt, and #1837 keeps "Sign-in didn't finish. Try again." until
 its DRAFT wording is approved. Two DRAFT strings, if the owner wants them:
 
@@ -279,7 +283,12 @@ The four questions this section asked were answered by the owner on
    until the account has its login recorded. Narrowed the same day: "It
    should just be NEAR AI login on both staging and production". Only a
    recorded NEAR AI login proves a link, never a NEAR wallet (#1862);
-   confirmed by the owner on 2026-11-03. Links made otherwise are revoked
-   at deploy (V147), and the refusal stays the generic `subject_mismatch`
-   with no new copy.
+   confirmed by the owner on 2026-11-03. At deploy, V147 revokes every
+   live `near_ai` link on an account with no NEAR AI login anchor, except a
+   link V146 carried to a legacy account (scope confirmed by the owner,
+   2026-11-03); it cannot see a wallet-proved link on an account that also
+   holds a login, which is kept. The refusal stays the generic
+   `subject_mismatch`, and a revoked person sees the existing status (an
+   unlink, then no link), accepted as is on 2026-11-03. The one new string
+   is the wallet sign-up disclosure line in section 5.
 4. **The inference key is revoked at NEAR AI on sign-out**, best effort.

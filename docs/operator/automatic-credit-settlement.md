@@ -58,9 +58,12 @@ have landed (owner, 2026-11-03):
      GROUP BY 1;
     ```
 
-    Any links it finds are handled by #1868's V147 (payout links without a
-    recorded NEAR AI login are revoked at deploy). Run it again after V147;
-    it must then find none with `carries = true`.
+    V147 (#1868) revokes the ones on accounts with no recorded NEAR AI
+    login. Run it again after V147: what remains with `carries = true` are
+    pre-#1862 links on accounts that do hold a NEAR AI login (including
+    pre-#1841 links, and any wallet-proved link on such an account). V147
+    cannot tell how those were proved. Give that count to the owner, who
+    decides which of them may be carried, before going live.
   - **Q5.** Run Q5 from the
     [legacy payout migration spec](../superpowers/specs/2026-11-03-legacy-account-payout-migration-design.md),
     section 8 (unowned accruals in non-pooled legacy tenants), and give the
@@ -82,25 +85,42 @@ pending unlink of a revoked link fails its version check. Stop the old
 service before the new one starts: an old pass can still act on links it
 loaded before V147 committed.
 
-Before deploying, count what V147 will revoke (hash-only; RLS is forced, so
-use a cross-tenant role or run per tenant):
+Before deploying, run this count **on the pilot first**. It uses V147's own
+selection, so it is what V147 will revoke (hash-only; RLS is forced, so use
+a cross-tenant role or run per tenant). If it shows any legacy or pilot
+account's own links (tenants outside `near-` and `nearai-`) that are being
+paid today, stop and ask the owner before deploying (owner, 2026-11-03):
 
 ```sql
-SELECT tenant_id, state, count(*) FROM trace_payout_links l
- WHERE l.rail_id = 'near_ai' AND l.state IN ('waiting', 'active')
+SELECT l.tenant_id, l.state, count(*) FROM trace_payout_links l
+ WHERE l.rail_id = 'near_ai'
+   AND (l.state = 'waiting'
+        OR (l.state = 'active' AND l.unlink_requested_at IS NULL))
    AND NOT EXISTS (SELECT 1 FROM trace_near_account_anchors a
                     WHERE a.tenant_id = l.tenant_id AND a.account_id = l.account_id
                       AND a.identity_source = 'near_ai_login')
- GROUP BY tenant_id, state;
+   AND NOT EXISTS (SELECT 1 FROM trace_legacy_payout_carries c
+                    WHERE c.tenant_id = l.tenant_id AND c.link_id = l.link_id
+                      AND c.released_at IS NULL)
+   AND NOT (l.state = 'waiting' AND EXISTS (
+        SELECT 1 FROM trace_payout_lines p
+         WHERE p.tenant_id = l.tenant_id AND p.link_id = l.link_id))
+ GROUP BY l.tenant_id, l.state;
 ```
 
-After it, see what it revoked:
+After it, see what it revoked (the counts should match, by tenant and
+state):
 
 ```sql
 SELECT tenant_id, prior_state, count(*) FROM trace_payout_audit
- WHERE label = 'near_ai_login_required'
+ WHERE rail_id = 'near_ai' AND label = 'near_ai_login_required'
  GROUP BY tenant_id, prior_state;
 ```
+
+A legacy account whose own link V147 revoked is paid again once its
+holder's next payout-link confirm or tenant link carries to it; a revoked
+own link no longer blocks that carry. Carrying to it without such an event
+is #1873.
 
 ## Scheduling
 

@@ -783,6 +783,12 @@ pub fn witness_copy() -> WitnessCopy {
         },
         wallet: WalletCopy {
             heading: "Join with a NEAR account",
+            // Approved 2026-11-03 (owner, relayed on #1868): the payouts
+            // sentence appended. It was "Check whether your commons accepts
+            // new accounts. Connecting proves control of your account and
+            // this device; it does not fund inference or enable capture."
+            // Shown by GTK, Windows and Tauri; macOS builds this step's view
+            // only in tests.
             disclosure: "Check whether your commons accepts new accounts. Connecting proves control of your account and this device; it does not fund inference or enable capture. Payouts need a NEAR AI login, which joining with a NEAR account doesn't set up.",
             commons: "Commons HTTPS address",
             account: "Your NEAR account",

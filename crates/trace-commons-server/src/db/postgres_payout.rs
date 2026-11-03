@@ -1524,9 +1524,11 @@ impl PayoutStore for PgBackend {
                 // The start checked the account's NEAR AI login, but a
                 // request can outlive that check: one started by an older
                 // service across a deploy (V147), or before the account
-                // lost its login. Re-read it here, in the transaction that
-                // writes the link, so no topology lets a link land on an
-                // account with none.
+                // lost its last login. Re-read it here, in the transaction
+                // that writes the link, so no topology lets a link land on
+                // an account with none. This checks for any login, not the
+                // one that proved the request: `subject_index` is a payout
+                // label and cannot be compared with an anchor.
                 let anchored: bool = tx
                     .query_one(
                         "SELECT EXISTS (
