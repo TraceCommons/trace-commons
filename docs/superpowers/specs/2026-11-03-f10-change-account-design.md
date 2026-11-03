@@ -1,6 +1,8 @@
 # F10: change the NEAR AI login an account uses
 
-Status: DRAFT design, for owner review. Nothing here is implemented.
+Status: APPROVED design. The owner approved every recommendation in
+section 9, the DRAFT strings in section 2 and both notices in 2.6 on
+2026-11-03 ("go with your recs on F10 and build it").
 Date: 2026-11-03.
 
 This is fix F10 of the one-connected-account spec
@@ -82,8 +84,9 @@ with the uniform deny. That is fail-closed and needs no decision.
 
 ## 2. User flow
 
-Every string in this section is **DRAFT** and needs owner approval of
-wording, except the three marked APPROVED. No string says "Trace Commons"
+Every string in this section is **APPROVED** (owner, 2026-11-03, with the
+recommendations in section 9). The three marked APPROVED with an earlier
+date were approved before. No string says "Trace Commons"
 (owner, 2026-11-02). Copy follows `docs/ui-copy-guide.md`: short buttons,
 consequences beside the action, separate title and button keys (rule 4),
 and no new notice without approval (rule 9).
@@ -237,7 +240,7 @@ from the server's answer at their next sign-in, routes a `near-` tenant to
 the NEAR AI path; until the daemon has it, the server's `identity` field
 in the sign-in answer sets it.
 
-### 2.6 Notices that need explicit approval
+### 2.6 Notices (both APPROVED by the owner, 2026-11-03)
 
 1. The mismatch block's new "Use a different account" button
    (`account.login.mismatch.change`). The block is already approved; the
@@ -672,6 +675,11 @@ tests on the state mapping), the C ABI fields in both header copies. GTK
 and Windows in their slice.
 
 ## 9. Owner decisions
+
+**Decided 2026-11-03: the owner approved every recommendation below,
+decisions 1 to 14, as written** ("go with your recs on F10 and build
+it"). Each item keeps its options for the record; the recommendation is
+the decision.
 
 Each has a recommendation. The companion's open questions are folded in
 where they still apply.
