@@ -9461,10 +9461,11 @@ beyond the Automation of Terminal every Terminal launch already needs.
   `in_window_of` field, which is still accepted so that app keeps launching,
   and ignored.
 - Every Terminal launch reads back its tab's tty and, on the next line, the
-  id of the window holding it, and the row keeps both. The window id is for
-  a later launch that places itself beside an earlier one (#1852); nothing
-  uses it yet. A window line that cannot be read leaves the row with its tab
-  and no window.
+  id of Terminal's front window when that window's selected tab is the
+  launch's (no other window is scanned), and the row keeps both. The window
+  id is recorded by owner decision for #1852's window picker; nothing reads
+  it yet. Output that is not a tty, optionally followed by a window id,
+  names no tab.
 
 The terminal opens with the daemon's managed state unlocked and off its async
 workers: the launch is held first (a second `managed_terminal_launch` with the
