@@ -2,7 +2,7 @@
 
 Date: 2026-11-03. Owner: Zaki. Status: research only; nothing is built.
 Asked for "on top of #1870" (Warp Tab Configs, open at the time of
-writing). Written against `origin/main` at 64a9ec753 plus the #1870 diff,
+writing). Written against `origin/main` at cc4b63022 plus the #1870 diff,
 which this note reads as the terminal-choice model to extend.
 
 ## The ask and the rules it must meet
@@ -51,7 +51,7 @@ Rex is the terminal multiplexer from Superlogical (Mitchell Hashimoto's
 company after HashiCorp and Ghostty), built on libghostty. A background
 server owns the terminals; the macOS app and the `rex` CLI are clients of it.
 Coverage: The Register, 2026-07-31,
-<https://www.theregister.com/2026/07/31/202614/>; <https://www.bitdoze.com/superlogical-rex/>.
+<https://www.theregister.com/devops/2026/07/31/dev-who-gave-hashicorp-its-name-returns-with-a-faster-terminal-multiplexer/5281970>; <https://www.bitdoze.com/superlogical-rex/>.
 No public documentation site was found; everything below comes from the
 installed beta and its CLI.
 
@@ -346,8 +346,8 @@ install herdr`, `mise`, or `install.sh` into `~/.local/bin`; Windows by
 - Launch:
   1. Connect to `~/.config/herdr/herdr.sock` (honour `HERDR_SOCKET_PATH`
      only if the owner wants named sessions). Check the socket's owner is
-     the current uid and its mode is 0600 before writing to it, as the
-     daemon's own socket is checked.
+     the current uid and its mode is 0600 before writing to it (as
+     `daemon/ironwire_pointer.rs` checks a file's owner).
   2. `ping`; then find or create the workspace labelled "Near.ai" from
      `session.snapshot` / `workspace.create { label, cwd }`.
   3. `layout.apply { workspace_id, tab_label, focus: true, root: { type:
