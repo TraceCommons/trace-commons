@@ -65,20 +65,17 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
     /// What `cancelNearAILogin` answers: whether the daemon took the cancel.
     var cancelAnswer = true
     private(set) var cancels = 0
-    /// When set, the browser sign-in ends this way instead of by `nearAILogin`'s answer.
+    /// When set, the browser sign-in ends this way, overriding `failing`.
     var loginOutcome: NearAILoginOutcome?
     func nearAILoginOutcome() async -> NearAILoginOutcome {
         if let loginOutcome {
             log.append(.nearAILogin)
             return loginOutcome
         }
-        return await nearAILogin() ? .signedIn : .failed
-    }
-    func nearAILogin() async -> Bool {
         let answer = record(.nearAILogin)
-        guard loginHolds else { return answer }
+        guard loginHolds else { return answer ? .signedIn : .failed }
         while !Task.isCancelled { await Task.yield() }
-        return loginAnswerOnCancel
+        return loginAnswerOnCancel ? .signedIn : .failed
     }
     func cancelNearAILogin() async -> Bool {
         cancels += 1

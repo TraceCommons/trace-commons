@@ -263,6 +263,27 @@ final class NearAiSignInPollTests: XCTestCase {
         }
     }
 
+    /// A retry after a failed sign-in, ended as cancelled: the earlier
+    /// failure stands, so the Sign in it kept on screen stays for another
+    /// try.
+    @MainActor
+    func testACancelledRetryKeepsTheEarlierFailure() async throws {
+        let daemon = SignInDaemon()
+        let model = makeModel(daemon)
+        model.openBrowser = { _ in }
+        for (end, failedAfter) in [(SignInDaemon.Phase.failed, true), (.cancelled, true)] {
+            let starts = daemon.count("near_ai_credential_start")
+            let signIn = Task { await model.signInToNearAI() }
+            let deadline = Date().addingTimeInterval(5)
+            while daemon.count("near_ai_credential_start") == starts, Date() < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            daemon.set(end)
+            await signIn.value
+            XCTAssertEqual(model.nearAiSignInFailed, failedAfter, "\(end)")
+        }
+    }
+
     @MainActor
     func testALateWaitingReplyCannotRearmACompletedSignIn() async throws {
         let daemon = SignInDaemon()

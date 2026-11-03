@@ -1130,7 +1130,11 @@ fn persist(
         expected,
         &serde_json::to_vec(&session)?,
         Some(&config),
-    )
+    )?;
+    // A new account, joined without a NEAR AI login: no earlier account's
+    // login may stand as this one's.
+    super::nearai_credential::login_record::enrolled_with(&store, None);
+    Ok(())
 }
 
 #[cfg(test)]

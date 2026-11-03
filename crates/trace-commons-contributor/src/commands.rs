@@ -3581,6 +3581,9 @@ async fn enroll_with_invite_core(
     store
         .save_config(&cfg)
         .context("saving contributor config")?;
+    // A new account, joined without a NEAR AI login: no earlier account's
+    // login may stand as this one's.
+    crate::daemon::nearai_credential::login_record::enrolled_with(store, None);
     // The invite's subject hash -- never the code -- so a later move to a
     // NEAR AI account can name the invite without asking anyone for it.
     // Best effort: the migration asks the issuer when it is missing.

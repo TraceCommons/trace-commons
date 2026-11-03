@@ -37,9 +37,15 @@ public enum FirstRunCall: Equatable, Sendable {
 public enum NearAILoginPoll: Equatable, Sendable {
     case signedIn
     case waiting
-    /// Ended by the person, not a fault: the wallet's own Cancel, or the
-    /// browser's login page coming back after a pick, which already tells
-    /// them to start again from the app. Nothing more is said here.
+    /// The daemon ended the attempt as cancelled (`ceremony::ended_by_person`),
+    /// not a fault. That word has several sources: the wallet's own Cancel;
+    /// the browser's login page coming back after a pick, which tells the
+    /// person to start again from the app; this app's own Cancel (Settings,
+    /// the first run); an unnamed cancel from another client (the CLI,
+    /// another shell); and a Forget that won the race with the sign-in's
+    /// persist. In the last two the browser may still be on the login page
+    /// with nothing said. Either way, callers report no failure for it, and
+    /// Sign in stays offered for another try.
     case cancelled
     case ended
 

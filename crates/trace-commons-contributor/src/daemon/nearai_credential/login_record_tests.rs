@@ -295,3 +295,19 @@ fn a_new_enrollment_replaces_or_clears_the_accounts_login() {
     enrolled_with(&store, Some(login()));
     assert_eq!(commons_login(&store), Some(login()));
 }
+
+/// A read that failed says nothing about what is there -- it may be a valid
+/// record -- so no change writes over it: the change fails instead, and only
+/// a caller that must clear the record falls back to removing it.
+#[test]
+fn a_failed_read_is_never_written_over() {
+    let (_dir, store) = enrolled();
+    let path = store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE);
+    // A directory where the record goes: reading it fails.
+    std::fs::create_dir_all(path.join("kept")).unwrap();
+    record_stored_login(&store, login(), "key-1");
+    clear_stored_login(&store);
+    accepted_by_commons(&store, Some(login()));
+    assert!(path.join("kept").exists(), "nothing wrote over it");
+    assert!(forget_commons_login(&store).is_err());
+}

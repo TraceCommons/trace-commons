@@ -51,7 +51,7 @@ final class StagingSignInTests: XCTestCase {
     func test_theFirstRunSignInNamesNoProvider() throws {
         let model = try Self.source("AppModel.swift")
         XCTAssertTrue(
-            model.contains("func nearAILogin() async -> Bool { await nearAILogin(fresh: false) }"),
+            model.contains("func nearAILoginOutcome() async -> NearAILoginOutcome { await nearAILoginOutcome(fresh: false) }"),
             "the first run's login names a provider")
 
         let notices = try Self.source("Views/Monitor/MonitorNotices.swift")
