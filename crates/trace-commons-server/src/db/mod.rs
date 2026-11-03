@@ -3854,14 +3854,16 @@ pub trait PayoutStore: Send + Sync {
         actor_ref_hash: &str,
     ) -> Result<LegacyCarryReport, DatabaseError>;
 
-    /// The pass's side of [`Self::carry_legacy_payout_links`] (#1873): for a
-    /// legacy tenant linked to a NEAR AI account, carry that account's live
-    /// link on `rail` again, so a legacy account opened after the last carry
-    /// (a later login link) is carried too. Nothing for a `near-` / `nearai-`
-    /// tenant or a tenant with no live tenant link. Idempotent.
-    async fn carry_legacy_payout_links_into(
+    /// The pass's side of [`Self::carry_legacy_payout_links`] (#1873): for
+    /// each account in this NEAR AI tenant that has live tenant links, carry
+    /// its live link on `rail` again, so a legacy account opened after the
+    /// last carry (a later login link) is carried too, whether or not its
+    /// legacy tenant has a live link of its own. Driven from the source
+    /// side, so each source account is carried once per pass. Nothing for a
+    /// tenant outside `near-` / `nearai-`. Idempotent.
+    async fn carry_legacy_payout_links_from(
         &self,
-        legacy_tenant: &str,
+        tenant: &str,
         rail: &RailId,
         programs: &CarryPrograms,
         actor_ref_hash: &str,

@@ -1664,33 +1664,40 @@ impl PayoutStore for PgBackend {
         Ok(report)
     }
 
-    async fn carry_legacy_payout_links_into(
+    async fn carry_legacy_payout_links_from(
         &self,
-        legacy_tenant: &str,
+        tenant: &str,
         rail: &RailId,
         programs: &CarryPrograms,
         actor_ref_hash: &str,
     ) -> Result<LegacyCarryReport, DatabaseError> {
-        if trace_commons_protocol::admission::is_anchored_tenant(legacy_tenant) {
+        if !trace_commons_protocol::admission::is_anchored_tenant(tenant) {
             return Ok(LegacyCarryReport::default());
         }
-        let source = {
+        let accounts: Vec<Uuid> = {
             let mut client = self.payout_tenant_client().await?;
-            let tx = Self::begin_trace_tenant_transaction(&mut client, legacy_tenant).await?;
-            let row = tx
-                .query_opt(
-                    "SELECT tenant_id, account_id FROM trace_legacy_payout_source_account($1)",
-                    &[&legacy_tenant],
+            let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+            let rows = tx
+                .query(
+                    "SELECT DISTINCT account_id FROM trace_legacy_invite_links
+                      WHERE tenant_id = $1 AND revoked_at IS NULL
+                      ORDER BY account_id",
+                    &[&tenant],
                 )
                 .await?;
             tx.commit().await?;
-            row.map(|row| (row.get::<_, String>(0), row.get::<_, Uuid>(1)))
+            rows.iter().map(|row| row.get(0)).collect()
         };
-        let Some((tenant, account)) = source else {
-            return Ok(LegacyCarryReport::default());
-        };
-        self.carry_legacy_payout_links(&tenant, account, rail, programs, actor_ref_hash)
-            .await
+        let mut total = LegacyCarryReport::default();
+        for account in accounts {
+            let report = self
+                .carry_legacy_payout_links(tenant, account, rail, programs, actor_ref_hash)
+                .await?;
+            total.carried += report.carried;
+            total.released += report.released;
+            total.skipped += report.skipped;
+        }
+        Ok(total)
     }
 
     async fn payout_audit_actions(

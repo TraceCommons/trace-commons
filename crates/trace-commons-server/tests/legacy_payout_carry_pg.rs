@@ -1385,3 +1385,123 @@ async fn deleting_the_tenant_link_releases_its_carries() {
     fx.assert_released(&legacy, active, waiting, "legacy_tenant_link_deleted")
         .await;
 }
+
+/// Review of #1879: deleting a linked legacy tenant (an erasure) still
+/// succeeds while it has live carries. The tenant link's delete trigger
+/// fires inside the cascade and must not write into a tenant being removed.
+#[tokio::test]
+async fn deleting_a_linked_legacy_tenant_with_live_carries_succeeds() {
+    let Some(fx) = fixture().await else { return };
+    let (_, _, legacy, active, _) = fx.carried_pair("org-e1").await;
+    assert_eq!(fx.live_carries(&legacy, active).await, 1);
+    fx.exec("DELETE FROM trace_tenants WHERE tenant_id = $1", &[&legacy])
+        .await;
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_payout_audit WHERE tenant_id = $1",
+            &[&legacy],
+        )
+        .await,
+        0
+    );
+}
+
+/// Review of #1879: the send-time check is still the backstop for each
+/// event V148 now releases from. With an event's trigger disabled, the
+/// carry stays live, and the standing holds it.
+#[tokio::test]
+async fn the_send_time_check_backs_up_each_release_event() {
+    let Some(fx) = fixture().await else { return };
+    for (trigger, table) in [
+        (
+            "trace_legacy_pooled_tenant_releases_carries",
+            "trace_legacy_invite_pooled_tenants",
+        ),
+        (
+            "trace_legacy_account_close_releases_carries",
+            "trace_accounts",
+        ),
+        (
+            "trace_legacy_invite_link_delete_releases_carries",
+            "trace_legacy_invite_links",
+        ),
+    ] {
+        let (near, account, legacy, active, _) = fx.carried_pair("org-b1").await;
+        fx.admin
+            .batch_execute(&format!("ALTER TABLE {table} DISABLE TRIGGER {trigger}"))
+            .await
+            .unwrap();
+        match table {
+            "trace_legacy_invite_pooled_tenants" => {
+                fx.exec(
+                    "INSERT INTO trace_legacy_invite_pooled_tenants (tenant_id, reason_label)
+                     VALUES ($1, 'shared event invite')",
+                    &[&legacy],
+                )
+                .await
+            }
+            "trace_accounts" => {
+                fx.exec(
+                    "UPDATE trace_accounts SET closed_at = now()
+                      WHERE tenant_id = $1 AND account_id = $2",
+                    &[&near, &account],
+                )
+                .await
+            }
+            _ => {
+                fx.exec(
+                    "DELETE FROM trace_legacy_invite_links WHERE legacy_tenant_id = $1",
+                    &[&legacy],
+                )
+                .await
+            }
+        }
+        fx.admin
+            .batch_execute(&format!("ALTER TABLE {table} ENABLE TRIGGER {trigger}"))
+            .await
+            .unwrap();
+        assert_eq!(
+            fx.live_carries(&legacy, active).await,
+            1,
+            "{trigger} disabled"
+        );
+        assert!(
+            fx.carry_invalid(&legacy, active).await,
+            "{trigger}: the backstop holds"
+        );
+    }
+}
+
+/// Review of #1879: a carry that changes nothing writes no audit row, so the
+/// pass carrying on every run does not grow the audit table with an
+/// account that keeps its own link (decision 6) skipped each time.
+#[tokio::test]
+async fn a_carry_that_changes_nothing_writes_no_audit_row() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, legacy, _) = fx.linked_pair().await;
+    let own = fx.add_account(&legacy, false).await;
+    fx.exec(
+        "INSERT INTO trace_payout_links (tenant_id, account_id, rail_id, link_id, recipient_kind,
+             state, sealed_recipient, recipient_index, recipient_key_ref, index_pepper_ref,
+             subject_index, program)
+         VALUES ($1, $2, $3, $4, 'near_ai_org', 'waiting', '{}', $5, 'k', 'p', $5, 'tc1-own2')",
+        &[&legacy, &own, &RAIL, &Uuid::new_v4(), &hash("own2")],
+    )
+    .await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-a1")
+        .await;
+    let audits = || async {
+        fx.count(
+            "SELECT count(*) FROM trace_account_audit
+              WHERE tenant_id = $1 AND action = 'legacy_payout_carried'",
+            &[&near],
+        )
+        .await
+    };
+    let before = audits().await;
+    for _ in 0..3 {
+        let report = fx.carry(&near, account).await;
+        assert_eq!((report.carried, report.released, report.skipped), (0, 0, 1));
+    }
+    assert_eq!(audits().await, before);
+}

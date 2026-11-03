@@ -716,11 +716,13 @@ Where the implementation differs from, or adds to, sections 3 to 5:
   only at the NEAR AI account's next confirm or tenant link. Their credit
   accrues but is not paid until then. (A claim at a V91 attestation goes
   through the tenant-link route, which carries after it.) **Fixed by V148
-  (#1873):** the payout pass, in live mode, carries a legacy tenant's NEAR
-  AI account's link again before each pass over that tenant
-  (`PayoutStore::carry_legacy_payout_links_into`, through the guard-owned
-  `trace_legacy_payout_source_account`), so a later account is carried at
-  the next pass.
+  (#1873):** in live mode the payout pass, visiting a NEAR AI tenant whose
+  source link is live, carries each of its accounts that has live tenant
+  links again (`PayoutStore::carry_legacy_payout_links_from`). A later
+  account is carried at the next pass, whether or not its legacy tenant
+  has a live link of its own; a closed source account carries nothing.
+  Whether the pass should carry automatically at all is an open owner
+  question (review of #1879).
 - **An invalid carry is held, not released.** A pooled mark, a closed or
   held NEAR AI account, or a deleted tenant link holds the legacy
   account's sends at once (fail closed), but the carried link is released
@@ -733,8 +735,9 @@ Where the implementation differs from, or adds to, sections 3 to 5:
   `legacy_tenant_pooled`, `legacy_account_closed`,
   `legacy_source_account_closed` and `legacy_tenant_link_deleted`. The
   send-time check stays as the backstop and still holds a live carry while
-  its source account is on a credit hold (temporary, so not a release) or
-  its source link is unlinked outside a confirm.
+  its source account is on a credit hold or its source link is unlinked
+  outside a confirm. Whether a credit hold should release instead is an
+  open owner question (review of #1879).
 - **The hash formulas** (`legacy-invite-link-v1:`, `payout-link-v1:`,
   `payout-account-v1:`) are written inline in V146 and mirrored in Rust;
   the tests catch a drift that breaks a match. Follow-up, #1874: small

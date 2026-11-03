@@ -96,6 +96,11 @@ pub(super) async fn carry_in_tx(
                FROM trace_payout_links l
               WHERE l.tenant_id = $1 AND l.account_id = $2 AND l.rail_id = $3
                 AND l.state IN ('waiting', 'active') AND l.unlink_requested_at IS NULL
+                -- A closed account carries nothing (review of #1879): its
+                -- close released its carries, and they must not come back.
+                AND EXISTS (SELECT 1 FROM trace_accounts a
+                             WHERE a.tenant_id = l.tenant_id AND a.account_id = l.account_id
+                               AND a.closed_at IS NULL)
                 AND EXISTS (SELECT 1 FROM trace_near_account_anchors n
                              WHERE n.tenant_id = l.tenant_id AND n.account_id = l.account_id
                                AND n.identity_source = 'near_ai_login')
@@ -156,7 +161,10 @@ pub(super) async fn carry_in_tx(
         set_tenant(tx, tenant).await?;
         outcome?;
     }
-    if report != LegacyCarryReport::default() {
+    // Only a carry that changed something is audited: the pass carries on
+    // every run, and an account keeping its own link is skipped each time
+    // (review of #1879).
+    if report.carried + report.released > 0 {
         tx.execute(
             "INSERT INTO trace_account_audit (tenant_id, action, actor_ref, outcome, safe_metadata)
              VALUES ($1, 'legacy_payout_carried', $2, 'success', $3)",
@@ -266,10 +274,6 @@ async fn carry_tenant(
             .get(0);
         if own {
             report.skipped += 1;
-            tracing::warn!(
-                label = "legacy_carry_skipped_own_link",
-                "legacy payout carry skipped an account with its own link"
-            );
             continue;
         }
         // An older generation is released outright: a waiting one never
