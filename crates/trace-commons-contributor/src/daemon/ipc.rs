@@ -351,8 +351,6 @@ pub const METHODS: &[&str] = &[
     "managed_launch_prepare",
     "managed_launch_redeem",
     "managed_terminal_launch",
-    "managed_terminal_windows",
-    "managed_terminal_tab_access",
     "managed_session_report",
     "managed_session_dismiss",
     "managed_session_focus",
@@ -3884,8 +3882,6 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "managed_select" => super::managed::handle(shared, req),
         "managed_launch_prepare" => super::managed::handle(shared, req),
         "managed_terminal_launch" => super::managed::handle(shared, req),
-        "managed_terminal_windows" => super::managed::handle(shared, req),
-        "managed_terminal_tab_access" => super::managed::handle(shared, req),
         "managed_launch_redeem" => super::managed::handle(shared, req),
         "managed_session_report" => super::managed::handle(shared, req),
         "managed_session_dismiss" => super::managed::handle(shared, req),
@@ -14775,6 +14771,25 @@ mod tests {
         assert_eq!(r.error.unwrap().code, ERR_UNKNOWN_METHOD);
     }
 
+    /// Owner, 2026-11-03: the window picker's two methods are gone. An app
+    /// built from #1852 still calls them, `try?`-ing the answer: it must
+    /// get the same plain refusal as any unknown method, with nothing
+    /// advertised and nothing run, and its dialog then offers no window.
+    #[test]
+    fn the_removed_window_picker_methods_are_refused_as_unknown() {
+        let s = shared();
+        for method in ["managed_terminal_windows", "managed_terminal_tab_access"] {
+            assert!(!METHODS.contains(&method), "{method}");
+            for params in [serde_json::json!({}), serde_json::Value::Null] {
+                let r = handle_request(&s, &req(method, params));
+                assert!(r.result.is_none(), "{method}");
+                let error = r.error.unwrap();
+                assert_eq!(error.code, ERR_UNKNOWN_METHOD, "{method}");
+                assert_eq!(error.message, "unknown-method", "{method}");
+            }
+        }
+    }
+
     #[test]
     fn hello_advertises_the_schema_and_method_set() {
         let s = shared();
@@ -19366,7 +19381,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 109, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 107, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 81, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
