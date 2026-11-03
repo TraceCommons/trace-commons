@@ -410,7 +410,14 @@ the new tables need; the features that add tables document their own grant
 blocks (for example [`native-admission-session.md`](native-admission-session.md)
 and [`mission-insight-rewards.md`](mission-insight-rewards.md)). Only then
 install. An older binary ignores migration versions it does not know, so
-applying them ahead of the binary is safe for the build still running.
+applying them ahead of the binary is usually safe for the build still running.
+The exception is a migration that changes state an old process may act on,
+such as V147, which revokes payout links and says to stop the old service
+before the new one starts: then stop both units before applying it. The issuer
+also runs the migration runner at boot whenever
+`TRACE_COMMONS_INVITE_REGISTRY_DATABASE_URL` is set (it connects as the
+migrator on the pilot), and `pull-and-install.sh both` restarts it before
+ingest, so stop both units first whenever the build carries migrations.
 
 Two more things this incident showed:
 

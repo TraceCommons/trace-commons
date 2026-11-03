@@ -408,7 +408,11 @@ the Devfolio onboarding path.
 ## 8. Rollout on the pilot
 
 Read-only first. The owner runs these; each returns counts only. RLS is
-forced, so run them as the migration owner or once per tenant.
+forced, and forced RLS binds the table owner too, so run them as a
+`BYPASSRLS` or superuser role, or once per tenant; a non-superuser migration
+owner sees no rows (see "Before production payouts" in
+`docs/operator/automatic-credit-settlement.md` for a rolled-back way to read
+them as the owner).
 
 - **Q1.** Open, non-pooled accounts in tenants outside `near-` / `nearai-`:
   ```sql
