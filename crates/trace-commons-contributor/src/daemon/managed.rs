@@ -205,7 +205,6 @@ impl ManagedService {
                 | ManagedError::UnsupportedVersion),
             ) => {
                 self.sessions.terminal_launch_failed(launch.session_id)?;
-                terminal::remove_launch_files(launch.session_id);
                 Err(error)
             }
             // Anything else may follow a typed command: held.
@@ -1438,7 +1437,9 @@ pub async fn close_routes_without_sign_in(shared: &DaemonShared) {
     }
     let ended = with_service(shared, |service| {
         let routes = service.take_routes(true);
-        service.sessions.end_sign_in_sessions()?;
+        for id in service.sessions.end_sign_in_sessions()? {
+            terminal::remove_launch_files(id);
+        }
         Ok(routes)
     })
     .unwrap_or_default();
@@ -1456,7 +1457,9 @@ pub async fn sweep(shared: &DaemonShared, now: chrono::DateTime<chrono::Utc>) {
         if service.routes.is_empty() {
             return Ok(vec![]);
         }
-        service.sessions.sweep(now)?;
+        for id in service.sessions.sweep(now)? {
+            terminal::remove_launch_files(id);
+        }
         Ok(service.take_routes(false))
     })
     .unwrap_or_default();
@@ -1536,7 +1539,13 @@ fn scan(
     let ids = crate::managed::collection_plan::list(&shared.store);
     let planned: std::collections::BTreeSet<Uuid> = ids.iter().copied().collect();
     with_service(shared, |service| {
-        service.sessions.sweep(now)?;
+        // A launch that ended without a redeem leaves a Tab Config holding
+        // its dead ticket; the lease tick removes it, and any past the
+        // ticket's life, with no thread per launch.
+        for id in service.sessions.sweep(now)? {
+            terminal::remove_launch_files(id);
+        }
+        terminal::expire_tab_configs();
         let scan = LeaseScan {
             plans: ids
                 .iter()
@@ -2444,9 +2453,7 @@ mod tests {
     fn redeeming_a_launch_removes_its_tab_config() {
         let (home, _store, mut service) = service();
         let prepared = prepare(&mut service, ToolId::Opencode, home.path());
-        let file = home.path().join("near-ai-test.toml");
-        std::fs::write(&file, "ticket").unwrap();
-        terminal::hold_launch_file(prepared.session_id, file.clone());
+        let file = terminal::write_tab_for_test(home.path(), prepared.session_id);
         // A refused redeem leaves the file for the backstop.
         let _ = service.redeem(prepared.session_id, "wrong", true);
         assert!(file.exists());
@@ -2457,6 +2464,32 @@ mod tests {
                 true,
             )
             .unwrap();
+        assert!(!file.exists());
+    }
+
+    /// A launch whose ticket lapses unredeemed is named by the sweep, which
+    /// is what the lease tick uses to remove its Tab Config.
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_names_a_launch_whose_ticket_lapsed() {
+        let (home, _store, mut service) = service();
+        let prepared = prepare(&mut service, ToolId::Opencode, home.path());
+        let file = terminal::write_tab_for_test(home.path(), prepared.session_id);
+        assert!(
+            service
+                .sessions
+                .sweep(chrono::Utc::now())
+                .unwrap()
+                .is_empty()
+        );
+        let ended = service
+            .sessions
+            .sweep(chrono::Utc::now() + chrono::Duration::seconds(121))
+            .unwrap();
+        assert_eq!(ended, vec![prepared.session_id]);
+        for id in ended {
+            terminal::remove_launch_files(id);
+        }
         assert!(!file.exists());
     }
 
