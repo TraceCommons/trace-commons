@@ -246,8 +246,8 @@ What "the scoring pipeline determines this" asks for, without a new binary.
 - The Settle cap stays at the delta (`versioned_pipeline_production.rs:683-697`),
   which is also the graded ceiling, so the cap code does not change.
 
-**Contributor status.** A graded leg reports its points as pending until
-its batch finalizes, instead of 0 and `not_settlement_eligible` (the
+**Contributor status.** A graded leg settles into a finalized batch in the
+same Settle transaction, so its points read as settled credit awaiting the rail, instead of 0 and `not_settlement_eligible` (the
 rules at `pipeline-activation.md:3277-3279` and `:3431-3433`). Any wording change goes
 through `docs/ui-copy-guide.md`; no new notice.
 
