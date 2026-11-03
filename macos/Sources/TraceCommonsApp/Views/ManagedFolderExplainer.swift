@@ -28,6 +28,8 @@ struct ManagedFolderExplainerSheet: View {
     /// The window picked in the dialog's window list, by its session; nil
     /// for a new window.
     @Binding var beside: String?
+    /// The windows the dialog offers ([`ManagedLaunchWindowRow`]).
+    @State private var windowOptions: [ManagedWindowOption] = []
     @EnvironmentObject private var model: AppModel
     @State private var path: String?
     @State private var draft = ManagedFolderDraft()
@@ -104,7 +106,7 @@ struct ManagedFolderExplainerSheet: View {
                 if let snapshot = model.managedSnapshot, snapshot.asksForTerminal {
                     ManagedLaunchTerminalRow(snapshot: snapshot, selection: $terminal)
                 } else {
-                    ManagedLaunchWindowRow(beside: $beside)
+                    ManagedLaunchWindowRow(options: windowOptions, beside: $beside)
                 }
                 if supportsFolderSettings {
                     ManagedFolderOptions(tool: tool, connection: "near_ai_signin", draft: $draft,
@@ -116,6 +118,7 @@ struct ManagedFolderExplainerSheet: View {
         }
         .onAppear {
             loadFolderSettings()
+            ManagedLaunchWindowRow.load(model: model, beside: $beside, into: $windowOptions)
             if supportsFolderSettings, let token = catalogueReads.begin(tool: tool) {
                 model.managedModelCatalogue(tool: tool) { catalogueReads.complete($0, token: token) }
             }
