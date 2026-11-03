@@ -579,14 +579,22 @@ fn warp_tab_life() -> std::time::Duration {
 /// on the lease tick, removes any older than the ticket's life. Unix only:
 /// the files are written owner-only.
 #[cfg(any(target_os = "macos", all(test, unix)))]
-static WARP_TAB_FILES: std::sync::Mutex<std::collections::BTreeMap<Uuid, PathBuf>> =
-    std::sync::Mutex::new(std::collections::BTreeMap::new());
+static WARP_TAB_FILES: TabFiles = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// A record of Tab Config files by session. The daemon uses the one static
+/// above; a test makes its own, so tests running in parallel never remove
+/// each other's files.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+type TabFiles = std::sync::Mutex<std::collections::BTreeMap<Uuid, PathBuf>>;
 
 /// The record, usable after a panic elsewhere: the map is never left
 /// half-updated, so a poisoned lock is still safe to use.
 #[cfg(any(target_os = "macos", all(test, unix)))]
-fn with_tab_files<R>(f: impl FnOnce(&mut std::collections::BTreeMap<Uuid, PathBuf>) -> R) -> R {
-    f(&mut WARP_TAB_FILES
+fn with_tab_files<R>(
+    record: &TabFiles,
+    f: impl FnOnce(&mut std::collections::BTreeMap<Uuid, PathBuf>) -> R,
+) -> R {
+    f(&mut record
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner))
 }
@@ -603,7 +611,12 @@ fn remove_tab_file(path: &Path) {
 /// touched.
 #[cfg(any(target_os = "macos", all(test, unix)))]
 pub fn remove_launch_files(session: Uuid) {
-    if let Some(path) = with_tab_files(|files| files.remove(&session)) {
+    remove_launch_files_in(&WARP_TAB_FILES, session);
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn remove_launch_files_in(record: &TabFiles, session: Uuid) {
+    if let Some(path) = with_tab_files(record, |files| files.remove(&session)) {
         remove_tab_file(&path);
     }
 }
@@ -626,8 +639,8 @@ fn is_old(meta: &std::fs::Metadata, age: std::time::Duration) -> bool {
 /// Remove the recorded Tab Configs older than `age`, and forget any that
 /// are already gone. Run on the lease tick.
 #[cfg(any(target_os = "macos", all(test, unix)))]
-fn expire_tab_configs_older_than(age: std::time::Duration) {
-    let expired: Vec<(Uuid, PathBuf)> = with_tab_files(|files| {
+fn expire_tab_configs_older_than(record: &TabFiles, age: std::time::Duration) {
+    let expired: Vec<(Uuid, PathBuf)> = with_tab_files(record, |files| {
         let expired: Vec<Uuid> = files
             .iter()
             .filter(|(_, path)| match std::fs::symlink_metadata(path) {
@@ -649,7 +662,7 @@ fn expire_tab_configs_older_than(age: std::time::Duration) {
 /// Remove the recorded Tab Configs older than the ticket's life.
 #[cfg(target_os = "macos")]
 pub fn expire_tab_configs() {
-    expire_tab_configs_older_than(warp_tab_life());
+    expire_tab_configs_older_than(&WARP_TAB_FILES, warp_tab_life());
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -658,7 +671,12 @@ pub fn expire_tab_configs() {}
 /// Write `tab` into `folder`, owner-only, and record it against `session`.
 /// Returns the file's path.
 #[cfg(any(target_os = "macos", all(test, unix)))]
-fn write_warp_tab(folder: &Path, tab: &WarpTab, session: Uuid) -> Result<PathBuf, ManagedError> {
+fn write_warp_tab(
+    record: &TabFiles,
+    folder: &Path,
+    tab: &WarpTab,
+    session: Uuid,
+) -> Result<PathBuf, ManagedError> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::create_dir_all(folder).map_err(|_| ManagedError::LaunchUnknown)?;
@@ -676,7 +694,7 @@ fn write_warp_tab(folder: &Path, tab: &WarpTab, session: Uuid) -> Result<PathBuf
         remove_tab_file(&path);
         return Err(ManagedError::LaunchUnknown);
     }
-    with_tab_files(|files| files.insert(session, path.clone()));
+    with_tab_files(record, |files| files.insert(session, path.clone()));
     Ok(path)
 }
 
@@ -701,7 +719,7 @@ fn is_ours(path: &Path, meta: &std::fs::Metadata) -> Option<Uuid> {
 /// lease tick removes them when their ticket has lapsed. Files that are not
 /// ours (see [`is_ours`]) are never touched.
 #[cfg(any(target_os = "macos", all(test, unix)))]
-fn adopt_or_sweep_tab_configs(folder: &Path, age: std::time::Duration) {
+fn adopt_or_sweep_tab_configs(record: &TabFiles, folder: &Path, age: std::time::Duration) {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return;
     };
@@ -716,7 +734,7 @@ fn adopt_or_sweep_tab_configs(folder: &Path, age: std::time::Duration) {
         if is_old(&meta, age) {
             remove_tab_file(&path);
         } else {
-            with_tab_files(|files| {
+            with_tab_files(record, |files| {
                 files.entry(id).or_insert(path);
             });
         }
@@ -727,7 +745,7 @@ fn adopt_or_sweep_tab_configs(folder: &Path, age: std::time::Duration) {
 #[cfg(target_os = "macos")]
 pub fn sweep_warp_tab_configs() {
     if let Some(folder) = warp_tab_configs() {
-        adopt_or_sweep_tab_configs(&folder, warp_tab_life());
+        adopt_or_sweep_tab_configs(&WARP_TAB_FILES, &folder, warp_tab_life());
     }
 }
 
@@ -741,7 +759,7 @@ pub fn sweep_warp_tab_configs() {}
 #[cfg(target_os = "macos")]
 fn open_warp_tab(tab: &WarpTab, session: Uuid) -> Result<(), ManagedError> {
     let folder = warp_tab_configs().ok_or(ManagedError::LaunchUnknown)?;
-    write_warp_tab(&folder, tab, session)?;
+    write_warp_tab(&WARP_TAB_FILES, &folder, tab, session)?;
     let mut open = std::process::Command::new("/usr/bin/open");
     open.arg(tab.url());
     match super::profiles::bounded_output(open) {
@@ -804,7 +822,13 @@ fn launch_for_session(
 /// A Tab Config written by the real writer, for a test of the daemon.
 #[cfg(all(test, unix))]
 pub(crate) fn write_tab_for_test(folder: &Path, session: Uuid) -> PathBuf {
-    write_warp_tab(folder, &WarpTab::new("true", None).unwrap(), session).unwrap()
+    write_warp_tab(
+        &WARP_TAB_FILES,
+        folder,
+        &WarpTab::new("true", None).unwrap(),
+        session,
+    )
+    .unwrap()
 }
 
 /// Run a macOS launch: `osascript` with the script's lines, or `open` with
@@ -1436,19 +1460,31 @@ mod tests {
     #[cfg(unix)]
     const LONG: std::time::Duration = std::time::Duration::from_secs(3600);
 
+    /// Make `path` look two `LONG`s old.
+    #[cfg(unix)]
+    fn age_file(path: &Path) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - LONG * 2)
+            .unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_redeem_removes_its_own_launchs_tab_config_only() {
         let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
         let (mine, other) = (Uuid::new_v4(), Uuid::new_v4());
-        let a = write_warp_tab(dir.path(), &warp_tab("a"), mine).unwrap();
-        let b = write_warp_tab(dir.path(), &warp_tab("b"), other).unwrap();
+        let a = write_warp_tab(&files, dir.path(), &warp_tab("a"), mine).unwrap();
+        let b = write_warp_tab(&files, dir.path(), &warp_tab("b"), other).unwrap();
         assert!(a.exists() && b.exists());
-        remove_launch_files(mine);
+        remove_launch_files_in(&files, mine);
         assert!(!a.exists(), "the redeemed launch's file is gone");
         assert!(b.exists(), "another launch's file is left");
-        remove_launch_files(mine);
-        remove_launch_files(other);
+        remove_launch_files_in(&files, mine);
+        remove_launch_files_in(&files, other);
         assert!(!b.exists());
     }
 
@@ -1456,24 +1492,26 @@ mod tests {
     #[test]
     fn a_tab_config_already_gone_is_fine() {
         let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
         let session = Uuid::new_v4();
-        let path = write_warp_tab(dir.path(), &warp_tab("a"), session).unwrap();
+        let path = write_warp_tab(&files, dir.path(), &warp_tab("a"), session).unwrap();
         std::fs::remove_file(&path).unwrap();
-        remove_launch_files(session);
-        remove_launch_files(session);
+        remove_launch_files_in(&files, session);
+        remove_launch_files_in(&files, session);
     }
 
     #[cfg(unix)]
     #[test]
     fn removing_a_tab_config_never_follows_a_symlink() {
         let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
         let session = Uuid::new_v4();
-        let path = write_warp_tab(dir.path(), &warp_tab("a"), session).unwrap();
+        let path = write_warp_tab(&files, dir.path(), &warp_tab("a"), session).unwrap();
         let target = dir.path().join("precious");
         std::fs::write(&target, "keep").unwrap();
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(&target, &path).unwrap();
-        remove_launch_files(session);
+        remove_launch_files_in(&files, session);
         assert!(path.symlink_metadata().is_err(), "the link is removed");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
     }
@@ -1482,16 +1520,17 @@ mod tests {
     #[test]
     fn a_file_that_is_not_ours_is_never_removed_by_a_failed_write() {
         let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
         let tab = warp_tab("a");
         let theirs = dir.path().join(format!("{}.toml", tab.name));
         std::fs::write(&theirs, "theirs").unwrap();
         let session = Uuid::new_v4();
         assert_eq!(
-            write_warp_tab(dir.path(), &tab, session),
+            write_warp_tab(&files, dir.path(), &tab, session),
             Err(ManagedError::LaunchUnknown)
         );
         assert_eq!(std::fs::read_to_string(&theirs).unwrap(), "theirs");
-        remove_launch_files(session);
+        remove_launch_files_in(&files, session);
         assert!(theirs.exists(), "nothing was recorded for it");
     }
 
@@ -1499,26 +1538,28 @@ mod tests {
     #[test]
     fn the_lease_tick_removes_a_tab_config_past_the_ticket_life() {
         let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
         let session = Uuid::new_v4();
-        let path = write_warp_tab(dir.path(), &warp_tab("a"), session).unwrap();
-        expire_tab_configs_older_than(LONG);
+        let path = write_warp_tab(&files, dir.path(), &warp_tab("a"), session).unwrap();
+        expire_tab_configs_older_than(&files, LONG);
         assert!(path.exists(), "still inside the ticket's life");
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        expire_tab_configs_older_than(std::time::Duration::from_millis(10));
+        age_file(&path);
+        expire_tab_configs_older_than(&files, LONG);
         assert!(!path.exists());
-        assert!(with_tab_files(|files| !files.contains_key(&session)));
+        assert!(with_tab_files(&files, |files| !files.contains_key(&session)));
     }
 
     #[cfg(unix)]
     #[test]
     fn a_modified_time_in_the_future_counts_as_old() {
         let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
         let session = Uuid::new_v4();
-        let path = write_warp_tab(dir.path(), &warp_tab("a"), session).unwrap();
+        let path = write_warp_tab(&files, dir.path(), &warp_tab("a"), session).unwrap();
         let file = std::fs::File::options().write(true).open(&path).unwrap();
         file.set_modified(std::time::SystemTime::now() + LONG)
             .unwrap();
-        expire_tab_configs_older_than(std::time::Duration::from_secs(60));
+        expire_tab_configs_older_than(&files, std::time::Duration::from_secs(60));
         assert!(!path.exists());
     }
 
@@ -1526,14 +1567,17 @@ mod tests {
     #[test]
     fn a_poisoned_record_still_removes_files() {
         let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
         let session = Uuid::new_v4();
-        let path = write_warp_tab(dir.path(), &warp_tab("a"), session).unwrap();
-        let _ = std::thread::spawn(|| {
-            let _guard = WARP_TAB_FILES.lock().unwrap();
+        let path = write_warp_tab(&files, dir.path(), &warp_tab("a"), session).unwrap();
+        let files = std::sync::Arc::new(files);
+        let poisoned = files.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
             panic!("poison the record");
         })
         .join();
-        remove_launch_files(session);
+        remove_launch_files_in(&files, session);
         assert!(!path.exists());
     }
 
@@ -1541,12 +1585,13 @@ mod tests {
     #[test]
     fn the_startup_sweep_touches_only_tab_configs_this_module_wrote() {
         let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
         let ours_old = warp_tab("a");
         let ours_young = warp_tab("b");
-        let old = write_warp_tab(dir.path(), &ours_old, Uuid::new_v4()).unwrap();
-        let young = write_warp_tab(dir.path(), &ours_young, Uuid::new_v4()).unwrap();
+        let old = write_warp_tab(&files, dir.path(), &ours_old, Uuid::new_v4()).unwrap();
+        let young = write_warp_tab(&files, dir.path(), &ours_young, Uuid::new_v4()).unwrap();
         // Forget what this run wrote: a restart has an empty record.
-        with_tab_files(|files| files.clear());
+        with_tab_files(&files, |files| files.clear());
         // The user's own files: a name that is not a uuid, a uuid name with
         // another shape, and a symlink.
         let dev = dir.path().join("near-ai-dev.toml");
@@ -1564,14 +1609,14 @@ mod tests {
             .set_modified(std::time::SystemTime::now() - LONG)
             .unwrap();
 
-        adopt_or_sweep_tab_configs(dir.path(), std::time::Duration::from_secs(120));
+        adopt_or_sweep_tab_configs(&files, dir.path(), std::time::Duration::from_secs(120));
         assert!(!old.exists(), "ours and past the ticket's life");
         assert!(young.exists(), "ours, inside the ticket's life: kept");
         assert!(dev.exists() && lookalike.exists(), "not ours");
         assert!(link.symlink_metadata().is_ok() && target.exists());
         // The kept one is adopted, so the lease tick removes it later.
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        expire_tab_configs_older_than(std::time::Duration::from_millis(10));
+        age_file(&young);
+        expire_tab_configs_older_than(&files, LONG);
         assert!(!young.exists());
         assert!(dev.exists() && lookalike.exists());
     }
@@ -1582,6 +1627,7 @@ mod tests {
     #[test]
     fn a_launch_records_its_tab_config_under_its_session() {
         let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
         let session = Uuid::new_v4();
         let mut written = None;
         launch_for_session(
@@ -1595,14 +1641,14 @@ mod tests {
                 let MacosLaunch::Warp(tab) = how else {
                     panic!("a Tab Config");
                 };
-                written = Some(write_warp_tab(dir.path(), &tab, id).unwrap());
+                written = Some(write_warp_tab(&files, dir.path(), &tab, id).unwrap());
                 Ok(Vec::new())
             },
         )
         .unwrap();
         let path = written.unwrap();
         assert!(path.exists());
-        remove_launch_files(session);
+        remove_launch_files_in(&files, session);
         assert!(!path.exists());
     }
 
