@@ -1,5 +1,6 @@
 use super::test_support::{
-    ACCESS, KEY, REFRESH, Seen, assert_cleared, assert_revoked_with_old_session, seed, stub,
+    ACCESS, KEY, REFRESH, Seen, assert_cleared, assert_no_record, assert_revoked_with_old_session,
+    seed, stub,
 };
 use super::*;
 use crate::config::tests_support::temp_store;
@@ -29,6 +30,8 @@ async fn the_store_clear_removes_everything_and_revokes_with_the_old_session() {
     assert_revoked_with_old_session(&seen);
     // The rotated refresh token the exchange answered is never stored.
     assert_cleared(&store, &reference);
+    // Every pending key was settled, so nothing was put back.
+    assert_no_record(&store);
 }
 
 /// A revoke NEAR AI refuses, or a session it no longer accepts, leaves the
@@ -718,4 +721,191 @@ fn account_logout_stops_at_a_dry_run_daemon() {
         )),
         crate::commands::DaemonSignOut::DryRun
     ));
+}
+
+/// A sendable pending key whose delete did not happen goes back into the
+/// record, tagged with the stored login's identity, for that identity's next
+/// sign-in to retry. One whose delete worked does not.
+#[tokio::test]
+async fn an_unsettled_pending_key_is_put_back_for_its_identity() {
+    use axum::{
+        Json, Router,
+        extract::Path,
+        routing::{delete, post},
+    };
+    let (_dir, store) = temp_store();
+    seed(&store);
+    super::super::spend_org::record_identity(&store, "key-1", "sha256:mine");
+    super::super::spend_org::record_pending(
+        &store,
+        &[super::super::spend_org::PendingRevocation::new(
+            "ws-2", "key-gone",
+        )],
+    )
+    .unwrap();
+    let router = Router::new()
+        .route(
+            "/v1/users/me/access-tokens",
+            post(|| async {
+                Json(serde_json::json!({
+                    "access_token": ACCESS,
+                    "refresh_token": "rt_rotated-secret",
+                    "refresh_token_expiration": "2030-01-01T00:00:00Z",
+                }))
+            }),
+        )
+        .route(
+            "/v1/workspaces/{workspace}/api-keys/{key}",
+            delete(
+                |Path((_workspace, key)): Path<(String, String)>| async move {
+                    if key == "key-old" {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    } else {
+                        StatusCode::NO_CONTENT
+                    }
+                },
+            ),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let api = CloudApi::for_test(&format!("http://{address}")).unwrap();
+    let revocation = clear_store(&store).unwrap().revocation.unwrap();
+    assert_eq!(revocation.run(Some(&api)).await, Some(true));
+    let record = super::super::spend_org::load(&store).unwrap();
+    assert_eq!(record.pending_revocations.len(), 1, "{record:?}");
+    assert_eq!(record.pending_revocations[0].key_id, "key-old");
+    assert_eq!(
+        record.pending_revocations[0].identity.as_deref(),
+        Some("sha256:mine")
+    );
+    assert!(record.chosen_organization_id.is_none());
+    assert!(record.session_identity.is_none());
+}
+
+/// The OS deletes after the clear are bounded too: a keyring that blocks on
+/// delete leaves the entry journaled and answers `cleaned` as an error,
+/// which `logout` reports before wiping anything.
+#[tokio::test]
+async fn an_os_delete_that_blocks_is_bounded() {
+    use crate::daemon::credential_store::{CredentialError, CredentialReference, SecretBackend};
+    struct SlowDelete(std::sync::Arc<dyn SecretBackend>);
+    impl SecretBackend for SlowDelete {
+        fn read(&self, r: &CredentialReference) -> Result<Vec<u8>, CredentialError> {
+            self.0.read(r)
+        }
+        fn write(&self, r: &CredentialReference, b: &[u8]) -> Result<(), CredentialError> {
+            self.0.write(r, b)
+        }
+        fn delete(&self, _: &CredentialReference) -> Result<(), CredentialError> {
+            std::thread::sleep(Duration::from_secs(30));
+            Err(CredentialError::NoEntry)
+        }
+    }
+    let (_dir, store) = temp_store();
+    seed(&store);
+    let inner = crate::daemon::cloud_credential_test_support::backend(store.dir()).unwrap();
+    crate::daemon::cloud_credential_test_support::install_backend(
+        &store,
+        std::sync::Arc::new(SlowDelete(inner)),
+    );
+    let started = std::time::Instant::now();
+    let owned = store.clone();
+    let cleared = tokio::task::spawn_blocking(move || clear_store(&owned))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        cleared.cleaned.unwrap_err().to_string(),
+        "near_ai_credential_cleanup_required"
+    );
+    // Cleared locally all the same: nothing names the key any more.
+    let settings = DaemonSettings::load(&store).unwrap();
+    assert!(settings.cloud_credentials.is_none());
+}
+
+/// Unenroll whose enrollment removal fails (a malformed account record)
+/// still clears the NEAR AI sign-in, and still answers the failure.
+#[tokio::test]
+async fn a_failed_unenroll_still_clears_near_ai() {
+    let (_dir, shared, reference, _seen) = connected_daemon(StatusCode::NO_CONTENT).await;
+    crate::identity::DeviceIdentity::load_or_generate(&shared.store).unwrap();
+    shared
+        .store
+        .save_config(&crate::commands::unenrolled_preview_config())
+        .unwrap();
+    // A malformed account record, written to the file itself: the store's
+    // own writer would wrap it in a valid record.
+    std::fs::write(
+        shared
+            .store
+            .daemon_path(crate::config::ACCOUNT_SESSION_FILE),
+        br#"{"commons_credential_version":2}"#,
+    )
+    .unwrap();
+    let response = crate::daemon::ipc::handle_request_async(&shared, &request("unenroll")).await;
+    assert_eq!(
+        response
+            .error
+            .expect("the enrollment removal failed")
+            .message,
+        crate::daemon::unenroll::ERR_UNENROLL_FAILED
+    );
+    assert_cleared(&shared.store, &reference);
+    assert_memory_cleared(&shared);
+}
+
+/// Native sign-out whose account record is malformed (the Commons clear
+/// refuses it) still clears the NEAR AI sign-in.
+#[tokio::test]
+async fn a_failed_native_sign_out_still_clears_near_ai() {
+    let (_dir, shared, reference, _seen) = connected_daemon(StatusCode::NO_CONTENT).await;
+    // A malformed account record, written to the file itself: the store's
+    // own writer would wrap it in a valid record.
+    std::fs::write(
+        shared
+            .store
+            .daemon_path(crate::config::ACCOUNT_SESSION_FILE),
+        br#"{"commons_credential_version":2}"#,
+    )
+    .unwrap();
+    let response =
+        crate::daemon::ipc::handle_request_async(&shared, &request("account_sign_out")).await;
+    assert!(response.error.is_some(), "{:?}", response.result);
+    assert_cleared(&shared.store, &reference);
+    assert_memory_cleared(&shared);
+}
+
+/// Native sign-out with a stored account session whose secret cannot be
+/// read: cleared here, never revoked there, so `server_revoked: false`.
+#[tokio::test]
+async fn an_unreadable_account_session_is_not_reported_as_none() {
+    let (_dir, store) = temp_store();
+    let fresh = crate::daemon::commons_credentials::snapshot(
+        &store,
+        crate::daemon::commons_credentials::Kind::Account,
+    )
+    .unwrap();
+    crate::daemon::commons_credentials::replace(
+        &store,
+        &fresh,
+        br#"{"access_token":"tcn1_x","expires_at":"2030-01-01T00:00:00Z","account_id":"a"}"#,
+        None,
+    )
+    .unwrap();
+    // The record stays; the secret it names is gone.
+    crate::daemon::cloud_credential_test_support::install_backend(
+        &store,
+        std::sync::Arc::new(crate::daemon::cloud_credential_test_support::MemoryBackend::default()),
+    );
+    let shared = crate::daemon::ipc::DaemonShared::load(store).unwrap();
+    let response =
+        crate::daemon::ipc::handle_request_async(&shared, &request("account_sign_out")).await;
+    let body = response.result.expect("sign-out answers");
+    assert_eq!(body["server_revoked"], false, "{body}");
 }

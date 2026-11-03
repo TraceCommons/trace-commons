@@ -18,13 +18,13 @@
 //! with the same session, since the record goes with the clear and nothing
 //! would be left to retry them.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
 
 use super::api::{CloudApi, RevokeOutcome};
 use super::loopback::SessionTokens;
+use super::spend_org::PendingRevocation;
 use crate::config::ConfigStore;
 use crate::daemon::settings::DaemonSettings;
 
@@ -40,14 +40,15 @@ const PENDING_BUDGET: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const PENDING_BUDGET: Duration = Duration::from_millis(500);
 
-/// How long a caller with no daemon waits to read the secret bundle. An OS
-/// store can prompt (macOS) or block on a locked keyring (Linux); past this
-/// the clear goes on without the session, and the revoke answers "stored,
-/// not revoked".
+/// How long a caller with no daemon waits on each OS credential-store step:
+/// the secret read, then the deletes. An OS store can prompt (macOS) or
+/// block on a locked keyring (Linux). Past this the read goes on without the
+/// session (the revoke answers "stored, not revoked"), and the deletes stay
+/// journaled (`cleanup_required`, which `logout` reports).
 #[cfg(not(test))]
-const SECRET_READ_BUDGET: Duration = Duration::from_secs(15);
+const OS_BUDGET: Duration = Duration::from_secs(15);
 #[cfg(test)]
-const SECRET_READ_BUDGET: Duration = Duration::from_millis(500);
+const OS_BUDGET: Duration = Duration::from_millis(500);
 
 /// The one log label a revoke that did not happen writes.
 pub(crate) const LABEL_NOT_REVOKED: &str = "near_ai_sign_out_key_not_revoked";
@@ -55,8 +56,9 @@ pub(crate) const LABEL_NOT_REVOKED: &str = "near_ai_sign_out_key_not_revoked";
 /// What a revoke needs, copied before the clear. Never logged: `Debug`
 /// names nothing.
 pub(crate) struct Revocation {
-    /// The daemon directory, for its refresh lock.
-    dir: PathBuf,
+    /// The daemon directory: its refresh lock, and the record unsettled
+    /// pending keys go back to.
+    store: ConfigStore,
     /// Whether disk named a stored key. Read from disk, not from the secret,
     /// so a key whose secret could not be read still counts as stored.
     stored: bool,
@@ -66,8 +68,12 @@ pub(crate) struct Revocation {
     /// The refresh token and the agent it is bound to. `None` when the
     /// secret could not be read, or no session was stored.
     session: Option<(String, String)>,
-    /// Older keys the spending-organization record still meant to revoke.
-    pending: Vec<(String, String)>,
+    /// Older keys the spending-organization record still meant to revoke,
+    /// and that this session may send.
+    pending: Vec<PendingRevocation>,
+    /// The stored login's recorded identity, which tags pending keys put
+    /// back unsettled, so only that identity's next sign-in sends them.
+    identity: Option<String>,
 }
 
 impl std::fmt::Debug for Revocation {
@@ -108,11 +114,12 @@ impl Revocation {
             .is_some_and(|metadata| metadata.has_inference())
             || disk.near_ai_inference.is_some();
         let active = metadata_ids.or(plaintext_ids);
-        let mut pending = Vec::new();
+        let mut pending: Vec<PendingRevocation> = Vec::new();
         let mut kept = Vec::new();
+        let mut identity = None;
         // An unreadable record names nothing this can act on.
         if let Ok(record) = super::spend_org::load(store) {
-            let identity = active
+            identity = active
                 .as_ref()
                 .and_then(|(_, key_id)| super::spend_org::recorded_identity(&record, key_id));
             for entry in record.pending_revocations {
@@ -120,9 +127,14 @@ impl Revocation {
                     kept.push(entry);
                     continue;
                 }
-                let pair = (entry.workspace_id, entry.key_id);
-                if active.as_ref() != Some(&pair) && !pending.contains(&pair) {
-                    pending.push(pair);
+                let is_active = active
+                    .as_ref()
+                    .is_some_and(|(w, k)| *w == entry.workspace_id && *k == entry.key_id);
+                let held = pending
+                    .iter()
+                    .any(|p| p.workspace_id == entry.workspace_id && p.key_id == entry.key_id);
+                if !is_active && !held {
+                    pending.push(entry);
                 }
             }
         }
@@ -136,11 +148,12 @@ impl Revocation {
             .map(|s| (s.refresh_token.clone(), s.user_agent.clone()));
         (
             Some(Self {
-                dir: store.dir().to_path_buf(),
+                store: store.clone(),
                 stored,
                 active,
                 session,
                 pending,
+                identity,
             }),
             kept,
         )
@@ -154,29 +167,28 @@ impl Revocation {
     ///
     /// The stored key's answer is settled before the pending keys are
     /// touched, and they have their own budget, so nothing they do changes
-    /// it.
+    /// it. Pending keys are deleted side by side; any not settled (no
+    /// session, a failed delete, out of budget) go back into the record,
+    /// tagged with the stored login's identity, for that identity's next
+    /// sign-in to retry. Settled is gone, already gone, or another account's
+    /// (`403`, which no session of this identity can ever revoke).
     pub(crate) async fn run(self, api: Option<&CloudApi>) -> Option<bool> {
         let stored = self.stored;
         let pending = self.pending.clone();
+        let identity = self.identity.clone();
+        let store = self.store.clone();
         let settled = tokio::time::timeout(REVOKE_BUDGET, self.revoke_stored(api)).await;
-        let (outcome, tokens) = match settled {
-            Ok((outcome, tokens)) => (outcome, tokens),
+        let (outcome, access_token) = match settled {
+            Ok((outcome, tokens)) => (outcome, tokens.map(|t| t.access_token)),
             Err(_) => (Err("timed_out"), None),
         };
-        if let (Some(api), Some(tokens)) = (api, tokens) {
-            if !pending.is_empty() {
-                let tidy = async {
-                    for (workspace_id, key_id) in &pending {
-                        // Tidied where this session can; another account's
-                        // (`403`) never can.
-                        let _ = api
-                            .revoke_inference_key(&tokens, workspace_id, key_id)
-                            .await;
-                    }
-                };
-                let _ = tokio::time::timeout(PENDING_BUDGET, tidy).await;
+        let unsettled = match (api, access_token) {
+            (Some(api), Some(access_token)) if !pending.is_empty() => {
+                tidy(api, &access_token, pending).await
             }
-        }
+            _ => pending,
+        };
+        put_back(&store, unsettled, identity);
         let reason = match outcome {
             Ok(()) => return stored.then_some(true),
             Err(reason) => reason,
@@ -212,7 +224,8 @@ impl Revocation {
         // gone), and this one presents a token NEAR AI no longer accepts and
         // answers `session`. Never two uses of one token at once.
         let exchanged = async {
-            let locks = super::session::coordination(&self.dir).map_err(|_| "unavailable")?;
+            let locks =
+                super::session::coordination(self.store.dir()).map_err(|_| "unavailable")?;
             let _refresh = locks.refresh_lock().await;
             api.refresh_session(&refresh_token, &user_agent)
                 .await
@@ -239,6 +252,69 @@ impl Revocation {
             None => Ok(()),
         };
         (outcome, Some(tokens))
+    }
+}
+
+/// Delete `pending` side by side within [`PENDING_BUDGET`]. Answers the
+/// entries not settled.
+async fn tidy(
+    api: &CloudApi,
+    access_token: &str,
+    pending: Vec<PendingRevocation>,
+) -> Vec<PendingRevocation> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for (index, entry) in pending.iter().enumerate() {
+        let api = api.clone();
+        let tokens = SessionTokens {
+            access_token: access_token.to_owned(),
+            refresh_token: String::new(),
+        };
+        let (workspace_id, key_id) = (entry.workspace_id.clone(), entry.key_id.clone());
+        tasks.spawn(async move {
+            let settled = matches!(
+                api.revoke_inference_key(&tokens, &workspace_id, &key_id)
+                    .await,
+                Ok(RevokeOutcome::Revoked
+                    | RevokeOutcome::AlreadyGone
+                    | RevokeOutcome::NotThisAccount)
+            );
+            (index, settled)
+        });
+    }
+    let mut settled = vec![false; pending.len()];
+    let _ = tokio::time::timeout(PENDING_BUDGET, async {
+        while let Some(Ok((index, done))) = tasks.join_next().await {
+            settled[index] = done;
+        }
+    })
+    .await;
+    tasks.abort_all();
+    pending
+        .into_iter()
+        .zip(settled)
+        .filter_map(|(entry, done)| (!done).then_some(entry))
+        .collect()
+}
+
+/// Put unsettled pending keys back in the record, tagged with the stored
+/// login's identity where they were untagged. Best effort: a lost write is a
+/// label line, and those keys stay in that NEAR AI account for the
+/// contributor to delete.
+fn put_back(store: &ConfigStore, unsettled: Vec<PendingRevocation>, identity: Option<String>) {
+    if unsettled.is_empty() {
+        return;
+    }
+    let tagged: Vec<PendingRevocation> = unsettled
+        .into_iter()
+        .map(|mut entry| {
+            if entry.identity.is_none() {
+                entry.identity = identity.clone();
+            }
+            entry
+        })
+        .collect();
+    if super::spend_org::record_pending(store, &tagged).is_err() {
+        tracing::warn!(target: "near_ai_spend_org", "near_ai_spend_org_parked_revocations_lost");
     }
 }
 
@@ -283,11 +359,13 @@ pub(crate) struct StoreCleared {
 /// [`clear_locked`] for a caller with no running daemon (CLI `logout`, which
 /// stops the daemon first, and `account logout` when none answers).
 ///
-/// The secret is read before the commit lock, and for at most
-/// [`SECRET_READ_BUDGET`]: an OS read may prompt or block, and the commit
-/// lock covers local publication only. A read that fails, is declined or
-/// takes too long still clears, and the revoke then answers "stored, not
-/// revoked". Blocking: an async caller runs it on a blocking worker.
+/// The secret is read before the commit lock: an OS read may prompt or
+/// block, and the commit lock covers local publication only. Every OS step
+/// (the read, then the deletes) waits at most [`OS_BUDGET`]. A read that
+/// fails, is declined or takes too long still clears, and the revoke then
+/// answers "stored, not revoked"; deletes that take too long stay journaled
+/// and answer `cleaned` as an error. Blocking: an async caller runs it on a
+/// blocking worker.
 ///
 /// The legacy sweep runs before `cleanup_native`, and the order matters.
 /// `clear_locked` has already cleared `cloud_credentials`, so every journal
@@ -304,8 +382,7 @@ pub(crate) fn clear_store(store: &ConfigStore) -> Result<StoreCleared> {
         .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
     let (removed, revocation) = clear_locked(store, current.as_ref())?;
     drop(commit);
-    crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(store);
-    let cleaned = crate::daemon::cloud_credential_lifecycle::cleanup_native(store);
+    let cleaned = cleanup_bounded(store);
     Ok(StoreCleared {
         removed,
         revocation,
@@ -313,8 +390,29 @@ pub(crate) fn clear_store(store: &ConfigStore) -> Result<StoreCleared> {
     })
 }
 
-/// [`resolve_stored`] on its own thread, waited for at most
-/// [`SECRET_READ_BUDGET`]. A read still waiting then (a prompt nobody has
+/// The legacy sweep, then `cleanup_native`, on their own thread, waited for
+/// at most [`OS_BUDGET`]. Past it the deletes are left to finish on their own
+/// and this answers `near_ai_credential_cleanup_required`: whatever was not
+/// deleted stays journaled for the next credential operation, and `logout`
+/// stops before wiping the journal that names it.
+fn cleanup_bounded(store: &ConfigStore) -> Result<()> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let owned = store.clone();
+    std::thread::Builder::new()
+        .name("near-ai-secret-cleanup".into())
+        .spawn(move || {
+            crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(&owned);
+            let _ = sender.send(crate::daemon::cloud_credential_lifecycle::cleanup_native(
+                &owned,
+            ));
+        })
+        .map_err(|_| anyhow::anyhow!("near_ai_credential_cleanup_required"))?;
+    receiver
+        .recv_timeout(OS_BUDGET)
+        .map_err(|_| anyhow::anyhow!("near_ai_credential_cleanup_required"))?
+}
+
+/// [`resolve_stored`] on its own thread, waited for at most [`OS_BUDGET`]. A read still waiting then (a prompt nobody has
 /// answered, a locked keyring) is left to finish on its own and its answer
 /// dropped; the caller goes on as if the secret could not be read. A
 /// detached thread, not the async runtime's blocking pool, so a CLI process
@@ -328,7 +426,7 @@ fn resolve_stored_bounded(store: &ConfigStore) -> Option<DaemonSettings> {
             let _ = sender.send(resolve_stored(&owned));
         })
         .ok()?;
-    receiver.recv_timeout(SECRET_READ_BUDGET).ok().flatten()
+    receiver.recv_timeout(OS_BUDGET).ok().flatten()
 }
 
 /// The stored credential with its secrets, for a caller with no running
@@ -545,6 +643,23 @@ pub(crate) mod test_support {
                 "{journal}"
             );
         }
+        // The record is gone, or holds only pending keys put back for a
+        // later sign-in of their identity: never the cleared login's choice,
+        // its identity binding, or the stored key itself.
+        if let Ok(record) = super::super::spend_org::load(store) {
+            assert!(record.chosen_organization_id.is_none());
+            assert!(record.session_identity.is_none());
+            assert!(
+                record
+                    .pending_revocations
+                    .iter()
+                    .all(|entry| entry.key_id != "key-1")
+            );
+        }
+    }
+
+    /// No record at all: every pending key was settled.
+    pub(crate) fn assert_no_record(store: &ConfigStore) {
         assert!(
             !store
                 .daemon_path(super::super::spend_org::SPEND_ORG_FILE)

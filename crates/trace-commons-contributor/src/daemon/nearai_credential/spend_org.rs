@@ -441,9 +441,6 @@ pub(crate) fn clear_locked(store: &ConfigStore) {
     }
 }
 
-/// Record `entries`. An entry already held keeps its place; one held
-/// untagged takes the incoming tag, so a later sweep under another
-/// identity parks it instead of sending it.
 /// After a sign-out removed the record: write back the pending entries the
 /// sign-out's session could not send (another identity's, or one it cannot
 /// tell), and nothing else -- no choice, no identity binding, both of which
@@ -466,6 +463,9 @@ pub(crate) fn keep_pending_locked(store: &ConfigStore, kept: Vec<PendingRevocati
     }
 }
 
+/// Record `entries`. An entry already held keeps its place; one held
+/// untagged takes the incoming tag, so a later sweep under another
+/// identity parks it instead of sending it.
 pub(crate) fn record_pending(store: &ConfigStore, entries: &[PendingRevocation]) -> Result<()> {
     update(store, |record| {
         for entry in entries {
