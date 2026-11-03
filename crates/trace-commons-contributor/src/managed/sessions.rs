@@ -261,6 +261,22 @@ where
     Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
+/// A quiet row whose tool the daemon watches ([`SessionRegistry::quiet_tools`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuietTool {
+    pub id: Uuid,
+    pub process: super::collection_plan::ProcessIdentity,
+    /// The launcher's last report, which named this process while it ran.
+    pub named_at: DateTime<Utc>,
+}
+
+impl QuietTool {
+    /// Whether the tool is gone.
+    pub fn gone(&self) -> bool {
+        !self.process.is_running_named_at(self.named_at)
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Entry {
     #[serde(default)]
@@ -296,6 +312,12 @@ struct Entry {
     /// the launcher's final report, which is then taken as how it ended.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     ended_by_daemon: bool,
+    /// The daemon failed this row's pending collection when it ended the
+    /// row, because nothing it knows of will collect it. A launcher that
+    /// did collect still says so, in a late report or its exit receipt,
+    /// and that result is taken over this one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    collection_by_daemon: bool,
     ticket_hash: Option<String>,
     ticket_expires: DateTime<Utc>,
     proof_hash: Option<String>,
@@ -360,7 +382,10 @@ impl SessionRegistry {
                 && entry.view.collection == CollectionState::Pending
                 && super::collection_plan::read(store, entry.view.id).is_none()
             {
+                // The daemon's guess: a receipt the launcher left, replayed
+                // below, still replaces it.
                 entry.view.collection = CollectionState::Failed;
+                entry.collection_by_daemon = true;
             }
             entry.ticket_hash = None;
             entry.request.keep_saved_model = entry.keep_saved_model;
@@ -442,24 +467,27 @@ impl SessionRegistry {
         // rows it continues beside it showed the conversation once per
         // resume, each with its own Resume. A resume stands for the
         // conversation only while it holds it or once its ticket was
-        // redeemed, so one never redeemed does not hide the row that ran. Dismissal
-        // is the conversation's ([`Self::dismiss`]); a row dismissed alone
-        // (v0.21.0-0.21.2 dismissed rows one at a time) is passed over, so
-        // such a registry reads as the person left it.
-        let mut latest = std::collections::BTreeMap::new();
+        // redeemed, so one never redeemed does not hide the row that ran.
+        //
+        // Dismissal is the conversation's: [`Self::dismiss`] flags every
+        // row of it, so none is left to list. A row flagged alone (#1838
+        // and v0.21.0-0.21.2 dismissed one row at a time) is passed over,
+        // and the conversation is listed as its latest row the person kept.
+        // The two builds wrote the same file, so a #1838 dismissal of a
+        // resumed conversation cannot be told from a v0.21.x dismissal of
+        // its resume alone; this reading never hides a row they kept.
+        let mut listed = std::collections::BTreeMap::new();
         for (index, e) in self.data.entries.iter().enumerate() {
             if !e.dismissed && e.stands_for_conversation() {
-                latest.insert(e.root(), index);
+                listed.insert(e.root(), index);
             }
         }
-        let held = self.held_conversations();
-        Ok(self
-            .data
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(index, e)| latest.get(&e.root()) == Some(index))
-            .map(|(_, e)| e)
+        let mut listed: Vec<usize> = listed.into_values().collect();
+        listed.sort_unstable();
+        let held = self.holders(true);
+        Ok(listed
+            .into_iter()
+            .map(|index| &self.data.entries[index])
             .map(|e| {
                 let mut view = e.view.clone();
                 let owned = e.owned_running();
@@ -537,11 +565,16 @@ impl SessionRegistry {
     }
 
     /// Whether the launcher of `id` is to stop its tool now.
+    /// Also a row the app opened that the person dismissed while it looked
+    /// stuck, whose launcher turns out to be running its tool
+    /// ([`Self::dismiss`]). Like Stop, never a row started from the command
+    /// line (owner, 2026-11-02).
     pub fn stop_requested(&self, id: Uuid) -> bool {
-        self.data
-            .entries
-            .iter()
-            .any(|e| e.view.id == id && e.stop_requested && e.owned_running())
+        self.data.entries.iter().any(|e| {
+            e.view.id == id
+                && e.stop_requested
+                && (e.owned_running() || (e.launched && e.dismissed && e.ended_by_daemon))
+        })
     }
 
     /// The launch request that started an ended coding session, under a
@@ -626,13 +659,7 @@ impl SessionRegistry {
     /// snapshot: each row whose conversation can be continued now, with
     /// that conversation's root.
     pub fn resume_roots(&self) -> std::collections::BTreeMap<Uuid, Uuid> {
-        let in_use: std::collections::BTreeSet<Uuid> = self
-            .data
-            .entries
-            .iter()
-            .filter(|e| e.view.state.holds_profile())
-            .map(Entry::root)
-            .collect();
+        let in_use = self.holders(false);
         let started: std::collections::BTreeSet<Uuid> = self
             .data
             .entries
@@ -654,36 +681,76 @@ impl SessionRegistry {
     }
 
     /// Whether a row on the conversation `root` started (the root itself,
-    /// or a resume of it) still holds its profile.
+    /// or a resume of it) still holds its profile. A stuck row does: its
+    /// launcher may still be alive, so no other session may resume it.
     fn conversation_in_use(&self, root: Uuid) -> bool {
         self.data
             .entries
             .iter()
-            .any(|e| e.root() == root && e.view.state.holds_profile())
+            .any(|e| e.root() == root && self.holds(e, false))
+    }
+
+    /// Whether row `e` holds its conversation: it holds its profile. When
+    /// `dismissing`, a stuck row ([`Self::stuck`]) does not: the person may
+    /// let it go. The one rule behind Resume's lock, Dismiss and
+    /// `can_dismiss`.
+    fn holds(&self, e: &Entry, dismissing: bool) -> bool {
+        e.view.state.holds_profile() && !(dismissing && self.stuck(e))
+    }
+
+    /// The roots of the conversations a row holds ([`Self::holds`]).
+    fn holders(&self, dismissing: bool) -> std::collections::BTreeSet<Uuid> {
+        self.data
+            .entries
+            .iter()
+            .filter(|e| self.holds(e, dismissing))
+            .map(Entry::root)
+            .collect()
+    }
+
+    /// Unknown with no process the daemon can watch: its launcher took the
+    /// ticket and went quiet before its first report named the tool's
+    /// process, and no collection plan file is there either (one this build
+    /// cannot read still blocks it until the collection pass removes it). So
+    /// nothing will end it but the person (owner, 2026-11-02: dismissed by
+    /// hand, never on a timer). A launcher still in its setup is safe to
+    /// dismiss from: it checks in before it spawns, and a dismissed row's
+    /// check-in is refused ([`Self::report`]).
+    fn stuck(&self, e: &Entry) -> bool {
+        e.view.state == SessionState::Unknown
+            && e.proof_hash.is_some()
+            && e.watched_process().is_none()
+            && !super::collection_plan::exists(&self.store, e.view.id)
     }
 
     /// Fail unredeemed launches whose ticket expired, and lapse redeemed
     /// sessions unheard for longer than [`LEASE`], as of `now`.
     pub fn sweep(&mut self, now: DateTime<Utc>) -> Result<(), ManagedError> {
+        let expired = |e: &Entry| {
+            e.view.state == SessionState::Starting
+                && e.proof_hash.is_none()
+                && now >= e.ticket_expires
+        };
+        let lapses = |e: &Entry| {
+            matches!(e.view.state, SessionState::Starting | SessionState::Running)
+                && e.proof_hash.is_some()
+                && now.signed_duration_since(e.last_seen) > LEASE
+        };
+        // Runs on every lease tick: copy the registry only to change it.
+        if !self.data.entries.iter().any(|e| expired(e) || lapses(e)) {
+            return Ok(());
+        }
         let mut next = self.data.clone();
         let mut changed = false;
         for entry in &mut next.entries {
-            if entry.view.state == SessionState::Starting
-                && entry.proof_hash.is_none()
-                && now >= entry.ticket_expires
-            {
+            if expired(entry) {
                 entry.view.state = SessionState::Failed;
                 if entry.view.collection == CollectionState::Pending {
                     entry.view.collection = CollectionState::Failed;
                 }
                 entry.ticket_hash = None;
                 changed = true;
-            } else if matches!(
-                entry.view.state,
-                SessionState::Starting | SessionState::Running
-            ) && entry.proof_hash.is_some()
-                && now.signed_duration_since(entry.last_seen) > LEASE
-            {
+            } else if lapses(entry) {
                 entry.view.state = lapsed(entry.view.connection);
                 changed = true;
             }
@@ -802,6 +869,7 @@ impl SessionRegistry {
             keep_saved_model: request.keep_saved_model,
             resume_of: request.resume_of,
             ended_by_daemon: false,
+            collection_by_daemon: false,
             request,
             ticket_hash: Some(digest(&ticket)),
             ticket_expires: now + Duration::seconds(120),
@@ -1074,6 +1142,17 @@ impl SessionRegistry {
             return Err(ManagedError::Conflict);
         }
         if !entry.view.state.holds_profile() {
+            // A row the person dismissed while it looked stuck, whose tool
+            // runs after all: its heartbeat is answered, with a stop
+            // ([`Self::stop_requested`]); the row stays ended.
+            if entry.launched
+                && entry.dismissed
+                && entry.stop_requested
+                && entry.ended_by_daemon
+                && report.state == SessionState::Running
+            {
+                return Ok(());
+            }
             // The daemon ended a sign-in session (sign-out, lapsed lease)
             // before its launcher said how it ended. The launcher's final
             // word is accepted and changes nothing, so its persisted exit
@@ -1107,15 +1186,34 @@ impl SessionRegistry {
             if let Some(collection @ (CollectionState::Collected | CollectionState::Failed)) =
                 report.collection
             {
-                if entry.view.collect_traces && entry.view.collection == CollectionState::Pending {
+                if entry.view.collect_traces
+                    && (entry.view.collection == CollectionState::Pending
+                        || entry.collection_by_daemon)
+                {
                     entry.view.collection = collection;
+                    entry.collection_by_daemon = false;
                     changed = true;
                 }
             }
             return if changed { self.commit(next) } else { Ok(()) };
         }
         if report.state == SessionState::Starting {
-            return Err(ManagedError::InvalidRequest);
+            // A launcher's check-in right before it spawns its tool: it is
+            // still in its setup, so the row is starting again, with a
+            // fresh lease. A dismissed row was refused above, so its
+            // launcher never spawns.
+            if entry.process_id.is_some()
+                || report.process_id.is_some()
+                || report.process_identity.is_some()
+                || report.exit_code.is_some()
+                || report.collection.is_some()
+                || report.model.is_some()
+            {
+                return Err(ManagedError::InvalidRequest);
+            }
+            entry.view.state = SessionState::Starting;
+            entry.last_seen = Utc::now();
+            return self.commit(next);
         }
         if report.state == SessionState::Running
             && (report.process_id.is_none()
@@ -1234,21 +1332,50 @@ impl SessionRegistry {
         if entry.view.state != SessionState::Unknown {
             return Ok(());
         }
-        entry.view.state = SessionState::Failed;
-        entry.ended_by_daemon = true;
+        entry.end_by_daemon(false);
         self.commit(next)
     }
 
-    /// The rows whose launcher went quiet (unknown) that named their
-    /// tool's process, with that process (`<pid>:<start time>`), so the
-    /// daemon can see whether the tool is gone ([`Self::tool_exited`]).
-    pub fn quiet_tools(&self) -> Vec<(Uuid, String)> {
+    /// The quiet rows (unknown: the launcher stopped reporting) whose tool
+    /// the daemon can watch, with that tool's process: rows a collection
+    /// plan (`plans`) does not cover, whose launcher named the tool's
+    /// process. A pid named without its start time counts as running while
+    /// any process holds it that started before the launcher last named it
+    /// (`named_at`), so a reused pid only delays the end, and only while
+    /// that is so.
+    pub fn quiet_tools(&self, plans: &std::collections::BTreeSet<Uuid>) -> Vec<QuietTool> {
         self.data
             .entries
             .iter()
-            .filter(|e| e.view.state == SessionState::Unknown)
-            .filter_map(|e| Some((e.view.id, e.process_identity.clone()?)))
+            .filter(|e| e.view.state == SessionState::Unknown && !plans.contains(&e.view.id))
+            .filter_map(|e| {
+                Some(QuietTool {
+                    id: e.view.id,
+                    process: e.watched_process()?,
+                    named_at: e.last_seen,
+                })
+            })
             .collect()
+    }
+
+    /// End the quiet rows in `ids` whose tool the daemon saw exit, as
+    /// [`Self::tool_exited`] does, in one write. They have no collection
+    /// plan, so the daemon will not collect them: a collection still
+    /// pending fails, unless the launcher, which may have collected itself,
+    /// still reports otherwise ([`Entry::end_by_daemon`]). A row that is no
+    /// longer unknown (its launcher reported again) is left as it is.
+    pub fn end_quiet(&mut self, ids: &[Uuid]) -> Result<(), ManagedError> {
+        let mut next = self.data.clone();
+        let mut changed = false;
+        for entry in next
+            .entries
+            .iter_mut()
+            .filter(|e| ids.contains(&e.view.id) && e.view.state == SessionState::Unknown)
+        {
+            entry.end_by_daemon(true);
+            changed = true;
+        }
+        if changed { self.commit(next) } else { Ok(()) }
     }
 
     /// Record the default model of a daemon-hosted proxy for a session on the
@@ -1296,7 +1423,7 @@ impl SessionRegistry {
 
     /// Dismiss the conversation of row `id`: every row of it, so no
     /// earlier row comes back in its place. Refused while a row of it
-    /// holds its profile, unless that row is stuck ([`Entry::stuck`]): the
+    /// holds its profile, unless that row is stuck ([`Self::stuck`]): the
     /// person may let it go (owner, 2026-11-02), and it is ended as
     /// [`Self::tool_exited`] ends a row, so a launcher that does report
     /// later is still taken as how it ended.
@@ -1308,29 +1435,32 @@ impl SessionRegistry {
             .find(|e| e.view.id == id)
             .ok_or(ManagedError::NotFound)?
             .root();
-        if self.held_conversations().contains(&root) {
-            return Err(ManagedError::Conflict);
+        // Refused by the same rule as `can_dismiss` ([`Self::holds`]); the
+        // rows that still hold the conversation past it are stuck.
+        let mut stuck = Vec::new();
+        for e in self.data.entries.iter().filter(|e| e.root() == root) {
+            if self.holds(e, true) {
+                return Err(ManagedError::Conflict);
+            }
+            if e.view.state.holds_profile() {
+                stuck.push(e.view.id);
+            }
         }
         let mut next = self.data.clone();
         for entry in next.entries.iter_mut().filter(|e| e.root() == root) {
-            if entry.stuck() {
-                entry.view.state = SessionState::Failed;
-                entry.ended_by_daemon = true;
+            if stuck.contains(&entry.view.id) {
+                // No plan (it is stuck), so nothing will collect it. Its
+                // launcher may yet be running the tool, if the daemon
+                // restarted between its spawn and its first report: if the
+                // app opened it, its next heartbeat is told to stop
+                // ([`Self::stop_requested`]); a command-line launch is never
+                // stopped by the app (owner, 2026-11-02).
+                entry.end_by_daemon(true);
+                entry.stop_requested = entry.launched;
             }
             entry.dismissed = true;
         }
         self.commit(next)
-    }
-
-    /// The conversations a row holds that the person cannot dismiss: one
-    /// holding its profile that is not stuck.
-    fn held_conversations(&self) -> std::collections::BTreeSet<Uuid> {
-        self.data
-            .entries
-            .iter()
-            .filter(|e| e.view.state.holds_profile() && !e.stuck())
-            .map(Entry::root)
-            .collect()
     }
 
     pub fn changed(&mut self) -> Result<(), ManagedError> {
@@ -1361,14 +1491,34 @@ impl Entry {
         self.request.resume_of.unwrap_or(self.view.id)
     }
 
-    /// Unknown with no process to watch: its launcher took the ticket and
-    /// went quiet before its first report named the tool's process, so
-    /// nothing will end it but the person (owner, 2026-11-02: dismissed by
-    /// hand, never on a timer).
-    fn stuck(&self) -> bool {
-        self.view.state == SessionState::Unknown
-            && self.proof_hash.is_some()
-            && self.process_id.is_none()
+    /// The tool's process as the launcher named it: its pid, with its
+    /// start time when the launcher could read it.
+    fn watched_process(&self) -> Option<super::collection_plan::ProcessIdentity> {
+        self.process_identity
+            .as_deref()
+            .and_then(super::collection_plan::ProcessIdentity::parse)
+            .or_else(|| {
+                Some(super::collection_plan::ProcessIdentity {
+                    pid: self.process_id?,
+                    start_time: None,
+                })
+            })
+    }
+
+    /// The daemon ends this row: it saw the tool exit, or the person
+    /// dismissed it while nothing watched it. Failed, the state for a
+    /// session that ended without an exit code from its tool; the
+    /// launcher's final report, if one still comes, is taken as how it
+    /// ended. With `unclaimed`, nothing the daemon knows of will collect
+    /// the row, so a pending collection fails too, until the launcher says
+    /// otherwise (`collection_by_daemon`).
+    fn end_by_daemon(&mut self, unclaimed: bool) {
+        self.view.state = SessionState::Failed;
+        self.ended_by_daemon = true;
+        if unclaimed && self.view.collection == CollectionState::Pending {
+            self.view.collection = CollectionState::Failed;
+            self.collection_by_daemon = true;
+        }
     }
 
     /// Whether this row is listed for its conversation when it is the
@@ -2450,12 +2600,16 @@ mod tests {
         assert_eq!(ids, vec![fresh]);
     }
 
-    /// A registry from v0.21.0-0.21.2, where every row was listed and the
-    /// person dismissed rows one at a time, reads as they left it: the
-    /// conversation is listed as its latest row they did not dismiss, and
-    /// is gone once they dismissed every row of it.
+    /// A registry where rows were dismissed one at a time, by #1838 (which
+    /// flagged only the listed latest row, staging builds from 2026-11-02)
+    /// or by v0.21.0-0.21.2 (every row listed). Both wrote the same file,
+    /// so the two cannot be told apart, and the reading chosen never hides
+    /// a row the person kept: the conversation is listed as its latest row
+    /// not dismissed, and is gone once every row that ran is dismissed. A
+    /// #1838 dismissal of a resumed conversation therefore shows its
+    /// earlier row again.
     #[test]
-    fn a_v0_21_registry_with_rows_dismissed_one_at_a_time_reads_as_meant() {
+    fn rows_dismissed_one_at_a_time_never_hide_a_row_the_person_kept() {
         let home = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
         let account = AccountStore::open(&store)
@@ -2483,6 +2637,17 @@ mod tests {
         assert_eq!(listed(), Vec::<Uuid>::new(), "every row was dismissed");
         dismissed_on_disk(&store, &[1], false);
         assert_eq!(listed(), vec![resumed], "the root alone was dismissed");
+
+        // A resume whose ticket expired unredeemed, dismissed alone: the
+        // row that ran is listed.
+        dismissed_on_disk(&store, &[0], false);
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let request = registry.resume_request(resumed, Uuid::new_v4()).unwrap();
+        registry.prepare(request, &account).unwrap();
+        registry.sweep(Utc::now() + Duration::seconds(121)).unwrap();
+        drop(registry);
+        dismissed_on_disk(&store, &[2], true);
+        assert_eq!(listed(), vec![resumed], "the row that ran");
     }
 
     /// A resume whose tool never started (its ticket expired) does not
@@ -2619,6 +2784,418 @@ mod tests {
             registry.describe(stuck.session_id).map(|(_, s)| s),
             Some(SessionState::Exited),
             "a late final report is taken"
+        );
+    }
+
+    /// A quiet row whose launcher named its tool's pid but not its start
+    /// time (`<pid>:<uuid>`, the launcher's fallback) is watched like any
+    /// other: a pid alone counts as running while any process holds it, so
+    /// a reused pid only delays its end, never ends a live tool. It is not
+    /// the person's to dismiss while it may run. The quiet rows the daemon
+    /// watches leave out the ones a collection plan covers.
+    #[test]
+    fn a_quiet_row_with_a_pid_only_identity_is_watched() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let mut quiet = |pid: u32, identity: String| {
+            let prepared = registry
+                .prepare(coding(&account, home.path()), &account)
+                .unwrap();
+            let context = registry
+                .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+                .unwrap();
+            registry
+                .report(LifecycleReport {
+                    model: None,
+                    collection: None,
+                    session_id: prepared.session_id,
+                    proof: context.proof,
+                    state: SessionState::Running,
+                    process_id: Some(pid),
+                    process_identity: Some(identity),
+                    exit_code: None,
+                })
+                .unwrap();
+            prepared.session_id
+        };
+        let pid_only = quiet(42, format!("42:{}", Uuid::new_v4()));
+        let watched = quiet(43, "43:1700000000".to_owned());
+        let planned = quiet(44, "44:1700000000".to_owned());
+        registry
+            .sweep(Utc::now() + LEASE + Duration::seconds(1))
+            .unwrap();
+        let views = registry.views().unwrap();
+        for id in [pid_only, watched] {
+            assert!(!views.iter().find(|v| v.id == id).unwrap().can_dismiss);
+        }
+        use super::super::collection_plan::ProcessIdentity;
+        let plans = std::collections::BTreeSet::from([planned]);
+        assert_eq!(
+            registry
+                .quiet_tools(&plans)
+                .into_iter()
+                .map(|tool| (tool.id, tool.process))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    pid_only,
+                    ProcessIdentity {
+                        pid: 42,
+                        start_time: None
+                    }
+                ),
+                (
+                    watched,
+                    ProcessIdentity {
+                        pid: 43,
+                        start_time: Some(1_700_000_000),
+                    }
+                ),
+            ]
+        );
+        assert_eq!(registry.dismiss(pid_only), Err(ManagedError::Conflict));
+    }
+
+    /// The daemon fails a quiet row's pending collection when it ends the
+    /// row, but the launcher may have collected after all (it wrote no
+    /// plan and collected itself, or its final report did not get
+    /// through): its late report, or the exit receipt it left, is taken
+    /// over the daemon's guess. A result the launcher or a plan recorded
+    /// is never overwritten that way.
+    #[test]
+    fn a_launchers_late_collection_result_wins_over_the_daemons() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let mut quiet = || {
+            let prepared = registry
+                .prepare(
+                    LaunchRequest {
+                        collect_traces: true,
+                        ..coding(&account, home.path())
+                    },
+                    &account,
+                )
+                .unwrap();
+            let context = registry
+                .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+                .unwrap();
+            registry
+                .report(LifecycleReport {
+                    model: None,
+                    collection: None,
+                    session_id: prepared.session_id,
+                    proof: context.proof.clone(),
+                    state: SessionState::Running,
+                    process_id: Some(42),
+                    process_identity: Some("42:1".into()),
+                    exit_code: None,
+                })
+                .unwrap();
+            (prepared.session_id, context.proof)
+        };
+        let (reported, reported_proof) = quiet();
+        let (receipted, receipted_proof) = quiet();
+        registry
+            .sweep(Utc::now() + LEASE + Duration::seconds(1))
+            .unwrap();
+        registry.end_quiet(&[reported, receipted]).unwrap();
+        let collection = |registry: &SessionRegistry, id: Uuid| {
+            registry.collection_status(id).unwrap().collection
+        };
+        assert_eq!(collection(&registry, reported), CollectionState::Failed);
+        let late = |id: Uuid, proof: String| LifecycleReport {
+            model: None,
+            collection: Some(CollectionState::Collected),
+            session_id: id,
+            proof,
+            state: SessionState::Exited,
+            process_id: Some(42),
+            process_identity: Some("42:1".into()),
+            exit_code: Some(0),
+        };
+        registry
+            .report(late(reported, reported_proof.clone()))
+            .unwrap();
+        assert_eq!(collection(&registry, reported), CollectionState::Collected);
+        persist_exit(&store, &late(receipted, receipted_proof)).unwrap();
+        registry.views().unwrap();
+        assert_eq!(collection(&registry, receipted), CollectionState::Collected);
+        assert_eq!(
+            registry.report(LifecycleReport {
+                collection: Some(CollectionState::Failed),
+                ..late(reported, reported_proof)
+            }),
+            Ok(()),
+            "a repeat is accepted"
+        );
+        assert_eq!(
+            collection(&registry, reported),
+            CollectionState::Collected,
+            "and changes nothing"
+        );
+    }
+
+    /// A launcher checks in (a `starting` report) right before it spawns
+    /// its tool. One that went quiet in a long setup is taken back as
+    /// starting, with a fresh lease, so the person cannot dismiss it from
+    /// under it; once dismissed, its check-in is refused, so it never
+    /// spawns. A check-in from a row that already named its tool's process,
+    /// or that names one, is refused as before.
+    #[test]
+    fn a_launcher_checks_in_before_it_spawns() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let mut redeemed = || {
+            let prepared = registry
+                .prepare(coding(&account, home.path()), &account)
+                .unwrap();
+            let context = registry
+                .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+                .unwrap();
+            (prepared.session_id, context.proof)
+        };
+        let (slow, slow_proof) = redeemed();
+        let (gone, gone_proof) = redeemed();
+        let check_in = |id: Uuid, proof: &str| LifecycleReport {
+            model: None,
+            collection: None,
+            session_id: id,
+            proof: proof.to_owned(),
+            state: SessionState::Starting,
+            process_id: None,
+            process_identity: None,
+            exit_code: None,
+        };
+        let can_dismiss = |registry: &mut SessionRegistry, id: Uuid| {
+            registry
+                .views()
+                .unwrap()
+                .iter()
+                .find(|v| v.id == id)
+                .unwrap()
+                .can_dismiss
+        };
+        registry.report(check_in(slow, &slow_proof)).unwrap();
+        registry
+            .sweep(Utc::now() + LEASE + Duration::seconds(1))
+            .unwrap();
+        assert!(can_dismiss(&mut registry, slow), "quiet in its setup");
+        registry.report(check_in(slow, &slow_proof)).unwrap();
+        assert_eq!(
+            registry.describe(slow).map(|(_, s)| s),
+            Some(SessionState::Starting)
+        );
+        assert!(!can_dismiss(&mut registry, slow), "it checked in");
+        assert_eq!(registry.dismiss(slow), Err(ManagedError::Conflict));
+
+        assert!(can_dismiss(&mut registry, gone));
+        registry.dismiss(gone).unwrap();
+        assert_eq!(
+            registry.report(check_in(gone, &gone_proof)),
+            Err(ManagedError::Conflict),
+            "dismissed: it must not spawn"
+        );
+
+        registry
+            .report(LifecycleReport {
+                state: SessionState::Running,
+                process_id: Some(42),
+                process_identity: Some("42:1".into()),
+                ..check_in(slow, &slow_proof)
+            })
+            .unwrap();
+        assert_eq!(
+            registry.report(check_in(slow, &slow_proof)),
+            Err(ManagedError::InvalidRequest),
+            "its tool runs"
+        );
+        assert_eq!(
+            registry.report(LifecycleReport {
+                process_id: Some(42),
+                ..check_in(slow, &slow_proof)
+            }),
+            Err(ManagedError::InvalidRequest)
+        );
+    }
+
+    /// A row can look stuck while its tool runs: the launcher checked in
+    /// and spawned, and the daemon restarted before it took a `running`
+    /// report. Dismissing a row the app opened asks for a stop too, so its
+    /// launcher's next heartbeat is answered with a stop (which every
+    /// launcher since `stop` obeys) rather than refused and ignored; the
+    /// row stays ended and dismissed, and its final report is still taken.
+    /// A row started from the command line is never stopped by the app
+    /// (owner, 2026-11-02, as with Stop): its heartbeat is refused as
+    /// before and its tool keeps running. A check-in from a dismissed row
+    /// is refused either way, so a launcher still in its setup never spawns.
+    #[test]
+    fn a_dismissed_row_whose_tool_runs_is_told_to_stop() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let prepared = registry
+            .prepare(coding(&account, home.path()), &account)
+            .unwrap();
+        let id = prepared.session_id;
+        let context = registry
+            .redeem(id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        registry.opened_in_terminal(id, None).unwrap();
+        let report = |state, exit_code| LifecycleReport {
+            model: None,
+            collection: None,
+            session_id: id,
+            proof: context.proof.clone(),
+            state,
+            process_id: Some(42),
+            process_identity: Some("42:1".into()),
+            exit_code,
+        };
+        registry
+            .sweep(Utc::now() + LEASE + Duration::seconds(1))
+            .unwrap();
+        registry.dismiss(id).unwrap();
+
+        assert_eq!(registry.report(report(SessionState::Running, None)), Ok(()));
+        assert!(registry.stop_requested(id), "told to stop");
+        assert_eq!(
+            registry.describe(id).map(|(_, s)| s),
+            Some(SessionState::Failed),
+            "still ended"
+        );
+        assert!(registry.views().unwrap().is_empty(), "still dismissed");
+        assert_eq!(
+            registry.report(LifecycleReport {
+                state: SessionState::Starting,
+                process_id: None,
+                process_identity: None,
+                ..report(SessionState::Starting, None)
+            }),
+            Err(ManagedError::Conflict),
+            "a check-in is refused"
+        );
+        registry
+            .report(report(SessionState::Exited, Some(143)))
+            .unwrap();
+        assert_eq!(
+            registry.describe(id).map(|(_, s)| s),
+            Some(SessionState::Exited)
+        );
+        assert!(!registry.stop_requested(id));
+    }
+
+    #[test]
+    fn a_dismissed_command_line_row_is_not_stopped_by_the_app() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let prepared = registry
+            .prepare(coding(&account, home.path()), &account)
+            .unwrap();
+        let id = prepared.session_id;
+        let context = registry
+            .redeem(id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        registry
+            .sweep(Utc::now() + LEASE + Duration::seconds(1))
+            .unwrap();
+        registry.dismiss(id).unwrap();
+        assert_eq!(
+            registry.report(LifecycleReport {
+                model: None,
+                collection: None,
+                session_id: id,
+                proof: context.proof.clone(),
+                state: SessionState::Running,
+                process_id: Some(42),
+                process_identity: Some("42:1".into()),
+                exit_code: None,
+            }),
+            Err(ManagedError::Conflict),
+            "refused, as before"
+        );
+        assert!(!registry.stop_requested(id), "never told to stop");
+    }
+
+    /// A restart fails a pending collection on an ended row with no plan,
+    /// as its guess; the launcher's exit receipt, replayed in the same
+    /// start, still replaces it.
+    #[test]
+    fn a_restart_keeps_a_late_receipts_collection_result() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let prepared = registry
+            .prepare(
+                LaunchRequest {
+                    collect_traces: true,
+                    ..coding(&account, home.path())
+                },
+                &account,
+            )
+            .unwrap();
+        let id = prepared.session_id;
+        let context = registry
+            .redeem(id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        let report = |state, collection, exit_code| LifecycleReport {
+            model: None,
+            collection,
+            session_id: id,
+            proof: context.proof.clone(),
+            state,
+            process_id: Some(42),
+            process_identity: Some("42:1".into()),
+            exit_code,
+        };
+        registry
+            .report(report(SessionState::Running, None, None))
+            .unwrap();
+        registry
+            .sweep(Utc::now() + LEASE + Duration::seconds(1))
+            .unwrap();
+        registry.tool_exited(id).unwrap();
+        persist_exit(
+            &store,
+            &report(
+                SessionState::Exited,
+                Some(CollectionState::Collected),
+                Some(0),
+            ),
+        )
+        .unwrap();
+        drop(registry);
+        let reopened = SessionRegistry::open(&store).unwrap();
+        assert_eq!(
+            reopened.collection_status(id).unwrap().collection,
+            CollectionState::Collected
         );
     }
 
