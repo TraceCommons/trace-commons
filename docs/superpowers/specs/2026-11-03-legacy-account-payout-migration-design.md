@@ -529,16 +529,9 @@ check, or the trigger, and the matching test fails.
 
 ## 10. Wording
 
-No new screen, notice or banner is proposed. The move and the payout link
-use their existing, approved strings. One optional line, only if the owner
-wants it, in the payout section when a carry is live:
-
-| Key | DRAFT text |
-| --- | --- |
-| `payout.legacy_included` | Also pays out credit from your earlier setup on this Mac. |
-
-It is a status line, not a notice. It needs explicit owner approval before
-any shell shows it.
+No user-facing text is added (owner decision 9, 2026-11-03). The move and
+the payout link use their existing, approved strings. No notice, banner
+or status line.
 
 ## 11. Alternatives considered
 
@@ -608,7 +601,53 @@ added); a database trigger on revocation; the section 8 rollout.
     with production payouts off throughout (section 8). **Recommended: as
     written.**
 
-## 13. Follow-ups outside this PR
+## 13. Implementation notes (2026-11-03)
+
+Where the implementation differs from, or adds to, sections 3 to 5:
+
+- **The carry runs in the payout store, not in a definer function.**
+  `crates/trace-commons-server/src/db/postgres_legacy_payout_carry.rs`,
+  called from `confirm_payout_link_request` in the confirm's transaction
+  for both a link and an unlink. It reads the account's tenant links under
+  the account's own tenant context, then sets the context to each legacy
+  tenant in turn and restores it, so forced RLS applies to every statement.
+  The rail's program for a carried link's own id comes in through
+  `PayoutLinkConfirmWrite::carry_programs`. The guard role
+  `trace_legacy_payout_carry_guard` owns only the decision-5 claim and the
+  revocation trigger, which run under logins that cannot otherwise reach a
+  legacy tenant.
+- **After a new tenant link**, the ingest route calls
+  `PayoutStore::carry_legacy_payout_links` for each enabled rail, in its
+  own transaction. Best effort: a failure carries nothing (no one is paid
+  wrongly), is logged as `legacy_payout_carry_failed`, and the next confirm
+  carries again.
+- **Release.** `trace_legacy_payout_release_carry` (SECURITY INVOKER,
+  shared by the store and the trigger): an active carried link gets an
+  unlink request; a waiting one, which never sent, closes at
+  `final_paid = 0`. V146 widens the link guard trigger for exactly that
+  move (waiting to closed, at zero, with no line), so a released carry
+  never pays once before its unlink takes effect. A superseded active carry
+  (a recipient change) is only marked released; the pass closes it as any
+  change.
+- **Audit.** Carried links: `link_created` / `legacy_tenant_link`.
+  Releases: `link_closed` or `unlink_requested` /
+  `legacy_tenant_link_released`. Skipped accounts (decision 6) are counted
+  in the NEAR AI tenant's `legacy_payout_carried` account audit row and
+  logged as `legacy_carry_skipped_own_link`; no payout audit row, since
+  nothing changed on a link. The claim writes `legacy_link_principals_claimed`
+  in the legacy tenant. Actor refs are hashes.
+- **Instance links** (decision 3) go through the existing route: when
+  `trace_link_legacy_invite` answers `device_not_eligible`, the store calls
+  `trace_link_legacy_instance_device` in the same transaction, which takes
+  the challenge that function spent. The response's `authority` is the
+  account's current one (`none` without a trust row) and its trust version
+  is unchanged. Only the device that linked an instance tenant is proven: a
+  second device of that tenant is refused, not attested.
+- **Tests.** `crates/trace-commons-server/tests/legacy_payout_carry_pg.rs`
+  (CI step `legacy_payout_carry_pg`) and one ingest route test,
+  `a_confirmed_link_reaches_a_linked_legacy_account_and_opens_to_the_same_org`.
+
+## 14. Follow-ups outside this PR
 
 - The 2026-10-21 payout spec, section 5, "Who can link", still has the row
   "account in a legacy or pooled tenant: as the wallet row", and section 6

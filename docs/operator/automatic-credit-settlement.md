@@ -21,6 +21,13 @@ is done:
   which names the two candidate designs. Pooled Devfolio tenants
   (`trace_legacy_invite_pooled_tenants`) are excluded from payouts by
   design; they need no migration.
+- **The migration exists (V146) but must be rolled out first.** Legacy
+  credit is paid through a payout link carried from the holder's NEAR AI
+  account to the legacy accounts its tenant link covers; see
+  [the legacy account payout migration spec](../superpowers/specs/2026-11-03-legacy-account-payout-migration-design.md),
+  section 8, for the pilot queries and rollout order, and
+  [legacy-invite-migration.md](./legacy-invite-migration.md) for the
+  tenant link it rides on.
 
 ## Scheduling
 

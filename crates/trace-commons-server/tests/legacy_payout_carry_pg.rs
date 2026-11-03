@@ -18,15 +18,21 @@ use role_ddl_lock::with_role_ddl_lock;
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use trace_commons_gate_api::{RailId, RecipientKind};
+use trace_commons_protocol::legacy_invite_link::LegacyInviteLinkResponse;
 use trace_commons_protocol::legacy_invite_link::{
     LegacyInviteLinkRequest, LegacyInviteLinkStatement, legacy_invite_link_statement_bytes,
 };
 use trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes;
 use trace_commons_server::account_trust::{device_claim_actor, device_upload_principal_refs};
 use trace_commons_server::config::{DatabaseConfig, SslMode};
-use trace_commons_server::db::{Database, PayoutStore, postgres::PgBackend};
+use trace_commons_server::db::{
+    CarryPrograms, Database, LegacyCarryReport, PayoutAuditAction, PayoutLinkAction,
+    PayoutLinkConfirm, PayoutLinkConfirmWrite, PayoutLinkRequestInsert, PayoutLinkRequestWrite,
+    PayoutLinkState, PayoutLinkTransition, PayoutStore, SealedRecipient, postgres::PgBackend,
+};
 use trace_commons_server::legacy_invite_link::{
-    LegacyInviteLinkSigner, issue_challenge, link_legacy_invite,
+    LegacyInviteLinkSigner, LinkRefusal, issue_challenge, link_legacy_invite,
 };
 use trace_commons_server::trace_upload_claim_issuer::generate_upload_claim_keypair;
 use uuid::Uuid;
@@ -71,7 +77,36 @@ struct Fixture {
     admin: deadpool_postgres::Object,
     /// A login holding only `trace_account_invite_runtime` (the link path).
     link_runtime: Arc<PgBackend>,
+    /// A login holding `trace_ingest_runtime` and the pilot's pre-V62
+    /// table grants the payout path uses (the confirm and the carry).
+    payout_runtime: Arc<PgBackend>,
+    /// An operator login with only what revoking a tenant link needs.
+    operator: deadpool_postgres::Object,
     signer: LegacyInviteLinkSigner,
+}
+
+const RAIL: &str = "near_ai";
+const ACTOR: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000001";
+
+fn rail() -> RailId {
+    RailId::new(RAIL).unwrap()
+}
+
+fn programs() -> CarryPrograms {
+    CarryPrograms(Arc::new(|link_id: Uuid| {
+        format!("tc1-{}", &hash(&link_id.to_string())[7..39])
+    }))
+}
+
+fn recipient(seed: &str) -> SealedRecipient {
+    SealedRecipient {
+        sealed: serde_json::json!({"v": 1, "ciphertext": hash(&format!("ct:{seed}"))}),
+        recipient_index: hash(&format!("index:{seed}")),
+        recipient_key_ref: "key-test-1".into(),
+        index_pepper_ref: "pepper-test-1".into(),
+        subject_index: hash(&format!("subject:{seed}")),
+        recipient_ref: Some(hash(&format!("ref:{seed}"))),
+    }
 }
 
 async fn fixture() -> Option<Fixture> {
@@ -99,6 +134,35 @@ async fn fixture() -> Option<Fixture> {
     let mut link_url = parsed.clone();
     link_url.set_username("tc_legacy_carry_link").unwrap();
     let link_runtime = Arc::new(PgBackend::new(&config(link_url.into())).await.unwrap());
+    admin
+        .batch_execute(&with_role_ddl_lock(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tc_legacy_carry_payout')
+             THEN CREATE ROLE tc_legacy_carry_payout LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
+             GRANT trace_ingest_runtime TO tc_legacy_carry_payout;
+             GRANT SELECT ON trace_accounts, trace_near_account_anchors TO trace_ingest_runtime;
+             GRANT INSERT ON trace_account_audit TO trace_ingest_runtime;
+             GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_ingest_runtime;
+             DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tc_legacy_carry_operator')
+             THEN CREATE ROLE tc_legacy_carry_operator LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
+             GRANT USAGE ON SCHEMA public TO tc_legacy_carry_operator;
+             GRANT SELECT, UPDATE (revoked_at) ON trace_legacy_invite_links TO tc_legacy_carry_operator;",
+        ))
+        .await
+        .unwrap();
+    let mut payout_url = parsed.clone();
+    payout_url.set_username("tc_legacy_carry_payout").unwrap();
+    let payout_runtime = Arc::new(PgBackend::new(&config(payout_url.into())).await.unwrap());
+    let mut operator_url = parsed.clone();
+    operator_url
+        .set_username("tc_legacy_carry_operator")
+        .unwrap();
+    let operator = PgBackend::new(&config(operator_url.into()))
+        .await
+        .unwrap()
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
     let keys = generate_upload_claim_keypair().unwrap();
     let signer =
         LegacyInviteLinkSigner::from_pem(&keys.private_key_pem, &keys.public_key_pem, "carry-1")
@@ -107,6 +171,8 @@ async fn fixture() -> Option<Fixture> {
         owner,
         admin,
         link_runtime,
+        payout_runtime,
+        operator,
         signer,
     })
 }
@@ -189,7 +255,7 @@ impl Fixture {
         legacy_tenant: &str,
         invite: &str,
         device: &Device,
-    ) {
+    ) -> Result<LegacyInviteLinkResponse, LinkRefusal> {
         let db = self.link_runtime.as_ref();
         let challenge = issue_challenge(db, account_tenant, account)
             .await
@@ -215,9 +281,7 @@ impl Fixture {
             issued_at: challenge.issued_at,
             signature: B64.encode(signature.as_ref()),
         };
-        link_legacy_invite(db, &self.signer, account_tenant, account, &request)
-            .await
-            .expect("tenant links");
+        link_legacy_invite(db, &self.signer, account_tenant, account, &request).await
     }
 }
 
@@ -242,7 +306,9 @@ async fn linking_a_tenant_claims_the_signing_devices_upload_credit() {
         .expect("subject actor parses")
         .to_vec();
 
-    fx.link(&near, account, &legacy, &invite, &device).await;
+    fx.link(&near, account, &legacy, &invite, &device)
+        .await
+        .expect("tenant links");
 
     let settled = fx
         .owner
@@ -281,4 +347,574 @@ async fn linking_a_tenant_claims_the_signing_devices_upload_credit() {
             .unwrap()
             .is_empty()
     );
+}
+
+impl Fixture {
+    /// An instance-enrolled legacy tenant: an `invite`-origin device with a
+    /// stored subject hash but no `onboarding_invites` row.
+    async fn legacy_instance_tenant(&self, device: &Device) -> (String, String) {
+        let tenant = format!("tenant-instance-{}", Uuid::new_v4().simple());
+        let subject = hash(&format!("instance:{tenant}"));
+        self.exec(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+            &[&tenant],
+        )
+        .await;
+        self.exec(
+            "INSERT INTO device_keys (device_key_id, tenant_id, public_key, invite_subject_hash)
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &device.id,
+                &tenant,
+                &B64.encode(device.key.public_key().as_ref()),
+                &subject,
+            ],
+        )
+        .await;
+        (tenant, subject)
+    }
+
+    /// A NEAR AI account whose legacy tenant is linked, with the linked
+    /// account the claim made there.
+    async fn linked_pair(&self) -> (String, Uuid, String, Uuid) {
+        let device = new_device();
+        let (legacy, invite) = self.legacy_invite_tenant(&device).await;
+        let (near, account) = self.near_ai_account().await;
+        self.link(&near, account, &legacy, &invite, &device)
+            .await
+            .expect("tenant links");
+        let legacy_account = self.accounts(&legacy).await[0];
+        (near, account, legacy, legacy_account)
+    }
+
+    async fn accounts(&self, tenant: &str) -> Vec<Uuid> {
+        self.admin
+            .query(
+                "SELECT account_id FROM trace_accounts WHERE tenant_id = $1 ORDER BY account_id",
+                &[&tenant],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect()
+    }
+
+    async fn add_account(&self, tenant: &str, closed: bool) -> Uuid {
+        let account = Uuid::new_v4();
+        self.exec(
+            "INSERT INTO trace_accounts (tenant_id, account_id, closed_at)
+             VALUES ($1, $2, CASE WHEN $3 THEN now() END)",
+            &[&tenant, &account, &closed],
+        )
+        .await;
+        account
+    }
+
+    /// A link or unlink through the real request and confirm, as the payout
+    /// runtime, carrying as ingest does.
+    async fn confirm(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        action: PayoutLinkAction,
+        seed: &str,
+    ) -> PayoutLinkConfirm {
+        let db = self.payout_runtime.as_ref();
+        let version = db
+            .payout_account_link_view(tenant, account, &rail())
+            .await
+            .unwrap()
+            .version;
+        let handle_hash = hash(&format!("handle:{}", Uuid::new_v4()));
+        let request = PayoutLinkRequestWrite {
+            account_id: account,
+            rail_id: rail(),
+            idempotency_key: Uuid::new_v4(),
+            handle_hash: handle_hash.clone(),
+            request_digest: hash(seed),
+            action,
+            expected_current_version: (version > 0).then_some(version),
+            recipient: matches!(action, PayoutLinkAction::Link)
+                .then(|| (RecipientKind::new("near_ai_org").unwrap(), recipient(seed))),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            actor_ref_hash: ACTOR.into(),
+            proof_label: matches!(action, PayoutLinkAction::Link).then_some("near_ai_login"),
+        };
+        assert_eq!(
+            db.insert_payout_link_request(tenant, &request)
+                .await
+                .unwrap(),
+            PayoutLinkRequestInsert::Inserted
+        );
+        let link_id = Uuid::new_v4();
+        db.confirm_payout_link_request(
+            tenant,
+            account,
+            &rail(),
+            &handle_hash,
+            &PayoutLinkConfirmWrite {
+                link_id,
+                program: (programs().0)(link_id),
+                actor_ref_hash: ACTOR.into(),
+                carry_programs: Some(programs()),
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    /// The pass's first move: the account's waiting link goes active.
+    async fn activate(&self, tenant: &str, account: Uuid) {
+        let link = self.link_in(tenant, account, "waiting").await.unwrap();
+        assert_eq!(
+            self.payout_runtime
+                .transition_payout_link(
+                    tenant,
+                    link,
+                    PayoutLinkState::Waiting,
+                    PayoutLinkState::Active,
+                    PayoutAuditAction::LinkActivated,
+                    ACTOR,
+                    None,
+                )
+                .await
+                .unwrap(),
+            PayoutLinkTransition::Moved
+        );
+    }
+
+    async fn link_in(&self, tenant: &str, account: Uuid, state: &str) -> Option<Uuid> {
+        self.admin
+            .query_opt(
+                "SELECT link_id FROM trace_payout_links
+                  WHERE tenant_id = $1 AND account_id = $2 AND rail_id = $3 AND state = $4",
+                &[&tenant, &account, &RAIL, &state],
+            )
+            .await
+            .unwrap()
+            .map(|row| row.get(0))
+    }
+
+    async fn count(&self, sql: &str, params: &[&(dyn tokio_postgres::types::ToSql + Sync)]) -> i64 {
+        self.admin.query_one(sql, params).await.unwrap().get(0)
+    }
+
+    async fn live_carries(&self, tenant: &str, account: Uuid) -> i64 {
+        self.count(
+            "SELECT count(*) FROM trace_legacy_payout_carries
+              WHERE tenant_id = $1 AND account_id = $2 AND released_at IS NULL",
+            &[&tenant, &account],
+        )
+        .await
+    }
+
+    async fn carry(&self, tenant: &str, account: Uuid) -> LegacyCarryReport {
+        self.payout_runtime
+            .carry_legacy_payout_links(tenant, account, &rail(), &programs(), ACTOR)
+            .await
+            .unwrap()
+    }
+}
+
+/// Spec 3.3: a confirmed link is carried to every open account of the
+/// linked legacy tenant, with the source's seal and indexes, audited by
+/// hash; a repeat carries nothing; a closed account gets nothing.
+#[tokio::test]
+async fn a_confirmed_link_is_carried_to_every_open_legacy_account() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, legacy, claimed) = fx.linked_pair().await;
+    let second = fx.add_account(&legacy, false).await;
+    let closed = fx.add_account(&legacy, true).await;
+
+    assert!(matches!(
+        fx.confirm(&near, account, PayoutLinkAction::Link, "org-1")
+            .await,
+        PayoutLinkConfirm::Confirmed { .. }
+    ));
+    for legacy_account in [claimed, second] {
+        let carried = fx
+            .link_in(&legacy, legacy_account, "waiting")
+            .await
+            .expect("carried as a waiting link");
+        let same: bool = fx
+            .admin
+            .query_one(
+                "SELECT c.sealed_recipient = s.sealed_recipient
+                    AND c.recipient_index = s.recipient_index
+                    AND c.subject_index = s.subject_index
+                    AND c.recipient_ref = s.recipient_ref
+                    AND c.program <> s.program
+                   FROM trace_payout_links c, trace_payout_links s
+                  WHERE c.link_id = $1 AND s.tenant_id = $2 AND s.account_id = $3",
+                &[&carried, &near, &account],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(same, "same recipient, own program");
+        assert_eq!(fx.live_carries(&legacy, legacy_account).await, 1);
+    }
+    assert_eq!(fx.link_in(&legacy, closed, "waiting").await, None);
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_payout_audit
+              WHERE tenant_id = $1 AND action = 'link_created' AND label = 'legacy_tenant_link'",
+            &[&legacy],
+        )
+        .await,
+        2
+    );
+    // Idempotent.
+    assert_eq!(fx.carry(&near, account).await, LegacyCarryReport::default());
+    // The pass activates a carried link like any other.
+    fx.activate(&legacy, claimed).await;
+    assert!(fx.link_in(&legacy, claimed, "active").await.is_some());
+    // Nothing was written to the legacy tenant that names a NEAR AI login.
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_near_account_anchors WHERE tenant_id = $1",
+            &[&legacy],
+        )
+        .await,
+        0
+    );
+}
+
+/// A recipient change carries the new generation and supersedes the old
+/// carry without unlinking it (the pass closes it as a change); an unlink
+/// of the source requests the carried link's unlink.
+#[tokio::test]
+async fn a_change_supersedes_and_an_unlink_releases_the_carry() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, legacy, claimed) = fx.linked_pair().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-a")
+        .await;
+    fx.activate(&near, account).await;
+    fx.activate(&legacy, claimed).await;
+    let first = fx.link_in(&legacy, claimed, "active").await.unwrap();
+
+    assert!(matches!(
+        fx.confirm(&near, account, PayoutLinkAction::Link, "org-b")
+            .await,
+        PayoutLinkConfirm::Confirmed { .. }
+    ));
+    assert!(fx.link_in(&legacy, claimed, "waiting").await.is_some());
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 1);
+    let first_unlinked: bool = fx
+        .admin
+        .query_one(
+            "SELECT unlink_requested_at IS NOT NULL FROM trace_payout_links WHERE link_id = $1",
+            &[&first],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(!first_unlinked, "a change is the pass's, not an unlink");
+
+    // A fresh pair for the unlink: the source is active and alone.
+    let (near, account, legacy, claimed) = fx.linked_pair().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-c")
+        .await;
+    fx.activate(&near, account).await;
+    fx.activate(&legacy, claimed).await;
+    let carried = fx.link_in(&legacy, claimed, "active").await.unwrap();
+    assert!(matches!(
+        fx.confirm(&near, account, PayoutLinkAction::Unlink, "unlink")
+            .await,
+        PayoutLinkConfirm::Confirmed { .. }
+    ));
+    let unlinked: bool = fx
+        .admin
+        .query_one(
+            "SELECT unlink_requested_at IS NOT NULL FROM trace_payout_links WHERE link_id = $1",
+            &[&carried],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(unlinked);
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 0);
+}
+
+/// Spec 3.3, decision 10: revoking the tenant link, as a non-superuser
+/// operator login under the NEAR AI account's tenant context, releases its
+/// carries in the same transaction. A waiting carry closes at zero; an
+/// active one gets an unlink request.
+#[tokio::test]
+async fn revoking_the_tenant_link_releases_its_carries() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, legacy, claimed) = fx.linked_pair().await;
+    let waiting_account = fx.add_account(&legacy, false).await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-r")
+        .await;
+    fx.activate(&legacy, claimed).await;
+    let active = fx.link_in(&legacy, claimed, "active").await.unwrap();
+    let waiting = fx
+        .link_in(&legacy, waiting_account, "waiting")
+        .await
+        .unwrap();
+
+    // Fixture tenant ids are `[a-z0-9-]` only, so inlining them is safe.
+    fx.operator
+        .batch_execute(&format!(
+            "BEGIN;
+             SELECT set_config('trace_commons.trace_tenant_id', '{near}', true);
+             UPDATE trace_legacy_invite_links SET revoked_at = now()
+              WHERE legacy_tenant_id = '{legacy}' AND revoked_at IS NULL;
+             COMMIT;"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_legacy_invite_links
+              WHERE legacy_tenant_id = $1 AND revoked_at IS NOT NULL",
+            &[&legacy],
+        )
+        .await,
+        1
+    );
+
+    let row = fx
+        .admin
+        .query_one(
+            "SELECT (SELECT unlink_requested_at IS NOT NULL FROM trace_payout_links WHERE link_id = $1),
+                    (SELECT state || ':' || final_paid::TEXT FROM trace_payout_links WHERE link_id = $2)",
+            &[&active, &waiting],
+        )
+        .await
+        .unwrap();
+    assert!(row.get::<_, bool>(0));
+    assert_eq!(row.get::<_, String>(1), "closed:0");
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 0);
+    assert_eq!(fx.live_carries(&legacy, waiting_account).await, 0);
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_payout_audit
+              WHERE tenant_id = $1 AND label = 'legacy_tenant_link_released'",
+            &[&legacy],
+        )
+        .await,
+        2
+    );
+}
+
+/// Spec section 7 and 3.7: a tenant marked pooled after linking, and an
+/// account closed after a carry, are released on the next carry; an account
+/// with its own link is skipped, never replaced.
+#[tokio::test]
+async fn pooled_closed_and_own_link_accounts_are_not_carried() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, legacy, claimed) = fx.linked_pair().await;
+    let own = fx.add_account(&legacy, false).await;
+    fx.exec(
+        "INSERT INTO trace_payout_links (tenant_id, account_id, rail_id, link_id, recipient_kind,
+             state, sealed_recipient, recipient_index, recipient_key_ref, index_pepper_ref,
+             subject_index, program)
+         VALUES ($1, $2, $3, $4, 'near_ai_org', 'waiting', '{}', $5, 'k', 'p', $5, 'tc1-own')",
+        &[&legacy, &own, &RAIL, &Uuid::new_v4(), &hash("own")],
+    )
+    .await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-p")
+        .await;
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 1);
+    assert_eq!(fx.live_carries(&legacy, own).await, 0);
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_payout_links WHERE tenant_id = $1 AND account_id = $2",
+            &[&legacy, &own],
+        )
+        .await,
+        1
+    );
+
+    fx.exec(
+        "UPDATE trace_accounts SET closed_at = now() WHERE tenant_id = $1 AND account_id = $2",
+        &[&legacy, &claimed],
+    )
+    .await;
+    let report = fx.carry(&near, account).await;
+    assert_eq!(report.released, 1);
+    assert_eq!(report.skipped, 1);
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 0);
+
+    // Pooled after the link: every carry goes, and none comes back.
+    let (near, account, legacy, claimed) = fx.linked_pair().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-q")
+        .await;
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 1);
+    fx.exec(
+        "INSERT INTO trace_legacy_invite_pooled_tenants (tenant_id, reason_label)
+         VALUES ($1, 'shared event invite')",
+        &[&legacy],
+    )
+    .await;
+    assert_eq!(fx.carry(&near, account).await.released, 1);
+    assert_eq!(fx.carry(&near, account).await, LegacyCarryReport::default());
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 0);
+}
+
+/// The carry needs the source account's own recorded NEAR AI login. A link
+/// on an account without one (written before #1841) carries nothing.
+#[tokio::test]
+async fn an_account_without_a_login_anchor_carries_nothing() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, legacy, claimed) = fx.linked_pair().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-w")
+        .await;
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 1);
+    // Remove the anchor; the next carry releases and writes nothing new.
+    fx.exec(
+        "DELETE FROM trace_near_account_anchors WHERE tenant_id = $1",
+        &[&near],
+    )
+    .await;
+    let report = fx.carry(&near, account).await;
+    assert_eq!(report.carried, 0);
+    assert_eq!(report.released, 1);
+}
+
+/// "Payout link first, tenant link second": the post-link carry ingest
+/// runs reaches the new tenant's accounts.
+#[tokio::test]
+async fn a_payout_link_made_before_the_tenant_link_is_carried_after_it() {
+    let Some(fx) = fixture().await else { return };
+    let device = new_device();
+    let (legacy, invite) = fx.legacy_invite_tenant(&device).await;
+    let (near, account) = fx.near_ai_account().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-f")
+        .await;
+    fx.link(&near, account, &legacy, &invite, &device)
+        .await
+        .expect("tenant links");
+    let claimed = fx.accounts(&legacy).await[0];
+    assert_eq!(fx.carry(&near, account).await.carried, 1);
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 1);
+}
+
+/// Decision 3: an instance-enrolled device links with no invite grant and
+/// no trust change, its upload credit is claimed, and the other refusals
+/// hold: a second account, and a pooled tenant.
+#[tokio::test]
+async fn an_instance_enrolled_device_links_without_invite_trust() {
+    let Some(fx) = fixture().await else { return };
+    let device = new_device();
+    let (legacy, subject) = fx.legacy_instance_tenant(&device).await;
+    let (near, account) = fx.near_ai_account().await;
+    let response = fx
+        .link(&near, account, &legacy, &subject, &device)
+        .await
+        .expect("instance device links");
+    assert_eq!(response.authority, "none");
+    assert_eq!(response.trust_version, 0);
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_account_invite_grants WHERE tenant_id = $1",
+            &[&near],
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_account_trust WHERE tenant_id = $1",
+            &[&near],
+        )
+        .await,
+        0
+    );
+    let bare = device_upload_principal_refs(&legacy, &device.id, &device.id)
+        .unwrap()
+        .to_vec();
+    assert_eq!(
+        fx.owner
+            .resolve_principals_to_accounts(&legacy, &bare)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    // The same device again: the same record.
+    assert_eq!(
+        fx.link(&near, account, &legacy, &subject, &device)
+            .await
+            .unwrap()
+            .record
+            .link_id,
+        response.record.link_id
+    );
+    // Another account cannot claim it.
+    let (other, other_account) = fx.near_ai_account().await;
+    assert_eq!(
+        fx.link(&other, other_account, &legacy, &subject, &device)
+            .await
+            .unwrap_err(),
+        LinkRefusal::TenantClaimed
+    );
+    // A pooled instance tenant never links.
+    let pooled_device = new_device();
+    let (pooled, pooled_subject) = fx.legacy_instance_tenant(&pooled_device).await;
+    fx.exec(
+        "INSERT INTO trace_legacy_invite_pooled_tenants (tenant_id, reason_label)
+         VALUES ($1, 'shared')",
+        &[&pooled],
+    )
+    .await;
+    assert_eq!(
+        fx.link(&near, account, &pooled, &pooled_subject, &pooled_device)
+            .await
+            .unwrap_err(),
+        LinkRefusal::TenantPooled
+    );
+    // The operator resolves the claim (the first link is right), so the
+    // fleet-wide readiness other tests read is not left blocked.
+    fx.exec(
+        "UPDATE trace_legacy_invite_link_conflicts SET resolved_at = now()
+          WHERE legacy_tenant_id = $1",
+        &[&legacy],
+    )
+    .await;
+    // A wrong key still reads as not eligible.
+    let stranger = new_device();
+    assert_eq!(
+        fx.link(&near, account, &legacy, &subject, &stranger)
+            .await
+            .unwrap_err(),
+        LinkRefusal::DeviceNotEligible
+    );
+}
+
+/// C1 and C2: the whole migration writes no anchor and no NEAR AI device
+/// in any legacy tenant, so readiness is untouched.
+#[tokio::test]
+async fn the_migration_leaves_readiness_and_anchors_alone() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, _legacy, _) = fx.linked_pair().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-z")
+        .await;
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_near_account_anchors WHERE tenant_id !~ '^(near-|nearai-)'",
+            &[],
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM device_keys
+              WHERE tenant_id !~ '^(near-|nearai-)' AND onboarding_origin <> 'invite'",
+            &[],
+        )
+        .await,
+        0
+    );
+    let ready: bool = fx
+        .admin
+        .query_one("SELECT trace_account_admission_linkage_ready()", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(ready);
 }

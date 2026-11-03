@@ -199,10 +199,12 @@ pub fn is_legacy_tenant(tenant_id: &str) -> bool {
 }
 
 /// Whether `cfg` can be offered the move at all: a legacy tenant, enrolled
-/// by an invite rather than an instance (an instance-enrolled device
-/// redeemed no invite, and the server refuses it).
+/// by an invite or by an instance. An instance-enrolled device redeemed no
+/// invite; since V146 the server links it all the same, without an invite
+/// grant (owner decision 3, 2026-11-03), and its statement names the
+/// subject hash the issuer stored for it.
 pub fn offered_for(cfg: &ContributorConfig) -> bool {
-    is_legacy_tenant(&cfg.tenant_id) && cfg.instance_id.is_empty()
+    is_legacy_tenant(&cfg.tenant_id)
 }
 
 /// The invite's subject hash, as the issuer computes it from the code.
