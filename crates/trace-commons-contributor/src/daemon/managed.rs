@@ -169,10 +169,13 @@ impl ManagedService {
     }
 
     /// Record what [`TerminalLaunch::open`] did: the tab and window it
-    /// opened. A refusal from before anything ran releases the held launch,
-    /// so its ticket can launch again. `LaunchUnknown` does not: the
-    /// command may already be typed and its tool about to redeem, so the
-    /// launch stays held until the tool reports or the ticket lapses.
+    /// opened. Only a refusal that comes before anything runs (the terminal
+    /// app not found, an invalid request, an unsupported build) releases the
+    /// held launch, so its ticket can launch again. Every other error,
+    /// `LaunchUnknown` above all, may follow a typed command whose tool is
+    /// about to redeem, so the launch stays held until the tool reports or
+    /// the ticket lapses. [`terminal::launch`] reports anything that goes
+    /// wrong after the terminal is asked as `LaunchUnknown`.
     fn finish_terminal_launch(
         &mut self,
         launch: &TerminalLaunch,
@@ -188,11 +191,17 @@ impl ManagedService {
                     .opened_in_terminal(launch.session_id, handle, window)?;
                 Ok(json!({"opened":true,"destination":terminal::destination(launch.choice)}))
             }
-            Err(ManagedError::LaunchUnknown) => Err(ManagedError::LaunchUnknown),
-            Err(error) => {
+            // Refusals that only come before anything is run.
+            Err(
+                error @ (ManagedError::TerminalNotFound
+                | ManagedError::InvalidRequest
+                | ManagedError::UnsupportedVersion),
+            ) => {
                 self.sessions.terminal_launch_failed(launch.session_id)?;
                 Err(error)
             }
+            // Anything else may follow a typed command: held.
+            Err(error) => Err(error),
         }
     }
 
@@ -538,11 +547,10 @@ impl ManagedService {
                 Ok(json!(selection))
             }
             "managed_launch_prepare" => self.prepare_launch(request, sign_in),
-            "managed_terminal_launch" => {
-                let launch = self.begin_terminal_launch(request, choice)?;
-                let opened = launch.open();
-                self.finish_terminal_launch(&launch, opened)
-            }
+            // Only through [`terminal_launch`], which opens the terminal
+            // with the service unlocked; `handle` and `handle_async` route
+            // it there before reaching this.
+            "managed_terminal_launch" => Err(ManagedError::InvalidRequest),
             "managed_launch_redeem" => {
                 let p: RedeemParams = parse(request)?;
                 // A sign-in session needs a daemon-hosted proxy, which only
@@ -2811,27 +2819,74 @@ mod tests {
         100 + u32::from(session.as_bytes()[0])
     }
 
+    /// A daemon whose terminal launches go to `launch`, with its service
+    /// set up as [`service`]'s. Launches go through [`terminal_launch`],
+    /// the one path that opens a terminal.
+    fn launching(launch: LaunchTerminal) -> (tempfile::TempDir, DaemonShared) {
+        let (home, store, _service) = service();
+        let shared = DaemonShared::load(store).unwrap();
+        locked(&shared, |service| {
+            service.installed_terminals = || TerminalApp::offered().to_vec();
+            service.launch_terminal = launch;
+        });
+        (home, shared)
+    }
+
+    fn locked<T>(shared: &DaemonShared, f: impl FnOnce(&mut ManagedService) -> T) -> T {
+        f(shared.managed.lock().unwrap().as_mut().unwrap())
+    }
+
+    /// `managed_terminal_launch` through the daemon: its answer, or its
+    /// refusal's label.
+    fn terminal(shared: &DaemonShared, params: Value) -> Result<Value, String> {
+        let response = terminal_launch(
+            shared,
+            &Request {
+                id: 1,
+                method: "managed_terminal_launch".into(),
+                params,
+            },
+        );
+        match response.error {
+            Some(error) => Err(error.message),
+            None => Ok(response.result.unwrap()),
+        }
+    }
+
+    /// Prepare a coding launch in `home` on a new account, through the
+    /// daemon's service.
+    fn prepared(shared: &DaemonShared, home: &std::path::Path) -> PreparedLaunch {
+        locked(shared, |service| {
+            let account = service
+                .accounts
+                .add(ToolId::Claude, ConnectionKind::Subscription, "Work")
+                .unwrap();
+            let mut request: LaunchRequest =
+                serde_json::from_value(launch(ToolId::Claude, home)).unwrap();
+            request.connection = ConnectionKind::Subscription;
+            request.account_id = account.id;
+            serde_json::from_value(
+                call(service, "managed_launch_prepare", json!(request), false).unwrap(),
+            )
+            .unwrap()
+        })
+    }
+
     /// Launch `prepared` through the daemon with `extra` launch fields,
     /// start it, and end it.
-    fn opened_and_ended(service: &mut ManagedService, prepared: Value, extra: Value) -> Uuid {
-        let prepared: PreparedLaunch = serde_json::from_value(prepared).unwrap();
+    fn opened_and_ended(shared: &DaemonShared, prepared: PreparedLaunch, extra: Value) -> Uuid {
         let id = prepared.session_id;
         let ticket = prepared.ticket.unwrap();
         let mut params = json!({"session_id":id,"ticket":ticket});
         for (key, value) in extra.as_object().unwrap() {
             params[key] = value.clone();
         }
-        call_with(
-            service,
-            "managed_terminal_launch",
-            params,
-            false,
-            TerminalSetting::Terminal,
-        )
-        .unwrap();
-        let context = service.sessions.redeem(id, &ticket).unwrap();
-        report(service, id, &context.proof, "running", None).unwrap();
-        report(service, id, &context.proof, "exited", Some(0)).unwrap();
+        terminal(shared, params).unwrap();
+        locked(shared, |service| {
+            let context = service.sessions.redeem(id, &ticket).unwrap();
+            report(service, id, &context.proof, "running", None).unwrap();
+            report(service, id, &context.proof, "exited", Some(0)).unwrap();
+        });
         id
     }
 
@@ -2840,41 +2895,41 @@ mod tests {
     /// daemon records the row it came from, and each row keeps the window
     /// id its launch printed, for #1852 to place launches beside; the app
     /// names nothing. An app built from #1839 that still names a row is
-    /// not refused, and what it names is ignored.
+    /// not refused, and what it names is ignored. The service's own handler
+    /// never opens a terminal: only [`terminal_launch`] does, unlocked.
     #[test]
     fn start_again_opens_a_new_window_and_the_daemon_records_where_from() {
-        let (home, _store, mut service) = service();
-        service.launch_terminal = record_launch;
-        let account = service
-            .accounts
-            .add(ToolId::Claude, ConnectionKind::Subscription, "Work")
-            .unwrap();
-        let mut request: LaunchRequest =
-            serde_json::from_value(launch(ToolId::Claude, home.path())).unwrap();
-        request.connection = ConnectionKind::Subscription;
-        request.account_id = account.id;
-        let prepared = call(
-            &mut service,
-            "managed_launch_prepare",
-            json!(request),
-            false,
-        )
-        .unwrap();
-        let first = opened_and_ended(&mut service, prepared, json!({}));
-
-        let prepared = call(
-            &mut service,
-            "managed_session_start_again",
-            json!({"session_id":first,"request_id":Uuid::new_v4()}),
-            false,
-        )
-        .unwrap();
-        let second = opened_and_ended(&mut service, prepared, json!({"in_window_of": first}));
-        assert_eq!(
-            service.sessions.again_window(second),
-            Some(window_of(first))
-        );
-        assert_eq!(service.sessions.again_window(first), None);
+        let (home, shared) = launching(record_launch);
+        let first = opened_and_ended(&shared, prepared(&shared, home.path()), json!({}));
+        let again: PreparedLaunch = locked(&shared, |service| {
+            serde_json::from_value(
+                call(
+                    service,
+                    "managed_session_start_again",
+                    json!({"session_id":first,"request_id":Uuid::new_v4()}),
+                    false,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        });
+        let second = opened_and_ended(&shared, again, json!({"in_window_of": first}));
+        locked(&shared, |service| {
+            assert_eq!(
+                service.sessions.again_window(second),
+                Some(window_of(first))
+            );
+            assert_eq!(service.sessions.again_window(first), None);
+            assert_eq!(
+                call(
+                    service,
+                    "managed_terminal_launch",
+                    json!({"session_id":second,"ticket":"00"}),
+                    false
+                ),
+                Err(ManagedError::InvalidRequest)
+            );
+        });
     }
 
     fn refuse_unknown(
@@ -2899,58 +2954,46 @@ mod tests {
         Err(ManagedError::TerminalNotFound)
     }
 
-    /// #1853 review: a launch refused before anything ran is released, so
-    /// the same ticket can launch again. One that may have run
-    /// (`LaunchUnknown`) stays held: a second terminal with the same ticket
-    /// is refused.
+    /// An error from after the terminal was asked, other than
+    /// `LaunchUnknown` (#1853 review: capture-file errors).
+    fn refuse_storage(
+        _: TerminalSetting,
+        _: &[TerminalApp],
+        _: &std::path::Path,
+        _: &std::path::Path,
+        _: Uuid,
+        _: &str,
+    ) -> Result<Option<TerminalTab>, ManagedError> {
+        Err(ManagedError::StorageUnavailable)
+    }
+
+    /// #1853 review: only a refusal that comes before anything runs is
+    /// released, so the same ticket can launch again. Anything that may
+    /// follow a typed command (`LaunchUnknown`, or any other error) stays
+    /// held: a second terminal with the same ticket is refused.
     #[test]
     fn only_a_launch_refused_before_it_ran_can_be_tried_again() {
-        let (home, _store, mut service) = service();
-        let account = service
-            .accounts
-            .add(ToolId::Claude, ConnectionKind::Subscription, "Work")
-            .unwrap();
-        let mut request: LaunchRequest =
-            serde_json::from_value(launch(ToolId::Claude, home.path())).unwrap();
-        request.connection = ConnectionKind::Subscription;
-        request.account_id = account.id;
-        let prepared: PreparedLaunch = serde_json::from_value(
-            call(
-                &mut service,
-                "managed_launch_prepare",
-                json!(request),
-                false,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let params = json!({"session_id":prepared.session_id,"ticket":prepared.ticket.unwrap()});
-        service.launch_terminal = refuse_missing;
-        assert_eq!(
-            call(
-                &mut service,
-                "managed_terminal_launch",
-                params.clone(),
-                false
-            ),
-            Err(ManagedError::TerminalNotFound)
-        );
-        service.launch_terminal = refuse_unknown;
-        assert_eq!(
-            call(
-                &mut service,
-                "managed_terminal_launch",
-                params.clone(),
-                false
-            ),
-            Err(ManagedError::LaunchUnknown)
-        );
-        service.launch_terminal = record_launch;
-        assert_eq!(
-            call(&mut service, "managed_terminal_launch", params, false),
-            Err(ManagedError::Conflict),
-            "may already be running"
-        );
+        for (after, label_after) in [
+            (refuse_unknown as LaunchTerminal, "managed-launch-unknown"),
+            (refuse_storage, "managed-storage-unavailable"),
+        ] {
+            let (home, shared) = launching(refuse_missing);
+            let prepared = prepared(&shared, home.path());
+            let params =
+                json!({"session_id":prepared.session_id,"ticket":prepared.ticket.unwrap()});
+            assert_eq!(
+                terminal(&shared, params.clone()),
+                Err("managed-terminal-not-found".into())
+            );
+            locked(&shared, |service| service.launch_terminal = after);
+            assert_eq!(terminal(&shared, params.clone()), Err(label_after.into()));
+            locked(&shared, |service| service.launch_terminal = record_launch);
+            assert_eq!(
+                terminal(&shared, params),
+                Err("managed-conflict".into()),
+                "may already be running"
+            );
+        }
     }
 
     #[test]

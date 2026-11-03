@@ -9468,11 +9468,13 @@ beyond the Automation of Terminal every Terminal launch already needs.
 
 The terminal opens with the daemon's managed state unlocked and off its async
 workers: the launch is held first (a second `managed_terminal_launch` with the
-same ticket is refused with `managed-conflict`), and recorded after. A launch
-refused before anything ran (the terminal app not found, an invalid request)
-is released, and its ticket can launch again while it lasts.
-`managed-launch-unknown`, where the command may already have been typed, keeps
-the launch held until its tool reports or the ticket lapses.
+same ticket is refused with `managed-conflict`), and recorded after. Only a
+refusal that comes before anything runs (the terminal app not found, an
+invalid request, an unsupported build) releases the launch, and its ticket can
+launch again while it lasts. Anything that goes wrong once the terminal is
+asked is `managed-launch-unknown`, since the command may already have been
+typed, and that, like any other error, keeps the launch held until its tool
+reports or the ticket lapses.
 
 When `managed_launch_prepare` or `managed_session_start_again` passes the
 checks that come before preparing, other than the tool's version, and would

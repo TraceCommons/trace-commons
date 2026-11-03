@@ -265,9 +265,12 @@ fn open_window(literal: &str) -> Vec<String> {
             "end try".into(),
             "try".into(),
             "set wid to missing value".into(),
+            // With no tty there is nothing to find: no scan.
+            "if found is not \"\" then".into(),
         ],
         find_window("found"),
         vec![
+            "end if".into(),
             "if wid is not missing value then set found to found & linefeed & (wid as text)".into(),
             "end try".into(),
         ],
@@ -997,7 +1000,12 @@ pub fn launch(
         let command = shell_command(&helper, config, session, ticket)?;
         let mut argv = vec![helper.into_os_string()];
         argv.extend(helper_args(config, session, ticket));
-        launch_macos(choice, installed, &command, argv, Some(cwd), run_macos)
+        // Anything that goes wrong once the terminal is asked may follow a
+        // typed command, so it reads as `LaunchUnknown`, never as a refusal
+        // from before anything ran.
+        launch_macos(choice, installed, &command, argv, Some(cwd), |how| {
+            run_macos(how).map_err(|_| ManagedError::LaunchUnknown)
+        })
     }
     #[cfg(any(windows, target_os = "linux"))]
     {
@@ -1348,6 +1356,7 @@ mod tests {
                 // #1852 to place launches beside.
                 "try",
                 "set wid to missing value",
+                "if found is not \"\" then",
                 "repeat with w in windows",
                 "repeat with x in tabs of w",
                 "if tty of x is found then",
@@ -1357,6 +1366,7 @@ mod tests {
                 "end repeat",
                 "if wid is not missing value then exit repeat",
                 "end repeat",
+                "end if",
                 "if wid is not missing value then set found to found & linefeed & (wid as text)",
                 "end try",
                 "return found",
