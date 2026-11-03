@@ -14,6 +14,7 @@
 
 use super::*;
 use axum::body::Body;
+use chrono::Datelike;
 use tower::ServiceExt;
 use trace_commons_protocol::ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER;
 use trace_commons_server::account_native_auth::NATIVE_SESSION_MAX_LIFETIME_DAYS;
@@ -371,6 +372,125 @@ async fn pg_native_rotation_stops_at_the_absolute_cap() {
     assert!(again.rotated_secret.is_some());
     let (_, _, capped, _) = fx.row(&next).await;
     assert_eq!(capped, after, "never past the cap, and never shortened");
+    fx.cleanup().await;
+}
+
+/// A POSIX time zone whose daylight time ended at 02:00 local, ten days ago,
+/// and began about half a year before that. A real zone only has a
+/// transition inside a 30-day window for part of the year; this one always
+/// does, so the test below bites on every run, not just in the month after a
+/// clock change. `Jn` counts days 1..=365 and never Feb 29.
+fn zone_that_fell_back_ten_days_ago() -> String {
+    let day = (Utc::now() - Duration::days(10)).date_naive();
+    let ordinal = day.ordinal() as i64;
+    let leap = chrono::NaiveDate::from_ymd_opt(day.year(), 2, 29).is_some();
+    let end = if leap && ordinal >= 60 {
+        (ordinal - 1).max(59)
+    } else {
+        ordinal
+    };
+    let start = (end - 1 + 365 - 182) % 365 + 1;
+    format!("XST8XDT,J{start}/2,J{end}/2")
+}
+
+/// The test backend, with every connection's TimeZone set to `zone`.
+async fn postgres_backend_in_zone(zone: &str) -> Option<Arc<PgBackend>> {
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()?;
+    let encoded: String = format!("-c TimeZone={zone}")
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
+                (b as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect();
+    let separator = if url.contains('?') { '&' } else { '?' };
+    let config = DatabaseConfig {
+        url: SecretString::from(format!("{url}{separator}options={encoded}")),
+        pool_size: 2,
+        ssl_mode: trace_commons_server::config::SslMode::Prefer,
+        login_resolver_url:
+            trace_commons_server::config::DatabaseConfig::login_resolver_url_from_env(),
+        gate_driver_url: trace_commons_server::config::DatabaseConfig::gate_driver_url_from_env(),
+        pii_backstop_driver_url:
+            trace_commons_server::config::DatabaseConfig::pii_backstop_driver_url_from_env(),
+        invite_registry_url: None,
+    };
+    Some(Arc::new(
+        PgBackend::new(&config).await.expect("zoned test backend"),
+    ))
+}
+
+/// The cap is 30 x 24 hours after sign-in in every time zone. Adding 30
+/// calendar days in a database session whose zone fell back inside the
+/// window put it an hour late (found on 2026-11-02, the day after US
+/// daylight time ended, on a database in America/Los_Angeles).
+#[tokio::test]
+async fn pg_native_rotation_cap_ignores_the_database_time_zone() {
+    // Migrations and the tenant come from the ordinary fixture.
+    let Some((fx, account)) = sliding_fixture().await else {
+        return;
+    };
+    let zone = zone_that_fell_back_ten_days_ago();
+    let zoned = postgres_backend_in_zone(&zone)
+        .await
+        .expect("test database URL");
+    let fx = SlidingFixture {
+        backend: zoned,
+        tenant: fx.tenant.clone(),
+    };
+    let secret = &fx.secret("pg-sliding-zone");
+    let created_ago = NATIVE_SESSION_MAX_LIFETIME_DAYS * 86_400 - 3600;
+    fx.insert(
+        account,
+        secret,
+        &SessionShape {
+            created_ago,
+            expires_in: 1800,
+            ..SessionShape::native_aged()
+        },
+    )
+    .await;
+    let (_, created_at, _, _) = fx.row(secret).await;
+
+    // The control: in this session, calendar days and 24-hour days disagree
+    // by the hour the clocks went back. Without it the test passes on any
+    // zone that has no change inside the window.
+    let admin = fx
+        .backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("admin");
+    let control = admin
+        .query_one(
+            "SELECT current_setting('TimeZone') AS zone,
+                    extract(epoch FROM ($1::timestamptz + make_interval(days => $2))
+                                     - ($1::timestamptz + make_interval(hours => $2 * 24)))::float8
+                        AS drift",
+            &[&created_at, &(NATIVE_SESSION_MAX_LIFETIME_DAYS as i32)],
+        )
+        .await
+        .expect("control");
+    assert_eq!(control.get::<_, String>("zone"), zone);
+    assert_eq!(
+        control.get::<_, f64>("drift"),
+        3600.0,
+        "the session zone must fall back between created_at and the cap"
+    );
+
+    let validated = fx.validate(secret).await.expect("live session");
+    assert!(validated.rotated_secret.is_some());
+    let (_, _, after, _) = fx.row(secret).await;
+    assert_eq!(
+        after,
+        created_at + Duration::days(NATIVE_SESSION_MAX_LIFETIME_DAYS),
+        "capped at 30 x 24 hours, not 30 calendar days in {zone}"
+    );
+    assert_eq!(validated.expires_at, after);
     fx.cleanup().await;
 }
 

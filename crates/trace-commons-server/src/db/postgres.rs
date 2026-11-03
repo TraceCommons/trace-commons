@@ -4361,6 +4361,11 @@ impl Database for PgBackend {
             // NATIVE_SESSION_MAX_LIFETIME_DAYS` and never earlier than it already
             // was. A browser session keeps its fixed expiry.
             //
+            // The cap is bound in HOURS (days x 24). A timestamptz plus a days
+            // interval counts calendar days in the database session's TimeZone,
+            // so across a daylight-saving change in a non-UTC zone the cap moved
+            // by an hour; hours are absolute in every zone (as in V143).
+            //
             // Concurrency. The SELECT above took no row lock, so another request
             // may rotate, revoke or sign out this row before this UPDATE runs.
             // Under READ COMMITTED the UPDATE waits for that writer and then
@@ -4384,7 +4389,7 @@ impl Database for PgBackend {
                                     expires_at,
                                     LEAST(
                                         now() + make_interval(hours => $5),
-                                        created_at + make_interval(days => $6)
+                                        created_at + make_interval(hours => $6)
                                     )
                                 )
                                 ELSE expires_at
@@ -4400,7 +4405,7 @@ impl Database for PgBackend {
                         &new_hash,
                         &crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND,
                         &(crate::account_native_auth::NATIVE_SESSION_TTL_HOURS as i32),
-                        &(crate::account_native_auth::NATIVE_SESSION_MAX_LIFETIME_DAYS as i32),
+                        &((crate::account_native_auth::NATIVE_SESSION_MAX_LIFETIME_DAYS * 24) as i32),
                     ],
                 )
                 .await
