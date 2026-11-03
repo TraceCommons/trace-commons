@@ -257,17 +257,44 @@ fn near_ai_login_readiness_named(
 }
 
 fn ready_for(state: &AppState, contract: ProvisionContract, wallet: bool) -> bool {
+    ready_or_declined(state, contract, wallet).is_ok()
+}
+
+/// [`ready_for`], naming the control that declined (reported once, as
+/// before).
+fn ready_or_declined(
+    state: &AppState,
+    contract: ProvisionContract,
+    wallet: bool,
+) -> Result<(), &'static str> {
     let result = if wallet {
         wallet_readiness_named(state, contract).map(|_| ())
     } else {
         near_ai_login_readiness_named(state, contract)
     };
-    match result {
-        Ok(()) => true,
-        Err(control) => {
-            report_declined_control(control);
-            false
-        }
+    result.inspect_err(|control| {
+        report_declined_control(control);
+    })
+}
+
+/// What a ceremony route answers when the commons is not ready to run it.
+///
+/// A path the operator did not offer -- NEAR provisioning switched off, the
+/// default, or the wallet ceremony closed on a staging build -- answers the
+/// uniform deny (`None`), as a route that is not there would: it will not
+/// start working on retry, so "unavailable" would be wrong. A path that is
+/// offered but whose configuration is incomplete (no account registry, no
+/// identity material, no issuer, no witness or origin) is a commons mid
+/// deploy or misconfigured, answered `503`. Both are deployment state, the
+/// same for every request.
+fn not_ready_answer(control: &'static str) -> Option<axum::response::Response> {
+    if matches!(
+        control,
+        control::PROVISIONING_ENABLED | control::STAGING_WALLET_CLOSED
+    ) {
+        None
+    } else {
+        Some(near_ai_not_ready())
     }
 }
 
@@ -545,8 +572,8 @@ async fn start(
     body: Result<Json<StartRequest>, JsonRejection>,
     contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
-    if !ready_for(&state, contract, true) {
-        return Some(near_ai_not_ready());
+    if let Err(control) = ready_or_declined(&state, contract, true) {
+        return not_ready_answer(control);
     }
     if limited(&headers, "start") {
         return Some(near_ai_sign_in_rate_limited());
@@ -627,8 +654,8 @@ async fn finish(
     body: Result<Json<FinishRequest>, JsonRejection>,
     contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
-    if !ready_for(&state, contract, true) {
-        return Some(near_ai_not_ready());
+    if let Err(control) = ready_or_declined(&state, contract, true) {
+        return not_ready_answer(control);
     }
     if limited(&headers, "finish") {
         return Some(near_ai_sign_in_rate_limited());
@@ -1290,8 +1317,8 @@ async fn near_ai_start(
     // The login path's own readiness, not the wallet's: `published_witness`
     // refuses without the NEP-413 sign-in config and the wallet redirect
     // origin, neither of which this ceremony has or needs.
-    if !ready_for(&state, contract, false) {
-        return Some(near_ai_not_ready());
+    if let Err(control) = ready_or_declined(&state, contract, false) {
+        return not_ready_answer(control);
     }
     if limited(&headers, "near-ai-start") {
         return Some(near_ai_sign_in_rate_limited());
@@ -1483,12 +1510,13 @@ fn near_ai_database_failure(
     }
 }
 
-/// A commons not ready to offer the NEAR AI login ceremony: the path is off,
-/// or its database, identity material or issuer is not configured. `503`,
-/// not the uniform deny: a client reads that `400` as "this login belongs to
-/// another account", and readiness is deployment state, the same for every
-/// request and already published by the capabilities route. The control that
-/// declined is logged once by `ready_for`.
+/// A commons that offers a NEAR sign-in ceremony but is not ready to run it:
+/// its database, identity material, issuer, witness or origin is not
+/// configured. `503`, not the uniform deny: a client reads that `400` as "this
+/// login belongs to another account", and readiness is deployment state, the
+/// same for every request and already published by the capabilities route.
+/// The control that declined is logged once by `ready_or_declined`. A path
+/// that is switched off is not this; see `not_ready_answer`.
 fn near_ai_not_ready() -> axum::response::Response {
     near_ai_sign_in_unavailable("not_ready")
 }
@@ -1499,8 +1527,8 @@ async fn near_ai_finish(
     body: Result<Json<NearAiFinishRequest>, JsonRejection>,
     contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
-    if !ready_for(&state, contract, false) {
-        return Some(near_ai_not_ready());
+    if let Err(control) = ready_or_declined(&state, contract, false) {
+        return not_ready_answer(control);
     }
     if limited(&headers, "near-ai-finish") {
         return Some(near_ai_sign_in_rate_limited());

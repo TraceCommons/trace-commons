@@ -2066,7 +2066,7 @@ async fn registry(database: Option<&str>, with_resolver: bool) -> Arc<PgBackend>
     )
 }
 
-/// A commons not ready to offer the ceremony -- the path off, no account
+/// A commons that offers the ceremony but is not ready to run it -- no account
 /// registry, no identity material -- answers `503` at start and at finish,
 /// not the uniform deny a signed-out device reads as "another account".
 /// Readiness is the same for every request, so this says nothing about who
@@ -2084,8 +2084,7 @@ async fn pg_a_near_ai_commons_that_is_not_ready_answers_503() {
         "code_challenge": challenge,
         "code_challenge_method": "S256",
     });
-    let unready: [(&str, fn(&mut AppState)); 3] = [
-        ("provisioning off", |s| s.near_provisioning_enabled = false),
+    let unready: [(&str, fn(&mut AppState)); 2] = [
         ("no account registry", |s| s.db_mirror = None),
         ("no identity material", |s| s.near_account_identity = None),
     ];
@@ -2102,6 +2101,19 @@ async fn pg_a_near_ai_commons_that_is_not_ready_answers_503() {
         .await;
         assert_unavailable(&finished, &format!("finish, {cause}"));
     }
+    // A path the operator switched off is not "unavailable": it will not
+    // start working on retry, so it answers the uniform deny, like a route
+    // that is not there.
+    let mut off = h.state.clone();
+    Arc::make_mut(&mut off).near_provisioning_enabled = false;
+    assert_uniform_deny(
+        &post(&off, PROVISION_START, &start_body).await,
+        "start, off",
+    );
+    assert_uniform_deny(
+        &post(&off, PROVISION_FINISH, &well_formed_unknown_finish(&device)).await,
+        "finish, off",
+    );
     reset_account_rate_limiter_for_db_test().await;
 }
 
