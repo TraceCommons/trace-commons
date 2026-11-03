@@ -19,6 +19,12 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     /// `offerExposure` in one line, shown on the offer card with its first
     /// paragraph while the rest waits behind `offerLearnMore`.
     public let offerExposureShort: String
+    /// The offer notice's own lines (owner, 2026-11-02): its opening line,
+    /// the shared-machine fact the short exposure line leaves out, and the
+    /// local log, the last two behind its Details.
+    public let offerWhatShort: String
+    public let offerExposureShared: String
+    public let offerLogged: String
     /// The offer card's link to the rest of its paragraphs.
     public let offerLearnMore: String
     public let offerNoRepoint: String
@@ -305,6 +311,9 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case offerWhat = "offer_what"
         case offerExposure = "offer_exposure"
         case offerExposureShort = "offer_exposure_short"
+        case offerWhatShort = "offer_what_short"
+        case offerExposureShared = "offer_exposure_shared"
+        case offerLogged = "offer_logged"
         case offerLearnMore = "offer_learn_more"
         case offerNoRepoint = "offer_no_repoint"
         case offerAccept = "offer_accept"

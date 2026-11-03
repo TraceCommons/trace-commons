@@ -83,9 +83,10 @@ final class DesignRulings20261102Tests: XCTestCase {
     }
 
     /// While a sign-in is needed, or one is running, the balance card's head
-    /// carries Sign in where its re-read icon was, the state line has no
-    /// dot, and the big button under the balance is gone; otherwise the
-    /// re-read icon is back and the line keeps its dot.
+    /// carries Sign in where its re-read icon was, and the big button under
+    /// the balance is gone; otherwise the re-read icon is back. With a state
+    /// line to show, the card is drawn as the sessions card draws its empty
+    /// line: the line as the subtitle, no dot, nothing under the head.
     func test_theBalanceCardSignsInFromItsHead() throws {
         XCTAssertTrue(NearAiSignInOffer.balanceHeadSignIn(state: "no_session", renewalFailure: nil, failed: false,
                                                           signingIn: false))
@@ -101,14 +102,17 @@ final class DesignRulings20261102Tests: XCTestCase {
         let account = try Self.text("Views/Monitor/InferenceAccount.swift")
         let start = try XCTUnwrap(account.range(of: "struct PrivateAIBalanceCard: View {"))
         let card = String(account[start.lowerBound...])
+        XCTAssertTrue(card.contains(
+            "if signIn, let line = BalanceSurface.stateLine(model.balanceStatus, copy: copy, calls: model.balanceCalls) {"))
+        XCTAssertTrue(card.contains("subtitle: [line, NearAiSignInOffer.progressLine("))
+        XCTAssertTrue(card.contains("trailing: { NearAiSignInHeadButton(copy: copy) })"))
         XCTAssertTrue(card.contains("refresh: signIn ? nil : GlassCardRefresh("))
         XCTAssertTrue(card.contains("if signIn { NearAiSignInHeadButton(copy: copy) }"))
-        XCTAssertTrue(card.contains("BalanceRow(copy: copy, plainLine: signIn)"))
-
-        let row = try Self.text("Views/BalanceRow.swift")
-        let plain = try XCTUnwrap(row.range(of: "if plainLine {\n                    Text(sentence)"))
-        let dotted = try XCTUnwrap(row.range(of: "GlassStatusLabel(sentence, status:"))
-        XCTAssertLessThan(plain.lowerBound, dotted.lowerBound)
+        XCTAssertFalse(try Self.text("Views/BalanceRow.swift").contains("plainLine"))
+        // The card it matches: the sessions card's empty line, a subtitle on
+        // the head-only card.
+        let sessions = try Self.text("Views/ManagedSessionsView.swift")
+        XCTAssertTrue(sessions.contains("subtitle: [model.managedText(\"empty\")], trailing: { EmptyView() })"))
 
         let control = try Self.text("Views/NearAiSignInControl.swift")
         let head = try XCTUnwrap(control.range(of: "struct NearAiSignInHeadButton: View {"))
@@ -118,5 +122,30 @@ final class DesignRulings20261102Tests: XCTestCase {
         XCTAssertTrue(button.contains("style: GlassButtonStyle(.primary, small: true)"))
         XCTAssertFalse(String(control[below.lowerBound...]).contains("NearAiSignInButton("),
                        "the big button under the balance is back")
+    }
+
+    /// Every notice's call to action is a primary button (owner,
+    /// 2026-11-02); its secondary actions stay links, and the nudge
+    /// notice's Not now stays a link.
+    func test_everyNoticeCallToActionIsPrimary() throws {
+        let notices = try Self.text("Views/Monitor/MonitorNotices.swift")
+        XCTAssertFalse(notices.contains("GlassButtonStyle(.glass)"), "a notice's call to action is glass again")
+        XCTAssertEqual(notices.components(separatedBy: "GlassButtonStyle(.primary)").count - 1, 12)
+        XCTAssertTrue(notices.contains("GlassButtonStyle(.link)"), "secondary actions stay links")
+        XCTAssertEqual(NudgeGlassCard.style(.seeHistory), .primary)
+        XCTAssertEqual(NudgeGlassCard.style(.notNow(.idleSessions)), .link)
+    }
+
+    /// The pixel field is tried on the Private AI tab's card only, out to
+    /// the card's edges and corners, behind its words.
+    func test_thePixelFieldIsOnThePrivateAIGuideOnly() throws {
+        XCTAssertTrue(try Self.text("Views/Monitor/InferenceViews.swift").contains("pixelField: true"))
+        XCTAssertFalse(try Self.text("Views/Monitor/HomeViews.swift").contains("pixelField"))
+        XCTAssertFalse(try Self.text("Views/InsightsGetStarted.swift").contains("pixelField"))
+        let card = try Self.text("Views/GetStartedCard.swift")
+        XCTAssertTrue(card.contains("var pixelField = false"))
+        XCTAssertTrue(card.contains(".background { if pixelField { GetStartedCardField() } }\n        .insightsSection()"))
+        XCTAssertTrue(card.contains(".clipShape(RoundedRectangle(cornerRadius: GlassTokens.Radius.card, style: .continuous))"))
+        XCTAssertTrue(card.contains(".padding(.horizontal, -GlassTokens.Space.cardPaddingHorizontal)"))
     }
 }

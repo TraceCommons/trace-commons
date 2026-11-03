@@ -33,6 +33,7 @@ enum PrivateInferenceCopyFixture {
     static let complete = """
         {"destination":"DESTINATION","subtitle":"SUBTITLE","subtitle_credit":"SUBTITLE-CREDIT",
          "offer_title":"T","offer_what":"WHAT","offer_exposure":"EXPOSURE","offer_exposure_short":"EXPOSURE SHORT","offer_learn_more":"MORE",
+         "offer_what_short":"WHAT SHORT","offer_exposure_shared":"EXPOSURE SHARED","offer_logged":"LOGGED",
          "offer_no_repoint":"NO-REPOINT","offer_accept":"ACCEPT",
          "offer_decline":"DECLINE","offer_asked_once":"ONCE",
          "settings_title":"S-TITLE","settings_toggle":"S-TOGGLE",

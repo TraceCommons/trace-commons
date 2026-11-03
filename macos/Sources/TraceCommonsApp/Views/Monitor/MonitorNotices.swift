@@ -201,7 +201,7 @@ struct MonitorNotices: View {
                     GlassNoticeMark(.ask)
                 } summary: { EmptyView() } details: { EmptyView() } actions: {
                     Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
-                        .buttonStyle(GlassButtonStyle(.glass))
+                        .buttonStyle(GlassButtonStyle(.primary))
                 }
             })
         case .awaiting, .open:
@@ -441,7 +441,7 @@ struct MonitorNotices: View {
                     // doing so agrees to the new settings.
                     if let rearm, let action = notice.rearmAction {
                         Button(action) { model.rearmGrantVoid(id: void.id, projectID: rearm) }
-                            .buttonStyle(GlassButtonStyle(.glass))
+                            .buttonStyle(GlassButtonStyle(.primary))
                             .lineLimit(1)
                     }
                     dismissAll
@@ -468,7 +468,7 @@ struct MonitorNotices: View {
                 } actions: {
                     if let target, let action = notice.askFirstAction {
                         Button(action) { model.askFirst(projectID: target) }
-                            .buttonStyle(GlassButtonStyle(.glass))
+                            .buttonStyle(GlassButtonStyle(.primary))
                             .lineLimit(1)
                     }
                     dismissAll
@@ -492,7 +492,7 @@ struct MonitorNotices: View {
                                 Text(project.line).foregroundStyle(GlassColor.textPrimary)
                                 if let projectID = project.projectId, let action = project.askFirstAction {
                                     Button(action) { model.askFirst(projectID: projectID) }
-                                        .buttonStyle(GlassButtonStyle(.glass))
+                                        .buttonStyle(GlassButtonStyle(.primary))
                                         .lineLimit(1)
                                 }
                                 if let projectID = project.projectId, model.askFirstRefused.contains(projectID),
@@ -532,7 +532,7 @@ struct MonitorNotices: View {
                     Button(busy ? words.undo.undoing : words.undoKeep) {
                         Task { await traces.perform(.undoKeep, on: kept) }
                     }
-                    .buttonStyle(GlassButtonStyle(.glass))
+                    .buttonStyle(GlassButtonStyle(.primary))
                     .disabled(busy)
                 }
             })
@@ -553,7 +553,7 @@ struct MonitorNotices: View {
                         Button(busy ? words.undo.undoing : words.undoContribute) {
                             Task { await traces.undoFolder(folder.projectId) }
                         }
-                        .buttonStyle(GlassButtonStyle(.glass))
+                        .buttonStyle(GlassButtonStyle(.primary))
                         .disabled(busy)
                     }
                 }
@@ -576,7 +576,7 @@ struct MonitorNotices: View {
                         Button(busy ? words.undo.undoing : words.undoContribute) {
                             Task { await traces.perform(.undoContribute, on: contributed.entryId) }
                         }
-                        .buttonStyle(GlassButtonStyle(.glass))
+                        .buttonStyle(GlassButtonStyle(.primary))
                         .disabled(busy)
                     }
                 }
@@ -610,7 +610,7 @@ struct MonitorNotices: View {
                     // The app's one Return binding, on the safe action: a
                     // keystroke pulls a transcript back.
                     Button(words?.undoContribute ?? QueueLegacyWords.undo) { model.undoApproval() }
-                        .buttonStyle(GlassButtonStyle(.glass))
+                        .buttonStyle(GlassButtonStyle(.primary))
                         .keyboardShortcut(.defaultAction)
                 }
             }
@@ -646,7 +646,7 @@ struct MonitorNotices: View {
                             await offers.accept(offer) { _ = await Notifier.shared.requestAuthorizationIfNeverAsked() }
                         }
                     }
-                    .buttonStyle(GlassButtonStyle(.glass))
+                    .buttonStyle(GlassButtonStyle(.primary))
                     .disabled(offers.writing)
                     Button(offer.decline) { Task { await offers.answer(offer, accept: false) } }
                         .buttonStyle(GlassButtonStyle(.link))
@@ -688,7 +688,8 @@ struct MonitorNotices: View {
                 // The X answers as Not now does: the offer is asked once, so
                 // closing it is an answer, not a deferral (owner,
                 // 2026-10-08). What it does and, in one line, what it
-                // exposes; the rest behind Details.
+                // exposes; the rest behind Details, each thing said once
+                // (owner, 2026-11-02).
                 GlassPopoverNotice(
                     title: copy.offerTitle, tag: copy.destination, tagTone: .accent,
                     detailsLabel: details, closeLabel: copy.offerDecline,
@@ -696,15 +697,16 @@ struct MonitorNotices: View {
                 ) {
                     GlassNoticeMark(systemImage: "shield.lefthalf.filled", tint: GlassColor.accentText)
                 } summary: {
-                    Text(copy.offerWhat)
+                    Text(copy.offerWhatShort)
                     Text(copy.offerExposureShort)
                 } details: {
-                    Text(copy.offerExposure)
+                    Text(copy.offerExposureShared)
                     Text(copy.offerNoRepoint)
+                    Text(copy.offerLogged)
                     Text(copy.offerAskedOnce)
                 } actions: {
                     Button(copy.offerAccept) { model.answerPrivateInferenceOffer(accepted: true) }
-                        .buttonStyle(GlassButtonStyle(.glass))
+                        .buttonStyle(GlassButtonStyle(.primary))
                     Button(copy.offerDecline) { model.answerPrivateInferenceOffer(accepted: false) }
                         .buttonStyle(GlassButtonStyle(.link))
                 }
@@ -725,7 +727,7 @@ struct MonitorNotices: View {
                         title: model.managedText("sign_in_near_ai"),
                         accessibilityName: model.managedText("sign_in_near_ai_accessibility"),
                         choice: NearAiSignInChoice.of(model.privateInferenceCopy),
-                        style: GlassButtonStyle(.glass)
+                        style: GlassButtonStyle(.primary)
                     ) { provider in
                         NearAiSignIn.begin(model, provider: provider, openURL: openURL)
                     }
@@ -822,7 +824,7 @@ private struct ArmingOfferPopover: View {
                 Text(copy.body)
             } actions: {
                 Button(copy.confirm) { confirming = true }
-                    .buttonStyle(GlassButtonStyle(.glass))
+                    .buttonStyle(GlassButtonStyle(.primary))
                 Button(copy.decline, action: onDecline)
                     .buttonStyle(GlassButtonStyle(.link))
             }

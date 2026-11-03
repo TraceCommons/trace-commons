@@ -152,6 +152,24 @@ pub const OFFER_EXPOSURE_SHORT: &str =
 /// The link on the offer card that shows the rest of the offer's paragraphs.
 pub const OFFER_LEARN_MORE: &str = "Learn more";
 
+/// [`OFFER_WHAT`]'s first sentence alone, for the offer notice over the
+/// Private AI tab, which says each thing once (owner, 2026-11-02: remove
+/// the redundant copy, and put the rest behind Details). Its second
+/// sentence is [`OFFER_NO_REPOINT`]'s, and its third is [`OFFER_LOGGED`].
+/// DRAFT, NEEDS APPROVAL (the words are [`OFFER_WHAT`]'s).
+pub const OFFER_WHAT_SHORT: &str =
+    "Lets your tools send AI requests through this app, answered by NEAR AI once you sign in.";
+
+/// What [`OFFER_EXPOSURE`] says beyond [`OFFER_EXPOSURE_SHORT`], for the
+/// notice's Details, where the short line is already in sight above it.
+/// Kept with the notice so a shared machine is never left unsaid. DRAFT,
+/// NEEDS APPROVAL.
+pub const OFFER_EXPOSURE_SHARED: &str =
+    "On a shared computer, anyone who can log in can use it too.";
+
+/// [`OFFER_WHAT`]'s last sentence alone, for the notice's Details.
+pub const OFFER_LOGGED: &str = "Requests are logged on this computer.";
+
 /// Saying yes to this is not saying yes to repointing a tool.
 pub const OFFER_NO_REPOINT: &str =
     "Turning it on doesn't change where any tool sends requests. You connect tools one at a time.";
@@ -540,6 +558,10 @@ pub struct PrivateInferenceCopy {
     pub offer_exposure: &'static str,
     pub offer_exposure_short: &'static str,
     pub offer_learn_more: &'static str,
+    /// The offer notice's own lines (owner, 2026-11-02): each thing once.
+    pub offer_what_short: &'static str,
+    pub offer_exposure_shared: &'static str,
+    pub offer_logged: &'static str,
     pub offer_no_repoint: &'static str,
     pub offer_accept: &'static str,
     pub offer_decline: &'static str,
@@ -2411,6 +2433,9 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         offer_exposure: OFFER_EXPOSURE,
         offer_exposure_short: OFFER_EXPOSURE_SHORT,
         offer_learn_more: OFFER_LEARN_MORE,
+        offer_what_short: OFFER_WHAT_SHORT,
+        offer_exposure_shared: OFFER_EXPOSURE_SHARED,
+        offer_logged: OFFER_LOGGED,
         offer_no_repoint: OFFER_NO_REPOINT,
         offer_accept: OFFER_ACCEPT,
         offer_decline: OFFER_DECLINE,
@@ -3456,6 +3481,31 @@ mod tests {
     /// one sentence the design will not ship without: the listener's
     /// answering side is unauthenticated, and a contributor on a shared
     /// machine is deciding something different from one on a laptop.
+    /// The offer notice says each thing once (owner, 2026-11-02): its
+    /// opening line is the offer's first sentence, its other two sentences
+    /// are the notice's no-repoint and logged lines, and the shared-machine
+    /// fact the short exposure line leaves out has a line of its own.
+    #[test]
+    fn the_offer_notice_says_each_thing_once() {
+        assert!(OFFER_WHAT.starts_with(OFFER_WHAT_SHORT));
+        assert!(OFFER_WHAT.ends_with(OFFER_LOGGED));
+        assert!(
+            !OFFER_WHAT_SHORT.contains("connect"),
+            "the no-repoint line says that"
+        );
+        assert!(!OFFER_WHAT_SHORT.contains("logged"));
+        assert!(OFFER_EXPOSURE.contains("shared") && OFFER_EXPOSURE_SHARED.contains("shared"));
+        assert!(!OFFER_EXPOSURE_SHORT.contains("shared"));
+        assert!(
+            !OFFER_EXPOSURE_SHARED.contains("charged"),
+            "the short line says that"
+        );
+        let payload = private_inference_copy();
+        assert_eq!(payload.offer_what_short, OFFER_WHAT_SHORT);
+        assert_eq!(payload.offer_exposure_shared, OFFER_EXPOSURE_SHARED);
+        assert_eq!(payload.offer_logged, OFFER_LOGGED);
+    }
+
     #[test]
     fn the_offer_says_what_it_exposes() {
         let payload = private_inference_copy();
@@ -4971,7 +5021,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            182,
+            185,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );

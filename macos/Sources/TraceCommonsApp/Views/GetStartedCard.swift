@@ -11,6 +11,11 @@ import TCDesign
 /// it has one, as a text link with an arrow under it. Given `close`, a
 /// small X in the top trailing corner closes the card. No graphic and no
 /// gradient: it is a plain card. Every word is the caller's.
+///
+/// `pixelField` adds a dithered grid of blues that grows from the card's
+/// bottom trailing corner and fades out before its text (owner, 2026-11-02,
+/// tried on the Private AI tab's card first, `GlassPixelField`), between
+/// the card's fill and its words.
 struct GetStartedCard: View {
     struct Step {
         let title: String
@@ -37,6 +42,7 @@ struct GetStartedCard: View {
     var lead: String = ""
     let steps: [Step]
     var close: Close?
+    var pixelField = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s9) {
@@ -61,7 +67,25 @@ struct GetStartedCard: View {
             .insightsCardBody()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background { if pixelField { GetStartedCardField() } }
         .insightsSection()
+    }
+}
+
+/// The pixel field, out to the card's own edges and corners: the card's
+/// content sits inside its padding, so the field reaches back out by that
+/// padding and is cut to the card's corner radius.
+private struct GetStartedCardField: View {
+    /// Three nearby blues: the kept blue, the chart blue and first run's
+    /// pale beam core, which the cells drift between.
+    static let palette = [GlassTokens.Color.dataKept, GlassTokens.Color.chartSeries1,
+                          GlassTokens.Color.firstRunBeamCore]
+
+    var body: some View {
+        GlassPixelField(palette: Self.palette)
+            .clipShape(RoundedRectangle(cornerRadius: GlassTokens.Radius.card, style: .continuous))
+            .padding(.horizontal, -GlassTokens.Space.cardPaddingHorizontal)
+            .padding(.vertical, -GlassTokens.Space.cardPaddingVertical)
     }
 }
 

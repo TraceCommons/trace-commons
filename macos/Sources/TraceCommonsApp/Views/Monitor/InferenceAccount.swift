@@ -200,35 +200,49 @@ struct PrivateAIStatCard: View {
 /// usable it draws the Private AI tab's Sign in, which opens the browser
 /// (the Settings credential card keeps its own, with the provider chooser),
 /// in the re-read icon's place at the head's trailing end (owner,
-/// 2026-11-02): re-reading cannot help until a sign-in lands. The state
-/// line under the heading is then plain text, with no dot.
+/// 2026-11-02): re-reading cannot help until a sign-in lands.
 struct PrivateAIBalanceCard: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
 
     /// Under its icon (owner, 2026-10-10): the heading with its re-read
     /// icon, or Sign in, and the state or the figures under it.
+    ///
+    /// While a sign-in is needed the card is drawn as the sessions card
+    /// draws its empty line (owner, 2026-11-02): the state, and the core's
+    /// waiting or failure line, as the subtitle under the title, Sign in at
+    /// the head's trailing end, and nothing under the head. Add funds never
+    /// shows in place of a sign-in (`FundingRow.showsAddFunds`), so nothing
+    /// is lost.
     var body: some View {
         let signIn = NearAiSignInOffer.balanceHeadSignIn(
             state: model.balanceStatus.state, renewalFailure: model.accountRenewalFailure,
             failed: model.nearAiSignInFailed, signingIn: model.nearAiSigningIn)
-        GlassIconCard(
-            systemImage: "dollarsign.circle", title: copy.balanceTitle,
-            refresh: signIn ? nil : GlassCardRefresh(
-                copy.panelBalanceRefreshAccessibility,
-                isDisabled: model.credentialBusy, isRefreshing: model.balanceRefreshing,
-                action: { model.refreshNearAiBalanceFromButton() }),
-            accessory: {
-                if signIn { NearAiSignInHeadButton(copy: copy) }
-            },
-            content: {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                    BalanceRow(copy: copy, plainLine: signIn)
-                    // To billing, verified, as Settings' Manage billing
-                    // (owner, 2026-10-27); hidden while a sign-in is needed.
-                    FundingRow(copy: copy, style: .addFunds)
-                    NearAiSignInControl(copy: copy)
-                }
-            })
+        if signIn, let line = BalanceSurface.stateLine(model.balanceStatus, copy: copy, calls: model.balanceCalls) {
+            GlassIconCard(
+                systemImage: "dollarsign.circle", title: copy.balanceTitle,
+                subtitle: [line, NearAiSignInOffer.progressLine(
+                    copy, signingIn: model.nearAiSigningIn, failed: model.nearAiSignInFailed) ?? ""],
+                trailing: { NearAiSignInHeadButton(copy: copy) })
+        } else {
+            GlassIconCard(
+                systemImage: "dollarsign.circle", title: copy.balanceTitle,
+                refresh: signIn ? nil : GlassCardRefresh(
+                    copy.panelBalanceRefreshAccessibility,
+                    isDisabled: model.credentialBusy, isRefreshing: model.balanceRefreshing,
+                    action: { model.refreshNearAiBalanceFromButton() }),
+                accessory: {
+                    if signIn { NearAiSignInHeadButton(copy: copy) }
+                },
+                content: {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                        BalanceRow(copy: copy)
+                        // To billing, verified, as Settings' Manage billing
+                        // (owner, 2026-10-27); hidden while a sign-in is needed.
+                        FundingRow(copy: copy, style: .addFunds)
+                        NearAiSignInControl(copy: copy)
+                    }
+                })
+        }
     }
 }

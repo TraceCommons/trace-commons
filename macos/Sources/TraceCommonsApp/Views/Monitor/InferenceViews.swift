@@ -403,7 +403,9 @@ struct PrivateAIGuideCard: View {
                 steps: Self.steps.map { keys in
                     GetStartedCard.Step(title: model.managedText(keys.title), detail: model.managedText(keys.line))
                 },
-                close: GetStartedCard.Close(label: MonitorWords.close) { closed = true })
+                close: GetStartedCard.Close(label: MonitorWords.close) { closed = true },
+                // Tried here first (owner, 2026-11-02).
+                pixelField: true)
         }
     }
 }

@@ -20,10 +20,12 @@ struct NudgeGlassCard: View {
     let refusal: String?
     let act: (NudgeSurface.Intent) -> Void
 
-    /// The button style for one action.
+    /// The button style for one action: the notice's call to action in
+    /// the primary style, as every notice's is (owner, 2026-11-02), and Not
+    /// now a link.
     static func style(_ intent: NudgeSurface.Intent) -> GlassButtonKind {
         if case .notNow = intent { return .link }
-        return .glass
+        return .primary
     }
 
     var body: some View {
