@@ -229,7 +229,7 @@ public static class PublicProfileCopy
             // surfaces as a sentence rather than as the fallback below.
             "bio-required-or-null" or "bio-invalid" =>
                 "The bio wasn't sent in a form the roster takes.",
-            "not-logged-in" => "This device isn't connected to Trace Commons.",
+            "not-logged-in" => "This device isn't connected.",
 
             // The underlying failure is never forwarded by the daemon -- it
             // can carry a server response body or a URL -- so there is nothing
@@ -249,7 +249,7 @@ public static class PublicProfileCopy
     public static string LeaveFailureSentence(string? label)
     {
         string reason = label == "not-logged-in"
-            ? "This device isn't connected to Trace Commons."
+            ? "This device isn't connected."
             : "The request didn't go through.";
 
         return $"{reason} You're still on the roster and your handle is still published. You can "

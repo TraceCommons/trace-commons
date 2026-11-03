@@ -1847,7 +1847,7 @@ mod tests {
     /// carries `$`, backticks and non-ASCII text.
     fn hostile_command() -> String {
         shell_command(
-            Path::new("/Applications/Trace Commons.app/Contents/MacOS/near-ai"),
+            Path::new("/Applications/Near.ai Staging.app/Contents/MacOS/near-ai"),
             Path::new(
                 "/Users/x/a\"; do shell script \"touch /tmp/pwn\" --\\\n'b/$HOME/`touch pwn`/año/日本語",
             ),
@@ -2335,8 +2335,8 @@ mod tests {
         plan(
             app,
             Path::new("/usr/bin/term"),
-            Path::new("/opt/Trace Commons/near-ai"),
-            Path::new("/home/x/.config/trace commons"),
+            Path::new("/opt/Near ai/near-ai"),
+            Path::new("/home/x/.config/near ai"),
             cwd,
             Uuid::nil(),
             "abcdef01",
@@ -2346,9 +2346,9 @@ mod tests {
     #[cfg(unix)]
     /// The helper and its arguments, as the tail every plan ends with.
     fn helper_tail() -> Vec<std::ffi::OsString> {
-        let mut tail = vec![std::ffi::OsString::from("/opt/Trace Commons/near-ai")];
+        let mut tail = vec![std::ffi::OsString::from("/opt/Near ai/near-ai")];
         tail.extend(helper_args(
-            Path::new("/home/x/.config/trace commons"),
+            Path::new("/home/x/.config/near ai"),
             Uuid::nil(),
             "abcdef01",
         ));
@@ -2565,7 +2565,7 @@ mod tests {
     fn macos_argv_apps_are_opened_by_bundle_id_with_the_command_as_argv() {
         let cwd = Path::new("/Users/x/it's \"quoted\"/$HOME");
         let command: Vec<std::ffi::OsString> = vec![
-            "/Applications/Trace Commons.app/near-ai".into(),
+            "/Applications/Near.ai Staging.app/near-ai".into(),
             "--ticket".into(),
             "ab".into(),
         ];

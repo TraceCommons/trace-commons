@@ -28,7 +28,7 @@ final class SafeguardNoticeCloseTests: XCTestCase {
     }
 
     func testACoreThatIsDownOrUnreadCannotBeClosed() {
-        XCTAssertNil(MonitorNotices.healthCloseID(for: banner("Trace Commons is not running.", .outside)))
+        XCTAssertNil(MonitorNotices.healthCloseID(for: banner("Near.ai is not running.", .outside)))
     }
 
     func testAClosedSafeguardReturnsOnceItsCauseHasGone() {
