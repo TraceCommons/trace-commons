@@ -197,24 +197,33 @@ struct PrivateAIStatCard: View {
 /// #1146's `PrivateAiBalancePanel`, drawn in the main pane and in the
 /// inspector: the balance eyebrow and heading with its own re-read link, then
 /// the balance row's sentence or figures. When the NEAR AI login is not
-/// usable it also draws the Private AI tab's Sign in, which opens the browser
-/// (the Settings credential card keeps its own, with the provider chooser).
+/// usable it draws the Private AI tab's Sign in, which opens the browser
+/// (the Settings credential card keeps its own, with the provider chooser),
+/// in the re-read icon's place at the head's trailing end (owner,
+/// 2026-11-02): re-reading cannot help until a sign-in lands. The state
+/// line under the heading is then plain text, with no dot.
 struct PrivateAIBalanceCard: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
 
     /// Under its icon (owner, 2026-10-10): the heading with its re-read
-    /// icon and the state or the figures under it.
+    /// icon, or Sign in, and the state or the figures under it.
     var body: some View {
+        let signIn = NearAiSignInOffer.balanceHeadSignIn(
+            state: model.balanceStatus.state, renewalFailure: model.accountRenewalFailure,
+            failed: model.nearAiSignInFailed, signingIn: model.nearAiSigningIn)
         GlassIconCard(
             systemImage: "dollarsign.circle", title: copy.balanceTitle,
-            refresh: .init(
+            refresh: signIn ? nil : GlassCardRefresh(
                 copy.panelBalanceRefreshAccessibility,
                 isDisabled: model.credentialBusy, isRefreshing: model.balanceRefreshing,
                 action: { model.refreshNearAiBalanceFromButton() }),
+            accessory: {
+                if signIn { NearAiSignInHeadButton(copy: copy) }
+            },
             content: {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                    BalanceRow(copy: copy)
+                    BalanceRow(copy: copy, plainLine: signIn)
                     // To billing, verified, as Settings' Manage billing
                     // (owner, 2026-10-27); hidden while a sign-in is needed.
                     FundingRow(copy: copy, style: .addFunds)

@@ -4,8 +4,10 @@ import XCTest
 
 /// The owner's 2026-11-02 asks: the Automatic card over the Traces tree
 /// becomes a toggle button with an eye in the toolbar, left of History;
-/// and the Private AI tab's guide and Home's Traces walkthrough take the
-/// Insights empty state's card design, formatting and layout.
+/// the Private AI tab's guide and Home's Traces walkthrough take the
+/// Insights empty state's card design, formatting and layout; Private AI
+/// is first on Home again; and the balance card's head carries Sign in in
+/// the re-read icon's place while a sign-in is needed.
 @MainActor
 final class DesignRulings20261102Tests: XCTestCase {
     private static func text(_ rel: String) throws -> String {
@@ -69,5 +71,52 @@ final class DesignRulings20261102Tests: XCTestCase {
         XCTAssertTrue(card.contains("if let close { GetStartedCardClose(close: close) }"))
         XCTAssertTrue(card.contains(".insightsSection()"), "the Insights card's own section")
         XCTAssertTrue(card.contains("Image(systemName: \"arrow.right\")"), "a step's action is a text link")
+    }
+
+    /// Private AI is the first section on Home, above Traces and Account.
+    func test_privateAIIsFirstOnHome() throws {
+        let home = try Self.text("Views/Monitor/HomeViews.swift")
+        XCTAssertTrue(home.contains(
+            "return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n"
+                + "            privateAI\n            HomeSection(words?.sectionTraces) {"))
+        XCTAssertEqual(home.components(separatedBy: "            privateAI\n").count - 1, 1)
+    }
+
+    /// While a sign-in is needed, or one is running, the balance card's head
+    /// carries Sign in where its re-read icon was, the state line has no
+    /// dot, and the big button under the balance is gone; otherwise the
+    /// re-read icon is back and the line keeps its dot.
+    func test_theBalanceCardSignsInFromItsHead() throws {
+        XCTAssertTrue(NearAiSignInOffer.balanceHeadSignIn(state: "no_session", renewalFailure: nil, failed: false,
+                                                          signingIn: false))
+        XCTAssertTrue(NearAiSignInOffer.balanceHeadSignIn(state: "session_expired", renewalFailure: nil,
+                                                          failed: false, signingIn: false))
+        XCTAssertTrue(NearAiSignInOffer.balanceHeadSignIn(state: "settled", renewalFailure: nil, failed: false,
+                                                          signingIn: true), "a running sign-in keeps it")
+        XCTAssertFalse(NearAiSignInOffer.balanceHeadSignIn(state: "settled", renewalFailure: nil, failed: false,
+                                                           signingIn: false))
+        XCTAssertFalse(NearAiSignInOffer.balanceHeadSignIn(state: "unreachable", renewalFailure: nil, failed: false,
+                                                           signingIn: false), "unreachable is not a sign-in")
+
+        let account = try Self.text("Views/Monitor/InferenceAccount.swift")
+        let start = try XCTUnwrap(account.range(of: "struct PrivateAIBalanceCard: View {"))
+        let card = String(account[start.lowerBound...])
+        XCTAssertTrue(card.contains("refresh: signIn ? nil : GlassCardRefresh("))
+        XCTAssertTrue(card.contains("if signIn { NearAiSignInHeadButton(copy: copy) }"))
+        XCTAssertTrue(card.contains("BalanceRow(copy: copy, plainLine: signIn)"))
+
+        let row = try Self.text("Views/BalanceRow.swift")
+        let plain = try XCTUnwrap(row.range(of: "if plainLine {\n                    Text(sentence)"))
+        let dotted = try XCTUnwrap(row.range(of: "GlassStatusLabel(sentence, status:"))
+        XCTAssertLessThan(plain.lowerBound, dotted.lowerBound)
+
+        let control = try Self.text("Views/NearAiSignInControl.swift")
+        let head = try XCTUnwrap(control.range(of: "struct NearAiSignInHeadButton: View {"))
+        let below = try XCTUnwrap(control.range(of: "struct NearAiSignInControl: View {"))
+        let button = String(control[head.lowerBound..<below.lowerBound])
+        XCTAssertTrue(button.contains("title: model.managedText(\"sign_in_near_ai\")"), "Home's \"Sign in\"")
+        XCTAssertTrue(button.contains("style: GlassButtonStyle(.primary, small: true)"))
+        XCTAssertFalse(String(control[below.lowerBound...]).contains("NearAiSignInButton("),
+                       "the big button under the balance is back")
     }
 }

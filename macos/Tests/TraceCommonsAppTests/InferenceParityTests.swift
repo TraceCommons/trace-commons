@@ -206,7 +206,7 @@ final class InferenceParityTests: XCTestCase {
         // Each card under its icon (owner, 2026-10-10); the billing card
         // draws its own.
         for needle in ["PrivateAIBalanceCard(copy: copy)",
-                       "BalanceRow(copy: copy)", "action: { model.refreshNearAiBalanceFromButton() })",
+                       "BalanceRow(copy: copy, plainLine: signIn)", "action: { model.refreshNearAiBalanceFromButton() })",
                        "systemImage: \"dollarsign.circle\"", "systemImage: \"gearshape\""] {
             XCTAssertTrue(account.contains(needle), "InferenceAccount.swift lacks \(needle)")
         }
@@ -253,7 +253,7 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(account.contains("FundingRow(copy: copy)"))
         let card = try XCTUnwrap(account.range(of: "struct PrivateAIBalanceCard: View {"))
         let cardSource = String(account[card.lowerBound...])
-        let row = try XCTUnwrap(cardSource.range(of: "BalanceRow(copy: copy)"))
+        let row = try XCTUnwrap(cardSource.range(of: "BalanceRow(copy: copy, plainLine: signIn)"))
         let addFunds = try XCTUnwrap(cardSource.range(of: "FundingRow(copy: copy, style: .addFunds)"))
         XCTAssertLessThan(row.lowerBound, addFunds.lowerBound, "Add funds follows the balance")
         let settings = try Self.text("Views/Settings/PrivateAISection.swift")

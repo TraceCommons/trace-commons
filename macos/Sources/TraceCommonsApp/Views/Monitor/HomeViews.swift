@@ -355,14 +355,16 @@ private struct HomeOverview: View {
         // A failed status read draws no dollar line rather than an old one.
         let settlement = SummaryFacts.fresh(store.status, unless: store.failures["status"])?.settlementEstimate
         let uncontributed = HomeUncontributed(traces.tree.allSessions, settlement: settlement)
-        // Three groups, each under its title: Traces (the tiles and what is
-        // not contributed across both columns), Account (Credit and the NEAR
-        // AI balance), then Private AI, below and smaller than Traces. The
-        // Traces walkthrough stands in for the Traces cards while no trace
-        // folder is watched and on the launch that finished first run, until
-        // it is closed (owner, 2026-11-02; it led Home above the heading from
+        // Three groups, each under its title: Private AI first (owner,
+        // 2026-11-02: back at the top, where it was before 2026-10-28), then
+        // Traces (the tiles and what is not contributed across both columns),
+        // then Account (Credit and the NEAR AI balance). The Traces
+        // walkthrough stands in for the Traces cards while no trace folder is
+        // watched and on the launch that finished first run, until it is
+        // closed (owner, 2026-11-02; it led Home above the heading from
         // 2026-10-28).
         return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            privateAI
             HomeSection(words?.sectionTraces) {
                 if showsTracesWalkthrough {
                     tracesHero
@@ -387,10 +389,9 @@ private struct HomeOverview: View {
             HomeSection(words?.sectionAccount, accessory: accountSignIn) {
                 HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)
             }
-            // Over Private AI, so the coins that burst from the Balance
-            // tile fall over it, not under it.
+            // Over the sections above it, so the coins that burst from the
+            // Balance tile, which may spill upward, fall over them.
             .zIndex(1)
-            privateAI
         }
     }
 
@@ -448,8 +449,8 @@ private struct HomeOverview: View {
 
     /// Home's Private AI section (owner, 2026-10-20), drawn once the core's
     /// words have loaded, the daemon runs and the NEAR AI sign-in has been
-    /// read. It sits under Traces and Account and is smaller than Traces
-    /// (owner, 2026-10-28). Signed in, one slim row: the calls answered
+    /// read. First on Home, above Traces and Account (owner, 2026-11-02; it
+    /// sat under them from 2026-10-28), and smaller than Traces. Signed in, one slim row: the calls answered
     /// here and how many are verified, over the Private AI tab's window.
     /// Signed out, one slim card: "Sign in to NEAR AI to get started." and
     /// Sign in, which begins the NEAR AI sign-in as the Private AI tab's

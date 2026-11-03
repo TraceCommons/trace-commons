@@ -23,6 +23,9 @@ import TCShellCore
 struct BalanceRow: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
+    /// The state line as plain text, with no status dot: while the card's
+    /// head offers Sign in (owner, 2026-11-02).
+    var plainLine = false
 
     var body: some View {
         let status = model.balanceStatus
@@ -35,8 +38,15 @@ struct BalanceRow: View {
             if let sentence = BalanceSurface.stateLine(
                 status, copy: copy, calls: model.balanceCalls)
             {
-                GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(tone))
-                    .fixedSize(horizontal: false, vertical: true)
+                if plainLine {
+                    Text(sentence)
+                        .glassType(GlassTokens.TypeScale.label)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(tone))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             } else if BalanceSurface.showsFigures(status, calls: model.balanceCalls) {
                 figures(status)
             }
