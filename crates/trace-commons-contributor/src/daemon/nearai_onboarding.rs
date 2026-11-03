@@ -786,7 +786,11 @@ async fn finish_ceremony(
         if caller == CeremonyFor::FreshLogin && !refused {
             anyhow::Error::new(fresh_failure(&error, status, CeremonyStage::Finish))
         } else {
-            finish_refusal(&error, "near_ai_enroll_verification_failed")
+            finish_refusal(
+                &error,
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
         }
     };
     // The JWT rides in the body, never a header: we are not
@@ -849,14 +853,48 @@ pub(super) const DEVICE_KEY_REVOKED_WIRE: &str = "device_key_revoked";
 /// key, then signing in, which makes a new one.
 pub const ENROLL_DEVICE_KEY_REVOKED: &str = "near_ai_enroll_device_key_revoked";
 
-/// A finish refusal as this module's label: the revoked-key refusal by
-/// name, anything else as `fallback`. Never the remote body.
+/// Whether a finish was not answered: no response, a status
+/// [`commons_busy`] counts as busy (the commons' own `503
+/// near_ai_sign_in_unavailable` and `429 near_ai_sign_in_rate_limited`
+/// among them), a body past the client's cap, or a success whose body does
+/// not parse. The commons' refusals are small JSON bodies, so an oversized
+/// one is an error page in front of it (a proxy's `502`/`503`/`504`), which
+/// carries no status this error keeps. A `MalformedResponse` follows only a
+/// `2xx`, so the commons answered success and this device may already have
+/// joined; signing in again works (provisioning is idempotent for one
+/// device), which the try-later label leads to and the verification-failed
+/// one would not.
+fn finish_unanswered(error: &trace_commons_operator_client::Error) -> bool {
+    use trace_commons_operator_client::Error;
+    match error {
+        Error::Transport { .. }
+        | Error::ResponseTooLarge { .. }
+        | Error::MalformedResponse { .. } => true,
+        Error::HttpFailure { status, .. } | Error::ServerLabel { status, .. } => {
+            commons_busy(*status)
+        }
+        _ => false,
+    }
+}
+
+/// A finish failure as this module's label: the revoked-key refusal by
+/// name; a commons that did not answer (no response, a server error such as
+/// its `503 near_ai_sign_in_unavailable`, or its `429
+/// near_ai_sign_in_rate_limited`) as `unavailable`, the caller's existing
+/// try-later label; anything else as `fallback`. Never the remote body.
+///
+/// The try-later label leads to a new start, never a resend of this finish:
+/// the commons' wire contract is that after a `503` or `429` at finish the
+/// ceremony may or may not still exist, so a client always starts again.
 pub(super) fn finish_refusal(
     error: &trace_commons_operator_client::Error,
     fallback: &'static str,
+    unavailable: &'static str,
 ) -> anyhow::Error {
     if error.server_label() == Some(DEVICE_KEY_REVOKED_WIRE) {
         anyhow!(ENROLL_DEVICE_KEY_REVOKED)
+    } else if finish_unanswered(error) {
+        anyhow!(unavailable)
     } else {
         anyhow!(fallback)
     }
@@ -1838,7 +1876,7 @@ mod tests {
             body: format!("{{\"error\":\"{label}\"}}"),
             retry_after: None,
         };
-        let revoked = finish_refusal(&refused(DEVICE_KEY_REVOKED_WIRE), "fallback");
+        let revoked = finish_refusal(&refused(DEVICE_KEY_REVOKED_WIRE), "fallback", "unavailable");
         assert_eq!(revoked.to_string(), ENROLL_DEVICE_KEY_REVOKED);
         assert_eq!(label(&revoked), ENROLL_DEVICE_KEY_REVOKED);
         assert_eq!(
@@ -1846,8 +1884,94 @@ mod tests {
             super::super::account_session_renewal::FAILURE_DEVICE_KEY_REVOKED
         );
         assert_eq!(
-            finish_refusal(&refused("anything_else"), "fallback").to_string(),
+            finish_refusal(&refused("anything_else"), "fallback", "unavailable").to_string(),
             "fallback"
+        );
+    }
+
+    /// A finish the commons did not answer -- its `503
+    /// near_ai_sign_in_unavailable`, its `429 near_ai_sign_in_rate_limited`,
+    /// any other server error, or no response -- is the caller's try-later
+    /// label, never the verification failure. Its uniform `400` deny still is.
+    #[test]
+    fn a_busy_finish_is_unavailable_not_a_verification_failure() {
+        let answer = |status: reqwest::StatusCode, label: &str| {
+            trace_commons_operator_client::Error::ServerLabel {
+                url: "https://commons.example/v1/account/near-ai/provision/finish".into(),
+                status,
+                label: label.into(),
+                body: format!("{{\"error\":\"{label}\"}}"),
+                retry_after: None,
+            }
+        };
+        for (status, label) in [
+            (
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "near_ai_sign_in_unavailable",
+            ),
+            (
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                "near_ai_sign_in_rate_limited",
+            ),
+            (reqwest::StatusCode::BAD_GATEWAY, "anything"),
+        ] {
+            for (fallback, unavailable) in [
+                (
+                    "near_ai_enroll_verification_failed",
+                    "near_ai_enroll_unavailable",
+                ),
+                ("near_signup_verification_failed", "near_signup_unavailable"),
+            ] {
+                assert_eq!(
+                    finish_refusal(&answer(status, label), fallback, unavailable).to_string(),
+                    unavailable,
+                    "{status} {label}"
+                );
+            }
+        }
+        // A success whose body does not parse: the commons answered `2xx`.
+        assert_eq!(
+            finish_refusal(
+                &trace_commons_operator_client::Error::MalformedResponse {
+                    url: "https://commons.example/v1/account/near-ai/provision/finish".into(),
+                    body: String::new(),
+                    source: serde_json::from_str::<serde_json::Value>("")
+                        .expect_err("empty input is not JSON"),
+                },
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
+            .to_string(),
+            "near_ai_enroll_unavailable"
+        );
+        // An error page too large to be the commons' own refusal.
+        assert_eq!(
+            finish_refusal(
+                &trace_commons_operator_client::Error::ResponseTooLarge { limit: 256 * 1024 },
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
+            .to_string(),
+            "near_ai_enroll_unavailable"
+        );
+        assert_eq!(
+            finish_refusal(
+                &answer(
+                    reqwest::StatusCode::BAD_REQUEST,
+                    "native sign-in could not be completed"
+                ),
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
+            .to_string(),
+            "near_ai_enroll_verification_failed",
+            "the uniform deny is still the refusal"
+        );
+        // The enroll label passes through to the shell as the existing
+        // try-later line, not a new one.
+        assert_eq!(
+            label(&anyhow!("near_ai_enroll_unavailable")),
+            "near_ai_enroll_unavailable"
         );
     }
 }

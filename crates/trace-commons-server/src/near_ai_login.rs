@@ -173,8 +173,20 @@ fn normalise_auth_provider(raw: Option<&str>) -> String {
 /// answers) is NEAR AI not answering the question, the same for every token
 /// at that moment; any other status is its answer about this token.
 fn failure_for_status(status: reqwest::StatusCode) -> LoginIntrospectionFailure {
+    if status_means_not_answered(status) {
+        LoginIntrospectionFailure::Unavailable
+    } else {
+        LoginIntrospectionFailure::Refused
+    }
+}
+
+/// Whether a non-success HTTP status from a dependency (NEAR AI, the NEAR
+/// RPC) means it did not handle the request -- a `5xx`, `429`, `408`, `421`
+/// or `425` -- rather than answering about it. One predicate for both NEAR
+/// sign-in ceremonies, so they cannot drift apart on the same status.
+pub fn status_means_not_answered(status: reqwest::StatusCode) -> bool {
     use reqwest::StatusCode;
-    if status.is_server_error()
+    status.is_server_error()
         || matches!(
             status,
             StatusCode::TOO_MANY_REQUESTS
@@ -182,11 +194,6 @@ fn failure_for_status(status: reqwest::StatusCode) -> LoginIntrospectionFailure 
                 | StatusCode::MISDIRECTED_REQUEST
                 | StatusCode::TOO_EARLY
         )
-    {
-        LoginIntrospectionFailure::Unavailable
-    } else {
-        LoginIntrospectionFailure::Refused
-    }
 }
 
 /// Ask NEAR AI whose token this is.
