@@ -379,9 +379,10 @@ fn reach<E: Exchange>(connect: &mut impl FnMut() -> Result<E, CallError>) -> Res
 
 /// Open `pane` as a tab in the group workspace. `connect` reaches herdr;
 /// `attach` starts a herdr client in the chosen terminal when none answers;
-/// `elapsed` reads the time since the launch began and `sleep` waits between
-/// tries, so the wait for herdr ends [`ATTACH_WAIT`] after it began however
-/// long each try took.
+/// `elapsed` reads a clock and `sleep` waits between tries, so the wait for
+/// herdr ends [`ATTACH_WAIT`] after the terminal opened, however long each
+/// try took. While waiting, every error is retried; the last one decides
+/// the refusal.
 ///
 /// Only the `layout.apply` request carries the ticket. Anything that fails
 /// before it is sent is a refusal that releases the held launch
@@ -403,14 +404,17 @@ pub(crate) fn launch_with<E: Exchange>(
         Ok(herdr) => herdr,
         Err(CallError::Unreachable) => {
             attach().map_err(|_| ManagedError::TerminalNotFound)?;
+            // Counted from when the terminal has opened, and every error
+            // retried: a herdr that is starting can briefly show its socket
+            // before it is 0600, or close before a whole line.
+            let began = elapsed();
             loop {
-                match reach(&mut connect) {
+                let error = match reach(&mut connect) {
                     Ok(herdr) => break herdr,
-                    Err(CallError::Unreachable) => {}
-                    Err(error) => return Err(refusal(error)),
-                }
-                if elapsed() >= ATTACH_WAIT {
-                    return Err(ManagedError::TerminalNotFound);
+                    Err(error) => error,
+                };
+                if elapsed().saturating_sub(began) >= ATTACH_WAIT {
+                    return Err(refusal(error));
                 }
                 sleep(ATTACH_STEP);
             }
@@ -777,7 +781,85 @@ mod tests {
             &pane(),
         );
         assert_eq!(never, Err(ManagedError::TerminalNotFound));
-        assert_eq!(tries, 3, "two slow tries after the first pass the wait");
+        // The first try comes before herdr is started; the wait counts from
+        // the start, so three slow tries follow it.
+        assert_eq!(tries, 4);
+    }
+
+    /// A herdr this launch started can briefly look untrusted (its socket
+    /// before it is set 0600) or answer half a line while it starts, so
+    /// every error is retried until the wait ends (poldsam, #1886).
+    #[test]
+    fn a_starting_herdr_is_retried_through_any_error() {
+        let mut tries = 0;
+        let tab = launch_with(
+            || {
+                tries += 1;
+                match tries {
+                    1 => Err(CallError::Unreachable),
+                    2 => Err(CallError::Untrusted),
+                    3 => Ok(Script {
+                        replies: VecDeque::from([Err(CallError::Malformed)]),
+                        ..Default::default()
+                    }),
+                    _ => Ok(Script {
+                        replies: VecDeque::from([
+                            pong(),
+                            snap(json!([{"workspace_id":"w1","label":"Near.ai"}]), json!([])),
+                            applied(),
+                            snap(json!([]), json!([])),
+                        ]),
+                        ..Default::default()
+                    }),
+                }
+            },
+            || Ok(()),
+            || std::time::Duration::ZERO,
+            |_| {},
+            &pane(),
+        );
+        assert_eq!(tab, Ok(None));
+        assert_eq!(tries, 4);
+
+        // One that never reads right is refused by its last error.
+        let clock = std::cell::Cell::new(std::time::Duration::ZERO);
+        let old = launch_with(
+            || {
+                let mut script = Script::default();
+                script.replies.push_back(Err(CallError::Malformed));
+                if clock.get().is_zero() {
+                    Err(CallError::Unreachable)
+                } else {
+                    Ok(script)
+                }
+            },
+            || Ok(()),
+            || clock.get(),
+            |step| clock.set(clock.get() + step),
+            &pane(),
+        );
+        assert_eq!(old, Err(ManagedError::UnsupportedVersion));
+    }
+
+    /// The wait for herdr starts once the host terminal has opened, so a
+    /// slow terminal does not use up herdr's time (poldsam, #1886).
+    #[test]
+    fn the_wait_for_herdr_starts_after_the_terminal_opens() {
+        let clock = std::cell::Cell::new(std::time::Duration::ZERO);
+        let attached_at = std::cell::Cell::new(std::time::Duration::ZERO);
+        let never = launch_with(
+            || Err::<Script, _>(CallError::Unreachable),
+            || {
+                clock.set(clock.get() + std::time::Duration::from_secs(9));
+                attached_at.set(clock.get());
+                Ok(())
+            },
+            || clock.get(),
+            |step| clock.set(clock.get() + step),
+            &pane(),
+        );
+        assert_eq!(never, Err(ManagedError::TerminalNotFound));
+        assert_eq!(clock.get() - attached_at.get(), ATTACH_WAIT);
     }
 
     /// A herdr too old to read, or a socket path held by something this
@@ -812,6 +894,9 @@ mod tests {
         );
         assert_eq!(untrusted, Err(ManagedError::TerminalNotFound));
 
+        // An old herdr this launch started is retried like any herdr that
+        // is starting, then refused for its version when the wait ends.
+        let clock = std::cell::Cell::new(std::time::Duration::ZERO);
         let mut tries = 0;
         let became_old = launch_with(
             || {
@@ -825,12 +910,13 @@ mod tests {
                 })
             },
             || Ok(()),
-            || std::time::Duration::ZERO,
-            |_| {},
+            || clock.get(),
+            |step| clock.set(clock.get() + step),
             &pane(),
         );
         assert_eq!(became_old, Err(ManagedError::UnsupportedVersion));
-        assert_eq!(tries, 2, "not waited around");
+        assert_eq!(clock.get(), ATTACH_WAIT);
+        assert!(tries > 2);
     }
 
     /// A refusal from `layout.apply`, or no answer to it, may follow a
