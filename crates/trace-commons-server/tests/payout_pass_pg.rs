@@ -2687,3 +2687,93 @@ async fn the_pass_does_not_carry() {
         "the pass carries nothing"
     );
 }
+
+/// Owner decision, 2026-11-03 (V148:444): a carry whose account stops being
+/// proven is released at send time. The live pass finds the account
+/// unproven, unlinks its active carried link with a hash-only audit row
+/// (`legacy_carry_unproven`), and the account's standing no longer holds it,
+/// so its other streams resume. The pass still creates no carry.
+#[tokio::test]
+async fn the_pass_releases_a_carry_whose_account_stopped_being_proven() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let mock = Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let opener = Arc::new(TestOpener::default());
+    let (near, source, legacy) = legacy_pair(&fixture, &rail, &opener).await;
+    let account = open_proven_legacy_account(&fixture, &legacy).await;
+    fixture
+        .runtime
+        .carry_legacy_payout_links(
+            &near,
+            source,
+            &rail.descriptor().rail_id,
+            &carry_programs(&rail),
+            ACTOR,
+        )
+        .await
+        .unwrap();
+    owner_exec(
+        &fixture,
+        &legacy,
+        "UPDATE trace_payout_links SET state = 'active'
+          WHERE tenant_id = $1 AND account_id = $2 AND state = 'waiting'",
+        &[&legacy, &account],
+    )
+    .await;
+    assert_eq!(live_carries(&fixture, &legacy, account).await, 1);
+    // Its proving principal is unlinked.
+    owner_exec(
+        &fixture,
+        &legacy,
+        "UPDATE trace_account_principals SET unlinked_at = now()
+          WHERE tenant_id = $1 AND account_id = $2",
+        &[&legacy, &account],
+    )
+    .await;
+    completed(
+        &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
+            .run_once()
+            .await,
+    );
+    assert_eq!(
+        live_carries(&fixture, &legacy, account).await,
+        0,
+        "released at send time"
+    );
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&legacy],
+    )
+    .await
+    .unwrap();
+    let row = tx
+        .query_one(
+            "SELECT (SELECT bool_and(unlink_requested_at IS NOT NULL OR state IN ('closing', 'closed'))
+                       FROM trace_payout_links WHERE tenant_id = $1 AND account_id = $2),
+                    (SELECT count(*) FROM trace_payout_audit
+                      WHERE tenant_id = $1 AND label = 'legacy_carry_unproven')",
+            &[&legacy, &account],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        row.get::<_, Option<bool>>(0),
+        Some(true),
+        "the carried link is ending"
+    );
+    assert_eq!(row.get::<_, i64>(1), 1, "audited");
+    assert!(
+        !fixture
+            .runtime
+            .payout_account_standing(&legacy, account)
+            .await
+            .unwrap()
+            .carry_invalid,
+        "no longer held: its other streams resume"
+    );
+}

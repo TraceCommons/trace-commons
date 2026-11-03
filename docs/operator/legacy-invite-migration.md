@@ -288,8 +288,11 @@ A tenant link also decides who is paid the legacy tenant's credit
   link proved: the linking device or a V91-attested one, still live in the
   tenant, under an instance-enrollment subject enrolled no later than the
   link or attestation. An account opened by any other device or subject,
-  such as one enrolled later with the instance key, waits. A legacy account whose own payout link V147 revoked is carried at
-  the next event, if proven.
+  such as one enrolled later with the instance key, waits. A legacy
+  account whose own payout link V147 revoked is carried at the next event,
+  if proven. A carry whose account stops being proven (its device revoked,
+  its principal unlinked) is released by the next payout pass, audited as
+  `legacy_carry_unproven` (owner, 2026-11-03).
 - **Every send re-checks the carry.** The account standing the pass reads
   before each send holds a live carry (`payout_legacy_carry_invalid`) when
   its tenant was marked pooled, its tenant link is revoked or deleted, or

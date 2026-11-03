@@ -1686,6 +1686,23 @@ impl PayoutStore for PgBackend {
         Ok(report)
     }
 
+    async fn release_unproven_legacy_carries(&self, tenant: &str) -> Result<u32, DatabaseError> {
+        if trace_commons_protocol::admission::is_anchored_tenant(tenant) {
+            return Ok(0);
+        }
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let released: i32 = tx
+            .query_one(
+                "SELECT trace_legacy_payout_release_unproven_carries($1)",
+                &[&tenant],
+            )
+            .await?
+            .get(0);
+        tx.commit().await?;
+        Ok(u32::try_from(released).unwrap_or(0))
+    }
+
     async fn create_or_reuse_account_carrying(
         &self,
         tenant: &str,

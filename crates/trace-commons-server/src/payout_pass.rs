@@ -777,6 +777,21 @@ impl PayoutPass {
         referral: &mut ReferralRun,
         report: &mut PayoutPassReport,
     ) -> Step<()> {
+        // Owner decision, 2026-11-03 (V148:444): a carry whose legacy account
+        // is no longer proven is released here, at send time, before this
+        // tenant's links are read, so it is never paid this pass and the
+        // account's other streams are not held. The pass only ends carries;
+        // it never creates one. A failure releases nothing, and the account
+        // standing still holds such a carry.
+        if !trace_commons_protocol::admission::is_anchored_tenant(tenant) {
+            if let Err(error) = self.payouts.release_unproven_legacy_carries(tenant).await {
+                tracing::warn!(
+                    label = "legacy_carry_release_failed",
+                    error_class = crate::account_onboarding::database_error_label(&error),
+                    "releasing unproven legacy carries failed; the standing holds them"
+                );
+            }
+        }
         match accrue_rail(
             self.payouts.as_ref(),
             self.corpus.as_ref(),

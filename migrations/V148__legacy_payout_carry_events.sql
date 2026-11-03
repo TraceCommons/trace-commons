@@ -26,7 +26,10 @@
 -- 5. trace_legacy_payout_proven_accounts: the accounts a live, signed
 --    device proved; every carry reaches only these (owner, 2026-11-03),
 --    and trace_legacy_payout_carry_unproven, which the send-time standing
---    reads so a carry on an account that stops being proven is held.
+--    reads as a backstop.
+-- 6. trace_legacy_payout_release_unproven_carries: the payout pass ends a
+--    carry whose account stopped being proven, at send time (owner,
+--    2026-11-03).
 --
 -- Every function is owned by V146's NOLOGIN, NOBYPASSRLS guard and reaches
 -- a legacy tenant only by setting the tenant context, so forced RLS applies
@@ -512,6 +515,51 @@ ALTER FUNCTION public.trace_legacy_payout_carry_unproven(TEXT, UUID)
     OWNER TO trace_legacy_payout_carry_guard;
 REVOKE ALL ON FUNCTION public.trace_legacy_payout_carry_unproven(TEXT, UUID) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.trace_legacy_payout_carry_unproven(TEXT, UUID)
+    TO trace_ingest_runtime;
+
+-- 6. Release at send time (owner, 2026-11-03, V148:444). The payout pass
+-- calls this for a legacy tenant before it reads that tenant's links: every
+-- live carry on an account that is no longer proven (its proving principal
+-- unlinked, its device revoked) is released, an active one with an unlink
+-- request and a waiting one closed at zero, audited hash-only as
+-- `legacy_carry_unproven`. The account's standing then no longer holds it,
+-- so its other streams resume. This only ends carries; the pass never
+-- creates one. Under the tenant-link lock, so it cannot interleave with a
+-- carry or a claim. Asked under the tenant's own context; refused under
+-- any other. Returns how many carries it released.
+CREATE FUNCTION public.trace_legacy_payout_release_unproven_carries(p_tenant TEXT)
+RETURNS INTEGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+DECLARE
+    v_account UUID;
+    v_released INTEGER := 0;
+BEGIN
+    IF p_tenant IS NULL OR p_tenant IS DISTINCT FROM public.trace_current_tenant_id() THEN
+        RAISE EXCEPTION 'legacy_payout_release_refused' USING ERRCODE = '42501';
+    END IF;
+    IF p_tenant ~ '^(near-|nearai-)' OR NOT EXISTS (
+        SELECT 1 FROM public.trace_legacy_payout_carries c
+         WHERE c.tenant_id = p_tenant AND c.released_at IS NULL) THEN
+        RETURN 0;
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || p_tenant, 0));
+    FOR v_account IN
+        SELECT DISTINCT c.account_id FROM public.trace_legacy_payout_carries c
+         WHERE c.tenant_id = p_tenant AND c.released_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM public.trace_legacy_payout_proven_accounts(p_tenant)
+                                       AS proven(account_id)
+                            WHERE proven.account_id = c.account_id)
+         ORDER BY c.account_id
+    LOOP
+        v_released := v_released + public.trace_legacy_payout_release_tenant_carries(
+            p_tenant, NULL, v_account, 'legacy_carry_unproven');
+    END LOOP;
+    RETURN v_released;
+END $$;
+ALTER FUNCTION public.trace_legacy_payout_release_unproven_carries(TEXT)
+    OWNER TO trace_legacy_payout_carry_guard;
+REVOKE ALL ON FUNCTION public.trace_legacy_payout_release_unproven_carries(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.trace_legacy_payout_release_unproven_carries(TEXT)
     TO trace_ingest_runtime;
 
 REVOKE CREATE ON SCHEMA public FROM trace_legacy_payout_carry_guard;

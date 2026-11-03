@@ -727,11 +727,9 @@ Where the implementation differs from, or adds to, sections 3 to 5:
    claims recorded; see decision 3). Only devices still live
    in the tenant prove (unrevoked, `invite` origin, not NEAR-provisioned).
    An account opened by an unproven device waits. A live carry on an
-   account that stops qualifying is held at send time
-   (`trace_legacy_payout_carry_unproven` in the account standing) and
-   released at the next carry event; the first event after deploy does the
-   same to any V146-era carry on an unproven account, which the pre-deploy
-   checks count.
+   account that stops qualifying is released at send time (decision 6);
+   so is any V146-era carry on an unproven account, at the first pass or
+   carry event after deploy, which the pre-deploy checks count.
 3. **Instance-enrollment subjects prove only if enrolled by the link**
    (owner, 2026-11-03, review of #1879 at V148:253). A subject counts
    toward the proof set only if it was enrolled no later than the tenant
@@ -752,6 +750,17 @@ Where the implementation differs from, or adds to, sections 3 to 5:
    account-opening carry runs in a savepoint of the login-link mint, for
    the opened account only and only when the call opened it; a failure is
    logged by class and carries nothing.
+6. **A carry whose account stops being proven is released at send time**
+   (owner, 2026-11-03, review of #1879 at V148:444). Before reading a
+   legacy tenant's links, the payout pass calls
+   `trace_legacy_payout_release_unproven_carries`: under the tenant-link
+   lock, every live carry on an account no longer proven (its proving
+   principal unlinked, its device revoked) is released, an active one with
+   an unlink request and a waiting one closed at zero, audited hash-only as
+   `legacy_carry_unproven`. The account's standing then no longer holds it,
+   so its other streams resume. The pass only ends carries; it never
+   creates one. `trace_legacy_payout_carry_unproven` stays in the standing
+   as the backstop if the release fails.
 
 ### Known limits, not fixed here
 

@@ -3866,6 +3866,13 @@ pub trait PayoutStore: Send + Sync {
     /// account in a linked tenant is one). Nothing is carried for a tenant
     /// outside a live tenant link, or from a closed source account. A
     /// failure rolls the whole transaction back, the account included.
+    /// Owner decision, 2026-11-03 (V148:444): release every live carry in
+    /// legacy tenant `tenant` whose account is no longer proven, at send
+    /// time. The pass calls this before it reads the tenant's links. It only
+    /// ends carries. Nothing for a `near-` / `nearai-` tenant. Returns how
+    /// many carries it released.
+    async fn release_unproven_legacy_carries(&self, tenant: &str) -> Result<u32, DatabaseError>;
+
     async fn create_or_reuse_account_carrying(
         &self,
         tenant: &str,
