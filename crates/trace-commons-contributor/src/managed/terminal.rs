@@ -969,7 +969,9 @@ fn placeable(
     place: Option<&Placement>,
     ready: impl FnOnce() -> bool,
 ) -> Option<&Placement> {
-    let place = place.filter(|_| choice.app() == Some(TerminalApp::Terminal))?;
+    // By setting, not `app()`: the setting reads Terminal only where it is
+    // offered, so this is the same answer on macOS and testable elsewhere.
+    let place = place.filter(|_| choice == TerminalSetting::Terminal)?;
     ready().then_some(place)
 }
 
