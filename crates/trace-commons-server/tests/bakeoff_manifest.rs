@@ -3,8 +3,7 @@
 
 use std::path::PathBuf;
 
-#[path = "../src/bin/gate_calibrate/bakeoff_manifest.rs"]
-mod bakeoff_manifest;
+use crate::gate_calibrate::bakeoff_manifest;
 use bakeoff_manifest::{CandidateArch, CandidateLicense, parse_manifest_str};
 
 #[test]
