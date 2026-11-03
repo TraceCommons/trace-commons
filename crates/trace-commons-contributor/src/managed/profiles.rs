@@ -776,6 +776,22 @@ fn check_project_config_in(
                         if near_ai && env.keys().any(|k| names_a_claude_model(k)) {
                             return Err(ManagedError::ProjectChoosesModel);
                         }
+                        // Claude Code applies a settings `env` over the
+                        // launcher's own, so a project could turn
+                        // server-side classifier review back on, which a
+                        // NEAR AI route cannot answer. Refused with its own
+                        // sentence.
+                        // Only a value other than "0" turns the review back on.
+                        // Names compare without case: Windows environment
+                        // names do.
+                        if near_ai
+                            && env.iter().any(|(k, v)| {
+                                k.eq_ignore_ascii_case("CLAUDE_CODE_AUTO_MODE_SERVER")
+                                    && v.as_str() != Some("0")
+                            })
+                        {
+                            return Err(ManagedError::ProjectSetsAutoModeServer);
+                        }
                     }
                 }
                 ToolId::Codex => {
@@ -1083,6 +1099,44 @@ mod tests {
     }
 
     const NEAR_AI: [ConnectionKind; 2] = [ConnectionKind::NearAi, ConnectionKind::NearAiSignIn];
+
+    /// A project's Claude Code settings may not turn server-side classifier
+    /// review back on through their `env` block on a NEAR AI session: the
+    /// route cannot answer it, and the launch is refused with its own
+    /// sentence (owner-approved, 2026-11-02). A `"0"` agrees with the
+    /// launcher and is allowed, and names compare without case.
+    #[test]
+    fn a_project_cannot_turn_server_classifier_review_back_on_for_a_near_ai_session() {
+        for file in [".claude/settings.json", ".claude/settings.local.json"] {
+            let dir = project(&[(file, r#"{"env":{"CLAUDE_CODE_AUTO_MODE_SERVER":"1"}}"#)]);
+            let lower = project(&[(file, r#"{"env":{"claude_code_auto_mode_server":"1"}}"#)]);
+            let zero = project(&[(file, r#"{"env":{"CLAUDE_CODE_AUTO_MODE_SERVER":"0"}}"#)]);
+            for connection in NEAR_AI {
+                assert_eq!(
+                    check_project_config(ToolId::Claude, connection, lower.path()),
+                    Err(ManagedError::ProjectSetsAutoModeServer),
+                    "lower case {file} on {connection:?}"
+                );
+                assert_eq!(
+                    check_project_config(ToolId::Claude, connection, zero.path()),
+                    Ok(()),
+                    "0 in {file} on {connection:?}"
+                );
+            }
+            for connection in NEAR_AI {
+                assert_eq!(
+                    check_project_config(ToolId::Claude, connection, dir.path()),
+                    Err(ManagedError::ProjectSetsAutoModeServer),
+                    "{file} on {connection:?}"
+                );
+            }
+            // Anthropic-native traffic can answer the review: unchanged.
+            assert_eq!(
+                check_project_config(ToolId::Claude, ConnectionKind::Subscription, dir.path()),
+                Ok(())
+            );
+        }
+    }
 
     /// A project's Claude Code settings may not name a model through their
     /// `env` block on a NEAR AI session: it would outrank the launcher's
@@ -1438,6 +1492,23 @@ mod tests {
                 Some(root.path())
             ),
             Err(ManagedError::Conflict)
+        );
+    }
+
+    /// The refusal for a project that sets the auto mode server variable
+    /// says what to remove, in the owner's words (2026-11-02), and is the
+    /// shared copy line the shells show for its label.
+    #[test]
+    fn the_project_auto_mode_server_refusal_says_what_to_remove() {
+        let text = "Remove CLAUDE_CODE_AUTO_MODE_SERVER from this project's settings.";
+        assert_eq!(ManagedError::ProjectSetsAutoModeServer.to_string(), text);
+        assert_eq!(
+            crate::managed::copy::copy()["project_sets_auto_mode_server"],
+            text
+        );
+        assert_eq!(
+            crate::managed::PROJECT_SETS_AUTO_MODE_SERVER_LABEL,
+            "managed-project-sets-auto-mode-server"
         );
     }
 

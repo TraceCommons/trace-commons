@@ -440,7 +440,8 @@ private struct HomeOverview: View {
                 } else {
                     HomePrivateAISignInCard(
                         line: words.privateAISignIn, button: model.managedText("sign_in_near_ai"),
-                        buttonName: model.managedText("sign_in_near_ai_accessibility"), busy: model.credentialBusy) {
+                        buttonName: model.managedText("sign_in_near_ai_accessibility"), busy: model.credentialBusy
+                    ) {
                         NearAiSignIn.begin(model, openURL: openURL)
                     }
                 }
@@ -590,10 +591,10 @@ private struct HomePrivateAISignInCard: View {
                 .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: GlassTokens.Space.s4)
-            Button(button, action: action)
-                .buttonStyle(GlassButtonStyle(.primary, small: true))
+            NearAiSignInButton(
+                title: button, accessibilityName: buttonName,
+                style: GlassButtonStyle(.primary, small: true), start: action)
                 .fixedSize()
-                .accessibilityLabel(buttonName)
                 .disabled(busy)
         }
         .padding(.vertical, 10)

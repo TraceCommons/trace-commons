@@ -28,12 +28,28 @@ near-ai launch codex --account Work --cwd /path/to/another-project
 near-ai sessions list
 ```
 
-CLI launches use the current terminal or multiplexer pane. All managed launches,
-including those initiated from the CLI, appear in the app's managed-session list.
+CLI launches use the current terminal or multiplexer pane. Managed launches,
+including those initiated from the CLI, appear in the app's managed-session list,
+one row per conversation: a resumed session continues its conversation's row
+rather than adding one beside it. The row shown is the conversation's latest
+session that is still starting or running, or whose launcher took up its launch;
+a resume whose launch expired unused does not replace the row that ran. Dismissing a row dismisses the
+whole conversation, so no earlier row comes back in its place.
 A session the app opened in Terminal can be shown (its tab brought to the
 front) and stopped from its row; a CLI launch cannot, because the app neither
 opened its window nor started its launcher. An ended session can be started
 again in the same folder with the same account while both still exist.
+Start again and Resume open a new window. The launch dialog, in Terminal on
+macOS, lists the windows holding sessions the app opened that are still
+running, and the person can pick one to open the new session in as a new tab;
+"New window" is the default. Placing a tab presses Command-T, which needs
+macOS's Automation (of System Events) and Accessibility permissions. macOS asks
+for them the first time someone picks a window, never during a launch. In the
+app, the daemon runs inside the app, so macOS's own prompts and the System
+Settings > Privacy & Security entries name the app, "Near.ai"; until both are
+granted, or when either is refused, the session opens in a new window, with no
+message in the app. Nothing is typed into an existing tab. See
+`docs/contributor-daemon-ipc-v1_1.md` for the checks.
 Stop signals only the tool process the launcher supervises: SIGTERM, then
 SIGKILL after a bounded wait. Processes the tool itself started (a shell
 command, a dev server) are not signalled and can outlive it.

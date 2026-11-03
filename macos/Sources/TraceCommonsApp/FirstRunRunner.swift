@@ -42,6 +42,11 @@ protocol FirstRunDaemon: AnyObject {
     /// The near.ai login: true once the daemon keeps a near.ai session,
     /// after the browser sign-in when it kept none.
     func nearAILogin() async -> Bool
+    /// [`nearAILogin`], telling a sign-in the person ended (the wallet's own
+    /// Cancel, or the browser's login page coming back after a pick) apart
+    /// from one that did not finish. The first run reports no failure for
+    /// the first.
+    func nearAILoginOutcome() async -> NearAILoginOutcome
     /// End the browser sign-in `nearAILogin` is waiting on
     /// (`near_ai_credential_cancel`). True only once the daemon took it.
     func cancelNearAILogin() async -> Bool
@@ -71,6 +76,14 @@ protocol FirstRunDaemon: AnyObject {
     /// the first-run host, with its runner, leaves the screen at the next
     /// render; whoever is told must outlive it.
     func firstRunFinished(notice: String?)
+}
+
+extension FirstRunDaemon {
+    /// A daemon that cannot tell a cancel apart reports every unfinished
+    /// sign-in as failed, as before.
+    func nearAILoginOutcome() async -> NearAILoginOutcome {
+        await nearAILogin() ? .signedIn : .failed
+    }
 }
 
 extension FirstRunDaemon {
@@ -133,7 +146,7 @@ final class FirstRunRunner: ObservableObject {
     /// with the NEAR AI enrolment only; the daemon checks it.
     @Published var referralCode = ""
     /// The login `signInWaiting` covers, so Cancel can end its wait.
-    private var loginTask: Task<Bool, Never>?
+    private var loginTask: Task<NearAILoginOutcome, Never>?
     /// The daemon's answer to a Cancel, awaited before the commit ends so
     /// a Continue pressed straight after cannot start a sign-in the cancel
     /// then ends.
@@ -251,10 +264,10 @@ final class FirstRunRunner: ObservableObject {
             state.signedIn = true
         case .nearAILogin:
             let daemon = self.daemon
-            let login = Task { await daemon.nearAILogin() }
+            let login = Task { await daemon.nearAILoginOutcome() }
             loginTask = login
             signInWaiting = true
-            let signedIn = await login.value
+            let outcome = await login.value
             signInWaiting = false
             loginTask = nil
             // The person cancelled: the step and the near.ai choice stay,
@@ -267,9 +280,15 @@ final class FirstRunRunner: ObservableObject {
                 if !(await cancel.value) { failure = .signInFailed }
                 return false
             }
+            // The person ended it in the browser (the wallet's Cancel, or the
+            // login page coming back after a pick, which already says to
+            // start again from the app): as a Cancel here, the step and the
+            // near.ai choice stay, nothing is said, and the next Continue
+            // signs in afresh.
+            if outcome == .cancelled { return false }
             // No Back to leave a sign-in that keeps failing: back to Join,
             // the choice cleared, which says why (`nearAINotice`).
-            guard signedIn else {
+            guard outcome == .signedIn else {
                 state = FirstRunNavigation.returnToJoin(afterNearAIFailure: state)
                 return fail(.signInFailed)
             }

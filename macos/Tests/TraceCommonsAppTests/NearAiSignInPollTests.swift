@@ -7,7 +7,7 @@ import XCTest
 
 /// A daemon whose sign-in the test finishes, cancels or times out by hand.
 private final class SignInDaemon: DaemonCalling {
-    enum Phase: Sendable { case absent, waiting, signedIn, failedWithRetainedKey, cancelledWithRetainedSession }
+    enum Phase: Sendable { case absent, waiting, signedIn, failedWithRetainedKey, cancelledWithRetainedSession, cancelled, failed }
 
     private struct State: Sendable {
         var phase: Phase = .absent
@@ -43,6 +43,10 @@ private final class SignInDaemon: DaemonCalling {
             return #"{"id":1,"result":{"state":"present","session_state":"absent","attempt_id":"synthetic-attempt","attempt_status":"failed"}}"#
         case .cancelledWithRetainedSession:
             return #"{"id":1,"result":{"state":"present","session_state":"present","attempt_id":"synthetic-attempt","attempt_status":"cancelled"}}"#
+        case .cancelled:
+            return #"{"id":1,"result":{"state":"absent","session_state":"absent","attempt_id":"synthetic-attempt","attempt_status":"cancelled"}}"#
+        case .failed:
+            return #"{"id":1,"result":{"state":"absent","session_state":"absent","attempt_id":"synthetic-attempt","attempt_status":"failed"}}"#
         }
     }
 
@@ -236,6 +240,27 @@ final class NearAiSignInPollTests: XCTestCase {
         await poll.value
         XCTAssertEqual(model.credentialStatus.sessionState, CredentialSurface.statePresent)
         XCTAssertEqual(model.accountSessionGeneration, 0, "the named attempt was cancelled despite an older retained session")
+    }
+
+    /// Sign in, then the browser's login page comes back after a pick (or
+    /// the wallet's own Cancel): the daemon ends the attempt as cancelled and
+    /// the browser already says to start again from the app. The app adds no
+    /// "Sign-in didn't finish" of its own. A failed attempt still does.
+    @MainActor
+    func testASignInTheDaemonCancelledIsNotShownAsFailed() async throws {
+        for (end, failed) in [(SignInDaemon.Phase.cancelled, false), (.failed, true)] {
+            let daemon = SignInDaemon()
+            let model = makeModel(daemon)
+            model.openBrowser = { _ in }
+            let signIn = Task { await model.signInToNearAI() }
+            let deadline = Date().addingTimeInterval(5)
+            while daemon.count("near_ai_credential_start") == 0, Date() < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            daemon.set(end)
+            await signIn.value
+            XCTAssertEqual(model.nearAiSignInFailed, failed, "\(end)")
+        }
     }
 
     @MainActor

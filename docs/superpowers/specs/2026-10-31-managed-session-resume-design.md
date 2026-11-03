@@ -181,5 +181,60 @@ app; changing collection staging rules.
   "Copied" with a neutral dot for 2 s;
   resumed rows show "Resumed · Continues <time>" (`SessionView.resumed_from`,
   stored at prepare time).
+- One row per conversation (#1838, rule settled in its follow-up): the
+  snapshot, and the Monitor and Traces maps that read the same list
+  (`tool_destinations.managed_sessions`), show a conversation (rows sharing
+  a root) once, as its latest row that stands for it. The root always
+  stands for it; a resume does while it holds the conversation (starting,
+  running or unknown) or once its launcher redeemed its ticket. A resume
+  whose ticket expired unredeemed therefore gives the row that ran back,
+  with its Start again and Resume. Dismiss is the conversation's: it marks
+  every row of the root, and is refused while any of them holds the
+  conversation (except a stuck row, below). The list passes over dismissed
+  rows. Rows dismissed one at a time, by #1838 (which flagged only the
+  listed latest row) or by v0.21.0-0.21.2 (every row listed), are read so
+  that no row the person kept is hidden: the conversation is listed as its
+  latest row not dismissed. The two builds wrote the same registry file, so
+  the shapes cannot be told apart, and no load-time rewrite can carry more
+  than the flags already say; a #1838 dismissal of a resumed conversation
+  therefore shows its earlier row again.
+- A quiet row (unknown: its launcher stopped reporting) that has no
+  collection plan ends once the tool process its launcher named is gone. A
+  pid named without its start time counts as running while a process
+  holds it that started before the launcher's last report named it; one
+  that started later is another process reusing the pid. This runs in the lease
+  pass (`lease_pass`): every lease tick, detached from the daemon's loop,
+  one sweep and one listing of the plans, whose plan rows then feed a
+  collection pass when none is running, so a long collection holds back no
+  quiet row. A collection still pending on such a row fails, since the
+  daemon will not collect it, but the launcher's own late result (a
+  report, or its exit receipt) is still taken over that; so is the failed
+  collection a restart sets on an ended row with no plan. Before, only a
+  collecting row with a plan ended this way, and a non-collecting resume
+  held its conversation, refusing Resume, for good.
+- A row whose launcher redeemed its ticket and went quiet before its first
+  report names no process, so nothing above ends it. It is never ended on a
+  timer (owner, 2026-11-02): the row says `can_dismiss`, the shell shows
+  Dismiss on it, and dismissing ends it (failed, as `tool_exited` does, so
+  a late final report is still taken) and dismisses its conversation.
+  `can_dismiss` is false while any other row of the conversation holds it.
+  A row whose collection plan names a process is not stuck (the plan path
+  watches that process). Dismissing a stuck collecting row fails its
+  collection, unless its launcher still reports a result.
+  Dismissing a stuck row the app opened also asks for a stop: if the daemon restarted
+  between the tool's spawn and its first report, the launcher's next
+  heartbeat is answered with `stop: true` (which every launcher since
+  `stop` obeys; an older one ignores it, as it ignored the refusal)
+  rather than refused, and the row stays ended and dismissed. A row
+  started from the command line is never stopped by the app (owner,
+  2026-11-02, as with Stop): its heartbeat is refused as before.
+- A launcher checks in (a `starting` report, no process) right before it
+  spawns its tool, after its setup. The daemon takes the row back as
+  starting with a fresh lease, so a launcher whose setup outlasted the
+  lease cannot be dismissed from under it; a dismissed row's check-in is
+  refused (`managed-conflict`) and the launcher exits without spawning.
+  Any other answer (an older daemon's `managed-invalid-request`, no
+  daemon) spawns as before. A launcher older than the check-in can still
+  spawn after its row was dismissed.
 - New OpenCode sessions on NEAR AI are titled "NEAR AI private session"
   (shown as `OC | NEAR AI private session`); others keep "Managed session".

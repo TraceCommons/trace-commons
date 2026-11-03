@@ -231,9 +231,10 @@ final class ManagedSessionsTests: XCTestCase {
 
     // MARK: #1407 row actions
 
-    private func session(_ state: String, focus: Bool = false, stop: Bool = false, again: Bool = false, resume: Bool? = nil, startedAt: String? = nil, resumedFrom: String? = nil) throws -> ManagedSession {
+    private func session(_ state: String, focus: Bool = false, stop: Bool = false, again: Bool = false, resume: Bool? = nil, dismiss: Bool? = nil, startedAt: String? = nil, resumedFrom: String? = nil) throws -> ManagedSession {
         var json = #"{"id":"s","tool":"claude","connection":"subscription","account_id":"a","account_label":"Work","project_label":"Project","cwd":"/tmp","state":"\#(state)","purpose":"coding","can_focus":\#(focus),"can_stop":\#(stop),"can_start_again":\#(again)"#
         if let resume { json += #","can_resume":\#(resume)"# }
+        if let dismiss { json += #","can_dismiss":\#(dismiss)"# }
         if let resumedFrom { json += #","resumed_from":"\#(resumedFrom)""# }
         if let startedAt { json += #","started_at":"\#(startedAt)""# }
         return try JSONDecoder().decode(ManagedSession.self, from: Data((json + "}").utf8))
@@ -283,6 +284,20 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(drawn(try session("exited"), terminalLaunch: true), [[.dismiss], []])
         XCTAssertEqual(ManagedSurface.menuActions(try session("running", focus: true, stop: true)), [.show, .stop])
         XCTAssertEqual(ManagedSurface.menuActions(try session("exited", again: true)), [])
+    }
+
+    /// Owner, 2026-11-02: a row stuck unknown (its launcher died before its
+    /// first report) draws Dismiss, alone, when the daemon says
+    /// `can_dismiss`; without it, or from an older daemon, a row holding its
+    /// account draws nothing. An ended row's actions do not depend on it.
+    func testAStuckRowDrawsDismissOnlyWhenTheDaemonOffersIt() throws {
+        XCTAssertEqual(drawn(try session("unknown", dismiss: true), terminalLaunch: true), [[.dismiss], []])
+        XCTAssertEqual(drawn(try session("unknown", again: true, resume: true, dismiss: true), terminalLaunch: true, resumeCapable: true), [[.dismiss], []])
+        XCTAssertEqual(drawn(try session("unknown", dismiss: false), terminalLaunch: true), [[], []])
+        XCTAssertEqual(drawn(try session("unknown"), terminalLaunch: true), [[], []])
+        XCTAssertFalse(try session("unknown").canDismiss)
+        XCTAssertEqual(drawn(try session("exited", again: true), terminalLaunch: true), [[.startAgain], [.dismiss]])
+        XCTAssertEqual(drawn(try session("exited"), terminalLaunch: true), [[.dismiss], []])
     }
 
     func testOnlyAShowableRunningRowShowsOnClick() throws {
@@ -943,5 +958,6 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.errorKey(code: "managed-model-unavailable", message: "managed-model-unavailable"), "model_unavailable")
         XCTAssertEqual(ManagedSurface.errorKey(code: "managed-near-ai-balance-too-low", message: "managed-near-ai-balance-too-low"), "balance_too_low")
         XCTAssertEqual(ManagedSurface.errorKey(code: "managed-project-chooses-model", message: "managed-project-chooses-model"), "project_chooses_model")
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-project-sets-auto-mode-server", message: "managed-project-sets-auto-mode-server"), "project_sets_auto_mode_server")
     }
 }

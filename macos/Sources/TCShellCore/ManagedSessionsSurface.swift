@@ -40,6 +40,10 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
     /// The ended session can be resumed: its conversation continues. False
     /// from an older daemon.
     public let canResume: Bool
+    /// The row can be dismissed even though it holds its account: it is
+    /// stuck unknown, its launcher gone before its first report (owner,
+    /// 2026-11-02). False from an older daemon.
+    public let canDismiss: Bool
     /// For a resumed row, when its conversation's root row started; nil for
     /// a fresh row, from an older daemon, or when unreadable.
     public let resumedFrom: Date?
@@ -49,7 +53,7 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
     enum CodingKeys: String, CodingKey {
         case id, tool, connection, cwd, state, purpose, model, collection
         case accountID = "account_id", accountLabel = "account_label", projectLabel = "project_label", exitCode = "exit_code"
-        case canFocus = "can_focus", canStop = "can_stop", canStartAgain = "can_start_again", canResume = "can_resume", resumedFrom = "resumed_from", startedAt = "started_at"
+        case canFocus = "can_focus", canStop = "can_stop", canStartAgain = "can_start_again", canResume = "can_resume", canDismiss = "can_dismiss", resumedFrom = "resumed_from", startedAt = "started_at"
     }
 
     /// Decodes its own timestamp, as `PastSession` does: chrono writes
@@ -72,6 +76,7 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
         canStop = try c.decodeIfPresent(Bool.self, forKey: .canStop) ?? false
         canStartAgain = try c.decodeIfPresent(Bool.self, forKey: .canStartAgain) ?? false
         canResume = try c.decodeIfPresent(Bool.self, forKey: .canResume) ?? false
+        canDismiss = try c.decodeIfPresent(Bool.self, forKey: .canDismiss) ?? false
         resumedFrom = try c.decodeIfPresent(String.self, forKey: .resumedFrom).flatMap(SourceCandidate.Wire.parseTimestamp)
         startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt).flatMap(SourceCandidate.Wire.parseTimestamp)
     }
@@ -283,6 +288,10 @@ public enum ManagedSurface {
         // A NEAR AI project that chooses a model: the line that says why.
         let projectChoosesModel = "managed-project-chooses-model"
         if code == projectChoosesModel || message == projectChoosesModel { return "project_chooses_model" }
+        // A NEAR AI project that sets the auto mode server variable: the
+        // line that says what to remove.
+        let projectSetsAutoModeServer = "managed-project-sets-auto-mode-server"
+        if code == projectSetsAutoModeServer || message == projectSetsAutoModeServer { return "project_sets_auto_mode_server" }
         return "action_failed"
     }
 
@@ -304,9 +313,10 @@ public extension ManagedSurface {
     /// The one visible action on the row (owner, 2026-11-01: fewer things on
     /// a crowded row): an ended row's Resume, or Start again when it has no
     /// Resume, or Dismiss when nothing else is offered. Everything else is in
-    /// the menu (`rowMenuItems`). A row that holds its account draws none.
+    /// the menu (`rowMenuItems`). A row that holds its account draws none,
+    /// except Dismiss on one the daemon says is stuck (`canDismiss`).
     static func rowButtons(_ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool = false) -> [ManagedSessionAction] {
-        guard !session.holdsAccount else { return [] }
+        guard !session.holdsAccount else { return session.canDismiss ? [.dismiss] : [] }
         if offersResume(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable) { return [.resume] }
         return [session.canStartAgain && terminalLaunch ? .startAgain : .dismiss]
     }
@@ -951,5 +961,59 @@ public struct ManagedCLIOptionsDrafts: Equatable, Sendable {
 
     public mutating func saved(tool: String, options: String) {
         if values[tool] == options { values.removeValue(forKey: tool) }
+    }
+}
+
+/// One choice in the launch dialog's window list (owner, 2026-11-02,
+/// #1852): a Terminal window holding running sessions the daemon opened,
+/// named by those sessions, and picked by its newest session's id, which
+/// the launch sends as `beside`. The daemon finds the window itself.
+public struct ManagedWindowOption: Equatable, Sendable {
+    public let beside: String
+    public let title: String
+
+    public init(beside: String, title: String) {
+        self.beside = beside
+        self.title = title
+    }
+}
+
+extension ManagedSurface {
+    /// The windows `managed_terminal_windows` listed, each as its sessions'
+    /// ids, newest first. Anything not of that shape is no window, and an
+    /// answer not of that shape is none: the dialog then offers no choice.
+    public static func terminalWindows(_ response: [String: Any]) -> [[String]] {
+        guard let windows = response["windows"] as? [[String: Any]] else { return [] }
+        return windows.compactMap { window in
+            guard let sessions = window["sessions"] as? [String], !sessions.isEmpty else { return nil }
+            return sessions
+        }
+    }
+
+    /// The dialog's window options: each window named by its sessions this
+    /// snapshot lists as running, as their rows name them (`window_option`,
+    /// "{tool} · {folder}"), joined with ", ", newest first. A session the
+    /// snapshot does not list as running is left out of the name, and a
+    /// window left with none is not offered. `tool` gives a tool's name.
+    public static func windowOptions(
+        _ windows: [[String]], sessions: [ManagedSession], tool: (String) -> String?, template: String
+    ) -> [ManagedWindowOption] {
+        windows.compactMap { ids in
+            let named = ids.compactMap { id in sessions.first { $0.id == id && $0.state == "running" } }
+            guard let newest = named.first else { return nil }
+            let title = named.map { session in
+                template
+                    .replacingOccurrences(of: "{tool}", with: tool(session.tool) ?? session.tool)
+                    .replacingOccurrences(of: "{folder}", with: session.projectLabel)
+            }.joined(separator: ", ")
+            return ManagedWindowOption(beside: newest.id, title: title)
+        }
+    }
+
+    /// What a launch sends as `beside`: the picked option's session, only
+    /// while it is still offered. Nil, "New window", otherwise.
+    public static func launchBeside(_ picked: String?, options: [ManagedWindowOption]) -> String? {
+        guard let picked, options.contains(where: { $0.beside == picked }) else { return nil }
+        return picked
     }
 }

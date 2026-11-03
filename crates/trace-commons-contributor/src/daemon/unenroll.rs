@@ -126,6 +126,22 @@ fn holds_enrollment(store: &ConfigStore) -> bool {
             .any(|name| store.daemon_path(name).exists())
 }
 
+/// No account any more, so no login goes with one: the next account on this
+/// machine is never shown this one's. Run once the config is gone, so an
+/// acceptance in flight either landed before (and is cleared here) or finds
+/// no enrollment and writes nothing (`login_record::accepted_by_commons`).
+/// The stored NEAR AI session's login stays with the session, which
+/// unenrolling keeps (until #1843 clears it too). It never blocks the
+/// unenroll: a record that cannot be rewritten is removed, and if even that
+/// fails, the next unenroll call (enrolled or not) tries again.
+fn forget_accounts_login(shared: &DaemonShared) {
+    if super::nearai_credential::login_record::forget_commons_login_or_remove(&shared.store)
+        .is_err()
+    {
+        tracing::warn!(target: "unenroll", "near_ai_login_record_not_cleared");
+    }
+}
+
 /// The blocking body. Errors are `(code, label)`.
 pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static str, &'static str)> {
     // Pass lock, then policy before queue, as everywhere: the same order
@@ -139,6 +155,7 @@ pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static st
     if !holds_enrollment(&shared.store) {
         // Every call, enrolled or not, so a call that removed the
         // enrollment and then failed here is finished by the next one.
+        forget_accounts_login(shared);
         clear_insights_counter(shared)?;
         return Ok(Unenrolled {
             removed: false,
@@ -172,6 +189,7 @@ pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static st
         shared.store.remove_enrollment_files()
     })
     .map_err(|_| (ERR_UNAVAILABLE, ERR_UNENROLL_FAILED))?;
+    forget_accounts_login(shared);
     let insights_cleanup = clear_insights_counter(shared);
     for id in &approved {
         queue.revoke_approval(*id, super::preview::REASON_INPUTS_CHANGED);

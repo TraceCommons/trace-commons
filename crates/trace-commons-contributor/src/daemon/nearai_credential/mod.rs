@@ -35,8 +35,11 @@ pub mod api;
 pub mod arrivals;
 pub mod balance;
 pub mod ceremony;
+pub(crate) mod chooser;
 pub mod funding;
+pub(crate) mod login_record;
 pub mod loopback;
+pub(crate) mod loopback_http;
 pub(crate) mod near_wallet;
 pub(crate) mod near_wallet_loopback;
 pub(crate) mod near_wallet_page;
@@ -109,7 +112,10 @@ pub const LABEL_CREDENTIAL_CLEANUP_REQUIRED: &str = "cleanup_required";
 fn state_from(attempt: Option<&str>, stored: bool) -> &'static str {
     match attempt {
         Some("starting" | "waiting_for_browser") => LABEL_CREDENTIAL_OBTAINING,
-        Some("failed") => LABEL_CREDENTIAL_FAILED,
+        // A login the enrolled commons refused (`different_account`) is a
+        // sign-in that did not finish, as far as any shell has words for
+        // today; the attempt word is what a distinct message keys on.
+        Some("failed" | ceremony::STATUS_DIFFERENT_ACCOUNT) => LABEL_CREDENTIAL_FAILED,
         _ if stored => LABEL_CREDENTIAL_PRESENT,
         Some("cancelled") => LABEL_CREDENTIAL_CANCELLED,
         _ => LABEL_CREDENTIAL_ABSENT,
@@ -189,15 +195,16 @@ pub fn credential_state(shared: &DaemonShared) -> &'static str {
 /// before it answers -- see [`ceremony::begin`] for why that ordering is not
 /// negotiable.
 ///
-/// With no `provider` the ceremony is the channel's default
-/// (`channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER`): in production the NEAR
-/// wallet sign-in (passkey wallets included), with `github` and `google`
-/// still accepted when named; in staging NEAR AI's Google login, the only
-/// one, with GitHub and the NEAR wallet refused.
+/// With no `provider` -- what every shell and the CLI send -- the person
+/// picks the login in the browser: the address handed back is the daemon's
+/// own chooser page listing `channel::NEAR_AI_SIGN_IN_PROVIDERS` (see
+/// [`chooser`]). A build with one login (staging: NEAR AI's Google login)
+/// skips the page and goes straight to it. A named `provider` still starts
+/// that login directly, and one the build does not offer is refused.
 pub async fn handle_start(shared: &DaemonShared, req: &Request) -> Response {
-    let provider = match req.params.get("provider") {
-        None => crate::channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER,
-        Some(serde_json::Value::String(provider)) => provider,
+    let started = match req.params.get("provider") {
+        None => ceremony::begin_in_browser(&shared.store).await,
+        Some(serde_json::Value::String(provider)) => ceremony::begin(&shared.store, provider).await,
         Some(_) => {
             return Response::err(
                 req.id,
@@ -206,7 +213,7 @@ pub async fn handle_start(shared: &DaemonShared, req: &Request) -> Response {
             );
         }
     };
-    match ceremony::begin(&shared.store, provider).await {
+    match started {
         Ok(value) => Response::ok(req.id, value),
         // One label for every failure. The service's own refusal is a 400
         // with an empty body, so there is nothing more specific to say that
@@ -644,7 +651,7 @@ mod tests {
     }
 
     /// Production's sign-in, pinned as it shipped (#1380): the NEAR wallet
-    /// first and by default, then NEAR AI's GitHub and Google logins.
+    /// first, then NEAR AI's GitHub and Google logins.
     #[cfg(not(feature = "near-ai-staging"))]
     #[test]
     fn production_offers_the_near_wallet_first_then_github_and_google() {
@@ -652,7 +659,6 @@ mod tests {
             crate::channel::NEAR_AI_SIGN_IN_PROVIDERS,
             ["near", "github", "google"]
         );
-        assert_eq!(crate::channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER, "near");
     }
 
     /// Staging signs in through NEAR AI's Google login only (owner,
@@ -662,20 +668,14 @@ mod tests {
     #[test]
     fn staging_offers_only_the_near_ai_google_login() {
         assert_eq!(crate::channel::NEAR_AI_SIGN_IN_PROVIDERS, ["google"]);
-        assert_eq!(crate::channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER, "google");
         assert!(!crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.contains(&"near"));
         assert!(!crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.contains(&"github"));
     }
 
-    /// Every provider a build offers has a ceremony behind it, and the
-    /// default is the first one offered.
+    /// Every provider a build offers has a ceremony behind it.
     #[test]
     fn every_offered_provider_has_a_ceremony() {
         assert!(!crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.is_empty());
-        assert_eq!(
-            crate::channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER,
-            crate::channel::NEAR_AI_SIGN_IN_PROVIDERS[0]
-        );
         for provider in crate::channel::NEAR_AI_SIGN_IN_PROVIDERS {
             assert!(
                 *provider == "near" || api::PROVIDERS.contains(provider),
@@ -686,7 +686,7 @@ mod tests {
 
     #[cfg(not(feature = "near-ai-staging"))]
     #[tokio::test]
-    async fn start_without_a_provider_begins_the_near_wallet_ceremony() {
+    async fn start_without_a_provider_opens_the_login_chooser_page() {
         let (_directory, store) = crate::config::tests_support::temp_store();
         let shared = DaemonShared::load(store).unwrap();
         let request = Request {
@@ -697,10 +697,11 @@ mod tests {
         let response = handle_start(&shared, &request).await;
         let body = response.result.expect("a ceremony starts");
         let url = reqwest::Url::parse(body["browser_url"].as_str().unwrap()).unwrap();
-        // The NEAR wallet page is served from the daemon's own loopback
-        // listener; an OAuth ceremony would point at the service instead.
+        // The person picks the login in the browser: the daemon's own page
+        // on its loopback listener, not the wallet page and not the service.
         assert_eq!(url.host_str(), Some("127.0.0.1"));
-        assert_eq!(url.path(), near_wallet::CALLBACK_PATH);
+        assert_eq!(url.path(), chooser::PAGE_PATH);
+        assert_ne!(url.path(), near_wallet::CALLBACK_PATH);
         let id = body["attempt_id"].as_str().unwrap();
         ceremony::cancel(shared.store.dir(), Some(id)).unwrap();
     }
@@ -860,6 +861,16 @@ mod tests {
         // A failed re-sign-in must remain visible even with an older key.
         assert_eq!(state_from(Some("failed"), false), LABEL_CREDENTIAL_FAILED);
         assert_eq!(state_from(Some("failed"), true), LABEL_CREDENTIAL_FAILED);
+        // A login the commons refused kept the older key, and still reads
+        // as a sign-in that did not finish.
+        assert_eq!(
+            state_from(Some("different_account"), true),
+            LABEL_CREDENTIAL_FAILED
+        );
+        assert_eq!(
+            state_from(Some("different_account"), false),
+            LABEL_CREDENTIAL_FAILED
+        );
         assert_eq!(
             state_from(Some("cancelled"), false),
             LABEL_CREDENTIAL_CANCELLED
@@ -905,7 +916,13 @@ mod tests {
         let resting = serde_json::json!({ "state": LABEL_CREDENTIAL_ABSENT });
         assert!(!reports_a_finished_ceremony(&Response::ok(1, resting)));
 
-        for word in ["starting", "waiting_for_browser", "failed", "cancelled"] {
+        for word in [
+            "starting",
+            "waiting_for_browser",
+            "failed",
+            "cancelled",
+            "different_account",
+        ] {
             let mut body = serde_json::json!({ "state": LABEL_CREDENTIAL_OBTAINING });
             body[ATTEMPT_STATUS_FIELD] = serde_json::Value::String(word.to_string());
             assert!(

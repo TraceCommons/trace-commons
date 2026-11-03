@@ -22,48 +22,6 @@ struct CredentialSection: View {
     /// Whether the section draws its own title. Inside #1146's connection
     /// panel it does not: the panel's title is the heading.
     var titled = true
-    /// The first provider this build offers (the daemon's default): the
-    /// NEAR wallet in production, NEAR AI's Google login in staging.
-    @State private var ownProvider = CredentialSection.offeredProviders.first ?? ""
-    /// Where the provider choice lives when the caller holds it. `nil` -- every
-    /// production caller -- keeps it in this view's own state.
-    ///
-    /// A test seam, and the only one: on macOS 27 SwiftUI draws the picker
-    /// itself, with no `NSPopUpButton` beneath it and no accessibility node in
-    /// an offscreen host, so a test cannot reach the control to change it.
-    /// Holding the same binding the picker writes lets it make the same change.
-    var providerSelection: Binding<String>? = nil
-
-    private var selection: Binding<String> { providerSelection ?? $ownProvider }
-    private var provider: String { selection.wrappedValue }
-
-    /// The sign-in providers the picker offers, in the order it offers them.
-    /// The titles are `PrivateInferenceCopy`'s; the tags are the daemon's
-    /// `provider` values.
-    struct ProviderOption: Hashable {
-        let tag: String
-        let title: String
-    }
-
-    /// The providers this build offers, as the core reports them
-    /// (`tc_build_channel_json`): a staging build offers NEAR AI's Google
-    /// login only.
-    static var offeredProviders: [String] { BuildChannelGate.dylibChannel?.nearAiSignInProviders ?? [] }
-
-    /// `offered`, in its order, with the core's title for each. A provider
-    /// this build has no title for is not drawn.
-    static func providerOptions(
-        _ copy: PrivateInferenceCopy, offered: [String] = CredentialSection.offeredProviders
-    ) -> [ProviderOption] {
-        offered.compactMap { tag in
-            switch tag {
-            case "near": return ProviderOption(tag: tag, title: copy.credentialProviderNear)
-            case "github": return ProviderOption(tag: tag, title: copy.credentialProviderGithub)
-            case "google": return ProviderOption(tag: tag, title: copy.credentialProviderGoogle)
-            default: return nil
-            }
-        }
-    }
 
     var body: some View {
         let status = model.credentialStatus
@@ -106,39 +64,12 @@ struct CredentialSection: View {
                     .foregroundStyle(GlassColor.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if action == .obtain || balanceAction == .obtain {
-                // The glass pill shows only the chosen provider, so the
-                // chooser's own word is drawn beside it, as the native
-                // picker drew its label. VoiceOver hears it once, from the
-                // pill, which carries both the label and the value.
-                HStack(spacing: GlassTokens.Space.s4) {
-                    Text(copy.credentialProviderLabel)
-                        .glassType(GlassTokens.TypeScale.label)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .accessibilityHidden(true)
-                    GlassPicker(
-                        copy.credentialProviderLabel,
-                        selection: Binding(
-                            get: { provider },
-                            set: { if let value = $0 { selection.wrappedValue = value } }),
-                        options: Self.providerOptions(copy).map { GlassPickerOption($0.title, value: $0.tag) },
-                        placeholder: copy.credentialProviderLabel)
-                }
-                .frame(minHeight: 44)
-                .disabled(model.credentialBusy)
-                if provider == "near" {
-                    Text(copy.credentialWalletNotice)
-                        .glassType(GlassTokens.TypeScale.body)
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
             actionButton(action)
             // The balance and funding are their own panels after this card,
             // as #1146 draws them (`PrivateAIBalanceCard`, `FundingRow`). The
-            // sign-in the balance needs stays here, beside the provider
-            // chooser it uses, and never doubles this card's own button: the
-            // decision is `BalanceSurface.actionToDraw`'s, not this view's.
+            // sign-in the balance needs stays here, and never doubles this
+            // card's own button: the decision is `BalanceSurface.actionToDraw`'s,
+            // not this view's.
             actionButton(balanceAction)
         }
     }
@@ -168,7 +99,9 @@ struct CredentialSection: View {
             Task {
                 // The URL is served once, by start. Opening it is this
                 // view's environment; the model has no window.
-                guard let url = await model.startNearAiCredential(provider: provider) else { return }
+                // No provider; the daemon's browser page lists the build's
+                // logins, and the wallet's notice with them (owner, 2026-11-02).
+                guard let url = await model.startNearAiCredential() else { return }
                 let accepted = await openURL.opened(url)
                 // A browser that never opened leaves a ceremony nobody can
                 // finish, so it is stopped rather than left to time out.

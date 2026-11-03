@@ -30,7 +30,7 @@ fn version_line() -> &'static str {
     // The semver does not move when a deploy does, so --version carries the
     // commit the binary was built from as well, and then the channel.
     version = version_line(),
-    about = "Submit local coding-agent traces to Trace Commons"
+    about = "Submit local coding-agent traces"
 )]
 struct Cli {
     // The help names the channel's override variable: `channel::CONFIG_DIR_HELP`.
@@ -557,7 +557,7 @@ fn run_on_this_thread() -> std::process::ExitCode {
     if canonical {
         command = command
             .name("near-ai")
-            .about("NEAR AI — manage native coding sessions and contribute to Trace Commons");
+            .about("NEAR AI — manage native coding sessions and contribute traces");
     }
     let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&command.get_matches())
         .unwrap_or_else(|e| e.exit());

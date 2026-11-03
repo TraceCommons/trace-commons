@@ -37,6 +37,26 @@ enum NearAiSignInOffer {
     }
 }
 
+/// Every NEAR AI Sign in outside Settings: one plain button with the
+/// caller's label and style. It names no login: the daemon's browser page
+/// lists the build's logins and the person picks one there (owner,
+/// 2026-11-02: "ideally the choosing of login types happens in the browser
+/// window rather than with a dropdown menu").
+struct NearAiSignInButton: View {
+    let title: String
+    /// VoiceOver's name for the control, when the label alone does not say
+    /// what is signed in to.
+    var accessibilityName: String?
+    let style: TCDesign.GlassButtonStyle
+    let start: () -> Void
+
+    var body: some View {
+        Button(title, action: start)
+            .buttonStyle(style)
+            .accessibilityLabel(accessibilityName ?? title)
+    }
+}
+
 /// The balance card's sign-in: a primary button that runs the one flow
 /// Settings' "Sign in again" runs (`AppModel.signInToNearAI`), with the
 /// core's waiting and failure lines. Draws nothing while the NEAR AI login
@@ -51,10 +71,9 @@ struct NearAiSignInControl: View {
             failed: model.nearAiSignInFailed)
         if offered || model.nearAiSigningIn {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                Button(NearAiSignInOffer.label(copy)) {
+                NearAiSignInButton(title: NearAiSignInOffer.label(copy), style: GlassButtonStyle(.primary)) {
                     Task { await model.signInToNearAI() }
                 }
-                .buttonStyle(GlassButtonStyle(.primary))
                 .disabled(model.credentialBusy || (model.nearAiSigningIn && !model.canRestartNearAiBrowserSignIn))
                 if let line = NearAiSignInOffer.progressLine(
                     copy, signingIn: model.nearAiSigningIn, failed: model.nearAiSignInFailed)

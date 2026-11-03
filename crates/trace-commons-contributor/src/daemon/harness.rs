@@ -2013,7 +2013,7 @@ mod tests {
         assert!(command_runs_ironwire("ironwire"));
         assert!(!command_runs_ironwire("/old/app statusline"));
         assert!(!command_runs_ironwire(
-            "/Applications/Trace Commons.app/Contents/MacOS/trace-commons statusline"
+            "/Applications/Old App.app/Contents/MacOS/trace-commons statusline"
         ));
         assert!(!command_runs_ironwire("/opt/ironwire/bin/tc statusline"));
         assert!(!command_runs_ironwire("/home/me/not-ironwire statusline"));
