@@ -743,3 +743,34 @@ where they still apply.
 14. **Copy and notices.** Every DRAFT string in section 2, and the two
     notices in 2.6: the mismatch block's "Use a different account" button
     and the payouts status line for wallet-origin accounts.
+
+## 10. Where the server build differs from the text above
+
+Recorded as the server half was built (2026-11-03):
+
+1. **The ceremony's purpose lives in its payload, not a column.** A change
+   ceremony row stores a `NearAiRebindPending` with a required `purpose:
+   "rebind"` field, and every ceremony payload denies unknown fields, so a
+   change row never parses as a sign-up row or the reverse. V150 adds no
+   column to `trace_near_provisioning_ceremonies`.
+2. **The login resolver is unchanged.** It still maps an anchor to its
+   tenant. The retired check is in the in-tenant account lookup of both
+   sign-in paths, which refuses a retired anchor before anything is
+   written: by name (`near_ai_login_retired`, 409) on the NEAR AI path,
+   with the uniform deny on the wallet path. No new resolver grant.
+3. **A waiting payout link on a wallet-origin account holds the change**
+   (`payout_link_review_required`, 409, logged) instead of being closed:
+   the runtime cannot close a waiting link past V146's guard, and such a
+   link should not exist after #1862 and V147. An active one is unlinked as
+   section 5.1 says.
+4. **The wallet's own sign-in keys are revoked.** A wallet-origin change
+   also revokes the account's `trace_near_identities` rows for the proven
+   NEAR account name, so the wallet stops signing in through the NEAR
+   login route as well (decision 3).
+5. **No rollout flag.** `capabilities_v2` publishes
+   `near_ai_rebind_start_path` / `near_ai_rebind_finish_path` alongside the
+   other paths; nothing calls them until a client that knows them ships.
+6. **The evidence-ledger lease check is a guard-owned function**,
+   `trace_admission_anchor_busy`, because the runtime cannot read the
+   ledger. Granted to `trace_ingest_runtime` and, as V149 does, to the
+   migrating login.
