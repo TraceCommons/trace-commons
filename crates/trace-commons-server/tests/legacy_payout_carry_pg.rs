@@ -1505,3 +1505,159 @@ async fn a_carry_that_changes_nothing_writes_no_audit_row() {
     }
     assert_eq!(audits().await, before);
 }
+
+const HASH_HELPERS: [&str; 3] = [
+    "trace_payout_link_hash",
+    "trace_payout_account_hash",
+    "trace_legacy_link_hash",
+];
+
+/// Review of #1878: the helpers are STABLE (their body calls the STABLE
+/// `convert_to`), carry no `SET` clause so the planner inlines them, and are
+/// closed to PUBLIC with execute granted to the roles that run their callers.
+#[tokio::test]
+async fn the_hash_helpers_are_stable_inlined_and_closed_to_public() {
+    let Some(fx) = fixture().await else { return };
+    for helper in HASH_HELPERS {
+        let signature = format!("public.{helper}(uuid)");
+        let row = fx
+            .admin
+            .query_one(
+                "SELECT p.provolatile::TEXT, p.proconfig IS NULL,
+                        has_function_privilege('public', p.oid, 'EXECUTE'),
+                        has_function_privilege('trace_ingest_runtime', p.oid, 'EXECUTE'),
+                        has_function_privilege('trace_legacy_payout_carry_guard', p.oid, 'EXECUTE'),
+                        has_function_privilege('trace_legacy_invite_link_guard', p.oid, 'EXECUTE')
+                   FROM pg_proc p WHERE p.oid = to_regprocedure($1)",
+                &[&signature],
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, String>(0), "s", "{helper} is STABLE");
+        assert!(row.get::<_, bool>(1), "{helper} has no SET clause");
+        assert!(!row.get::<_, bool>(2), "{helper} is closed to PUBLIC");
+        for (column, role) in [(3, "runtime"), (4, "carry guard"), (5, "link guard")] {
+            assert!(
+                row.get::<_, bool>(column),
+                "{helper} is granted to the {role}"
+            );
+        }
+        // Inlined: the plan shows the expression, not a call to the helper.
+        let plan: Vec<String> = fx
+            .admin
+            .query(
+                &format!("EXPLAIN (VERBOSE, COSTS OFF) SELECT {helper}(gen_random_uuid())"),
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        let plan = plan.join("\n");
+        assert!(!plan.contains(helper), "{helper} is inlined: {plan}");
+        assert!(plan.contains("sha256"), "{plan}");
+    }
+}
+
+/// Review of #1878: the three hash formulas are spelled only inside their
+/// helpers. Any function in the database that writes one of the domain
+/// strings itself (a later migration re-inlining a formula, or a `CREATE OR
+/// REPLACE` of a V146 function that stops calling the helper) fails this.
+#[tokio::test]
+async fn no_function_but_the_helpers_spells_a_hash_formula() {
+    let Some(fx) = fixture().await else { return };
+    let spellers: Vec<String> = fx
+        .admin
+        .query(
+            "SELECT p.proname::TEXT FROM pg_proc p
+               JOIN pg_namespace n ON n.oid = p.pronamespace
+              WHERE n.nspname = 'public'
+                AND (p.prosrc LIKE '%''payout-link-v1:''%'
+                     OR p.prosrc LIKE '%''payout-account-v1:''%'
+                     OR p.prosrc LIKE '%''legacy-invite-link-v1:''%')
+              ORDER BY 1",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    let mut helpers: Vec<String> = HASH_HELPERS.iter().map(|name| name.to_string()).collect();
+    helpers.sort();
+    assert_eq!(spellers, helpers);
+    // And the V146 functions that match on them call the helpers.
+    for (function, helper) in [
+        (
+            "trace_legacy_payout_release_carry",
+            "trace_payout_link_hash",
+        ),
+        (
+            "trace_legacy_payout_release_carry",
+            "trace_payout_account_hash",
+        ),
+        (
+            "trace_legacy_invite_links_release_carries",
+            "trace_legacy_link_hash",
+        ),
+        (
+            "trace_legacy_payout_carry_invalid",
+            "trace_legacy_link_hash",
+        ),
+        (
+            "trace_legacy_payout_carry_invalid",
+            "trace_payout_link_hash",
+        ),
+        (
+            "trace_legacy_link_claim_device_principals",
+            "trace_payout_account_hash",
+        ),
+        (
+            "trace_link_legacy_instance_device",
+            "trace_payout_account_hash",
+        ),
+    ] {
+        let calls: bool = fx
+            .admin
+            .query_one(
+                "SELECT bool_or(prosrc LIKE '%' || $2 || '(%') FROM pg_proc WHERE proname = $1",
+                &[&function, &helper],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(calls, "{function} calls {helper}");
+    }
+}
+
+/// Review of #1878: V146 was edited in place, and the runner keeps no
+/// checksum, so a database that ran an earlier V146 must be refused rather
+/// than run on silently. The migration runner's post-run check does that:
+/// a missing helper, or one with the earlier IMMUTABLE label, is an error
+/// naming V146.
+#[tokio::test]
+async fn a_database_that_ran_an_earlier_v146_is_refused() {
+    let Some(fx) = fixture().await else { return };
+    let mut client = fx
+        .owner
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    trace_commons_server::db::postgres::verify_in_place_migration_edits(&**client)
+        .await
+        .expect("a database migrated to head passes");
+    for change in [
+        "DROP FUNCTION public.trace_legacy_link_hash(uuid)",
+        "ALTER FUNCTION public.trace_payout_link_hash(uuid) IMMUTABLE",
+    ] {
+        let tx = client.transaction().await.unwrap();
+        tx.batch_execute(change).await.unwrap();
+        let refused = trace_commons_server::db::postgres::verify_in_place_migration_edits(&*tx)
+            .await
+            .expect_err(change);
+        assert!(refused.to_string().contains("V146"), "{refused}");
+        tx.rollback().await.unwrap();
+    }
+}

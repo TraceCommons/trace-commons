@@ -1083,6 +1083,56 @@ fn recorded_migration_state(
     }
 }
 
+/// Functions a migration created only after it was edited in place, with the
+/// volatility the edit gave them. The runner keeps no checksum, so a database
+/// that applied the earlier text of such a migration is never told it
+/// changed; this list is how it is noticed instead. V146 was edited in place
+/// twice before any deployed database applied it: #1878 added the three hash
+/// helpers, and the review of #1878 made them STABLE and inlinable.
+const IN_PLACE_EDITED_FUNCTIONS: &[(i32, &str, &str)] = &[
+    (146, "public.trace_payout_link_hash(uuid)", "s"),
+    (146, "public.trace_payout_account_hash(uuid)", "s"),
+    (146, "public.trace_legacy_link_hash(uuid)", "s"),
+];
+
+/// Refuses a database that recorded a migration whose in-place edits it never
+/// ran: one of [`IN_PLACE_EDITED_FUNCTIONS`] is missing, or has another
+/// volatility. Run after every migration run, so the service will not start
+/// on such a database. The error names the version and the function, never a
+/// tenant or a row.
+#[doc(hidden)]
+pub async fn verify_in_place_migration_edits<C>(client: &C) -> Result<(), DatabaseError>
+where
+    C: tokio_postgres::GenericClient + Sync,
+{
+    for (version, signature, volatility) in IN_PLACE_EDITED_FUNCTIONS {
+        let row = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM _trace_commons_migrations WHERE version = $1),
+                        (SELECT p.provolatile::TEXT FROM pg_catalog.pg_proc p
+                          WHERE p.oid = pg_catalog.to_regprocedure($2))",
+                &[version, signature],
+            )
+            .await?;
+        let recorded: bool = row.get(0);
+        let found: Option<String> = row.get(1);
+        if recorded && found.as_deref() != Some(*volatility) {
+            return Err(DatabaseError::Migration(format!(
+                "V{version} is recorded here, but `{signature}` is {}: this database \
+                 applied an earlier text of V{version}, which was edited in place before \
+                 release. Recreate the database, or apply V{version}'s current definition of \
+                 that function by hand",
+                if found.is_some() {
+                    "not STABLE"
+                } else {
+                    "missing"
+                }
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The `MIGRATIONS` table below, exposed (hidden) so
 /// `tests/migration_atomicity_pg.rs` can stop a database part-way, the way a
 /// deployment sits between two releases, and apply the rest later.
@@ -2630,6 +2680,7 @@ impl Database for PgBackend {
                     apply_and_record_migration(&mut client, *version, name, sql).await?;
                 }
             }
+            verify_in_place_migration_edits(&**client).await?;
             Ok::<(), DatabaseError>(())
         }
         .await;
