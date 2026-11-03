@@ -783,7 +783,7 @@ pub fn witness_copy() -> WitnessCopy {
         },
         wallet: WalletCopy {
             heading: "Join with a NEAR account",
-            disclosure: "Check whether your commons accepts new accounts. Connecting proves control of your account and this device; it does not fund inference or enable capture.",
+            disclosure: "Check whether your commons accepts new accounts. Connecting proves control of your account and this device; it does not fund inference or enable capture. Payouts need a NEAR AI login, which joining with a NEAR account doesn't set up.",
             commons: "Commons HTTPS address",
             account: "Your NEAR account",
             check: "Check availability",
