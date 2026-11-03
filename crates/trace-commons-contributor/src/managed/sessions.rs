@@ -3134,7 +3134,7 @@ mod tests {
         let context = registry
             .redeem(id, prepared.ticket.as_deref().unwrap())
             .unwrap();
-        registry.opened_in_terminal(id, None).unwrap();
+        registry.opened_in_terminal(id, None, None).unwrap();
         let report = |state, exit_code| LifecycleReport {
             model: None,
             collection: None,
