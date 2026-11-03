@@ -6025,9 +6025,15 @@ unrecognized: `managed_snapshot` then reports no `terminal_current` and no
 the default. `set_managed_terminal` writes the same setting. The managed
 snapshot's `capabilities` carries `terminal_current` (the chosen id, or
 `null`), `terminal_choices` (`[{id, name}]` of the offered apps found on
-this computer; empty under Flatpak) and `terminal_destination` (the
-chosen app's name). A launch whose chosen app was not found is refused
-with `managed-terminal-not-found`.
+this computer; empty under Flatpak), `terminal_destination` (the
+chosen app's name: where tool setup opens, and what the install and update
+hints and the picker name) and `launch_destination` (where a session opens:
+the chosen app's name, or "herdr" while `managed_herdr` is on; `null`
+whenever `terminal_destination` is). A launch whose chosen app was not found
+is refused with `managed-terminal-not-found`. A shell fills `{destination}`
+and a launch refusal's `{terminal}` from `launch_destination`, and a tool
+setup refusal's `{terminal}` from `terminal_destination`; from a daemon
+that sends no `launch_destination`, `terminal_destination` serves for both.
 
 `managed_herdr` (boolean, default `false`) is "Group sessions in herdr":
 managed sessions open as tabs of herdr's "Near.ai" workspace, with
@@ -6037,7 +6043,8 @@ managed sessions open as tabs of herdr's "Near.ai" workspace, with
 managed snapshot's `capabilities` carries `herdr_available` (herdr was found
 and a terminal can host it) and `herdr_grouping` (the setting). With the
 setting on, `managed_terminal_launch` answers `destination: "herdr"`,
-`terminal_destination` is "herdr" (so a refusal names herdr), and a launch
+`launch_destination` is "herdr" (so a launch refusal names herdr, while
+`terminal_destination` stays the chosen terminal), and a launch
 with no herdr found, with herdr not answering within 10 s, or with
 something at herdr's socket path this account cannot trust, is refused with
 `managed-terminal-not-found`. A herdr older than socket protocol 22 is

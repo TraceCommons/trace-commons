@@ -499,8 +499,11 @@ was built follows the recommended shapes above, with these differences:
     that releases the launch; only a failure of that request is
     `LaunchUnknown`. The orchestration takes its CLI runner as a parameter
     and is tested off macOS.
-  - While sessions are grouped in herdr, `capabilities.terminal_destination`
-    is "herdr", so a refusal names herdr, not the chosen terminal.
+  - While sessions are grouped in herdr, `capabilities.launch_destination`
+    is "herdr", so a launch refusal names herdr. `terminal_destination`
+    stays the chosen terminal, which tool setup, the install and update
+    hints and the picker name (owner, 2026-11-03; it was briefly "herdr" in
+    65f75d4f8, which named herdr in the install hints too).
 - Known gap: herdr's API has no list of attached clients, so a herdr server
   running with no client (headless, or its terminal closed) answers, and the
   tab opens where nobody sees it. Show cannot raise it either. The person

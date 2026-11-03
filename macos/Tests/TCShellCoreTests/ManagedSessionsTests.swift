@@ -20,6 +20,34 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(snapshot.terminalChoices, [ManagedTerminalChoice(id: "terminal", name: "Terminal"), ManagedTerminalChoice(id: "ghostty", name: "Ghostty")])
     }
 
+    /// Owner, 2026-11-03: while sessions are grouped in herdr, a launch
+    /// refusal names herdr, but tool setup, its install and update hints and
+    /// the picker still name the chosen terminal, where setup opens.
+    func testGroupedLaunchesNameHerdrAndSetupNamesTheTerminal() throws {
+        func capabilities(_ fields: String) throws -> ManagedSnapshot.Capabilities {
+            let json = #"{"revision":2,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,\#(fields)"terminal_choices":[]}}"#
+            return try JSONDecoder().decode(ManagedSnapshot.self, from: Data(json.utf8)).capabilities
+        }
+        let grouped = try capabilities(#""terminal_destination":"Ghostty","launch_destination":"herdr","herdr_grouping":true,"#)
+        let install = "Open {terminal} and run the official installer for {tool}."
+        let notFound = "{terminal} wasn't found on this computer. Choose another in Settings."
+        XCTAssertEqual(
+            ManagedSurface.fillTerminal(install, terminal: ManagedSurface.setupDestination(grouped), fallback: "your terminal"),
+            "Open Ghostty and run the official installer for {tool}.")
+        XCTAssertEqual(
+            ManagedSurface.fillTerminal(notFound, terminal: ManagedSurface.failureDestination(method: "managed_launch_prepare", grouped), fallback: "your terminal"),
+            "herdr wasn't found on this computer. Choose another in Settings.")
+        XCTAssertEqual(ManagedSurface.failureDestination(method: "managed_tool_setup", grouped), "Ghostty")
+        XCTAssertEqual(ManagedSurface.sessionDestination(grouped), "herdr")
+
+        // An older daemon sends only `terminal_destination`, which then
+        // names where everything opens.
+        let older = try capabilities(#""terminal_destination":"Ghostty","#)
+        XCTAssertEqual(ManagedSurface.sessionDestination(older), "Ghostty")
+        XCTAssertEqual(ManagedSurface.failureDestination(method: "managed_launch_prepare", older), "Ghostty")
+        XCTAssertEqual(ManagedSurface.setupDestination(older), "Ghostty")
+    }
+
     /// "Group sessions in herdr" is offered where the daemon found herdr,
     /// or while it is on, so it can be turned off after herdr is removed;
     /// an older daemon that sends neither offers nothing.

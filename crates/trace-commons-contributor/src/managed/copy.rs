@@ -35,8 +35,9 @@
 //! - `terminal_not_found` "{terminal} wasn't found on this computer.
 //!   Choose another in Settings." The line a shell shows for the refusal
 //!   `managed-terminal-not-found` ("not found", never "not installed");
-//!   it fills `{terminal}` from `capabilities.terminal_destination`, which
-//!   names herdr while sessions are grouped there.
+//!   it fills `{terminal}` from `capabilities.launch_destination` for a
+//!   launch (herdr while sessions are grouped there) and from
+//!   `capabilities.terminal_destination` for tool setup.
 //! - `herdr_grouping` "Group sessions in herdr" -- the switch under the
 //!   picker, and its accessible name (owner decision D4, 2026-11-03,
 //!   `docs/superpowers/specs/2026-11-03-rex-herdr-terminal-integration.md`).

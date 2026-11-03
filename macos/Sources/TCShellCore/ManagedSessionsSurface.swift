@@ -138,7 +138,13 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         public let resume: Bool?
         /// Terminal installer support; absent from older daemons.
         public let toolSetup: Bool?
+        /// The chosen terminal's name: where tool setup opens, and what the
+        /// install and update hints and the picker name.
         public let terminalDestination: String?
+        /// Where a session opens: herdr while sessions are grouped there,
+        /// else the chosen terminal. Absent from an older daemon, which
+        /// reads as `terminalDestination` ([`ManagedSurface.sessionDestination`]).
+        public let launchDestination: String?
         /// Whether the daemon holds a NEAR AI sign-in. A bool, never the
         /// credential; absent from an older daemon, which reads as no.
         public let nearAiSignin: Bool?
@@ -159,6 +165,7 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         public let herdrGrouping: Bool?
         enum CodingKeys: String, CodingKey {
             case managedLaunch = "managed_launch", terminalLaunch = "terminal_launch", terminalDestination = "terminal_destination"
+            case launchDestination = "launch_destination"
             case toolSetup = "tool_setup"
             case folderSettings = "folder_settings"
             case keepSavedModel = "keep_saved_model"
@@ -300,6 +307,25 @@ public enum ManagedSurface {
         let projectSetsAutoModeServer = "managed-project-sets-auto-mode-server"
         if code == projectSetsAutoModeServer || message == projectSetsAutoModeServer { return "project_sets_auto_mode_server" }
         return "action_failed"
+    }
+
+    /// Where a session opens, for `{destination}` and a launch's
+    /// `{terminal}`: herdr while sessions are grouped there (owner,
+    /// 2026-11-03), else the chosen terminal.
+    public static func sessionDestination(_ capabilities: ManagedSnapshot.Capabilities) -> String? {
+        capabilities.launchDestination ?? capabilities.terminalDestination
+    }
+
+    /// The chosen terminal, where tool setup opens: for the install and
+    /// update hints and the picker, never herdr.
+    public static func setupDestination(_ capabilities: ManagedSnapshot.Capabilities) -> String? {
+        capabilities.terminalDestination
+    }
+
+    /// The app a failed request's `{terminal}` names: the chosen terminal
+    /// for tool setup, where a session opens for anything else.
+    public static func failureDestination(method: String?, _ capabilities: ManagedSnapshot.Capabilities) -> String? {
+        method == "managed_tool_setup" ? setupDestination(capabilities) : sessionDestination(capabilities)
     }
 
     /// A line with `{terminal}` filled from the terminal the daemon

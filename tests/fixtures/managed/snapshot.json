@@ -58,6 +58,7 @@
     "managed_launch": true,
     "terminal_launch": true,
     "terminal_destination": "Terminal",
+    "launch_destination": "Terminal",
     "terminal_current": "terminal",
     "terminal_choices": [
       {

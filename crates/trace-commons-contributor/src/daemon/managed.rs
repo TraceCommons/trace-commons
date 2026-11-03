@@ -555,15 +555,13 @@ impl ManagedService {
                 // "Group sessions in herdr" is offered only where herdr is
                 // found and a terminal can host it.
                 let herdr_available = terminal_launch && (self.herdr_available)();
-                // A grouped launch opens in herdr, and its refusals are
-                // herdr's, so `{terminal}` names herdr while grouping is on.
-                let destination = if terminal.herdr {
-                    Some(herdr::NAME)
-                } else {
-                    terminal::destination(choice)
-                };
+                // `terminal_destination` is the chosen terminal, where tool
+                // setup opens; `launch_destination` is where a session opens,
+                // herdr while sessions are grouped there (owner, 2026-11-03).
+                let destination = terminal::destination(choice);
+                let opens_in = launch_destination(terminal.herdr, destination);
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":destination,"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices,"herdr_available":herdr_available,"herdr_grouping":terminal.herdr}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":destination,"launch_destination":opens_in,"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices,"herdr_available":herdr_available,"herdr_grouping":terminal.herdr}}),
                 )
             }
             "managed_tool_setup" => {
@@ -779,6 +777,12 @@ struct TerminalChoice {
     chosen: bool,
     /// "Group sessions in herdr" (`managed_herdr`).
     herdr: bool,
+}
+
+/// Where a session opens: herdr while "Group sessions in herdr" is on, else
+/// the chosen terminal; none when no terminal can open here at all.
+fn launch_destination(grouped: bool, terminal: Option<&'static str>) -> Option<&'static str> {
+    terminal.map(|terminal| if grouped { herdr::NAME } else { terminal })
 }
 
 /// The terminal choice, read per request like the sign-in. Unreadable
@@ -2625,6 +2629,7 @@ mod tests {
         // does, the name follows the choice.
         if terminal::helper_path().is_ok() && terminal::launch_available() {
             assert_eq!(capabilities["terminal_destination"], chosen.name());
+            assert_eq!(capabilities["launch_destination"], chosen.name());
         }
 
         let unknown = call_with(
@@ -2637,6 +2642,7 @@ mod tests {
         .unwrap();
         assert_eq!(unknown["capabilities"]["terminal_current"], Value::Null);
         assert_eq!(unknown["capabilities"]["terminal_destination"], Value::Null);
+        assert_eq!(unknown["capabilities"]["launch_destination"], Value::Null);
     }
 
     /// The snapshot says whether the person has chosen a terminal, so a
@@ -3328,6 +3334,16 @@ mod tests {
         );
     }
 
+    /// Where a session opens: herdr while sessions are grouped there, the
+    /// chosen terminal otherwise, and nowhere when no terminal can open.
+    #[test]
+    fn a_grouped_launch_opens_in_herdr_and_setup_in_the_terminal() {
+        assert_eq!(launch_destination(false, Some("Ghostty")), Some("Ghostty"));
+        assert_eq!(launch_destination(true, Some("Ghostty")), Some("herdr"));
+        assert_eq!(launch_destination(true, None), None);
+        assert_eq!(launch_destination(false, None), None);
+    }
+
     /// The snapshot says whether "Group sessions in herdr" is on, and offers
     /// it only where herdr is found.
     #[test]
@@ -3357,14 +3373,22 @@ mod tests {
         }
         let found = snapshot(&mut service, false);
         assert_eq!(found["herdr_available"], found["terminal_launch"]);
-        assert_eq!(
-            found["terminal_destination"],
-            terminal::destination(TerminalSetting::default()).map_or(Value::Null, Value::from)
-        );
-        assert_eq!(
-            snapshot(&mut service, true)["terminal_destination"],
-            "herdr"
-        );
+        // `terminal_destination` is always the chosen terminal: tool setup,
+        // the install and update hints and the picker use it. Where a
+        // session opens is `launch_destination`: herdr while sessions are
+        // grouped there, so a launch refusal names herdr (owner, 2026-11-03).
+        let chosen =
+            terminal::destination(TerminalSetting::default()).map_or(Value::Null, Value::from);
+        assert_eq!(found["terminal_destination"], chosen);
+        assert_eq!(found["launch_destination"], chosen);
+        let grouped = snapshot(&mut service, true);
+        assert_eq!(grouped["terminal_destination"], chosen);
+        if chosen.is_null() {
+            // No terminal launch in this build: nothing opens anywhere.
+            assert_eq!(grouped["launch_destination"], Value::Null);
+        } else {
+            assert_eq!(grouped["launch_destination"], "herdr");
+        }
         service.herdr_available = || false;
         assert_eq!(snapshot(&mut service, true)["herdr_available"], false);
     }

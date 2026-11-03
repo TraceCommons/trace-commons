@@ -93,7 +93,7 @@ struct ManagedSessionsSection: View {
             title: model.managedText("sign_in_title"),
             subtitle: [ManagedSurface.signInScope(
                 model.managedText("sign_in_scope"),
-                destination: snapshot.capabilities.terminalDestination,
+                destination: ManagedSurface.sessionDestination(snapshot.capabilities),
                 fallback: model.managedText("terminal"))],
             accessory: { AnyView(EmptyView()) },
             content: { AnyView(toolButtons(snapshot)) })
@@ -200,10 +200,13 @@ struct ManagedSessionsSection: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
             GlassAlert(model.managedText("action_failed"))
             if key != "action_failed" {
-                // `{terminal}` is the chosen app the daemon names.
+                // `{terminal}` is the app that failed: herdr for a grouped
+                // launch, the chosen terminal for tool setup.
                 GlassAlert(ManagedSurface.fillTerminal(
                     model.managedText(key),
-                    terminal: model.managedSnapshot?.capabilities.terminalDestination,
+                    terminal: model.managedSnapshot.flatMap {
+                        ManagedSurface.failureDestination(method: model.managedErrorMethod, $0.capabilities)
+                    },
                     fallback: model.managedText("terminal")))
                     .textSelection(.enabled)
             }
@@ -590,7 +593,7 @@ struct ManagedLaunchSheet: View {
            let picked = snapshot?.terminalChoices.first(where: { $0.id == launchTerminal }) {
             return picked.name
         }
-        return snapshot?.capabilities.terminalDestination ?? model.managedText("terminal")
+        return snapshot.flatMap { ManagedSurface.sessionDestination($0.capabilities) } ?? model.managedText("terminal")
     }
     private var selectedAccount: ManagedAccount? { model.managedSnapshot?.accounts.first { $0.id == accountID } }
     private var toolAvailable: Bool { selectedAccount.map { model.managedSnapshot?.canLaunch(tool: $0.tool) == true } ?? false }
@@ -1039,7 +1042,7 @@ struct ManagedInstallLink: View {
     private var terminalHint: String {
         ManagedSurface.fillTerminal(
             copy(labelKey == "update" ? "update_in_terminal" : "install_in_terminal"),
-            terminal: model.managedSnapshot?.capabilities.terminalDestination, fallback: copy("terminal"))
+            terminal: model.managedSnapshot.flatMap { ManagedSurface.setupDestination($0.capabilities) }, fallback: copy("terminal"))
             .replacingOccurrences(of: "{tool}", with: copy(tool.tool))
     }
     var body: some View {
