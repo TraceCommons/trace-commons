@@ -8625,6 +8625,8 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
         .merge(referral_routes::routes())
         // The devices linked to the account: list, rename, revoke.
         .merge(account_devices_routes::routes())
+        // F10: change the NEAR AI login the account uses.
+        .merge(near_provisioning::near_ai_rebind::routes())
         // One-time codes that link a headless device: mint and status.
         .merge(account_device_codes_routes::account_routes())
         .get("/v1/account/traces", account_traces_list_handler)

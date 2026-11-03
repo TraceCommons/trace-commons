@@ -99882,6 +99882,10 @@ mod migrated_pg_fixture;
 #[path = "nearai_ceremony_pg_tests.rs"]
 mod nearai_ceremony_pg_tests;
 
+/// F10, changing an account's NEAR AI login, against PostgreSQL. Selected in
+/// CI by `near_ai_rebind_pg_tests -- --ignored`, like the two suites above.
+#[path = "near_ai_rebind_pg_tests.rs"]
+mod near_ai_rebind_pg_tests;
 /// Full wallet v2 completion through the router, real signatures and PostgreSQL.
 /// CI selects this ignored module explicitly with a fresh database.
 #[path = "wallet_v2_pg_tests.rs"]

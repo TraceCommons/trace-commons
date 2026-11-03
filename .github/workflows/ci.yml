@@ -161,6 +161,7 @@ jobs:
         admission_test_referral_bonus
         admission_test_referral_stream
         admission_test_walletv2
+        admission_test_rebind
         admission_test_legacy_invite_link
         admission_test_legacy_payout_carry
         admission_test_device_invite_subject
@@ -704,6 +705,11 @@ jobs:
         run: cargo test -p trace-commons-ingest --lib wallet_v2_pg_tests -- --ignored
         env:
           TRACE_COMMONS_WALLET_V2_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_walletv2
+      # F10: changing an account's NEAR AI login, against the real handlers.
+      - name: NEAR AI login change against PostgreSQL
+        run: cargo test -p trace-commons-ingest --lib near_ai_rebind_pg_tests -- --ignored --test-threads=1
+        env:
+          TRACE_COMMONS_REBIND_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_rebind
       # A suite that runs nothing passes, so the steps above cannot prove
       # themselves. `trace_invite_registry_pg` reports "21 passed" in 0.00s with
       # no database configured; a pass count is not evidence that anything ran.

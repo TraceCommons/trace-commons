@@ -210,7 +210,8 @@ async fn source_link(
                                AND a.closed_at IS NULL)
                 AND EXISTS (SELECT 1 FROM trace_near_account_anchors n
                              WHERE n.tenant_id = l.tenant_id AND n.account_id = l.account_id
-                               AND n.identity_source = 'near_ai_login')
+                               AND n.identity_source = 'near_ai_login'
+                               AND n.retired_at IS NULL)
               ORDER BY (l.state = 'waiting') DESC, l.created_at DESC
               LIMIT 1",
             &[&tenant, &account, &rail],

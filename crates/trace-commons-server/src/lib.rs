@@ -4,6 +4,7 @@
 //! TraceCommons hosted server crate.
 
 pub mod account_ceremony;
+pub mod account_login_change;
 pub mod account_native_auth;
 pub mod account_near;
 pub mod account_onboarding;
