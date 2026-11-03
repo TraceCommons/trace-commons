@@ -23,11 +23,11 @@ fn near_ai_tenant() -> String {
     format!("nearai-{}", "ab".repeat(32))
 }
 
-/// An OS store that counts reads, can lose every entry, and can stop
-/// answering, as a locked keychain does.
 /// Runs on a read before it answers; `Some` makes the read fail with it.
 type OnRead = Box<dyn Fn() -> Option<CredentialError> + Send + Sync>;
 
+/// An OS store that counts reads, can lose every entry, and can stop
+/// answering, as a locked keychain does.
 #[derive(Default)]
 struct Store {
     entries: Mutex<std::collections::HashMap<String, Vec<u8>>>,
@@ -344,7 +344,7 @@ fn the_state_survives_a_restart() {
     let fx = Fixture::healthy();
     fx.write_record(b"not json");
     let _ = fx.read_record();
-    commons_credentials::forget_observations_for_test();
+    commons_credentials::forget_observations_for_test(&fx.shared.store);
     assert_eq!(fx.state(), unreadable());
 }
 
@@ -385,14 +385,38 @@ fn a_record_that_moved_during_the_read_is_not_unreadable() {
 }
 
 /// A build that lost access to its own entry (a code-signature mismatch on
-/// macOS) never regains it: unreadable, so setting up again is offered.
+/// macOS) never regains it: unreadable, so setting up again is offered. But
+/// that is this build's answer, not the files': it is not saved, so the
+/// restart an update brings starts without it.
 #[test]
-fn an_unentitled_store_is_unreadable() {
+fn an_unentitled_store_is_unreadable_for_this_build_only() {
     let fx = Fixture::healthy();
+    fx.read_record().unwrap();
     *fx.os.on_read.lock().unwrap() = Some(Box::new(|| Some(CredentialError::Unentitled)));
     assert_eq!(
         fx.read_record(),
         Err(commons_credentials::AccountLoadFailure::Unreadable)
     );
+    assert_eq!(fx.state(), unreadable());
+    commons_credentials::forget_observations_for_test(&fx.shared.store);
+    assert_eq!(fx.state().0, json!("ok"));
+}
+
+/// An answer whose file could not be written is not remembered either, so
+/// the next read writes it, and it then survives a restart.
+#[test]
+fn a_failed_save_is_tried_again() {
+    let fx = Fixture::healthy();
+    fx.write_record(b"not json");
+    let blocker = fx
+        .shared
+        .store
+        .daemon_path(commons_credentials::OBSERVATION_FILE);
+    std::fs::create_dir_all(&blocker).unwrap();
+    let _ = fx.read_record();
+    assert_eq!(fx.state().0, json!("ok"), "nothing remembered unsaved");
+    std::fs::remove_dir(&blocker).unwrap();
+    let _ = fx.read_record();
+    commons_credentials::forget_observations_for_test(&fx.shared.store);
     assert_eq!(fx.state(), unreadable());
 }

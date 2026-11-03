@@ -387,18 +387,20 @@ struct DaemonStatus: Decodable, Equatable {
     }
 
     /// This status as the daemon reports it straight after `unenroll`: not
-    /// logged in, no tenant, no setup completion and nothing about the
-    /// account. Everything else is kept. For a model whose status read after
+    /// logged in, no tenant, no setup completion, no account scope (the
+    /// config and record are gone, so the account-scoped state resets as it
+    /// does for a real logged-out status), no legacy migration and nothing
+    /// about the account. Everything else is kept. For a model whose status read after
     /// a confirmed unenroll failed, so `requiresOnboarding` still follows
     /// the unenroll.
     func unenrolled() -> DaemonStatus {
         DaemonStatus(
             schemaVersion: schemaVersion, loggedIn: false, tenantID: nil, setupComplete: nil,
-            accountScope: accountScope, consentScopes: consentScopes, paused: paused,
+            accountScope: nil, consentScopes: consentScopes, paused: paused,
             queueDepth: queueDepth, decisionsOwed: decisionsOwed, nextDigestAt: nextDigestAt,
             health: health, routing: routing, grantVoids: grantVoids,
             witnessCapacity: witnessCapacity, armingRewordings: armingRewordings, gateHeld: gateHeld,
-            legacyInviteMigration: legacyInviteMigration, accountAttention: .none)
+            legacyInviteMigration: .none, accountAttention: .none)
     }
 
     static let unknown = DaemonStatus(

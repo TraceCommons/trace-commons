@@ -140,6 +140,26 @@ final class AccountAttentionModelTests: XCTestCase {
         XCTAssertFalse(model.setUpAgainFailed)
         model.setStatusForTesting(try status(unreadable))
         XCTAssertFalse(model.setUpAgainFailed)
+
+        // Nor does it carry over to a block with another reason.
+        _ = await model.setUpAgain()
+        XCTAssertTrue(model.setUpAgainFailed)
+        model.setStatusForTesting(try status(
+            #","account_state":"needs_attention","account_state_reason":"account_address_refused","near_ai_login_unconfirmed":true"#))
+        XCTAssertFalse(model.setUpAgainFailed)
+    }
+
+    /// The made-up logged-out status resets the account-scoped state, as a
+    /// real one does: no scope, no legacy migration, no account state.
+    func testTheUnenrolledStatusDropsTheAccountScope() throws {
+        let before = try status(#","account_scope":"sha256:abc"\#(unreadable)"#)
+        XCTAssertEqual(before.accountScope, "sha256:abc")
+        let after = before.unenrolled()
+        XCTAssertFalse(after.loggedIn)
+        XCTAssertNil(after.accountScope)
+        XCTAssertNil(after.tenantID)
+        XCTAssertEqual(after.accountAttention, .none)
+        XCTAssertEqual(after.legacyInviteMigration, .none)
     }
 
     @MainActor

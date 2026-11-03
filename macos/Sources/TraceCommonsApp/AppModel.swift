@@ -359,10 +359,8 @@ final class AppModel: ObservableObject {
                     .flatMap(accountAttentionWording)
                     .flatMap(AccountAttention.decode(fromJSON:))
                 // A refusal belongs to the block it was shown in: one that
-                // goes and comes back starts without it.
-                if accountAttention == nil {
-                    setUpAgainFailed = false
-                }
+                // goes, comes back, or changes its reason starts without it.
+                setUpAgainFailed = false
             }
         }
     }

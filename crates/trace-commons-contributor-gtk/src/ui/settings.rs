@@ -78,6 +78,10 @@ pub struct SettingsView {
     /// is rebuilt on every daemon event, and a fresh button must not start a
     /// second unenroll while one is running.
     set_up_again: std::cell::Cell<SetUpAgain>,
+    /// The block last drawn ([`attention_block`]): a refusal belongs to it,
+    /// so a block that goes, comes back or changes its reason starts without
+    /// one.
+    attention_shown: std::cell::RefCell<Option<AttentionBlock>>,
     /// The three check rows of §5.4's Connection section. Filled from
     /// `get_settings`, never from a guess.
     connection_checks: gtk::Box,
@@ -696,6 +700,7 @@ impl SettingsView {
             connection_chip,
             account_attention,
             set_up_again: std::cell::Cell::new(SetUpAgain::Idle),
+            attention_shown: std::cell::RefCell::new(None),
             connection_checks,
             pause_button,
             projects,
@@ -1096,6 +1101,19 @@ impl SetUpAgain {
     }
 }
 
+/// Which block a status draws: its reason and whether the Private AI line
+/// shows, or `None` while there is no block.
+pub(crate) type AttentionBlock = (Option<String>, bool);
+
+pub(crate) fn attention_block(status: &Status) -> Option<AttentionBlock> {
+    status.account_attention().map(|_| {
+        (
+            status.account_state_reason.clone(),
+            status.near_ai_login_unconfirmed,
+        )
+    })
+}
+
 /// The account's status while it needs to be set up again (#1836 F1), in
 /// the core's words. "Set up again" asks first (`confirm_*`); only the
 /// confirmation unenrolls this device, then opens the first run, which
@@ -1106,10 +1124,13 @@ fn render_account_attention(app: &Rc<App>, status: &Status) {
     while let Some(child) = view.first_child() {
         view.remove(&child);
     }
-    let Some(copy) = status.account_attention() else {
+    let now = attention_block(status);
+    if app.settings.attention_shown.replace(now.clone()) != now {
         let mut state = app.settings.set_up_again.get();
         state.block_gone();
         app.settings.set_up_again.set(state);
+    }
+    let Some(copy) = status.account_attention() else {
         view.set_visible(false);
         return;
     };
@@ -3720,6 +3741,25 @@ mod set_up_again_tests {
         assert!(state.button_sensitive());
         assert!(state.begin());
         assert!(!state.shows_failure());
+    }
+
+    /// The block a status draws changes with its reason, so a refusal shown
+    /// under one reason does not carry over to another.
+    #[test]
+    fn the_block_changes_with_its_reason() {
+        let status = |reason: Option<&str>| {
+            serde_json::from_value::<crate::model::Status>(serde_json::json!({
+                "account_state": if reason.is_some() { "needs_attention" } else { "ok" },
+                "account_state_reason": reason,
+                "near_ai_login_unconfirmed": false,
+            }))
+            .unwrap()
+        };
+        let unreadable = super::attention_block(&status(Some("account_record_unreadable")));
+        let refused = super::attention_block(&status(Some("account_address_refused")));
+        assert!(unreadable.is_some());
+        assert_ne!(unreadable, refused);
+        assert_eq!(super::attention_block(&status(None)), None);
     }
 
     /// A refusal goes with its block: one that comes back later starts
