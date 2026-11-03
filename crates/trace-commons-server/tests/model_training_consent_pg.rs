@@ -5,7 +5,11 @@
 //! eligibility read, the add-only grant, and the withheld-award lookup, on a
 //! real PostgreSQL, as the least-privilege ingest runtime role.
 
+#[path = "support/role_ddl_lock.rs"]
+mod role_ddl_lock;
+
 use chrono::{Duration, Utc};
+use role_ddl_lock::with_role_ddl_lock;
 use std::collections::BTreeMap;
 use trace_commons_protocol::model_training_consent::ModelTrainingConsentOutcome;
 use trace_commons_server::{
@@ -108,11 +112,14 @@ async fn backends() -> Option<(PgBackend, PgBackend)> {
         .get()
         .await
         .unwrap()
-        .batch_execute(
+        // Under the shared role-DDL lock: this file's tests run in parallel,
+        // and two concurrent GRANTs on one table raise `tuple concurrently
+        // updated` (see `support/role_ddl_lock.rs`).
+        .batch_execute(&with_role_ddl_lock(
             "GRANT SELECT ON trace_submissions, trace_withdrawals, trace_submission_sessions,
                     trace_source_sessions, trace_gate_decisions, trace_tenants
                TO trace_ingest_runtime",
-        )
+        ))
         .await
         .unwrap();
     let mut runtime_url = parsed.clone();

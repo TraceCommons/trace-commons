@@ -895,12 +895,13 @@ struct ManagedSessionActions: View {
             }
     }
 
-    /// The conversation continues; the terminal opens as for any launch.
+    /// The conversation continues; the terminal opens in a new window, as
+    /// for any launch.
     private func resume() {
         model.managedAction(
             "managed_session_resume",
             params: ManagedSurface.resumeParams(sessionID: session.id, requestID: UUID().uuidString),
-            openTerminal: true, inWindowOf: session.id)
+            openTerminal: true)
     }
 
     private func copyResumeCommand() {
@@ -922,12 +923,12 @@ struct ManagedSessionActions: View {
     }
 
     /// Same tool, account and folder, with no folder chooser; the terminal
-    /// opens as for any launch.
+    /// opens in a new window, as for any launch.
     private func startAgain() {
         model.managedAction(
             "managed_session_start_again",
             params: ManagedSurface.startAgainParams(sessionID: session.id, requestID: UUID().uuidString),
-            openTerminal: true, inWindowOf: session.id)
+            openTerminal: true)
     }
 }
 
@@ -948,21 +949,49 @@ struct ManagedSessionRowActions<Content: View>: View {
         } else {
             content
                 .contentShape(Rectangle())
-                // A click on the row shows its terminal, never moves the window.
-                .holdsWindowStill()
-                .onTapGesture { if ManagedSurface.clickShows(session) { model.showManagedSession(session.id) } }
+                .holdsWindowStill(enabled: ManagedRowClick.holdsWindow(session))
+                // Off while another request runs, as the row's buttons are.
+                .gesture(
+                    TapGesture().onEnded { model.showManagedSession(session.id) },
+                    including: ManagedRowClick.acts(session, busy: model.managedBusy) ? .all : .subviews)
                 .accessibilityElement(children: .contain)
+                // Named actions ignore `.disabled`, so while another request
+                // runs they are not offered at all, rather than dropped.
                 .accessibilityActions {
-                    if menu.contains(.show) {
+                    if ManagedRowClick.offers(.show, menu: menu, busy: model.managedBusy) {
                         Button(model.managedText("show")) { model.showManagedSession(session.id) }
                     }
-                    if menu.contains(.stop) {
+                    if ManagedRowClick.offers(.stop, menu: menu, busy: model.managedBusy) {
                         Button(model.managedText("stop")) { onStop() }
                     }
                 }
         }
     }
 
+}
+
+/// What a click on a session row does.
+enum ManagedRowClick {
+    /// A click on the row shows its terminal, never moves the window, so
+    /// the row holds the window still, but only where that click shows
+    /// something: a session in another terminal app has nothing to show,
+    /// and its row stays a place the window can be dragged by (#1839
+    /// review, finding 10).
+    static func holdsWindow(_ session: ManagedSession) -> Bool {
+        ManagedSurface.clickShows(session)
+    }
+
+    /// The click shows the terminal, and is off while another request
+    /// runs, as the row's buttons are, rather than dropped unseen.
+    static func acts(_ session: ManagedSession, busy: Bool) -> Bool {
+        ManagedSurface.clickShows(session) && !busy
+    }
+
+    /// Whether the row's VoiceOver action is offered: in the row's menu,
+    /// and not while another request runs.
+    static func offers(_ action: ManagedSessionAction, menu: [ManagedSessionAction], busy: Bool) -> Bool {
+        menu.contains(action) && !busy
+    }
 }
 
 extension AppModel {
