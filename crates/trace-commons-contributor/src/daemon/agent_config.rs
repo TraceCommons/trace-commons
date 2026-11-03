@@ -54,6 +54,10 @@ pub(crate) fn schema() -> Value {
         ("notifications_enabled", "Master switch for notifications."),
         ("menu_bar_mark_enabled", "Show the menu-bar news mark."),
         (
+            "managed_herdr",
+            "Open managed sessions as tabs of herdr's Near.ai workspace, hosted by managed_terminal.",
+        ),
+        (
             "verdicts_offer_pending",
             "Whether the one-time verdict notification offer remains pending.",
         ),

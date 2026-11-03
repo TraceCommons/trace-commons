@@ -110,10 +110,12 @@ public sealed class ManagedSessionsView : UserControl
         try { await action(); }
         catch (Refused refused)
         {
-            // `{terminal}` is the chosen terminal the daemon names.
+            // `{terminal}` is where the session opens: herdr while grouped
+            // there. This shell runs no tool setup, so every refusal here is
+            // a launch's.
             _error.Text = ManagedSignIn.FillTerminal(
                 T(_unsupportedVersion ? "unsupported_version" : ManagedSignIn.ErrorKey(refused.Code)),
-                _snapshot?.Capabilities.TerminalDestination,
+                _snapshot?.Capabilities.SessionDestination,
                 T("terminal"));
         }
         catch { _error.Text = T("action_failed"); }
@@ -161,7 +163,7 @@ public sealed class ManagedSessionsView : UserControl
                 _root.Children.Add(recovery);
             }
         }
-        _root.Children.Add(new TextBlock { Text = _snapshot.Capabilities.TerminalDestination is string destination
+        _root.Children.Add(new TextBlock { Text = _snapshot.Capabilities.SessionDestination is string destination
             ? T("terminal_scope").Replace("{destination}", destination) : T("terminal_unavailable"), TextWrapping = TextWrapping.Wrap });
         _root.Children.Add(_rows);
         _rows.Children.Clear();
@@ -223,7 +225,7 @@ public sealed class ManagedSessionsView : UserControl
         section.Children.Add(new TextBlock { Text = T("near_ai"), FontSize = 20 });
         bool signedIn = _snapshot.NearAiSignedIn;
         string line = signedIn
-            ? ManagedSignIn.Scope(T("sign_in_scope"), _snapshot.Capabilities.TerminalDestination, T("terminal"))
+            ? ManagedSignIn.Scope(T("sign_in_scope"), _snapshot.Capabilities.SessionDestination, T("terminal"))
             : T("sign_in_needed");
         section.Children.Add(new TextBlock { Text = line, TextWrapping = TextWrapping.Wrap });
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
@@ -349,7 +351,7 @@ public sealed class ManagedSessionsView : UserControl
             if (await PickFolderAsync() is string path) project.Text = path;
         };
         form.Children.Add(choose);
-        form.Children.Add(new TextBlock { Text = T("launch_scope").Replace("{destination}", _snapshot.Capabilities.TerminalDestination ?? T("terminal")), TextWrapping = TextWrapping.Wrap });
+        form.Children.Add(new TextBlock { Text = T("launch_scope").Replace("{destination}", _snapshot.Capabilities.SessionDestination ?? T("terminal")), TextWrapping = TextWrapping.Wrap });
         var launchDialog = Dialog("launch_title", form, "launch_short");
         void ValidateLaunch() => launchDialog.IsPrimaryButtonEnabled = account.SelectedIndex >= 0 && !string.IsNullOrWhiteSpace(project.Text) && (accounts[account.SelectedIndex].Tool != "opencode" || !string.IsNullOrWhiteSpace(model.Text));
         account.SelectionChanged += (_, _) => ValidateLaunch();

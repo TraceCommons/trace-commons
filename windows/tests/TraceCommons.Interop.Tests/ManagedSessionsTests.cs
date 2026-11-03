@@ -205,6 +205,25 @@ public sealed class ManagedSessionsTests
         Assert.Equal(-1, snapshot.TerminalSelectedIndex);
     }
 
+    /// <summary>Owner, 2026-11-03: a session grouped in herdr opens there,
+    /// so the launch lines name herdr; an older daemon sends only
+    /// <c>terminal_destination</c>, which then names where sessions open.</summary>
+    [Fact]
+    public void ALaunchNamesWhereTheSessionOpens()
+    {
+        var grouped = ManagedSnapshot.Parse("""
+        {"revision":2,"accounts":[],"sessions":[],"generations":{},"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Windows Terminal","launch_destination":"herdr"},"copy":{}}
+        """);
+        Assert.NotNull(grouped);
+        Assert.Equal("herdr", grouped.Capabilities.SessionDestination);
+        Assert.Equal("Windows Terminal", grouped.Capabilities.TerminalDestination);
+        var older = ManagedSnapshot.Parse("""
+        {"revision":1,"accounts":[],"sessions":[],"generations":{},"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Windows Terminal"},"copy":{}}
+        """);
+        Assert.NotNull(older);
+        Assert.Equal("Windows Terminal", older.Capabilities.SessionDestination);
+    }
+
     [Fact]
     public void AMissingTerminalHasItsOwnLine()
     {

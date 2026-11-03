@@ -49,7 +49,14 @@ struct PrivateAISection: View {
             // only managed sessions. Drawn only when the daemon found an
             // app to offer.
             if let snapshot = model.managedSnapshot, !snapshot.terminalChoices.isEmpty {
-                GlassCard { ManagedTerminalPicker(snapshot: snapshot) }
+                GlassCard {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                        ManagedTerminalPicker(snapshot: snapshot)
+                        if snapshot.offersHerdrGrouping {
+                            ManagedHerdrGroupingSwitch(snapshot: snapshot)
+                        }
+                    }
+                }
             }
             // The models listed first in the Launch sheet's picker, with
             // the ones NEAR AI stopped offering marked. Drawn only while

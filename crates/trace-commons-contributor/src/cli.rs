@@ -80,8 +80,11 @@ enum Command {
     RedeemLaunch {
         #[arg(long)]
         session_id: uuid::Uuid,
-        #[arg(long)]
-        ticket: String,
+        /// The launch ticket. A terminal that can give the helper an
+        /// environment (herdr) passes it as `NEAR_AI_LAUNCH_TICKET` instead,
+        /// so it is not in argv; the tool never inherits that variable.
+        #[arg(long, env = "NEAR_AI_LAUNCH_TICKET", hide_env_values = true)]
+        ticket: Option<String>,
     },
     /// Check a local mission proposal; does not fetch, execute, or publish
     MissionDraft {
@@ -667,10 +670,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::RedeemLaunch { session_id, ticket } => {
             let code = crate::managed::supervisor::redeem_and_run(
                 &store,
-                crate::managed::sessions::PreparedLaunch {
-                    session_id,
-                    ticket: Some(ticket),
-                },
+                crate::managed::sessions::PreparedLaunch { session_id, ticket },
             )
             .await?;
             std::process::exit(code);
@@ -987,6 +987,46 @@ mod tests {
             std::iter::once("trace-commons-contributor").chain(args.iter().copied()),
         )
         .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+    }
+
+    /// `redeem-launch` takes its ticket from `--ticket`, as every argv
+    /// terminal passes it, or from `NEAR_AI_LAUNCH_TICKET` (herdr), whose
+    /// name is the one the daemon sets.
+    #[test]
+    fn redeem_launch_reads_the_ticket_from_the_flag_or_the_environment() {
+        use clap::CommandFactory;
+        let id = uuid::Uuid::new_v4();
+        let id_text = id.to_string();
+        match parse(&[
+            "redeem-launch",
+            "--session-id",
+            &id_text,
+            "--ticket",
+            "ab12",
+        ])
+        .command
+        {
+            Command::RedeemLaunch { session_id, ticket } => {
+                assert_eq!(session_id, id);
+                assert_eq!(ticket.as_deref(), Some("ab12"));
+            }
+            _ => panic!("redeem-launch"),
+        }
+        let ticket = Cli::command()
+            .find_subcommand("redeem-launch")
+            .expect("redeem-launch")
+            .get_arguments()
+            .find(|arg| arg.get_id() == "ticket")
+            .expect("--ticket")
+            .clone();
+        assert_eq!(
+            ticket.get_env().and_then(|name| name.to_str()),
+            Some(crate::managed::terminal::LAUNCH_TICKET_ENV)
+        );
+        assert!(
+            ticket.is_hide_env_values_set(),
+            "the value is never printed"
+        );
     }
 
     /// `sessions resume <session-id>` names the session to continue; the

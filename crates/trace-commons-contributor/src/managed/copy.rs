@@ -35,7 +35,16 @@
 //! - `terminal_not_found` "{terminal} wasn't found on this computer.
 //!   Choose another in Settings." The line a shell shows for the refusal
 //!   `managed-terminal-not-found` ("not found", never "not installed");
-//!   it fills `{terminal}` from `capabilities.terminal_destination`.
+//!   it fills `{terminal}` from `capabilities.launch_destination` for a
+//!   launch (herdr while sessions are grouped there) and from
+//!   `capabilities.terminal_destination` for tool setup.
+//! - `herdr_grouping` "Group sessions in herdr" -- the switch under the
+//!   picker, and its accessible name (owner decision D4, 2026-11-03,
+//!   `docs/superpowers/specs/2026-11-03-rex-herdr-terminal-integration.md`).
+//!   Drawn while `capabilities.herdr_available`, and while
+//!   `capabilities.herdr_grouping` is on even when herdr is no longer found,
+//!   so it can be turned off; on when `capabilities.herdr_grouping`;
+//!   written with `set_managed_herdr`.
 //!
 //! A session row's actions (Ron, #1407, 2026-10-14):
 //! - `show` "Show" and `stop` "Stop" -- the row menu's items and the row's
@@ -307,6 +316,7 @@ pub fn copy() -> serde_json::Value {
             "sign_in_near_ai": "Sign in",
             "sign_in_near_ai_accessibility": "Sign in to NEAR AI",
             "terminal_choice": "Open sessions in",
+            "herdr_grouping": "Group sessions in herdr",
             "terminal_not_found": "{terminal} wasn't found on this computer. Choose another in Settings.",
             "show": "Show",
             "stop": "Stop",
@@ -396,6 +406,7 @@ mod tests {
     fn the_terminal_choice_has_its_words() {
         let copy = copy();
         assert_eq!(copy["terminal_choice"], "Open sessions in");
+        assert_eq!(copy["herdr_grouping"], "Group sessions in herdr");
         assert_eq!(
             copy["terminal_not_found"],
             "{terminal} wasn't found on this computer. Choose another in Settings."

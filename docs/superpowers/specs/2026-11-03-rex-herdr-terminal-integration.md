@@ -1,6 +1,8 @@
 # Opening Private AI sessions in Rex and herdr -- research and design
 
-Date: 2026-11-03. Owner: Zaki. Status: decided 2026-11-03 (see "Owner decisions"); nothing is built.
+Date: 2026-11-03. Owner: Zaki. Status: decided 2026-11-03 (see "Owner decisions"); built
+2026-11-03 at the owner's request, which reverses D1 (see "Built").
+`docs/managed-sessions.md` describes what shipped.
 Asked for "on top of #1870" (Warp Tab Configs, merged as 7c6134631).
 Written against `origin/main` at cc4b63022, which contains #1870; its
 terminal-choice model in `managed/terminal.rs` is what this note extends.
@@ -462,6 +464,64 @@ install herdr`, `mise`, or `install.sh` into `~/.local/bin`; Windows by
 > option on terminal blocks would also let us keep a short-lived launch
 > token out of the process's argv. Is Rex expected to leave private beta,
 > and on which platforms?
+
+## Built
+
+2026-11-03: the owner asked for both to be built ("pick up the rex and herdr
+work"), which overrides D1 and goes ahead of D8's ask to Superlogical. What
+was built follows the recommended shapes above, with these differences:
+
+- herdr: `layout.apply` replies with the new tab's `focused_pane_id`, not its
+  terminal id, so the launch reads the terminal id from one more
+  `session.snapshot`. A workspace the launch creates starts with a shell
+  tab; the session's tab replaces it (`layout.apply` with that `tab_id`),
+  so the group holds no stray shell.
+- Rex: the Rex session is found with `rex ls --json`, read by value (an
+  object holding both "Near.ai" and a `session:` id), because the listing's
+  field names were not recorded. `rex new Near.ai --json -c <folder>` makes
+  it; the session id is read from its output whatever its format. That
+  session starts with one shell tab of Rex's own. The app is raised with
+  `open -b` before anything else, so a Rex that is not running starts with
+  its window; the app's `session.select` action is not used (unverified).
+- Review (#1886, poldsam), answered in the same change:
+  - Two launches at once could each create a "Near.ai" group. A launch now
+    holds a process-wide lock from finding the group to opening its tab, in
+    both integrations.
+  - herdr's `ping` must report protocol 22 or later; an older or unreadable
+    herdr is refused (`UnsupportedVersion`) before the ticket is sent.
+  - Something at herdr's socket path that this account cannot trust (another
+    owner, open to others, not a socket) is refused, not attached around.
+  - The waits for herdr's socket and Rex's server end 10 s after the launch
+    began by the clock, however long each try took.
+  - Show runs with the service unlocked, as a launch does.
+  - A Rex launch that fails before `session.new_window` (the app did not
+    open, its server never answered, `rex new` gave no session) is a refusal
+    that releases the launch; only a failure of that request is
+    `LaunchUnknown`. The orchestration takes its CLI runner as a parameter
+    and is tested off macOS.
+  - While sessions are grouped in herdr, `capabilities.launch_destination`
+    is "herdr", so a launch refusal names herdr. `terminal_destination`
+    stays the chosen terminal, which tool setup, the install and update
+    hints and the picker name (owner, 2026-11-03; it was briefly "herdr" in
+    65f75d4f8, which named herdr in the install hints too).
+- Known gap: herdr's API has no list of attached clients, so a herdr server
+  running with no client (headless, or its terminal closed) answers, and the
+  tab opens where nobody sees it. Show cannot raise it either. The person
+  opens herdr to reach it. Left until herdr exposes its clients.
+  - A Rex launch now follows the Recommended shape for a Rex that is not
+    running: every `rex` call passes `--autostart=false` (before the
+    subcommand), and after `open -b` the launch polls `rex client ls --json`
+    for an object with `kind: "app"` before anything else. It then reads
+    `rex version` and refuses a Rex whose "supports A to B" range does not
+    hold API revision 10. Each `rex` call is bounded by `bounded_output`'s
+    own deadline; `--timeout` is not passed.
+- Unchecked for Rex: the flag placement of `--autostart=false`, the exact
+  shape of `rex client ls --json`, and `--timeout`'s value format. A wrong
+  guess fails before the ticket is sent, as a refusal. Asked of the owner.
+- Neither was run against the real program in this change. The herdr client
+  is tested against herdr's published schema and source (protocol 22,
+  v0.9.5) with a scripted server; Rex against the replies recorded above.
+  Both need a run on a Mac with Rex and herdr installed before release.
 
 ## Not checked
 
