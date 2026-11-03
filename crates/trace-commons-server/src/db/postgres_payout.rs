@@ -1871,7 +1871,8 @@ impl PayoutStore for PgBackend {
                                             AND accrued.credit_account_hash = 'sha256:' ||
                                                 encode(sha256(convert_to(h.credit_account_ref, 'UTF8')), 'hex')))),
                      ARRAY(SELECT credit_account_ref FROM trace_credit_holds
-                            WHERE tenant_id = $1 AND released_at IS NULL)",
+                            WHERE tenant_id = $1 AND released_at IS NULL),
+                     trace_legacy_payout_carry_invalid($1, $2)",
                 &[&tenant, &account],
             )
             .await?;
@@ -1884,6 +1885,7 @@ impl PayoutStore for PgBackend {
                     .get::<_, Vec<String>>(3)
                     .iter()
                     .any(|reference| super::settlement_key_account_id(reference) == Some(account)),
+            carry_invalid: row.get(4),
         })
     }
 

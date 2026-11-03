@@ -139,7 +139,7 @@ async fn fixture() -> Option<Fixture> {
             "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tc_legacy_carry_payout')
              THEN CREATE ROLE tc_legacy_carry_payout LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
              GRANT trace_ingest_runtime TO tc_legacy_carry_payout;
-             GRANT SELECT ON trace_accounts, trace_near_account_anchors TO trace_ingest_runtime;
+             GRANT SELECT ON trace_accounts, trace_near_account_anchors, trace_credit_holds, trace_account_principals TO trace_ingest_runtime;
              GRANT INSERT ON trace_account_audit TO trace_ingest_runtime;
              GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_ingest_runtime;
              DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tc_legacy_carry_operator')
@@ -287,10 +287,13 @@ impl Fixture {
 
 /// Owner decision 5, option (A), 2026-11-03. Linking the tenant claims the
 /// signing device's past upload credit: both forms of the signed-upload
-/// principal of its bare device-key actor resolve to one account in the
-/// legacy tenant, for the settlement key and for the accrual claim. A
-/// per-user-subject actor cannot be derived from the key and stays unowned
-/// (the spec's known limit).
+/// principal of each actor derivable from its key resolve to one account in
+/// the legacy tenant, for the settlement key and for the accrual claim. The
+/// app's uploads carry `subject = user_subject_hash(cfg.user_subject)`, and
+/// an invite device's `user_subject` is its key id (review of #1865), so that
+/// actor is the one that matters; the bare actor covers device-JWT uploads.
+/// A subject that cannot be derived (a contributor label) stays unowned, the
+/// spec's known limit.
 #[tokio::test]
 async fn linking_a_tenant_claims_the_signing_devices_upload_credit() {
     let Some(fx) = fixture().await else { return };
@@ -298,10 +301,21 @@ async fn linking_a_tenant_claims_the_signing_devices_upload_credit() {
     let (legacy, invite) = fx.legacy_invite_tenant(&device).await;
     let (near, account) = fx.near_ai_account().await;
 
-    let bare = device_upload_principal_refs(&legacy, &device.id, &device.id)
+    let app_actor = device_claim_actor(
+        &legacy,
+        &device.id,
+        Some(&trace_commons_protocol::onboarding::user_subject_hash(
+            &device.id,
+        )),
+    );
+    let mut bare = device_upload_principal_refs(&legacy, &device.id, &device.id)
         .expect("bare actor parses")
         .to_vec();
-    let subject_actor = device_claim_actor(&legacy, &device.id, Some("user-1"));
+    bare.extend(
+        device_upload_principal_refs(&legacy, &device.id, &app_actor).expect("app actor parses"),
+    );
+    let labelled = trace_commons_protocol::onboarding::user_subject_hash("a-contributor-label");
+    let subject_actor = device_claim_actor(&legacy, &device.id, Some(&labelled));
     let subject = device_upload_principal_refs(&legacy, &device.id, &subject_actor)
         .expect("subject actor parses")
         .to_vec();
@@ -324,7 +338,13 @@ async fn linking_a_tenant_claims_the_signing_devices_upload_credit() {
     let claimed = owner_of(&bare[0]).expect(
         "the signed-upload principal of the device's bare actor resolves to a legacy account",
     );
-    assert_eq!(owner_of(&bare[1]), Some(claimed), "both forms, one account");
+    for principal in &bare {
+        assert_eq!(
+            owner_of(principal),
+            Some(claimed),
+            "every form, one account"
+        );
+    }
     for principal in &bare {
         assert_eq!(claimable.get(principal), Some(&claimed));
     }
@@ -339,7 +359,7 @@ async fn linking_a_tenant_claims_the_signing_devices_upload_credit() {
         .unwrap()
         .get(0);
     assert!(in_legacy);
-    // Known limit: per-user-subject credit stays unowned.
+    // Known limit: a subject not derivable from the key stays unowned.
     assert!(
         fx.owner
             .resolve_principals_to_accounts(&legacy, &subject)
@@ -610,7 +630,9 @@ async fn a_change_supersedes_and_an_unlink_releases_the_carry() {
         .await
         .unwrap()
         .get(0);
-    assert!(!first_unlinked, "a change is the pass's, not an unlink");
+    // The superseded carry is unlinked outright (review of #1865), so it
+    // stops even if the new carry never activates.
+    assert!(first_unlinked, "a superseded active carry is unlinked");
 
     // A fresh pair for the unlink: the source is active and alone.
     let (near, account, legacy, claimed) = fx.linked_pair().await;
@@ -801,7 +823,34 @@ async fn an_instance_enrolled_device_links_without_invite_trust() {
     let Some(fx) = fixture().await else { return };
     let device = new_device();
     let (legacy, subject) = fx.legacy_instance_tenant(&device).await;
+    let enrolled_subject = hash(&format!("enrolled-user:{legacy}"));
+    fx.exec(
+        "INSERT INTO trace_instance_enrollments (instance_subject_hash, user_subject_hash, tenant_id)
+         VALUES ($1, $2, $3)",
+        &[&hash(&format!("instance:{legacy}")), &enrolled_subject, &legacy],
+    )
+    .await;
+    // A device the instance key enrolled into the same tenant later cannot
+    // claim it (review of #1865): only the earliest live device links.
+    let later = new_device();
+    fx.exec(
+        "INSERT INTO device_keys (device_key_id, tenant_id, public_key, invite_subject_hash, created_at)
+         VALUES ($1, $2, $3, $4, now() + interval '1 minute')",
+        &[
+            &later.id,
+            &legacy,
+            &B64.encode(later.key.public_key().as_ref()),
+            &subject,
+        ],
+    )
+    .await;
     let (near, account) = fx.near_ai_account().await;
+    assert_eq!(
+        fx.link(&near, account, &legacy, &subject, &later)
+            .await
+            .unwrap_err(),
+        LinkRefusal::DeviceNotEligible
+    );
     let response = fx
         .link(&near, account, &legacy, &subject, &device)
         .await
@@ -824,16 +873,25 @@ async fn an_instance_enrolled_device_links_without_invite_trust() {
         .await,
         0
     );
-    let bare = device_upload_principal_refs(&legacy, &device.id, &device.id)
+    let mut claimed = device_upload_principal_refs(&legacy, &device.id, &device.id)
         .unwrap()
         .to_vec();
+    claimed.extend(
+        device_upload_principal_refs(
+            &legacy,
+            &device.id,
+            &device_claim_actor(&legacy, &device.id, Some(&enrolled_subject)),
+        )
+        .unwrap(),
+    );
     assert_eq!(
         fx.owner
-            .resolve_principals_to_accounts(&legacy, &bare)
+            .resolve_principals_to_accounts(&legacy, &claimed)
             .await
             .unwrap()
             .len(),
-        2
+        4,
+        "the bare actor and the enrollment's subject actor, both forms"
     );
     // The same device again: the same record.
     assert_eq!(
@@ -917,4 +975,197 @@ async fn the_migration_leaves_readiness_and_anchors_alone() {
         .unwrap()
         .get(0);
     assert!(ready);
+}
+
+impl Fixture {
+    async fn carry_invalid(&self, tenant: &str, account: Uuid) -> bool {
+        self.payout_runtime
+            .payout_account_standing(tenant, account)
+            .await
+            .unwrap()
+            .carry_invalid
+    }
+
+    async fn revoke(&self, near: &str, legacy: &str) {
+        // Fixture tenant ids are `[a-z0-9-]` only, so inlining them is safe.
+        self.operator
+            .batch_execute(&format!(
+                "BEGIN;
+                 SELECT set_config('trace_commons.trace_tenant_id', '{near}', true);
+                 UPDATE trace_legacy_invite_links SET revoked_at = now()
+                  WHERE legacy_tenant_id = '{legacy}' AND revoked_at IS NULL;
+                 COMMIT;"
+            ))
+            .await
+            .unwrap();
+    }
+}
+
+/// Review of #1865, finding 1: after a recipient change and before the new
+/// carry activates, a revocation stops both carries. The old one was
+/// unlinked at the change; the new waiting one closes at zero.
+#[tokio::test]
+async fn a_revocation_after_a_change_and_before_activation_stops_both_carries() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, legacy, claimed) = fx.linked_pair().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-1a")
+        .await;
+    fx.activate(&near, account).await;
+    fx.activate(&legacy, claimed).await;
+    let old = fx.link_in(&legacy, claimed, "active").await.unwrap();
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-1b")
+        .await;
+    let new = fx.link_in(&legacy, claimed, "waiting").await.unwrap();
+    fx.revoke(&near, &legacy).await;
+    let row = fx
+        .admin
+        .query_one(
+            "SELECT (SELECT unlink_requested_at IS NOT NULL FROM trace_payout_links WHERE link_id = $1),
+                    (SELECT state FROM trace_payout_links WHERE link_id = $2)",
+            &[&old, &new],
+        )
+        .await
+        .unwrap();
+    assert!(row.get::<_, bool>(0), "the old carry is unlinked");
+    assert_eq!(
+        row.get::<_, String>(1),
+        "closed",
+        "the new carry closed at zero"
+    );
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 0);
+}
+
+/// Review of #1865, finding 4: the account standing checked before every
+/// send holds a live carry whose tenant was marked pooled, whose tenant link
+/// row is gone, whose source account closed or was put on a credit hold, or
+/// whose source link was unlinked, without waiting for another carry run.
+#[tokio::test]
+async fn the_send_time_standing_holds_a_carry_that_no_longer_stands() {
+    let Some(fx) = fixture().await else { return };
+
+    // Pooled after linking.
+    let (near, account, legacy, claimed) = fx.linked_pair().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-4a")
+        .await;
+    assert!(!fx.carry_invalid(&legacy, claimed).await);
+    assert!(!fx.carry_invalid(&near, account).await);
+    fx.exec(
+        "INSERT INTO trace_legacy_invite_pooled_tenants (tenant_id, reason_label)
+         VALUES ($1, 'shared event invite')",
+        &[&legacy],
+    )
+    .await;
+    assert!(fx.carry_invalid(&legacy, claimed).await);
+    assert_eq!(
+        fx.payout_runtime
+            .payout_account_standing(&legacy, claimed)
+            .await
+            .unwrap()
+            .hold_label(),
+        Some(trace_commons_server::db::PAYOUT_LEGACY_CARRY_INVALID)
+    );
+
+    // The tenant link row deleted rather than revoked.
+    let (near, account, legacy, claimed) = fx.linked_pair().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-4b")
+        .await;
+    fx.exec(
+        "DELETE FROM trace_legacy_invite_links WHERE legacy_tenant_id = $1",
+        &[&legacy],
+    )
+    .await;
+    assert!(fx.carry_invalid(&legacy, claimed).await);
+
+    // The NEAR AI account closed, then (another pair) put on a credit hold.
+    let (near, account, legacy, claimed) = fx.linked_pair().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-4c")
+        .await;
+    fx.exec(
+        "UPDATE trace_accounts SET closed_at = now() WHERE tenant_id = $1 AND account_id = $2",
+        &[&near, &account],
+    )
+    .await;
+    assert!(fx.carry_invalid(&legacy, claimed).await);
+    let (near, account, legacy, claimed) = fx.linked_pair().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-4d")
+        .await;
+    fx.exec(
+        "INSERT INTO trace_credit_holds (tenant_id, hold_id, credit_account_ref,
+             credit_account_hash, reason, reason_hash, actor_principal_ref)
+         VALUES ($1, $2, $3, $4, 'test', $4, 'test-operator')",
+        &[
+            &near,
+            &Uuid::new_v4(),
+            &format!("account:{account}"),
+            &hash(&format!("account:{account}")),
+        ],
+    )
+    .await;
+    assert!(fx.carry_invalid(&legacy, claimed).await);
+
+    // The source link unlinked without a carry run.
+    let (near, account, legacy, claimed) = fx.linked_pair().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-4e")
+        .await;
+    fx.activate(&near, account).await;
+    fx.exec(
+        "UPDATE trace_payout_links SET unlink_requested_at = now()
+          WHERE tenant_id = $1 AND account_id = $2",
+        &[&near, &account],
+    )
+    .await;
+    assert!(fx.carry_invalid(&legacy, claimed).await);
+}
+
+/// Review of #1865, finding 7: only a carried waiting link may close at
+/// zero; any other waiting link still moves only to active.
+#[tokio::test]
+async fn only_a_carried_waiting_link_closes_at_zero() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account) = fx.near_ai_account().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-7")
+        .await;
+    let own = fx.link_in(&near, account, "waiting").await.unwrap();
+    let refused = fx
+        .admin
+        .execute(
+            "UPDATE trace_payout_links SET state = 'closed', final_paid = 0 WHERE link_id = $1",
+            &[&own],
+        )
+        .await
+        .unwrap_err();
+    let message = refused
+        .as_db_error()
+        .map(|error| error.message().to_owned())
+        .unwrap_or_default();
+    assert!(message.contains("a link moves only"), "{refused:?}");
+}
+
+/// Review of #1865, finding 8: the legacy tenant's audit rows carry the
+/// NEAR AI account's actor hash hashed again, so rows in the two tenants
+/// cannot be joined on it.
+#[tokio::test]
+async fn carry_audit_actors_cannot_be_joined_across_tenants() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, legacy, _) = fx.linked_pair().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-8")
+        .await;
+    assert!(
+        fx.count(
+            "SELECT count(*) FROM trace_payout_audit WHERE tenant_id = $1",
+            &[&legacy],
+        )
+        .await
+            > 0
+    );
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_payout_audit l JOIN trace_payout_audit n
+                 ON n.actor_ref_hash = l.actor_ref_hash
+              WHERE l.tenant_id = $1 AND n.tenant_id = $2",
+            &[&legacy, &near],
+        )
+        .await,
+        0
+    );
 }

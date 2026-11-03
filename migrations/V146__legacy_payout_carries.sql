@@ -15,9 +15,10 @@
 --    tenant context (an active link gets an unlink request; a waiting one,
 --    which never paid, closes at zero). Shared by the payout store and the
 --    revocation trigger.
--- 3. A waiting link that never sent may close at final_paid 0. Before V146 a
---    waiting link could only go active, so a released carry would have paid
---    once before its unlink took effect.
+-- 3. A carried waiting link that never sent may close at final_paid 0.
+--    Before V146 a waiting link could only go active, so a released carry
+--    would have paid once before its unlink took effect. Every other link
+--    keeps V132's rule.
 -- 4. trace_legacy_link_claim_device_principals (decision 5, option A): links
 --    the signing device's signed-upload principals to an account in the
 --    legacy tenant, so its past credit is claimable.
@@ -85,7 +86,7 @@ GRANT SELECT (tenant_id, account_id, legacy_tenant_id, link_id, revoked_at)
     ON trace_legacy_invite_links TO trace_ingest_runtime;
 GRANT SELECT ON trace_legacy_invite_pooled_tenants TO trace_ingest_runtime;
 
--- 3. A waiting link that never sent may close at zero.
+-- 3. A carried waiting link that never sent may close at zero.
 CREATE OR REPLACE FUNCTION trace_payout_links_guard_update()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -99,9 +100,12 @@ BEGIN
            (OLD.state = 'waiting' AND NEW.state = 'active')
         OR (OLD.state = 'active' AND NEW.state = 'closing')
         OR (OLD.state = 'closing' AND NEW.state = 'closed')
-        -- V146: a waiting link closes only at zero and only if it never
-        -- had a line (checked below).
-        OR (OLD.state = 'waiting' AND NEW.state = 'closed' AND NEW.final_paid = 0)
+        -- V146: a carried waiting link (and only a carried one) closes at
+        -- zero, and only if it never had a line (checked below). Every
+        -- other link keeps V132's rule: waiting moves only to active.
+        OR (OLD.state = 'waiting' AND NEW.state = 'closed' AND NEW.final_paid = 0
+            AND EXISTS (SELECT 1 FROM public.trace_legacy_payout_carries c
+                         WHERE c.tenant_id = OLD.tenant_id AND c.link_id = OLD.link_id))
     ) THEN
         RAISE EXCEPTION 'trace_payout_links: a link moves only waiting, active, closing, closed'
             USING ERRCODE = 'check_violation';
@@ -199,6 +203,18 @@ GRANT SELECT (tenant_id, device_key_id) ON trace_near_provisioned_devices
 GRANT SELECT (tenant_id, upload_principal_ref) ON trace_device_upload_principals
     TO trace_legacy_payout_carry_guard;
 GRANT SELECT, INSERT ON trace_accounts TO trace_legacy_payout_carry_guard;
+GRANT SELECT (tenant_id, user_subject_hash) ON trace_instance_enrollments
+    TO trace_legacy_payout_carry_guard;
+GRANT SELECT (tenant_id, credit_account_ref, released_at) ON trace_credit_holds
+    TO trace_legacy_payout_carry_guard;
+-- Instance enrollments are isolated by instance subject, not tenant; the
+-- guard reads one tenant's rows under that tenant's context only.
+CREATE POLICY legacy_payout_carry_instance_enrollments ON trace_instance_enrollments
+    FOR SELECT TO trace_legacy_payout_carry_guard
+    USING (tenant_id = trace_current_tenant_id());
+-- The send-time check finds a legacy tenant's link from the legacy side.
+CREATE POLICY legacy_payout_carry_tenant_links ON trace_legacy_invite_links
+    FOR SELECT TO trace_legacy_payout_carry_guard USING (TRUE);
 GRANT SELECT, INSERT ON trace_account_principals TO trace_legacy_payout_carry_guard;
 GRANT INSERT ON trace_account_audit TO trace_legacy_payout_carry_guard;
 GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_legacy_payout_carry_guard;
@@ -216,10 +232,14 @@ GRANT CREATE ON SCHEMA public TO trace_legacy_payout_carry_guard;
 -- transaction, under the NEAR AI account's tenant context, after a link or
 -- an attestation. The device must be the live link's own device or one
 -- attested under it. Links both forms of the signed-upload principal of the
--- device's bare actor (`account_trust::device_upload_principal_refs`) to one
+-- device's actors (`account_trust::device_upload_principal_refs`) to one
 -- account in the legacy tenant: the live account one of them already
 -- belongs to, or a new one. A principal that was unlinked stays unlinked.
--- A per-user-subject upload principal cannot be derived here and stays
+-- The actors are the ones the server can derive from the device key alone:
+-- the bare key (device-JWT uploads), the app's per-user subject when it is
+-- the key itself (`user_subject_hash(device_key_id)`, every invite device
+-- without a contributor label), and each instance enrollment's subject for
+-- this tenant. Any other subject cannot be derived and its credit stays
 -- unowned (the spec's known limit). Returns how many principals it linked.
 CREATE FUNCTION public.trace_legacy_link_claim_device_principals(
     p_account_tenant TEXT, p_account UUID, p_legacy_tenant TEXT, p_device_key_id TEXT
@@ -227,7 +247,10 @@ CREATE FUNCTION public.trace_legacy_link_claim_device_principals(
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
     v_material TEXT;
-    v_principals TEXT[];
+    v_actor TEXT;
+    v_subjects TEXT[];
+    v_subject TEXT;
+    v_principals TEXT[] := ARRAY[]::TEXT[];
     v_free TEXT[];
     v_principal TEXT;
     v_account UUID;
@@ -264,13 +287,28 @@ BEGIN
         RETURN 0;
     END IF;
 
-    -- account_trust::device_upload_principal_refs(tenant, key, key).
-    v_material := 'signed:' || p_legacy_tenant || ':' || p_device_key_id;
-    v_principals := ARRAY[
-        'principal_sha256:' || encode(sha256(convert_to(
-            '12:signed_claim:' || octet_length(v_material)::TEXT || ':' || v_material, 'UTF8')), 'hex'),
-        'principal_sha256:' || encode(sha256(convert_to(v_material, 'UTF8')), 'hex')
-    ];
+    -- account_trust::device_claim_actor and device_upload_principal_refs,
+    -- for every subject derivable here ('' is the bare actor).
+    SELECT ARRAY['',
+                 'sha256:' || encode(sha256(convert_to('user_subject:' || p_device_key_id, 'UTF8')), 'hex')]
+           || coalesce(array_agg(DISTINCT e.user_subject_hash), ARRAY[]::TEXT[])
+      INTO v_subjects
+      FROM public.trace_instance_enrollments e
+     WHERE e.tenant_id = p_legacy_tenant;
+    FOREACH v_subject IN ARRAY v_subjects LOOP
+        IF v_subject = '' THEN
+            v_actor := p_device_key_id;
+        ELSE
+            v_actor := 'instance:' || p_legacy_tenant || ':' || p_device_key_id || ':user:' || v_subject;
+        END IF;
+        v_material := 'signed:' || p_legacy_tenant || ':' || v_actor;
+        v_principals := v_principals || ARRAY[
+            'principal_sha256:' || encode(sha256(convert_to(
+                '12:signed_claim:' || octet_length(v_material)::TEXT || ':' || v_material, 'UTF8')), 'hex'),
+            'principal_sha256:' || encode(sha256(convert_to(v_material, 'UTF8')), 'hex')
+        ];
+    END LOOP;
+    SELECT array_agg(DISTINCT x ORDER BY x) INTO v_principals FROM unnest(v_principals) AS x;
     -- The same lock both V135 namespace-guard triggers take per principal.
     FOREACH v_principal IN ARRAY v_principals LOOP
         PERFORM pg_advisory_xact_lock(hashtextextended(p_legacy_tenant || ':' || v_principal, 135));
@@ -337,6 +375,10 @@ BEGIN
     IF OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL THEN
         RETURN NEW;
     END IF;
+    -- The tenant link's own lock, which the carry takes too: a carry that
+    -- committed first is seen below, and one that waits re-reads
+    -- `revoked_at` and carries nothing.
+    PERFORM pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || NEW.legacy_tenant_id, 0));
     v_hash := 'sha256:' || encode(sha256(convert_to(
         'legacy-invite-link-v1:' || NEW.link_id::TEXT, 'UTF8')), 'hex');
     PERFORM set_config('trace_commons.trace_tenant_id', NEW.legacy_tenant_id, true);
@@ -361,6 +403,74 @@ CREATE TRIGGER trace_legacy_invite_links_release_carries
     AFTER UPDATE OF revoked_at ON trace_legacy_invite_links
     FOR EACH ROW EXECUTE FUNCTION public.trace_legacy_invite_links_release_carries();
 
+-- 7. The send-time check (spec section 7): whether a legacy account holds a
+-- live carry that should not be paid. Called by the payout store's account
+-- standing, under the legacy tenant's context, before every send; a TRUE
+-- answer holds the account. Invalid when the tenant is pooled; when no
+-- unrevoked tenant link names the carry (revoked, deleted, or relinked);
+-- when the NEAR AI account is closed or has an open account credit hold;
+-- or when the source link is no longer live there. FALSE, cheaply, for an
+-- account with no live carry.
+CREATE FUNCTION public.trace_legacy_payout_carry_invalid(p_tenant TEXT, p_account UUID)
+RETURNS BOOLEAN
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+DECLARE
+    v_carry RECORD;
+    v_link RECORD;
+    v_invalid BOOLEAN := FALSE;
+BEGIN
+    IF p_tenant IS NULL OR p_tenant IS DISTINCT FROM public.trace_current_tenant_id()
+        OR p_tenant ~ '^(near-|nearai-)' THEN
+        RETURN FALSE;
+    END IF;
+    FOR v_carry IN
+        SELECT c.rail_id, c.legacy_link_hash, c.source_link_hash
+          FROM public.trace_legacy_payout_carries c
+          JOIN public.trace_payout_links l ON l.tenant_id = c.tenant_id AND l.link_id = c.link_id
+         WHERE c.tenant_id = p_tenant AND c.account_id = p_account AND c.released_at IS NULL
+           AND l.state IN ('waiting', 'active')
+    LOOP
+        IF EXISTS (SELECT 1 FROM public.trace_legacy_invite_pooled_tenants p
+                    WHERE p.tenant_id = p_tenant) THEN
+            RETURN TRUE;
+        END IF;
+        SELECT l.tenant_id, l.account_id INTO v_link
+          FROM public.trace_legacy_invite_links l
+         WHERE l.legacy_tenant_id = p_tenant AND l.revoked_at IS NULL
+           AND 'sha256:' || encode(sha256(convert_to(
+                   'legacy-invite-link-v1:' || l.link_id::TEXT, 'UTF8')), 'hex') = v_carry.legacy_link_hash;
+        IF NOT FOUND THEN
+            RETURN TRUE;
+        END IF;
+        PERFORM set_config('trace_commons.trace_tenant_id', v_link.tenant_id, true);
+        v_invalid := NOT EXISTS (
+                SELECT 1 FROM public.trace_accounts a
+                 WHERE a.tenant_id = v_link.tenant_id AND a.account_id = v_link.account_id
+                   AND a.closed_at IS NULL)
+            OR EXISTS (
+                SELECT 1 FROM public.trace_credit_holds h
+                 WHERE h.tenant_id = v_link.tenant_id AND h.released_at IS NULL
+                   AND lower(h.credit_account_ref) = 'account:' || v_link.account_id::TEXT)
+            OR NOT EXISTS (
+                SELECT 1 FROM public.trace_payout_links s
+                 WHERE s.tenant_id = v_link.tenant_id AND s.account_id = v_link.account_id
+                   AND s.rail_id = v_carry.rail_id
+                   AND s.state IN ('waiting', 'active') AND s.unlink_requested_at IS NULL
+                   AND 'sha256:' || encode(sha256(convert_to(
+                           'payout-link-v1:' || s.link_id::TEXT, 'UTF8')), 'hex') = v_carry.source_link_hash);
+        PERFORM set_config('trace_commons.trace_tenant_id', p_tenant, true);
+        IF v_invalid THEN
+            RETURN TRUE;
+        END IF;
+    END LOOP;
+    RETURN FALSE;
+END $$;
+ALTER FUNCTION public.trace_legacy_payout_carry_invalid(TEXT, UUID)
+    OWNER TO trace_legacy_payout_carry_guard;
+REVOKE ALL ON FUNCTION public.trace_legacy_payout_carry_invalid(TEXT, UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.trace_legacy_payout_carry_invalid(TEXT, UUID)
+    TO trace_ingest_runtime;
+
 REVOKE CREATE ON SCHEMA public FROM trace_legacy_payout_carry_guard;
 REVOKE trace_legacy_payout_carry_guard FROM CURRENT_USER;
 
@@ -375,6 +485,7 @@ REVOKE trace_legacy_payout_carry_guard FROM CURRENT_USER;
 -- Labels: challenge_invalid, account_ineligible, device_not_eligible,
 -- tenant_pooled, tenant_claimed, already_linked, linked. Returns the
 -- account's current authority (or 'none') and trust version (or 0).
+GRANT SELECT (created_at) ON device_keys TO trace_legacy_invite_link_guard;
 GRANT trace_legacy_invite_link_guard TO CURRENT_USER;
 GRANT CREATE ON SCHEMA public TO trace_legacy_invite_link_guard;
 CREATE FUNCTION public.trace_link_legacy_instance_device(
@@ -452,9 +563,18 @@ BEGIN
         END;
     END IF;
     -- Instance-enrolled only: an invite row means the V81 link applies.
+    -- And only the tenant's earliest live device: whoever holds the
+    -- instance key can enroll a later device into this tenant, and must not
+    -- be able to claim it with that one (review of #1865).
     IF NOT v_key_matches OR EXISTS (
         SELECT 1 FROM public.onboarding_invites i
          WHERE i.tenant_id = p_legacy_tenant AND i.invite_subject_hash = p_invite_hash
+    ) OR EXISTS (
+        SELECT 1 FROM public.device_keys older, public.device_keys this
+         WHERE this.tenant_id = p_legacy_tenant AND this.device_key_id = p_device_key_id
+           AND older.tenant_id = p_legacy_tenant AND older.revoked_at IS NULL
+           AND older.device_key_id <> p_device_key_id
+           AND (older.created_at, older.device_key_id) < (this.created_at, this.device_key_id)
     ) THEN
         RETURN QUERY SELECT 'device_not_eligible'::TEXT, NULL::UUID, NULL::TEXT, NULL::TEXT,
             NULL::TEXT, NULL::BIGINT, NULL::TEXT, NULL::BIGINT, NULL::TEXT, NULL::TEXT,

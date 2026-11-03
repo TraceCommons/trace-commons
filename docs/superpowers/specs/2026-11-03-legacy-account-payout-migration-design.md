@@ -236,10 +236,16 @@ nobody and a carry has no account to land on.
 Owner decision 5 (2026-11-03, option A): when the V81 link is made, link
 the signing device's **signed-upload principals** to one account in the
 legacy tenant, and do the same for each device that later attests under
-the link (V91). These are the two forms that
-`account_trust::device_upload_principal_refs(tenant, device_key_id,
-device_key_id)` returns for the device's bare device-key actor, which is
-what the app's uploads carry. The accrual pass then claims their unowned
+the link (V91). These are both forms that
+`account_trust::device_upload_principal_refs` returns for each actor the
+server can derive from the device key: the app's actor, whose subject is
+`user_subject_hash(cfg.user_subject)` and, for an invite device without a
+contributor label, `user_subject_hash(device_key_id)` (the actor
+`repair_native_device_upload_principal` already builds); each instance
+enrollment's subject for the tenant (`trace_instance_enrollments`); and
+the bare device-key actor of device-JWT uploads. (The first version of
+this section said the app's uploads carry the bare actor; the review of
+#1865 showed they carry the subject form.) The accrual pass then claims their unowned
 accruals the normal way, once, with its own `accrual_claimed` audit row.
 Only proven devices are linked; nothing is inferred for the tenant's other
 principals. If either principal already belongs to a live account in the
@@ -252,12 +258,12 @@ device writes no V135 upload alias rows (`postgres.rs:2011-2018`: "Legacy
 registered devices use signed claims as independent login principals"),
 so its credit is keyed by the signed-upload principal itself.
 
-**Known limit.** An upload whose claim names a per-user subject
-(`instance:<tenant>:<device>:user:<subject>`, possible on an
-instance-vouched enrollment) has a principal that cannot be derived from
-the device key. Its credit stays unowned and is not paid. Pilot query Q5
-measures how much credit is unowned in non-pooled legacy tenants, which
-bounds this.
+**Known limit.** An upload whose subject cannot be derived from the
+device key (an invite device enrolled with a contributor label, whose
+`user_subject` is the label) has a principal the claim cannot name. Its
+credit stays unowned and is not paid. Pilot query Q5 measures how much
+credit is unowned in non-pooled legacy tenants, which bounds this; check
+it against real `auth_principal_ref`s before turning payouts on.
 
 ### 3.6 Existing credit and attestations
 
@@ -646,6 +652,48 @@ Where the implementation differs from, or adds to, sections 3 to 5:
 - **Tests.** `crates/trace-commons-server/tests/legacy_payout_carry_pg.rs`
   (CI step `legacy_payout_carry_pg`) and one ingest route test,
   `a_confirmed_link_reaches_a_linked_legacy_account_and_opens_to_the_same_org`.
+
+### Changes after review (2026-11-03, #1865)
+
+- **A superseded active carry is unlinked** at the change, not only marked
+  released, so a revocation, unlink or pooled mark before the new carry
+  activates cannot leave the old one paying.
+- **The carry takes the tenant link's lock** (`trace_legacy_invite_link:`
+  per legacy tenant) and re-reads `revoked_at` under it; the revocation
+  trigger takes the same lock. A carry and a revocation can no longer
+  interleave into a live carry on a revoked link.
+- **Send-time check.** `trace_legacy_payout_carry_invalid` (guard-owned)
+  runs inside `payout_account_standing`, which the pass checks before every
+  send. A live carry is held (`payout_legacy_carry_invalid`) when its tenant
+  is pooled, its tenant link is revoked or deleted, the NEAR AI account is
+  closed or has an open account credit hold, or the source link is no
+  longer live. Section 7's exclusion now holds where money moves.
+- **Only a carried waiting link** may close at zero; every other link
+  keeps V132's rule.
+- **Audit actors are re-hashed** under `legacy-payout-carry-actor-v1:` on
+  the legacy tenant's rows, as section 5 says.
+- **Decision 5 claims the subject-form principals** (section 3.5).
+- **Instance links require the tenant's earliest live device.** A device
+  enrolled into the tenant later, for example by whoever holds the
+  instance key, cannot link it. If every earlier device was revoked, a
+  later one becomes earliest; whether instance links should instead need
+  operator approval is an open owner question.
+- **The app does not offer the move to instance-enrolled devices yet.**
+  The existing offer and notice say "invite", which is untrue for them, and
+  showing them needs approved wording (copy guide rule 9). The server
+  accepts instance links; the client offer waits for that wording.
+
+### Known limits, not fixed here
+
+- **Accounts created after a carry** (a later login link, or a claim at a
+  V91 attestation) are carried only at the NEAR AI account's next confirm
+  or tenant link. Their credit accrues but is not paid until then.
+- **Links proved before #1862.** The carry requires the source account to
+  hold a `near_ai_login` anchor, not that the source link was proved by
+  one. A link proved through a wallet anchor before #1862 would be carried
+  once that account records a login. Rollout check: before enabling
+  payouts, Q4 plus a count of live links created before #1862's deploy on
+  accounts with a live tenant link must both be 0.
 
 ## 14. Follow-ups outside this PR
 

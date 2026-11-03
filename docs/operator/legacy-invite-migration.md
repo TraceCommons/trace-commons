@@ -271,12 +271,18 @@ A tenant link also decides who is paid the legacy tenant's credit
 - **Revoking a link releases its carries** in the same transaction (a
   trigger on `trace_legacy_invite_links`): an active carried link gets an
   unlink request, a waiting one closes at zero. Paid credit stays paid.
-  Marking a tenant pooled after it was linked does not release anything by
-  itself until the next carry; revoke its link as well.
+- **Every send re-checks the carry.** The account standing the pass reads
+  before each send holds a live carry (`payout_legacy_carry_invalid`) when
+  its tenant was marked pooled, its tenant link is revoked or deleted, or
+  the NEAR AI account is closed, on an account credit hold, or no longer
+  has the source link live. Marking a tenant pooled therefore stops its
+  carried payouts at once; revoking its link as well releases them.
 - **Instance-enrolled tenants link too** (no `onboarding_invites` row):
   the link records no invite grant and changes no trust
-  (`legacy_instance_linked`). Only the device that linked is proven; a
-  second device of that tenant is refused.
+  (`legacy_instance_linked`). Only the tenant's earliest live device can
+  link it, and only that device is proven; a second device is refused.
+  The app does not offer instance devices the move yet (its wording says
+  "invite"); the server accepts the link.
 
 ## Readiness under coexistence
 

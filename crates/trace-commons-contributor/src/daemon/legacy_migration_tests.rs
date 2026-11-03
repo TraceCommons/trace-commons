@@ -974,18 +974,16 @@ async fn status_offers_the_move_then_shows_the_notice_until_acknowledged() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn only_a_legacy_identity_is_offered_the_move() {
+async fn only_a_legacy_invite_identity_is_offered_the_move() {
     let f = fixture(LinkMode::Honest, true).await;
     let mut near = f.cfg.clone();
     near.tenant_id = format!("nearai-{}", "ab".repeat(32));
     f.shared.store.save_config(&near).unwrap();
     let error = f.migrate(&provisioner(&f.ingest)).await.unwrap_err();
     assert_eq!(label(&error), "legacy_migration_not_applicable");
-    // Owner decision 3 (2026-11-03): an instance-enrolled legacy device is
-    // offered the move too; the server links it without an invite grant.
     let mut instance = f.cfg.clone();
     instance.instance_id = "instance-1".into();
-    assert!(offered_for(&instance));
+    assert!(!offered_for(&instance));
     assert!(offered_for(&f.cfg));
 }
 

@@ -3459,12 +3459,19 @@ pub struct PayoutAccountStanding {
     /// An open `trace_credit_holds` row names the account's `account:` key
     /// or a principal actively linked to it.
     pub credit_held: bool,
+    /// The account holds a live carried link that must not be paid (V146,
+    /// `trace_legacy_payout_carry_invalid`): its tenant was marked pooled,
+    /// its tenant link is gone or revoked, or its source account or link
+    /// no longer stands.
+    pub carry_invalid: bool,
 }
 
 /// An account whose row is gone or closed.
 pub const PAYOUT_ACCOUNT_CLOSED: &str = "payout_account_closed";
 /// An open credit hold on the account or a principal linked to it.
 pub const PAYOUT_ACCOUNT_CREDIT_HOLD: &str = "payout_account_credit_hold";
+/// A carried link that no longer has a standing source (V146).
+pub const PAYOUT_LEGACY_CARRY_INVALID: &str = "payout_legacy_carry_invalid";
 
 impl PayoutAccountStanding {
     /// The shared hold label, if any. A missing account row holds like a
@@ -3474,6 +3481,8 @@ impl PayoutAccountStanding {
             Some(PAYOUT_ACCOUNT_CLOSED)
         } else if self.credit_held {
             Some(PAYOUT_ACCOUNT_CREDIT_HOLD)
+        } else if self.carry_invalid {
+            Some(PAYOUT_LEGACY_CARRY_INVALID)
         } else {
             None
         }

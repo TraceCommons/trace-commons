@@ -38,6 +38,17 @@ pub fn legacy_link_hash(link_id: Uuid) -> String {
     )
 }
 
+/// The actor hash written on the legacy tenant's audit rows: the NEAR AI
+/// account's actor hash hashed again under a carry domain, so rows in the
+/// two tenants cannot be joined on it (spec section 5).
+pub fn carry_actor_hash(actor_ref_hash: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "sha256:{:x}",
+        Sha256::digest(format!("legacy-payout-carry-actor-v1:{actor_ref_hash}").as_bytes())
+    )
+}
+
 fn anchored_tenant(tenant: &str) -> bool {
     trace_commons_protocol::admission::is_anchored_tenant(tenant)
 }
@@ -103,12 +114,33 @@ pub(super) async fn carry_in_tx(
             &[&tenant, &account],
         )
         .await?;
+    let carry_actor = carry_actor_hash(actor_ref_hash);
     for tenant_link in tenant_links {
+        let tenant_link_id: Uuid = tenant_link.get(0);
         let legacy: String = tenant_link.get(1);
         if anchored_tenant(&legacy) {
             continue;
         }
-        let legacy_hash = legacy_link_hash(tenant_link.get(0));
+        // The tenant link's own lock, which its revocation trigger takes
+        // too; then re-read it, so a revocation that committed meanwhile
+        // is seen and nothing is carried on a revoked link.
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || $1, 0))",
+            &[&legacy],
+        )
+        .await?;
+        let still_live = tx
+            .query_opt(
+                "SELECT 1 FROM trace_legacy_invite_links
+                  WHERE link_id = $1 AND revoked_at IS NULL",
+                &[&tenant_link_id],
+            )
+            .await?
+            .is_some();
+        if !still_live {
+            continue;
+        }
+        let legacy_hash = legacy_link_hash(tenant_link_id);
         set_tenant(tx, &legacy).await?;
         let outcome = carry_tenant(
             tx,
@@ -117,7 +149,7 @@ pub(super) async fn carry_in_tx(
             source.as_ref(),
             rail,
             programs,
-            actor_ref_hash,
+            &carry_actor,
             &mut report,
         )
         .await;
@@ -242,21 +274,13 @@ async fn carry_tenant(
             );
             continue;
         }
-        // An older generation: a waiting one never paid and closes at zero;
-        // an active one is superseded as any change is, and the pass closes
-        // it when the new link activates.
+        // An older generation is released outright: a waiting one never
+        // paid and closes at zero; an active one gets an unlink request, so
+        // it stops even if the new carry never activates (a later
+        // revocation, unlink or pooled mark finds only the new one). The
+        // pass still closes the old one and activates the new.
         for carry in &live {
-            let state: String = carry.get(2);
-            if state == PayoutLinkState::Waiting.as_str() {
-                release(tx, carry.get(0), actor_ref_hash).await?;
-            } else {
-                tx.execute(
-                    "UPDATE trace_legacy_payout_carries SET released_at = clock_timestamp()
-                      WHERE tenant_id = $1 AND link_id = $2 AND released_at IS NULL",
-                    &[&legacy, &carry.get::<_, Uuid>(0)],
-                )
-                .await?;
-            }
+            release(tx, carry.get(0), actor_ref_hash).await?;
             report.released += 1;
         }
         let link_id = Uuid::new_v4();
