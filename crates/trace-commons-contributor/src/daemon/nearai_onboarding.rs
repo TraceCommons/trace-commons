@@ -853,6 +853,21 @@ pub(super) const DEVICE_KEY_REVOKED_WIRE: &str = "device_key_revoked";
 /// key, then signing in, which makes a new one.
 pub const ENROLL_DEVICE_KEY_REVOKED: &str = "near_ai_enroll_device_key_revoked";
 
+/// Whether a finish was not answered: no response, or a status
+/// [`commons_busy`] counts as busy (the commons' own `503
+/// near_ai_sign_in_unavailable` and `429 near_ai_sign_in_rate_limited`
+/// among them).
+fn finish_unanswered(error: &trace_commons_operator_client::Error) -> bool {
+    use trace_commons_operator_client::Error;
+    match error {
+        Error::Transport { .. } => true,
+        Error::HttpFailure { status, .. } | Error::ServerLabel { status, .. } => {
+            commons_busy(*status)
+        }
+        _ => false,
+    }
+}
+
 /// A finish failure as this module's label: the revoked-key refusal by
 /// name; a commons that did not answer (no response, a server error such as
 /// its `503 near_ai_sign_in_unavailable`, or its `429
@@ -865,7 +880,7 @@ pub(super) fn finish_refusal(
 ) -> anyhow::Error {
     if error.server_label() == Some(DEVICE_KEY_REVOKED_WIRE) {
         anyhow!(ENROLL_DEVICE_KEY_REVOKED)
-    } else if commons_unanswered(error) {
+    } else if finish_unanswered(error) {
         anyhow!(unavailable)
     } else {
         anyhow!(fallback)
