@@ -459,12 +459,34 @@ final class FundingTests: XCTestCase {
     /// chosen; `NearAiSignInChoiceTests` holds the choice to its start.
     @MainActor
     func testHostedSignedOutBillingButtonRunsTheSignInFlow() async throws {
-        let offersSeveral: Bool
-        if case .menu = NearAiSignInChoice.of(AppModel().privateInferenceCopy) {
-            offersSeveral = true
+        let offered: [CredentialSection.ProviderOption]?
+        if case .menu(let options) = NearAiSignInChoice.of(AppModel().privateInferenceCopy) {
+            offered = options
         } else {
-            offersSeveral = false
+            offered = nil
         }
+        // Pressing the menu opens a real pop-up menu, and its tracking loop
+        // holds the main thread inside the mouse-down until something ends
+        // it. On a CI runner nothing does, and the job ran into its timeout
+        // (#1855). The test closes it once it is open, noting what it
+        // offered. The begin-tracking notification comes before the
+        // session watches for events, and a cancel sent from inside it is
+        // ignored, so the cancel runs on the tracking loop's next turn.
+        let menuSeen = OSAllocatedUnfairLock<[String]?>(initialState: nil)
+        let menuOpened = NotificationCenter.default.addObserver(
+            forName: NSMenu.didBeginTrackingNotification, object: nil, queue: nil
+        ) { note in
+            // Posted on the main thread, from inside the tracking loop.
+            nonisolated(unsafe) let opened = note.object as? NSMenu
+            MainActor.assumeIsolated {
+                guard let menu = opened else { return }
+                let titles = menu.items.map(\.title)
+                menuSeen.withLock { $0 = titles }
+                menu.perform(#selector(NSMenu.cancelTracking), with: nil, afterDelay: 0.1,
+                             inModes: [.eventTracking, .common])
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(menuOpened) }
         let view = try HostedFunding()
         defer { view.close() }
         let entered = expectation(description: "Visible row reads its account")
@@ -478,8 +500,10 @@ final class FundingTests: XCTestCase {
 
         try await view.press()
         try await view.draw()
-        if offersSeveral {
+        if let offered {
             try await Task.sleep(nanoseconds: 300_000_000)
+            XCTAssertEqual(menuSeen.withLock { $0 }, offered.map(\.title),
+                           "the press opens a menu of the core's logins")
             let methods = view.daemon.calls.map(\.method)
             XCTAssertEqual(methods.filter { $0 == "near_ai_funding" }.count, fundingReads,
                            "Check account must not run when signed out: \(methods)")
