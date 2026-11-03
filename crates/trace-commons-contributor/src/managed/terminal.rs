@@ -387,26 +387,21 @@ fn raise_tab() -> Vec<String> {
 /// prints less, the launch stands, and the session simply cannot be shown.
 #[cfg(any(target_os = "macos", test))]
 fn open_window(literal: &str) -> Vec<String> {
-    [
-        vec![
-            format!("set t to do script \"{literal}\""),
-            "activate".into(),
-            "set found to \"\"".into(),
-            "try".into(),
-            "set found to tty of t".into(),
-            "end try".into(),
-            "try".into(),
-            "set wid to missing value".into(),
-            // With no tty there is nothing to find: no scan.
-            "if found is not \"\" then".into(),
-        ],
-        find_window("found"),
-        vec![
-            "end if".into(),
-            "if wid is not missing value then set found to found & linefeed & (wid as text)".into(),
-            "end try".into(),
-        ],
-    ]
+    [vec![
+        format!("set t to do script \"{literal}\""),
+        "activate".into(),
+        "set found to \"\"".into(),
+        "try".into(),
+        "set found to tty of t".into(),
+        "end try".into(),
+        // The window id, read only from the front window and only
+        // when its selected tab is this one: no scan of other windows.
+        "try".into(),
+        "if found is not \"\" and tty of selected tab of front window is found then".into(),
+        "set found to found & linefeed & ((id of front window) as text)".into(),
+        "end if".into(),
+        "end try".into(),
+    ]]
     .concat()
 }
 
@@ -651,7 +646,10 @@ fn launch_macos(
         (None, Some(place)) => MacosLaunch::Script(app.script_in(command, place)),
         (None, None) => MacosLaunch::Script(app.script(command)),
     };
-    let printed = run(how)?;
+    // Once the app is asked, anything that goes wrong may follow a typed
+    // command, so it reads as `LaunchUnknown`, never as a refusal from
+    // before anything ran; only the refusals above release a held launch.
+    let printed = run(how).map_err(|_| ManagedError::LaunchUnknown)?;
     Ok(match app {
         TerminalApp::Terminal => terminal_tab(&printed),
         _ => None,
@@ -906,26 +904,19 @@ fn tty_path<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalTab {
     pub handle: TerminalHandle,
-    /// Terminal's window id, kept on the row for a launch that places
-    /// itself beside it (#1852).
+    /// Terminal's window id. Recorded on the row by owner decision
+    /// (2026-11-02) for #1852's window picker; nothing in production reads
+    /// it yet.
     pub window: Option<u32>,
 }
 
-/// The tab a launch script printed: a bare tty path, then optionally a line
-/// of digits, the window id. A second line of digits that is not a window
-/// id (too long) keeps the tab with no window, so Show and Stop never hang
-/// on it. Anything else, a second tty or any other text, is not what the
-/// script prints, and names no tab.
+/// The tab a launch script printed: a bare tty path, then optionally the
+/// window id on a line of its own. Anything else names no tab.
 pub fn terminal_tab(output: &[u8]) -> Option<TerminalTab> {
     let text = std::str::from_utf8(output).ok()?;
     let text = text.strip_suffix('\n').unwrap_or(text);
     let (tty, window) = match text.split_once('\n') {
-        Some((tty, window)) => {
-            if window.is_empty() || !window.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            (tty, window.parse::<u32>().ok())
-        }
+        Some((tty, window)) => (tty, Some(window.parse::<u32>().ok()?)),
         None => (text, None),
     };
     valid_tty(tty).then(|| TerminalTab {
@@ -1294,7 +1285,7 @@ pub fn launch_tool_setup(
             setup_argv(body)?,
             None,
             None,
-            |how| run_macos(how).map_err(|_| ManagedError::LaunchUnknown),
+            run_macos,
         )?;
         Ok(())
     }
@@ -1333,9 +1324,6 @@ pub fn launch(
         let command = shell_command(&helper, config, session, ticket)?;
         let mut argv = vec![helper.into_os_string()];
         argv.extend(helper_args(config, session, ticket));
-        // Anything that goes wrong once the terminal is asked may follow a
-        // typed command, so it reads as `LaunchUnknown`, never as a refusal
-        // from before anything ran.
         // A placed launch presses Command-T only when macOS already allows
         // it; otherwise it opens a new window and the prompts are asked for
         // off the launch (#1853 review).
@@ -1346,9 +1334,15 @@ pub fn launch(
             }
             ready
         });
-        launch_macos(choice, installed, &command, argv, Some(cwd), place, |how| {
-            run_macos(how).map_err(|_| ManagedError::LaunchUnknown)
-        })
+        launch_macos(
+            choice,
+            installed,
+            &command,
+            argv,
+            Some(cwd),
+            place,
+            run_macos,
+        )
     }
     #[cfg(any(windows, target_os = "linux"))]
     {
@@ -1781,14 +1775,11 @@ mod tests {
             ]
             .concat()
         );
-        assert!(launch.contains(&"if tty of x is found then".to_string()));
-        assert_eq!(
-            launch
+        assert!(
+            !launch
                 .iter()
-                .filter(|l| l.contains("repeat with w in windows"))
-                .count(),
-            1,
-            "one scan"
+                .any(|l| l.contains("repeat with w in windows")),
+            "no scan of the windows"
         );
     }
 
@@ -1811,20 +1802,6 @@ mod tests {
                 window: None
             })
         );
-        // A window id too long to be one keeps the tab, with no window.
-        for output in [
-            &b"/dev/ttys003\n99999999999"[..],
-            b"/dev/ttys003\n99999999999\n",
-        ] {
-            assert_eq!(
-                terminal_tab(output),
-                Some(TerminalTab {
-                    handle: tab("/dev/ttys003"),
-                    window: None
-                }),
-                "{output:?}"
-            );
-        }
         // Anything else is not what the script prints: no tab.
         for output in [
             &b""[..],
@@ -1834,6 +1811,7 @@ mod tests {
             b"/dev/ttys003\n42\n43",
             b"4242\n/dev/ttys003",
             b"ttys003\n42",
+            b"/dev/ttys003\n99999999999",
         ] {
             assert_eq!(terminal_tab(output), None, "{output:?}");
         }
@@ -2053,22 +2031,12 @@ mod tests {
                 "try",
                 "set found to tty of t",
                 "end try",
-                // The window holding the tab, kept on the row (#1853) for
-                // #1852 to place launches beside.
+                // The window id, from the front window only when its
+                // selected tab is this one (#1853), for #1852.
                 "try",
-                "set wid to missing value",
-                "if found is not \"\" then",
-                "repeat with w in windows",
-                "repeat with x in tabs of w",
-                "if tty of x is found then",
-                "set wid to id of w",
-                "exit repeat",
+                "if found is not \"\" and tty of selected tab of front window is found then",
+                "set found to found & linefeed & ((id of front window) as text)",
                 "end if",
-                "end repeat",
-                "if wid is not missing value then exit repeat",
-                "end repeat",
-                "end if",
-                "if wid is not missing value then set found to found & linefeed & (wid as text)",
                 "end try",
                 "return found",
                 "end tell",
@@ -2240,6 +2208,32 @@ mod tests {
             ),
             Ok(None)
         );
+    }
+
+    /// #1853 review: once the app is asked, any error reads as
+    /// `LaunchUnknown`, so the daemon keeps the launch held; only the
+    /// refusals from before anything runs are passed through.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_error_once_the_terminal_is_asked_is_launch_unknown() {
+        let argv = || vec![std::ffi::OsString::from("/x/near-ai")];
+        let cwd = Some(Path::new("/Users/x/app"));
+        for error in [
+            ManagedError::StorageUnavailable,
+            ManagedError::UnsupportedVersion,
+            ManagedError::TerminalNotFound,
+        ] {
+            for (choice, app) in [
+                (TerminalSetting::Terminal, TerminalApp::Terminal),
+                (TerminalSetting::Wezterm, TerminalApp::Wezterm),
+            ] {
+                assert_eq!(
+                    launch_macos(choice, &[app], "'/x/near-ai'", argv(), cwd, |_| Err(error)),
+                    Err(ManagedError::LaunchUnknown),
+                    "{error:?}"
+                );
+            }
+        }
     }
 
     #[test]

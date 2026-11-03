@@ -9539,8 +9539,8 @@ command. Secure Keyboard Entry, the known cause of a silent swallow, is
 checked first.
 
 A launch that opens a new window reads back its tab's tty and, on the next
-line, the id of the window holding it, found by one scan that stops at the
-match (#1853); the row keeps both, and a window line that cannot be read leaves
+line, the id of Terminal's front window when that window's selected tab is
+the launch's, with no scan of other windows (#1853); the row keeps both, and a window line that cannot be read leaves
 the row with its tab and no window. A placed launch reads only the picked
 window's tabs, once.
 

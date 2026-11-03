@@ -297,13 +297,15 @@ struct Entry {
     )]
     terminal: Option<TerminalHandle>,
     /// The id of the Terminal window `terminal`'s tab was in when the
-    /// launch read it back, for a launch that places itself beside it
-    /// (#1852). A row written before it has none.
+    /// launch read it back. Recorded by owner decision (2026-11-02) for
+    /// #1852's window picker; nothing in production reads it yet. A row
+    /// written before it has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     terminal_window: Option<u32>,
     /// The ended row Start again or Resume prepared this one from. Set by
-    /// the daemon, never by a request, so no shell names a row to place a
-    /// launch beside.
+    /// the daemon, never by a request: the app no longer names the row
+    /// (#1839 review, finding 11). Kept by owner decision for #1852;
+    /// nothing in production reads it yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     again_of: Option<Uuid>,
     /// A stop was asked for; the launcher is told on its next report.
