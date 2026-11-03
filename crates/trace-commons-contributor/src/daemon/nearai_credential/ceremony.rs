@@ -208,13 +208,16 @@ fn ceremony_runtime() -> Result<&'static tokio::runtime::Runtime> {
 /// It is unique per attempt because the service answers `409` on a duplicate
 /// name within a workspace, and a contributor who re-runs the ceremony after
 /// losing a key must not be blocked by the name of the one they lost.
+///
+/// The prefix is how NEAR AI finds keys made through this app. It shows in the
+/// contributor's own key list, so it must not carry the product name.
 pub(super) fn key_name(attempt_id: &str) -> String {
     let suffix: String = attempt_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .take(8)
         .collect();
-    format!("trace-commons-{suffix}")
+    format!("near-ai-app-{suffix}")
 }
 
 /// One sign-in's browser leg: a login already known, or the chooser page
@@ -1637,8 +1640,15 @@ mod tests {
             first, second,
             "a 409 on a duplicate name would block a retry"
         );
+        assert_eq!(first.len(), "near-ai-app-".len() + 8);
         for name in [first, second, key_name("")] {
-            assert!(name.starts_with("trace-commons-"));
+            let suffix = name.strip_prefix("near-ai-app-").expect("prefix");
+            assert!(
+                suffix.len() <= 8 && suffix.bytes().all(|b| b.is_ascii_alphanumeric()),
+                "{name}"
+            );
+            assert!(name.len() <= 128);
+            assert!(!name.to_ascii_lowercase().contains("trace-commons"));
             assert!(
                 name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
                 "{name}"
