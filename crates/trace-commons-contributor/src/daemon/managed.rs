@@ -115,6 +115,9 @@ struct RedeemParams {
 
 impl ManagedService {
     pub fn open(store: &ConfigStore) -> Result<Self, ManagedError> {
+        // Tab Configs an earlier run left behind hold dead tickets.
+        #[cfg(not(test))]
+        terminal::sweep_warp_tab_configs();
         Ok(Self {
             accounts: AccountStore::open(store)?,
             #[cfg(test)]
@@ -236,6 +239,7 @@ impl ManagedService {
                 | ManagedError::UnsupportedVersion),
             ) => {
                 self.sessions.terminal_launch_failed(launch.session_id)?;
+                terminal::remove_launch_files(launch.session_id);
                 Err(error)
             }
             // Anything else may follow a typed command: held.
@@ -462,6 +466,8 @@ impl ManagedService {
         );
         if on_sign_in && !sign_in {
             self.sessions.fail_unredeemed(session_id, ticket)?;
+            // The ticket can never be redeemed now; its Tab Config is done.
+            terminal::remove_launch_files(session_id);
             return Err(ManagedError::NearAiSignInRequired);
         }
         let redeemed = self.sessions.redeem(session_id, ticket)?;
@@ -2562,6 +2568,7 @@ mod tests {
 
     /// Owner, 2026-11-03: a Warp launch's Tab Config holds the launch
     /// ticket, so redeeming the ticket removes that launch's file.
+    #[cfg(unix)]
     #[test]
     fn redeeming_a_launch_removes_its_tab_config() {
         let (home, _store, mut service) = service();
