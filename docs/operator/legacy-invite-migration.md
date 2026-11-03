@@ -271,6 +271,11 @@ A tenant link also decides who is paid the legacy tenant's credit
 - **Revoking a link releases its carries** in the same transaction (a
   trigger on `trace_legacy_invite_links`): an active carried link gets an
   unlink request, a waiting one closes at zero. Paid credit stays paid.
+  **Revoke one tenant link per transaction.** The trigger takes that
+  tenant link's lock, and a carry running at the same time takes the
+  account's links' locks in tenant order; revoking several links in one
+  transaction can deadlock with it, and PostgreSQL then aborts one side
+  (retry it).
 - **Every send re-checks the carry.** The account standing the pass reads
   before each send holds a live carry (`payout_legacy_carry_invalid`) when
   its tenant was marked pooled, its tenant link is revoked or deleted, or

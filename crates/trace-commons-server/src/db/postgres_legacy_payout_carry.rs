@@ -38,14 +38,16 @@ pub fn legacy_link_hash(link_id: Uuid) -> String {
     )
 }
 
-/// The actor hash written on the legacy tenant's audit rows: the NEAR AI
-/// account's actor hash hashed again under a carry domain, so rows in the
-/// two tenants cannot be joined on it (spec section 5).
-pub fn carry_actor_hash(actor_ref_hash: &str) -> String {
+/// The actor hash written on the legacy tenant's audit rows for one
+/// carried link: derived from that link's own random id, never from the
+/// NEAR AI account, so the legacy tenant's rows cannot be joined to the
+/// NEAR AI tenant's or to another legacy tenant's (spec section 5; an
+/// unkeyed re-hash of the account's actor could be, review of #1865).
+pub fn carry_actor_hash(carried_link_id: Uuid) -> String {
     use sha2::{Digest, Sha256};
     format!(
         "sha256:{:x}",
-        Sha256::digest(format!("legacy-payout-carry-actor-v1:{actor_ref_hash}").as_bytes())
+        Sha256::digest(format!("legacy-payout-carry-actor-v1:{carried_link_id}").as_bytes())
     )
 }
 
@@ -114,7 +116,6 @@ pub(super) async fn carry_in_tx(
             &[&tenant, &account],
         )
         .await?;
-    let carry_actor = carry_actor_hash(actor_ref_hash);
     for tenant_link in tenant_links {
         let tenant_link_id: Uuid = tenant_link.get(0);
         let legacy: String = tenant_link.get(1);
@@ -149,7 +150,6 @@ pub(super) async fn carry_in_tx(
             source.as_ref(),
             rail,
             programs,
-            &carry_actor,
             &mut report,
         )
         .await;
@@ -184,11 +184,10 @@ pub(super) async fn carry_in_tx(
 async fn release(
     tx: &deadpool_postgres::Transaction<'_>,
     link_id: Uuid,
-    actor_ref_hash: &str,
 ) -> Result<(), DatabaseError> {
     tx.execute(
         "SELECT trace_legacy_payout_release_carry($1, $2, $3)",
-        &[&link_id, &actor_ref_hash, &RELEASED_LABEL],
+        &[&link_id, &carry_actor_hash(link_id), &RELEASED_LABEL],
     )
     .await?;
     Ok(())
@@ -202,7 +201,6 @@ async fn carry_tenant(
     source: Option<&Source>,
     rail: &str,
     programs: &CarryPrograms,
-    actor_ref_hash: &str,
     report: &mut LegacyCarryReport,
 ) -> Result<(), DatabaseError> {
     // Re-checked on every call: a tenant can be marked pooled after it was
@@ -241,7 +239,7 @@ async fn carry_tenant(
             (source, source_hash.as_deref(), pooled, closed)
         else {
             for carry in &live {
-                release(tx, carry.get(0), actor_ref_hash).await?;
+                release(tx, carry.get(0)).await?;
                 report.released += 1;
             }
             continue;
@@ -280,7 +278,7 @@ async fn carry_tenant(
         // revocation, unlink or pooled mark finds only the new one). The
         // pass still closes the old one and activates the new.
         for carry in &live {
-            release(tx, carry.get(0), actor_ref_hash).await?;
+            release(tx, carry.get(0)).await?;
             report.released += 1;
         }
         let link_id = Uuid::new_v4();
@@ -327,7 +325,7 @@ async fn carry_tenant(
             legacy,
             rail,
             PayoutAuditAction::LinkCreated,
-            actor_ref_hash,
+            &carry_actor_hash(link_id),
             Some(account),
             Some(link_id),
             None,

@@ -695,11 +695,40 @@ Where the implementation differs from, or adds to, sections 3 to 5:
    client offer stays limited to invite devices. Follow-up: wording for
    instance devices, then widen `offered_for`.
 
+### Changes after the second review (2026-11-03, #1865)
+
+- **The send-time check reads the source account's standing as broadly as
+  `payout_account_standing` does:** a credit hold on its `account:` key in
+  any spelling settlement accepts (case, braces, compact, `urn:uuid:`), on a
+  principal it owns, or matched through its accruals, and an open payout
+  hold on the carried rail.
+- **The check refuses misuse** (`42501` under another tenant's context)
+  instead of answering "valid".
+- **Legacy-side audit actors** derive from the carried link's own random
+  id, so they cannot be joined to the NEAR AI tenant or across legacy
+  tenants.
+- **Runbook:** revoke one tenant link per transaction (a multi-row revoke
+  can deadlock with a concurrent carry; PostgreSQL aborts one side).
+
 ### Known limits, not fixed here
 
-- **Accounts created after a carry** (a later login link, or a claim at a
-  V91 attestation) are carried only at the NEAR AI account's next confirm
-  or tenant link. Their credit accrues but is not paid until then.
+- **Accounts created after a carry by a later login link** are carried
+  only at the NEAR AI account's next confirm or tenant link. Their credit
+  accrues but is not paid until then. (A claim at a V91 attestation goes
+  through the tenant-link route, which carries after it.) Product call
+  for the owner: is accrued-but-unpaid acceptable at launch, or should the
+  pass carry on its next run?
+- **An invalid carry is held, not released.** A pooled mark, a closed or
+  held NEAR AI account, or a deleted tenant link holds the legacy
+  account's sends at once (fail closed), but the carried link is released
+  only at the next carry or a revocation. The hold is per account, so it
+  also pauses that account's referral stream. Follow-up: release from the
+  event itself (triggers on the pooled marker, account close and link
+  delete) and keep the check as the backstop.
+- **The hash formulas** (`legacy-invite-link-v1:`, `payout-link-v1:`,
+  `payout-account-v1:`) are written inline in V146 and mirrored in Rust;
+  the tests catch a drift that breaks a match. Follow-up: small
+  `IMMUTABLE` SQL helpers.
 - **Links proved before #1862.** The carry requires the source account to
   hold a `near_ai_login` anchor, not that the source link was proved by
   one. A link proved through a wallet anchor before #1862 would be carried

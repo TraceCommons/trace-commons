@@ -207,6 +207,13 @@ GRANT SELECT (tenant_id, user_subject_hash) ON trace_instance_enrollments
     TO trace_legacy_payout_carry_guard;
 GRANT SELECT (tenant_id, credit_account_ref, released_at) ON trace_credit_holds
     TO trace_legacy_payout_carry_guard;
+GRANT SELECT (tenant_id, account_id, rail_id, cleared_at) ON trace_payout_holds
+    TO trace_legacy_payout_carry_guard;
+GRANT SELECT (tenant_id, account_id, credit_account_hash) ON trace_payout_accruals
+    TO trace_legacy_payout_carry_guard;
+GRANT SELECT (tenant_id, device_principal_ref) ON trace_device_upload_principals
+    TO trace_legacy_payout_carry_guard;
+GRANT SELECT ON trace_account_owned_principals TO trace_legacy_payout_carry_guard;
 -- Instance enrollments are isolated by instance subject, not tenant; the
 -- guard reads one tenant's rows under that tenant's context only.
 CREATE POLICY legacy_payout_carry_instance_enrollments ON trace_instance_enrollments
@@ -403,6 +410,31 @@ CREATE TRIGGER trace_legacy_invite_links_release_carries
     AFTER UPDATE OF revoked_at ON trace_legacy_invite_links
     FOR EACH ROW EXECUTE FUNCTION public.trace_legacy_invite_links_release_carries();
 
+-- The account a settlement key names, in every spelling
+-- `db::settlement_key_account_id` accepts: `account:` in any case, then a
+-- UUID hyphenated or compact, braced or not, optionally `urn:uuid:`.
+-- NULL for anything else, including a bare principal.
+CREATE FUNCTION public.trace_legacy_payout_settlement_key_account(p_ref TEXT)
+RETURNS UUID
+LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog AS $$
+DECLARE
+    v_raw TEXT;
+BEGIN
+    IF p_ref IS NULL OR lower(left(p_ref, 8)) <> 'account:' THEN
+        RETURN NULL;
+    END IF;
+    v_raw := btrim(substr(p_ref, 9));
+    IF lower(left(v_raw, 9)) = 'urn:uuid:' THEN
+        v_raw := substr(v_raw, 10);
+    END IF;
+    RETURN v_raw::UUID;
+EXCEPTION WHEN invalid_text_representation THEN
+    RETURN NULL;
+END $$;
+REVOKE ALL ON FUNCTION public.trace_legacy_payout_settlement_key_account(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.trace_legacy_payout_settlement_key_account(TEXT)
+    TO trace_legacy_payout_carry_guard;
+
 -- 7. The send-time check (spec section 7): whether a legacy account holds a
 -- live carry that should not be paid. Called by the payout store's account
 -- standing, under the legacy tenant's context, before every send; a TRUE
@@ -419,8 +451,12 @@ DECLARE
     v_link RECORD;
     v_invalid BOOLEAN := FALSE;
 BEGIN
-    IF p_tenant IS NULL OR p_tenant IS DISTINCT FROM public.trace_current_tenant_id()
-        OR p_tenant ~ '^(near-|nearai-)' THEN
+    -- Misuse holds rather than pays: a caller under another tenant's
+    -- context is refused, never answered "valid".
+    IF p_tenant IS NULL OR p_tenant IS DISTINCT FROM public.trace_current_tenant_id() THEN
+        RAISE EXCEPTION 'legacy_payout_carry_check_refused' USING ERRCODE = '42501';
+    END IF;
+    IF p_tenant ~ '^(near-|nearai-)' THEN
         RETURN FALSE;
     END IF;
     FOR v_carry IN
@@ -443,6 +479,11 @@ BEGIN
             RETURN TRUE;
         END IF;
         PERFORM set_config('trace_commons.trace_tenant_id', v_link.tenant_id, true);
+        -- The source account's standing, as `payout_account_standing`
+        -- reads it for that account (review of #1865): closed; an open
+        -- credit hold on its `account:` key in any spelling settlement
+        -- accepts, on a principal it owns, or matched through its accruals;
+        -- or an open payout hold on this rail.
         v_invalid := NOT EXISTS (
                 SELECT 1 FROM public.trace_accounts a
                  WHERE a.tenant_id = v_link.tenant_id AND a.account_id = v_link.account_id
@@ -450,7 +491,22 @@ BEGIN
             OR EXISTS (
                 SELECT 1 FROM public.trace_credit_holds h
                  WHERE h.tenant_id = v_link.tenant_id AND h.released_at IS NULL
-                   AND lower(h.credit_account_ref) = 'account:' || v_link.account_id::TEXT)
+                   AND (public.trace_legacy_payout_settlement_key_account(h.credit_account_ref)
+                            = v_link.account_id
+                        OR h.credit_account_ref IN (
+                            SELECT p.principal_ref FROM public.trace_account_owned_principals p
+                             WHERE p.tenant_id = v_link.tenant_id
+                               AND p.account_id = v_link.account_id)
+                        OR EXISTS (
+                            SELECT 1 FROM public.trace_payout_accruals accrued
+                             WHERE accrued.tenant_id = v_link.tenant_id
+                               AND accrued.account_id = v_link.account_id
+                               AND accrued.credit_account_hash = 'sha256:' ||
+                                   encode(sha256(convert_to(h.credit_account_ref, 'UTF8')), 'hex'))))
+            OR EXISTS (
+                SELECT 1 FROM public.trace_payout_holds ph
+                 WHERE ph.tenant_id = v_link.tenant_id AND ph.account_id = v_link.account_id
+                   AND ph.rail_id = v_carry.rail_id AND ph.cleared_at IS NULL)
             OR NOT EXISTS (
                 SELECT 1 FROM public.trace_payout_links s
                  WHERE s.tenant_id = v_link.tenant_id AND s.account_id = v_link.account_id

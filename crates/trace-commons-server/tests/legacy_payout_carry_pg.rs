@@ -1169,3 +1169,57 @@ async fn carry_audit_actors_cannot_be_joined_across_tenants() {
         0
     );
 }
+
+/// Review of #1865 (second pass): the send-time check reads the source
+/// account's standing as broadly as the account's own standing does. A
+/// credit hold spelled with an uppercase, braced or compact UUID, and an
+/// open payout hold on the rail, both hold the carry; and a call under
+/// another tenant's context is refused, never answered "valid".
+#[tokio::test]
+async fn the_send_time_check_reads_every_hold_on_the_source_and_refuses_misuse() {
+    let Some(fx) = fixture().await else { return };
+    for spelling in [
+        |id: Uuid| format!("ACCOUNT:{}", id.to_string().to_uppercase()),
+        |id: Uuid| format!("account:{{{id}}}"),
+        |id: Uuid| format!("account:{}", id.simple()),
+        |id: Uuid| format!("account:urn:uuid:{id}"),
+    ] {
+        let (near, account, legacy, claimed) = fx.linked_pair().await;
+        fx.confirm(&near, account, PayoutLinkAction::Link, "org-h")
+            .await;
+        assert!(!fx.carry_invalid(&legacy, claimed).await);
+        let reference = spelling(account);
+        fx.exec(
+            "INSERT INTO trace_credit_holds (tenant_id, hold_id, credit_account_ref,
+                 credit_account_hash, reason, reason_hash, actor_principal_ref)
+             VALUES ($1, $2, $3, $4, 'test', $4, 'test-operator')",
+            &[&near, &Uuid::new_v4(), &reference, &hash(&reference)],
+        )
+        .await;
+        assert!(fx.carry_invalid(&legacy, claimed).await, "{reference}");
+    }
+
+    let (near, account, legacy, claimed) = fx.linked_pair().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-i")
+        .await;
+    fx.exec(
+        "INSERT INTO trace_payout_holds (tenant_id, hold_id, account_id, rail_id, label)
+         VALUES ($1, $2, $3, $4, 'test_hold')",
+        &[&near, &Uuid::new_v4(), &account, &RAIL],
+    )
+    .await;
+    assert!(fx.carry_invalid(&legacy, claimed).await);
+
+    let refused = fx
+        .admin
+        .query_one(
+            "SELECT trace_legacy_payout_carry_invalid($1, $2)",
+            &[&legacy, &claimed],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.code(),
+        Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+    );
+}
