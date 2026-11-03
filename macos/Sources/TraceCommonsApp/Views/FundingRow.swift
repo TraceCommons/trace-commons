@@ -219,12 +219,10 @@ struct FundingRow: View {
                     state: status?.state, failed: model.nearAiSignInFailed)
                 Group {
                     if signIn {
-                        // Every login the build offers, as the balance card.
-                        NearAiSignInButton(
-                            title: NearAiSignInOffer.label(copy), choice: NearAiSignInChoice.of(copy),
-                            style: GlassButtonStyle(.primary)
-                        ) { provider in
-                            Task { await model.signInToNearAI(provider: provider) }
+                        // The balance card's Sign in; the login is chosen
+                        // on the daemon's browser page.
+                        NearAiSignInButton(title: NearAiSignInOffer.label(copy), style: GlassButtonStyle(.primary)) {
+                            Task { await model.signInToNearAI() }
                         }
                     } else {
                         Button {

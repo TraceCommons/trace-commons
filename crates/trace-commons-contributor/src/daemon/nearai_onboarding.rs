@@ -362,6 +362,8 @@ async fn enroll_prepared(
     prepared: Prepared,
     expected: super::commons_credentials::Snapshot,
 ) -> Result<Enrolled> {
+    // The sign-in whose session this spends, read with it by `prepare`.
+    let signed_in = prepared.login.clone();
     let identity = DeviceIdentity::load_or_generate_async(&shared.store).await?;
     let provisioned = provision(shared, api, prepared, &identity).await?;
     let referral = provisioned.finished.referral;
@@ -369,7 +371,7 @@ async fn enroll_prepared(
     let store = shared.store.clone();
     let ingest_url = ingest_url.to_string();
     tokio::task::spawn_blocking(move || {
-        persist(
+        let value = persist(
             &store,
             Commons {
                 ingest_url: &ingest_url,
@@ -381,7 +383,10 @@ async fn enroll_prepared(
             &identity,
             provisioned.finished,
             Some(&expected),
-        )
+        )?;
+        // The account accepted this NEAR AI login: it is the account's login.
+        Login::accepted(signed_in.as_ref(), &store);
+        Ok(value)
     })
     .await
     .map_err(|_| anyhow!("commons_credential_worker_unavailable"))?
@@ -867,6 +872,15 @@ pub(super) struct Login {
 }
 
 impl Login {
+    /// The account accepted this sign-in's NEAR AI login: remember which
+    /// login it was, when the record names this sign-in. File I/O: call it
+    /// off the async runtime.
+    fn accepted(login: Option<&Self>, store: &ConfigStore) {
+        use super::nearai_credential::login_record;
+        let provider = login.and_then(|login| login_record::stored_login(store, &login.key_id));
+        login_record::accepted_by_commons(store, provider);
+    }
+
     fn of(settings: &super::settings::DaemonSettings) -> Option<Self> {
         settings.near_ai_inference.as_ref().map(|key| Self {
             key_id: key.key_id.clone(),
@@ -1044,7 +1058,13 @@ pub(super) async fn renew_account_session(
     store_renewed_session(
         shared, cfg, identity, previous, account_id, finished, expected,
     )
-    .await
+    .await?;
+    // The account accepted the login this spent: remember it, checked
+    // against that sign-in (`login`, read with the session), off this
+    // runtime.
+    let store = shared.store.clone();
+    let _ = tokio::task::spawn_blocking(move || Login::accepted(login.as_ref(), &store)).await;
+    Ok(())
 }
 
 /// The stored record's account id, which a renewal's answer must name.
@@ -2146,7 +2166,35 @@ mod route_tests {
         commons: Commons,
         referral: SignupReferral,
     ) -> (Stub, DaemonShared, Result<Value>, tempfile::TempDir) {
+        enroll_against_signed_in_with(commons, referral, None).await
+    }
+
+    /// [`enroll_against_with`], with the NEAR AI session recorded as coming
+    /// from `login`.
+    async fn enroll_against_signed_in_with(
+        commons: Commons,
+        referral: SignupReferral,
+        login: Option<(&str, &str)>,
+    ) -> (Stub, DaemonShared, Result<Value>, tempfile::TempDir) {
         let (dir, shared) = shared_with_session();
+        // The retained session's sign-in minted "key-enroll"; the record
+        // names the login of the sign-in whose key it was given.
+        if let Some((login, key_id)) = login {
+            shared.settings.lock().unwrap().near_ai_inference =
+                Some(crate::daemon::settings::NearAiInferenceCredential {
+                    key: "sk-synthetic-enroll".into(),
+                    key_id: "key-enroll".into(),
+                    key_prefix: "sk-syn".into(),
+                    organization_id: "org-enroll".into(),
+                    workspace_id: "ws-enroll".into(),
+                    minted_at: Utc::now(),
+                });
+            crate::daemon::nearai_credential::login_record::record_stored_login(
+                &shared.store,
+                login,
+                key_id,
+            );
+        }
         let identity = DeviceIdentity::load_or_generate(&shared.store).unwrap();
         let stub = stub(commons, identity).await;
         let expected = super::super::commons_credentials::snapshot(
@@ -2212,6 +2260,46 @@ mod route_tests {
                 crate::config::WitnessOrigin::PublishedAtJoin
             ))
         );
+    }
+
+    /// An enrollment the Commons accepted remembers the login it came from
+    /// as the account's; one it refused remembers nothing.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[tokio::test]
+    async fn an_accepted_enrollment_remembers_the_accounts_login_and_a_refused_one_does_not() {
+        use crate::daemon::nearai_credential::login_record;
+        let (_stub, shared, result, _dir) = enroll_against_signed_in_with(
+            Commons::Production,
+            SignupReferral::None,
+            Some(("github", "key-enroll")),
+        )
+        .await;
+        result.expect("enrolled");
+        assert_eq!(login_record::commons_login(&shared.store), Some("github"));
+
+        let (_stub, shared, result, _dir) = enroll_against_signed_in_with(
+            Commons::ProductionFinishDenied,
+            SignupReferral::None,
+            Some(("github", "key-enroll")),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(login_record::commons_login(&shared.store), None);
+
+        // A tag written for another sign-in is not this session's login.
+        let (_stub, shared, result, _dir) = enroll_against_signed_in_with(
+            Commons::Production,
+            SignupReferral::None,
+            Some(("github", "key-of-another-sign-in")),
+        )
+        .await;
+        result.expect("enrolled");
+        assert_eq!(login_record::commons_login(&shared.store), None);
+
+        // A session whose login is not known leaves the record as it was.
+        let (_stub, shared, result, _dir) = enroll_against(Commons::Production).await;
+        result.expect("enrolled");
+        assert_eq!(login_record::commons_login(&shared.store), None);
     }
 
     /// A referral code typed at sign-up rides in the finish, canonical, and
