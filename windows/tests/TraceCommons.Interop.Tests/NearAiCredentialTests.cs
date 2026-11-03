@@ -53,6 +53,39 @@ public class NearAiCredentialTests
     }
 
     /// <summary>
+    /// An unenroll takes the NEAR AI sign-in with it (#1843). Only when it
+    /// did not is anything said: not cleared outranks not revoked, and a
+    /// daemon that predates the fields says nothing.
+    /// </summary>
+    [Fact]
+    public void AnUnenrollSaysOnlyWhatItLeftBehind()
+    {
+        PrivateInferenceCopy copy = Copy();
+        Assert.False(string.IsNullOrEmpty(copy.NearAiStillSignedIn));
+        Assert.Equal(
+            copy.NearAiStillSignedIn,
+            NearAiCredentialSurface.UnenrollNotice(DaemonResponse.Parse(
+                "{\"id\":1,\"result\":{\"unenrolled\":true,\"near_ai_cleared\":false,\"near_ai_revoked\":false}}"), copy));
+        Assert.Equal(
+            copy.CredentialForgetNotRevoked,
+            NearAiCredentialSurface.UnenrollNotice(DaemonResponse.Parse(
+                "{\"id\":1,\"result\":{\"unenrolled\":true,\"near_ai_cleared\":true,\"near_ai_revoked\":false}}"), copy));
+        foreach (string quiet in new[]
+        {
+            "{\"id\":1,\"result\":{\"unenrolled\":true,\"near_ai_cleared\":true,\"near_ai_revoked\":true}}",
+            "{\"id\":1,\"result\":{\"unenrolled\":true,\"near_ai_cleared\":true,\"near_ai_revoked\":null}}",
+            "{\"id\":1,\"result\":{\"unenrolled\":true}}",
+            "{\"id\":1,\"error\":{\"code\":\"busy\",\"message\":\"upload-in-flight\"}}",
+        })
+        {
+            Assert.Equal(string.Empty, NearAiCredentialSurface.UnenrollNotice(DaemonResponse.Parse(quiet), copy));
+        }
+
+        Assert.Equal(string.Empty, NearAiCredentialSurface.UnenrollNotice(DaemonResponse.Parse(
+            "{\"id\":1,\"result\":{\"near_ai_cleared\":false}}"), null));
+    }
+
+    /// <summary>
     /// Sign in names no login: the person picks one on the page the daemon
     /// opens in the browser (owner, 2026-11-02), so the start request is an
     /// empty object and this surface keeps no list of logins.
@@ -676,6 +709,8 @@ public class NearAiCredentialTests
             "github", "google", "near",
             // The forget answer's two fields, read by ForgetLeftKeyAtService.
             "removed", "revoked",
+            // The unenroll answer's NEAR AI fields, read by UnenrollNotice.
+            "near_ai_cleared", "near_ai_revoked",
         };
 
         foreach (Match match in Regex.Matches(uncommented, "\"([^\"\\\\]|\\\\.)*\""))

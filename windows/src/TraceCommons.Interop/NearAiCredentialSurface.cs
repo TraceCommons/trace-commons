@@ -231,6 +231,35 @@ public static class NearAiCredentialSurface
     }
 
     /// <summary>
+    /// What an <c>unenroll</c> answer says about the NEAR AI sign-in that went
+    /// with it (#1843): the still-signed-in sentence when it was not cleared
+    /// here (<c>near_ai_cleared: false</c>, which outranks the rest: nothing
+    /// was attempted), the failed-revoke sentence when its key was not
+    /// revoked at NEAR AI (<c>near_ai_revoked: false</c>), otherwise nothing,
+    /// as for a daemon that predates the fields. The same reading as macOS's
+    /// <c>CredentialSurface.signOutNearAi</c>.
+    /// </summary>
+    public static string UnenrollNotice(DaemonResponse response, PrivateInferenceCopy? copy)
+    {
+        if (copy is null || response.IsError
+            || response.Result is not JsonElement value || value.ValueKind != JsonValueKind.Object)
+        {
+            return string.Empty;
+        }
+
+        if (value.TryGetProperty("near_ai_cleared", out JsonElement cleared)
+            && cleared.ValueKind == JsonValueKind.False)
+        {
+            return copy.NearAiStillSignedIn;
+        }
+
+        return value.TryGetProperty("near_ai_revoked", out JsonElement revoked)
+            && revoked.ValueKind == JsonValueKind.False
+            ? copy.CredentialForgetNotRevoked
+            : string.Empty;
+    }
+
+    /// <summary>
     /// The status text a forget leaves: the failed-revoke sentence when the
     /// key was removed here but not revoked at NEAR AI, otherwise nothing.
     /// </summary>

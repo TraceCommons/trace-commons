@@ -137,6 +137,19 @@ public class AccountAttentionShellWiringTests
             view);
     }
 
+    /// <summary>
+    /// A confirmed Set up again says what the unenroll left of the NEAR AI
+    /// sign-in (#1843), in the Rust's words, before the status is read.
+    /// </summary>
+    [Fact]
+    public void SetUpAgainSaysWhatTheUnenrollLeftOfNearAi()
+    {
+        string viewModel = ShellSource("TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs");
+        Assert.Matches(
+            new Regex(@"Methods\.Unenroll.*?NearAiCredentialSurface\.UnenrollNotice\(response, _privateInferenceCopy\).*?Notice = nearAi;.*?Methods\.Status", RegexOptions.Singleline),
+            viewModel);
+    }
+
     private static string ShellSource(string relativePath)
     {
         string path = Path.Combine(

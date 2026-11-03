@@ -1184,6 +1184,20 @@ fn confirm_set_up_again(
     dialog.present();
 }
 
+/// What an `unenroll` answer says about the NEAR AI sign-in that went with
+/// it, as a sentence, or `None` when it went (or the daemon predates the
+/// fields). Not cleared here outranks not revoked: nothing was attempted.
+pub(crate) fn near_ai_left_behind(answer: &serde_json::Value) -> Option<&'static str> {
+    use trace_commons_contributor::private_inference_copy as pi;
+    if answer.get("near_ai_cleared") == Some(&serde_json::Value::Bool(false)) {
+        return Some(pi::NEAR_AI_STILL_SIGNED_IN);
+    }
+    if answer.get("near_ai_revoked") == Some(&serde_json::Value::Bool(false)) {
+        return Some(pi::CREDENTIAL_FORGET_NOT_REVOKED);
+    }
+    None
+}
+
 /// Unenroll, then open the first run. One run at a time, whatever buttons
 /// the block's rebuilds made meanwhile.
 fn set_up_again(app: &Rc<App>, button: &gtk::Button) {
@@ -1197,7 +1211,12 @@ fn set_up_again(app: &Rc<App>, button: &gtk::Button) {
         let mut state = app.settings.set_up_again.get();
         state.finish(result.is_ok());
         app.settings.set_up_again.set(state);
-        if result.is_ok() {
+        if let Ok(answer) = &result {
+            // The NEAR AI sign-in goes with the enrollment (#1843): say so
+            // only when it did not, as macOS does.
+            if let Some(line) = near_ai_left_behind(answer) {
+                app.toast(line);
+            }
             super::onboarding::present_after_unenroll(app);
         }
         // Re-renders the block: the button sensitive again, and the
@@ -3741,6 +3760,36 @@ mod set_up_again_tests {
         assert!(state.button_sensitive());
         assert!(state.begin());
         assert!(!state.shows_failure());
+    }
+
+    /// The NEAR AI half of an unenroll answer (#1843): a sentence only when
+    /// the sign-in was not cleared, or its key not revoked at NEAR AI.
+    #[test]
+    fn the_near_ai_half_of_set_up_again_is_said_only_when_left_behind() {
+        use super::near_ai_left_behind;
+        use serde_json::json;
+        use trace_commons_contributor::private_inference_copy as pi;
+        assert_eq!(
+            near_ai_left_behind(
+                &json!({"unenrolled": true, "near_ai_cleared": true, "near_ai_revoked": true})
+            ),
+            None
+        );
+        assert_eq!(
+            near_ai_left_behind(
+                &json!({"unenrolled": true, "near_ai_cleared": true, "near_ai_revoked": null})
+            ),
+            None
+        );
+        assert_eq!(near_ai_left_behind(&json!({"unenrolled": true})), None);
+        assert_eq!(
+            near_ai_left_behind(&json!({"near_ai_cleared": true, "near_ai_revoked": false})),
+            Some(pi::CREDENTIAL_FORGET_NOT_REVOKED)
+        );
+        assert_eq!(
+            near_ai_left_behind(&json!({"near_ai_cleared": false, "near_ai_revoked": false})),
+            Some(pi::NEAR_AI_STILL_SIGNED_IN)
+        );
     }
 
     /// The block a status draws changes with its reason, so a refusal shown

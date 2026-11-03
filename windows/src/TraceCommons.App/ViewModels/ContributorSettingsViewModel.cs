@@ -1078,6 +1078,14 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 return false;
             }
 
+            // The NEAR AI sign-in goes with the enrollment (#1843): said only
+            // when it did not, as macOS and GTK do.
+            string nearAi = NearAiCredentialSurface.UnenrollNotice(response, _privateInferenceCopy);
+            if (nearAi.Length > 0)
+            {
+                Notice = nearAi;
+            }
+
             DaemonResponse status = await _host
                 .CallAsync(DaemonProtocol.Methods.Status)
                 .ConfigureAwait(true);
