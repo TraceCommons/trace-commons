@@ -1400,3 +1400,14 @@ So `unknown` on a deployed binary points at the build step, not at the host.
   `dstack` and `enclave_near_ai` (attested NEAR AI TEE scoring); the test
   gates are withheld as `non_production_gate`. Run the settlement as a dry
   run first.
+- On a pipeline-routed deployment the delta alone pays nothing: the
+  compatibility bundle's award is a `NoveltyUtility` ledger row that no
+  batch carries. Paying needs the graded credit rule,
+  `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_RULE=graded_perplexity_v1` (`flat`,
+  the default, keeps today's behaviour). Under it the award is the delta
+  times the trace's perplexity and anomaly terms, and the pipeline batches
+  it so the NEAR AI payout rail pays it. The rule is pinned in the signed
+  package like the delta, so changing it is a new package; see
+  [`pipeline-activation.md`](pipeline-activation.md), "Compatibility credit",
+  and the rollout in
+  `docs/superpowers/specs/2026-11-03-pilot-paying-bundle-design.md`.

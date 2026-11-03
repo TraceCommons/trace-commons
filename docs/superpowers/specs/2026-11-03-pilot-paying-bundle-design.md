@@ -2,7 +2,14 @@
 
 Status: approved 2026-11-03. The owner accepted all ten recommendations in
 section 9 and asked for deployment in the three stages of section 7.2.
-Stage 1 (the code, with the rule off) is being implemented.
+Stage 1 (the code, with the rule off) is implemented in PR #1895:
+`CompatibilityCreditRule` and `graded_perplexity_award` in
+`versioned_pipeline_compat.rs`, the batched leg
+(`PipelineTraceCreditEvent::SettledNoveltyUtility`), the startup tolerance
+(`PipelineService::check_tenant_package`) and the default-routing move
+(`requalify_batch`, `migrate_tenant`). The operator-facing rules are in
+`docs/operator/pipeline-activation.md`, "The graded credit rule" and
+"Raising the award".
 Date: 2026-11-03. Code read at `main` 96ba35043. The pilot runs 0eea14e2c.
 
 ## 1. Summary
