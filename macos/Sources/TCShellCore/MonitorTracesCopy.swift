@@ -731,10 +731,12 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let sectionTraces: String
     public let sectionAccount: String
     public let privateAISignIn: String
-    /// Home's Traces hero: its title, line and way into Traces (owner,
-    /// 2026-10-28).
+    /// Beside the Account heading while its figures wait on a sign-in
+    /// (owner, 2026-11-02).
+    public let accountNoData: String
+    /// Home's Traces hero: its title and way into Traces (owner,
+    /// 2026-10-28; no line under the title since 2026-11-02).
     public let tracesHeroTitle: String
-    public let tracesHeroBody: String
     public let tracesHeroAction: String
     /// The hero's three steps, each a title over one line (owner,
     /// 2026-10-29).
@@ -744,7 +746,9 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let tracesHeroStepEarnDetail: String
     public let tracesHeroStepUse: String
     public let tracesHeroStepUseDetail: String
-    public let creditDelta: String
+    /// Home's Credit earned tile: the account's whole total, `{amount}`
+    /// (product owner, 2026-10-29).
+    public let creditAccountTotal: String
     public let insightsToday: String
     public let insightsTeaser: String
     public let campaignEyebrow: String
@@ -797,8 +801,8 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case sectionTraces = "section_traces"
         case sectionAccount = "section_account"
         case privateAISignIn = "private_ai_sign_in"
+        case accountNoData = "account_no_data"
         case tracesHeroTitle = "traces_hero_title"
-        case tracesHeroBody = "traces_hero_body"
         case tracesHeroAction = "traces_hero_action"
         case tracesHeroStepContribute = "traces_hero_step_contribute"
         case tracesHeroStepContributeDetail = "traces_hero_step_contribute_detail"
@@ -806,7 +810,7 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case tracesHeroStepEarnDetail = "traces_hero_step_earn_detail"
         case tracesHeroStepUse = "traces_hero_step_use"
         case tracesHeroStepUseDetail = "traces_hero_step_use_detail"
-        case creditDelta = "credit_delta"
+        case creditAccountTotal = "credit_account_total"
         case insightsToday = "insights_today"
         case insightsTeaser = "insights_teaser"
         case campaignEyebrow = "campaign_eyebrow"

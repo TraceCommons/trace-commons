@@ -3063,6 +3063,7 @@ final class AppModel: ObservableObject {
         }
         objectWillChange.send()
         UserDefaults.standard.set(true, forKey: Self.onboardingCompleteKey(tenantID))
+        finishedFirstRunThisLaunch = true
     }
 
     #if DEBUG
@@ -3844,6 +3845,15 @@ final class AppModel: ObservableObject {
     /// Moves each time a sign-in lands, so a section that read "Sign in
     /// again" (the payout section, Home's Credit tile) reads again.
     @Published private(set) var accountSessionGeneration = 0
+
+    /// First run was finished in this launch (`markOnboardingComplete`):
+    /// Home's Traces walkthrough stands in for the Traces cards for the rest
+    /// of it (owner, 2026-11-02: "on first launch"). Never read back from an
+    /// earlier launch's marker, so an install that set up long ago is not
+    /// shown it again. Not `@Published`: it changes only under the one
+    /// `objectWillChange` that `markOnboardingComplete` already sends, and a
+    /// second notification for the same press is one too many.
+    private(set) var finishedFirstRunThisLaunch = false
 
     /// Sign in again by whichever path this account has: the NEAR AI one
     /// for a NEAR AI account, `account_sign_in` otherwise. The path comes

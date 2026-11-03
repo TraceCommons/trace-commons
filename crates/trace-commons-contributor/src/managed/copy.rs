@@ -12,6 +12,11 @@
 //!   `guide_step_use` -- the Private AI tab's step-by-step card, first on
 //!   the tab and closed with its X. Approved by the product owner
 //!   2026-10-28, with `sign_in_title` and `title` "My Private AI sessions".
+//!   On 2026-11-02 the card took the Insights getting-started layout, each
+//!   step a title over one line: `guide_step_earn_title`,
+//!   `guide_step_start_title` and `guide_step_use_title` are new, and
+//!   `guide_step_use` lost its "Work as usual." to its title. Those four
+//!   are DRAFT, NEEDS APPROVAL.
 //! - `sign_in_title` "Start a Private AI session" -- the launch card's
 //!   title on the Private AI tab (approved 2026-10-28).
 //! - `sign_in_scope` "Uses your NEAR AI sign-in." Shortened and approved by
@@ -99,7 +104,8 @@
 //! - `install` "Install"; its accessible name appends the tool's name.
 //! - `tool_unavailable` "{tool} wasn't found on this computer." Shells fill
 //!   `{tool}` with the tool's display name (`claude`, `codex`, `opencode`).
-//! - `refresh` "Refresh": a bare glyph's tooltip and accessible name.
+//! - `refresh` "Refresh": the refresh pill's word, tooltip and accessible
+//!   name (a pill with its word since 2026-11-02; it was a bare glyph).
 //!
 //! A folder is optional in the launch dialog (owner, 2026-10-29): a session
 //! with none runs in the person's home folder, which the daemon resolves.
@@ -320,9 +326,12 @@ pub fn copy() -> serde_json::Value {
             "open_tool": "Open {tool}",
             "guide_title": "How Private AI works",
             "guide_body": "Pay for the AI you already use with credit from your traces.",
+            "guide_step_earn_title": "Earn credit",
             "guide_step_earn": "Share traces to earn NEAR AI credit.",
+            "guide_step_start_title": "Pick a tool",
             "guide_step_start": "Start Claude Code, Codex or OpenCode below.",
-            "guide_step_use": "Work as usual. Calls go through Private AI and use your credit.",
+            "guide_step_use_title": "Work as usual",
+            "guide_step_use": "Calls go through Private AI and use your credit.",
             "sign_in_title": "Start a Private AI session",
             "sign_in_scope": "Uses your NEAR AI sign-in.",
             "sign_in_needed": "Sign in to NEAR AI to start a session.",
@@ -373,6 +382,32 @@ mod tests {
         assert_eq!(copy["pick_folder"], "Pick a folder as context");
         assert_eq!(copy["home_folder"], "Home folder");
         assert_eq!(copy["clear_folder"], "Use home");
+    }
+
+    /// The Private AI tab's guide: each step a title over one line, in the
+    /// Insights getting-started layout (product owner, 2026-11-02).
+    #[test]
+    fn the_guide_steps_each_have_a_title_and_a_line() {
+        let copy = copy();
+        assert_eq!(copy["guide_title"], "How Private AI works");
+        for (title, line) in [
+            ("guide_step_earn_title", "guide_step_earn"),
+            ("guide_step_start_title", "guide_step_start"),
+            ("guide_step_use_title", "guide_step_use"),
+        ] {
+            let title_words = copy[title].as_str().unwrap();
+            let line_words = copy[line].as_str().unwrap();
+            assert!(!title_words.is_empty(), "{title}");
+            assert!(!title_words.ends_with('.'), "{title} is a title");
+            assert!(!line_words.contains(". "), "{line} is one sentence");
+        }
+        assert_eq!(copy["guide_step_use_title"], "Work as usual");
+        assert!(
+            !copy["guide_step_use"]
+                .as_str()
+                .unwrap()
+                .contains("Work as usual")
+        );
     }
 
     /// The NEAR AI sign-in launch reads these words, exactly as proposed.

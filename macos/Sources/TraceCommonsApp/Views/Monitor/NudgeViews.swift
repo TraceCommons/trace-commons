@@ -20,10 +20,12 @@ struct NudgeGlassCard: View {
     let refusal: String?
     let act: (NudgeSurface.Intent) -> Void
 
-    /// The button style for one action.
+    /// The button style for one action: the notice's call to action in
+    /// the primary style, as every notice's is (owner, 2026-11-02), and Not
+    /// now a link.
     static func style(_ intent: NudgeSurface.Intent) -> GlassButtonKind {
         if case .notNow = intent { return .link }
-        return .glass
+        return .primary
     }
 
     var body: some View {
@@ -57,13 +59,16 @@ struct NudgeGlassCard: View {
 }
 
 /// Above the Traces tree: its heading, the idle filter while it is on, with
-/// its way out, then search, History and the order control. Each is drawn
-/// only with the core's words for it. Suggested first is selected until
-/// another order is chosen.
+/// its way out, then search, the Automatic eye, History and the order
+/// control. Each is drawn only with the core's words for it. Suggested
+/// first is selected until another order is chosen.
 struct TracesListControls: View {
     @Bindable var store: TracesStore
     /// Opens History on the Traces tab; nil draws no History button.
     var openHistory: (() -> Void)?
+    /// Automatic for every folder, as an eye left of History (owner,
+    /// 2026-11-02); nil draws none.
+    var automatic: SharingChoiceCard.ToolbarToggle?
 
     /// Whether the search field is open. It opens inline from its icon
     /// (owner, 2026-10-12) and closes, cleared, from its clear button or
@@ -94,6 +99,7 @@ struct TracesListControls: View {
             Spacer(minLength: 0)
             if let tree = store.words?.tree {
                 search(tree)
+                if let automatic { SharingChoiceCard(toolbar: automatic) }
                 if let openHistory {
                     GlassRoundButton(tree.openHistory, systemImage: Self.historyIcon, action: openHistory)
                 }

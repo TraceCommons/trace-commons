@@ -587,7 +587,7 @@ final class InferenceParityTests: XCTestCase {
                        "the inspector summary draws the core's subtitle once")
         // One word and the menu bar's dot, the full sentence as help and
         // hint (2026-10-28).
-        XCTAssertTrue(views.contains("GlassStatusLabel(status.word, status: status.dot)"))
+        XCTAssertTrue(views.contains("GlassChip(status.word, status: status.dot)"))
         XCTAssertTrue(views.contains(".help(status.sentence)"))
         XCTAssertTrue(views.contains(".accessibilityHint(status.sentence)"))
         XCTAssertEqual(views.components(separatedBy: "GlassTabHeading(").count - 1, 1,
@@ -759,7 +759,9 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertEqual(PrivateAIInspectorView.subtitle(copy, state: nil), copy.subtitle)
     }
 
-    /// The step-by-step card explains and is not a button: no action.
+    /// The step-by-step card explains and is not a button: no action, and
+    /// no step link. It is the shared getting-started card (owner,
+    /// 2026-11-02), each step a title over its line.
     func testTheGuideCardIsNotAButton() throws {
         let views = try String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -768,12 +770,13 @@ final class InferenceParityTests: XCTestCase {
         let next = try XCTUnwrap(views.range(of: "struct PrivateAIInspectorView: View {"))
         let card = String(views[guide.lowerBound..<next.lowerBound])
         XCTAssertFalse(card.contains("action:"), "the guide card has no action")
-        XCTAssertTrue(card.contains("closeLabel: MonitorWords.close"))
-        let hero = try String(contentsOf: URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/TCDesign/Components/HeroCard.swift"), encoding: .utf8)
-        XCTAssertTrue(hero.contains("if let action {"))
-        XCTAssertTrue(hero.contains("card.accessibilityElement(children: .combine)"))
+        XCTAssertFalse(card.contains("link:"), "no step links anywhere")
+        XCTAssertTrue(card.contains("GetStartedCard("))
+        XCTAssertFalse(card.contains("GlassHeroCard("))
+        XCTAssertTrue(card.contains("close: GetStartedCard.Close(label: MonitorWords.close) { closed = true },"))
+        XCTAssertEqual(PrivateAIGuideCard.steps.map { $0.title },
+                       ["guide_step_earn_title", "guide_step_start_title", "guide_step_use_title"])
+        XCTAssertEqual(PrivateAIGuideCard.steps.map { $0.line }, ["guide_step_earn", "guide_step_start", "guide_step_use"])
     }
 
 }

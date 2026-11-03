@@ -103,8 +103,6 @@ public struct InsightsRequest: Encodable, Sendable {
         /// `reenable`.
         public var kind: String?
         public var action: String?
-        /// `lever_card`: the Settings switch for the lever's card.
-        public var enabled: Bool?
         public init(_ type: String, source: String? = nil, file: String? = nil,
                     save: Bool? = nil, id: String? = nil, category: String? = nil, outcome: String? = nil,
                     repository: String? = nil, commit: String? = nil, evidenceID: String? = nil,
@@ -117,8 +115,7 @@ public struct InsightsRequest: Encodable, Sendable {
                     weekStart: String? = nil, tz: Int32? = nil, card: String? = nil,
                     weeks: Int? = nil, pattern: String? = nil,
                     counterWeeks: [InsightsWeekFigures]? = nil, recapCardEnabled: Bool? = nil,
-                    kind: String? = nil, action: String? = nil,
-                    enabled: Bool? = nil) {
+                    kind: String? = nil, action: String? = nil) {
             self.type = type; self.source = source; self.file = file; self.save = save
             self.id = id; self.category = category; self.outcome = outcome
             self.repository = repository; self.commit = commit; self.evidence_id = evidenceID
@@ -132,7 +129,6 @@ public struct InsightsRequest: Encodable, Sendable {
             self.weeks = weeks; self.pattern = pattern
             self.counter_weeks = counterWeeks; self.recap_card_enabled = recapCardEnabled
             self.kind = kind; self.action = action
-            self.enabled = enabled
         }
     }
 }

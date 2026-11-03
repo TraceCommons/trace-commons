@@ -50,11 +50,10 @@ pub struct LeverState {
     /// Kinds off after repeated "Not useful", until turned back on.
     pub disabled: Vec<PatternKind>,
     pub unavailable: Option<Unavailable>,
-    /// The Settings switch for the lever's card (`analytics_setting_lever`):
-    /// false while it is switched off, or while any kind is off after
-    /// repeated "Not useful", whatever the weekly history. Turning it on is
-    /// the `lever_card` operation. Switched off, no card is drawn and
-    /// `disabled` is empty.
+    /// False while the lever's card was switched off in Settings before
+    /// that switch was removed (`GoalState::lever_card_off`), or while any
+    /// kind is off after repeated "Not useful", whatever the weekly
+    /// history. Switched off, no card is drawn and `disabled` is empty.
     pub card_enabled: bool,
 }
 

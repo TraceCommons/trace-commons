@@ -15,6 +15,13 @@ enum NearAiSignInOffer {
             || renewalFailure == "near_ai_sign_in_required"
     }
 
+    /// Whether the balance card's head carries Sign in in place of its
+    /// re-read icon (owner, 2026-11-02): while it is offered, and while a
+    /// sign-in it started is still running.
+    static func balanceHeadSignIn(state: String, renewalFailure: String?, failed: Bool, signingIn: Bool) -> Bool {
+        signingIn || balanceOffers(state: state, renewalFailure: renewalFailure, failed: failed)
+    }
+
     /// The billing card: the funding read answered that there is no usable
     /// sign-in, or a previous attempt needs a retry.
     static func billingOffers(state: String?, failed: Bool = false) -> Bool {
@@ -57,34 +64,50 @@ struct NearAiSignInButton: View {
     }
 }
 
-/// The balance card's sign-in: a primary button that runs the one flow
-/// Settings' "Sign in again" runs (`AppModel.signInToNearAI`), with the
-/// core's waiting and failure lines. Draws nothing while the NEAR AI login
-/// is usable.
+/// The balance card's Sign in (owner, 2026-11-02): a small primary button
+/// in the card head's trailing slot, where the re-read icon sits
+/// otherwise, that runs the one flow Settings' "Sign in again" runs
+/// (`AppModel.signInToNearAI`); the browser lists the logins (#1835). It
+/// reads "Sign in", Home's word for the same sign-in. The card draws it
+/// only while `NearAiSignInOffer.balanceHeadSignIn` holds.
+struct NearAiSignInHeadButton: View {
+    @EnvironmentObject private var model: AppModel
+    let copy: PrivateInferenceCopy
+
+    var body: some View {
+        NearAiSignInButton(
+            title: model.managedText("sign_in_near_ai"),
+            accessibilityName: model.managedText("sign_in_near_ai_accessibility"),
+            style: GlassButtonStyle(.primary, small: true)
+        ) {
+            Task { await model.signInToNearAI() }
+        }
+        .disabled(model.credentialBusy || (model.nearAiSigningIn && !model.canRestartNearAiBrowserSignIn))
+        .fixedSize()
+        .task { if model.accountSession == .unread { model.refreshAccountSession() } }
+    }
+}
+
+/// Under the balance, while its Sign in is offered: the core's waiting
+/// line while the browser sign-in runs, its failure line after one that
+/// did not finish. The button itself is in the card's head
+/// (`NearAiSignInHeadButton`). Draws nothing while the NEAR AI login is
+/// usable.
 struct NearAiSignInControl: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
 
     var body: some View {
-        let offered = NearAiSignInOffer.balanceOffers(
+        if NearAiSignInOffer.balanceHeadSignIn(
             state: model.balanceStatus.state, renewalFailure: model.accountRenewalFailure,
-            failed: model.nearAiSignInFailed)
-        if offered || model.nearAiSigningIn {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                NearAiSignInButton(title: NearAiSignInOffer.label(copy), style: GlassButtonStyle(.primary)) {
-                    Task { await model.signInToNearAI() }
-                }
-                .disabled(model.credentialBusy || (model.nearAiSigningIn && !model.canRestartNearAiBrowserSignIn))
-                if let line = NearAiSignInOffer.progressLine(
-                    copy, signingIn: model.nearAiSigningIn, failed: model.nearAiSignInFailed)
-                {
-                    Text(line)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .task { if model.accountSession == .unread { model.refreshAccountSession() } }
+            failed: model.nearAiSignInFailed, signingIn: model.nearAiSigningIn),
+            let line = NearAiSignInOffer.progressLine(
+                copy, signingIn: model.nearAiSigningIn, failed: model.nearAiSignInFailed)
+        {
+            Text(line)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

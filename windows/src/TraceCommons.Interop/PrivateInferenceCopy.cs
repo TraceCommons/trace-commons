@@ -61,6 +61,20 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("offer_exposure_short")]
     public string OfferExposureShort { get; init; } = string.Empty;
 
+    /// <summary>
+    /// The macOS offer notice's own lines: its opening line, the shared-machine
+    /// fact <see cref="OfferExposureShort"/> leaves out, and the local log.
+    /// This shell's offer card keeps the full sentences.
+    /// </summary>
+    [JsonPropertyName("offer_what_short")]
+    public string OfferWhatShort { get; init; } = string.Empty;
+
+    [JsonPropertyName("offer_exposure_shared")]
+    public string OfferExposureShared { get; init; } = string.Empty;
+
+    [JsonPropertyName("offer_logged")]
+    public string OfferLogged { get; init; } = string.Empty;
+
     /// <summary>The offer's link to its longer paragraphs.</summary>
     [JsonPropertyName("offer_learn_more")]
     public string OfferLearnMore { get; init; } = string.Empty;
@@ -784,6 +798,9 @@ public sealed record PrivateInferenceCopy
             OfferWhat,
             OfferExposure,
             OfferExposureShort,
+            OfferWhatShort,
+            OfferExposureShared,
+            OfferLogged,
             OfferLearnMore,
             OfferNoRepoint,
             OfferAccept,

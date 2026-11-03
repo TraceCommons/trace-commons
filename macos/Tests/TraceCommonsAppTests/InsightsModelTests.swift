@@ -249,7 +249,7 @@ final class InsightsOverviewTests: XCTestCase {
     }
 
     @MainActor
-    func testOverviewModelAsksForTheWeekInTheLocalOffsetAndDrillsDown() async throws {
+    func testOverviewModelAsksForTheWeekInTheLocalOffsetWithItsSessions() async throws {
         let recorder = OverviewRecorder()
         let model = InsightsOverviewModel(service: { try await recorder.call($0) })
         model.open()
@@ -264,29 +264,16 @@ final class InsightsOverviewTests: XCTestCase {
         XCTAssertEqual(requests[1].operation.card, "sessions")
         XCTAssertEqual(requests[1].operation.week_start, "2026-09-07")
         XCTAssertEqual(model.sessionsInputs?.card, "sessions")
-        XCTAssertNil(model.openCard, "the breakdown is not a figure's drill-down")
-
-        model.showInputs("cache_share")
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
-        requests = await recorder.requests
-        XCTAssertEqual(requests.last?.operation.type, "card_inputs")
-        XCTAssertEqual(requests.last?.operation.card, "cache_share")
-        XCTAssertEqual(requests.last?.operation.week_start, "2026-09-07")
-        XCTAssertEqual(model.inputs?.card, "cache_share")
-        XCTAssertEqual(model.inputs?.sessions.first?.tokens, nil)
+        // No other card's drill-down is ever asked for (product owner,
+        // 2026-10-29, #1753: the tokens and cache share figures are plain).
+        XCTAssertFalse(requests.contains { $0.operation.card == "tokens" || $0.operation.card == "cache_share" })
 
         model.selectWeek("2026-08-31")
         for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
         requests = await recorder.requests
         XCTAssertEqual(requests.last?.operation.week_start, "2026-08-31")
-        XCTAssertNil(model.inputs, "a new week closes the old drill-down")
 
         await recorder.fail()
-        model.showInputs("tokens")
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertNil(model.inputs)
-        XCTAssertNotNil(model.overview, "a failed drill-down closes only itself")
-        XCTAssertFalse(model.failed)
         model.reload()
         for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertNil(model.overview, "a failed read never keeps the old figures")

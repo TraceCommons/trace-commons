@@ -1333,28 +1333,37 @@ pub struct MonitorHomeHistoryCopy {
     pub section_traces: &'static str,
     pub section_account: &'static str,
     pub private_ai_sign_in: &'static str,
+    /// Beside the Account heading while its figures wait on a sign-in,
+    /// before the managed copy's "Sign in" as a link; the Account cards
+    /// themselves say nothing about signing in (owner, 2026-11-02, in the
+    /// owner's words: "No data - Sign in").
+    pub account_no_data: &'static str,
     /// Home's Traces hero, which leads Home (owner, 2026-10-28: the macOS
-    /// MVP is "contribute traces, earn credit", so it is the first and
-    /// largest card, over Private AI): its title, one line on what
-    /// contributing is and what it earns, and the way into Traces.
-    /// Approved by the product owner 2026-10-28; the title gained ", use
-    /// Private AI" on 2026-10-29 (product owner).
+    /// MVP is "contribute traces, earn credit", so it is the first card,
+    /// over Private AI): its title and the way into Traces. No line under
+    /// the title: the steps say it (product owner, 2026-11-02: reduce the
+    /// copy). The title is DRAFT, NEEDS APPROVAL; "Start earning" was
+    /// approved 2026-10-28.
     pub traces_hero_title: &'static str,
-    pub traces_hero_body: &'static str,
     pub traces_hero_action: &'static str,
     /// The hero's three steps, left to right, each a title over one line
     /// (owner, 2026-10-29, from the owner's mock-up): contribute, earn,
-    /// spend on Private AI.
+    /// spend on Private AI. Each title and its line read as one short
+    /// sentence ("Earn credit / for each trace"). The first two lines are
+    /// the owner's words (2026-11-02: "Traces from tools", "For each
+    /// trace"); the titles and "With your credit" are DRAFT, NEEDS
+    /// APPROVAL (2026-11-02 rewrite).
     pub traces_hero_step_contribute: &'static str,
     pub traces_hero_step_contribute_detail: &'static str,
     pub traces_hero_step_earn: &'static str,
     pub traces_hero_step_earn_detail: &'static str,
     pub traces_hero_step_use: &'static str,
     pub traces_hero_step_use_detail: &'static str,
-    /// Home's Credit tile: the change in total credit since the last day
-    /// this Mac saw, `{amount}` signed. No change says nothing (owner,
-    /// 2026-10-16). DRAFT, NEEDS APPROVAL.
-    pub credit_delta: &'static str,
+    /// Home's Credit earned tile: the account's whole total under this
+    /// Mac's figure, `{amount}` the commons' lifetime points (product
+    /// owner, 2026-10-29: show the account-wide total, and leave the change
+    /// since yesterday out). DRAFT, NEEDS APPROVAL.
+    pub credit_account_total: &'static str,
     /// Home's Insights promotion: today's routed tokens, and its line while
     /// no figures are read. DRAFT, NEEDS APPROVAL.
     pub insights_today: &'static str,
@@ -1679,17 +1688,17 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             section_private_ai: "Private AI",
             section_traces: "Traces",
             section_account: "Account",
+            account_no_data: "No data",
             private_ai_sign_in: "Sign in to NEAR AI to get started.",
-            traces_hero_title: "Contribute traces, earn credit, use Private AI",
-            traces_hero_body: "Share the sessions from your AI coding tools. Each accepted trace earns you credit.",
+            traces_hero_title: "Your traces earn Private AI credit",
             traces_hero_action: "Start earning",
-            traces_hero_step_contribute: "Contribute traces",
-            traces_hero_step_contribute_detail: "Share the sessions from your AI coding tools",
+            traces_hero_step_contribute: "Contribute",
+            traces_hero_step_contribute_detail: "Traces from tools",
             traces_hero_step_earn: "Earn credit",
-            traces_hero_step_earn_detail: "Each accepted trace earns you credit",
+            traces_hero_step_earn_detail: "For each trace",
             traces_hero_step_use: "Use Private AI",
-            traces_hero_step_use_detail: "Spend your credit on Private AI",
-            credit_delta: "{amount} since yesterday",
+            traces_hero_step_use_detail: "With your credit",
+            credit_account_total: "{amount} across your account",
             insights_today: "{total} tokens today",
             insights_teaser: "See where your agents spend their tokens.",
             campaign_eyebrow: "New on NEAR AI",
