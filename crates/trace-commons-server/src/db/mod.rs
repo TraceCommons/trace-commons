@@ -3489,6 +3489,7 @@ impl PayoutAccountStanding {
     }
 }
 
+pub use postgres_legacy_payout_carry::legacy_link_hash as payout_legacy_link_hash;
 pub use postgres_payout::{
     PayoutPassLock, account_id_hash as payout_account_id_hash, link_id_hash as payout_link_id_hash,
 };
