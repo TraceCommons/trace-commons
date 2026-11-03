@@ -128,7 +128,7 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
     ("autostart.rs", 2),
     ("backend.rs", 1),
     ("bin/probe.rs", 4),
-    ("copy.rs", 209),
+    ("copy.rs", 207),
     ("main.rs", 2),
     ("model.rs", 4),
     ("notify.rs", 3),
@@ -139,7 +139,7 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
     ("ui/queue.rs", 8),
     // Lowered from 22 (button rule, 2026-10-08): "For 1 hour" became
     // "1 hour", which is a length, not a sentence.
-    ("ui/settings.rs", 21),
+    ("ui/settings.rs", 20),
     ("update.rs", 2),
     ("worker.rs", 1),
 ];

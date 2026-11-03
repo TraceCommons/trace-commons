@@ -116,10 +116,19 @@ public class NoCommonsNameTests
         text.Contains("trace commons", StringComparison.OrdinalIgnoreCase);
 
     private static IEnumerable<string> SourceFiles() =>
-        Directory.Exists(ShellSourceRoot)
+        (Directory.Exists(ShellSourceRoot)
             ? Directory.EnumerateFiles(ShellSourceRoot, "*.txt", SearchOption.AllDirectories)
-            : Array.Empty<string>();
+            : Array.Empty<string>())
+        .Append(ManifestCopy);
 
     private static string ShellSourceRoot =>
         Path.Combine(AppContext.BaseDirectory, "shell-source");
+
+    /// <summary>
+    /// The MSIX manifest, copied beside <c>shell-source/</c> rather than into
+    /// it so the wording ratchet does not count it. Reading a missing file
+    /// throws, so a copy that stopped happening fails here.
+    /// </summary>
+    private static string ManifestCopy =>
+        Path.Combine(AppContext.BaseDirectory, "manifest-source", "Package.appxmanifest.txt");
 }

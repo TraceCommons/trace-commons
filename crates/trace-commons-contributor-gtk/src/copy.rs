@@ -431,10 +431,8 @@ pub const BODY_NOT_AVAILABLE_HERE: &str = concat!(
 
 pub const PERMISSIONS_INTRO: &str =
     "If you contribute this trace, it will carry these permissions:";
-pub const PERMISSIONS_REQUESTED_NOTE: &str = concat!(
-    "These are the permissions this device requests. The server can narrow them, never \
-     widen them."
-);
+pub const PERMISSIONS_REQUESTED_NOTE: &str =
+    "These are the permissions this device requests. The server can narrow them, never widen them.";
 pub const UNENROLLED_PREVIEW: &str = "This is an illustration. This device isn't connected yet, so this was built without your \
      identity and nothing here can be contributed.";
 
@@ -1419,10 +1417,9 @@ pub const UPDATE_UNAVAILABLE_BODY: &str = "Updates cannot be offered here: this 
 // change it there first.
 
 pub const ONBOARD_WELCOME_TITLE: &str = APP_NAME;
-pub const ONBOARD_WELCOME_BODY_1: &str = concat!(
-    "Coding agents get better when there are real transcripts to learn from. Almost all of \
-     that data is locked inside companies. Your traces go to a shared pool that isn't."
-);
+pub const ONBOARD_WELCOME_BODY_1: &str = "Coding agents get better when there are real transcripts \
+     to learn from. Almost all of that data is locked inside companies. Your traces go to a shared \
+     pool that isn't.";
 /// The bold half of screen 1. Split from the paragraph around it because it
 /// is the promise the whole product is judged against.
 pub const ONBOARD_WELCOME_DECIDES: &str =
