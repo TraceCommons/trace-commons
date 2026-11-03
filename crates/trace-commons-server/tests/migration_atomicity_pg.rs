@@ -3647,3 +3647,191 @@ async fn an_owner_run_deployment_completes_a_live_payout_pass() {
     dropped.expect("drop the owner-probe database");
     probe.release().await;
 }
+
+/// V150, applied by a non-superuser owner, as staging applies it:
+///
+/// - an account holding two live anchors (a V82 merge left both) stops the
+///   migration, which changes nothing, and it applies once one is gone;
+/// - one live anchor per account holds afterwards;
+/// - the replaced merge keeps it: an absorbed live anchor arrives retired on
+///   a survivor that already holds a live one, and every survivor device
+///   points at that live anchor.
+#[tokio::test]
+async fn v150_keeps_one_live_anchor_per_account_as_a_non_superuser_owner() {
+    let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+    else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return;
+    };
+    let _turn = VIRGIN_DATABASE.lock().await;
+
+    const OWNER: &str = "tc_v150_owner_probe";
+    const DB: &str = "trace_v150_owner_probe_db";
+    let probe = ProbeRole::claim(&url, OWNER, &[DB]).await;
+    let admin = owned_database(&url, OWNER, DB, Standing::Creator).await;
+    let mut owner = connect(&with_user(&with_database(&url, DB), OWNER, "probe")).await;
+    owner
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS _trace_commons_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );",
+        )
+        .await
+        .expect("create the recording table");
+    for (version, name, sql) in registered_migrations()
+        .iter()
+        .filter(|(version, ..)| *version < 150)
+    {
+        apply_and_record_migration(&mut owner, *version, name, sql)
+            .await
+            .unwrap_or_else(|error| panic!("V{version} before V150: {error:?}"));
+    }
+
+    // Seeded as the superuser, which row security does not apply to.
+    let seed = connect(&with_database(&url, DB)).await;
+    let tenant = format!("nearai-{}", "5".repeat(64));
+    let (survivor, absorbed) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let anchor_of = |n: char| format!("sha256:{}", n.to_string().repeat(64));
+    let (live, other, absorbed_anchor) = (anchor_of('1'), anchor_of('2'), anchor_of('3'));
+    seed.batch_execute(&format!(
+        "INSERT INTO trace_tenants (tenant_id) VALUES ('{tenant}');
+         INSERT INTO trace_accounts (tenant_id, account_id)
+             VALUES ('{tenant}', '{survivor}'), ('{tenant}', '{absorbed}');"
+    ))
+    .await
+    .expect("seed accounts");
+    let anchor = |account: uuid::Uuid, hash: &str| {
+        format!(
+            "INSERT INTO trace_near_account_anchors
+                 (tenant_id, account_id, anchor_hash, sealed_account_name, index_pepper_ref,
+                  account_name_key_ref, identity_source, auth_provider)
+             VALUES ('{tenant}', '{account}', '{hash}', '{{}}', 'p', 'k', 'near_ai_login', 'github');"
+        )
+    };
+    seed.batch_execute(&format!(
+        "{}{}",
+        anchor(survivor, &live),
+        anchor(survivor, &other)
+    ))
+    .await
+    .expect("seed two anchors on one account");
+
+    let (version, name, sql) = registered_migrations()
+        .iter()
+        .find(|(version, ..)| *version == 150)
+        .expect("V150 is wired into the runner");
+    let mut problems = Vec::new();
+    match apply_and_record_migration(&mut owner, *version, name, sql).await {
+        Ok(()) => problems.push("V150 applied over an account with two live anchors".to_string()),
+        Err(error) => {
+            let text = format!("{error:?}");
+            if !text.contains("more than one live anchor") {
+                problems.push(format!("V150 refused for another reason: {text}"));
+            }
+        }
+    }
+    let column: i64 = seed
+        .query_one(
+            "SELECT count(*) FROM information_schema.columns
+              WHERE table_name = 'trace_near_account_anchors' AND column_name = 'retired_at'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    if column != 0 {
+        problems.push("a refused V150 left its column behind".into());
+    }
+
+    // Resolve it as an operator would, then apply.
+    seed.execute(
+        "DELETE FROM trace_near_account_anchors WHERE anchor_hash = $1",
+        &[&other],
+    )
+    .await
+    .unwrap();
+    apply_and_record_migration(&mut owner, *version, name, sql)
+        .await
+        .expect("V150 applies once each account holds one anchor");
+
+    // One live anchor per account, enforced.
+    if seed.batch_execute(&anchor(survivor, &other)).await.is_ok() {
+        problems.push("a second live anchor was accepted".into());
+    }
+
+    // The merge, as its guard: the absorbed account's live anchor and its
+    // device move to the survivor, the anchor retired, the device re-keyed.
+    seed.batch_execute(&format!(
+        "{}
+         INSERT INTO device_keys (device_key_id, tenant_id, public_key, onboarding_origin)
+             VALUES ('sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', '{tenant}', 'pk-v150', 'near_ai');
+         INSERT INTO trace_near_provisioned_devices
+             (tenant_id, principal_ref, account_id, device_key_id, anchor_hash)
+             VALUES ('{tenant}', 'principal-v150', '{absorbed}', 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                     '{absorbed_anchor}');",
+        anchor(absorbed, &absorbed_anchor)
+    ))
+    .await
+    .expect("seed the absorbed account");
+    let merged = owner
+        .batch_execute(&format!(
+            "BEGIN;
+             SELECT set_config('trace_commons.trace_tenant_id', '{tenant}', true);
+             INSERT INTO trace_account_merge_proposals
+                 (tenant_id, proposal_id, surviving_account_id, absorbed_account_id,
+                  expires_at, consumed_at)
+                 VALUES ('{tenant}', '{p}', '{survivor}', '{absorbed}',
+                         now() + interval '1 hour', now());
+             SELECT trace_near_account_merge('{tenant}', '{survivor}', '{absorbed}', '{p}');
+             COMMIT;",
+            p = uuid::Uuid::new_v4()
+        ))
+        .await;
+    if let Err(error) = merged {
+        problems.push(format!("the merge failed under V150: {error:?}"));
+    } else {
+        let rows: Vec<(String, bool)> = seed
+            .query(
+                "SELECT anchor_hash, retired_at IS NULL FROM trace_near_account_anchors
+                  WHERE tenant_id = $1 AND account_id = $2 ORDER BY anchor_hash",
+                &[&tenant, &survivor],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        if rows != vec![(live.clone(), true), (absorbed_anchor.clone(), false)] {
+            problems.push(format!("after the merge the survivor holds {rows:?}"));
+        }
+        let device: String = seed
+            .query_one(
+                "SELECT anchor_hash FROM trace_near_provisioned_devices
+                  WHERE device_key_id = 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if device != live {
+            problems.push("the absorbed device still points at a retired anchor".into());
+        }
+    }
+
+    drop(seed);
+    drop(owner);
+    admin
+        .execute(&format!("DROP DATABASE IF EXISTS {DB} WITH (FORCE)"), &[])
+        .await
+        .expect("drop the probe database");
+    assert!(problems.is_empty(), "V150:\n  {}", problems.join("\n  "));
+    probe.release().await;
+    assert!(
+        !role_exists(&url, OWNER).await,
+        "{OWNER} is per server and must not outlive the test (#1335)"
+    );
+}

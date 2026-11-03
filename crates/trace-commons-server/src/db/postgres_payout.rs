@@ -1430,7 +1430,7 @@ impl PayoutStore for PgBackend {
             .query(
                 "SELECT anchor_hash FROM trace_near_account_anchors
                   WHERE tenant_id = $1 AND account_id = $2
-                    AND identity_source = 'near_ai_login'",
+                    AND identity_source = 'near_ai_login' AND retired_at IS NULL",
                 &[&tenant, &account],
             )
             .await?;
@@ -1534,7 +1534,8 @@ impl PayoutStore for PgBackend {
                         "SELECT EXISTS (
                              SELECT 1 FROM trace_near_account_anchors
                               WHERE tenant_id = $1 AND account_id = $2
-                                AND identity_source = 'near_ai_login')",
+                                AND identity_source = 'near_ai_login'
+                                AND retired_at IS NULL)",
                         &[&tenant, &account],
                     )
                     .await?

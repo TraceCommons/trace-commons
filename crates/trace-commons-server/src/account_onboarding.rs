@@ -45,7 +45,7 @@ pub enum ProvisioningFailure {
 /// the request was not handled, or a handler error about the node itself
 /// ([`crate::account_near::NearRpcNotAnswered`]) -- unless the RPC answered
 /// with a status about the request.
-fn ownership_check_failure(error: &anyhow::Error) -> ProvisioningFailure {
+pub fn ownership_check_failure(error: &anyhow::Error) -> ProvisioningFailure {
     if error
         .chain()
         .any(|cause| cause.is::<crate::account_near::NearRpcNotAnswered>())
@@ -242,6 +242,17 @@ pub const CEREMONY_UNREADABLE: &str = "near_provisioning_ceremony_unreadable";
 
 /// A ceremony this process cannot serialize to store. A fault. Label-only.
 pub const CEREMONY_UNWRITABLE: &str = "near_provisioning_ceremony_unwritable";
+
+/// The login signing in was retired by a change of account (F10): it no
+/// longer signs in to the account it left, and it never mints a fresh one.
+/// Shown by name, `near_ai_login_retired`, only to someone who just proved
+/// that login. Label-only.
+pub const NEAR_AI_LOGIN_RETIRED_REFUSAL: &str = "near_provisioning_login_retired";
+
+/// Whether `error` is the [`NEAR_AI_LOGIN_RETIRED_REFUSAL`] refusal.
+pub fn is_near_ai_login_retired(error: &crate::error::DatabaseError) -> bool {
+    matches!(error, crate::error::DatabaseError::Pool(label) if label == NEAR_AI_LOGIN_RETIRED_REFUSAL)
+}
 
 /// Whether `error` is the [`DEVICE_KEY_REVOKED`] refusal.
 pub fn is_device_key_revoked(error: &crate::error::DatabaseError) -> bool {
@@ -441,6 +452,7 @@ pub fn is_decided_refusal(error: &crate::error::DatabaseError) -> bool {
                 | "near_provisioning_device_bound_to_other_account"
                 | DEVICE_KEY_REGISTERED_ELSEWHERE
                 | DEVICE_KEY_REVOKED
+                | NEAR_AI_LOGIN_RETIRED_REFUSAL
         ),
         DatabaseError::Query(label) => label == "near_provisioning_ambiguous",
         _ => false,

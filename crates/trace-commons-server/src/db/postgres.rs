@@ -21,6 +21,8 @@ mod legacy_invite_link;
 mod mission_catalog;
 #[path = "postgres_model_training_consent.rs"]
 mod model_training_consent;
+#[path = "postgres_near_ai_rebind.rs"]
+mod near_ai_rebind;
 #[cfg(test)]
 mod pipeline_upgrade_tests;
 #[path = "postgres_public_run.rs"]
@@ -308,6 +310,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_payout_audit",
     "trace_payout_reversal_hold_decisions",
     "trace_account_device_codes",
+    "trace_account_login_changes",
     "trace_device_session_renewals",
     "trace_consent_grants",
     "trace_referral_codes",
@@ -2074,6 +2077,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "owner_runtime_function_grants",
         include_str!("../../../../migrations/V149__owner_runtime_function_grants.sql"),
     ),
+    // V150: F10, changing the NEAR AI login an account uses. Retired
+    // anchors, one live anchor per account (V82's merge replaced to keep
+    // it), the change table and the admission lease check.
+    (
+        150,
+        "near_ai_login_change",
+        include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
+    ),
 ];
 
 /// The body of `create_or_reuse_account`, inside a transaction already under
@@ -2261,7 +2272,8 @@ pub(super) async fn active_strong_authenticator_count(
                         SELECT 1 FROM trace_near_account_anchors
                          WHERE tenant_id = trace_current_tenant_id()
                            AND account_id = $1
-                           AND identity_source = 'near_ai_login')
+                           AND identity_source = 'near_ai_login'
+                           AND retired_at IS NULL)
                      THEN 1 ELSE 0 END)
                     AS strong_count",
             &[account_id],
@@ -4252,6 +4264,41 @@ impl Database for PgBackend {
         grant_template: Option<&crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
     ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
         self.near_ai_login_provision(login, device_public_key, session, identity, grant_template)
+            .await
+    }
+
+    async fn store_near_ai_rebind_ceremony(
+        &self,
+        ceremony_hash: &str,
+        pending: &crate::account_login_change::NearAiRebindPending,
+        expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        self.near_ai_rebind_store_ceremony(ceremony_hash, pending, expires_at)
+            .await
+    }
+
+    async fn take_near_ai_rebind_ceremony(
+        &self,
+        ceremony_hash: &str,
+    ) -> Result<Option<crate::account_login_change::NearAiRebindPending>, DatabaseError> {
+        self.near_ai_rebind_take_ceremony(ceremony_hash).await
+    }
+
+    async fn near_ai_rebind_precheck(
+        &self,
+        session: &crate::account_login_change::RebindSession,
+    ) -> Result<crate::account_login_change::RebindPrecheck, DatabaseError> {
+        self.near_ai_rebind_check(session).await
+    }
+
+    async fn near_ai_rebind(
+        &self,
+        session: &crate::account_login_change::RebindSession,
+        current: &crate::account_login_change::RebindCurrent,
+        new_login: &crate::near_ai_login::VerifiedNearAiLogin,
+        identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_login_change::RebindOutcome, DatabaseError> {
+        self.near_ai_rebind_commit(session, current, new_login, identity)
             .await
     }
 
@@ -8500,6 +8547,7 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
+            include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
             include_str!("../../../../migrations/V142__referral_rewards.sql"),
             include_str!("../../../../migrations/V141__trace_model_training_consent_grants.sql"),
             include_str!("../../../../migrations/V140__account_device_codes.sql"),
@@ -8550,6 +8598,7 @@ mod tests {
             include_str!("../../../../migrations/V131__starter_plausibility_features.sql"),
         ];
         let force_rls_migrations = [
+            include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
             include_str!("../../../../migrations/V142__referral_rewards.sql"),
             include_str!("../../../../migrations/V141__trace_model_training_consent_grants.sql"),
             include_str!("../../../../migrations/V140__account_device_codes.sql"),
