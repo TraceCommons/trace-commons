@@ -30,7 +30,7 @@ holds these credentials for it:
 | 6 | Contributor config (`contributor.json`: tenant, device key id, ingest and issuer) | File (`config.rs:22`) | Enrollment, the identity switch | -- | Unenroll (`ENROLLMENT_FILES`), logout | The Commons tenant | Not enrolled |
 | 7 | Device key | `Kind::Device` record plus OS entry, account service (`commons_credentials.rs:37-41`) | Enrollment; the legacy migration's staged key (`Kind::StagedDevice`, promoted by `switch_identity`, `daemon/commons_credentials_switch.rs:197`) | Never | Unenroll, logout | Registered to one tenant on the server (`DEVICE_KEY_REGISTERED_ELSEWHERE`, change-account spec 1.1) | Not enrolled; `device_key_revoked` is remembered |
 | 8 | Payout link cache and organization names | `daemon-payout-link.json`, `daemon-payout-org-names.json` (`config.rs:62`, `:68`) | `daemon/payout_link.rs` | Re-read from the server | Unenroll, logout | Server side: `trace_payout_links` carries `subject_index`, the NEAR AI subject that proved the org (`migrations/V132__payout_rails.sql:108`) | Shows no link |
-| 9 | Payout link proof (a NEAR AI access token) | Not stored: exchanged from #2 for one request and dropped (`daemon/payout_link.rs:308-339`) | -- | -- | -- | Server checks the subject against the account's live `near_ai_login` anchors, **only when the account has one** (`crates/trace-commons-server/src/payout_recipient_proof.rs:224-227`) | `subject_mismatch`, `near_ai_login_unverified` |
+| 9 | Payout link proof (a NEAR AI access token) | Not stored: exchanged from #2 for one request and dropped (`daemon/payout_link.rs:308-339`) | -- | -- | -- | Server checks the subject against the account's recorded `near_ai_login` anchors and refuses an account with none (since #1841 and #1862; before #1841 the check ran only when the account had one, B9) | `subject_mismatch`, `near_ai_login_unverified` |
 | 10 | Inference connection choice | `daemon-inference-connection.json` (`config.rs:57`), server table `trace_account_inference_connections` (V79) | Account reads | Account reads | Unenroll, logout | The Commons account. A choice, not a credential (V79 header) | Default connection |
 
 **Settlement holds no contributor credential.** Credit and referrals are
@@ -243,12 +243,12 @@ Each fits in one PR.
 | F7 | The connected-account record and the `needs_sign_in` status check | Invariant detection | Medium, client and IPC | #1835's `commons_login` folds into it |
 | F8 | `commit_connected`, with #1837's ceremony moved onto it | Single commit point | Medium, client | #1837 is its first caller |
 | F9 | `account_disconnect` replacing forget, native sign-out and CLI logout's partial clears, with NEAR AI key revocation | B4, B6, B7 | Medium, client and every shell's sign-out | None |
-| F10 | The change-account flow (companion spec, slice 1) on top of F7 and F8 | Deliberate change | Large | This PR's other spec |
+| F10 | The change-account flow (companion spec, slice 1) on top of F7 and F8. It is also how a wallet-origin `near-` account records a NEAR AI login and so reaches payouts; that needs a wallet-capable proof of the account's current identity (a NEAR wallet), since the NEAR AI wallet-placeholder match was removed from the payout check (#1862) | Deliberate change | Large | This PR's other spec. **Prerequisite for turning production payouts on** (owner, 2026-11-03) |
 | F11 | Give non-pooled, principal-linked legacy and pilot accounts (tenants outside `near-` / `nearai-`) a recorded NEAR AI login, the only anchor a payout proof can match. (Wallet-origin `near-` accounts get theirs through F10.) Two candidate designs: **(a)** move each account onto a NEAR AI tenant, carrying its history, devices and credit, so it holds a `near_ai_login` anchor like any NEAR AI account; or **(b)** change `trace_account_admission_linkage_ready()` (V81) so a `near_ai` device in a legacy tenant does not fail readiness for the whole deployment, then let such an account record its NEAR AI login. Pooled Devfolio tenants (`trace_legacy_invite_pooled_tenants`) are excluded from payouts by design and need nothing | B9's remainder | Large, server and migration | None. **Prerequisite for turning production payouts on** (owner, 2026-11-02); not a blocker for #1841. See `docs/operator/automatic-credit-settlement.md`, "Before production payouts" |
 
 F1 should land with or straight after #1837, since #1837 is what makes B12 reachable silently. F2, F3 and F5 are independent and can land in any order. F8 depends on
-F7. F9 and F10 depend on F8. F11 must land before production payouts are
-turned on.
+F7. F9 and F10 depend on F8. F10 and F11 must both land before production
+payouts are turned on.
 
 ## 5. Wording
 
@@ -276,5 +276,10 @@ The four questions this section asked were answered by the owner on
 2. **A device that joined by code may use only the account's own NEAR AI
    login.** F4 enforces it later.
 3. **Payout links on accounts with no NEAR AI login anchor are refused**
-   until the account has its login recorded.
+   until the account has its login recorded. Narrowed the same day: "It
+   should just be NEAR AI login on both staging and production". Only a
+   recorded NEAR AI login proves a link, never a NEAR wallet (#1862);
+   confirmed by the owner on 2026-11-03. Links made otherwise are revoked
+   at deploy (V147), and the refusal stays the generic `subject_mismatch`
+   with no new copy.
 4. **The inference key is revoked at NEAR AI on sign-out**, best effort.

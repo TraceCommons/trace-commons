@@ -7,8 +7,10 @@ outbox or `TRACE_COMMONS_NEAR_SETTLEMENT_MODE`.
 
 ## Before production payouts
 
-Do not turn the `near_ai` payout rail to `live` for production until this
-is done:
+Do not turn the `near_ai` payout rail to `live` for production until both
+F10 and F11 in
+[the one-connected-account spec](../superpowers/specs/2026-11-02-one-connected-account-design.md)
+have landed (owner, 2026-11-03):
 
 - **Accounts need a recorded NEAR AI login.** A payout link is proved
   only against one of the account's recorded NEAR AI login anchors
@@ -16,15 +18,33 @@ is done:
   "It should just be NEAR AI login on both staging and production"). A
   NEAR wallet anchor proves nothing. So:
   - **Wallet-origin accounts** (`near-` tenants) link only once they have
-    recorded a NEAR AI login, which the change-account flow does (F10 in
-    [the one-connected-account spec](../superpowers/specs/2026-11-02-one-connected-account-design.md)).
-    Until then they are refused.
+    recorded a NEAR AI login, which the change-account flow does (**F10**).
+    Until then they are refused. F10 checks the account's current identity
+    before recording the new one, and for a wallet-origin account that
+    identity is the NEAR wallet, so F10 needs a wallet-capable proof of
+    current identity: the NEAR AI wallet-placeholder match #1862 removed
+    from the payout check is not available to it.
   - **Principal-linked legacy and pilot accounts** (tenants outside
     `near-` and `nearai-`) have no NEAR AI login anchor either. Migrating
-    the non-pooled ones is fix F11 in the same spec, which names the two
+    the non-pooled ones is **F11** in the same spec, which names the two
     candidate designs.
   - **Pooled Devfolio tenants** (`trace_legacy_invite_pooled_tenants`) are
     excluded from payouts by design; they need no migration.
+
+Links already made on accounts with no recorded NEAR AI login are revoked
+at deploy by migration V147: each live link is marked recipient-unavailable
+and unlink-requested, so the pass sends nothing more and closes it, with a
+`trace_payout_audit` row labelled `near_ai_login_required`. The same
+migration drops those accounts' pending link requests. Stop the old service
+before the new one starts, so no old-code confirm lands after V147. To see
+what it revoked (hash-only; RLS is forced, so use a cross-tenant role or
+run per tenant):
+
+```sql
+SELECT tenant_id, prior_state, count(*) FROM trace_payout_audit
+ WHERE label = 'near_ai_login_required'
+ GROUP BY tenant_id, prior_state;
+```
 
 ## Scheduling
 

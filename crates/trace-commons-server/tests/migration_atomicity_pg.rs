@@ -3014,3 +3014,335 @@ async fn v145_cluster_table(seed: &tokio_postgres::Client) -> Vec<(uuid::Uuid, i
     })
     .collect()
 }
+
+/// V147 revokes every live payout link on an account with no recorded NEAR
+/// AI login (owner, 2026-11-03, on #1862). Run as the non-superuser owner it
+/// runs as in production: forced row security applies to the owner, so a
+/// superuser run could not tell an update that reaches every tenant from one
+/// that silently reaches none.
+///
+/// Seeded before V147 in two tenants:
+/// - an account with a `near_ai_login` anchor and an active link (kept);
+/// - accounts with only a `wallet` anchor or none, holding an active link, a
+///   waiting link and a closing link;
+/// - pending link and unlink requests.
+/// After V147 the live links of unanchored accounts carry both marks with
+/// one hash-only audit row each, closing links and the anchored account's
+/// link are untouched, the unanchored accounts' pending link requests are
+/// gone, and a second run changes nothing.
+#[tokio::test]
+async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
+    let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+    else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return;
+    };
+    let _turn = VIRGIN_DATABASE.lock().await;
+
+    const OWNER: &str = "tc_v147_owner_probe";
+    const DB: &str = "trace_v147_owner_probe_db";
+    let probe = ProbeRole::claim(&url, OWNER, &[DB]).await;
+    let admin = owned_database(&url, OWNER, DB, Standing::Creator).await;
+    let mut owner = connect(&with_user(&with_database(&url, DB), OWNER, "probe")).await;
+    owner
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS _trace_commons_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );",
+        )
+        .await
+        .expect("create the recording table");
+    for (version, name, sql) in registered_migrations()
+        .iter()
+        .filter(|(version, ..)| *version < 147)
+    {
+        apply_and_record_migration(&mut owner, *version, name, sql)
+            .await
+            .unwrap_or_else(|error| panic!("V{version} before V147: {error:?}"));
+    }
+
+    // Seeded as the superuser, which row security does not apply to.
+    let seed = connect(&with_database(&url, DB)).await;
+    let sha = |value: &str| {
+        use sha2::{Digest, Sha256};
+        format!("sha256:{:x}", Sha256::digest(value.as_bytes()))
+    };
+    let (t1, t2) = ("v147-tenant-1", "v147-tenant-2");
+    for tenant in [t1, t2] {
+        seed.execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+            &[&tenant],
+        )
+        .await
+        .expect("seed tenant");
+    }
+    let account = |tenant: &'static str| (tenant, uuid::Uuid::new_v4());
+    let anchored = account(t1);
+    let wallet_active = account(t1);
+    let bare_waiting = account(t2);
+    let bare_closing = account(t2);
+    for (tenant, id) in [anchored, wallet_active, bare_waiting, bare_closing] {
+        seed.execute(
+            "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+            &[&tenant, &id],
+        )
+        .await
+        .expect("seed account");
+    }
+    let anchor = "INSERT INTO trace_near_account_anchors
+            (tenant_id, account_id, anchor_hash, sealed_account_name, index_pepper_ref,
+             account_name_key_ref, identity_source, auth_provider)
+         VALUES ($1, $2, $3, '{\"fixture\": true}', 'pepper', 'key', $4, $5)";
+    seed.execute(
+        anchor,
+        &[
+            &anchored.0,
+            &anchored.1,
+            &sha("v147-login"),
+            &"near_ai_login",
+            &Some("github"),
+        ],
+    )
+    .await
+    .expect("seed login anchor");
+    seed.execute(
+        anchor,
+        &[
+            &wallet_active.0,
+            &wallet_active.1,
+            &sha("v147-wallet"),
+            &"wallet",
+            &None::<&str>,
+        ],
+    )
+    .await
+    .expect("seed wallet anchor");
+    let link = |(tenant, account): (&'static str, uuid::Uuid), state: &'static str| {
+        let id = uuid::Uuid::new_v4();
+        (tenant, account, id, state)
+    };
+    let links = [
+        link(anchored, "active"),
+        link(wallet_active, "active"),
+        link(bare_waiting, "waiting"),
+        link(bare_closing, "closing"),
+    ];
+    for (tenant, account, id, state) in links {
+        seed.execute(
+            "INSERT INTO trace_payout_links (
+                 tenant_id, account_id, rail_id, link_id, recipient_kind, state,
+                 sealed_recipient, recipient_index, recipient_key_ref, index_pepper_ref,
+                 subject_index, program
+             ) VALUES ($1, $2, 'near_ai', $3, 'near_ai_org', $4, '{\"v\": 1}', $5, 'key',
+                       'pepper', $6, $7)",
+            &[
+                &tenant,
+                &account,
+                &id,
+                &state,
+                &sha(&format!("index:{id}")),
+                &sha(&format!("subject:{id}")),
+                &format!("tc1-{}", id.simple()),
+            ],
+        )
+        .await
+        .expect("seed link");
+    }
+    let request = |tenant: &str, account: uuid::Uuid, action: &str| {
+        let key = uuid::Uuid::new_v4();
+        let link = action == "link";
+        (
+            tenant.to_owned(),
+            account,
+            key,
+            action.to_owned(),
+            link.then(|| "near_ai_org".to_owned()),
+            link.then(|| serde_json::json!({"v": 1})),
+            link.then(|| sha(&format!("index:{key}"))),
+            link.then(|| "key".to_owned()),
+            link.then(|| "pepper".to_owned()),
+            link.then(|| sha(&format!("subject:{key}"))),
+        )
+    };
+    let requests = [
+        request(anchored.0, anchored.1, "link"),
+        request(wallet_active.0, wallet_active.1, "link"),
+        request(bare_waiting.0, bare_waiting.1, "unlink"),
+    ];
+    for (tenant, account, key, action, kind, sealed, index, key_ref, pepper, subject) in &requests {
+        seed.execute(
+            "INSERT INTO trace_payout_link_requests (
+                 tenant_id, account_id, rail_id, idempotency_key, handle_hash, request_digest,
+                 action, recipient_kind, sealed_recipient, recipient_index, recipient_key_ref,
+                 index_pepper_ref, subject_index, expires_at
+             ) VALUES ($1, $2, 'near_ai', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                       now() + interval '5 minutes')",
+            &[
+                tenant,
+                account,
+                key,
+                &sha(&format!("handle:{key}")),
+                &sha(&format!("digest:{key}")),
+                action,
+                kind,
+                sealed,
+                index,
+                key_ref,
+                pepper,
+                subject,
+            ],
+        )
+        .await
+        .expect("seed request");
+    }
+
+    let (version, name, sql) = registered_migrations()
+        .iter()
+        .find(|(version, ..)| *version == 147)
+        .expect("V147 is wired into the runner");
+    let applied = apply_and_record_migration(&mut owner, *version, name, sql)
+        .await
+        .map_err(|error| format!("{error:?}"));
+
+    // (link, state, unavailable, unlink requested), read as the superuser.
+    let read_links = || async {
+        let mut rows: Vec<(uuid::Uuid, String, bool, bool)> = seed
+            .query(
+                "SELECT link_id, state, recipient_unavailable_at IS NOT NULL,
+                        unlink_requested_at IS NOT NULL
+                   FROM trace_payout_links",
+                &[],
+            )
+            .await
+            .expect("read links")
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+            .collect();
+        rows.sort();
+        rows
+    };
+    let read_audit = || async {
+        let mut rows: Vec<(String, String, String, String, String, String)> = seed
+            .query(
+                "SELECT tenant_id, action, account_id_hash, link_id_hash, prior_state || '>' || new_state,
+                        label || ' ' || actor_ref_hash
+                   FROM trace_payout_audit",
+                &[],
+            )
+            .await
+            .expect("read audit")
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4), row.get(5)))
+            .collect();
+        rows.sort();
+        rows
+    };
+    let read_requests = || async {
+        let mut rows: Vec<uuid::Uuid> = seed
+            .query(
+                "SELECT idempotency_key FROM trace_payout_link_requests",
+                &[],
+            )
+            .await
+            .expect("read requests")
+            .into_iter()
+            .map(|row| row.get(0))
+            .collect();
+        rows.sort();
+        rows
+    };
+
+    let mut problems: Vec<String> = Vec::new();
+    if let Err(error) = &applied {
+        problems.push(format!("V147 failed for the non-superuser owner: {error}"));
+    } else {
+        let expected_link = |(_, _, id, state): (&str, uuid::Uuid, uuid::Uuid, &str), revoked| {
+            (id, state.to_owned(), revoked, revoked)
+        };
+        let mut expected = vec![
+            expected_link(links[0], false),
+            expected_link(links[1], true),
+            expected_link(links[2], true),
+            expected_link(links[3], false),
+        ];
+        expected.sort();
+        let after = read_links().await;
+        if after != expected {
+            problems.push(format!("links read {after:?}, not {expected:?}"));
+        }
+
+        let actor = sha("payout-migration-actor-v1:V147");
+        let audit_row = |(tenant, account, id, state): (&str, uuid::Uuid, uuid::Uuid, &str)| {
+            (
+                tenant.to_owned(),
+                "unlink_requested".to_owned(),
+                trace_commons_server::db::payout_account_id_hash(account),
+                trace_commons_server::db::payout_link_id_hash(id),
+                format!("{state}>{state}"),
+                format!("near_ai_login_required {actor}"),
+            )
+        };
+        let mut expected = vec![audit_row(links[1]), audit_row(links[2])];
+        expected.sort();
+        let audit = read_audit().await;
+        if audit != expected {
+            problems.push(format!("audit read {audit:?}, not {expected:?}"));
+        }
+
+        let mut expected = vec![requests[0].2, requests[2].2];
+        expected.sort();
+        let kept = read_requests().await;
+        if kept != expected {
+            problems.push(format!(
+                "requests read {kept:?}, not {expected:?} (the unanchored link request must go)"
+            ));
+        }
+
+        let unforced: Vec<String> = seed
+            .query(
+                "SELECT relname::text FROM pg_class
+                  WHERE relname IN ('trace_near_account_anchors', 'trace_payout_links',
+                                    'trace_payout_link_requests', 'trace_payout_audit')
+                    AND NOT relforcerowsecurity",
+                &[],
+            )
+            .await
+            .expect("read row security")
+            .into_iter()
+            .map(|row| row.get(0))
+            .collect();
+        if !unforced.is_empty() {
+            problems.push(format!("row security left unforced on {unforced:?}"));
+        }
+
+        // A second run changes nothing and writes no second audit row.
+        let (links_before, audit_before) = (read_links().await, read_audit().await);
+        if let Err(error) = owner.batch_execute(sql).await {
+            problems.push(format!("a second run failed: {error:?}"));
+        }
+        if read_links().await != links_before || read_audit().await != audit_before {
+            problems.push("a second run changed links or wrote audit rows".into());
+        }
+    }
+
+    drop(seed);
+    drop(owner);
+    admin
+        .execute(&format!("DROP DATABASE IF EXISTS {DB} WITH (FORCE)"), &[])
+        .await
+        .expect("drop the probe database");
+    assert!(
+        problems.is_empty(),
+        "V147 must revoke exactly the live links of accounts with no NEAR AI login:\n  {}",
+        problems.join("\n  ")
+    );
+    probe.release().await;
+    assert!(
+        !role_exists(&url, OWNER).await,
+        "{OWNER} is per server and must not outlive the test (#1335)"
+    );
+}

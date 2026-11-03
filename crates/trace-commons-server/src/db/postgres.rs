@@ -1988,6 +1988,15 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "trace_dedup_cluster_representatives",
         include_str!("../../../../migrations/V145__trace_dedup_cluster_representatives.sql"),
     ),
+    // V147 revokes every live payout link on an account with no recorded
+    // NEAR AI login (owner, 2026-11-03, on #1862): marks it unavailable and
+    // unlinked for the pass to close, and drops such accounts' pending link
+    // requests. V146 is claimed by #1865.
+    (
+        147,
+        "revoke_payout_links_without_near_ai_login",
+        include_str!("../../../../migrations/V147__revoke_payout_links_without_near_ai_login.sql"),
+    ),
 ];
 
 /// Shared by verified claim issuance and the explicit historical repair.

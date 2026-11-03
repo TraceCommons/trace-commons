@@ -4706,7 +4706,7 @@ mod payout_debug_tests {
                 recipient: Some((kind.clone(), sealed())),
                 expires_at: expires,
                 actor_ref_hash: ACCOUNT_HASH.into(),
-                proof_label: Some("near_wallet"),
+                proof_label: Some("near_ai_login"),
             }
         ));
         assert_redacted(format!(

@@ -691,24 +691,15 @@ async fn an_account_with_no_anchor_of_either_kind_links_nothing() {
     assert!(h.dump(&account.tenant).await.is_empty());
 }
 
-fn near_config(network: &str) -> Arc<trace_commons_server::config::NearConfig> {
-    Arc::new(trace_commons_server::config::NearConfig {
-        rpc_url: "http://near-rpc.invalid".to_owned(),
-        network: network.to_owned(),
-        recipient: "app.example.invalid".to_owned(),
-    })
-}
-
 /// Only a recorded NEAR AI login proves a link (owner, 2026-11-02: "It
 /// should just be NEAR AI login on both staging and production"). A
 /// wallet-origin account with no recorded NEAR AI login links nothing, even
-/// through NEAR AI's own wallet sign-in on mainnet, and the token is never
-/// spent. Its path to payouts is the change-account flow, which records a
+/// through NEAR AI's own wallet sign-in, and the token is never spent. The
+/// deployment's NEAR network plays no part. Its path to payouts is the change-account flow, which records a
 /// NEAR AI login.
 #[tokio::test]
 async fn a_wallet_account_with_no_recorded_login_links_nothing_through_a_wallet_sign_in() {
-    let Some(mut h) = harness().await else { return };
-    Arc::get_mut(&mut h.state).unwrap().account_near_config = Some(near_config("mainnet"));
+    let Some(h) = harness().await else { return };
     let account = h
         .unanchored_account_in(
             &trace_commons_server::near_account_identity::random_near_tenant_id(),
@@ -725,28 +716,6 @@ async fn a_wallet_account_with_no_recorded_login_links_nothing_through_a_wallet_
     assert_eq!(body["error"], "subject_mismatch", "{body}");
     assert_eq!(h.stub().users_me_calls, 0, "the token is never spent");
     assert_eq!(h.request_rows(&account).await, 0);
-}
-
-/// A recorded NEAR AI login links on every deployment, whatever its NEAR
-/// network, and the request's audit row says it was a NEAR AI login.
-#[tokio::test]
-async fn a_recorded_near_ai_login_links_on_mainnet_and_testnet() {
-    for network in ["mainnet", "testnet"] {
-        let Some(mut h) = harness().await else { return };
-        Arc::get_mut(&mut h.state).unwrap().account_near_config = Some(near_config(network));
-        let account = h.account().await;
-        h.link(&account, org(1)).await;
-        assert_eq!(
-            h.links(&account, &[PayoutLinkState::Waiting]).await.len(),
-            1,
-            "{network}"
-        );
-        assert_eq!(
-            h.request_proof_labels(&account).await,
-            vec![Some("near_ai_login".to_owned())],
-            "{network}"
-        );
-    }
 }
 
 /// A link an unanchored account made before this check existed is left as
