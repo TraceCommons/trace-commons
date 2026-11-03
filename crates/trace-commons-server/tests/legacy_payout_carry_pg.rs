@@ -73,7 +73,10 @@ async fn decision_5_linking_the_device_principal_claims_its_legacy_upload_credit
         hex::encode(Sha256::digest(format!("{tenant}:legacy-device")))
     );
     admin
-        .execute("INSERT INTO trace_tenants(tenant_id) VALUES($1)", &[&tenant])
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1)",
+            &[&tenant],
+        )
         .await
         .unwrap();
     // An invite-onboarded legacy device: `invite` origin, no NEAR provisioning.
