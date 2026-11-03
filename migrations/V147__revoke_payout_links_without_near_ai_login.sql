@@ -29,7 +29,10 @@
 --     closes at `final_paid` 0, so the pass never activates it. V146's
 --     guard allows that only for a carried link, so this file sets the
 --     trigger aside for that one UPDATE and applies the guard's own
---     condition itself: the link has no payout line at all.
+--     condition itself: the link has no payout line at all. A waiting link
+--     with a line should not exist (the store writes lines only to active
+--     links); if one does, this migration refuses to run rather than leave
+--     it to be activated and paid, and an operator resolves it first.
 --   * an `active` link gets `unlink_requested_at`, exactly as a person's
 --     own unlink: on its next run the pass moves it to `closing`, before
 --     anything is paid, and closes it with the zero send that reads the
@@ -59,9 +62,12 @@
 -- nothing and writes no second audit row.
 --
 -- LOCKS. Lifting FORCE and setting the trigger aside take an ACCESS
--- EXCLUSIVE lock on each table for the whole migration, which stalls NEAR
--- sign-ins (they read the anchors). A `lock_timeout` makes a deploy that
--- cannot get the locks fail and retry rather than queue every login.
+-- EXCLUSIVE lock on each table touched (anchors, links, lines, audit,
+-- carries) for the whole migration, which stalls NEAR sign-ins (they read
+-- the anchors). A `lock_timeout` makes a deploy that cannot get the locks
+-- fail instead of queueing every login. The runner does not retry: the
+-- service fails to start, and it is retried only if the supervisor
+-- restarts it (the pilot's systemd unit does).
 --
 -- FORCED ROW SECURITY applies to the table owner too, so a plain UPDATE
 -- here, run by the non-superuser migrator, would silently touch zero rows
@@ -75,6 +81,30 @@ ALTER TABLE trace_payout_links NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE trace_payout_lines NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE trace_payout_audit NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE trace_legacy_payout_carries NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM trace_payout_links l
+         WHERE l.rail_id = 'near_ai' AND l.state = 'waiting'
+           AND NOT EXISTS (
+               SELECT 1 FROM trace_near_account_anchors a
+                WHERE a.tenant_id = l.tenant_id
+                  AND a.account_id = l.account_id
+                  AND a.identity_source = 'near_ai_login')
+           AND NOT EXISTS (
+               SELECT 1 FROM trace_legacy_payout_carries c
+                WHERE c.tenant_id = l.tenant_id
+                  AND c.link_id = l.link_id
+                  AND c.released_at IS NULL)
+           AND EXISTS (
+               SELECT 1 FROM trace_payout_lines p
+                WHERE p.tenant_id = l.tenant_id AND p.link_id = l.link_id)
+    ) THEN
+        RAISE EXCEPTION 'V147: a waiting near_ai payout link on an account with no NEAR AI login has a payout line; resolve it before this migration runs'
+            USING ERRCODE = 'check_violation';
+    END IF;
+END $$;
 
 CREATE TEMPORARY TABLE v147_revoked ON COMMIT DROP AS
     SELECT l.tenant_id, l.rail_id, l.account_id, l.link_id, l.state
@@ -91,12 +121,7 @@ CREATE TEMPORARY TABLE v147_revoked ON COMMIT DROP AS
            SELECT 1 FROM trace_legacy_payout_carries c
             WHERE c.tenant_id = l.tenant_id
               AND c.link_id = l.link_id
-              AND c.released_at IS NULL)
-       -- The guard's own condition for closing a waiting link at zero: it
-       -- never had a line. One that had is not closed here.
-       AND NOT (l.state = 'waiting' AND EXISTS (
-           SELECT 1 FROM trace_payout_lines p
-            WHERE p.tenant_id = l.tenant_id AND p.link_id = l.link_id));
+              AND c.released_at IS NULL);
 
 ALTER TABLE trace_payout_links DISABLE TRIGGER trace_payout_links_guard_update;
 UPDATE trace_payout_links AS l

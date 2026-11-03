@@ -81,7 +81,8 @@ per link out of that run's send window). Each gets a `trace_payout_audit`
 row labelled `near_ai_login_required`. Pending requests are left to expire:
 the new service's confirm refuses a link on an account with no NEAR AI
 login, so a request started before the deploy cannot land after it, and a
-pending unlink of a revoked link fails its version check. Stop the old
+pending unlink of a revoked active link fails its version check (one of
+a closed waiting link confirms and answers that nothing is linked). Stop the old
 service before the new one starts: an old pass can still act on links it
 loaded before V147 committed.
 
@@ -102,11 +103,14 @@ SELECT l.tenant_id, l.state, count(*) FROM trace_payout_links l
    AND NOT EXISTS (SELECT 1 FROM trace_legacy_payout_carries c
                     WHERE c.tenant_id = l.tenant_id AND c.link_id = l.link_id
                       AND c.released_at IS NULL)
-   AND NOT (l.state = 'waiting' AND EXISTS (
-        SELECT 1 FROM trace_payout_lines p
-         WHERE p.tenant_id = l.tenant_id AND p.link_id = l.link_id))
  GROUP BY l.tenant_id, l.state;
 ```
+
+V147 refuses to run, and the service does not start, if an unanchored
+account's waiting link has a payout line (the store never writes one; it
+would have to be resolved by hand). A `lock_timeout` failure also stops
+startup; the runner does not retry, so the deploy depends on the
+supervisor restarting the service.
 
 After it, see what it revoked (the counts should match, by tenant and
 state):

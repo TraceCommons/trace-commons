@@ -3089,7 +3089,15 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
     let bare_waiting = account(t2);
     let bare_closing = account(t2);
     let carried = account(t1);
-    for (tenant, id) in [anchored, wallet_active, bare_waiting, bare_closing, carried] {
+    let both = account(t2);
+    for (tenant, id) in [
+        anchored,
+        wallet_active,
+        bare_waiting,
+        bare_closing,
+        carried,
+        both,
+    ] {
         seed.execute(
             "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
             &[&tenant, &id],
@@ -3138,6 +3146,10 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
         link(bare_waiting, "active"),
         // A link V146 carried from a NEAR AI account to a legacy account.
         link(carried, "active"),
+        // One unanchored account with an active link and its waiting
+        // successor: both revoked.
+        link(both, "active"),
+        link(both, "waiting"),
     ];
     for (index, (tenant, account, id, state)) in links.into_iter().enumerate() {
         let rail = if index == 4 { "other_rail" } else { "near_ai" };
@@ -3296,6 +3308,8 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
             row(links[3], "closing:-", false),
             row(links[4], "active:-", false),
             row(links[5], "active:-", false),
+            row(links[6], "active:-", true),
+            row(links[7], "closed:0", false),
         ];
         expected.sort();
         let after = read_links().await;
@@ -3319,6 +3333,8 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
         let mut expected = vec![
             audit_row(links[1], "unlink_requested", "active>active"),
             audit_row(links[2], "link_closed", "waiting>closed"),
+            audit_row(links[6], "unlink_requested", "active>active"),
+            audit_row(links[7], "link_closed", "waiting>closed"),
         ];
         expected.sort();
         let audit = read_audit().await;
@@ -3373,6 +3389,56 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
         }
         if read_links().await != links_before || read_audit().await != audit_before {
             problems.push("a second run changed links or wrote audit rows".into());
+        }
+
+        // A waiting link with a payout line cannot be closed at zero; V147
+        // refuses to run rather than leave it to be activated and paid, and
+        // changes nothing.
+        let lined = account(t2);
+        seed.execute(
+            "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+            &[&lined.0, &lined.1],
+        )
+        .await
+        .expect("seed lined account");
+        let lined_link = uuid::Uuid::new_v4();
+        seed.execute(
+            "INSERT INTO trace_payout_links (
+                 tenant_id, account_id, rail_id, link_id, recipient_kind, state,
+                 sealed_recipient, recipient_index, recipient_key_ref, index_pepper_ref,
+                 subject_index, program
+             ) VALUES ($1, $2, 'near_ai', $3, 'near_ai_org', 'waiting', '{\"v\": 1}', $4,
+                       'key', 'pepper', $5, $6)",
+            &[
+                &lined.0,
+                &lined.1,
+                &lined_link,
+                &sha(&format!("index:{lined_link}")),
+                &sha(&format!("subject:{lined_link}")),
+                &format!("tc1-{}", lined_link.simple()),
+            ],
+        )
+        .await
+        .expect("seed lined link");
+        seed.execute(
+            "INSERT INTO trace_payout_lines (
+                 tenant_id, line_id, account_id, rail_id, link_id, target_total, delta,
+                 owed_through_accrual_count, state
+             ) VALUES ($1, gen_random_uuid(), $2, 'near_ai', $3, 1, 1, 0, 'pending')",
+            &[&lined.0, &lined.1, &lined_link],
+        )
+        .await
+        .expect("seed line");
+        let (links_before, audit_before) = (read_links().await, read_audit().await);
+        match owner.batch_execute(sql).await {
+            Ok(()) => problems.push("a waiting link with a line did not stop V147".into()),
+            Err(error) if !format!("{error:?}").contains("has a payout line") => {
+                problems.push(format!("V147 refused for another reason: {error:?}"))
+            }
+            Err(_) => {}
+        }
+        if read_links().await != links_before || read_audit().await != audit_before {
+            problems.push("a refused run changed links or wrote audit rows".into());
         }
     }
 
