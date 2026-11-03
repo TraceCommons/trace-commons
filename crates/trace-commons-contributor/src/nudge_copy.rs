@@ -456,7 +456,7 @@ pub const MARK_A11Y_SETTLEMENT: &str = "An estimate for traces on this Mac is re
 pub const MARK_TOOLTIP_SETTLEMENT: &str = "Estimate ready";
 /// The estimate's info popover, in plain words (owner, 2026-10-19: the
 /// first wording read as too technical). DRAFT, NEEDS APPROVAL.
-pub const SETTLEMENT_ESTIMATE_EXPLAINER: &str = "This is a guess worked out on your Mac from how big your traces are and what's in them. Nothing was sent to make it, and the price comes from Trace Commons' published rates. The real amount is set once a trace is scored, and a guess for one trace is rougher than the total.";
+pub const SETTLEMENT_ESTIMATE_EXPLAINER: &str = "This is a guess worked out on your Mac from how big your traces are and what's in them. Nothing was sent to make it, and the price comes from the published rates. The real amount is set once a trace is scored, and a guess for one trace is rougher than the total.";
 // ---------------------------------------------------------------------
 // NEAR AI credit received. `{amount}` is a dollar figure from
 // `private_inference_copy::format_amount`. DRAFT, awaiting owner review

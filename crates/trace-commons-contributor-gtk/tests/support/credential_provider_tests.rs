@@ -140,14 +140,14 @@ impl Fixture {
             .count()
     }
 
-    fn assert_near_start(&self, index: usize) {
+    fn assert_unnamed_start(&self, index: usize) {
         let starts = self.starts.borrow();
         assert_eq!(
             starts.len(),
             index + 1,
             "duplicate start escaped the pending guard"
         );
-        assert_eq!(starts[index].1, json!({ "provider": "near" }));
+        assert_eq!(starts[index].1, json!({}));
     }
 
     fn refuse_start(&self, index: usize) {
@@ -184,28 +184,6 @@ fn descendants(root: &gtk::Widget) -> Vec<gtk::Widget> {
     result
 }
 
-fn choice_index(selector: &gtk::DropDown, label: &str) -> Option<u32> {
-    let model = selector.model()?;
-    (0..model.n_items()).find(|index| {
-        model
-            .item(*index)
-            .and_then(|item| item.downcast::<gtk::StringObject>().ok())
-            .is_some_and(|item| item.string() == label)
-    })
-}
-
-fn selector(root: &gtk::Widget) -> gtk::DropDown {
-    let label = trace_commons_contributor::private_inference_copy::private_inference_copy()
-        .credential_provider_near;
-    let matches: Vec<_> = descendants(root)
-        .into_iter()
-        .filter_map(|widget| widget.downcast::<gtk::DropDown>().ok())
-        .filter(|selector| choice_index(selector, label).is_some())
-        .collect();
-    assert_eq!(matches.len(), 1, "expected the actual provider selector");
-    matches[0].clone()
-}
-
 fn obtain_button(root: &gtk::Widget) -> gtk::Button {
     descendants(root)
         .into_iter()
@@ -214,16 +192,14 @@ fn obtain_button(root: &gtk::Widget) -> gtk::Button {
         .expect("the credential sign-in button must be rendered")
 }
 
-fn choose_near(root: &gtk::Widget) {
-    let copy = trace_commons_contributor::private_inference_copy::private_inference_copy();
-    let selector = selector(root);
-    selector.set_selected(choice_index(&selector, copy.credential_provider_near).unwrap());
-    let notice = descendants(root)
-        .into_iter()
-        .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
-        .find(|label| label.text() == copy.credential_wallet_notice)
-        .expect("wallet key-custody notice must accompany the selector");
-    assert!(notice.is_visible());
+/// Sign in carries no login choice: no dropdown anywhere under the root.
+fn assert_no_login_choice(root: &gtk::Widget) {
+    assert!(
+        !descendants(root)
+            .into_iter()
+            .any(|widget| widget.downcast::<gtk::DropDown>().is_ok()),
+        "a login selector is drawn beside Sign in"
+    );
 }
 
 #[test]
@@ -251,38 +227,23 @@ fn wallet_provider_signals_preserve_pending_and_recover() {
         .upcast_ref::<gtk::Widget>();
     fixture.drive_until(&context, || root.is_mapped());
 
-    choose_near(root);
+    assert_no_login_choice(root);
     obtain_button(root).emit_clicked();
     obtain_button(root).emit_clicked();
     fixture.drive_until(&context, || !fixture.starts.borrow().is_empty());
-    fixture.assert_near_start(0);
+    fixture.assert_unnamed_start(0);
     assert!(credential::pending(app));
     assert!(
         !obtain_button(root).is_sensitive(),
         "settings sign-in stayed enabled while pending"
     );
-    assert!(
-        !selector(root).is_sensitive(),
-        "settings provider stayed enabled while pending"
-    );
-    let locked = selector(root);
-    let selected = locked.selected();
-    let google = trace_commons_contributor::private_inference_copy::private_inference_copy()
-        .credential_provider_google;
-    locked.set_selected(choice_index(&locked, google).unwrap());
-    assert_eq!(
-        locked.selected(),
-        selected,
-        "pending selection changed the captured provider"
-    );
     fixture.refuse_start(0);
     fixture.settle(&context);
     assert!(!credential::pending(app));
     assert!(obtain_button(root).is_sensitive());
-    assert!(selector(root).is_sensitive());
     obtain_button(root).emit_clicked();
     fixture.drive_until(&context, || fixture.starts.borrow().len() == 2);
-    fixture.assert_near_start(1);
+    fixture.assert_unnamed_start(1);
     fixture.refuse_start(1);
     fixture.settle(&context);
 
@@ -300,14 +261,13 @@ fn wallet_provider_signals_preserve_pending_and_recover() {
             })
         })
     });
-    choose_near(root);
+    assert_no_login_choice(root);
     obtain_button(root).emit_clicked();
     obtain_button(root).emit_clicked();
     fixture.drive_until(&context, || fixture.starts.borrow().len() == 3);
-    fixture.assert_near_start(2);
+    fixture.assert_unnamed_start(2);
     assert!(credential::pending(app));
     assert!(!obtain_button(root).is_sensitive());
-    assert!(!selector(root).is_sensitive());
     let reads = fixture.status_reads();
     // Let the actual mapped card's periodic status callback execute while its
     // sign-in response stays held. A poll must not make the action pressable.
@@ -317,19 +277,16 @@ fn wallet_provider_signals_preserve_pending_and_recover() {
         !obtain_button(root).is_sensitive(),
         "onboarding poll re-enabled a pending sign-in"
     );
-    assert!(!selector(root).is_sensitive());
     obtain_button(root).emit_clicked();
     fixture.drain_jobs();
-    fixture.assert_near_start(2);
+    fixture.assert_unnamed_start(2);
     fixture.refuse_start(2);
     fixture.drive_until(&context, || {
-        !credential::pending(app)
-            && obtain_button(root).is_sensitive()
-            && selector(root).is_sensitive()
+        !credential::pending(app) && obtain_button(root).is_sensitive()
     });
     obtain_button(root).emit_clicked();
     fixture.drive_until(&context, || fixture.starts.borrow().len() == 4);
-    fixture.assert_near_start(3);
+    fixture.assert_unnamed_start(3);
     fixture.refuse_start(3);
     fixture.settle(&context);
     assert!(!credential::pending(app));

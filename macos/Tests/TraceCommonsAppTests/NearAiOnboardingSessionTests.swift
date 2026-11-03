@@ -77,24 +77,12 @@ private final class OnboardingSessionDaemon: DaemonCalling {
     }
 }
 
-/// Holds the credential section's provider choice outside the view, so a test
-/// can see and make the change the picker makes.
-private final class ProviderSelection: ObservableObject {
-    @Published var provider = LinkedChannel.channel.nearAiSignInProviders.first ?? ""
-}
-
-private struct ProviderSelectionHost: View {
-    @ObservedObject var selection: ProviderSelection
-    let copy: PrivateInferenceCopy
-
-    var body: some View {
-        CredentialSection(copy: copy, requiresSession: true, providerSelection: $selection.provider)
-    }
-}
-
 final class NearAiOnboardingSessionTests: XCTestCase {
+    /// The section offers Sign in with no provider chooser: the daemon's
+    /// browser page lists the build's logins (owner, 2026-11-02). Drawing
+    /// it starts nothing.
     @MainActor
-    func testNativePickerOffersNearWithoutStartingSignIn() async throws {
+    func testSettingsDrawsNoChooserAndStartsNoSignIn() async throws {
         let unexpected = expectation(description: "Native controls must not enroll or grant consent")
         unexpected.isInverted = true
         let daemon = OnboardingSessionDaemon(unexpectedCall: unexpected)
@@ -103,32 +91,14 @@ final class NearAiOnboardingSessionTests: XCTestCase {
         let copy = try XCTUnwrap(model.privateInferenceCopy)
         await awaitSession(model, state: "absent") { model.refreshNearAiCredential() }
 
-        // The picker is drawn only when the Cloud session is the thing to
-        // obtain; a legacy inference key must not hide it.
+        // Sign in is the thing to obtain; a legacy inference key must not
+        // hide it.
         XCTAssertEqual(
             CredentialSurface.action(CredentialStatus(state: model.credentialStatus.sessionState),
                                      calls: model.credentialCalls),
             .obtain)
-        // The picker offers what the linked core offers, in its order:
-        // production's NEAR wallet first, staging's NEAR AI Google login
-        // alone.
-        let options = CredentialSection.providerOptions(copy)
-        XCTAssertEqual(options.map(\.tag), LinkedChannel.channel.nearAiSignInProviders)
-        if LinkedChannel.isStaging {
-            XCTAssertEqual(options.map(\.title), [copy.credentialProviderGoogle])
-            XCTAssertEqual(options.map(\.tag), ["google"])
-        } else {
-            XCTAssertEqual(options.map(\.title),
-                           [copy.credentialProviderNear, copy.credentialProviderGithub, copy.credentialProviderGoogle])
-            XCTAssertEqual(options.map(\.tag), ["near", "github", "google"])
-        }
-        // Production chooses the NEAR wallet, as before; staging, which has
-        // one provider, chooses Google, its only one.
-        let target = LinkedChannel.isStaging ? "google" : "near"
-        let targetTitle = try XCTUnwrap(options.first { $0.tag == target }).title
 
-        let selection = ProviderSelection()
-        let content = ProviderSelectionHost(selection: selection, copy: copy)
+        let content = CredentialSection(copy: copy, requiresSession: true)
             .environmentObject(model)
             .padding(24)
             .frame(width: 375)
@@ -141,44 +111,12 @@ final class NearAiOnboardingSessionTests: XCTestCase {
         await Task.yield()
         hosting.layoutSubtreeIfNeeded()
 
-        // Where SwiftUI backs the picker with AppKit (macOS 26, the CI
-        // runner), choose NEAR through the real control, as a person does.
-        // On macOS 27 SwiftUI draws the picker itself: there is no
-        // NSPopUpButton to find and no accessibility node in an offscreen
-        // host, so the choice goes through the binding the picker writes.
-        // Either way the view sees the same change of selection, which is
-        // what must not start a sign-in.
-        if let picker = descendants(hosting).compactMap({ $0 as? NSPopUpButton }).first {
-            XCTAssertEqual(picker.itemTitles, options.map(\.title))
-            picker.selectItem(withTitle: targetTitle)
-            picker.sendAction(picker.action, to: picker.target)
-            await Task.yield()
-            hosting.layoutSubtreeIfNeeded()
-            XCTAssertEqual(picker.titleOfSelectedItem, targetTitle)
-            // The popup's own selection moves, but on the macos-26 runner the
-            // action on an offscreen popup did not reach SwiftUI's binding
-            // (CI read "github" here), and the version of this test before it
-            // never checked that it did. Give it a few run-loop turns; if it
-            // still has not arrived, make the same change through the
-            // binding, so the no-sign-in check below always follows a real
-            // change of selection on both render paths.
-            for _ in 0..<10 where selection.provider != target {
-                try await Task.sleep(for: .milliseconds(20))
-                await Task.yield()
-            }
-            if selection.provider != target {
-                selection.provider = target
-                await Task.yield()
-                hosting.layoutSubtreeIfNeeded()
-            }
-        } else {
-            selection.provider = target
-            await Task.yield()
-            hosting.layoutSubtreeIfNeeded()
-        }
-        XCTAssertEqual(selection.provider, target)
-        // A sign-in the change started would be a Task, not a synchronous
-        // call: give it time to reach the daemon before asserting it did not.
+        // Where SwiftUI backs a picker with AppKit (macOS 26), it would be an
+        // NSPopUpButton; none is drawn. The source pin in
+        // `NearAiSignInNamesNoProviderTests` covers macOS 27, which draws
+        // pickers itself.
+        XCTAssertTrue(descendants(hosting).compactMap { $0 as? NSPopUpButton }.isEmpty,
+                      "Settings draws a provider chooser again")
         await fulfillment(of: [unexpected], timeout: 0.2)
         hosting.layoutSubtreeIfNeeded()
         XCTAssertFalse(daemon.calls.contains { $0.method == "near_ai_credential_start" })
@@ -191,8 +129,8 @@ final class NearAiOnboardingSessionTests: XCTestCase {
     }
 
     @MainActor
-    func testNearWalletSignInSendsOnlyTheProviderWithoutEnrolling() async throws {
-        let unexpected = expectation(description: "Wallet login must not enroll or grant consent")
+    func testSettingsSignInSendsNoProviderWithoutEnrolling() async throws {
+        let unexpected = expectation(description: "Sign-in must not enroll or grant consent")
         unexpected.isInverted = true
         let daemon = OnboardingSessionDaemon(unexpectedCall: unexpected)
         let model = AppModel()
@@ -201,14 +139,14 @@ final class NearAiOnboardingSessionTests: XCTestCase {
 
         var browserURL: URL?
         await awaitSession(model, state: "obtaining") {
-            browserURL = await model.startNearAiCredential(provider: "near")
+            browserURL = await model.startNearAiCredential()
         }
         XCTAssertEqual(browserURL?.absoluteString, "https://cloud.example.invalid/native-login")
         let starts = daemon.calls.filter { $0.method == "near_ai_credential_start" }
         XCTAssertEqual(starts.count, 1)
         let start = try XCTUnwrap(starts.first)
-        let params = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(start.params.utf8)) as? [String: String])
-        XCTAssertEqual(params, ["provider": "near"])
+        let params = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(start.params.utf8)) as? [String: Any])
+        XCTAssertTrue(params.isEmpty, "the login is chosen on the daemon's browser page: \(params)")
         XCTAssertFalse(model.status.loggedIn)
         XCTAssertNil(model.status.tenantID)
         XCTAssertFalse(model.isOnboardingComplete)
@@ -258,7 +196,7 @@ final class NearAiOnboardingSessionTests: XCTestCase {
         var browserURL: URL?
         await awaitSession(model, state: "obtaining") {
             // Exercise the model action without opening a browser or spending.
-            browserURL = await model.startNearAiCredential(provider: nil)
+            browserURL = await model.startNearAiCredential()
         }
         XCTAssertEqual(browserURL?.absoluteString, "https://cloud.example.invalid/native-login")
         XCTAssertEqual(model.credentialAttempt?.attemptID, "synthetic-attempt")

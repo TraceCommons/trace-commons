@@ -24,6 +24,9 @@ final class NearAiAccountDaemon: DaemonCalling, @unchecked Sendable {
     var signInPath: String? = "near_ai"
     /// The browser sign-in ends without a login (closed, timed out).
     var attemptFails = false
+    /// The daemon ends the browser sign-in as cancelled (the wallet's
+    /// Cancel, or the login page coming back after a pick).
+    var attemptCancels = false
     private var attempt = "absent"
     var cancelFails = false
     var startFails = false
@@ -36,9 +39,10 @@ final class NearAiAccountDaemon: DaemonCalling, @unchecked Sendable {
     func holdNextSuccessfulStatus() { lock.withLock { holdStatus = true } }
     private var _cancelledIDs: [String] = []
     var cancelledIDs: [String] { lock.withLock { _cancelledIDs } }
-    /// The `provider` each `near_ai_credential_start` named, nil for none.
-    private var _startedProviders: [String?] = []
-    var startedProviders: [String?] { lock.withLock { _startedProviders } }
+    /// The parameter keys of each `near_ai_credential_start`, sorted. The
+    /// login is chosen on the daemon's browser page, so none should name one.
+    private var _startedParamKeys: [[String]] = []
+    var startedParamKeys: [[String]] { lock.withLock { _startedParamKeys } }
 
     func call(_ method: String, params: String) -> String {
         lock.withLock { _calls.append(method) }
@@ -63,12 +67,12 @@ final class NearAiAccountDaemon: DaemonCalling, @unchecked Sendable {
                 return Self.ok(["signed_in": true, "expires_at": NSNull()])
             }
         case "near_ai_credential_start":
-            let named = (try? JSONSerialization.jsonObject(with: Data(params.utf8)) as? [String: Any])?["provider"]
-            lock.withLock { _startedProviders.append(named as? String) }
+            let object = (try? JSONSerialization.jsonObject(with: Data(params.utf8)) as? [String: Any]) ?? [:]
+            lock.withLock { _startedParamKeys.append(object.keys.sorted()) }
             if startFails { return #"{"error":{"code":"unavailable","message":"start-failed"}}"# }
             return lock.withLock {
                 attemptNumber += 1
-                attempt = attemptFails ? "failed" : "waiting_for_browser"
+                attempt = attemptFails ? "failed" : attemptCancels ? "cancelled" : "waiting_for_browser"
                 return Self.ok(["attempt_id": "synthetic-attempt-\(attemptNumber)",
                                 "browser_url": "https://cloud.example.invalid/native-login/\(attemptNumber)",
                                 "status": "waiting_for_browser"])
@@ -174,6 +178,27 @@ final class SignInAgainTests: XCTestCase {
         XCTAssertNil(model.accountSignInFailure)
         XCTAssertEqual(daemon.count("near_ai_credential_start"), 1)
         XCTAssertEqual(daemon.count("near_ai_account_sign_in"), 2)
+    }
+
+    /// NEAR AI refused the stored login, and the browser sign-in Sign in
+    /// again opened ends as cancelled: not a failure, so Sign in again says
+    /// nothing and the daemon is not asked again. A failed one still says
+    /// so.
+    @MainActor
+    func test_aCancelledNearAiSignInIsNotAFailedSignInAgain() async {
+        for (cancels, failure) in [(true, nil), (false, AppModel.AccountSignInFailure.failed)] as [(Bool, AppModel.AccountSignInFailure?)] {
+            let daemon = NearAiAccountDaemon()
+            daemon.loginRefused = true
+            daemon.attemptCancels = cancels
+            daemon.attemptFails = !cancels
+            let (model, _) = model(daemon)
+
+            await model.signInToAccount()
+
+            XCTAssertEqual(model.accountSignInFailure, failure, "cancels: \(cancels)")
+            XCTAssertEqual(daemon.count("near_ai_credential_start"), 1)
+            XCTAssertEqual(daemon.count("near_ai_account_sign_in"), 1, "not asked again")
+        }
     }
 
     /// The freeze: a daemon call that blocks on the network must not hold

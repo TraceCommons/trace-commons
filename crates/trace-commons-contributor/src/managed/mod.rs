@@ -132,12 +132,21 @@ pub enum ManagedError {
         "This project's Claude Code settings, agents, commands or skills choose a model. NEAR AI sessions use the session's models."
     )]
     ProjectChoosesModel,
+    /// A NEAR AI Claude Code launch whose project's settings set
+    /// `CLAUDE_CODE_AUTO_MODE_SERVER` (owner-approved wording, 2026-11-02).
+    #[error("Remove CLAUDE_CODE_AUTO_MODE_SERVER from this project's settings.")]
+    ProjectSetsAutoModeServer,
 }
 
 /// The daemon's label for [`ManagedError::ProjectChoosesModel`], which the
 /// CLI turns back into its sentence and the shells map to the shared
 /// `project_chooses_model` line.
 pub const PROJECT_CHOOSES_MODEL_LABEL: &str = "managed-project-chooses-model";
+
+/// The daemon's label for [`ManagedError::ProjectSetsAutoModeServer`], which
+/// the CLI turns back into its sentence and the shells map to the shared
+/// `project_sets_auto_mode_server` line.
+pub const PROJECT_SETS_AUTO_MODE_SERVER_LABEL: &str = "managed-project-sets-auto-mode-server";
 
 pub mod copy;
 pub mod route;

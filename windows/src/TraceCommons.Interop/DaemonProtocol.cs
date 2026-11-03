@@ -109,6 +109,13 @@ public static class DaemonProtocol
         public const string AcknowledgeLegacyInviteMigration = "acknowledge_legacy_invite_migration";
 
         /// <summary>
+        /// Drops this device's enrollment, locally only. The account
+        /// section's "Set up again" sends it while the account needs
+        /// attention, then the first run starts.
+        /// </summary>
+        public const string Unenroll = "unenroll";
+
+        /// <summary>
         /// Moves this legacy invite identity to the contributor's NEAR AI
         /// account, because they pressed Move. Blocks for the whole move; a
         /// refusal is an error whose message is a <c>legacy_migration_*</c> label.

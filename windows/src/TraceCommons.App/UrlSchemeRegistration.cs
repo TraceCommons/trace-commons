@@ -75,7 +75,7 @@ public static class UrlSchemeRegistration
             using RegistryKey key = Registry.CurrentUser.CreateSubKey(
                 $@"Software\Classes\{Scheme}");
 
-            key.SetValue(string.Empty, "URL:Trace Commons Invite");
+            key.SetValue(string.Empty, "URL:Near.ai Invite");
 
             // The marker that tells the shell this key is a protocol handler.
             // Its presence is what matters; the value is empty by convention.

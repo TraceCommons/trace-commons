@@ -684,7 +684,7 @@ private final class StartDaemon: FirstRunDaemon {
     }
     func enrollInvite(_ invite: String) async -> Bool { log.append(.enroll(invite)); return true }
     func signInNearAI() async -> Bool { log.append(.signInNearAI); return true }
-    func nearAILogin() async -> Bool { log.append(.nearAILogin); return true }
+    func nearAILoginOutcome() async -> NearAILoginOutcome { log.append(.nearAILogin); return .signedIn }
     func cancelNearAILogin() async -> Bool { true }
     func enrollNearAI(referralCode: String?) async -> FirstRunNearAIEnrolment { log.append(.enrollNearAI); return .enrolled }
     func setAskEachTime() async -> Bool { log.append(.setAskEachTime); return true }
