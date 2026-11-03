@@ -955,7 +955,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_start_step_use", "Keep using Claude or Codex"),
     (
         "analytics_start_step_use_detail",
-        "Trace Commons automatically detects sessions from Claude Code and Codex on your Mac.",
+        "This app automatically detects sessions from Claude Code and Codex on your Mac.",
     ),
     ("analytics_start_step_share", "Choose what to share"),
     (

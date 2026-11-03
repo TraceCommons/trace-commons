@@ -183,6 +183,12 @@ pub(crate) struct Snapshot {
     record_key: [u8; 32],
 }
 impl Snapshot {
+    /// Whether a record of this kind was stored when the snapshot was taken,
+    /// whether or not its secret can be read now.
+    pub(crate) fn held_record(&self) -> bool {
+        self.previous.is_some()
+    }
+
     /// Configuration captured with this credential generation; never a later
     /// config selected during an in-flight request or sign-out.
     pub(crate) fn configuration(&self) -> Result<Option<ContributorConfig>> {

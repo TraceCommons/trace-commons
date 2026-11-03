@@ -21,25 +21,51 @@ namespace TraceCommons.Interop.Tests;
 public class NearAiCredentialTests
 {
     [Theory]
-    [InlineData("github")]
-    [InlineData("google")]
-    [InlineData("near")]
-    public void SignInCarriesOnlyTheSelectedProvider(string provider)
+    [InlineData("{\"removed\":true,\"revoked\":false}", true)]
+    [InlineData("{\"removed\":true,\"revoked\":true}", false)]
+    [InlineData("{\"removed\":true,\"revoked\":null}", false)]
+    [InlineData("{\"removed\":false,\"revoked\":null}", false)]
+    [InlineData("{\"removed\":false,\"revoked\":false}", false)]
+    [InlineData("{\"removed\":true}", false)]
+    [InlineData("[]", false)]
+    public void OnlyAFailedRevokeLeavesTheKeyAtTheService(string result, bool left)
     {
-        using JsonDocument document = JsonDocument.Parse(NearAiCredentialSurface.SerializeStart(provider));
-        Assert.Single(document.RootElement.EnumerateObject());
-        Assert.Equal(provider, document.RootElement.GetProperty("provider").GetString());
-        Assert.Contains(NearAiCredentialSurface.Providers(Copy()), choice => choice.Id == provider);
+        using JsonDocument document = JsonDocument.Parse(result);
+        Assert.Equal(left, NearAiCredentialSurface.ForgetLeftKeyAtService(document.RootElement.Clone()));
+        Assert.False(NearAiCredentialSurface.ForgetLeftKeyAtService(null));
     }
 
-    [Theory]
-    [InlineData("")]
-    [InlineData("NEAR")]
-    [InlineData("near\"}")]
-    public void UnknownProvidersCannotBecomeStartRequests(string provider)
+    [Fact]
+    public void AFailedRevokeIsStatusTextInTheOwnersWords()
     {
-        Assert.False(NearAiCredentialSurface.IsProvider(provider));
-        Assert.Throws<ArgumentException>(() => NearAiCredentialSurface.SerializeStart(provider));
+        PrivateInferenceCopy copy = Copy();
+        DaemonResponse failed = DaemonResponse.Parse(
+            "{\"id\":1,\"result\":{\"removed\":true,\"revoked\":false}}");
+        Assert.Equal(
+            "Couldn't revoke the key. Delete it in your NEAR AI account.",
+            NearAiCredentialSurface.ForgetNotice(failed, copy));
+        DaemonResponse revoked = DaemonResponse.Parse(
+            "{\"id\":1,\"result\":{\"removed\":true,\"revoked\":true}}");
+        Assert.Equal(string.Empty, NearAiCredentialSurface.ForgetNotice(revoked, copy));
+        DaemonResponse refused = DaemonResponse.Parse(
+            "{\"id\":1,\"error\":{\"code\":\"unavailable\",\"message\":\"near_ai_credential_unavailable\"}}");
+        Assert.Equal(string.Empty, NearAiCredentialSurface.ForgetNotice(refused, copy));
+    }
+
+    /// <summary>
+    /// Sign in names no login: the person picks one on the page the daemon
+    /// opens in the browser (owner, 2026-11-02), so the start request is an
+    /// empty object and this surface keeps no list of logins.
+    /// </summary>
+    [Fact]
+    public void SignInStartsWithNoProvider()
+    {
+        using JsonDocument document = JsonDocument.Parse(NearAiCredentialSurface.StartRequest);
+        Assert.Equal(JsonValueKind.Object, document.RootElement.ValueKind);
+        Assert.Empty(document.RootElement.EnumerateObject());
+        Assert.DoesNotContain(
+            typeof(NearAiCredentialSurface).GetMembers(),
+            member => member.Name.Contains("Provider", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -132,7 +158,9 @@ public class NearAiCredentialTests
             .Where(name => name.StartsWith("credential_", StringComparison.Ordinal))
             .ToList();
 
-        Assert.Equal(21, credentialFields.Count);
+        // 22 since `credential_forget_not_revoked`: copy, and none of its
+        // words is a carrier, so the per-word check below still holds it.
+        Assert.Equal(22, credentialFields.Count);
         var carriers = new HashSet<string>(StringComparer.Ordinal)
         {
             "key", "keys", "secret", "token", "prefix", "account", "email", "org", "workspace",
@@ -339,10 +367,11 @@ public class NearAiCredentialTests
             Assert.Contains(consequence, copy.CredentialCost, StringComparison.Ordinal);
         }
 
-        // And forgetting says what it does not do: the key keeps working
-        // until the contributor removes it in their own account.
+        // And forgetting says what it does: removed here, revoked at NEAR AI;
+        // a failed revoke sends the contributor to their own account.
         Assert.Contains("from this computer", copy.CredentialForgetExplains, StringComparison.Ordinal);
-        Assert.Contains("account", copy.CredentialForgetExplains, StringComparison.Ordinal);
+        Assert.Contains("revokes it at NEAR AI", copy.CredentialForgetExplains, StringComparison.Ordinal);
+        Assert.Contains("account", copy.CredentialForgetNotRevoked, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -645,6 +674,8 @@ public class NearAiCredentialTests
             // session state's empty default when an older daemon omits it.
             "state", "session_state", "attempt_id", "attempt_status", "browser_url", "{}", "",
             "github", "google", "near",
+            // The forget answer's two fields, read by ForgetLeftKeyAtService.
+            "removed", "revoked",
         };
 
         foreach (Match match in Regex.Matches(uncommented, "\"([^\"\\\\]|\\\\.)*\""))

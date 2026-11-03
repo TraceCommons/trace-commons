@@ -1583,6 +1583,7 @@ async fn a_link_request_is_replayed_once_and_taken_once() {
         )),
         expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
         actor_ref_hash: ACTOR.into(),
+        proof_label: Some("near_ai_login"),
     };
     assert_eq!(
         store
@@ -2258,6 +2259,7 @@ async fn the_pass_reads_and_marks_links_and_purges_expired_requests() {
         recipient: None,
         expires_at: expires,
         actor_ref_hash: ACTOR.into(),
+        proof_label: None,
     };
     let soon = request(
         Uuid::new_v4(),

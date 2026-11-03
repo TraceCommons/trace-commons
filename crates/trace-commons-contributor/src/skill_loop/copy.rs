@@ -164,7 +164,7 @@ pub fn skill_learning_copy() -> SkillLearningCopy {
 #[must_use]
 pub fn skill_learning_error_line(label: &str) -> &'static str {
     match label {
-        "account-session-required" => "Sign in to your Trace Commons account, then retry.",
+        "account-session-required" => "Sign in, then retry.",
         "session-detail-not-found" => "This contribution is no longer available to this account.",
         "skill-correction-required" => {
             "This trace has no contributed human correction to learn from."

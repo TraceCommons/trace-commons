@@ -37,23 +37,34 @@ public enum FirstRunCall: Equatable, Sendable {
 public enum NearAILoginPoll: Equatable, Sendable {
     case signedIn
     case waiting
+    /// Ended by the person, not a fault: the wallet's own Cancel, or the
+    /// browser's login page coming back after a pick, which already tells
+    /// them to start again from the app. Nothing more is said here.
+    case cancelled
     case ended
 
     /// The ceremony's waiting word (`nearai_credential::ceremony`).
     public static let waitingForBrowser = "waiting_for_browser"
+    /// The ceremony's word for an attempt the person ended
+    /// (`ceremony::ended_by_person`).
+    public static let cancelledWord = "cancelled"
     /// How long the first run waits on the browser before it gives up and
     /// says the sign-in did not finish.
     public static let limit: TimeInterval = 600
 
     /// A kept session is signed in. An attempt still waiting on the
-    /// browser, or a poll that could not be read, waits. Any other attempt
-    /// word -- cancelled, failed, finished without a session, or one this
-    /// build does not know -- is over.
+    /// browser, or a poll that could not be read, waits. A cancelled one is
+    /// the person's. Any other attempt word -- failed, finished without a
+    /// session, or one this build does not know -- is over.
     public static func verdict(_ status: CredentialStatus?) -> NearAILoginPoll {
         guard let status else { return .waiting }
         if status.sessionState == CredentialSurface.statePresent { return .signedIn }
         guard let attempt = status.attemptStatus else { return .waiting }
-        return attempt == waitingForBrowser ? .waiting : .ended
+        switch attempt {
+        case waitingForBrowser: return .waiting
+        case cancelledWord: return .cancelled
+        default: return .ended
+        }
     }
 
     /// The ceremony's word for an attempt that stored its session.
@@ -69,9 +80,18 @@ public enum NearAILoginPoll: Equatable, Sendable {
         switch attempt {
         case complete: return .signedIn
         case waitingForBrowser: return .waiting
+        case cancelledWord: return .cancelled
         default: return .ended
         }
     }
+}
+
+/// How a browser sign-in to NEAR AI ended, for its callers: signed in, ended
+/// by the person (no failure to report), or did not finish.
+public enum NearAILoginOutcome: Equatable, Sendable {
+    case signedIn
+    case cancelled
+    case failed
 }
 
 /// Where the first run commits answers to the daemon.

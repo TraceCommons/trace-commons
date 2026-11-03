@@ -234,7 +234,7 @@ pub struct PublicProfileWords {
 
 #[must_use]
 pub fn public_profile_words() -> PublicProfileWords {
-    let not_connected = "This device isn't connected to Trace Commons.";
+    let not_connected = "This device isn't connected.";
     PublicProfileWords {
         heading: "Public profile",
         list_handle_publicly: "List my handle publicly",

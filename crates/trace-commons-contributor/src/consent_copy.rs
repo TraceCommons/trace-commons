@@ -372,7 +372,7 @@ pub fn void_notice_title(project_label: Option<&str>) -> String {
 #[must_use]
 pub fn void_reason_line(label: &str) -> &'static str {
     match label {
-        "destination-changed" => "Your traces would now go to a different Trace Commons server.",
+        "destination-changed" => "Your traces would now go to a different server.",
         "identity-changed" => {
             "Your traces would now be sent under a different account, identity or device."
         }
@@ -1529,7 +1529,7 @@ pub const DISCLOSURE_ROUTE_WITNESS_REFUSING: &str =
 /// The local redactor runs before upload; the hosted service applies its
 /// own privacy-filter pass at ingest. This does not promise complete PII
 /// removal. What an attached local filter receives is the next sentence's job.
-pub const DISCLOSURE_ROUTE_LOCAL: &str = "Traces are redacted on this computer. Trace Commons' servers apply an additional personal information (PII) removal pass.";
+pub const DISCLOSURE_ROUTE_LOCAL: &str = "Traces are redacted on this computer. The server that receives your traces applies an additional personal information (PII) removal pass.";
 
 /// The route line for a device that is not enrolled.
 ///

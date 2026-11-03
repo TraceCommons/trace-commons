@@ -493,9 +493,13 @@ final class FirstRunPlanTests: XCTestCase {
         XCTAssertEqual(
             NearAILoginPoll.verdict(CredentialStatus(state: "x", attemptStatus: "waiting_for_browser")), .waiting)
         XCTAssertEqual(NearAILoginPoll.verdict(CredentialStatus(state: "x", attemptStatus: nil)), .waiting)
-        for ended in ["cancelled", "failed", "complete", "something-new"] {
+        for ended in ["failed", "complete", "something-new"] {
             XCTAssertEqual(NearAILoginPoll.verdict(CredentialStatus(state: "x", attemptStatus: ended)), .ended, ended)
         }
+        // A cancel -- the wallet's own, or the login page coming back after
+        // a pick -- is the person's doing, not a failure.
+        XCTAssertEqual(
+            NearAILoginPoll.verdict(CredentialStatus(state: "x", attemptStatus: "cancelled")), .cancelled)
         XCTAssertEqual(NearAILoginPoll.verdict(nil), .waiting)
     }
 }
@@ -514,6 +518,7 @@ final class NearAILoginFreshVerdictTests: XCTestCase {
         XCTAssertEqual(NearAILoginPoll.freshVerdict(nil), .waiting)
         XCTAssertEqual(NearAILoginPoll.freshVerdict(status("complete")), .signedIn)
         XCTAssertEqual(NearAILoginPoll.freshVerdict(status("failed")), .ended)
-        XCTAssertEqual(NearAILoginPoll.freshVerdict(status("cancelled")), .ended)
+        XCTAssertEqual(NearAILoginPoll.freshVerdict(status("cancelled")), .cancelled)
+        XCTAssertEqual(NearAILoginPoll.freshVerdict(status("something-new")), .ended)
     }
 }

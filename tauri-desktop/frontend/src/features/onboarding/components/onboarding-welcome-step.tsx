@@ -11,7 +11,7 @@ export function OnboardingWelcomeStep({
   return (
     <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px] max-w-[760px]">
       <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
-        TRACE COMMONS
+        NEAR.AI
       </span>
       <h2>{copy?.onboarding.heading ?? "Your first contribution"}</h2>
       {copy ? (

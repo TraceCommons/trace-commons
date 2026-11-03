@@ -599,7 +599,7 @@
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
-                    <TextBlock Text="These are the permissions this device requests. Trace Commons can narrow them, never widen them, and if your permissions change between now and sending, this approval stops applying and you are asked again."
+                    <TextBlock Text="These are the permissions this device requests. The server can narrow them, never widen them, and if your permissions change between now and sending, this approval stops applying and you are asked again."
                                Style="{StaticResource TcCaptionTextStyle}"
                                TextWrapping="Wrap" />
                 </StackPanel>

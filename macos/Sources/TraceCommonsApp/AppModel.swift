@@ -60,6 +60,27 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The Terminal windows a new session can open in, each as its running
+    /// sessions' ids (`managed_terminal_windows`). Empty when the daemon
+    /// lists none, or could not be asked.
+    func managedTerminalWindows(done: @escaping @MainActor ([[String]]) -> Void) {
+        guard let client else { return done([]) }
+        Task.detached(priority: .userInitiated) {
+            let response = (try? client.managedAction("managed_terminal_windows", params: [:])) ?? [:]
+            let windows = ManagedSurface.terminalWindows(response)
+            await MainActor.run { done(windows) }
+        }
+    }
+
+    /// The person picked a window: the daemon asks macOS for the
+    /// permissions a tab needs, off any launch. Nothing waits for it.
+    func managedTerminalTabAccess() {
+        guard let client else { return }
+        Task.detached(priority: .utility) {
+            _ = try? client.managedAction("managed_terminal_tab_access", params: [:])
+        }
+    }
+
     /// Read or reset one folder/agent profile without choosing an account.
     /// A nil `cwd` is the home folder, which the daemon resolves.
     func managedFolderSettings(tool: String, cwd: String?, reset: Bool = false,
@@ -146,7 +167,7 @@ final class AppModel: ObservableObject {
     /// request, in the same task, so a launch dialog that asked for one
     /// opens in it.
     func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil,
-                       terminal: String? = nil, inWindowOf: String? = nil) {
+                       terminal: String? = nil, beside: String? = nil) {
         guard let client, !managedBusy else { return }
         managedBusy = true
         managedErrorKey = nil
@@ -188,10 +209,12 @@ final class AppModel: ObservableObject {
                           let ticket = response["ticket"] as? String else {
                         throw DaemonClient.Failure(code: "launch-unknown", message: "managed-launch-unknown")
                     }
-                    // Start again and Resume run in the ended row's own
-                    // tab when Terminal still has it (owner, 2026-11-02).
+                    // A window picked in the launch dialog is sent by its
+                    // session (`beside`); the daemon finds the window. Start
+                    // again and Resume always open a new window (owner,
+                    // 2026-11-02, #1853 decision (b)).
                     var launch: [String: Any] = ["session_id": session, "ticket": ticket]
-                    if let inWindowOf { launch["in_window_of"] = inWindowOf }
+                    if let beside { launch["beside"] = beside }
                     _ = try client.managedAction("managed_terminal_launch", params: launch)
                 }
                 return response["revision"] as? UInt64
@@ -820,10 +843,6 @@ final class AppModel: ObservableObject {
     @Published private(set) var nearAiBrowserSignInWaiting = false
     @Published private(set) var nearAiBrowserRestarting = false
     private var nearAiBrowserGeneration = 0
-    /// The provider the browser sign-in under way was started with, nil
-    /// for the daemon's default. A retry that names none starts the same
-    /// one again rather than switching the person to another login.
-    private var nearAiBrowserProvider: String?
 
     /// A second Sign in again replaces the browser attempt, without
     /// starting a second account flow or trusting the old poll's result.
@@ -1112,11 +1131,14 @@ final class AppModel: ObservableObject {
     /// means the ceremony did not begin in a way this shell can carry
     /// through, and nothing is left half-started -- the daemon's own attempt
     /// times out on the browser.
-    func startNearAiCredential(provider: String?) async -> URL? {
+    ///
+    /// It names no provider; the daemon's browser page offers the build's
+    /// logins (owner, 2026-11-02).
+    func startNearAiCredential() async -> URL? {
         guard let client, !credentialBusy else { return nil }
         credentialBusy = true
         let outcome = await Task.detached(priority: .userInitiated) {
-            Result { try client.nearAiCredentialStart(provider: provider) }
+            Result { try client.nearAiCredentialStart() }
         }.value
         credentialBusy = false
         guard case .success(let attempt) = outcome, let attempt else {
@@ -1144,8 +1166,14 @@ final class AppModel: ObservableObject {
     }
 
     /// Removes the stored key from this machine.
+    ///
+    /// The daemon also revokes the key at NEAR AI. When that did not happen,
+    /// the one sentence for it is shown where an action's failure is.
     func forgetNearAiCredential() {
-        submitNearAiCredential { try $0.nearAiCredentialForget() }
+        submitNearAiCredentialReporting { client in
+            try CredentialSurface.forgetLeftKeyAtService(
+                resultJSON: client.nearAiCredentialForget())
+        }
     }
 
     func migrateNearAiCredential() {
@@ -1163,6 +1191,17 @@ final class AppModel: ObservableObject {
     /// continuation on success only, which would leave a failed cancel with
     /// the button disabled and no way back.
     private func submitNearAiCredential(_ work: @escaping @Sendable (DaemonClient) throws -> Void) {
+        submitNearAiCredentialReporting { client in
+            try work(client)
+            return false
+        }
+    }
+
+    /// The same, for a forget: `true` from `work` is a key removed here but
+    /// not revoked at NEAR AI, and `credentialForgetNotRevoked` is shown.
+    private func submitNearAiCredentialReporting(
+        _ work: @escaping @Sendable (DaemonClient) throws -> Bool
+    ) {
         guard !credentialBusy else { return }
         guard let client else {
             lastActionError = privateInferenceCopy?.writeUnconfirmed
@@ -1173,8 +1212,13 @@ final class AppModel: ObservableObject {
             let outcome = Result { try work(client) }
             await MainActor.run {
                 self.credentialBusy = false
-                if case .failure = outcome {
+                switch outcome {
+                case .failure:
                     self.lastActionError = self.privateInferenceCopy?.writeUnconfirmed
+                case .success(true):
+                    self.lastActionError = self.privateInferenceCopy?.credentialForgetNotRevoked
+                case .success(false):
+                    break
                 }
                 self.refreshNearAiCredential()
                 self.refreshSettings()
@@ -3721,13 +3765,9 @@ final class AppModel: ObservableObject {
     /// NEAR AI no longer accepts that login (`near_ai_sign_in_required`),
     /// this signs in to NEAR AI in the browser first and asks once more.
     /// The session is then read again, and only that read is trusted.
-    ///
-    /// `provider` is the login the browser sign-in uses when one is needed:
-    /// the person's choice, or nil for the daemon's default
-    /// (`channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER`).
-    func signInAgain(provider: String?) async {
+    func signInAgain() async {
         if nearAiBrowserSignInWaiting {
-            await restartNearAIBrowserSignIn(provider: provider ?? nearAiBrowserProvider)
+            await restartNearAIBrowserSignIn()
             return
         }
         guard !accountSigningIn else { return }
@@ -3737,7 +3777,11 @@ final class AppModel: ObservableObject {
         var answer = await firstRunCall { try $0.nearAiAccountSignIn() }
         if case .failure(let failure as DaemonClient.Failure) = answer,
            failure.message == "near_ai_sign_in_required" {
-            guard await nearAILogin(fresh: true, provider: provider) else {
+            switch await nearAILoginOutcome(fresh: true) {
+            case .signedIn: break
+            // The person ended it; the browser already said so.
+            case .cancelled: return
+            case .failed:
                 accountSignInFailure = .failed
                 return
             }
@@ -3753,12 +3797,9 @@ final class AppModel: ObservableObject {
     /// Refresh the NEAR AI login explicitly, even when the separate Commons
     /// account session is still valid. Once the browser completes, restore or
     /// reread the Commons session when this account uses NEAR AI sign-in.
-    ///
-    /// `provider` is the login the person chose (`NearAiSignInChoice`), or
-    /// nil when the build offers one and names none.
-    func signInToNearAI(provider: String?) async {
+    func signInToNearAI() async {
         if nearAiBrowserSignInWaiting {
-            await restartNearAIBrowserSignIn(provider: provider)
+            await restartNearAIBrowserSignIn()
             return
         }
         guard !nearAiSigningIn, !accountSigningIn else { return }
@@ -3770,12 +3811,18 @@ final class AppModel: ObservableObject {
             accountSignInPath = session.signIn
             accountRenewalFailure = session.renewalFailure
         }
-        guard await nearAILogin(fresh: true, provider: provider) else {
+        switch await nearAILoginOutcome(fresh: true) {
+        case .signedIn: break
+        // The person ended it (the wallet's Cancel, or Back to the login page
+        // after a pick): the browser already said to start again from the
+        // app, so no "Sign-in didn't finish" here.
+        case .cancelled: return
+        case .failed:
             nearAiSignInFailed = true
             return
         }
         if accountSignInPath == "near_ai" {
-            await signInAgain(provider: provider)
+            await signInAgain()
             nearAiSignInFailed = accountSignInFailure != nil
         } else {
             accountSessionGeneration &+= 1
@@ -3824,7 +3871,7 @@ final class AppModel: ObservableObject {
     /// that read, as Ron's History does.
     func signInToWithdraw() async {
         // A NEAR AI account signs in through NEAR AI.
-        if accountSignInPath == "near_ai" { return await signInAgain(provider: nil) }
+        if accountSignInPath == "near_ai" { return await signInAgain() }
         guard !accountSigningIn else { return }
         accountSigningIn = true
         accountSignInFailure = nil
@@ -4363,37 +4410,45 @@ extension AppModel: FirstRunDaemon {
     /// until it ends (`NearAILoginPoll`). Called directly rather than
     /// through `startNearAiCredential`, whose failure writes the Settings
     /// notice; the first run says its own (`folders.sign_in_failed`).
-    /// It names no provider: the first run offers no choice of login, so
-    /// the daemon starts this build's default.
-    func nearAILogin() async -> Bool { await nearAILogin(fresh: false, provider: nil) }
+    func nearAILogin() async -> Bool { await nearAILogin(fresh: false) }
 
     /// `fresh`: sign in even when a NEAR AI login is stored, because NEAR AI
-    /// refused it (Sign in again's `near_ai_sign_in_required`). `provider`:
-    /// the login to start, nil for the daemon's default.
-    func nearAILogin(fresh: Bool, provider: String?) async -> Bool {
-        guard let client, !nearAiBrowserSignInWaiting else { return false }
+    /// refused it (Sign in again's `near_ai_sign_in_required`). It names no
+    /// provider; the daemon's browser page offers the build's logins.
+    func nearAILogin(fresh: Bool) async -> Bool {
+        await nearAILoginOutcome(fresh: fresh) == .signedIn
+    }
+
+    /// The first run's login, with how it ended (`FirstRunDaemon`).
+    func nearAILoginOutcome() async -> NearAILoginOutcome { await nearAILoginOutcome(fresh: false) }
+
+    /// [`nearAILogin(fresh:)`], telling an attempt the person ended
+    /// (`.cancelled`: the wallet's own Cancel, or the browser's login page
+    /// coming back after a pick, which already says to start again from the
+    /// app) apart from one that did not finish, so no caller reports a
+    /// failure for it.
+    func nearAILoginOutcome(fresh: Bool) async -> NearAILoginOutcome {
+        guard let client, !nearAiBrowserSignInWaiting else { return .failed }
         if !fresh {
             let first = await Task.detached { try? client.nearAiCredentialStatus(attemptID: nil) }.value
-            if NearAILoginPoll.verdict(first) == .signedIn { return true }
+            if NearAILoginPoll.verdict(first) == .signedIn { return .signedIn }
         }
         // A Cancel before the browser opens: no attempt is begun, and none
         // that began meanwhile opens the browser.
-        if Task.isCancelled { return false }
+        if Task.isCancelled { return .failed }
         credentialSignInNotificationEpoch &+= 1
         credentialSignInNotifiesAccount = false
         nearAiBrowserGeneration &+= 1
         nearAiBrowserSignInWaiting = true
-        nearAiBrowserProvider = provider
         defer {
             nearAiBrowserSignInWaiting = false
             firstRunLoginAttemptID = nil
-            nearAiBrowserProvider = nil
         }
-        let started = await Task.detached { try? client.nearAiCredentialStart(provider: provider) }.value
-        guard let attempt = started, let url = URL(string: attempt.browserURL) else { return false }
+        let started = await Task.detached { try? client.nearAiCredentialStart() }.value
+        guard let attempt = started, let url = URL(string: attempt.browserURL) else { return .failed }
         if Task.isCancelled || self.client !== client {
             _ = await Task.detached { try? client.nearAiCredentialCancel(attemptID: attempt.attemptID) }.value
-            return false
+            return .failed
         }
         firstRunLoginAttemptID = attempt.attemptID
         openBrowser(url)
@@ -4403,41 +4458,42 @@ extension AppModel: FirstRunDaemon {
             try? await Task.sleep(for: .seconds(1))
             // Cancelled (the first run's Cancel): stop at once, without
             // another poll that could report a sign-in.
-            if Task.isCancelled { return false }
-            guard self.client === client else { return false }
+            if Task.isCancelled { return .failed }
+            guard self.client === client else { return .failed }
             // Cancellation and replacement are one operation. In particular,
             // an old poll must not finish the flow while cancel is in flight.
             if nearAiBrowserRestarting { continue }
-            guard let attemptID = firstRunLoginAttemptID else { return false }
+            guard let attemptID = firstRunLoginAttemptID else { return .failed }
             if deadlineAttemptID != attemptID {
                 deadlineAttemptID = attemptID
                 deadline = Date().addingTimeInterval(NearAILoginPoll.limit)
             }
-            guard Date() < deadline else { return false }
+            guard Date() < deadline else { return .failed }
             let generation = nearAiBrowserGeneration
             let status = await Task.detached { try? client.nearAiCredentialStatus(attemptID: attemptID) }.value
-            guard !Task.isCancelled, self.client === client else { return false }
+            guard !Task.isCancelled, self.client === client else { return .failed }
             guard !nearAiBrowserRestarting, generation == nearAiBrowserGeneration,
                   firstRunLoginAttemptID == attemptID else { continue }
             switch fresh ? NearAILoginPoll.freshVerdict(status) : NearAILoginPoll.verdict(status) {
             case .signedIn:
                 refreshNearAiCredential()
-                return true
+                return .signedIn
+            case .cancelled:
+                refreshNearAiCredential()
+                return .cancelled
             case .ended:
                 refreshNearAiCredential()
-                return false
+                return .failed
             case .waiting:
                 continue
             }
         }
-        return false
+        return .failed
     }
 
     /// Cancel the named attempt before requesting a new one. The original
     /// waiter follows the replacement, so only it completes the account flow.
-    /// `provider` is the login the new attempt starts: the one chosen for
-    /// the retry, else the one the attempt it replaces was started with.
-    private func restartNearAIBrowserSignIn(provider: String?) async {
+    private func restartNearAIBrowserSignIn() async {
         guard canRestartNearAiBrowserSignIn, let client,
               let attemptID = firstRunLoginAttemptID else { return }
         nearAiBrowserRestarting = true
@@ -4455,9 +4511,7 @@ extension AppModel: FirstRunDaemon {
             return
         }
         firstRunLoginAttemptID = nil
-        let provider = provider ?? nearAiBrowserProvider
-        nearAiBrowserProvider = provider
-        let started = await DaemonWork.run { try? client.nearAiCredentialStart(provider: provider) }
+        let started = await DaemonWork.run { try? client.nearAiCredentialStart() }
         guard self.client === client, nearAiBrowserSignInWaiting, !Task.isCancelled,
               generation == nearAiBrowserGeneration else {
             if let attempt = started {
@@ -4642,8 +4696,22 @@ extension AppModel: FirstRunDaemon {
 
     /// The daemon drops this Mac's enrollment (`unenroll`). Status is read
     /// again, so `status.loggedIn` is false before watch only is marked.
+    ///
+    /// The NEAR AI sign-in goes too. Where an action's failure is shown:
+    /// the failed-revoke sentence when its key could not be revoked at NEAR
+    /// AI, and `nearAiStillSignedIn` when it could not be cleared here (the
+    /// enrollment is gone either way, and Forget in Private AI removes it).
     func unenroll() async -> Bool {
-        guard case .success = await firstRunCall({ try $0.unenroll() }) else { return false }
+        guard case .success(let nearAi) = await firstRunCall({ try $0.unenroll() })
+        else { return false }
+        switch nearAi {
+        case .notRevoked:
+            lastActionError = privateInferenceCopy?.credentialForgetNotRevoked
+        case .notCleared:
+            lastActionError = privateInferenceCopy?.nearAiStillSignedIn
+        case .done:
+            break
+        }
         if case .success(let fresh) = await firstRunCall({ try $0.status() }) {
             publishIfChanged(\.status, fresh)
         }
