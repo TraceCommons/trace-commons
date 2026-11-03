@@ -1418,32 +1418,23 @@ impl PayoutStore for PgBackend {
         })
     }
 
-    async fn payout_account_anchors(
+    async fn payout_account_login_anchors(
         &self,
         tenant: &str,
         account: Uuid,
-    ) -> Result<crate::payout_recipient_proof::AccountAnchors, DatabaseError> {
+    ) -> Result<Vec<String>, DatabaseError> {
         let mut client = self.payout_tenant_client().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
         let rows = tx
             .query(
-                "SELECT identity_source, anchor_hash FROM trace_near_account_anchors
+                "SELECT anchor_hash FROM trace_near_account_anchors
                   WHERE tenant_id = $1 AND account_id = $2
-                    AND identity_source IN ('near_ai_login', 'wallet')",
+                    AND identity_source = 'near_ai_login'",
                 &[&tenant, &account],
             )
             .await?;
         tx.commit().await?;
-        let mut anchors = crate::payout_recipient_proof::AccountAnchors::default();
-        for row in rows {
-            let source: &str = row.get(0);
-            let hash: String = row.get(1);
-            match source {
-                "near_ai_login" => anchors.login.push(hash),
-                _ => anchors.wallet.push(hash),
-            }
-        }
-        Ok(anchors)
+        Ok(rows.iter().map(|row| row.get(0)).collect())
     }
 
     async fn confirm_payout_link_request(

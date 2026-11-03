@@ -3749,14 +3749,15 @@ pub trait PayoutStore: Send + Sync {
         rail: &RailId,
     ) -> Result<PayoutAccountLinkView, DatabaseError>;
 
-    /// The account's anchors a `near_ai` proof can match, in one read: its
-    /// `near_ai_login` anchors (a NEAR AI subject) and its `wallet` anchors
-    /// (a NEAR AI wallet sign-in). Both empty for an account with none.
-    async fn payout_account_anchors(
+    /// The account's recorded NEAR AI login anchors
+    /// (`trace_near_account_anchors` rows with `identity_source =
+    /// 'near_ai_login'`), which a `near_ai` proof's subject must match. Empty
+    /// for an account with none; wallet anchors prove nothing here.
+    async fn payout_account_login_anchors(
         &self,
         tenant: &str,
         account: Uuid,
-    ) -> Result<crate::payout_recipient_proof::AccountAnchors, DatabaseError>;
+    ) -> Result<Vec<String>, DatabaseError>;
 
     /// Takes the account's request on `rail` with that handle hash and, in
     /// the same transaction, writes what it asks for: a `waiting` link
