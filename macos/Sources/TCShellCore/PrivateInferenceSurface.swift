@@ -136,6 +136,10 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     /// false`: the revoke at NEAR AI did not happen, and the contributor can
     /// delete the key there. See `CredentialSurface.forgetLeftKeyAtService`.
     public let credentialForgetNotRevoked: String
+    /// After an unenroll that could not clear the NEAR AI sign-in
+    /// (`near_ai_cleared: false`): it is still on this Mac, and Forget in
+    /// Private AI removes it.
+    public let nearAiStillSignedIn: String
     /// The button behind `migration_available`, and the sentence drawn beside
     /// it: moving copies the sign-in out of the login keychain, and macOS may
     /// ask for the login password once to allow that.
@@ -388,6 +392,7 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case credentialForget = "credential_forget"
         case credentialForgetExplains = "credential_forget_explains"
         case credentialForgetNotRevoked = "credential_forget_not_revoked"
+        case nearAiStillSignedIn = "near_ai_still_signed_in"
         case credentialMigrate = "credential_migrate"
         case credentialMigrateExplains = "credential_migrate_explains"
         case credentialAbsent = "credential_absent"

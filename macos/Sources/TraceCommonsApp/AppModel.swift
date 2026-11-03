@@ -4649,8 +4649,8 @@ extension AppModel: FirstRunDaemon {
     ///
     /// The NEAR AI sign-in goes too. Where an action's failure is shown:
     /// the failed-revoke sentence when its key could not be revoked at NEAR
-    /// AI, and "couldn't confirm, try again" when it could not be cleared
-    /// here (calling again clears it). The enrollment is gone either way.
+    /// AI, and `nearAiStillSignedIn` when it could not be cleared here (the
+    /// enrollment is gone either way, and Forget in Private AI removes it).
     func unenroll() async -> Bool {
         guard case .success(let nearAi) = await firstRunCall({ try $0.unenroll() })
         else { return false }
@@ -4658,7 +4658,7 @@ extension AppModel: FirstRunDaemon {
         case .notRevoked:
             lastActionError = privateInferenceCopy?.credentialForgetNotRevoked
         case .notCleared:
-            lastActionError = privateInferenceCopy?.writeUnconfirmed
+            lastActionError = privateInferenceCopy?.nearAiStillSignedIn
         case .done:
             break
         }

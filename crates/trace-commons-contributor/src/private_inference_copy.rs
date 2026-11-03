@@ -652,6 +652,7 @@ pub struct PrivateInferenceCopy {
     pub credential_forget: &'static str,
     pub credential_forget_explains: &'static str,
     pub credential_forget_not_revoked: &'static str,
+    pub near_ai_still_signed_in: &'static str,
     pub credential_migrate: &'static str,
     pub credential_migrate_explains: &'static str,
     pub credential_absent: &'static str,
@@ -1281,6 +1282,12 @@ pub const CREDENTIAL_FORGET_EXPLAINS: &str =
 /// contributor is the one who can delete it. Owner wording, 2026-11-02.
 pub const CREDENTIAL_FORGET_NOT_REVOKED: &str =
     "Couldn't revoke the key. Delete it in your NEAR AI account.";
+
+/// Drawn after an unenroll that removed the enrollment but could not clear
+/// the NEAR AI sign-in (`near_ai_cleared: false`): the key and session are
+/// still on this computer, and Forget in Private AI removes them. Owner
+/// wording, approved 2026-11-03.
+pub const NEAR_AI_STILL_SIGNED_IN: &str = "NEAR AI is still signed in. Use Forget in Private AI.";
 
 /// The button behind `migration_available`: copy the sign-in an earlier
 /// build kept in the login keychain into the store this build uses.
@@ -2498,6 +2505,7 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         credential_forget: CREDENTIAL_FORGET,
         credential_forget_explains: CREDENTIAL_FORGET_EXPLAINS,
         credential_forget_not_revoked: CREDENTIAL_FORGET_NOT_REVOKED,
+        near_ai_still_signed_in: NEAR_AI_STILL_SIGNED_IN,
         credential_migrate: CREDENTIAL_MIGRATE,
         credential_migrate_explains: CREDENTIAL_MIGRATE_EXPLAINS,
         credential_absent: CREDENTIAL_ABSENT,
@@ -4104,6 +4112,10 @@ mod tests {
             copy.credential_forget_not_revoked,
             "Couldn't revoke the key. Delete it in your NEAR AI account."
         );
+        assert_eq!(
+            copy.near_ai_still_signed_in,
+            "NEAR AI is still signed in. Use Forget in Private AI."
+        );
     }
 
     /// NOTHING ON THIS SURFACE RENDERS A KEY. Hash-only and label-only, in
@@ -4121,6 +4133,7 @@ mod tests {
             copy.credential_forget,
             copy.credential_forget_explains,
             copy.credential_forget_not_revoked,
+            copy.near_ai_still_signed_in,
             copy.credential_absent,
             copy.credential_obtaining,
             copy.credential_failed,
@@ -4967,7 +4980,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            183,
+            184,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );

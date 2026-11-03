@@ -123,6 +123,8 @@ final class CredentialExportTests: XCTestCase {
             copy.credentialForgetExplains)
         XCTAssertFalse(copy.credentialForgetExplains.isEmpty)
         XCTAssertFalse(copy.credentialForgetNotRevoked.isEmpty)
+        XCTAssertEqual(
+            copy.nearAiStillSignedIn, "NEAR AI is still signed in. Use Forget in Private AI.")
     }
 
     /// The tri-state crosses as three values, and only the middle one draws

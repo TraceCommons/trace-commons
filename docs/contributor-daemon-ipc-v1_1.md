@@ -6372,6 +6372,7 @@ state, the harness rows and the credential row:
 - `credential_title`, `credential_what`, `credential_cost`;
 - `credential_obtain`, `credential_cancel`, `credential_forget`,
   `credential_forget_explains`, `credential_forget_not_revoked`,
+  `near_ai_still_signed_in`,
   `credential_migrate`,
   `credential_migrate_explains`;
 - `credential_absent`, `credential_obtaining`, `credential_failed`,
@@ -6924,7 +6925,8 @@ refuses it with `near-ai-credential-forget-requires-async`. A shell draws
 Unenroll and `account_sign_out` clear the same NEAR AI sign-in and revoke the
 same way. Each answers `near_ai_revoked` with the same three values, and
 `near_ai_cleared: false` when the NEAR AI sign-in could not be cleared here
-(the rest of the call has happened; calling again clears what is left).
+(the rest of the call has happened). After an unenroll, a shell says so
+with `near_ai_still_signed_in`: Forget in Private AI removes what is left.
 `account_sign_out` also answers `server_revoked`: whether the server accepted
 the account session's revoke, `null` when there was no session.
 

@@ -179,8 +179,8 @@ public enum CredentialSurface {
         /// (`near_ai_revoked: false`): `credentialForgetNotRevoked`.
         case notRevoked
         /// Not cleared here (`near_ai_cleared: false`): the key, session and
-        /// record are still on this Mac. Calling again clears them, so the
-        /// shell says the change is unconfirmed and to try again.
+        /// record are still on this Mac. The shell says so with
+        /// `nearAiStillSignedIn`; Forget in Private AI removes them.
         case notCleared
     }
 

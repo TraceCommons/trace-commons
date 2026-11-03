@@ -79,6 +79,7 @@ enum PrivateInferenceCopyFixture {
          "credential_cancel":"C-CANCEL","credential_forget":"C-FORGET",
          "credential_forget_explains":"C-FORGET-EXPLAINS",
          "credential_forget_not_revoked":"C-FORGET-NOT-REVOKED",
+         "near_ai_still_signed_in":"NEAR-AI-STILL-SIGNED-IN",
          "credential_migrate":"C-MIGRATE","credential_migrate_explains":"C-MIGRATE-EXPLAINS",
          "credential_absent":"C-ABSENT","credential_obtaining":"C-OBTAINING",
          "credential_failed":"C-FAILED","credential_cancelled":"C-CANCELLED",
