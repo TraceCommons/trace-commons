@@ -209,11 +209,14 @@ GRANT EXECUTE ON FUNCTION public.trace_legacy_payout_source_account(TEXT)
 -- of the signed-upload principal (`account_trust::device_upload_principal_refs`)
 -- of each actor derivable from `p_device` in `p_tenant`: the bare device
 -- key, the app's `user_subject_hash(device_key_id)` subject, and each
--- instance enrollment subject of the tenant. Sorted and distinct. Asked
--- under `p_tenant`'s context (instance enrollments are read through the
--- guard's tenant policy). The claim (redefined below) and the proof set
--- both call it, so they cannot drift.
-CREATE FUNCTION public.trace_legacy_device_upload_principals(p_tenant TEXT, p_device TEXT)
+-- instance enrollment subject of the tenant enrolled before
+-- `p_enrolled_before` (NULL: up to now). Sorted and distinct. Asked under
+-- `p_tenant`'s context (instance enrollments are read through the guard's
+-- tenant policy). The claim (redefined below) and the proof set both call
+-- it, so they cannot drift.
+CREATE FUNCTION public.trace_legacy_device_upload_principals(
+    p_tenant TEXT, p_device TEXT, p_enrolled_before TIMESTAMPTZ
+)
 RETURNS TEXT[]
 LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
@@ -225,7 +228,9 @@ BEGIN
     FOREACH v_subject IN ARRAY
         ARRAY['', 'sha256:' || encode(sha256(convert_to('user_subject:' || p_device, 'UTF8')), 'hex')]
         || (SELECT coalesce(array_agg(DISTINCT e.user_subject_hash), ARRAY[]::TEXT[])
-              FROM public.trace_instance_enrollments e WHERE e.tenant_id = p_tenant)
+              FROM public.trace_instance_enrollments e
+             WHERE e.tenant_id = p_tenant
+               AND (p_enrolled_before IS NULL OR e.created_at < p_enrolled_before))
     LOOP
         IF v_subject = '' THEN
             v_actor := p_device;
@@ -241,9 +246,15 @@ BEGIN
     END LOOP;
     RETURN (SELECT array_agg(DISTINCT x ORDER BY x) FROM unnest(v_principals) AS x);
 END $$;
-REVOKE ALL ON FUNCTION public.trace_legacy_device_upload_principals(TEXT, TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.trace_legacy_device_upload_principals(TEXT, TEXT)
+REVOKE ALL ON FUNCTION public.trace_legacy_device_upload_principals(TEXT, TEXT, TIMESTAMPTZ)
+    FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.trace_legacy_device_upload_principals(TEXT, TEXT, TIMESTAMPTZ)
     TO trace_legacy_payout_carry_guard;
+-- What the proof set reads to bound each device's subjects: when the tenant
+-- link was made, when each device attested, and when each subject enrolled.
+GRANT SELECT (linked_at) ON trace_legacy_invite_links TO trace_legacy_payout_carry_guard;
+GRANT SELECT (attested_at) ON trace_legacy_invite_link_devices TO trace_legacy_payout_carry_guard;
+GRANT SELECT (created_at) ON trace_instance_enrollments TO trace_legacy_payout_carry_guard;
 
 -- V146's decision-5 claim, unchanged but for its derivation, which is now
 -- the helper above.
@@ -289,7 +300,10 @@ BEGIN
         RETURN 0;
     END IF;
 
-    v_principals := public.trace_legacy_device_upload_principals(p_legacy_tenant, p_device_key_id);
+    -- The claim runs at the link or attestation itself: every subject
+    -- enrolled so far is one enrolled by then.
+    v_principals := public.trace_legacy_device_upload_principals(
+        p_legacy_tenant, p_device_key_id, NULL);
     -- The same lock both V135 namespace-guard triggers take per principal.
     FOREACH v_principal IN ARRAY v_principals LOOP
         PERFORM pg_advisory_xact_lock(hashtextextended(p_legacy_tenant || ':' || v_principal, 135));
@@ -340,15 +354,22 @@ END $$;
 -- legacy tenant holding a principal the helper above derives from a device
 -- the live tenant link proved (the linking device or a V91-attested one)
 -- that is still live in the tenant: unrevoked, `invite` origin, and not
--- NEAR-provisioned, the same test the claim applies (review of #1879). An
--- account opened by any other device waits. Asked under the legacy
--- tenant's own context; refused under any other.
+-- NEAR-provisioned, the same test the claim applies (review of #1879). Each
+-- device's instance-enrollment subjects count only if enrolled no later
+-- than the tenant link (the linking device) or its V91 attestation (an
+-- attested device): owner decision, 2026-11-03, so a subject the instance
+-- key enrolls after the link proves nothing. Link and attestation times
+-- are whole seconds, so "no later than" is "before the next second". An
+-- account opened by any other device or subject waits. Asked under the
+-- legacy tenant's own context; refused under any other.
 CREATE FUNCTION public.trace_legacy_payout_proven_accounts(p_legacy_tenant TEXT)
 RETURNS SETOF UUID
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
     v_link RECORD;
     v_devices TEXT[];
+    v_bounds TIMESTAMPTZ[];
+    v_index INTEGER;
     v_device TEXT;
     v_principals TEXT[] := ARRAY[]::TEXT[];
 BEGIN
@@ -359,7 +380,7 @@ BEGIN
     IF p_legacy_tenant ~ '^(near-|nearai-)' THEN
         RETURN;
     END IF;
-    SELECT l.link_id, l.tenant_id, l.device_key_id INTO v_link
+    SELECT l.link_id, l.tenant_id, l.device_key_id, l.linked_at INTO v_link
       FROM public.trace_legacy_invite_links l
      WHERE l.legacy_tenant_id = p_legacy_tenant AND l.revoked_at IS NULL;
     IF NOT FOUND THEN
@@ -367,19 +388,24 @@ BEGIN
     END IF;
     -- The attested devices live under the NEAR AI account's tenant.
     PERFORM set_config('trace_commons.trace_tenant_id', v_link.tenant_id, true);
-    SELECT ARRAY[v_link.device_key_id] || coalesce(array_agg(d.device_key_id), ARRAY[]::TEXT[])
-      INTO v_devices
+    SELECT ARRAY[v_link.device_key_id] || coalesce(array_agg(d.device_key_id ORDER BY d.device_key_id), ARRAY[]::TEXT[]),
+           ARRAY[to_timestamp(v_link.linked_at + 1)]
+               || coalesce(array_agg(to_timestamp(d.attested_at + 1) ORDER BY d.device_key_id),
+                           ARRAY[]::TIMESTAMPTZ[])
+      INTO v_devices, v_bounds
       FROM public.trace_legacy_invite_link_devices d
      WHERE d.link_id = v_link.link_id;
     PERFORM set_config('trace_commons.trace_tenant_id', p_legacy_tenant, true);
-    FOREACH v_device IN ARRAY v_devices LOOP
+    FOR v_index IN 1 .. cardinality(v_devices) LOOP
+        v_device := v_devices[v_index];
         IF EXISTS (SELECT 1 FROM public.device_keys d
                     WHERE d.tenant_id = p_legacy_tenant AND d.device_key_id = v_device
                       AND d.revoked_at IS NULL AND d.onboarding_origin = 'invite')
            AND NOT EXISTS (SELECT 1 FROM public.trace_near_provisioned_devices n
                             WHERE n.tenant_id = p_legacy_tenant AND n.device_key_id = v_device) THEN
             v_principals := v_principals
-                || public.trace_legacy_device_upload_principals(p_legacy_tenant, v_device);
+                || public.trace_legacy_device_upload_principals(
+                    p_legacy_tenant, v_device, v_bounds[v_index]);
         END IF;
     END LOOP;
     RETURN QUERY

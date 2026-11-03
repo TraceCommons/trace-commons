@@ -731,10 +731,14 @@ Where the implementation differs from, or adds to, sections 3 to 5:
    (`trace_legacy_payout_carry_unproven` in the account standing) and
    released at the next carry event; the first event after deploy does the
    same to any V146-era carry on an unproven account, which the pre-deploy
-   checks count. Still open for the owner (review of #1879): the proof set
-   takes the tenant's instance-enrollment subjects at the time of the
-   event, so a subject enrolled after the link proves a new account of the
-   linking device.
+   checks count.
+5. **Instance-enrollment subjects prove only if enrolled by the link**
+   (owner, 2026-11-03, review of #1879 at V148:253). A subject counts
+   toward the proof set only if it was enrolled no later than the tenant
+   link (for the linking device) or the V91 attestation (for an attested
+   device), matching the claim's own snapshot. An account under a subject
+   the instance key enrolls after the link is not proven and is not
+   carried.
 3. **A legacy account whose own payout link V147 (#1868) revoked** gets its
    carry at the next of those events, if it is proven, as the waiting
    successor of the revoked link. The pilot had 0 links on 2026-11-02;

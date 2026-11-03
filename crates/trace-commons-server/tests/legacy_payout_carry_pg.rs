@@ -437,8 +437,17 @@ impl Fixture {
 
     /// A signed-upload principal of the tenant's linking device that no
     /// account holds yet: the device's actor under a fresh instance
-    /// enrollment subject for the tenant, so the carry can derive it.
+    /// enrollment subject for the tenant, enrolled before the tenant link
+    /// (owner decision, 2026-11-03: only subjects enrolled by the link
+    /// prove), so the carry can derive it.
     async fn proven_principal(&self, tenant: &str) -> String {
+        self.enrolled_principal(tenant, "now() - interval '1 day'")
+            .await
+    }
+
+    /// A principal of the tenant's linking device under a fresh enrollment
+    /// subject enrolled at `enrolled_at` (an SQL expression).
+    async fn enrolled_principal(&self, tenant: &str, enrolled_at: &str) -> String {
         let device: String = self
             .admin
             .query_one(
@@ -451,8 +460,11 @@ impl Fixture {
             .get(0);
         let subject = hash(&format!("enrolled-user:{}", Uuid::new_v4()));
         self.exec(
-            "INSERT INTO trace_instance_enrollments (instance_subject_hash, user_subject_hash, tenant_id)
-             VALUES ($1, $2, $3)",
+            &format!(
+                "INSERT INTO trace_instance_enrollments
+                     (instance_subject_hash, user_subject_hash, tenant_id, created_at)
+                 VALUES ($1, $2, $3, {enrolled_at})"
+            ),
             &[&hash(&format!("instance:{subject}")), &subject, &tenant],
         )
         .await;
@@ -2003,4 +2015,33 @@ async fn only_one_function_derives_signed_upload_principals() {
             .get(0);
         assert!(calls, "{caller} calls the shared derivation");
     }
+}
+
+/// Owner decision, 2026-11-03 (V148:253): an instance-enrollment subject
+/// proves only if it was enrolled no later than the tenant link (or than the
+/// V91 attestation, for an attested device). An account under a subject the
+/// instance key enrolled after the link is not proven: not carried at its
+/// opening, and a carry it held is held at send time.
+#[tokio::test]
+async fn a_subject_enrolled_after_the_link_proves_nothing() {
+    let Some(fx) = fixture().await else { return };
+    let (_, _, legacy, _, _) = fx.carried_pair("org-l1").await;
+    let late = fx
+        .enrolled_principal(&legacy, "now() + interval '1 minute'")
+        .await;
+    let opened = fx.open_account(&legacy, &late).await;
+    assert_eq!(
+        fx.live_carries(&legacy, opened).await,
+        0,
+        "not carried at its opening"
+    );
+    let proven: i64 = fx
+        .count(
+            "SELECT count(*) FROM (SELECT set_config('trace_commons.trace_tenant_id', $1, true)) c,
+                    trace_legacy_payout_proven_accounts($1) AS p(account_id)
+              WHERE p.account_id = $2",
+            &[&legacy, &opened],
+        )
+        .await;
+    assert_eq!(proven, 0, "not in the proof set");
 }
