@@ -32,7 +32,7 @@
         <StackPanel Spacing="16" Visibility="{x:Bind ViewModel.IsWelcome, Mode=OneWay}">
             <TextBlock Style="{StaticResource TcTitleScreenTextStyle}" Text="Near.ai" />
             <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
-                       Text="Coding agents get better when there are real transcripts to learn from. Almost all of that data is locked inside companies. Trace Commons is a shared pool that isn't." />
+                       Text="Coding agents get better when there are real transcripts to learn from. Almost all of that data is locked inside companies. Your traces go to a shared pool that isn't." />
             <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
                        Text="{x:Bind ViewModel.WelcomeBody}" />
             <!--
@@ -124,16 +124,6 @@
                 <TextBlock Text="{x:Bind ViewModel.NearAiNeedsLogin, Mode=OneWay}" TextWrapping="Wrap" />
                 <StackPanel Spacing="12" Visibility="{x:Bind ViewModel.CanOfferCloudSignIn, Mode=OneWay}">
                     <TextBlock Text="{x:Bind ViewModel.CloudSignIn.CredentialActionPreamble, Mode=OneWay}" TextWrapping="Wrap" />
-                    <ComboBox Header="{x:Bind ViewModel.CloudSignIn.CredentialProviderLabel}"
-                              ItemsSource="{x:Bind ViewModel.CloudSignIn.CredentialProviders}"
-                              DisplayMemberPath="Label" SelectedValuePath="Id"
-                              SelectedValue="{x:Bind ViewModel.CloudSignIn.CredentialProvider, Mode=TwoWay}"
-                              Visibility="{x:Bind ViewModel.CloudSignIn.HasCredentialProvider, Mode=OneWay}"
-                              IsEnabled="{x:Bind ViewModel.CloudSignIn.CredentialControlsEnabled, Mode=OneWay}"
-                              MinHeight="44" HorizontalAlignment="Stretch" />
-                    <TextBlock Text="{x:Bind ViewModel.CloudSignIn.CredentialWalletNotice}"
-                               Visibility="{x:Bind ViewModel.CloudSignIn.HasCredentialWalletNotice, Mode=OneWay}"
-                               TextWrapping="Wrap" />
                     <Button Content="{x:Bind ViewModel.CloudSignIn.CredentialActionText, Mode=OneWay}"
                             Click="OnCloudSignIn"
                             Visibility="{x:Bind ViewModel.CloudSignIn.HasCredentialAction, Mode=OneWay}"
@@ -264,7 +254,7 @@
                 screen dishonest in one direction.
             -->
             <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
-                       Text="This means your message text is transmitted to NEAR AI before it reaches Trace Commons. If that scanner is unreachable, nothing is sent at all: traces wait rather than going out unscanned." />
+                       Text="This means your message text is transmitted to NEAR AI before it reaches the server that receives your traces. If that scanner is unreachable, nothing is sent at all: traces wait rather than going out unscanned." />
             <RadioButton x:Name="ScanLocalOnly" GroupName="Scan" Content="Local scrubbing only" IsChecked="True" />
             <RadioButton x:Name="ScanWithNearAi" GroupName="Scan" Content="Local scrubbing + NEAR AI scan"
                          IsChecked="{x:Bind ViewModel.UseNearAiScan, Mode=TwoWay}" />

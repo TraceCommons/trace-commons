@@ -154,6 +154,11 @@
 //!   commands or skills choose a model. NEAR AI sessions use the session's
 //!   models." The line a shell shows for the refusal
 //!   `managed-project-chooses-model`; the CLI prints the same sentence.
+//! - `project_sets_auto_mode_server` "Remove CLAUDE_CODE_AUTO_MODE_SERVER
+//!   from this project's settings." Owner-approved wording, 2026-11-02. The
+//!   line a shell shows for the refusal
+//!   `managed-project-sets-auto-mode-server`; the CLI prints the same
+//!   sentence.
 //! - `project_workflows` "This project has Claude Code workflows. A workflow
 //!   step can choose its own model, so it may not stay in this session's
 //!   privacy tier." A notice the launcher prints in the session's terminal
@@ -174,12 +179,12 @@ pub fn copy() -> serde_json::Value {
             "folder_settings_reset_accessibility": "Reset {tool} folder settings",
             "folder_model_unavailable": "The saved model is no longer available, so the default is selected.",
             "cli_options_title": "Agent CLI options",
-            "cli_options_scope": "Applies to new managed sessions. Quote values that contain spaces. Account routing, profiles and session identity are managed by Trace Commons.",
+            "cli_options_scope": "Applies to new managed sessions. Quote values that contain spaces. Account routing, profiles and session identity are managed by this app.",
             "cli_options_label": "CLI options",
             "cli_options_save": "Save",
             "cli_options_save_accessibility": "Save {tool} CLI options",
             "cli_options_invalid": "Check quotes and escapes. Account routing, profile and session overrides are unavailable here; choose the OpenCode model when launching.",
-            "cli_options_unavailable": "Update Trace Commons to edit managed session options.",
+            "cli_options_unavailable": "Update this app to edit managed session options.",
             "cli_options_read_failed": "Could not read managed session options. Try Refresh.",
             "provider_openai": "OpenAI",
             "provider_anthropic": "Anthropic",
@@ -248,6 +253,7 @@ pub fn copy() -> serde_json::Value {
             "favorites_title": "Favorite models",
             "balance_too_low": "Add funds to your NEAR AI balance to start a session.",
             "project_chooses_model": "This project's Claude Code settings, agents, commands or skills choose a model. NEAR AI sessions use the session's models.",
+            "project_sets_auto_mode_server": "Remove CLAUDE_CODE_AUTO_MODE_SERVER from this project's settings.",
             "project_workflows": "This project has Claude Code workflows. A workflow step can choose its own model, so it may not stay in this session's privacy tier.",
             "collect_traces": "Collect this session",
             "opencode_scope": "Uses only the selected key and model in an isolated profile. Project OpenCode settings and plugins are disabled. API key means an OpenAI key; NEAR AI uses a NEAR AI key.",

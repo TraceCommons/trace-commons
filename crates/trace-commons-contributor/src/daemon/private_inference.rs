@@ -583,7 +583,7 @@ const PRODUCTION_IRONWIRE_HOME_DIR: &str = ".ironwire";
 /// channel's base. `kind` is required by IronWire's parser at the pinned rev.
 fn staging_nearai_config() -> String {
     format!(
-        "# Written by the Trace Commons staging app: NEAR AI on its staging base.\n\
+        "# Written by the Near.ai Staging app: NEAR AI on its staging base.\n\
          [[backends]]\nid = \"nearai\"\nkind = \"nearai\"\nbase_url = \"{}\"\n",
         crate::channel::NEAR_AI_INFERENCE_BASE
     )

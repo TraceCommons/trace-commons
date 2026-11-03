@@ -150,6 +150,7 @@ impl Fixture {
                     session,
                     None,
                     "Mozilla/5.0 Test".into(),
+                    None,
                 )
             });
             ready_rx
@@ -214,6 +215,7 @@ fn the_current_waiting_attempt_publishes_both_credentials_once() {
         refresh("current"),
         Some(expires_at),
         "Mozilla/5.0 Test".into(),
+        None,
     )
     .expect("the current waiting attempt must publish");
 
@@ -281,6 +283,7 @@ fn a_late_mint_cannot_replace_a_new_waiting_attempts_credentials() {
             refresh("replacement"),
             None,
             "Mozilla/5.0 Test".into(),
+            None,
         )
         .expect("publish replacement account");
         // Keep the new entry waiting: only its different ID can reject the old
