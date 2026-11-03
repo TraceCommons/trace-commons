@@ -1,15 +1,15 @@
 # Opening Private AI sessions in Rex and herdr -- research and design
 
 Date: 2026-11-03. Owner: Zaki. Status: research only; nothing is built.
-Asked for "on top of #1870" (Warp Tab Configs, open at the time of
-writing). Written against `origin/main` at cc4b63022 plus the #1870 diff,
-which this note reads as the terminal-choice model to extend.
+Asked for "on top of #1870" (Warp Tab Configs, merged as 7c6134631).
+Written against `origin/main` at cc4b63022, which contains #1870; its
+terminal-choice model in `managed/terminal.rs` is what this note extends.
 
 ## The ask and the rules it must meet
 
 - Kristi (2026-11-03) wants Private AI sessions "in one window", without
   the macOS permission prompts #1852 caused. #1867 removed those prompts;
-  #1870 adds Warp, which opens a tab through a `warp://` link and a 0600
+  #1870 added Warp, which opens a tab through a `warp://` link and a 0600
   Tab Config file, with no prompt.
 - The rules this note holds both tools to:
   1. **No macOS permission prompt** (Automation, Accessibility). No Apple
@@ -17,7 +17,7 @@ which this note reads as the terminal-choice model to extend.
   2. **The command reaches the terminal as argv or a string literal**, not
      as shell text typed into a shell (`docs/managed-sessions.md`, "The
      test"). Warp was rejected on 2026-10-30 partly for failing this; #1870
-     takes Warp anyway.
+     took Warp anyway.
   3. **The single-use launch ticket** (hex, stored as a hash, 120 s, bound
      to the session id, redeemed only over the daemon's per-user socket;
      `managed/sessions.rs`, `ticket_expires: now + Duration::seconds(120)`)
@@ -37,7 +37,7 @@ which this note reads as the terminal-choice model to extend.
 | One window | Yes: one Rex session "Near.ai", one tab (Rex "window") per Private AI session | Yes: one herdr workspace "Near.ai", one tab per session |
 | Show | `rex focus` (verified) + app action `session.select` (not verified) + `open -b` to raise the app | `tab.focus` switches an attached client's view; cannot raise the host terminal window without Apple Events |
 | When not running | `open -b com.superlogical.rex`, wait for an app client, then launch | Needs a herdr client in some terminal: open the chosen terminal running `herdr`, wait for the socket, then launch |
-| Build now? | No -- private beta, not testable in CI, few users | Not yet -- worth building after #1870 lands, if the owner wants a cross-platform "one window" |
+| Build now? | No -- private beta, not testable in CI, few users | Not yet -- worth building if the owner wants a cross-platform "one window" |
 
 Neither integration is a code dependency: both talk to a separately
 installed program over its CLI or socket, so neither touches the license
@@ -416,7 +416,7 @@ install herdr`, `mise`, or `install.sh` into `~/.local/bin`; Windows by
 
 ## Open questions for the owner
 
-1. **Build either now?** Recommendation: no. Land #1870 first. Rex is a
+1. **Build either now?** Recommendation: no; let Warp (#1870) settle first. Rex is a
    private beta that almost no contributor can install; herdr is real but
    needs a socket client and a helper change. Revisit herdr when someone
    asks for it, or when Linux/Windows want "one window".
