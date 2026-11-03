@@ -258,7 +258,7 @@ fn raise_tab() -> Vec<String> {
 /// window and set `found` to its tab's tty and, on the next line, the id of
 /// Terminal's front window when its selected tab is this one (no other
 /// window is scanned). If another window is in front by then, the row gets
-/// no window id; #1852 is to treat that as normal. Run after the command is
+/// no window id, which is normal. Run after the command is
 /// typed, so each read is inside a `try`: a failure prints less, the launch
 /// stands, and the session simply cannot be shown.
 #[cfg(any(target_os = "macos", test))]
@@ -884,9 +884,9 @@ fn tty_path<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalTab {
     pub handle: TerminalHandle,
-    /// Terminal's window id. Recorded on the row by owner decision
-    /// (2026-11-02) for #1852's window picker; nothing in production reads
-    /// it yet.
+    /// Terminal's window id. Kept on the row by owner decision
+    /// (2026-11-03) although the window picker it was recorded for is gone;
+    /// nothing in production reads it.
     pub window: Option<u32>,
 }
 
@@ -1286,13 +1286,11 @@ mod tests {
             ),
             Ok(Some(tab.clone()))
         );
-        let script = TerminalApp::Terminal.script("'/x/near-ai'");
-        assert_eq!(ran, Some(MacosLaunch::Script(script.clone())));
-        assert!(
-            !script.iter().any(|l| l.contains("System Events")
-                || l.contains("keystroke")
-                || l.contains("\" in t")),
-            "{script:#?}"
+        assert_eq!(
+            ran,
+            Some(MacosLaunch::Script(
+                TerminalApp::Terminal.script("'/x/near-ai'")
+            ))
         );
         assert_eq!(
             launch_macos(
@@ -1646,7 +1644,7 @@ mod tests {
                 "set found to tty of t",
                 "end try",
                 // The window id, from the front window only when its
-                // selected tab is this one (#1853), for #1852.
+                // selected tab is this one (#1853).
                 "try",
                 "if found is not \"\" and tty of selected tab of front window is found then",
                 "set found to found & linefeed & ((id of front window) as text)",

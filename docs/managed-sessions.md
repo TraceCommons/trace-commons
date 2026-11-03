@@ -41,8 +41,8 @@ opened its window nor started its launcher. An ended session can be started
 again in the same folder with the same account while both still exist.
 Every launch, Start again and Resume included, opens a window of its own; none
 types into an existing tab. Opening a session in a window already open needed
-macOS's Automation and Accessibility prompts, which the owner does not want
-(2026-11-03), so the app does not offer it and the daemon has no such path: an
+macOS's System Events Automation and Accessibility prompts, which the owner
+does not want (2026-11-03), so the app does not offer it and the daemon has no such path: an
 older app's `beside` is accepted and ignored, and its two window-list methods
 are refused as unknown. See `docs/contributor-daemon-ipc-v1_1.md`.
 Stop signals only the tool process the launcher supervises: SIGTERM, then

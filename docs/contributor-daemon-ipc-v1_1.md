@@ -9434,8 +9434,8 @@ ignore these fields; macOS renders them.
 Session views carry three additive booleans, computed on every read:
 
 - `can_focus`: the daemon opened the session itself through
-  `managed_terminal_launch`, in a terminal it can script, named the window it
-  opened (today a Terminal window id, printed by the launch script), and the
+  `managed_terminal_launch`, in a terminal it can script, named the tab it
+  opened (today a Terminal tty, printed by the launch script), and the
   session is a running coding session.
 - `can_stop`: the daemon opened the session itself, its launcher reports a
   running coding tool, and no stop has been asked for yet.
@@ -9470,8 +9470,9 @@ focusable or stoppable.
 `managed_terminal_launch {session_id, ticket}` opens a prepared session in a
 window of its own, in the chosen terminal. Every launch does, Start again and
 Resume included (owner, 2026-11-03); nothing is ever typed into an existing
-tab, whose prompt may hold input not yet run, and the daemon asks macOS for no
-permission to do it.
+tab, whose prompt may hold input not yet run, and the daemon no longer asks
+macOS for the System Events and Accessibility permissions that a new tab
+needed. A launch still sends Apple Events to the terminal app it opens.
 
 An older app may still send two fields, which are accepted so that app keeps
 launching, and ignored: `in_window_of` (the app built from #1839) and `beside`
@@ -9488,7 +9489,9 @@ front window when that window's selected tab is the launch's, with no scan of
 other windows (#1853), and the row keeps both. Output that is not a tty,
 optionally followed by a line of digits only that is a window id, names no
 tab. When another window is in front by then, the row has its tab and no
-window id; that is normal. Nothing reads the window id yet.
+window id; that is normal. Nothing reads the window id or the row `again_of`
+records: the owner decided to keep both on the row (2026-11-03) although the
+window picker they were recorded for is gone.
 
 The terminal opens with the daemon's managed state unlocked and off the async
 worker: the launch is held first (a second `managed_terminal_launch` with the

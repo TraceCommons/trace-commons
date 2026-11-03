@@ -3004,7 +3004,7 @@ mod tests {
     /// #1839 review, findings 2 and 11, and the owner's decision
     /// (2026-11-02): Start again opens a new window like any launch. The
     /// daemon records the row it came from, and each row keeps the window
-    /// id its launch printed, for #1852 to place launches beside; the app
+    /// id its launch printed (kept by owner decision, 2026-11-03); the app
     /// names nothing. An app built from #1839 that still names a row is
     /// not refused, and what it names is ignored. The service's own handler
     /// never opens a terminal: only [`terminal_launch`] does, unlocked.
@@ -3048,20 +3048,15 @@ mod tests {
 
     /// Records each session it is asked to open, in a window of its own.
     fn record_opened(
-        _: TerminalSetting,
-        _: &[TerminalApp],
-        _: &std::path::Path,
-        _: &std::path::Path,
+        choice: TerminalSetting,
+        installed: &[TerminalApp],
+        config: &std::path::Path,
+        cwd: &std::path::Path,
         session: Uuid,
-        _: &str,
+        ticket: &str,
     ) -> Result<Option<TerminalTab>, ManagedError> {
         OPENED.lock().unwrap().push(session);
-        Ok(Some(TerminalTab {
-            handle: TerminalHandle::AppleTerminal {
-                tty: "/dev/ttys042".into(),
-            },
-            window: Some(window_of(session)),
-        }))
+        record_launch(choice, installed, config, cwd, session, ticket)
     }
 
     fn opened(session: Uuid) -> usize {

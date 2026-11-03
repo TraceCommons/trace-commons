@@ -153,20 +153,6 @@ else
   cat "$scratch/err" >&2
 fi
 
-# --- no Apple Events usage string (owner, 2026-11-03) -------------------------
-#
-# The app asks macOS for no Automation permission, so neither channel carries
-# NSAppleEventsUsageDescription (#1852 added it for the window picker, and the
-# picker is gone).
-
-for channel in production staging; do
-  if render TC_CHANNEL="$channel" >"$scratch/events-$channel.plist" 2>/dev/null; then
-    lacks "$channel" "$scratch/events-$channel.plist" 'NSAppleEventsUsageDescription'
-  else
-    fail "$channel: did not render"
-  fi
-done
-
 # --- refusals -----------------------------------------------------------------
 
 for channel in beta Production ../channels/production staging/ ""; do
