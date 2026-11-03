@@ -250,9 +250,11 @@ fn raise_tab() -> Vec<String> {
 
 /// Terminal's lines that run the AppleScript literal `literal` in a new
 /// window and set `found` to its tab's tty and, on the next line, the id of
-/// the window holding it, found by one scan that stops at the match. Run
-/// after the command is typed, so each read is inside a `try`: a failure
-/// prints less, the launch stands, and the session simply cannot be shown.
+/// Terminal's front window when its selected tab is this one (no other
+/// window is scanned). If another window is in front by then, the row gets
+/// no window id; #1852 is to treat that as normal. Run after the command is
+/// typed, so each read is inside a `try`: a failure prints less, the launch
+/// stands, and the session simply cannot be shown.
 #[cfg(any(target_os = "macos", test))]
 fn open_window(literal: &str) -> Vec<String> {
     [vec![
@@ -782,7 +784,13 @@ pub fn terminal_tab(output: &[u8]) -> Option<TerminalTab> {
     let text = std::str::from_utf8(output).ok()?;
     let text = text.strip_suffix('\n').unwrap_or(text);
     let (tty, window) = match text.split_once('\n') {
-        Some((tty, window)) => (tty, Some(window.parse::<u32>().ok()?)),
+        Some((tty, window)) => {
+            // Digits only: `u32::from_str` would also take a leading `+`.
+            if !window.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            (tty, Some(window.parse::<u32>().ok()?))
+        }
         None => (text, None),
     };
     valid_tty(tty).then(|| TerminalTab {
@@ -1040,13 +1048,13 @@ fn external_terminal(name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// Show and a launch find a tab's window the same way, by window id,
-    /// stopping at the match; a launch prints its tab's tty and that
-    /// window's id. Nothing types into or opens a tab in an existing window
-    /// (owner, 2026-11-02). Built on every platform, so no builder is
-    /// compiled for nothing.
+    /// Show scans the windows for its tab's window, by id, stopping at the
+    /// match; a launch scans nothing and reads only the front window's id,
+    /// when its selected tab is the launch's. Nothing types into or opens a
+    /// tab in an existing window (owner, 2026-11-02). Built on every
+    /// platform, so no builder is compiled for nothing.
     #[test]
-    fn show_and_a_launch_share_the_window_lines() {
+    fn show_scans_and_a_launch_reads_only_the_front_window() {
         let focus = focus_script("/dev/ttys011");
         assert_eq!(
             focus.first().unwrap(),
@@ -1111,6 +1119,7 @@ mod tests {
             b"4242\n/dev/ttys003",
             b"ttys003\n42",
             b"/dev/ttys003\n99999999999",
+            b"/dev/ttys003\n+42",
         ] {
             assert_eq!(terminal_tab(output), None, "{output:?}");
         }
