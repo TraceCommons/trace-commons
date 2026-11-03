@@ -377,14 +377,72 @@ const LEADERBOARD_INPUTS_SQL: &str = "SELECT
                               >= NOW() - ($1 || ' days')::interval
                      ) >= $2";
 
+/// How long a caller waits for a free pooled connection before the pool
+/// refuses it. Without a bound, an exhausted pool queues every caller
+/// indefinitely: requests pile up holding their bodies and any permits taken
+/// earlier, and nothing tells a client to back off. A refusal surfaces as
+/// `DatabaseError::PoolRuntime`, which callers already treat as transient.
+pub const POOL_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long opening a new connection may take, so an unreachable database
+/// fails a caller instead of holding it for the TCP timeout. When the URL
+/// sets `connect_timeout`, it is added on top of the per-host budget
+/// ([`pool_create_timeout`]).
+pub const POOL_CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long the health check on a reused connection may take.
+pub const POOL_RECYCLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The create timeout for a pool on `config`. Without a URL
+/// `connect_timeout` it is [`POOL_CREATE_TIMEOUT`]. With one, it is that
+/// timeout once per configured host, plus [`POOL_CREATE_TIMEOUT`].
+/// `tokio_postgres` applies `connect_timeout` to the TCP connect of each
+/// resolved address in turn, so a bound below that would cut off failover
+/// to a second host. The budget counts configured hosts, not addresses: a
+/// host that resolves to several addresses (`localhost`, a dual-stack name)
+/// gets one `connect_timeout` plus the shared pad, which covers a second
+/// address that fails fast but not one that also hangs. The
+/// TLS handshake, authentication and startup that follow have no timeout of
+/// their own, so the create is always bounded: a server that accepts the
+/// socket and then stalls must not hold a caller until TCP keepalive gives
+/// up.
+fn pool_create_timeout(config: &tokio_postgres::Config) -> std::time::Duration {
+    match config.get_connect_timeout() {
+        Some(per_host) => {
+            let hosts = u32::try_from(config.get_hosts().len().max(1)).unwrap_or(u32::MAX);
+            per_host
+                .saturating_mul(hosts)
+                .saturating_add(POOL_CREATE_TIMEOUT)
+        }
+        None => POOL_CREATE_TIMEOUT,
+    }
+}
+
+/// Builds a pool of at most `max_size` connections on `config` whose waits
+/// are bounded by the timeouts above. Every pool this backend opens goes
+/// through here.
+fn bounded_pool(
+    config: tokio_postgres::Config,
+    max_size: usize,
+) -> Result<Pool, deadpool_postgres::BuildError> {
+    let create_timeout = pool_create_timeout(&config);
+    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    Pool::builder(manager)
+        .max_size(max_size)
+        .runtime(deadpool_postgres::Runtime::Tokio1)
+        .wait_timeout(Some(POOL_WAIT_TIMEOUT))
+        .create_timeout(Some(create_timeout))
+        .recycle_timeout(Some(POOL_RECYCLE_TIMEOUT))
+        .build()
+}
+
 impl PgBackend {
     pub async fn new(config: &DatabaseConfig) -> Result<Self, DatabaseError> {
         let pg_config = config
             .url()
             .parse::<tokio_postgres::Config>()
             .map_err(|e| DatabaseError::Pool(format!("invalid PostgreSQL URL: {e}")))?;
-        let manager = deadpool_postgres::Manager::new(pg_config, tokio_postgres::NoTls);
-        let pool = Pool::builder(manager).max_size(config.pool_size).build()?;
+        let pool = bounded_pool(pg_config, config.pool_size)?;
 
         // Build a SEPARATE, small resolver pool only when a distinct resolver
         // connection string is configured. This pool runs as the narrow
@@ -399,9 +457,7 @@ impl PgBackend {
                                 "invalid login-resolver PostgreSQL URL: {e}"
                             ))
                         })?;
-                let resolver_manager =
-                    deadpool_postgres::Manager::new(resolver_config, tokio_postgres::NoTls);
-                let resolver_pool = Pool::builder(resolver_manager).max_size(2).build()?;
+                let resolver_pool = bounded_pool(resolver_config, 2)?;
                 Some(resolver_pool)
             }
             None => None,
@@ -418,9 +474,7 @@ impl PgBackend {
                     .map_err(|e| {
                         DatabaseError::Pool(format!("invalid gate-driver PostgreSQL URL: {e}"))
                     })?;
-                let gate_driver_manager =
-                    deadpool_postgres::Manager::new(gate_driver_config, tokio_postgres::NoTls);
-                let gate_driver_pool = Pool::builder(gate_driver_manager).max_size(2).build()?;
+                let gate_driver_pool = bounded_pool(gate_driver_config, 2)?;
                 Some(gate_driver_pool)
             }
             None => None,
@@ -440,13 +494,7 @@ impl PgBackend {
                             "invalid pii-backstop-driver PostgreSQL URL: {e}"
                         ))
                     })?;
-                let pii_backstop_driver_manager = deadpool_postgres::Manager::new(
-                    pii_backstop_driver_config,
-                    tokio_postgres::NoTls,
-                );
-                let pii_backstop_driver_pool = Pool::builder(pii_backstop_driver_manager)
-                    .max_size(2)
-                    .build()?;
+                let pii_backstop_driver_pool = bounded_pool(pii_backstop_driver_config, 2)?;
                 Some(pii_backstop_driver_pool)
             }
             None => None,
@@ -463,10 +511,7 @@ impl PgBackend {
                     .map_err(|e| {
                         DatabaseError::Pool(format!("invalid invite-registry PostgreSQL URL: {e}"))
                     })?;
-                let invite_registry_manager =
-                    deadpool_postgres::Manager::new(invite_registry_config, tokio_postgres::NoTls);
-                let invite_registry_pool =
-                    Pool::builder(invite_registry_manager).max_size(2).build()?;
+                let invite_registry_pool = bounded_pool(invite_registry_config, 2)?;
                 Some(invite_registry_pool)
             }
             None => None,
@@ -8970,6 +9015,36 @@ mod tests {
             "PgBackend must not expose its raw pool as a normal public API; use the \
              tenant-context helpers for application paths and an explicit test hook for \
              raw RLS probes"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pool_timeout_tests {
+    use super::*;
+
+    fn config(url: &str) -> tokio_postgres::Config {
+        url.parse().expect("valid PostgreSQL URL")
+    }
+
+    #[test]
+    fn create_timeout_leaves_room_for_failover_and_stays_bounded() {
+        use std::time::Duration;
+        assert_eq!(
+            pool_create_timeout(&config("postgres://u@127.0.0.1/db")),
+            POOL_CREATE_TIMEOUT
+        );
+        // `connect_timeout` bounds each host's TCP connect, so the pool
+        // budget covers every host and then the handshake on top.
+        assert_eq!(
+            pool_create_timeout(&config(
+                "postgres://u@primary,standby/db?connect_timeout=10"
+            )),
+            Duration::from_secs(20) + POOL_CREATE_TIMEOUT
+        );
+        assert_eq!(
+            pool_create_timeout(&config("postgres://u@127.0.0.1/db?connect_timeout=3")),
+            Duration::from_secs(3) + POOL_CREATE_TIMEOUT
         );
     }
 }
