@@ -62,8 +62,9 @@ have landed (owner, 2026-11-03):
     login. Run it again after V147: what remains with `carries = true` are
     pre-#1862 links on accounts that do hold a NEAR AI login (including
     pre-#1841 links, and any wallet-proved link on such an account). V147
-    cannot tell how those were proved. Give that count to the owner, who
-    decides which of them may be carried, before going live.
+    cannot tell how those were proved. Run it on the pilot first; if it
+    finds any such rows, stop and ask the owner before going live (owner,
+    2026-11-03).
   - **Q5.** Run Q5 from the
     [legacy payout migration spec](../superpowers/specs/2026-11-03-legacy-account-payout-migration-design.md),
     section 8 (unowned accruals in non-pooled legacy tenants), and give the
@@ -121,10 +122,15 @@ SELECT tenant_id, prior_state, count(*) FROM trace_payout_audit
  GROUP BY tenant_id, prior_state;
 ```
 
-A legacy account whose own link V147 revoked is paid again once its
-holder's next payout-link confirm or tenant link carries to it; a revoked
-own link no longer blocks that carry. Carrying to it without such an event
-is #1873.
+A legacy account whose own link V147 revoked is paid again only through a
+carry, and only at a carry event (owner, 2026-11-03, on #1879): its
+holder's next payout-link confirm, a tenant link, or a new account opening
+in a linked legacy tenant, and only to an account a signed device claimed.
+A carry never runs on a pass, so nothing replaces the revoked link until
+such an event. A revoked own link (unlink-marked or closing) no longer
+blocks the carry, which then lands as its waiting successor. The pass
+closes the revoked link before activating the carry, so the account is
+never paid through both.
 
 ## Scheduling
 

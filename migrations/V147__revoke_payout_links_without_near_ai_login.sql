@@ -16,7 +16,12 @@
 -- links and links made before #1841 whatever proved them. It does NOT touch
 -- a link V146 carried to a legacy account from a NEAR AI account (a live
 -- row in `trace_legacy_payout_carries`): that link was proved by the NEAR
--- AI account's own recorded login, and it is how F11 pays legacy credit. It
+-- AI account's own recorded login, and it is how F11 pays legacy credit.
+-- A legacy account whose own link is revoked here is paid again only
+-- through a carry at a carry event (owner, 2026-11-03, on #1879: confirm,
+-- tenant link, or a new account in a linked legacy tenant; never on a
+-- pass); the carry lands as the revoked link's waiting successor, and the
+-- pass closes the revoked link before activating it, so never both. It
 -- cannot see one case: a link proved through #1841's wallet path on an
 -- account that also holds a `near_ai_login` anchor (for example after a V82
 -- merge) is kept, because `subject_index` is a payout-domain label and
