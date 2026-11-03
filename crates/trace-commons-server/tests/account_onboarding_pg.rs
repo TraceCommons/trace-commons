@@ -2681,14 +2681,15 @@ async fn each_listed_device_says_what_it_has_contributed() {
 }
 
 /// `is_database_unavailable` and `database_error_label` against errors a real
-/// PostgreSQL and a real pool raise, which also pins the `tokio_postgres`
-/// error-kind strings the predicate reads.
+/// PostgreSQL and a real pool raise.
 ///
-/// Unavailable: nothing listening, a database that does not exist, a
-/// statement cancelled by `statement_timeout`. A refusal: a `query_opt` that
-/// matches two rows, and a statement that fails to parse on the client --
-/// both follow the data, and the parse failure boxes an `io::Error` cause,
-/// which is why the predicate reads the kind and not the cause.
+/// Unavailable: nothing listening, a database that does not exist, an
+/// undefined table (a migration not run), a write in a read-only
+/// transaction (a demoted primary), a statement cancelled by
+/// `statement_timeout`. A refusal: a `query_opt` that matches two rows, and a
+/// statement that fails to parse on the client -- both follow the data, and
+/// the parse failure boxes an `io::Error` cause, so nothing may classify by
+/// that cause.
 #[tokio::test]
 async fn the_database_unavailable_predicate_reads_real_errors() {
     use trace_commons_server::account_onboarding::{database_error_label, is_database_unavailable};
@@ -2722,17 +2723,10 @@ async fn the_database_unavailable_predicate_reads_real_errors() {
         .get()
         .await
         .expect_err("nothing listens");
-    match &unreachable {
-        deadpool_postgres::PoolError::Backend(error) => {
-            assert!(error.as_db_error().is_none());
-            assert_eq!(
-                error.to_string(),
-                "error connecting to server",
-                "tokio_postgres reworded a kind the predicate reads"
-            );
-        }
-        other => panic!("expected a backend error, got {other:?}"),
-    }
+    assert!(
+        matches!(&unreachable, deadpool_postgres::PoolError::Backend(error) if error.as_db_error().is_none()),
+        "a connect failure, with no server answer"
+    );
     let unreachable = DatabaseError::PoolRuntime(unreachable);
     assert!(is_database_unavailable(&unreachable));
     assert_eq!(database_error_label(&unreachable), "postgres_unreachable");
@@ -2772,6 +2766,27 @@ async fn the_database_unavailable_predicate_reads_real_errors() {
         "the case an io-cause check gets wrong"
     );
     assert!(!is_database_unavailable(&DatabaseError::Postgres(parse)));
+
+    // Deployment state: a table a migration did not create (42P01).
+    let undefined = client
+        .batch_execute("SELECT 1 FROM no_such_table_from_a_migration")
+        .await
+        .expect_err("undefined table");
+    let undefined = DatabaseError::Postgres(undefined);
+    assert!(is_database_unavailable(&undefined));
+    assert_eq!(database_error_label(&undefined), "sqlstate_42P01");
+
+    // A demoted primary: every write in a read-only transaction (25006).
+    let read_only = client
+        .batch_execute(
+            "BEGIN READ ONLY; INSERT INTO trace_tenants(tenant_id) VALUES ('read-only-probe')",
+        )
+        .await
+        .expect_err("read-only write");
+    client.batch_execute("ROLLBACK").await.unwrap();
+    let read_only = DatabaseError::Postgres(read_only);
+    assert!(is_database_unavailable(&read_only));
+    assert_eq!(database_error_label(&read_only), "sqlstate_25006");
 
     // Contention-shaped: a statement cancelled by statement_timeout (57014).
     client
