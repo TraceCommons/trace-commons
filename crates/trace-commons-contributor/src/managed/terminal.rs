@@ -566,7 +566,7 @@ fn warp_tab_configs() -> Option<PathBuf> {
 
 /// How long a Tab Config may stay on disk: the ticket's life, so a slow
 /// Warp start can still find it.
-#[cfg(any(target_os = "macos", all(test, unix)))]
+#[cfg(target_os = "macos")]
 fn warp_tab_life() -> std::time::Duration {
     super::sessions::TICKET_LIFE
         .to_std()
