@@ -43,6 +43,7 @@ mod managed_statusline;
 mod managed_terminal;
 mod mission_draft_cli;
 mod near_ai_cli;
+mod no_commons_name_in_copy;
 mod preflight;
 mod queue_fixture_default_guard;
 mod release_pipeline;
