@@ -38,6 +38,17 @@
 //!   it fills `{terminal}` from `capabilities.launch_destination` for a
 //!   launch (herdr while sessions are grouped there) and from
 //!   `capabilities.terminal_destination` for tool setup.
+//! - `herdr_socket_untrusted` "herdr's connection file can't be trusted.
+//!   Remove it or check its permissions." Owner-approved wording,
+//!   2026-11-03. The line a shell shows for the refusal
+//!   `managed-herdr-socket-untrusted`: something at herdr's socket path
+//!   that this account cannot trust.
+//! - `rex_not_ready` "Rex didn't open in time. Try again." Owner-approved
+//!   wording, 2026-11-03. The line a shell shows for the refusal
+//!   `managed-rex-not-ready`: Rex is installed but its app did not connect
+//!   in time. A Rex call that fails before the ticket is sent
+//!   (`managed-terminal-call-failed`) shows the general `action_failed`
+//!   line, never the unsupported-version one.
 //! - `herdr_grouping` "Group sessions in herdr" -- the switch under the
 //!   picker, and its accessible name (owner decision D4, 2026-11-03,
 //!   `docs/superpowers/specs/2026-11-03-rex-herdr-terminal-integration.md`).
@@ -263,6 +274,8 @@ pub fn copy() -> serde_json::Value {
             "balance_too_low": "Add funds to your NEAR AI balance to start a session.",
             "project_chooses_model": "This project's Claude Code settings, agents, commands or skills choose a model. NEAR AI sessions use the session's models.",
             "project_sets_auto_mode_server": "Remove CLAUDE_CODE_AUTO_MODE_SERVER from this project's settings.",
+            "herdr_socket_untrusted": "herdr's connection file can't be trusted. Remove it or check its permissions.",
+            "rex_not_ready": "Rex didn't open in time. Try again.",
             "project_workflows": "This project has Claude Code workflows. A workflow step can choose its own model, so it may not stay in this session's privacy tier.",
             "collect_traces": "Collect this session",
             "opencode_scope": "Uses only the selected key and model in an isolated profile. Project OpenCode settings and plugins are disabled. API key means an OpenAI key; NEAR AI uses a NEAR AI key.",
@@ -402,6 +415,17 @@ mod tests {
     }
 
     /// The terminal choice reads these words, exactly as proposed.
+    /// Owner-approved wording, 2026-11-03 (#1886 follow-up).
+    #[test]
+    fn the_herdr_and_rex_refusals_have_their_words() {
+        let copy = copy();
+        assert_eq!(
+            copy["herdr_socket_untrusted"],
+            "herdr's connection file can't be trusted. Remove it or check its permissions."
+        );
+        assert_eq!(copy["rex_not_ready"], "Rex didn't open in time. Try again.");
+    }
+
     #[test]
     fn the_terminal_choice_has_its_words() {
         let copy = copy();

@@ -314,9 +314,10 @@ fn raise_app() -> bool {
 ///
 /// Only `session.new_window` carries the ticket. A failure before it is
 /// sent is a refusal that releases the held launch: `TerminalNotFound`
-/// when the app does not open or never connects, `UnsupportedVersion` when
-/// Rex does not support the API revision used here or answers in a way
-/// this build cannot read.
+/// when the app does not open, `RexNotReady` when it never connects,
+/// `TerminalCallFailed` when a `rex` call fails or gives nothing, and
+/// `UnsupportedVersion` when Rex does not support the API revision used
+/// here or answers in a way this build cannot read.
 /// A failure of that request may follow a started helper: `LaunchUnknown`.
 /// A tab whose ids cannot be read back is still a launch, printing nothing.
 #[cfg(any(target_os = "macos", test))]
@@ -333,14 +334,17 @@ fn open_tab_with(
     // The app may still be starting: wait for it to connect.
     while !rex(&["client", "ls", "--json"], None).is_some_and(|c| app_connected(&c)) {
         if elapsed() >= SERVER_WAIT {
-            return Err(ManagedError::TerminalNotFound);
+            return Err(ManagedError::RexNotReady);
         }
         sleep(SERVER_STEP);
     }
-    if !rex(&["version"], None).is_some_and(|v| supports_revision(&v)) {
+    // A call that fails or gives nothing is `TerminalCallFailed`; only a
+    // reply this build cannot read is an unsupported version.
+    let version = rex(&["version"], None).ok_or(ManagedError::TerminalCallFailed)?;
+    if !supports_revision(&version) {
         return Err(ManagedError::UnsupportedVersion);
     }
-    let listing = rex(&["ls", "--json"], None).ok_or(ManagedError::UnsupportedVersion)?;
+    let listing = rex(&["ls", "--json"], None).ok_or(ManagedError::TerminalCallFailed)?;
     let session = match group_session(&listing) {
         Some(session) => session,
         None => {
@@ -349,9 +353,8 @@ fn open_tab_with(
             if let Some(cwd) = cwd {
                 args.extend(["-c", cwd]);
             }
-            rex(&args, None)
-                .and_then(|made| first_id("session", &made))
-                .ok_or(ManagedError::UnsupportedVersion)?
+            let made = rex(&args, None).ok_or(ManagedError::TerminalCallFailed)?;
+            first_id("session", &made).ok_or(ManagedError::UnsupportedVersion)?
         }
     };
     let reply = rex(
@@ -693,13 +696,20 @@ mod tests {
         );
         assert!(!sent(&made_nothing));
 
+        // A call that fails or gives nothing is not a version problem
+        // (owner, 2026-11-03): the general failure line, still a refusal.
         let mut new_failed = FakeRex::ready(Some("[]".into()));
         new_failed.set("new", vec![None]);
-        assert_eq!(run(&mut new_failed), Err(ManagedError::UnsupportedVersion));
+        assert_eq!(run(&mut new_failed), Err(ManagedError::TerminalCallFailed));
 
         let mut no_listing = FakeRex::ready(None);
-        assert_eq!(run(&mut no_listing), Err(ManagedError::UnsupportedVersion));
+        assert_eq!(run(&mut no_listing), Err(ManagedError::TerminalCallFailed));
         assert!(!sent(&no_listing));
+
+        let mut no_version = FakeRex::ready(group());
+        no_version.set("version", vec![None]);
+        assert_eq!(run(&mut no_version), Err(ManagedError::TerminalCallFailed));
+        assert!(!sent(&no_version));
 
         for version in [
             "api: revision 12 (supports 11 to 12)",
@@ -762,7 +772,9 @@ mod tests {
             |step| clock.set(clock.get() + step),
             &rex_tab(),
         );
-        assert_eq!(never, Err(ManagedError::TerminalNotFound));
+        // Rex is there but its app did not connect: "Rex didn't open in
+        // time. Try again." (owner, 2026-11-03), not "wasn't found".
+        assert_eq!(never, Err(ManagedError::RexNotReady));
         assert_eq!(tries, 4, "three slow tries pass the wait, a fourth ends it");
         assert!(clock.get() < SERVER_WAIT + std::time::Duration::from_secs(4));
     }

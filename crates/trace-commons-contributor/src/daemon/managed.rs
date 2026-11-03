@@ -236,11 +236,15 @@ impl ManagedService {
                 };
                 Ok(json!({"opened":true,"destination":destination}))
             }
-            // Refusals that only come before anything is run.
+            // Refusals that only come before anything is run, or (herdr and
+            // Rex) before the ticket is sent.
             Err(
                 error @ (ManagedError::TerminalNotFound
                 | ManagedError::InvalidRequest
-                | ManagedError::UnsupportedVersion),
+                | ManagedError::UnsupportedVersion
+                | ManagedError::HerdrSocketUntrusted
+                | ManagedError::RexNotReady
+                | ManagedError::TerminalCallFailed),
             ) => {
                 self.sessions.terminal_launch_failed(launch.session_id)?;
                 Err(error)
@@ -1833,6 +1837,9 @@ fn label(error: ManagedError) -> &'static str {
         ManagedError::ProjectSetsAutoModeServer => {
             crate::managed::PROJECT_SETS_AUTO_MODE_SERVER_LABEL
         }
+        ManagedError::HerdrSocketUntrusted => "managed-herdr-socket-untrusted",
+        ManagedError::RexNotReady => "managed-rex-not-ready",
+        ManagedError::TerminalCallFailed => "managed-terminal-call-failed",
     }
 }
 
@@ -3496,6 +3503,63 @@ mod tests {
         _: &str,
     ) -> Result<Option<TerminalTab>, ManagedError> {
         Err(ManagedError::StorageUnavailable)
+    }
+
+    fn refuse_untrusted(
+        _: TerminalSetting,
+        _: &[TerminalApp],
+        _: &std::path::Path,
+        _: &std::path::Path,
+        _: Uuid,
+        _: &str,
+    ) -> Result<Option<TerminalTab>, ManagedError> {
+        Err(ManagedError::HerdrSocketUntrusted)
+    }
+
+    fn refuse_not_ready(
+        _: TerminalSetting,
+        _: &[TerminalApp],
+        _: &std::path::Path,
+        _: &std::path::Path,
+        _: Uuid,
+        _: &str,
+    ) -> Result<Option<TerminalTab>, ManagedError> {
+        Err(ManagedError::RexNotReady)
+    }
+
+    fn refuse_call_failed(
+        _: TerminalSetting,
+        _: &[TerminalApp],
+        _: &std::path::Path,
+        _: &std::path::Path,
+        _: Uuid,
+        _: &str,
+    ) -> Result<Option<TerminalTab>, ManagedError> {
+        Err(ManagedError::TerminalCallFailed)
+    }
+
+    /// An untrusted herdr socket, a Rex app that did not open in time and a
+    /// Rex call that failed all come before the ticket is sent: each has a
+    /// label of its own and releases the launch, so it can be tried again
+    /// (owner, 2026-11-03).
+    #[test]
+    fn the_herdr_and_rex_refusals_release_the_launch() {
+        for (refuse, expected) in [
+            (
+                refuse_untrusted as LaunchTerminal,
+                "managed-herdr-socket-untrusted",
+            ),
+            (refuse_not_ready, "managed-rex-not-ready"),
+            (refuse_call_failed, "managed-terminal-call-failed"),
+        ] {
+            let (home, shared) = launching(refuse);
+            let prepared = prepared(&shared, home.path());
+            let params =
+                json!({"session_id":prepared.session_id,"ticket":prepared.ticket.unwrap()});
+            assert_eq!(terminal(&shared, params.clone()), Err(expected.into()));
+            locked(&shared, |service| service.launch_terminal = record_launch);
+            assert!(terminal(&shared, params).is_ok(), "{expected} was released");
+        }
     }
 
     /// #1853 review: only a refusal that comes before anything runs is

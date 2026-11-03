@@ -1004,4 +1004,13 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.errorKey(code: "managed-project-chooses-model", message: "managed-project-chooses-model"), "project_chooses_model")
         XCTAssertEqual(ManagedSurface.errorKey(code: "managed-project-sets-auto-mode-server", message: "managed-project-sets-auto-mode-server"), "project_sets_auto_mode_server")
     }
+
+    /// Owner, 2026-11-03: an untrusted herdr socket and a Rex app that did
+    /// not open in time have lines of their own; a Rex call that failed is
+    /// the general failure, never the unsupported-version line.
+    func testHerdrAndRexRefusalsHaveTheirLines() {
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-herdr-socket-untrusted", message: "managed-herdr-socket-untrusted"), "herdr_socket_untrusted")
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-rex-not-ready", message: "managed-rex-not-ready"), "rex_not_ready")
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-terminal-call-failed", message: "managed-terminal-call-failed"), "action_failed")
+    }
 }

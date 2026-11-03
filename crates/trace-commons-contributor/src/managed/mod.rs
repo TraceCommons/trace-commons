@@ -137,6 +137,18 @@ pub enum ManagedError {
     /// `CLAUDE_CODE_AUTO_MODE_SERVER` (owner-approved wording, 2026-11-02).
     #[error("Remove CLAUDE_CODE_AUTO_MODE_SERVER from this project's settings.")]
     ProjectSetsAutoModeServer,
+    /// Something at herdr's socket path that this account cannot trust
+    /// (owner-approved wording, 2026-11-03). Refused before the ticket.
+    #[error("herdr's connection file can't be trusted. Remove it or check its permissions.")]
+    HerdrSocketUntrusted,
+    /// Rex is installed but its app did not connect in time
+    /// (owner-approved wording, 2026-11-03). Refused before the ticket.
+    #[error("Rex didn't open in time. Try again.")]
+    RexNotReady,
+    /// A terminal app's own command failed or gave nothing before the
+    /// ticket was sent. Shells show the general failure line.
+    #[error("the terminal app's command failed")]
+    TerminalCallFailed,
 }
 
 /// The daemon's label for [`ManagedError::ProjectChoosesModel`], which the

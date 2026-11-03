@@ -397,7 +397,8 @@ pub(crate) fn launch_with<E: Exchange>(
     pane: &Pane,
 ) -> Result<Option<TerminalTab>, ManagedError> {
     let refusal = |error: CallError| match error {
-        CallError::Unreachable | CallError::Untrusted => ManagedError::TerminalNotFound,
+        CallError::Unreachable => ManagedError::TerminalNotFound,
+        CallError::Untrusted => ManagedError::HerdrSocketUntrusted,
         CallError::Refused | CallError::Malformed => ManagedError::UnsupportedVersion,
     };
     let mut herdr = match reach(&mut connect) {
@@ -841,6 +842,28 @@ mod tests {
         assert_eq!(old, Err(ManagedError::UnsupportedVersion));
     }
 
+    /// A herdr this launch started whose socket is still untrusted when the
+    /// wait ends is refused with the untrusted line, not "not found".
+    #[test]
+    fn a_socket_still_untrusted_after_the_wait_has_its_own_refusal() {
+        let clock = std::cell::Cell::new(std::time::Duration::ZERO);
+        let first = std::cell::Cell::new(true);
+        let refused = launch_with(
+            || {
+                if first.replace(false) {
+                    Err::<Script, _>(CallError::Unreachable)
+                } else {
+                    Err(CallError::Untrusted)
+                }
+            },
+            || Ok(()),
+            || clock.get(),
+            |step| clock.set(clock.get() + step),
+            &pane(),
+        );
+        assert_eq!(refused, Err(ManagedError::HerdrSocketUntrusted));
+    }
+
     /// The wait for herdr starts once the host terminal has opened, so a
     /// slow terminal does not use up herdr's time (poldsam, #1886).
     #[test]
@@ -892,7 +915,9 @@ mod tests {
             |_| {},
             &pane(),
         );
-        assert_eq!(untrusted, Err(ManagedError::TerminalNotFound));
+        // Its own line (owner, 2026-11-03): "herdr's connection file can't be
+        // trusted. Remove it or check its permissions."
+        assert_eq!(untrusted, Err(ManagedError::HerdrSocketUntrusted));
 
         // An old herdr this launch started is retried like any herdr that
         // is starting, then refused for its version when the wait ends.

@@ -292,6 +292,14 @@ public enum ManagedSurface {
         // and points at Settings.
         let notFound = "managed-terminal-not-found"
         if code == notFound || message == notFound { return "terminal_not_found" }
+        // Something at herdr's socket path this account cannot trust, and a
+        // Rex app that did not open in time: lines of their own (owner,
+        // 2026-11-03). A Rex call that failed
+        // (`managed-terminal-call-failed`) is the general failure below.
+        let herdrUntrusted = "managed-herdr-socket-untrusted"
+        if code == herdrUntrusted || message == herdrUntrusted { return "herdr_socket_untrusted" }
+        let rexNotReady = "managed-rex-not-ready"
+        if code == rexNotReady || message == rexNotReady { return "rex_not_ready" }
         // A named model NEAR AI does not offer: the line that says so.
         let modelUnavailable = "managed-model-unavailable"
         if code == modelUnavailable || message == modelUnavailable { return "model_unavailable" }
