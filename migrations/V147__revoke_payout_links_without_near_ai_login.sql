@@ -50,8 +50,8 @@
 -- AUDIT. One `trace_payout_audit` row per revoked link, hash-only, in the
 -- shapes V146's release writes: `link_closed` (waiting to closed) or
 -- `unlink_requested` (active to active), label `near_ai_login_required`,
--- the account and link as `payout-account-v1:` / `payout-link-v1:` SHA-256
--- hashes (as `account_id_hash` / `link_id_hash` in `postgres_payout.rs`),
+-- the account and link hashed by V146's `trace_payout_account_hash` /
+-- `trace_payout_link_hash` (the Rust `account_id_hash` / `link_id_hash`),
 -- and a fixed actor hash for this migration.
 --
 -- IDEMPOTENT. A revoked waiting link is closed and a revoked active link
@@ -125,8 +125,8 @@ SELECT r.tenant_id,
        r.rail_id,
        CASE r.state WHEN 'waiting' THEN 'link_closed' ELSE 'unlink_requested' END,
        'sha256:' || encode(sha256(convert_to('payout-migration-actor-v1:V147', 'UTF8')), 'hex'),
-       'sha256:' || encode(sha256(convert_to('payout-account-v1:' || r.account_id::text, 'UTF8')), 'hex'),
-       'sha256:' || encode(sha256(convert_to('payout-link-v1:' || r.link_id::text, 'UTF8')), 'hex'),
+       public.trace_payout_account_hash(r.account_id),
+       public.trace_payout_link_hash(r.link_id),
        r.state,
        CASE r.state WHEN 'waiting' THEN 'closed' ELSE 'active' END,
        'near_ai_login_required'
