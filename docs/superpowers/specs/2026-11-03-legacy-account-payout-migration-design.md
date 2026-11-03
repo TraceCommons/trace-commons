@@ -233,18 +233,31 @@ and the accrual stays unowned until that principal is linked
 that never minted a login link has no account, so its credit is owed to
 nobody and a carry has no account to land on.
 
-Recommended (owner decision 5): when the V81 link is made, link the signing
-device's principal to an account in the legacy tenant with the existing
-`create_or_reuse_account`, and do the same for each device that later
-attests under the link (V91). The accrual pass then claims their unowned
+Owner decision 5 (2026-11-03, option A): when the V81 link is made, link
+the signing device's **signed-upload principals** to one account in the
+legacy tenant, and do the same for each device that later attests under
+the link (V91). These are the two forms that
+`account_trust::device_upload_principal_refs(tenant, device_key_id,
+device_key_id)` returns for the device's bare device-key actor, which is
+what the app's uploads carry. The accrual pass then claims their unowned
 accruals the normal way, once, with its own `accrual_claimed` audit row.
 Only proven devices are linked; nothing is inferred for the tenant's other
-principals.
+principals. If either principal already belongs to a live account in the
+tenant (the device minted a login link), the other joins that account; a
+principal that was unlinked is left unlinked.
 
-This works only if the principal the link step derives from the device
-key is the same principal the settlement key used for that device's
-uploads. That is not asserted here; it is the implementation's first test,
-and if it fails, decision 5 comes back to the owner.
+Why not the device principal (`device_principal_ref`): the first
+implementation test showed that linking it claims nothing. A legacy
+device writes no V135 upload alias rows (`postgres.rs:2011-2018`: "Legacy
+registered devices use signed claims as independent login principals"),
+so its credit is keyed by the signed-upload principal itself.
+
+**Known limit.** An upload whose claim names a per-user subject
+(`instance:<tenant>:<device>:user:<subject>`, possible on an
+instance-vouched enrollment) has a principal that cannot be derived from
+the device key. Its credit stays unowned and is not paid. Pilot query Q5
+measures how much credit is unowned in non-pooled legacy tenants, which
+bounds this.
 
 ### 3.6 Existing credit and attestations
 
@@ -574,6 +587,10 @@ added); a database trigger on revocation; the section 8 rollout.
    principal (and later attested devices) to an account at link time so
    its unowned accruals are claimed. **Recommended: yes, proven devices
    only**, subject to the principal check in section 3.5.
+   **Decided 2026-11-03: option (A).** The check failed for the device
+   principal; the owner chose to link the device's signed-upload
+   principals of its bare actor instead. Per-user-subject credit stays
+   unowned, a known limit (section 3.5) measured by Q5.
 6. **A legacy account that already has its own live link** (none expected,
    Q4). Skip and audit, or replace with the carry. **Recommended: skip and
    audit; the operator decides.**
