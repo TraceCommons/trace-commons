@@ -512,10 +512,36 @@ const MINIMAL_SETTLE_IMPLEMENTATION: &str = "trace_commons.settle.minimal.v1";
 /// `NoveltyUtility` events (owner decision 2026-10-23) but not this leg:
 /// `trace_credit_event_counts_toward_settlement` in `trace-commons-ingest.rs`
 /// takes only the legacy gate's `external_ref` shape.
+///
+/// `SettledNoveltyUtility` is the compatibility family under the graded
+/// credit rule (`CompatibilityCreditRule::GradedPerplexityV1`, owner
+/// decisions D2 and D7 of 2026-11-03,
+/// `docs/superpowers/specs/2026-11-03-pilot-paying-bundle-design.md`): the
+/// ledger's `NoveltyUtility` event type, so `main`'s `NoveltyUtility` credit
+/// checks still run, but composed and finalized into a batch like
+/// `PipelineScore`, so a payout rail pays it, and held like it. `main`'s
+/// settlement still never selects it (its `external_ref` is the pipeline's
+/// ledger source key), so it is paid once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineTraceCreditEvent {
     PipelineScore,
     NoveltyUtility,
+    SettledNoveltyUtility,
+}
+
+impl PipelineTraceCreditEvent {
+    /// Whether the leg writes the ledger's `NoveltyUtility` event type, and
+    /// so passes `main`'s `NoveltyUtility` credit checks and needs the
+    /// pipeline's credit issuer.
+    pub fn is_novelty_utility(self) -> bool {
+        matches!(self, Self::NoveltyUtility | Self::SettledNoveltyUtility)
+    }
+
+    /// Whether the leg is composed and finalized into a settlement batch
+    /// (and so is paid by a payout rail, and stopped by a credit hold).
+    pub fn settles_into_batch(self) -> bool {
+        matches!(self, Self::PipelineScore | Self::SettledNoveltyUtility)
+    }
 }
 
 pub struct MinimalPolicyBundle {
@@ -793,6 +819,10 @@ impl MinimalPolicyBundle {
                 .ok_or_else(|| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
             let config: CompatibilityBundleConfig = serde_json::from_slice(config_bytes)
                 .map_err(|_| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
+            // The credit rule the signed configuration pins decides the leg:
+            // `flat` keeps Ruling S10 (never batched), the graded rule
+            // settles into a batch (owner decision D2, 2026-11-03).
+            let credit_event = config.credit_rule.trace_credit_event();
             // Ruling S4: refuse at bind time, not at the first positive
             // award, a package whose manifest does not pin `trace_credit` to
             // this config's own instrument descriptor.
@@ -819,7 +849,7 @@ impl MinimalPolicyBundle {
                 review: Arc::new(MinimalReviewPolicy),
                 score: Arc::new(score),
                 settle: Arc::new(CompatibilitySettlePolicy),
-                trace_credit_event: PipelineTraceCreditEvent::NoveltyUtility,
+                trace_credit_event: credit_event,
             })
         } else if let Some(factory) = registered_score_factory(&package, score_policies) {
             let configuration = package
@@ -1376,6 +1406,7 @@ mod tests {
                 chunk_cap: reference.chunk_cap,
                 chunk_min_tokens: reference.chunk_min_tokens,
                 novelty_utility_microcredits: reference.novelty_utility_microcredits,
+                credit_rule: crate::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
             },
         )
         .expect("a production-compatible configuration validates");
@@ -1709,6 +1740,38 @@ mod tests {
             IsolatedPipelineIndex::new(),
             policies,
         )
+    }
+
+    /// Owner decision D2 (2026-11-03): the credit rule the signed
+    /// configuration pins decides the compatibility leg. `flat` keeps Ruling
+    /// S10's unbatched `NoveltyUtility` leg; the graded rule settles the same
+    /// event type into a batch, so `main`'s checks run and a rail pays it.
+    #[tokio::test]
+    async fn the_pinned_credit_rule_decides_the_compatibility_leg() {
+        let scorer = ReferencePerplexityScorer::new();
+        let embedder = ReferenceEmbedder::new();
+        for (rule, event) in [
+            (
+                crate::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
+                PipelineTraceCreditEvent::NoveltyUtility,
+            ),
+            (
+                crate::versioned_pipeline_compat::CompatibilityCreditRule::GradedPerplexityV1,
+                PipelineTraceCreditEvent::SettledNoveltyUtility,
+            ),
+        ] {
+            let mut config = CompatibilityBundleConfig::local_reference();
+            config.credit_rule = rule;
+            let package = MinimalPolicyBundle::compatibility_package(&config, &scorer, &embedder)
+                .expect("build compatibility bundle package");
+            let bundle = bind(package, &ScorePolicyRegistry::new()).unwrap();
+            assert_eq!(bundle.trace_credit_event, event);
+            assert!(bundle.trace_credit_event.is_novelty_utility());
+        }
+        assert!(!PipelineTraceCreditEvent::NoveltyUtility.settles_into_batch());
+        assert!(PipelineTraceCreditEvent::SettledNoveltyUtility.settles_into_batch());
+        assert!(PipelineTraceCreditEvent::PipelineScore.settles_into_batch());
+        assert!(!PipelineTraceCreditEvent::PipelineScore.is_novelty_utility());
     }
 
     /// (a) An empty registry -- what the ingest binary passes -- binds the
