@@ -141,6 +141,10 @@ pub(crate) const PIPELINE_DEFAULT_ROUTING_RESULTS_EXPIRING_LABEL: &str =
     "pipeline_default_routing_results_expiring";
 pub(crate) const PIPELINE_DEFAULT_ROUTING_REQUALIFY_BUNDLE_DIFFERS_LABEL: &str =
     "pipeline_default_routing_requalify_bundle_differs";
+/// Logged once for each tenant the loop moves from a bundle that awards
+/// nothing to the armed bundle (owner decision D6).
+pub(crate) const PIPELINE_DEFAULT_ROUTING_TENANT_MIGRATED_LABEL: &str =
+    "pipeline_default_routing_tenant_migrated";
 pub(crate) const PIPELINE_DEFAULT_ROUTING_TENANT_BUNDLE_CHECK_FAILED_LABEL: &str =
     "pipeline_default_routing_tenant_bundle_check_failed";
 pub(crate) const PIPELINE_DEFAULT_ROUTING_ACTIVATION_REFUSED_LABEL: &str =
@@ -499,6 +503,9 @@ pub(crate) struct DefaultRoutingPassReport {
     pub(crate) refused: u64,
     pub(crate) skipped: u64,
     pub(crate) requalified: u64,
+    /// Tenants moved from a bundle that awards nothing to the armed bundle
+    /// (owner decision D6).
+    pub(crate) migrated: u64,
     pub(crate) duration_ms: u64,
 }
 
@@ -949,7 +956,7 @@ impl PipelineDefaultRouting {
         let next = (page.len() as i64 >= self.config.batch)
             .then(|| page.last().map(|(tenant_id, _)| tenant_id.clone()))
             .flatten();
-        for (tenant_id, _) in page
+        for (tenant_id, routing_state) in page
             .iter()
             .filter(|(tenant_id, _)| self.loop_may_act_on(tenant_id))
         {
@@ -964,7 +971,28 @@ impl PipelineDefaultRouting {
                 routing.actor_principal_ref == DEFAULT_ROUTING_ACTOR_REF
                     && routing.reason_code == PIPELINE_DEFAULT_ROUTING_REASON_CODE
             });
-            if !ours || view.active_bundle_qualified_on_revision != Some(false) {
+            if !ours {
+                continue;
+            }
+            // Owner decision D6 (2026-11-03): a tenant this mode routed,
+            // still on a compatibility bundle that awards nothing where
+            // `main` now awards (the delta or the credit rule was raised), is
+            // moved to the armed bundle, whatever its qualification on this
+            // revision. Only an open (`pipeline`) tenant: activating a
+            // contained one would reopen its uploads.
+            if *routing_state == RoutingState::Pipeline
+                && view.active_bundle_id.as_deref() != Some(armed.bundle_id.as_str())
+                && self
+                    .awards_nothing_under_main_gate(state, tenant_id, view.active_bundle_id.as_deref())
+                    .await
+            {
+                if let Some(routing) = view.routing.as_ref() {
+                    self.migrate_tenant(state, armed, tenant_id, routing.activation_record_id, report)
+                        .await;
+                }
+                continue;
+            }
+            if view.active_bundle_qualified_on_revision != Some(false) {
                 continue;
             }
             if view.active_bundle_id.as_deref() != Some(armed.bundle_id.as_str()) {
@@ -996,6 +1024,83 @@ impl PipelineDefaultRouting {
             }
         }
         *self.requalify_cursor.lock().unwrap_or_else(lock_poisoned) = next;
+    }
+
+    async fn awards_nothing_under_main_gate(
+        &self,
+        state: &AppState,
+        tenant_id: &str,
+        bundle_id: Option<&str>,
+    ) -> bool {
+        let (Some(service), Some(bundle_id)) = (state.pipeline_service.as_deref(), bundle_id) else {
+            return false;
+        };
+        service
+            .bundle_awards_nothing_under(tenant_id, bundle_id, &state.pipeline_main_gate)
+            .await
+    }
+
+    /// Qualifies the armed bundle for `tenant_id` and activates it, as this
+    /// mode's own system actor and reason code, expecting the routing row it
+    /// read: the routing row stays this mode's, so later deploys re-qualify
+    /// the tenant as before. Under the tenant's routing lock, like a first
+    /// activation.
+    async fn migrate_tenant(
+        &self,
+        state: &AppState,
+        armed: &ArmedSet,
+        tenant_id: &str,
+        activation_record_id: Uuid,
+        report: &mut DefaultRoutingPassReport,
+    ) {
+        let lock = self.tenant_lock(tenant_id);
+        let outcome = {
+            let _guard = lock.lock().await;
+            let actor = system_audit_tenant(tenant_id, DEFAULT_ROUTING_ACTOR_REF);
+            match qualify_for_tenant(state, &actor, &armed.signed_package, &armed.attestations)
+                .await
+            {
+                Err((_, error)) if error.0.error != PIPELINE_CHANGE_COMMITTED_AUDIT_FAILED_LABEL => {
+                    Err(error.0.error)
+                }
+                _ => {
+                    let body = ActivateBody::for_routed_tenant(
+                        armed.bundle_id.clone(),
+                        PIPELINE_DEFAULT_ROUTING_REASON_CODE,
+                        armed.attestations.clone(),
+                        activation_record_id,
+                    );
+                    match activate_for_tenant(state, &actor, &body).await {
+                        Ok(_) => Ok(()),
+                        Err((_, error))
+                            if error.0.error == PIPELINE_CHANGE_COMMITTED_AUDIT_FAILED_LABEL =>
+                        {
+                            Ok(())
+                        }
+                        Err((_, error)) => Err(error.0.error),
+                    }
+                }
+            }
+        };
+        self.release_tenant_lock(tenant_id, lock);
+        match outcome {
+            Ok(()) => {
+                report.migrated += 1;
+                tracing::info!(
+                    tenant_storage_ref = %tenant_storage_ref(tenant_id),
+                    "{PIPELINE_DEFAULT_ROUTING_TENANT_MIGRATED_LABEL}"
+                );
+            }
+            Err(label) if label == PIPELINE_ROUTING_STATE_CHANGED_LABEL => report.skipped += 1,
+            Err(label) => {
+                report.refused += 1;
+                tracing::warn!(
+                    tenant_storage_ref = %tenant_storage_ref(tenant_id),
+                    label = %safe_refusal_label(label),
+                    "{PIPELINE_DEFAULT_ROUTING_ACTIVATION_REFUSED_LABEL}"
+                );
+            }
+        }
     }
 
     async fn refresh_cache_if_due(&self, state: &AppState) {

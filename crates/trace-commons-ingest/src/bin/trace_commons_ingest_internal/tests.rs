@@ -12426,6 +12426,47 @@ fn the_main_gate_configuration_is_read_only_for_an_assembled_pipeline() {
     unsafe { std::env::remove_var(TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS) };
 }
 
+/// Owner decision D1 (2026-11-03): the credit rule is part of `main`'s gate
+/// configuration, read only for an assembled pipeline. Unset or empty is
+/// `flat`; `graded_perplexity_v1` selects the graded rule; anything else
+/// refuses the start with a safe label naming the variable.
+#[test]
+fn the_credit_rule_is_read_with_the_main_gate_configuration() {
+    use trace_commons_server::versioned_pipeline_compat::{
+        CompatibilityCreditRule, NOVELTY_UTILITY_CREDIT_RULE_ENV,
+    };
+    // SAFETY: env mutation in tests is OK here -- only startup reads this
+    // variable, and no other test sets it.
+    unsafe { std::env::remove_var(NOVELTY_UTILITY_CREDIT_RULE_ENV) };
+    assert_eq!(
+        pipeline_main_gate_config_from_env(true, 0.0)
+            .unwrap()
+            .credit_rule,
+        CompatibilityCreditRule::Flat
+    );
+    unsafe { std::env::set_var(NOVELTY_UTILITY_CREDIT_RULE_ENV, "graded_perplexity_v1") };
+    assert_eq!(
+        pipeline_main_gate_config_from_env(true, 1.0)
+            .unwrap()
+            .credit_rule,
+        CompatibilityCreditRule::GradedPerplexityV1
+    );
+    assert_eq!(
+        pipeline_main_gate_config_from_env(false, 1.0)
+            .unwrap()
+            .credit_rule,
+        CompatibilityCreditRule::Flat,
+        "no pipeline: the rule is not read"
+    );
+    unsafe { std::env::set_var(NOVELTY_UTILITY_CREDIT_RULE_ENV, "graded") };
+    let error = pipeline_main_gate_config_from_env(true, 1.0).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "novelty_utility_credit_rule_invalid (TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_RULE)"
+    );
+    unsafe { std::env::remove_var(NOVELTY_UTILITY_CREDIT_RULE_ENV) };
+}
+
 #[test]
 fn pipeline_receipt_tenants_require_an_injected_runtime() {
     let gates = TraceTenantRolloutGates::for_feature(
@@ -13549,6 +13590,13 @@ async fn pipeline_runtime_compatibility_holds_mains_gate_configuration() {
         ),
         (
             MainGateConfig {
+                credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::GradedPerplexityV1,
+                ..TEST_MAIN_GATE
+            },
+            "a credit rule main does not run (owner decision D1, 2026-11-03)",
+        ),
+        (
+            MainGateConfig {
                 novelty_floor_micros: Some(400_000),
                 ..TEST_MAIN_GATE
             },
@@ -14424,6 +14472,7 @@ const TEST_MAIN_GATE: trace_commons_server::versioned_pipeline_compat::MainGateC
         chunk_cap: 16,
         chunk_min_tokens: 64,
         novelty_utility_microcredits: 0,
+        credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
     };
 
 /// The `main` gate configuration `config` holds, for a test assembler that
@@ -14442,6 +14491,7 @@ fn main_gate_of(
         chunk_cap: config.chunk_cap,
         chunk_min_tokens: config.chunk_min_tokens,
         novelty_utility_microcredits: config.novelty_utility_microcredits,
+        credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
     }
 }
 
@@ -61915,14 +61965,31 @@ fn legacy_scoring_award_event(
 
 /// A `NoveltyUtility` event as a compatibility pipeline run writes it
 /// (`settle_internal_credit`): the pipeline's ledger source key as its
-/// `external_ref`. The pipeline never batches that leg (Ruling S10).
+/// `external_ref`. Under the flat rule the pipeline never batches that leg
+/// (Ruling S10).
 fn pipeline_scoring_award_event(
     submission_id: Uuid,
     credit_points_delta: f32,
 ) -> TraceCommonsCreditLedgerRecord {
+    pipeline_scoring_award_event_of(
+        submission_id,
+        credit_points_delta,
+        trace_commons_server::versioned_pipeline_bundle::PipelineTraceCreditEvent::NoveltyUtility,
+    )
+}
+
+/// As [`pipeline_scoring_award_event`], for the leg `event` writes: under
+/// the graded rule (`SettledNoveltyUtility`) the pipeline batches it itself.
+fn pipeline_scoring_award_event_of(
+    submission_id: Uuid,
+    credit_points_delta: f32,
+    event: trace_commons_server::versioned_pipeline_bundle::PipelineTraceCreditEvent,
+) -> TraceCommonsCreditLedgerRecord {
     TraceCommonsCreditLedgerRecord {
         reason: Some(
-            trace_commons_server::versioned_pipeline_credit::pipeline_novelty_utility_reason(),
+            trace_commons_server::versioned_pipeline_credit::pipeline_novelty_utility_reason(
+                event,
+            ),
         ),
         external_ref: Some(
             trace_commons_server::versioned_pipeline_credit::pipeline_ledger_source_key(
@@ -61950,6 +62017,22 @@ fn only_the_legacy_gate_scoring_award_counts_toward_legacy_settlement() {
     // `main` paying it would pay what the pipeline chose not to.
     assert!(!trace_credit_event_counts_toward_settlement(
         &pipeline_scoring_award_event(submission_id, 1.0),
+        settle_from
+    ));
+    // Owner decision D2 (2026-11-03): a graded-rule leg, which the pipeline
+    // batches and a payout rail pays, is never `main`'s to settle either, so
+    // it is paid once.
+    let graded = pipeline_scoring_award_event_of(
+        submission_id,
+        1.0,
+        trace_commons_server::versioned_pipeline_bundle::PipelineTraceCreditEvent::SettledNoveltyUtility,
+    );
+    assert_eq!(
+        graded.reason.as_deref(),
+        Some("novelty_utility:compatibility_graded_perplexity_v1")
+    );
+    assert!(!trace_credit_event_counts_toward_settlement(
+        &graded,
         settle_from
     ));
     // Fail closed on a scoring award with no gate provenance.

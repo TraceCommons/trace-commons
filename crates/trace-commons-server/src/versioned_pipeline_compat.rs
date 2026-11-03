@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use trace_commons_gate_api::pipeline::{
-    AtomicUnits, BundleManifest, IndexMembershipDecision, InstrumentAward, InstrumentAwards,
+    AtomicUnits, AwardAdjustment, BundleManifest, IndexMembershipDecision, InstrumentAward, InstrumentAwards,
     InstrumentDescriptor, InstrumentId, InstrumentKind, MAX_TRACE_CREDIT_MICROCREDITS, PhaseResult,
     PolicyError, ReasonCode, ScoreDecision, ScoreEvaluation, ScoreEvidence, ScoreInput,
     ScoreOutput, ScorePolicy, SealedIndexCommand, SealedIndexEntry, SettleDecision,
@@ -40,10 +40,12 @@ use trace_commons_gate_enclave::chunker::{ChunkerConfig, chunk_envelope_plaintex
 use trace_commons_gate_enclave::embedder::embed_chunk_mean_pooled;
 use uuid::Uuid;
 
-use crate::credit_quality::{constants_at, credit_quality};
+use crate::credit_quality::{
+    CreditQualityConstants, anomaly_term, constants_at, credit_quality, perplexity_term,
+};
 use crate::versioned_pipeline_bundle::{
     MINIMAL_INDEX_ID, MINIMAL_PROJECTION_ID, PipelineInstrumentAwardConfig,
-    dependency_content_hash, settlement_operations,
+    PipelineTraceCreditEvent, dependency_content_hash, settlement_operations,
 };
 
 /// Implementation id this policy family answers to in a bundle manifest
@@ -56,6 +58,138 @@ pub const COMPATIBILITY_SCORE_IMPLEMENTATION: &str = "trace_commons.score.compat
 pub const COMPATIBILITY_SETTLE_IMPLEMENTATION: &str = "trace_commons.settle.compatibility.v1";
 pub const COMPATIBILITY_SCORE_RULE: &str = "compatibility_quality_novelty_v1";
 pub const COMPATIBILITY_SETTLE_RULE: &str = "compatibility_membership_from_score_v1";
+/// The Score rule id of the graded credit rule
+/// ([`CompatibilityCreditRule::GradedPerplexityV1`]).
+pub const COMPATIBILITY_GRADED_SCORE_RULE: &str = "compatibility_graded_perplexity_v1";
+/// `award_adjustments` label of the graded rule's perplexity term.
+pub const GRADED_PERPLEXITY_TERM_LABEL: &str = "perplexity_term";
+/// `award_adjustments` label of the graded rule's anomaly term.
+pub const GRADED_ANOMALY_TERM_LABEL: &str = "anomaly_term";
+/// The env variable that selects the credit rule `main`'s gate configuration
+/// holds (`flat` when unset or empty).
+pub const NOVELTY_UTILITY_CREDIT_RULE_ENV: &str = "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_RULE";
+/// Safe label for a credit-rule value that is neither `flat` nor
+/// `graded_perplexity_v1`.
+pub const COMPATIBILITY_CREDIT_RULE_INVALID_LABEL: &str = "novelty_utility_credit_rule_invalid";
+
+/// How a compatibility Score prices a trace that passes both floors
+/// (`docs/superpowers/specs/2026-11-03-pilot-paying-bundle-design.md`,
+/// owner decisions D1-D4 and D7 of 2026-11-03).
+///
+/// - `Flat` (the default, and every package before this rule existed): the
+///   award is the configured delta, never a function of the scores (Ruling
+///   P3-D6), and its `NoveltyUtility` leg is never batched (Ruling S10).
+///   Serialized as nothing, so a flat configuration keeps the bytes, and
+///   every package its hash, that it had before the field existed.
+/// - `GradedPerplexityV1`: the award is `delta * f * a`
+///   ([`graded_perplexity_award`]), with each factor recorded in
+///   `award_adjustments`, and the leg is batched
+///   (`PipelineTraceCreditEvent::SettledNoveltyUtility`), so `main`'s
+///   `NoveltyUtility` credit checks still run and a payout rail pays it.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompatibilityCreditRule {
+    #[default]
+    Flat,
+    GradedPerplexityV1,
+}
+
+impl CompatibilityCreditRule {
+    pub fn is_flat(&self) -> bool {
+        *self == Self::Flat
+    }
+
+    /// The env spelling: `flat` or `graded_perplexity_v1`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Flat => "flat",
+            Self::GradedPerplexityV1 => "graded_perplexity_v1",
+        }
+    }
+
+    /// Parses the env value; unset or empty is `flat`, anything else
+    /// unknown is `None`.
+    pub fn from_env_value(value: Option<&str>) -> Option<Self> {
+        match value.map(str::trim) {
+            None | Some("") | Some("flat") => Some(Self::Flat),
+            Some("graded_perplexity_v1") => Some(Self::GradedPerplexityV1),
+            Some(_) => None,
+        }
+    }
+
+    /// The Score rule id a compatibility evaluation records under this rule,
+    /// and the version in its ledger reason (`novelty_utility:<rule>`).
+    pub fn score_rule_id(self) -> &'static str {
+        match self {
+            Self::Flat => COMPATIBILITY_SCORE_RULE,
+            Self::GradedPerplexityV1 => COMPATIBILITY_GRADED_SCORE_RULE,
+        }
+    }
+
+    /// The Trace Credit leg a bundle under this rule settles.
+    pub fn trace_credit_event(self) -> PipelineTraceCreditEvent {
+        match self {
+            Self::Flat => PipelineTraceCreditEvent::NoveltyUtility,
+            Self::GradedPerplexityV1 => PipelineTraceCreditEvent::SettledNoveltyUtility,
+        }
+    }
+}
+
+/// A graded award and the adjustments that recompute it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GradedAward {
+    pub microcredits: u64,
+    pub adjustments: Vec<AwardAdjustment>,
+}
+
+/// The graded rule's award: `floor(delta * f_micros * a_micros / 10^12)`.
+///
+/// - `f_micros` is the credit-quality perplexity term
+///   (`credit_quality::perplexity_term`) of the representative perplexity,
+///   rounded to micros;
+/// - `a_micros` is its anomaly term (`credit_quality::anomaly_term`) of
+///   `peak / representative`, rounded to micros;
+/// - both under `constants`, the calibration in force at Score.
+///
+/// The adjustments are, in order, `perplexity_term` (basis: the
+/// representative perplexity in micros) and `anomaly_term` (basis: the ratio
+/// in micros), each basis clamped to `u32`. An auditor recomputes the award
+/// from the delta the signed package pins with integer arithmetic alone;
+/// the two factors are pinned by test vectors
+/// (`graded_award_test_vectors`). The novelty term is left out (owner
+/// decision D4): novelty decides whether a trace is paid, not how much.
+pub fn graded_perplexity_award(
+    delta_microcredits: u64,
+    ppl_rep_micros: u64,
+    ppl_peak_micros: u64,
+    constants: &CreditQualityConstants,
+) -> GradedAward {
+    let rep = i64::try_from(ppl_rep_micros).unwrap_or(i64::MAX);
+    let peak = i64::try_from(ppl_peak_micros).unwrap_or(i64::MAX);
+    let to_micros = |term: f64| (term.clamp(0.0, 1.0) * 1_000_000.0).round() as u32;
+    let f_micros = to_micros(perplexity_term(rep, constants));
+    let (a, ratio_micros, _) = anomaly_term(rep, peak, constants);
+    let a_micros = to_micros(a);
+    let clamp_u32 = |value: i64| u32::try_from(value.max(0)).unwrap_or(u32::MAX);
+    let product = u128::from(delta_microcredits) * u128::from(f_micros) * u128::from(a_micros);
+    let microcredits = u64::try_from(product / 1_000_000_000_000).unwrap_or(u64::MAX);
+    let label = |text: &str| ReasonCode::new(text).expect("static label");
+    GradedAward {
+        microcredits,
+        adjustments: vec![
+            AwardAdjustment {
+                label: label(GRADED_PERPLEXITY_TERM_LABEL),
+                factor_micros: f_micros,
+                basis_micros: Some(clamp_u32(rep)),
+            },
+            AwardAdjustment {
+                label: label(GRADED_ANOMALY_TERM_LABEL),
+                factor_micros: a_micros,
+                basis_micros: Some(clamp_u32(ratio_micros)),
+            },
+        ],
+    }
+}
 pub const COMPATIBILITY_EXCLUDE_REASON: &str = "compatibility_not_eligible";
 pub const COMPATIBILITY_ZERO_FLOOR_LABEL: &str = "compatibility_zero_floor";
 /// Safe label for a `novelty_utility_microcredits` delta above the trace
@@ -93,6 +227,8 @@ pub struct MainGateConfig {
     pub chunk_cap: u32,
     pub chunk_min_tokens: u64,
     pub novelty_utility_microcredits: u64,
+    /// The credit rule (`TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_RULE`).
+    pub credit_rule: CompatibilityCreditRule,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -144,6 +280,11 @@ pub struct CompatibilityBundleConfig {
     /// later task's bundle constructor uses `instrument.descriptor` to pin
     /// `trace_credit` in the bundle manifest.
     pub instrument: PipelineInstrumentAwardConfig,
+    /// How a passing trace is priced ([`CompatibilityCreditRule`]). Not
+    /// serialized when `flat`, so a flat configuration's bytes, and its
+    /// package's hash, are the ones it had before this field.
+    #[serde(default, skip_serializing_if = "CompatibilityCreditRule::is_flat")]
+    pub credit_rule: CompatibilityCreditRule,
 }
 
 impl CompatibilityBundleConfig {
@@ -164,6 +305,7 @@ impl CompatibilityBundleConfig {
             chunk_min_tokens: 64,
             novelty_utility_microcredits: 0,
             instrument: default_trace_credit_instrument(),
+            credit_rule: CompatibilityCreditRule::Flat,
         }
     }
 
@@ -208,6 +350,7 @@ impl CompatibilityBundleConfig {
             chunk_min_tokens: gate.chunk_min_tokens,
             novelty_utility_microcredits: gate.novelty_utility_microcredits,
             instrument: default_trace_credit_instrument(),
+            credit_rule: gate.credit_rule,
         };
         config.validate()?;
         Ok(config)
@@ -229,12 +372,32 @@ impl CompatibilityBundleConfig {
             chunk_cap: self.chunk_cap,
             chunk_min_tokens: self.chunk_min_tokens,
             novelty_utility_microcredits: self.novelty_utility_microcredits,
+            credit_rule: self.credit_rule,
         }
     }
 
     /// Whether this configuration holds every value of `main`'s gate
     /// configuration `gate`. A floor `main` has no value for matches nothing.
     pub fn matches_main_gate(&self, gate: &MainGateConfig) -> bool {
+        self.matches_main_gate_scoring(gate)
+            && gate.novelty_utility_microcredits == self.novelty_utility_microcredits
+            && gate.credit_rule == self.credit_rule
+    }
+
+    /// Owner decision D6 (2026-11-03): whether this configuration holds every
+    /// scoring value of `main`'s gate configuration and awards nothing (delta
+    /// 0, rule `flat`). A tenant that already selected such a bundle, or a
+    /// run bound to one, may keep running it after the delta or the rule is
+    /// raised: it scores as `main` does and pays less than `main` would,
+    /// never more. It never stands for the default package or an armed set,
+    /// which must match exactly ([`Self::matches_main_gate`]).
+    pub fn matches_main_gate_without_award(&self, gate: &MainGateConfig) -> bool {
+        self.matches_main_gate_scoring(gate)
+            && self.novelty_utility_microcredits == 0
+            && self.credit_rule == CompatibilityCreditRule::Flat
+    }
+
+    fn matches_main_gate_scoring(&self, gate: &MainGateConfig) -> bool {
         gate.perplexity_floor_micros == Some(self.perplexity_floor_micros)
             && gate.tail_fraction_floor_micros == Some(self.tail_fraction_floor_micros)
             && gate.novelty_floor_micros == Some(self.novelty_floor_micros)
@@ -244,7 +407,6 @@ impl CompatibilityBundleConfig {
             && gate.chunk_max_tokens == self.chunk_max_tokens
             && gate.chunk_cap == self.chunk_cap
             && gate.chunk_min_tokens == self.chunk_min_tokens
-            && gate.novelty_utility_microcredits == self.novelty_utility_microcredits
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -492,20 +654,43 @@ impl CompatibilityScorePolicy {
                 .map_err(|_| permanent("score_output_invalid"))?,
             )
         };
-        // P3-D6: the award is the configured NoveltyUtility delta, never q.
-        let awards =
-            if quality_passed && novelty_passed && self.config.novelty_utility_microcredits > 0 {
-                InstrumentAwards::new(vec![
-                    InstrumentAward::new(
-                        InstrumentId::trace_credit(),
-                        AtomicUnits::from_raw(u128::from(self.config.novelty_utility_microcredits)),
-                    )
-                    .map_err(|_| permanent("score_output_invalid"))?,
-                ])
-            } else {
-                InstrumentAwards::new(Vec::new())
+        // P3-D6: under the flat rule the award is the configured
+        // NoveltyUtility delta, never q. Under the graded rule (owner
+        // decisions D3-D4, 2026-11-03) it is the delta scaled by the
+        // perplexity and anomaly terms, recorded as award adjustments.
+        let passed = quality_passed && novelty_passed;
+        let (award_microcredits, award_adjustments) = match self.config.credit_rule {
+            CompatibilityCreditRule::Flat => (
+                if passed {
+                    self.config.novelty_utility_microcredits
+                } else {
+                    0
+                },
+                Vec::new(),
+            ),
+            CompatibilityCreditRule::GradedPerplexityV1 if passed => {
+                let graded = graded_perplexity_award(
+                    self.config.novelty_utility_microcredits,
+                    perplexity.representative_perplexity_micros,
+                    perplexity.peak_perplexity_micros,
+                    constants,
+                );
+                (graded.microcredits, graded.adjustments)
             }
-            .map_err(|_| permanent("score_output_invalid"))?;
+            CompatibilityCreditRule::GradedPerplexityV1 => (0, Vec::new()),
+        };
+        let awards = if award_microcredits > 0 {
+            InstrumentAwards::new(vec![
+                InstrumentAward::new(
+                    InstrumentId::trace_credit(),
+                    AtomicUnits::from_raw(u128::from(award_microcredits)),
+                )
+                .map_err(|_| permanent("score_output_invalid"))?,
+            ])
+        } else {
+            InstrumentAwards::new(Vec::new())
+        }
+        .map_err(|_| permanent("score_output_invalid"))?;
         let neighbor_bytes = serde_json::to_vec(
             &neighbors
                 .iter()
@@ -550,13 +735,14 @@ impl CompatibilityScorePolicy {
         evidence.credit_quality_micros = Some(u64::try_from(shadow.q_micros.max(0)).unwrap_or(0));
         evidence.credit_quality_version = Some(constants.version);
         evidence.neighbor_artifact_hash = Some(dependency_content_hash(&neighbor_bytes));
+        evidence.award_adjustments = award_adjustments;
         let decision = ScoreDecision::for_bundle(&self.manifest, awards.clone())
             .map_err(|_| permanent("score_output_invalid"))?;
         let result = PhaseResult {
             decision,
             evidence,
             evaluation: ScoreEvaluation {
-                rule_id: COMPATIBILITY_SCORE_RULE.to_string(),
+                rule_id: self.config.credit_rule.score_rule_id().to_string(),
                 awards,
             },
         };
@@ -1428,6 +1614,321 @@ mod tests {
         );
     }
 
+    // ---- graded credit rule (owner decisions D1-D4, 2026-11-03) ---------
+
+    /// The graded award at the V3 calibration, pinned against values
+    /// computed independently (Python's `math.log`, the same formula), so a
+    /// change to the terms or their rounding cannot pass by agreeing with
+    /// itself. Delta 1 point; columns: representative and peak perplexity,
+    /// `f` and `a` in micros, the award.
+    #[test]
+    fn graded_award_test_vectors() {
+        use crate::credit_quality::CREDIT_QUALITY_CONSTANTS_V3;
+        let delta = 1_000_000;
+        for (rep, peak, f, a, award) in [
+            (1_650_000, 1_650_000, 290_589, 1_000_000, 290_589),
+            (2_170_000, 2_170_000, 398_933, 1_000_000, 398_933),
+            (4_620_000, 37_800_000, 661_189, 1_000_000, 661_189),
+            (5_140_000, 5_140_000, 695_708, 1_000_000, 695_708),
+            (13_730_000, 13_730_000, 1_000_000, 1_000_000, 1_000_000),
+            (23_990_000, 23_990_000, 1_000_000, 1_000_000, 1_000_000),
+            (10_000_000, 1_750_000_000, 903_815, 500_000, 451_907),
+            (10_000_000, 3_100_000_000, 903_815, 0, 0),
+            (1_000_000, 1_000_000, 250_000, 1_000_000, 250_000),
+        ] {
+            let graded = graded_perplexity_award(delta, rep, peak, &CREDIT_QUALITY_CONSTANTS_V3);
+            assert_eq!(graded.microcredits, award, "award at rep {rep} peak {peak}");
+            let [perplexity, anomaly] = graded.adjustments.as_slice() else {
+                panic!("two adjustments, in order");
+            };
+            assert_eq!(perplexity.label.as_str(), GRADED_PERPLEXITY_TERM_LABEL);
+            assert_eq!(perplexity.factor_micros, f, "f at rep {rep}");
+            assert_eq!(perplexity.basis_micros, Some(u32::try_from(rep).unwrap()));
+            assert_eq!(anomaly.label.as_str(), GRADED_ANOMALY_TERM_LABEL);
+            assert_eq!(anomaly.factor_micros, a, "a at rep {rep} peak {peak}");
+            // An auditor recomputes the award from the delta and the two
+            // factors with integer arithmetic alone.
+            assert_eq!(
+                u128::from(delta) * u128::from(perplexity.factor_micros)
+                    * u128::from(anomaly.factor_micros)
+                    / 1_000_000_000_000,
+                u128::from(award)
+            );
+        }
+        // The delta is the ceiling: a saturated trace earns exactly it.
+        assert_eq!(
+            graded_perplexity_award(2_500_000, 50_000_000, 50_000_000, &CREDIT_QUALITY_CONSTANTS_V3)
+                .microcredits,
+            2_500_000
+        );
+    }
+
+    fn graded_config(delta: u64) -> CompatibilityBundleConfig {
+        let mut config = CompatibilityBundleConfig::local_reference();
+        config.credit_rule = CompatibilityCreditRule::GradedPerplexityV1;
+        config.novelty_utility_microcredits = delta;
+        config.chunk_min_tokens = 1;
+        config
+    }
+
+    /// The graded Score awards `delta * f * a` from its own evidence, records
+    /// the factors in `award_adjustments` in order, and names its own rule.
+    #[tokio::test]
+    async fn graded_rule_awards_delta_times_f_times_a_with_its_adjustments() {
+        use crate::credit_quality::CREDIT_QUALITY_CONSTANTS_V3;
+        let config = graded_config(1_000_000);
+        let after_qwen3_8 = QWEN3_8_EFFECTIVE_FROM_UNIX + 1;
+        let output = run_score_at(
+            &config,
+            FixedPerplexityScorer::uniform(100, 5.14, 0.0),
+            RecordingIndexReader::new(),
+            after_qwen3_8,
+        )
+        .await;
+        let result = output.result();
+        let evidence = &result.evidence;
+        assert!(evidence.quality_passed.unwrap() && evidence.novelty_passed.unwrap());
+        let expected = graded_perplexity_award(
+            1_000_000,
+            evidence.perplexity_micros.unwrap(),
+            evidence.peak_perplexity_micros.unwrap(),
+            &CREDIT_QUALITY_CONSTANTS_V3,
+        );
+        assert!(expected.microcredits > 600_000 && expected.microcredits < 800_000);
+        let award = result
+            .decision
+            .awards()
+            .get(&InstrumentId::trace_credit())
+            .unwrap();
+        assert_eq!(
+            award.atomic_units(),
+            AtomicUnits::from_raw(u128::from(expected.microcredits))
+        );
+        assert_eq!(evidence.award_adjustments, expected.adjustments);
+        assert_eq!(result.evidence.fixed_awards, result.decision.awards().clone());
+        assert_eq!(result.evaluation.rule_id, COMPATIBILITY_GRADED_SCORE_RULE);
+        let product: u128 = evidence
+            .award_adjustments
+            .iter()
+            .fold(1_000_000_u128, |amount, adjustment| {
+                amount * u128::from(adjustment.factor_micros) / 1_000_000
+            });
+        assert_eq!(product, u128::from(expected.microcredits));
+
+        // A trace above the ceiling earns exactly the delta.
+        let saturated = run_score_at(
+            &config,
+            FixedPerplexityScorer::uniform(100, 40.0, 0.0),
+            RecordingIndexReader::new(),
+            after_qwen3_8,
+        )
+        .await;
+        assert_eq!(
+            saturated
+                .result()
+                .decision
+                .awards()
+                .get(&InstrumentId::trace_credit())
+                .unwrap()
+                .atomic_units(),
+            AtomicUnits::from_raw(1_000_000)
+        );
+    }
+
+    /// A graded trace that fails a floor earns nothing and records no
+    /// adjustment; the flat rule records none either.
+    #[tokio::test]
+    async fn graded_rule_awards_nothing_below_a_floor_and_flat_records_no_adjustments() {
+        let mut config = graded_config(1_000_000);
+        config.perplexity_floor_micros = 5_000_000;
+        let failing = run_score(
+            &config,
+            FixedPerplexityScorer::uniform(100, 1.0, 0.0),
+            RecordingIndexReader::new(),
+        )
+        .await;
+        assert!(failing.result().decision.awards().is_empty());
+        assert!(failing.result().evidence.award_adjustments.is_empty());
+        assert_eq!(
+            failing.result().evaluation.rule_id,
+            COMPATIBILITY_GRADED_SCORE_RULE
+        );
+
+        let mut flat = CompatibilityBundleConfig::local_reference();
+        flat.novelty_utility_microcredits = 1_000_000;
+        flat.chunk_min_tokens = 1;
+        let flat_output = run_score(
+            &flat,
+            FixedPerplexityScorer::uniform(100, 5.14, 0.0),
+            RecordingIndexReader::new(),
+        )
+        .await;
+        assert!(flat_output.result().evidence.award_adjustments.is_empty());
+        assert_eq!(flat_output.result().evaluation.rule_id, COMPATIBILITY_SCORE_RULE);
+        assert_eq!(
+            flat_output
+                .result()
+                .decision
+                .awards()
+                .get(&InstrumentId::trace_credit())
+                .unwrap()
+                .atomic_units(),
+            AtomicUnits::from_raw(1_000_000)
+        );
+    }
+
+    fn pilot_like_gate(
+        delta: u64,
+        credit_rule: CompatibilityCreditRule,
+    ) -> MainGateConfig {
+        MainGateConfig {
+            perplexity_floor_micros: Some(1_500_000),
+            tail_fraction_floor_micros: Some(0),
+            novelty_floor_micros: Some(100_000),
+            embed_insert_novelty_micros: 50_000,
+            top_k: 5,
+            chunk_target_tokens: 2048,
+            chunk_max_tokens: 3072,
+            chunk_cap: 16,
+            chunk_min_tokens: 64,
+            novelty_utility_microcredits: delta,
+            credit_rule,
+        }
+    }
+
+    fn pin_config(gate: &MainGateConfig) -> CompatibilityBundleConfig {
+        CompatibilityBundleConfig::production_compatible(
+            "near_ai_perplexity.pin".to_string(),
+            "projection.pin".to_string(),
+            "index.pin".to_string(),
+            gate,
+        )
+        .unwrap()
+    }
+
+    /// With the rule off, a configuration and its package are byte for byte
+    /// what `main` built before the rule existed. The three pins were
+    /// produced by `main` at 96ba35043 (a test printing them, run on that
+    /// tree), not by this code, so the pilot's signed package
+    /// (`sha256:973e6171...`) keeps its hash after this change ships.
+    #[test]
+    fn a_flat_configuration_keeps_the_bytes_and_bundle_id_it_had_before_the_rule() {
+        const PIN_CONFIG: &str = r#"{"qualification":"production_compatible","scorer_model_id":"near_ai_perplexity.pin","projection_id":"projection.pin","index_id":"index.pin","perplexity_floor_micros":1500000,"tail_fraction_floor_micros":0,"novelty_floor_micros":100000,"embed_insert_novelty_micros":50000,"top_k":5,"chunk_target_tokens":2048,"chunk_max_tokens":3072,"chunk_cap":16,"chunk_min_tokens":64,"novelty_utility_microcredits":0,"instrument":{"instrument_id":"trace_credit","atomic_units":"0","descriptor":{"kind":"nep141","network":"testnet","contract":"trace-credit.testnet","decimals":6}}}"#;
+        const PIN_BUNDLE: &str =
+            "sha256:c0de977adbeded0ef4321d8f5a6f336ebec93e14078b99209441768b36dbfbe4";
+        const PIN_PACKAGE: &str =
+            "sha256:0c1b8f2fd83d72340e38a779d5b7014d149ae18319cdd03ae999f92aaee376cc";
+        let build = |config: &CompatibilityBundleConfig| {
+            crate::versioned_pipeline_bundle::MinimalPolicyBundle::compatibility_package(
+                config,
+                &ReferencePerplexityScorer::new(),
+                &ReferenceEmbedder::new(),
+            )
+            .unwrap()
+        };
+
+        let flat = pin_config(&pilot_like_gate(0, CompatibilityCreditRule::Flat));
+        assert_eq!(String::from_utf8(serde_json::to_vec(&flat).unwrap()).unwrap(), PIN_CONFIG);
+        let package = build(&flat);
+        assert_eq!(package.bundle_id, PIN_BUNDLE);
+        assert_eq!(
+            dependency_content_hash(&serde_json::to_vec(&package).unwrap()),
+            PIN_PACKAGE
+        );
+        // Today's bytes decode to the flat rule.
+        let decoded: CompatibilityBundleConfig = serde_json::from_str(PIN_CONFIG).unwrap();
+        assert_eq!(decoded, flat);
+
+        // The graded rule is pinned in the bytes, so it is a different
+        // package; the rule round-trips.
+        let graded = pin_config(&pilot_like_gate(0, CompatibilityCreditRule::GradedPerplexityV1));
+        let graded_bytes = serde_json::to_vec(&graded).unwrap();
+        assert!(
+            String::from_utf8(graded_bytes.clone())
+                .unwrap()
+                .ends_with(r#","credit_rule":"graded_perplexity_v1"}"#)
+        );
+        let decoded: CompatibilityBundleConfig = serde_json::from_slice(&graded_bytes).unwrap();
+        assert_eq!(decoded.credit_rule, CompatibilityCreditRule::GradedPerplexityV1);
+        assert_ne!(build(&graded).bundle_id, PIN_BUNDLE);
+        // An unknown rule does not decode.
+        let unknown = PIN_CONFIG.replace(
+            r#""decimals":6}}}"#,
+            r#""decimals":6}},"credit_rule":"graded_v9"}"#,
+        );
+        assert!(serde_json::from_str::<CompatibilityBundleConfig>(&unknown).is_err());
+    }
+
+    /// The package pins the rule: `main`'s configuration with another rule,
+    /// or another delta, does not match it, so ingest refuses the runtime
+    /// (`pipeline_runtime_main_gate_config_mismatch`).
+    #[test]
+    fn the_credit_rule_is_part_of_the_gate_configuration_a_package_must_match() {
+        let graded_gate = pilot_like_gate(1_000_000, CompatibilityCreditRule::GradedPerplexityV1);
+        let flat_gate = pilot_like_gate(1_000_000, CompatibilityCreditRule::Flat);
+        let graded = pin_config(&graded_gate);
+        assert!(graded.matches_main_gate(&graded_gate));
+        assert!(!graded.matches_main_gate(&flat_gate));
+        assert!(!pin_config(&flat_gate).matches_main_gate(&graded_gate));
+        assert_eq!(graded.main_gate(), graded_gate);
+    }
+
+    /// Owner decision D6: a bundle that holds `main`'s scoring configuration
+    /// and awards nothing may keep running after `main`'s award is raised;
+    /// any other difference, or any award, is still a mismatch.
+    #[test]
+    fn a_bundle_that_awards_nothing_matches_a_raised_award_and_nothing_else() {
+        let today = pin_config(&pilot_like_gate(0, CompatibilityCreditRule::Flat));
+        let raised = pilot_like_gate(1_000_000, CompatibilityCreditRule::GradedPerplexityV1);
+        assert!(!today.matches_main_gate(&raised));
+        assert!(today.matches_main_gate_without_award(&raised));
+        assert!(today.matches_main_gate_without_award(&pilot_like_gate(
+            2_500_000,
+            CompatibilityCreditRule::Flat
+        )));
+        // A scoring value differs: refused.
+        let mut other_floor = raised;
+        other_floor.novelty_floor_micros = Some(150_000);
+        assert!(!today.matches_main_gate_without_award(&other_floor));
+        // A bundle that awards anything is never tolerated this way.
+        let flat_award = pin_config(&pilot_like_gate(500_000, CompatibilityCreditRule::Flat));
+        assert!(!flat_award.matches_main_gate_without_award(&raised));
+        let graded_no_delta =
+            pin_config(&pilot_like_gate(0, CompatibilityCreditRule::GradedPerplexityV1));
+        assert!(!graded_no_delta.matches_main_gate_without_award(&raised));
+    }
+
+    #[test]
+    fn the_credit_rule_env_value_is_flat_unless_it_names_the_graded_rule() {
+        assert_eq!(
+            CompatibilityCreditRule::from_env_value(None),
+            Some(CompatibilityCreditRule::Flat)
+        );
+        assert_eq!(
+            CompatibilityCreditRule::from_env_value(Some("")),
+            Some(CompatibilityCreditRule::Flat)
+        );
+        assert_eq!(
+            CompatibilityCreditRule::from_env_value(Some("flat")),
+            Some(CompatibilityCreditRule::Flat)
+        );
+        assert_eq!(
+            CompatibilityCreditRule::from_env_value(Some(" graded_perplexity_v1 ")),
+            Some(CompatibilityCreditRule::GradedPerplexityV1)
+        );
+        assert_eq!(CompatibilityCreditRule::from_env_value(Some("graded")), None);
+        assert_eq!(CompatibilityCreditRule::from_env_value(Some("FLAT")), None);
+        for rule in [
+            CompatibilityCreditRule::Flat,
+            CompatibilityCreditRule::GradedPerplexityV1,
+        ] {
+            assert_eq!(
+                CompatibilityCreditRule::from_env_value(Some(rule.as_str())),
+                Some(rule)
+            );
+        }
+    }
+
     #[tokio::test]
     async fn anomaly_withheld_does_not_change_membership() {
         let mut config = CompatibilityBundleConfig::local_reference();
@@ -1923,6 +2424,7 @@ mod tests {
             chunk_cap: 16,
             chunk_min_tokens: 64,
             novelty_utility_microcredits: 2_500_000,
+            credit_rule: crate::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
         }
     }
 

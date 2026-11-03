@@ -3378,6 +3378,7 @@ pub(super) fn production_test_package_awarding(microcredits: u64) -> BundlePacka
             chunk_cap: 16,
             chunk_min_tokens: 64,
             novelty_utility_microcredits: microcredits,
+            credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
         },
     )
     .expect("the production test package builds")
@@ -3416,6 +3417,7 @@ fn production_package_build_needs_no_network() {
         chunk_cap: 16,
         chunk_min_tokens: 64,
         novelty_utility_microcredits: COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS,
+        credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
     };
     let package = production_bundle_package(&lookup, &gate).expect("builds offline");
     trace_commons_server::versioned_pipeline_qualification::validate_production_package(&package)

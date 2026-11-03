@@ -314,7 +314,10 @@ use trace_commons_server::versioned_pipeline_activation::{
     PIPELINE_TENANT_NOT_SERVED_LABEL, PipelineActivationStore, ReceiptOwner, RoutingState,
     decide_new_receipt_route,
 };
-use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
+use trace_commons_server::versioned_pipeline_compat::{
+    COMPATIBILITY_CREDIT_RULE_INVALID_LABEL, CompatibilityCreditRule, MainGateConfig,
+    NOVELTY_UTILITY_CREDIT_RULE_ENV,
+};
 use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_IDEMPOTENCY_CONFLICT, PIPELINE_EXPORT_ITEM_MAX,
     PIPELINE_EXPORT_SNAPSHOT_INVALIDATED, PIPELINE_EXPORT_SOURCE_INVALIDATED,
@@ -7254,6 +7257,7 @@ fn pipeline_main_gate_config_from_env(
             chunk_cap: TRACE_COMMONS_GATE_DEFAULT_CHUNK_CAP as u32,
             chunk_min_tokens: TRACE_COMMONS_GATE_DEFAULT_CHUNK_MIN_TOKENS as u64,
             novelty_utility_microcredits,
+            credit_rule: CompatibilityCreditRule::Flat,
         });
     }
     let optional_floor = |var: &'static str| -> anyhow::Result<Option<u64>> {
@@ -7268,6 +7272,17 @@ fn pipeline_main_gate_config_from_env(
         u32::try_from(value).with_context(|| format!("{var} is too large"))
     };
     let chunking = parse_gate_chunking_config_from_env()?;
+    // Owner decision D1 (2026-11-03): the credit rule the compatibility
+    // bundle pins, `flat` unless set. Like the delta, it is part of the
+    // gate configuration the default package must hold.
+    let credit_rule = CompatibilityCreditRule::from_env_value(
+        optional_trimmed_env(NOVELTY_UTILITY_CREDIT_RULE_ENV)?.as_deref(),
+    )
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "{COMPATIBILITY_CREDIT_RULE_INVALID_LABEL} ({NOVELTY_UTILITY_CREDIT_RULE_ENV})"
+        )
+    })?;
     Ok(MainGateConfig {
         perplexity_floor_micros: optional_floor(TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS)?,
         tail_fraction_floor_micros: optional_floor(TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS)?,
@@ -7288,6 +7303,7 @@ fn pipeline_main_gate_config_from_env(
         chunk_cap: as_u32(TRACE_COMMONS_GATE_CHUNK_CAP, chunking.chunk_cap)?,
         chunk_min_tokens: chunking.chunk_min_tokens,
         novelty_utility_microcredits,
+        credit_rule,
     })
 }
 
@@ -13987,6 +14003,10 @@ struct TraceCommonsConfigStatusResponse {
 struct TraceCommonsNoveltyUtilityConfigStatus {
     credit_points_delta: f32,
     require_production_gate: bool,
+    /// The credit rule the pipeline's gate configuration holds (`flat` or
+    /// `graded_perplexity_v1`; owner decision D1, 2026-11-03): `flat` when
+    /// no pipeline runtime is assembled.
+    credit_rule: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -14561,6 +14581,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         novelty_utility: TraceCommonsNoveltyUtilityConfigStatus {
             credit_points_delta: state.novelty_utility_credit_points_delta,
             require_production_gate: state.novelty_utility_require_production_gate,
+            credit_rule: state.pipeline_main_gate.credit_rule.as_str(),
         },
     }
 }
