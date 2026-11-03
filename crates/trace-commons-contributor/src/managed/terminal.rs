@@ -169,9 +169,10 @@ impl TerminalApp {
         match self {
             // Addressed by bundle id, like the others, so the app that
             // receives the command is the one the installed check found.
-            // The new tab's tty is printed, and read back only as a bare
-            // device path. Any failure there prints nothing: the launch
-            // stands and the session simply cannot be shown.
+            // The new window's tty and window id are printed, and read
+            // back only as a bare device path and digits. Any failure there
+            // prints less: the launch stands and the session simply cannot
+            // be shown.
             TerminalApp::Terminal => [
                 vec![format!("tell application id \"{id}\"")],
                 open_window(&literal),
@@ -380,36 +381,33 @@ fn raise_tab() -> Vec<String> {
 }
 
 /// Terminal's lines that run the AppleScript literal `literal` in a new
-/// window and read the tab back ([`read_back`]).
+/// window and set `found` to its tab's tty and, on the next line, the id of
+/// the window holding it, found by one scan that stops at the match. Run
+/// after the command is typed, so each read is inside a `try`: a failure
+/// prints less, the launch stands, and the session simply cannot be shown.
 #[cfg(any(target_os = "macos", test))]
 fn open_window(literal: &str) -> Vec<String> {
     [
         vec![
             format!("set t to do script \"{literal}\""),
             "activate".into(),
+            "set found to \"\"".into(),
+            "try".into(),
+            "set found to tty of t".into(),
+            "end try".into(),
+            "try".into(),
+            "set wid to missing value".into(),
+            // With no tty there is nothing to find: no scan.
+            "if found is not \"\" then".into(),
         ],
-        read_back(),
+        find_window("found"),
+        vec![
+            "end if".into(),
+            "if wid is not missing value then set found to found & linefeed & (wid as text)".into(),
+            "end try".into(),
+        ],
     ]
     .concat()
-}
-
-/// Terminal's lines that set `found` to tab `t`'s tty and, on the next
-/// line, the id of the window holding it: Terminal's front window, which a
-/// new window is, taken only when that window's selected tab is `t`. Run
-/// after the command is typed, so each read is inside a `try`: a failure
-/// prints less, the launch stands, and the session simply cannot be shown,
-/// or not picked to open beside. No tab of any other window is read.
-#[cfg(any(target_os = "macos", test))]
-fn read_back() -> Vec<String> {
-    vec![
-        "set found to \"\"".into(),
-        "try".into(),
-        "set found to tty of t".into(),
-        "end try".into(),
-        "try".into(),
-        "if found is not \"\" and (tty of selected tab of window 1) is found then set found to found & linefeed & (id of window 1 as text)".into(),
-        "end try".into(),
-    ]
 }
 
 /// Terminal's lines that bring the tab on `tty` to the front, in whichever
@@ -634,10 +632,6 @@ enum MacosLaunch {
 /// `command`, the one shell string; an argv app gets `argv` and `cwd`.
 /// `run` returns what was printed; only Terminal's script prints a tab,
 /// which is read back as a bare tty path and window id and nothing else.
-/// `place`, the window the person picked, is where Terminal opens a new
-/// tab for `command` ([`TerminalApp::script_in`]); every other app ignores
-/// it. The caller has already checked that this launch may press
-/// Command-T ([`placeable`]).
 #[cfg(target_os = "macos")]
 fn launch_macos(
     choice: TerminalSetting,
@@ -666,12 +660,6 @@ fn launch_macos(
 
 /// Run a macOS launch: `osascript` with the script's lines, or `open` with
 /// the plan's argv. Both return as soon as the app has the command.
-///
-/// Once the process may have started, every failure is `LaunchUnknown`:
-/// the command may already be running, so the launch is never released
-/// for another try with the same ticket (#1853 review). Only a failure
-/// before anything ran, a capture file that could not be made, keeps its
-/// own error.
 #[cfg(target_os = "macos")]
 fn run_macos(how: MacosLaunch) -> Result<Vec<u8>, ManagedError> {
     let command = match how {
@@ -688,10 +676,7 @@ fn run_macos(how: MacosLaunch) -> Result<Vec<u8>, ManagedError> {
             open
         }
     };
-    let output = super::profiles::bounded_output(command).map_err(|error| match error {
-        ManagedError::StorageUnavailable => error,
-        _ => ManagedError::LaunchUnknown,
-    })?;
+    let output = super::profiles::bounded_output(command)?;
     if output.status.success() {
         Ok(output.stdout)
     } else {
@@ -921,26 +906,26 @@ fn tty_path<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalTab {
     pub handle: TerminalHandle,
-    /// Terminal's window id: where Start again and Resume open a new tab.
+    /// Terminal's window id, kept on the row for a launch that places
+    /// itself beside it (#1852).
     pub window: Option<u32>,
 }
 
-/// A Terminal window id as a script prints it: digits only, at most ten,
-/// and within `u32`.
-fn window_id(text: &str) -> Option<u32> {
-    let digits = !text.is_empty() && text.len() <= 10 && text.bytes().all(|b| b.is_ascii_digit());
-    digits.then(|| text.parse::<u32>().ok()).flatten()
-}
-
 /// The tab a launch script printed: a bare tty path, then optionally a line
-/// holding only a window id. A first line that is not a tty is none; a
-/// second line that is not a window id keeps the tab, with no window, so an
-/// unreadable optional value never costs the session Show and Stop.
+/// of digits, the window id. A second line of digits that is not a window
+/// id (too long) keeps the tab with no window, so Show and Stop never hang
+/// on it. Anything else, a second tty or any other text, is not what the
+/// script prints, and names no tab.
 pub fn terminal_tab(output: &[u8]) -> Option<TerminalTab> {
     let text = std::str::from_utf8(output).ok()?;
     let text = text.strip_suffix('\n').unwrap_or(text);
     let (tty, window) = match text.split_once('\n') {
-        Some((tty, window)) => (tty, window_id(window)),
+        Some((tty, window)) => {
+            if window.is_empty() || !window.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            (tty, window.parse::<u32>().ok())
+        }
         None => (text, None),
     };
     valid_tty(tty).then(|| TerminalTab {
@@ -1171,6 +1156,14 @@ fn parse_windows(stdout: &[u8]) -> Vec<(u32, Vec<String>)> {
         .collect()
 }
 
+/// A Terminal window id as a script prints it: digits only, at most ten,
+/// and within `u32`.
+#[cfg(any(target_os = "macos", test))]
+fn window_id(text: &str) -> Option<u32> {
+    let digits = !text.is_empty() && text.len() <= 10 && text.bytes().all(|b| b.is_ascii_digit());
+    digits.then(|| text.parse::<u32>().ok()).flatten()
+}
+
 pub fn shell_command(
     helper: &Path,
     config: &Path,
@@ -1322,12 +1315,6 @@ pub fn launch_tool_setup(
 /// (Terminal's tab, by tty); a launch that cannot is still a launch, with no
 /// handle.
 ///
-/// `place` is the Terminal window the person picked in the launch dialog.
-/// Terminal opens the session in a new tab of that window when macOS
-/// allows the keystroke now ([`tab_access`]); when it does not, when the
-/// window no longer holds the session it was picked by, and in every other
-/// app or platform, the launch opens a new window as it would without it.
-/// Nothing is typed into an existing tab.
 pub fn launch(
     choice: TerminalSetting,
     installed: &[TerminalApp],
@@ -1346,6 +1333,12 @@ pub fn launch(
         let command = shell_command(&helper, config, session, ticket)?;
         let mut argv = vec![helper.into_os_string()];
         argv.extend(helper_args(config, session, ticket));
+        // Anything that goes wrong once the terminal is asked may follow a
+        // typed command, so it reads as `LaunchUnknown`, never as a refusal
+        // from before anything ran.
+        // A placed launch presses Command-T only when macOS already allows
+        // it; otherwise it opens a new window and the prompts are asked for
+        // off the launch (#1853 review).
         let place = placeable(choice, place, || {
             let ready = tab_access(false);
             if !ready {
@@ -1353,15 +1346,9 @@ pub fn launch(
             }
             ready
         });
-        launch_macos(
-            choice,
-            installed,
-            &command,
-            argv,
-            Some(cwd),
-            place,
-            run_macos,
-        )
+        launch_macos(choice, installed, &command, argv, Some(cwd), place, |how| {
+            run_macos(how).map_err(|_| ManagedError::LaunchUnknown)
+        })
     }
     #[cfg(any(windows, target_os = "linux"))]
     {
@@ -1485,8 +1472,15 @@ mod tests {
                 .count(),
             1
         );
-        assert!(!lines.iter().any(|l| l.contains("repeat with w in windows")));
-        assert!(!lines.iter().any(|l| l.contains("tabs of w")));
+        // The placed path scans nothing; only the new-window fallback
+        // finds its window, as every new-window launch does.
+        let fallback = lines.iter().position(|l| l == "else").unwrap();
+        assert!(
+            !lines[..fallback]
+                .iter()
+                .any(|l| l.contains("repeat with w in windows"))
+        );
+        assert!(!lines[..fallback].iter().any(|l| l.contains("tabs of w")));
         let vouched = at("if known contains \"/dev/ttys011\" then");
         assert!(at("set tw to window id 7") < before);
         assert!(before < vouched);
@@ -1533,80 +1527,6 @@ mod tests {
         // The one shared Command-T builder.
         for line in new_tab("tw") {
             assert!(lines.contains(&line), "{line}");
-        }
-    }
-
-    /// Show finds a tab's window by scanning; a launch reads back only its
-    /// own tab and the front window, never every tab (#1853 review, one
-    /// scan per launch). Built on every platform, so no builder is
-    /// compiled for nothing.
-    #[test]
-    fn show_scans_and_a_launch_reads_back_only_its_own_tab() {
-        let focus = focus_script("/dev/ttys011");
-        assert_eq!(
-            focus.first().unwrap(),
-            "tell application id \"com.apple.Terminal\""
-        );
-        assert!(focus.contains(&"set wid to id of w".to_string()));
-        assert!(focus.contains(&"set tw to window id wid".to_string()));
-        assert!(focus.contains(&"if tty of x is \"/dev/ttys011\" then".to_string()));
-        assert!(focus.contains(&"if t is missing value then error \"no tab\"".to_string()));
-        assert!(
-            !focus
-                .iter()
-                .any(|l| l.contains("do script") || l.contains("keystroke"))
-        );
-        assert_eq!(
-            TerminalApp::Terminal.script("echo ok"),
-            [
-                vec![
-                    "tell application id \"com.apple.Terminal\"".to_string(),
-                    "set t to do script \"echo ok\"".into(),
-                    "activate".into(),
-                ],
-                read_back(),
-                vec!["return found".into(), "end tell".into()],
-            ]
-            .concat()
-        );
-        assert!(!read_back().iter().any(|l| l.contains("repeat")));
-        assert!(read_back().contains(
-            &"if found is not \"\" and (tty of selected tab of window 1) is found then set found to found & linefeed & (id of window 1 as text)"
-                .to_string()
-        ));
-    }
-
-    /// A launch prints its tab's tty and, on the next line, its window's
-    /// id. A first line that is not a tty names no tab; a second line that
-    /// is not a window id keeps the tab, with no window (#1853 review).
-    #[test]
-    fn a_launch_prints_its_tab_and_window() {
-        let tab = |tty: &str, window| {
-            Some(TerminalTab {
-                handle: TerminalHandle::AppleTerminal { tty: tty.into() },
-                window,
-            })
-        };
-        assert_eq!(
-            terminal_tab(b"/dev/ttys003\n4242\n"),
-            tab("/dev/ttys003", Some(4242))
-        );
-        assert_eq!(terminal_tab(b"/dev/ttys003\n"), tab("/dev/ttys003", None));
-        for output in [
-            &b"/dev/ttys003\n\n"[..],
-            b"/dev/ttys003\n42 x",
-            b"/dev/ttys003\n99999999999",
-            b"/dev/ttys003\n/dev/ttys004",
-            b"/dev/ttys003\n42\n43",
-        ] {
-            assert_eq!(
-                terminal_tab(output),
-                tab("/dev/ttys003", None),
-                "{output:?}"
-            );
-        }
-        for output in [&b"4242\n/dev/ttys003"[..], b"", b"/dev/tty\n42"] {
-            assert_eq!(terminal_tab(output), None, "{output:?}");
         }
     }
 
@@ -1827,6 +1747,98 @@ mod tests {
         assert_eq!(Placement::beside(9, &handle("/dev/ttys004\"")), None);
     }
 
+    /// Show and a launch find a tab's window the same way, by window id,
+    /// stopping at the match; a launch prints its tab's tty and that
+    /// window's id. Nothing types into or opens a tab in an existing window
+    /// (owner, 2026-11-02). Built on every platform, so no builder is
+    /// compiled for nothing.
+    #[test]
+    fn show_and_a_launch_share_the_window_lines() {
+        let focus = focus_script("/dev/ttys011");
+        assert_eq!(
+            focus.first().unwrap(),
+            "tell application id \"com.apple.Terminal\""
+        );
+        assert!(focus.contains(&"set wid to id of w".to_string()));
+        assert!(focus.contains(&"set tw to window id wid".to_string()));
+        assert!(focus.contains(&"if tty of x is \"/dev/ttys011\" then".to_string()));
+        assert!(focus.contains(&"if t is missing value then error \"no tab\"".to_string()));
+        let launch = TerminalApp::Terminal.script("echo ok");
+        for lines in [&focus, &launch] {
+            assert!(
+                !lines.iter().any(|l| l.contains("keystroke")
+                    || l.contains("System Events")
+                    || l.contains("\" in t")),
+                "{lines:#?}"
+            );
+        }
+        assert_eq!(
+            launch,
+            [
+                vec!["tell application id \"com.apple.Terminal\"".to_string()],
+                open_window("echo ok"),
+                vec!["return found".into(), "end tell".into()],
+            ]
+            .concat()
+        );
+        assert!(launch.contains(&"if tty of x is found then".to_string()));
+        assert_eq!(
+            launch
+                .iter()
+                .filter(|l| l.contains("repeat with w in windows"))
+                .count(),
+            1,
+            "one scan"
+        );
+    }
+
+    /// A launch prints its tab's tty and, on the next line, its window's
+    /// id; anything else names no tab.
+    #[test]
+    fn a_launch_prints_its_tab_and_window() {
+        let tab = |tty: &str| TerminalHandle::AppleTerminal { tty: tty.into() };
+        assert_eq!(
+            terminal_tab(b"/dev/ttys003\n4242\n"),
+            Some(TerminalTab {
+                handle: tab("/dev/ttys003"),
+                window: Some(4242)
+            })
+        );
+        assert_eq!(
+            terminal_tab(b"/dev/ttys003\n"),
+            Some(TerminalTab {
+                handle: tab("/dev/ttys003"),
+                window: None
+            })
+        );
+        // A window id too long to be one keeps the tab, with no window.
+        for output in [
+            &b"/dev/ttys003\n99999999999"[..],
+            b"/dev/ttys003\n99999999999\n",
+        ] {
+            assert_eq!(
+                terminal_tab(output),
+                Some(TerminalTab {
+                    handle: tab("/dev/ttys003"),
+                    window: None
+                }),
+                "{output:?}"
+            );
+        }
+        // Anything else is not what the script prints: no tab.
+        for output in [
+            &b""[..],
+            b"/dev/ttys003\n\n",
+            b"/dev/ttys003\n42 x",
+            b"/dev/ttys003\n/dev/ttys004",
+            b"/dev/ttys003\n42\n43",
+            b"4242\n/dev/ttys003",
+            b"ttys003\n42",
+        ] {
+            assert_eq!(terminal_tab(output), None, "{output:?}");
+        }
+    }
+
     #[test]
     fn setup_is_one_quoted_shell_invocation_and_keeps_the_terminal_open() {
         let command = setup_shell_command("printf '%s\\n' 'quoted $HOME `not-code`'").unwrap();
@@ -2041,8 +2053,22 @@ mod tests {
                 "try",
                 "set found to tty of t",
                 "end try",
+                // The window holding the tab, kept on the row (#1853) for
+                // #1852 to place launches beside.
                 "try",
-                "if found is not \"\" and (tty of selected tab of window 1) is found then set found to found & linefeed & (id of window 1 as text)",
+                "set wid to missing value",
+                "if found is not \"\" then",
+                "repeat with w in windows",
+                "repeat with x in tabs of w",
+                "if tty of x is found then",
+                "set wid to id of w",
+                "exit repeat",
+                "end if",
+                "end repeat",
+                "if wid is not missing value then exit repeat",
+                "end repeat",
+                "end if",
+                "if wid is not missing value then set found to found & linefeed & (wid as text)",
                 "end try",
                 "return found",
                 "end tell",

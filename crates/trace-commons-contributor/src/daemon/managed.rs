@@ -84,9 +84,9 @@ struct TerminalLaunch {
 }
 
 impl TerminalLaunch {
-    /// Open the terminal. Run without the service locked, and off the async
-    /// worker ([`crate::daemon::run_blocking`]): osascript can take seconds,
-    /// and every other managed request would wait with it.
+    /// Open the terminal. Run without the service locked, and off the
+    /// async workers: `osascript` can take up to its 10 s bound, and every
+    /// other managed request would wait with it.
     fn open(&self) -> Result<Option<TerminalTab>, ManagedError> {
         (self.launch)(
             self.choice,
@@ -176,9 +176,10 @@ impl ManagedService {
             #[serde(default, rename = "in_window_of")]
             _in_window_of: Option<serde::de::IgnoredAny>,
             /// The running session whose Terminal window the person picked
-            /// in the launch dialog (owner, 2026-11-02). The daemon finds
-            /// that session's window and tab itself, and only for a session
-            /// it opened that runs; anything else opens a new window.
+            /// in the launch dialog (owner, 2026-11-02, #1852). The daemon
+            /// finds that session's window and tab itself, and only for a
+            /// session it opened that runs; anything else opens a new
+            /// window.
             #[serde(default)]
             beside: Option<Uuid>,
         }
@@ -187,8 +188,9 @@ impl ManagedService {
             .sessions
             .begin_terminal_launch(p.session_id, &p.ticket)?;
         // The window list is the only way a session opens in an existing
-        // window; Start again and Resume open a new one (owner,
-        // 2026-11-02, #1853 decision (b)).
+        // window; Start again and Resume open a new one (owner, 2026-11-02).
+        // By setting, not `app()`: the setting reads Terminal only where
+        // Terminal is offered, and tests run on every platform.
         let place = (choice == TerminalSetting::Terminal)
             .then(|| p.beside.and_then(|id| self.sessions.placement_beside(id)))
             .flatten();
@@ -205,10 +207,13 @@ impl ManagedService {
     }
 
     /// Record what [`TerminalLaunch::open`] did: the tab and window it
-    /// opened, or, when it was refused before anything ran, release the
-    /// held launch. Any other failure (`LaunchUnknown`) may have typed the
-    /// command already, so the launch stays held: its ticket cannot open a
-    /// second terminal (#1853 review).
+    /// opened. Only a refusal that comes before anything runs (the terminal
+    /// app not found, an invalid request, an unsupported build) releases the
+    /// held launch, so its ticket can launch again. Every other error,
+    /// `LaunchUnknown` above all, may follow a typed command whose tool is
+    /// about to redeem, so the launch stays held until the tool reports or
+    /// the ticket lapses. [`terminal::launch`] reports anything that goes
+    /// wrong after the terminal is asked as `LaunchUnknown`.
     fn finish_terminal_launch(
         &mut self,
         launch: &TerminalLaunch,
@@ -224,18 +229,17 @@ impl ManagedService {
                     .opened_in_terminal(launch.session_id, handle, window)?;
                 Ok(json!({"opened":true,"destination":terminal::destination(launch.choice)}))
             }
-            Err(error) => {
-                if matches!(
-                    error,
-                    ManagedError::TerminalNotFound
-                        | ManagedError::InvalidRequest
-                        | ManagedError::UnsupportedVersion
-                        | ManagedError::StorageUnavailable
-                ) {
-                    self.sessions.terminal_launch_failed(launch.session_id)?;
-                }
+            // Refusals that only come before anything is run.
+            Err(
+                error @ (ManagedError::TerminalNotFound
+                | ManagedError::InvalidRequest
+                | ManagedError::UnsupportedVersion),
+            ) => {
+                self.sessions.terminal_launch_failed(launch.session_id)?;
                 Err(error)
             }
+            // Anything else may follow a typed command: held.
+            Err(error) => Err(error),
         }
     }
 
@@ -581,6 +585,9 @@ impl ManagedService {
                 Ok(json!(selection))
             }
             "managed_launch_prepare" => self.prepare_launch(request, sign_in),
+            // Only through [`terminal_launch`], which opens the terminal
+            // with the service unlocked; `handle` and `handle_async` route
+            // it there before reaching this.
             "managed_terminal_windows" => {
                 no_params(request)?;
                 let candidates = self.window_candidates(choice);
@@ -599,11 +606,7 @@ impl ManagedService {
                 }
                 Ok(json!({"asked": asked}))
             }
-            "managed_terminal_launch" => {
-                let launch = self.begin_terminal_launch(request, choice)?;
-                let opened = launch.open();
-                self.finish_terminal_launch(&launch, opened)
-            }
+            "managed_terminal_launch" => Err(ManagedError::InvalidRequest),
             "managed_launch_redeem" => {
                 let p: RedeemParams = parse(request)?;
                 // A sign-in session needs a daemon-hosted proxy, which only
@@ -1159,8 +1162,8 @@ fn terminal_windows(shared: &DaemonShared, request: &Request) -> Response {
 }
 
 /// `managed_terminal_launch` with the service locked only to hold the
-/// launch and to record it: the terminal opens in between, unlocked, since
-/// it can wait on a macOS consent prompt for seconds.
+/// launch and to record it: the terminal opens in between, unlocked and off
+/// the async workers, since `osascript` can take seconds.
 fn terminal_launch(shared: &DaemonShared, request: &Request) -> Response {
     let choice = terminal_choice(shared).setting;
     let launch = match with_service(shared, |service| {
@@ -1581,67 +1584,160 @@ pub async fn sweep(shared: &DaemonShared, now: chrono::DateTime<chrono::Utc>) {
     }
 }
 
+/// A row a collection plan covers, with what the plan's decision needs.
+pub type PlanRow = (Uuid, Option<crate::managed::collection_plan::RowStatus>);
+
+/// What one lease tick read, under one sweep and one listing of the plans:
+/// the rows a plan covers, for [`collect_abandoned_rows`], and the quiet
+/// rows no plan covers whose tool the daemon can watch, for ending. Taken
+/// together, each quiet row has one owner per tick.
+struct LeaseScan {
+    plans: Vec<PlanRow>,
+    quiet: Vec<crate::managed::sessions::QuietTool>,
+}
+
+/// The daemon's lease tick, whose first tick is at startup: lapse rows
+/// whose launcher went quiet, shut down the proxies of sessions that no
+/// longer run, and end the quiet rows no collection plan covers once the
+/// tool process their launcher named is gone, so they free their
+/// conversation and account (`SessionRegistry::end_quiet`). Returns the
+/// plan rows, for a collection pass if none is running; a row with a plan
+/// is ended there, when its plan is decided. A row whose launcher named no
+/// process is never ended here: the person can dismiss it
+/// (`SessionRegistry::dismiss`).
+///
+/// One sweep and one listing of the plans per tick. The listing, the
+/// process checks and the writes run on blocking tasks, off the daemon's
+/// loop; the managed lock is taken once to read and once more only when
+/// there is a row to end.
+pub async fn lease_pass(
+    shared: &std::sync::Arc<DaemonShared>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<PlanRow> {
+    let held = std::sync::Arc::clone(shared);
+    let Ok((scan, routes)) = tokio::task::spawn_blocking(move || scan(&held, now, true)).await
+    else {
+        return Vec::new();
+    };
+    for route in routes {
+        route.shutdown().await;
+    }
+    let Some(scan) = scan else {
+        return Vec::new();
+    };
+    let held = std::sync::Arc::clone(shared);
+    let quiet = scan.quiet;
+    let _ = tokio::task::spawn_blocking(move || end_gone(&held, quiet)).await;
+    scan.plans
+}
+
+/// [`lease_pass`]'s ending of quiet rows alone, without the proxies or a
+/// collection.
+#[cfg(test)]
+pub async fn end_quiet_rows(
+    shared: &std::sync::Arc<DaemonShared>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let held = std::sync::Arc::clone(shared);
+    let _ = tokio::task::spawn_blocking(move || {
+        if let (Some(scan), _) = scan(&held, now, false) {
+            end_gone(&held, scan.quiet);
+        }
+    })
+    .await;
+}
+
+fn scan(
+    shared: &DaemonShared,
+    now: chrono::DateTime<chrono::Utc>,
+    routes: bool,
+) -> (Option<LeaseScan>, Vec<ManagedRoute>) {
+    let ids = crate::managed::collection_plan::list(&shared.store);
+    let planned: std::collections::BTreeSet<Uuid> = ids.iter().copied().collect();
+    with_service(shared, |service| {
+        service.sessions.sweep(now)?;
+        let scan = LeaseScan {
+            plans: ids
+                .iter()
+                .map(|id| (*id, service.sessions.collection_status(*id)))
+                .collect(),
+            quiet: service.sessions.quiet_tools(&planned),
+        };
+        let routes = if routes {
+            service.take_routes(false)
+        } else {
+            Vec::new()
+        };
+        Ok((Some(scan), routes))
+    })
+    .unwrap_or((None, Vec::new()))
+}
+
+/// End, in one write, the quiet rows whose tool is gone.
+fn end_gone(shared: &DaemonShared, quiet: Vec<crate::managed::sessions::QuietTool>) {
+    let gone: Vec<Uuid> = quiet
+        .into_iter()
+        .filter(|tool| tool.gone())
+        .map(|tool| tool.id)
+        .collect();
+    if !gone.is_empty() {
+        let _ = with_service(shared, |service| service.sessions.end_quiet(&gone));
+    }
+}
+
 /// Collect the trace of a collecting session whose launcher went quiet
 /// (terminal window closed, force quit, logout), once its tool has exited,
 /// from the collection plan the launcher left (`managed::collection_plan`).
-/// The daemon's loop runs this on its lease tick, whose first tick is at
-/// startup, so rows a restart found unknown or failed are picked up too.
-/// A row whose tool the daemon saw exit has ended, so its conversation can
-/// be resumed (`SessionRegistry::tool_exited`). That includes a quiet row
-/// with no plan (it does not collect), whose tool's process the launcher
-/// named: without it, such a row stayed unknown, holding its conversation,
-/// for good.
+/// The daemon's loop runs this after a [`lease_pass`], on the plan rows it
+/// read, so rows a restart found unknown or failed are picked up at
+/// startup too. A row whose tool the daemon saw exit has ended, so its
+/// conversation can be resumed (`SessionRegistry::tool_exited`). Quiet rows
+/// with no plan are [`lease_pass`]'s.
 ///
 /// Never while the launcher still reports, never while the tool's process
-/// runs (its pid and start time), never for a row that does not collect,
-/// and never when the launcher took the row's claim first. A plan is read
-/// only for a quiet row still waiting for its result, and all file,
+/// runs (its pid and start time), never collects a row that does not
+/// collect, and never when the launcher took the row's claim first. A plan
+/// is read only for a quiet row still waiting for its result, and all file,
 /// process and collection work runs on a blocking task, off the daemon's
 /// loop and off the managed lock, which is taken only to read rows and
 /// record results. Past `collection_plan::GIVE_UP_AFTER` a running tool's
 /// collection is recorded as failed and its local session is left as it
 /// is. Returns how many rows it collected.
-pub async fn collect_abandoned(
+pub async fn collect_abandoned_rows(
     shared: &std::sync::Arc<DaemonShared>,
+    plans: Vec<PlanRow>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> usize {
     let shared = std::sync::Arc::clone(shared);
-    tokio::task::spawn_blocking(move || collect_abandoned_now(&shared, now))
+    tokio::task::spawn_blocking(move || collect_abandoned_now(&shared, plans, now))
         .await
         .unwrap_or(0)
 }
 
-fn collect_abandoned_now(shared: &DaemonShared, now: chrono::DateTime<chrono::Utc>) -> usize {
+/// A lease scan and a collection pass on its plan rows, without the
+/// proxies or the ending of quiet rows.
+#[cfg(test)]
+pub async fn collect_abandoned(
+    shared: &std::sync::Arc<DaemonShared>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> usize {
+    let held = std::sync::Arc::clone(shared);
+    let plans = tokio::task::spawn_blocking(move || scan(&held, now, false).0)
+        .await
+        .ok()
+        .flatten()
+        .map(|scan| scan.plans)
+        .unwrap_or_default();
+    collect_abandoned_rows(shared, plans, now).await
+}
+
+fn collect_abandoned_now(
+    shared: &DaemonShared,
+    plans: Vec<PlanRow>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> usize {
     use crate::managed::collection_plan::{self, Next, ProcessIdentity};
     let store = &shared.store;
-    let ids = collection_plan::list(store);
-    // Rows lapse lazily (a shell's snapshot, or a sweep while the daemon
-    // hosts a route); lapse them here so a quiet launcher is seen.
-    let Ok((rows, quiet)) = with_service(shared, |service| {
-        service.sessions.sweep(now)?;
-        Ok((
-            ids.iter()
-                .map(|id| service.sessions.collection_status(*id))
-                .collect::<Vec<_>>(),
-            service.sessions.quiet_tools(),
-        ))
-    }) else {
-        return 0;
-    };
-    // A quiet row with no plan is never collected, so nothing below ends
-    // it: once its tool is gone it has ended, and frees its conversation.
-    // A row with a plan is ended below, when its plan is decided.
-    for (id, identity) in quiet {
-        if ids.contains(&id) {
-            continue;
-        }
-        if ProcessIdentity::parse(&identity).is_some_and(|process| !process.is_running()) {
-            let _ = with_service(shared, |service| service.sessions.tool_exited(id));
-        }
-    }
-    if ids.is_empty() {
-        return 0;
-    }
     let record = |id, collection, tool_exited: bool| {
         let _ = with_service(shared, |service| {
             service.sessions.record_collection(id, collection)?;
@@ -1653,7 +1749,7 @@ fn collect_abandoned_now(shared: &DaemonShared, now: chrono::DateTime<chrono::Ut
     };
     let mut me = None;
     let mut collected = 0;
-    for (id, row) in ids.into_iter().zip(rows) {
+    for (id, row) in plans {
         let (next, plan) = match collection_plan::before_reading(row) {
             Some(decided) => (decided, None),
             None => {
@@ -2927,13 +3023,151 @@ mod tests {
         assert!(retried.ticket.is_none());
     }
 
-    static LAUNCHED: std::sync::Mutex<Vec<(Uuid, Option<Placement>)>> =
-        std::sync::Mutex::new(vec![]);
+    /// Answers every launch with a new window, numbered from 100 by
+    /// session. Tests never open a real terminal.
+    fn record_launch(
+        _: TerminalSetting,
+        _: &[TerminalApp],
+        _: &std::path::Path,
+        _: &std::path::Path,
+        session: Uuid,
+        _: &str,
+        _: Option<&Placement>,
+    ) -> Result<Option<TerminalTab>, ManagedError> {
+        Ok(Some(TerminalTab {
+            handle: TerminalHandle::AppleTerminal {
+                tty: "/dev/ttys042".into(),
+            },
+            window: Some(window_of(session)),
+        }))
+    }
+
+    fn window_of(session: Uuid) -> u32 {
+        100 + u32::from(session.as_bytes()[0])
+    }
+
+    /// A daemon whose terminal launches go to `launch`, with its service
+    /// set up as [`service`]'s. Launches go through [`terminal_launch`],
+    /// the one path that opens a terminal.
+    fn launching(launch: LaunchTerminal) -> (tempfile::TempDir, DaemonShared) {
+        let (home, store, _service) = service();
+        let shared = DaemonShared::load(store).unwrap();
+        locked(&shared, |service| {
+            service.installed_terminals = || TerminalApp::offered().to_vec();
+            service.launch_terminal = launch;
+        });
+        (home, shared)
+    }
+
+    fn locked<T>(shared: &DaemonShared, f: impl FnOnce(&mut ManagedService) -> T) -> T {
+        f(shared.managed.lock().unwrap().as_mut().unwrap())
+    }
+
+    /// `managed_terminal_launch` through the daemon: its answer, or its
+    /// refusal's label.
+    fn terminal(shared: &DaemonShared, params: Value) -> Result<Value, String> {
+        let response = terminal_launch(
+            shared,
+            &Request {
+                id: 1,
+                method: "managed_terminal_launch".into(),
+                params,
+            },
+        );
+        match response.error {
+            Some(error) => Err(error.message),
+            None => Ok(response.result.unwrap()),
+        }
+    }
+
+    /// Prepare a coding launch in `home` on a new account, through the
+    /// daemon's service.
+    fn prepared(shared: &DaemonShared, home: &std::path::Path) -> PreparedLaunch {
+        locked(shared, |service| {
+            let account = service
+                .accounts
+                .add(ToolId::Claude, ConnectionKind::Subscription, "Work")
+                .unwrap();
+            let mut request: LaunchRequest =
+                serde_json::from_value(launch(ToolId::Claude, home)).unwrap();
+            request.connection = ConnectionKind::Subscription;
+            request.account_id = account.id;
+            serde_json::from_value(
+                call(service, "managed_launch_prepare", json!(request), false).unwrap(),
+            )
+            .unwrap()
+        })
+    }
+
+    /// Launch `prepared` through the daemon with `extra` launch fields,
+    /// start it, and end it.
+    fn opened_and_ended(shared: &DaemonShared, prepared: PreparedLaunch, extra: Value) -> Uuid {
+        let id = prepared.session_id;
+        let ticket = prepared.ticket.unwrap();
+        let mut params = json!({"session_id":id,"ticket":ticket});
+        for (key, value) in extra.as_object().unwrap() {
+            params[key] = value.clone();
+        }
+        terminal(shared, params).unwrap();
+        locked(shared, |service| {
+            let context = service.sessions.redeem(id, &ticket).unwrap();
+            report(service, id, &context.proof, "running", None).unwrap();
+            report(service, id, &context.proof, "exited", Some(0)).unwrap();
+        });
+        id
+    }
+
+    /// #1839 review, findings 2 and 11, and the owner's decision
+    /// (2026-11-02): Start again opens a new window like any launch. The
+    /// daemon records the row it came from, and each row keeps the window
+    /// id its launch printed, for #1852 to place launches beside; the app
+    /// names nothing. An app built from #1839 that still names a row is
+    /// not refused, and what it names is ignored. The service's own handler
+    /// never opens a terminal: only [`terminal_launch`] does, unlocked.
+    #[test]
+    fn start_again_opens_a_new_window_and_the_daemon_records_where_from() {
+        let (home, shared) = launching(record_launch);
+        let first = opened_and_ended(&shared, prepared(&shared, home.path()), json!({}));
+        let again: PreparedLaunch = locked(&shared, |service| {
+            serde_json::from_value(
+                call(
+                    service,
+                    "managed_session_start_again",
+                    json!({"session_id":first,"request_id":Uuid::new_v4()}),
+                    false,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        });
+        let second = opened_and_ended(&shared, again, json!({"in_window_of": first}));
+        locked(&shared, |service| {
+            assert_eq!(
+                service.sessions.again_window(second),
+                Some(window_of(first))
+            );
+            assert_eq!(service.sessions.again_window(first), None);
+            assert_eq!(
+                call(
+                    service,
+                    "managed_terminal_launch",
+                    json!({"session_id":second,"ticket":"00"}),
+                    false
+                ),
+                Err(ManagedError::InvalidRequest)
+            );
+        });
+    }
+
+    static PLACED: std::sync::Mutex<Vec<(Uuid, Option<Placement>)>> = std::sync::Mutex::new(vec![]);
+
+    fn tty_of(session: Uuid) -> String {
+        format!("/dev/ttys{:03}", session.as_bytes()[0])
+    }
 
     /// Records where each launch was placed and answers with a new tab in
-    /// that window, or in a new window of its own. Tests never open a real
-    /// terminal.
-    fn record_launch(
+    /// that window, or a new window of its own (#1852).
+    fn record_placed(
         _: TerminalSetting,
         _: &[TerminalApp],
         _: &std::path::Path,
@@ -2942,48 +3176,49 @@ mod tests {
         _: &str,
         place: Option<&Placement>,
     ) -> Result<Option<TerminalTab>, ManagedError> {
-        let mut launched = LAUNCHED.lock().unwrap();
-        launched.push((session, place.cloned()));
-        let n = u32::try_from(launched.len() % 1000).unwrap();
+        PLACED.lock().unwrap().push((session, place.cloned()));
         Ok(Some(TerminalTab {
             handle: TerminalHandle::AppleTerminal {
-                tty: format!("/dev/ttys{n:03}"),
+                tty: tty_of(session),
             },
-            window: Some(place.map_or(1000 + n, |place| place.window)),
+            window: Some(place.map_or(window_of(session), |place| place.window)),
         }))
     }
 
     fn placed(session: Uuid) -> Option<Placement> {
-        let launched = LAUNCHED.lock().unwrap();
+        let launched = PLACED.lock().unwrap();
         let (_, place) = launched.iter().find(|(id, _)| *id == session).unwrap();
         place.clone()
     }
 
+    /// A daemon placing launches through [`record_placed`], with Terminal
+    /// chosen on every platform.
+    fn placing() -> (tempfile::TempDir, DaemonShared) {
+        let (home, shared) = launching(record_placed);
+        shared.settings.lock().unwrap().managed_terminal = TerminalSetting::Terminal;
+        (home, shared)
+    }
+
     /// Launch `prepared` through the daemon with `extra` launch fields and
-    /// start it: a running session the daemon opened.
+    /// start it: a running session the daemon opened. Returns its proof.
     fn opened_and_running(
-        service: &mut ManagedService,
-        prepared: Value,
+        shared: &DaemonShared,
+        prepared: PreparedLaunch,
         extra: Value,
     ) -> (Uuid, String) {
-        let prepared: PreparedLaunch = serde_json::from_value(prepared).unwrap();
         let id = prepared.session_id;
         let ticket = prepared.ticket.unwrap();
         let mut params = json!({"session_id":id,"ticket":ticket});
         for (key, value) in extra.as_object().unwrap() {
             params[key] = value.clone();
         }
-        call_with(
-            service,
-            "managed_terminal_launch",
-            params,
-            false,
-            TerminalSetting::Terminal,
-        )
-        .unwrap();
-        let context = service.sessions.redeem(id, &ticket).unwrap();
-        report(service, id, &context.proof, "running", None).unwrap();
-        (id, context.proof)
+        terminal(shared, params).unwrap();
+        let proof = locked(shared, |service| {
+            let context = service.sessions.redeem(id, &ticket).unwrap();
+            report(service, id, &context.proof, "running", None).unwrap();
+            context.proof
+        });
+        (id, proof)
     }
 
     thread_local! {
@@ -2998,49 +3233,28 @@ mod tests {
         LIVE.with(|live| live.borrow().clone())
     }
 
+    fn set_live(windows: Vec<(u32, Vec<String>)>) {
+        LIVE.with(|live| *live.borrow_mut() = windows);
+    }
+
     fn record_ask() {
         ASKED.with(|asked| asked.set(asked.get() + 1));
     }
 
-    /// The window and tty the daemon recorded for `id`'s launch.
-    fn window_and_tty(service: &ManagedService, id: Uuid) -> (u32, String) {
-        let (_, handle, window) = service
-            .sessions
-            .placeable_sessions()
-            .into_iter()
-            .find(|(row, _, _)| *row == id)
-            .unwrap();
-        let TerminalHandle::AppleTerminal { tty } = handle;
-        (window, tty)
-    }
-
-    fn windows(service: &mut ManagedService, choice: TerminalSetting) -> Value {
-        call_with(
-            service,
-            "managed_terminal_windows",
-            json!({}),
-            false,
-            choice,
-        )
-        .unwrap()
-    }
-
-    fn subscription_request(service: &mut ManagedService, home: &std::path::Path) -> LaunchRequest {
-        let account = service
-            .accounts
-            .add(ToolId::Claude, ConnectionKind::Subscription, "Work")
-            .unwrap();
-        let mut request: LaunchRequest =
-            serde_json::from_value(launch(ToolId::Claude, home)).unwrap();
-        request.connection = ConnectionKind::Subscription;
-        request.account_id = account.id;
-        request
-    }
-
-    fn fresh(service: &mut ManagedService, request: &LaunchRequest) -> Value {
-        let mut request = request.clone();
-        request.request_id = Uuid::new_v4();
-        call(service, "managed_launch_prepare", json!(request), false).unwrap()
+    /// `managed_terminal_windows` through the daemon.
+    fn windows_listed(shared: &DaemonShared, params: Value) -> Result<Value, String> {
+        let response = terminal_windows(
+            shared,
+            &Request {
+                id: 1,
+                method: "managed_terminal_windows".into(),
+                params,
+            },
+        );
+        match response.error {
+            Some(error) => Err(error.message),
+            None => Ok(response.result.unwrap()),
+        }
     }
 
     /// Owner, 2026-11-02 (#1852): the launch dialog lists only windows
@@ -3052,169 +3266,158 @@ mod tests {
     /// Terminal is not read when there is nothing to check.
     #[test]
     fn the_window_list_holds_only_running_sessions_the_daemon_can_vouch_for() {
-        let (home, _store, mut service) = service();
-        service.launch_terminal = record_launch;
-        service.open_windows = live_windows;
-        let request = subscription_request(&mut service, home.path());
-
-        service.open_windows = || panic!("nothing to check");
+        let (home, shared) = placing();
+        locked(&shared, |service| {
+            service.open_windows = || panic!("nothing to check")
+        });
         assert_eq!(
-            windows(&mut service, TerminalSetting::Terminal),
-            json!({"windows": []})
+            windows_listed(&shared, json!({})),
+            Ok(json!({"windows": []}))
         );
-        service.open_windows = live_windows;
+        locked(&shared, |service| service.open_windows = live_windows);
 
-        let prepared = fresh(&mut service, &request);
-        let (first, _) = opened_and_running(&mut service, prepared, json!({}));
-        let (window, tty) = window_and_tty(&service, first);
-        let prepared = fresh(&mut service, &request);
-        let (second, _) = opened_and_running(&mut service, prepared, json!({"beside": first}));
-        let (_, second_tty) = window_and_tty(&service, second);
-        let prepared = fresh(&mut service, &request);
-        let (other, _) = opened_and_running(&mut service, prepared, json!({}));
-        let (other_window, other_tty) = window_and_tty(&service, other);
-
-        // A launch prepared but never redeemed is not listed.
-        let prepared: PreparedLaunch =
-            serde_json::from_value(fresh(&mut service, &request)).unwrap();
-        call_with(
-            &mut service,
-            "managed_terminal_launch",
-            json!({"session_id":prepared.session_id,"ticket":prepared.ticket.unwrap()}),
-            false,
-            TerminalSetting::Terminal,
+        let (first, _) = opened_and_running(&shared, prepared(&shared, home.path()), json!({}));
+        let (second, _) = opened_and_running(
+            &shared,
+            prepared(&shared, home.path()),
+            json!({"beside": first}),
+        );
+        let (other, _) = opened_and_running(&shared, prepared(&shared, home.path()), json!({}));
+        // Prepared and launched but never started: not listed.
+        let unstarted = prepared(&shared, home.path());
+        terminal(
+            &shared,
+            json!({"session_id":unstarted.session_id,"ticket":unstarted.ticket.unwrap()}),
         )
         .unwrap();
 
-        LIVE.with(|live| {
-            *live.borrow_mut() = vec![
-                (window, vec![tty.clone(), second_tty.clone()]),
-                // The other session's tty now sits in another window.
-                (other_window + 1, vec![other_tty.clone()]),
-            ]
+        let window = window_of(first);
+        set_live(vec![
+            (window, vec![tty_of(first), tty_of(second)]),
+            // The other session's tty now sits in another window.
+            (window_of(other) + 1000, vec![tty_of(other)]),
+            (
+                window_of(unstarted.session_id),
+                vec![tty_of(unstarted.session_id)],
+            ),
+        ]);
+        let together: Vec<Uuid> = locked(&shared, |service| {
+            service
+                .sessions
+                .placeable_sessions()
+                .into_iter()
+                .map(|(id, _, _)| id)
+                .filter(|id| *id == first || *id == second)
+                .collect()
         });
-        let listed = windows(&mut service, TerminalSetting::Terminal);
-        // Newest first, as the daemon orders its rows.
-        let together: Vec<Uuid> = service
-            .sessions
-            .placeable_sessions()
-            .into_iter()
-            .map(|(id, _, _)| id)
-            .filter(|id| *id == first || *id == second)
-            .collect();
-        assert_eq!(together.len(), 2);
-        assert_eq!(listed, json!({"windows": [{"sessions": together}]}));
-
-        LIVE.with(|live| *live.borrow_mut() = vec![(window, vec![tty.clone()])]);
+        assert_eq!(together.len(), 2, "newest first, as the daemon orders rows");
         assert_eq!(
-            windows(&mut service, TerminalSetting::Terminal),
-            json!({"windows": [{"sessions": [first]}]}),
+            windows_listed(&shared, json!({})),
+            Ok(json!({"windows": [{"sessions": together}]}))
+        );
+
+        set_live(vec![(window, vec![tty_of(first)])]);
+        assert_eq!(
+            windows_listed(&shared, json!({})),
+            Ok(json!({"windows": [{"sessions": [first]}]})),
             "a tab that is gone takes its session off"
         );
-        LIVE.with(|live| *live.borrow_mut() = vec![]);
+        set_live(vec![]);
         assert_eq!(
-            windows(&mut service, TerminalSetting::Terminal),
-            json!({"windows": []}),
+            windows_listed(&shared, json!({})),
+            Ok(json!({"windows": []})),
             "Terminal closed"
         );
-        LIVE.with(|live| *live.borrow_mut() = vec![(window, vec![tty.clone()])]);
+        set_live(vec![(window, vec![tty_of(first)])]);
         assert_eq!(
-            windows(&mut service, TerminalSetting::Iterm2),
-            json!({"windows": []})
+            windows_listed(&shared, json!({"window": 1})),
+            Err("managed-invalid-request".into())
         );
+        shared.settings.lock().unwrap().managed_terminal = TerminalSetting::Iterm2;
         assert_eq!(
-            call_with(
-                &mut service,
-                "managed_terminal_windows",
-                json!({"window": 1}),
-                false,
-                TerminalSetting::Terminal
-            ),
-            Err(ManagedError::InvalidRequest)
+            windows_listed(&shared, json!({})),
+            Ok(json!({"windows": []}))
         );
     }
 
-    /// Owner, 2026-11-02 (#1852 and #1853 decision (b)): a launch opens in
-    /// an existing window only when the person picked one, by a running
-    /// session the daemon opened, and the daemon finds that session's
-    /// window and tab itself. A session that ended, an unknown id, Start
-    /// again, an app built from #1839 naming a row (`in_window_of`, still
-    /// accepted and ignored), and another terminal app all open a new
-    /// window.
+    /// Owner, 2026-11-02 (#1852, and #1853's decision that Start again and
+    /// Resume open a new window): a launch opens in an existing window only
+    /// when the person picked one, by a running session the daemon opened,
+    /// and the daemon finds that session's window and tab itself. A session
+    /// that ended, an unknown id, Start again, an app built from #1839
+    /// naming a row (`in_window_of`, accepted and ignored), and another
+    /// terminal app all open a new window.
     #[test]
     fn a_launch_opens_beside_only_a_running_session_the_daemon_opened() {
-        let (home, _store, mut service) = service();
-        service.launch_terminal = record_launch;
-        let request = subscription_request(&mut service, home.path());
-
-        let prepared = fresh(&mut service, &request);
-        let (first, _) = opened_and_running(&mut service, prepared, json!({}));
+        let (home, shared) = placing();
+        let (first, _) = opened_and_running(&shared, prepared(&shared, home.path()), json!({}));
         assert_eq!(placed(first), None, "a launch opens a new window");
-        let (window, tty) = window_and_tty(&service, first);
 
-        let prepared = fresh(&mut service, &request);
-        let (second, _) = opened_and_running(&mut service, prepared, json!({"beside": first}));
-        assert_eq!(placed(second), Some(Placement { window, tty }));
-
-        let prepared = fresh(&mut service, &request);
-        let (third, _) =
-            opened_and_running(&mut service, prepared, json!({"beside": Uuid::new_v4()}));
+        let (second, _) = opened_and_running(
+            &shared,
+            prepared(&shared, home.path()),
+            json!({"beside": first}),
+        );
+        assert_eq!(
+            placed(second),
+            Some(Placement {
+                window: window_of(first),
+                tty: tty_of(first)
+            })
+        );
+        let (third, _) = opened_and_running(
+            &shared,
+            prepared(&shared, home.path()),
+            json!({"beside": Uuid::new_v4()}),
+        );
         assert_eq!(placed(third), None, "an unknown session");
-
-        let prepared = fresh(&mut service, &request);
-        let (fourth, _) =
-            opened_and_running(&mut service, prepared, json!({"in_window_of": first}));
+        let (fourth, _) = opened_and_running(
+            &shared,
+            prepared(&shared, home.path()),
+            json!({"in_window_of": first}),
+        );
         assert_eq!(placed(fourth), None, "what an old app names is ignored");
-
-        let prepared: PreparedLaunch =
-            serde_json::from_value(fresh(&mut service, &request)).unwrap();
-        call_with(
-            &mut service,
-            "managed_terminal_launch",
-            json!({"session_id":prepared.session_id,"ticket":prepared.ticket.unwrap(),"beside":first}),
-            false,
-            TerminalSetting::Ghostty,
-        )
-        .unwrap();
-        assert_eq!(placed(prepared.session_id), None, "not Terminal");
 
         // A session that ended: a launch beside it, and its Start again,
         // open a new window.
-        let context_proof = {
-            let prepared = fresh(&mut service, &request);
-            opened_and_running(&mut service, prepared, json!({}))
-        };
-        report(
-            &mut service,
-            context_proof.0,
-            &context_proof.1,
-            "exited",
-            Some(0),
-        )
-        .unwrap();
-        let prepared = fresh(&mut service, &request);
-        let (beside_ended, _) =
-            opened_and_running(&mut service, prepared, json!({"beside": context_proof.0}));
+        let (ended, proof) = opened_and_running(&shared, prepared(&shared, home.path()), json!({}));
+        locked(&shared, |service| {
+            report(service, ended, &proof, "exited", Some(0)).unwrap();
+        });
+        let (beside_ended, _) = opened_and_running(
+            &shared,
+            prepared(&shared, home.path()),
+            json!({"beside": ended}),
+        );
         assert_eq!(placed(beside_ended), None, "an ended session");
-        let prepared: PreparedLaunch = serde_json::from_value(
-            call(
-                &mut service,
-                "managed_session_start_again",
-                json!({"session_id":context_proof.0,"request_id":Uuid::new_v4()}),
-                false,
+        let again: PreparedLaunch = locked(&shared, |service| {
+            serde_json::from_value(
+                call(
+                    service,
+                    "managed_session_start_again",
+                    json!({"session_id":ended,"request_id":Uuid::new_v4()}),
+                    false,
+                )
+                .unwrap(),
             )
-            .unwrap(),
+            .unwrap()
+        });
+        let again_id = again.session_id;
+        terminal(
+            &shared,
+            json!({"session_id":again_id,"ticket":again.ticket.unwrap()}),
         )
         .unwrap();
-        call_with(
-            &mut service,
-            "managed_terminal_launch",
-            json!({"session_id":prepared.session_id,"ticket":prepared.ticket.unwrap()}),
-            false,
-            TerminalSetting::Terminal,
+        assert_eq!(placed(again_id), None, "Start again");
+
+        shared.settings.lock().unwrap().managed_terminal = TerminalSetting::Ghostty;
+        let other = prepared(&shared, home.path());
+        terminal(
+            &shared,
+            json!({"session_id":other.session_id,"ticket":other.ticket.unwrap(),"beside":first}),
         )
         .unwrap();
-        assert_eq!(placed(prepared.session_id), None, "Start again");
+        assert_eq!(placed(other.session_id), None, "not Terminal");
     }
 
     /// Owner, 2026-11-02: macOS's prompts appear when the person picks a
@@ -3258,7 +3461,7 @@ mod tests {
         assert_eq!(ASKED.with(std::cell::Cell::get), before + 1);
     }
 
-    fn refuse_launch(
+    fn refuse_unknown(
         _: TerminalSetting,
         _: &[TerminalApp],
         _: &std::path::Path,
@@ -3270,7 +3473,7 @@ mod tests {
         Err(ManagedError::LaunchUnknown)
     }
 
-    fn not_found_launch(
+    fn refuse_missing(
         _: TerminalSetting,
         _: &[TerminalApp],
         _: &std::path::Path,
@@ -3282,43 +3485,47 @@ mod tests {
         Err(ManagedError::TerminalNotFound)
     }
 
-    /// #1853 review: a launch refused before anything ran is released, so
-    /// the same ticket can launch again while it lasts. A launch that may
-    /// have run (`LaunchUnknown`: osascript failed or was killed after it
-    /// started) stays held, so its ticket cannot open a second terminal.
+    /// An error from after the terminal was asked, other than
+    /// `LaunchUnknown` (#1853 review: capture-file errors).
+    fn refuse_storage(
+        _: TerminalSetting,
+        _: &[TerminalApp],
+        _: &std::path::Path,
+        _: &std::path::Path,
+        _: Uuid,
+        _: &str,
+        _: Option<&Placement>,
+    ) -> Result<Option<TerminalTab>, ManagedError> {
+        Err(ManagedError::StorageUnavailable)
+    }
+
+    /// #1853 review: only a refusal that comes before anything runs is
+    /// released, so the same ticket can launch again. Anything that may
+    /// follow a typed command (`LaunchUnknown`, or any other error) stays
+    /// held: a second terminal with the same ticket is refused.
     #[test]
-    fn only_a_launch_refused_before_it_ran_is_released() {
-        let (home, _store, mut service) = service();
-        let request = subscription_request(&mut service, home.path());
-        let prepared: PreparedLaunch =
-            serde_json::from_value(fresh(&mut service, &request)).unwrap();
-        let params = json!({"session_id":prepared.session_id,"ticket":prepared.ticket.unwrap()});
-        service.launch_terminal = not_found_launch;
-        assert_eq!(
-            call(
-                &mut service,
-                "managed_terminal_launch",
-                params.clone(),
-                false
-            ),
-            Err(ManagedError::TerminalNotFound)
-        );
-        service.launch_terminal = refuse_launch;
-        assert_eq!(
-            call(
-                &mut service,
-                "managed_terminal_launch",
-                params.clone(),
-                false
-            ),
-            Err(ManagedError::LaunchUnknown)
-        );
-        service.launch_terminal = record_launch;
-        assert_eq!(
-            call(&mut service, "managed_terminal_launch", params, false),
-            Err(ManagedError::Conflict),
-            "may have run: held"
-        );
+    fn only_a_launch_refused_before_it_ran_can_be_tried_again() {
+        for (after, label_after) in [
+            (refuse_unknown as LaunchTerminal, "managed-launch-unknown"),
+            (refuse_storage, "managed-storage-unavailable"),
+        ] {
+            let (home, shared) = launching(refuse_missing);
+            let prepared = prepared(&shared, home.path());
+            let params =
+                json!({"session_id":prepared.session_id,"ticket":prepared.ticket.unwrap()});
+            assert_eq!(
+                terminal(&shared, params.clone()),
+                Err("managed-terminal-not-found".into())
+            );
+            locked(&shared, |service| service.launch_terminal = after);
+            assert_eq!(terminal(&shared, params.clone()), Err(label_after.into()));
+            locked(&shared, |service| service.launch_terminal = record_launch);
+            assert_eq!(
+                terminal(&shared, params),
+                Err("managed-conflict".into()),
+                "may already be running"
+            );
+        }
     }
 
     #[test]
@@ -4156,7 +4363,8 @@ mod tests {
 
         /// A row with no collection plan whose launcher went quiet ends once
         /// its tool is gone, so it no longer holds its conversation; while
-        /// the tool runs it stays unknown.
+        /// the tool runs it stays unknown. This is the lease tick's own
+        /// pass, not the collection pass.
         #[tokio::test]
         async fn a_quiet_row_without_a_plan_ends_once_its_tool_is_gone() {
             let f = fixture();
@@ -4171,15 +4379,160 @@ mod tests {
                 running(&f, s, ProcessIdentity::of(tool.id()), false)
             });
             collection_plan::finish(&f.store, live);
-            assert_eq!(collect_abandoned(&shared, chrono::Utc::now()).await, 0);
+            end_quiet_rows(&shared, chrono::Utc::now()).await;
             assert_eq!(status(&shared, gone).state, SessionState::Running);
-            collect_abandoned(&shared, lapsed()).await;
+            end_quiet_rows(&shared, lapsed()).await;
             assert_eq!(status(&shared, gone).state, SessionState::Failed);
             assert_eq!(status(&shared, live).state, SessionState::Unknown);
             tool.kill().unwrap();
             tool.wait().unwrap();
-            collect_abandoned(&shared, lapsed()).await;
+            end_quiet_rows(&shared, lapsed()).await;
             assert_eq!(status(&shared, live).state, SessionState::Failed);
+        }
+
+        /// A collecting row with no plan (its launcher could not write one,
+        /// or took the claim and died) is never collected by the daemon:
+        /// once its tool is gone, the row and its collection both end.
+        #[tokio::test]
+        async fn a_collecting_row_without_a_plan_ends_its_collection_too() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let id = sessions_of(&shared, |s| running(&f, s, exited(), true));
+            collection_plan::finish(&f.store, id);
+            assert_eq!(status(&shared, id).collection, CollectionState::Pending);
+            end_quiet_rows(&shared, lapsed()).await;
+            let row = status(&shared, id);
+            assert_eq!(row.state, SessionState::Failed);
+            assert_eq!(row.collection, CollectionState::Failed);
+        }
+
+        /// A collecting row whose launcher redeemed it and went quiet
+        /// without reporting, after writing a collection plan naming
+        /// `process` when one is given. Returns its id, lapsed to unknown.
+        fn quiet_unreported(
+            f: &Fixture,
+            sessions: &mut SessionRegistry,
+            process: Option<ProcessIdentity>,
+        ) -> Uuid {
+            let prepared = sessions
+                .prepare(
+                    LaunchRequest {
+                        cli_options: None,
+                        model: None,
+                        collect_traces: true,
+                        purpose: LaunchPurpose::Coding,
+                        request_id: Uuid::new_v4(),
+                        tool: ToolId::Claude,
+                        connection: ConnectionKind::Subscription,
+                        account_id: f.account.id,
+                        cwd: f.store.dir().to_path_buf(),
+                        expected_generation: Generation(0),
+                        save_default: false,
+                        keep_saved_model: false,
+                        resume_of: None,
+                        background_model: None,
+                    },
+                    &f.account,
+                )
+                .unwrap();
+            let id = prepared.session_id;
+            sessions
+                .redeem(id, prepared.ticket.as_deref().unwrap())
+                .unwrap();
+            if let Some(process) = process {
+                let collection =
+                    NativeCollection::snapshot(&f.store, ToolId::Claude, f.account.id, id, None)
+                        .unwrap();
+                collection_plan::write(
+                    &f.store,
+                    &CollectionPlan {
+                        schema_version: 1,
+                        session_id: id,
+                        tool: ToolId::Claude,
+                        account_id: f.account.id,
+                        resume_root: None,
+                        cwd: f.store.dir().to_path_buf(),
+                        collect_traces: true,
+                        created_at: chrono::Utc::now(),
+                        native: Some(collection.plan()),
+                        opencode: None,
+                        process,
+                    },
+                )
+                .unwrap();
+            }
+            sessions.sweep(lapsed()).unwrap();
+            assert_eq!(
+                sessions.describe(id).map(|(_, s)| s),
+                Some(SessionState::Unknown)
+            );
+            id
+        }
+
+        fn can_dismiss(shared: &DaemonShared, id: Uuid) -> bool {
+            sessions_of(shared, |s| {
+                s.views()
+                    .unwrap()
+                    .iter()
+                    .find(|v| v.id == id)
+                    .unwrap()
+                    .can_dismiss
+            })
+        }
+
+        /// A launcher that spawned its tool and wrote a plan naming it, then
+        /// died before reporting, is not stuck: the daemon watches that
+        /// process, by its pid alone when the plan names no start time, and
+        /// the plan ends the row once it is gone.
+        #[tokio::test]
+        async fn a_plan_naming_the_tool_keeps_an_unreported_row_watched() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let mut tool = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap();
+            let watched = sessions_of(&shared, |s| {
+                quiet_unreported(&f, s, Some(ProcessIdentity::of(tool.id())))
+            });
+            let pid_only = sessions_of(&shared, |s| {
+                quiet_unreported(
+                    &f,
+                    s,
+                    Some(ProcessIdentity {
+                        pid: tool.id(),
+                        start_time: None,
+                    }),
+                )
+            });
+            assert!(!can_dismiss(&shared, watched));
+            assert!(!can_dismiss(&shared, pid_only));
+            tool.kill().unwrap();
+            tool.wait().unwrap();
+            collect_abandoned(&shared, lapsed()).await;
+            assert_eq!(status(&shared, watched).state, SessionState::Failed);
+            assert_eq!(status(&shared, pid_only).state, SessionState::Failed);
+        }
+
+        /// Dismissing a stuck collecting row (no plan, so nothing will
+        /// collect it) fails its collection; a row with a plan is watched,
+        /// so it is not the person's to dismiss.
+        #[tokio::test]
+        async fn dismissing_a_stuck_collecting_row_settles_its_collection() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let unplanned = sessions_of(&shared, |s| quiet_unreported(&f, s, None));
+            let planned = sessions_of(&shared, |s| {
+                quiet_unreported(&f, s, Some(ProcessIdentity::current()))
+            });
+            assert_eq!(
+                sessions_of(&shared, |s| s.dismiss(planned)),
+                Err(ManagedError::Conflict)
+            );
+            sessions_of(&shared, |s| s.dismiss(unplanned)).unwrap();
+            let row = status(&shared, unplanned);
+            assert_eq!(row.state, SessionState::Failed);
+            assert_eq!(row.collection, CollectionState::Failed);
         }
 
         #[tokio::test]

@@ -9535,16 +9535,17 @@ within those 3 seconds, their tab is the only new one and receives the
 command. Secure Keyboard Entry, the known cause of a silent swallow, is
 checked first.
 
-A launch that opens a new window reads back its tab's tty and, when Terminal's
-front window's selected tab is that tab, that window's id. No launch reads
-every tab of every window.
+A launch that opens a new window reads back its tab's tty and, on the next
+line, the id of the window holding it, found by one scan that stops at the
+match (#1853); the row keeps both, and a window line that cannot be read leaves
+the row with its tab and no window. A placed launch reads only the picked
+window's tabs, once.
 
 The terminal opens with the daemon's managed state unlocked and off the async
 worker: the launch is held first (a second `managed_terminal_launch` with the
 same ticket is refused with `managed-conflict`), and recorded after. A launch
 refused before anything ran (`managed-terminal-not-found`,
-`managed-invalid-request`, `managed-unsupported-version`,
-`managed-storage-unavailable`) is released, and its ticket stands until it
+`managed-invalid-request`, `managed-unsupported-version`) is released, and its ticket stands until it
 lapses. A launch that may have run (`managed-launch-unknown`: the script
 failed or was stopped after it started) stays held, so its ticket cannot open
 a second terminal.
