@@ -1078,6 +1078,15 @@ impl SetUpAgain {
         *self = if unenrolled { Self::Idle } else { Self::Failed };
     }
 
+    /// The block went away (the account no longer needs attention): a
+    /// refusal belongs to it, so one that comes back starts without it. A
+    /// run in flight is kept.
+    pub(crate) fn block_gone(&mut self) {
+        if *self == Self::Failed {
+            *self = Self::Idle;
+        }
+    }
+
     pub(crate) fn button_sensitive(self) -> bool {
         self != Self::Running
     }
@@ -1098,6 +1107,9 @@ fn render_account_attention(app: &Rc<App>, status: &Status) {
         view.remove(&child);
     }
     let Some(copy) = status.account_attention() else {
+        let mut state = app.settings.set_up_again.get();
+        state.block_gone();
+        app.settings.set_up_again.set(state);
         view.set_visible(false);
         return;
     };
@@ -3708,6 +3720,23 @@ mod set_up_again_tests {
         assert!(state.button_sensitive());
         assert!(state.begin());
         assert!(!state.shows_failure());
+    }
+
+    /// A refusal goes with its block: one that comes back later starts
+    /// without the failure line. A run in flight survives the block going.
+    #[test]
+    fn a_refusal_goes_with_its_block() {
+        let mut state = SetUpAgain::default();
+        assert!(state.begin());
+        state.finish(false);
+        state.block_gone();
+        assert!(!state.shows_failure());
+        assert_eq!(state, SetUpAgain::Idle);
+
+        let mut running = SetUpAgain::default();
+        assert!(running.begin());
+        running.block_gone();
+        assert_eq!(running, SetUpAgain::Running);
     }
 }
 

@@ -386,6 +386,21 @@ struct DaemonStatus: Decodable, Equatable {
                 (try? c.decodeIfPresent(Bool.self, forKey: .nearAILoginUnconfirmed)).flatMap { $0 } ?? false)
     }
 
+    /// This status as the daemon reports it straight after `unenroll`: not
+    /// logged in, no tenant, no setup completion and nothing about the
+    /// account. Everything else is kept. For a model whose status read after
+    /// a confirmed unenroll failed, so `requiresOnboarding` still follows
+    /// the unenroll.
+    func unenrolled() -> DaemonStatus {
+        DaemonStatus(
+            schemaVersion: schemaVersion, loggedIn: false, tenantID: nil, setupComplete: nil,
+            accountScope: accountScope, consentScopes: consentScopes, paused: paused,
+            queueDepth: queueDepth, decisionsOwed: decisionsOwed, nextDigestAt: nextDigestAt,
+            health: health, routing: routing, grantVoids: grantVoids,
+            witnessCapacity: witnessCapacity, armingRewordings: armingRewordings, gateHeld: gateHeld,
+            legacyInviteMigration: legacyInviteMigration, accountAttention: .none)
+    }
+
     static let unknown = DaemonStatus(
         schemaVersion: "",
         loggedIn: false,

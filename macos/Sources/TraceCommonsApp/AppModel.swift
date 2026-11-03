@@ -358,6 +358,11 @@ final class AppModel: ObservableObject {
                 accountAttention = status.accountAttention.wireJSON
                     .flatMap(accountAttentionWording)
                     .flatMap(AccountAttention.decode(fromJSON:))
+                // A refusal belongs to the block it was shown in: one that
+                // goes and comes back starts without it.
+                if accountAttention == nil {
+                    setUpAgainFailed = false
+                }
             }
         }
     }
@@ -374,9 +379,6 @@ final class AppModel: ObservableObject {
     @Published private(set) var settingUpAgain = false
     /// The daemon refused the last "Set up again"; cleared by the next one.
     @Published private(set) var setUpAgainFailed = false
-    /// Replaces the unenroll "Set up again" runs, for tests only; nil runs
-    /// the daemon's.
-    var setUpAgainUnenroll: (() async -> Bool)?
     /// Words `status.legacy_invite_migration.notice`. The ABI in the app;
     /// replaced only by tests.
     var legacyMigrationWording: (String) -> String? = TCConsentCopy.legacyMigrationNoticeJSON(
@@ -4647,6 +4649,12 @@ extension AppModel: FirstRunDaemon {
         if case .success(let fresh) = await firstRunCall({ try $0.status() }) {
             publishIfChanged(\.status, fresh)
         }
+        // The daemon confirmed it: when the read after it failed (or answered
+        // from before), say so anyway, or `requiresOnboarding` stays false
+        // and the first run closes itself on appear.
+        if status.loggedIn {
+            publishIfChanged(\.status, status.unenrolled())
+        }
         return true
     }
 
@@ -4660,12 +4668,7 @@ extension AppModel: FirstRunDaemon {
         settingUpAgain = true
         setUpAgainFailed = false
         defer { settingUpAgain = false }
-        let done: Bool
-        if let replaced = setUpAgainUnenroll {
-            done = await replaced()
-        } else {
-            done = await unenroll()
-        }
+        let done = await unenroll()
         setUpAgainFailed = !done
         return done
     }

@@ -1059,6 +1059,9 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     {
         if (IsBusy)
         {
+            // Another settings write took the turn while the confirmation
+            // was open: nothing ran, so say so rather than nothing.
+            AccountAttentionFailedLine = AccountAttention?.Failed ?? string.Empty;
             return false;
         }
 

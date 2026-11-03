@@ -2697,9 +2697,10 @@ pub const ACCOUNT_ATTENTION_CONFIRM_BODY: &str =
 pub const ACCOUNT_ATTENTION_CONFIRM_ACTION: &str = ACCOUNT_ATTENTION_ACTION;
 /// Approved 2026-11-02. The confirmation's button that changes nothing.
 pub const ACCOUNT_ATTENTION_CONFIRM_CANCEL: &str = ACCOUNT_DEVICES_CANCEL_BUTTON;
-/// Shown under the button when the daemon refused to set up again. The
-/// approved "Nothing changed. Try again." the other account writes use.
-pub const ACCOUNT_ATTENTION_FAILED: &str = PAYOUT_LINK_FAILED;
+/// Approved 2026-11-02 for this use. Shown under the button when the
+/// daemon refused to set up again. Its own constant, so a change to another
+/// surface's failure line does not change it.
+pub const ACCOUNT_ATTENTION_FAILED: &str = "Nothing changed. Try again.";
 
 /// What the account section shows while `status.account_state` is
 /// `needs_attention` (`tc_account_attention_copy_json`). The branch is the

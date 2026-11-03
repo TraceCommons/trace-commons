@@ -1,3 +1,4 @@
+import TCBridge
 import TCShellCore
 import XCTest
 
@@ -84,29 +85,60 @@ final class AccountAttentionModelTests: XCTestCase {
         XCTAssertEqual(AccountAttentionBlock.lines(attention, failed: true).last, attention.failed)
     }
 
-    /// A refused unenroll is said, and the next attempt clears it; a second
-    /// press while one runs does nothing.
+    /// A refused unenroll is said, the next attempt clears it, and a second
+    /// press while one runs does nothing. Through the daemon client, as the
+    /// app runs it.
     @MainActor
     func testSetUpAgainReportsARefusalAndRunsOnce() async throws {
         let model = AppModel()
-        var runs = 0
-        var answer = false
-        model.setUpAgainUnenroll = {
-            runs += 1
-            await Task.yield()
-            return answer
-        }
+        let daemon = UnenrollDaemon()
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        daemon.set(unenrolls: false)
         let first = await model.setUpAgain()
         XCTAssertFalse(first)
         XCTAssertTrue(model.setUpAgainFailed)
         XCTAssertFalse(model.settingUpAgain)
 
-        answer = true
+        daemon.set(unenrolls: true)
         async let a = model.setUpAgain()
         async let b = model.setUpAgain()
         let results = await [a, b]
         XCTAssertEqual(results.filter { $0 }.count, 1, "one run, one first-run window")
-        XCTAssertEqual(runs, 2)
+        XCTAssertEqual(daemon.unenrollCalls, 2)
+        XCTAssertFalse(model.setUpAgainFailed)
+    }
+
+    /// The daemon unenrolled but the status read after it failed: the model
+    /// still says logged out, so the first run it opens stays open.
+    @MainActor
+    func testAConfirmedUnenrollIsLoggedOutEvenWhenTheStatusReadFails() async throws {
+        let model = AppModel()
+        model.setStatusForTesting(try status(unreadable))
+        XCTAssertTrue(model.status.loggedIn)
+        let daemon = UnenrollDaemon()
+        daemon.set(unenrolls: true)
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        let done = await model.setUpAgain()
+        XCTAssertTrue(done)
+        XCTAssertFalse(model.status.loggedIn)
+        XCTAssertTrue(model.requiresOnboarding)
+        XCTAssertNil(model.accountAttention)
+    }
+
+    /// A refusal shown in one block does not come back with the next one.
+    @MainActor
+    func testARefusalGoesWithItsBlock() async throws {
+        let model = AppModel()
+        model.setStatusForTesting(try status(unreadable))
+        let daemon = UnenrollDaemon()
+        daemon.set(unenrolls: false)
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        _ = await model.setUpAgain()
+        XCTAssertTrue(model.setUpAgainFailed)
+        model.setStatusForTesting(
+            try status(#","account_state":"ok","account_state_reason":null,"near_ai_login_unconfirmed":false"#))
+        XCTAssertFalse(model.setUpAgainFailed)
+        model.setStatusForTesting(try status(unreadable))
         XCTAssertFalse(model.setUpAgainFailed)
     }
 
@@ -116,5 +148,40 @@ final class AccountAttentionModelTests: XCTestCase {
         model.setStatusForTesting(
             try status(#","account_state":"ok","account_state_reason":null,"near_ai_login_unconfirmed":false"#))
         XCTAssertNil(model.accountAttention)
+    }
+}
+
+/// A daemon that answers `hello` and `unenroll` (as told) and fails every
+/// other call, `status` included.
+private final class UnenrollDaemon: DaemonCalling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var unenrolls = false
+    private var calls = 0
+
+    func set(unenrolls: Bool) {
+        lock.withLock { self.unenrolls = unenrolls }
+    }
+
+    var unenrollCalls: Int { lock.withLock { calls } }
+
+    func call(_ method: String, params paramsJSON: String) -> String {
+        if method == "hello" {
+            return #"{"id":1,"result":{"methods":["unenroll","status"]}}"#
+        }
+        guard method == "unenroll" else {
+            return #"{"id":1,"error":{"code":"unavailable","message":"synthetic-test-failure"}}"#
+        }
+        let ok = lock.withLock { () -> Bool in
+            calls += 1
+            return unenrolls
+        }
+        return ok
+            ? #"{"id":1,"result":{"unenrolled":true}}"#
+            : #"{"id":1,"error":{"code":"busy","message":"upload-in-flight"}}"#
+    }
+
+    func searchOriginal(entryID: String, needle: String) -> Int? { nil }
+    func openPreview(entryID: String) throws -> TCPreview {
+        throw TCDaemon.TCError.daemonGone
     }
 }

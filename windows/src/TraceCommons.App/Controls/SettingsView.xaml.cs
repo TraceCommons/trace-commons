@@ -89,7 +89,9 @@ public sealed partial class SettingsView : UserControl
     /// </summary>
     private async void OnSetUpAgain(object sender, RoutedEventArgs e)
     {
-        if (_setUpAgainDialogOpen || !Settings.HasAccountAttention)
+        // Not while another settings write runs: the confirmation would ask
+        // for something that could not start.
+        if (_setUpAgainDialogOpen || !Settings.HasAccountAttention || Settings.IsBusy)
         {
             return;
         }
@@ -106,8 +108,8 @@ public sealed partial class SettingsView : UserControl
             PrimaryButtonText = Settings.AccountAttentionConfirmAction,
             CloseButtonText = Settings.AccountAttentionConfirmCancel,
 
-            // Keeping the enrollment is what Enter and Escape both do: this
-            // signs out of NEAR AI and drops the enrollment.
+            // Keeping the enrollment is what Enter and Escape both do: the
+            // primary button drops it.
             DefaultButton = ContentDialogButton.Close,
         };
 

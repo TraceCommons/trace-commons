@@ -25,16 +25,25 @@ fn near_ai_tenant() -> String {
 
 /// An OS store that counts reads, can lose every entry, and can stop
 /// answering, as a locked keychain does.
+/// Runs on a read before it answers; `Some` makes the read fail with it.
+type OnRead = Box<dyn Fn() -> Option<CredentialError> + Send + Sync>;
+
 #[derive(Default)]
 struct Store {
     entries: Mutex<std::collections::HashMap<String, Vec<u8>>>,
     reads: AtomicUsize,
     locked: AtomicBool,
+    on_read: Mutex<Option<OnRead>>,
 }
 
 impl SecretBackend for Store {
     fn read(&self, reference: &CredentialReference) -> Result<Vec<u8>, CredentialError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
+        if let Some(on_read) = self.on_read.lock().unwrap().as_ref()
+            && let Some(error) = on_read()
+        {
+            return Err(error);
+        }
         if self.locked.load(Ordering::SeqCst) {
             return Err(CredentialError::Unavailable);
         }
@@ -326,4 +335,64 @@ fn the_sign_in_check_reads_a_missing_entry_as_unreadable() {
         super::account_session_renewal::load_account_record(&fx.shared.store),
         Err(super::account_session_renewal::AccountRecordError::Malformed)
     ));
+}
+
+/// The answer outlives the daemon: after a restart, status still says what
+/// the last read found, until the record changes.
+#[test]
+fn the_state_survives_a_restart() {
+    let fx = Fixture::healthy();
+    fx.write_record(b"not json");
+    let _ = fx.read_record();
+    commons_credentials::forget_observations_for_test();
+    assert_eq!(fx.state(), unreadable());
+}
+
+/// A settings write that rewrites the configuration but not the account it
+/// names leaves the state in place.
+#[test]
+fn an_unrelated_settings_write_keeps_the_state() {
+    let fx = Fixture::healthy();
+    fx.write_record(b"not json");
+    let _ = fx.read_record();
+    let mut cfg = fx.shared.store.load_config().unwrap().unwrap();
+    cfg.consent_scopes.push("attention-test-scope".into());
+    fx.shared.store.save_config(&cfg).unwrap();
+    assert_eq!(fx.state(), unreadable());
+}
+
+/// A renewal or switch that lands during the read (here: the credential
+/// generation moves, and the old entry is gone) is not a record no retry
+/// reads: storage, so the sign-in check stays fail-closed and nothing is
+/// shown.
+#[test]
+fn a_record_that_moved_during_the_read_is_not_unreadable() {
+    let fx = Fixture::healthy();
+    let generation = fx
+        .shared
+        .store
+        .daemon_path("commons-credential-generation.json");
+    *fx.os.on_read.lock().unwrap() = Some(Box::new(move || {
+        std::fs::write(&generation, br#"{"moved":true}"#).unwrap();
+        Some(CredentialError::NoEntry)
+    }));
+    assert_eq!(
+        fx.read_record(),
+        Err(commons_credentials::AccountLoadFailure::Storage)
+    );
+    *fx.os.on_read.lock().unwrap() = None;
+    assert_eq!(fx.state().0, json!("ok"));
+}
+
+/// A build that lost access to its own entry (a code-signature mismatch on
+/// macOS) never regains it: unreadable, so setting up again is offered.
+#[test]
+fn an_unentitled_store_is_unreadable() {
+    let fx = Fixture::healthy();
+    *fx.os.on_read.lock().unwrap() = Some(Box::new(|| Some(CredentialError::Unentitled)));
+    assert_eq!(
+        fx.read_record(),
+        Err(commons_credentials::AccountLoadFailure::Unreadable)
+    );
+    assert_eq!(fx.state(), unreadable());
 }

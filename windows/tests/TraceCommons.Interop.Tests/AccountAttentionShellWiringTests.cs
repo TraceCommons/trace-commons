@@ -118,6 +118,25 @@ public class AccountAttentionShellWiringTests
             settings);
     }
 
+    /// <summary>
+    /// A confirmed Set up again that finds another settings write running
+    /// says nothing changed rather than nothing, and the confirmation is not
+    /// offered while one runs.
+    /// </summary>
+    [Fact]
+    public void ABusySetUpAgainSaysNothingChanged()
+    {
+        string viewModel = ShellSource("TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs");
+        Assert.Matches(
+            new Regex(@"public async Task<bool> SetUpAgainAsync\(\)\s*\{\s*if \(IsBusy\)\s*\{.*?AccountAttentionFailedLine = AccountAttention\?\.Failed \?\? string\.Empty;\s*return false;", RegexOptions.Singleline),
+            viewModel);
+
+        string view = ShellSource("TraceCommons.App/Controls/SettingsView.xaml.cs");
+        Assert.Matches(
+            new Regex(@"if \(_setUpAgainDialogOpen \|\| !Settings\.HasAccountAttention \|\| Settings\.IsBusy\)\s*\{\s*return;", RegexOptions.Singleline),
+            view);
+    }
+
     private static string ShellSource(string relativePath)
     {
         string path = Path.Combine(
