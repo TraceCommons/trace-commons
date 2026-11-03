@@ -1451,67 +1451,160 @@ pub async fn sweep(shared: &DaemonShared, now: chrono::DateTime<chrono::Utc>) {
     }
 }
 
+/// A row a collection plan covers, with what the plan's decision needs.
+pub type PlanRow = (Uuid, Option<crate::managed::collection_plan::RowStatus>);
+
+/// What one lease tick read, under one sweep and one listing of the plans:
+/// the rows a plan covers, for [`collect_abandoned_rows`], and the quiet
+/// rows no plan covers whose tool the daemon can watch, for ending. Taken
+/// together, each quiet row has one owner per tick.
+struct LeaseScan {
+    plans: Vec<PlanRow>,
+    quiet: Vec<crate::managed::sessions::QuietTool>,
+}
+
+/// The daemon's lease tick, whose first tick is at startup: lapse rows
+/// whose launcher went quiet, shut down the proxies of sessions that no
+/// longer run, and end the quiet rows no collection plan covers once the
+/// tool process their launcher named is gone, so they free their
+/// conversation and account (`SessionRegistry::end_quiet`). Returns the
+/// plan rows, for a collection pass if none is running; a row with a plan
+/// is ended there, when its plan is decided. A row whose launcher named no
+/// process is never ended here: the person can dismiss it
+/// (`SessionRegistry::dismiss`).
+///
+/// One sweep and one listing of the plans per tick. The listing, the
+/// process checks and the writes run on blocking tasks, off the daemon's
+/// loop; the managed lock is taken once to read and once more only when
+/// there is a row to end.
+pub async fn lease_pass(
+    shared: &std::sync::Arc<DaemonShared>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<PlanRow> {
+    let held = std::sync::Arc::clone(shared);
+    let Ok((scan, routes)) = tokio::task::spawn_blocking(move || scan(&held, now, true)).await
+    else {
+        return Vec::new();
+    };
+    for route in routes {
+        route.shutdown().await;
+    }
+    let Some(scan) = scan else {
+        return Vec::new();
+    };
+    let held = std::sync::Arc::clone(shared);
+    let quiet = scan.quiet;
+    let _ = tokio::task::spawn_blocking(move || end_gone(&held, quiet)).await;
+    scan.plans
+}
+
+/// [`lease_pass`]'s ending of quiet rows alone, without the proxies or a
+/// collection.
+#[cfg(test)]
+pub async fn end_quiet_rows(
+    shared: &std::sync::Arc<DaemonShared>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let held = std::sync::Arc::clone(shared);
+    let _ = tokio::task::spawn_blocking(move || {
+        if let (Some(scan), _) = scan(&held, now, false) {
+            end_gone(&held, scan.quiet);
+        }
+    })
+    .await;
+}
+
+fn scan(
+    shared: &DaemonShared,
+    now: chrono::DateTime<chrono::Utc>,
+    routes: bool,
+) -> (Option<LeaseScan>, Vec<ManagedRoute>) {
+    let ids = crate::managed::collection_plan::list(&shared.store);
+    let planned: std::collections::BTreeSet<Uuid> = ids.iter().copied().collect();
+    with_service(shared, |service| {
+        service.sessions.sweep(now)?;
+        let scan = LeaseScan {
+            plans: ids
+                .iter()
+                .map(|id| (*id, service.sessions.collection_status(*id)))
+                .collect(),
+            quiet: service.sessions.quiet_tools(&planned),
+        };
+        let routes = if routes {
+            service.take_routes(false)
+        } else {
+            Vec::new()
+        };
+        Ok((Some(scan), routes))
+    })
+    .unwrap_or((None, Vec::new()))
+}
+
+/// End, in one write, the quiet rows whose tool is gone.
+fn end_gone(shared: &DaemonShared, quiet: Vec<crate::managed::sessions::QuietTool>) {
+    let gone: Vec<Uuid> = quiet
+        .into_iter()
+        .filter(|tool| tool.gone())
+        .map(|tool| tool.id)
+        .collect();
+    if !gone.is_empty() {
+        let _ = with_service(shared, |service| service.sessions.end_quiet(&gone));
+    }
+}
+
 /// Collect the trace of a collecting session whose launcher went quiet
 /// (terminal window closed, force quit, logout), once its tool has exited,
 /// from the collection plan the launcher left (`managed::collection_plan`).
-/// The daemon's loop runs this on its lease tick, whose first tick is at
-/// startup, so rows a restart found unknown or failed are picked up too.
-/// A row whose tool the daemon saw exit has ended, so its conversation can
-/// be resumed (`SessionRegistry::tool_exited`). That includes a quiet row
-/// with no plan (it does not collect), whose tool's process the launcher
-/// named: without it, such a row stayed unknown, holding its conversation,
-/// for good.
+/// The daemon's loop runs this after a [`lease_pass`], on the plan rows it
+/// read, so rows a restart found unknown or failed are picked up at
+/// startup too. A row whose tool the daemon saw exit has ended, so its
+/// conversation can be resumed (`SessionRegistry::tool_exited`). Quiet rows
+/// with no plan are [`lease_pass`]'s.
 ///
 /// Never while the launcher still reports, never while the tool's process
-/// runs (its pid and start time), never for a row that does not collect,
-/// and never when the launcher took the row's claim first. A plan is read
-/// only for a quiet row still waiting for its result, and all file,
+/// runs (its pid and start time), never collects a row that does not
+/// collect, and never when the launcher took the row's claim first. A plan
+/// is read only for a quiet row still waiting for its result, and all file,
 /// process and collection work runs on a blocking task, off the daemon's
 /// loop and off the managed lock, which is taken only to read rows and
 /// record results. Past `collection_plan::GIVE_UP_AFTER` a running tool's
 /// collection is recorded as failed and its local session is left as it
 /// is. Returns how many rows it collected.
-pub async fn collect_abandoned(
+pub async fn collect_abandoned_rows(
     shared: &std::sync::Arc<DaemonShared>,
+    plans: Vec<PlanRow>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> usize {
     let shared = std::sync::Arc::clone(shared);
-    tokio::task::spawn_blocking(move || collect_abandoned_now(&shared, now))
+    tokio::task::spawn_blocking(move || collect_abandoned_now(&shared, plans, now))
         .await
         .unwrap_or(0)
 }
 
-fn collect_abandoned_now(shared: &DaemonShared, now: chrono::DateTime<chrono::Utc>) -> usize {
+/// A lease scan and a collection pass on its plan rows, without the
+/// proxies or the ending of quiet rows.
+#[cfg(test)]
+pub async fn collect_abandoned(
+    shared: &std::sync::Arc<DaemonShared>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> usize {
+    let held = std::sync::Arc::clone(shared);
+    let plans = tokio::task::spawn_blocking(move || scan(&held, now, false).0)
+        .await
+        .ok()
+        .flatten()
+        .map(|scan| scan.plans)
+        .unwrap_or_default();
+    collect_abandoned_rows(shared, plans, now).await
+}
+
+fn collect_abandoned_now(
+    shared: &DaemonShared,
+    plans: Vec<PlanRow>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> usize {
     use crate::managed::collection_plan::{self, Next, ProcessIdentity};
     let store = &shared.store;
-    let ids = collection_plan::list(store);
-    // Rows lapse lazily (a shell's snapshot, or a sweep while the daemon
-    // hosts a route); lapse them here so a quiet launcher is seen.
-    let Ok((rows, quiet)) = with_service(shared, |service| {
-        service.sessions.sweep(now)?;
-        Ok((
-            ids.iter()
-                .map(|id| service.sessions.collection_status(*id))
-                .collect::<Vec<_>>(),
-            service.sessions.quiet_tools(),
-        ))
-    }) else {
-        return 0;
-    };
-    // A quiet row with no plan is never collected, so nothing below ends
-    // it: once its tool is gone it has ended, and frees its conversation.
-    // A row with a plan is ended below, when its plan is decided.
-    for (id, identity) in quiet {
-        if ids.contains(&id) {
-            continue;
-        }
-        if ProcessIdentity::parse(&identity).is_some_and(|process| !process.is_running()) {
-            let _ = with_service(shared, |service| service.sessions.tool_exited(id));
-        }
-    }
-    if ids.is_empty() {
-        return 0;
-    }
     let record = |id, collection, tool_exited: bool| {
         let _ = with_service(shared, |service| {
             service.sessions.record_collection(id, collection)?;
@@ -1523,7 +1616,7 @@ fn collect_abandoned_now(shared: &DaemonShared, now: chrono::DateTime<chrono::Ut
     };
     let mut me = None;
     let mut collected = 0;
-    for (id, row) in ids.into_iter().zip(rows) {
+    for (id, row) in plans {
         let (next, plan) = match collection_plan::before_reading(row) {
             Some(decided) => (decided, None),
             None => {
@@ -3831,7 +3924,8 @@ mod tests {
 
         /// A row with no collection plan whose launcher went quiet ends once
         /// its tool is gone, so it no longer holds its conversation; while
-        /// the tool runs it stays unknown.
+        /// the tool runs it stays unknown. This is the lease tick's own
+        /// pass, not the collection pass.
         #[tokio::test]
         async fn a_quiet_row_without_a_plan_ends_once_its_tool_is_gone() {
             let f = fixture();
@@ -3846,15 +3940,160 @@ mod tests {
                 running(&f, s, ProcessIdentity::of(tool.id()), false)
             });
             collection_plan::finish(&f.store, live);
-            assert_eq!(collect_abandoned(&shared, chrono::Utc::now()).await, 0);
+            end_quiet_rows(&shared, chrono::Utc::now()).await;
             assert_eq!(status(&shared, gone).state, SessionState::Running);
-            collect_abandoned(&shared, lapsed()).await;
+            end_quiet_rows(&shared, lapsed()).await;
             assert_eq!(status(&shared, gone).state, SessionState::Failed);
             assert_eq!(status(&shared, live).state, SessionState::Unknown);
             tool.kill().unwrap();
             tool.wait().unwrap();
-            collect_abandoned(&shared, lapsed()).await;
+            end_quiet_rows(&shared, lapsed()).await;
             assert_eq!(status(&shared, live).state, SessionState::Failed);
+        }
+
+        /// A collecting row with no plan (its launcher could not write one,
+        /// or took the claim and died) is never collected by the daemon:
+        /// once its tool is gone, the row and its collection both end.
+        #[tokio::test]
+        async fn a_collecting_row_without_a_plan_ends_its_collection_too() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let id = sessions_of(&shared, |s| running(&f, s, exited(), true));
+            collection_plan::finish(&f.store, id);
+            assert_eq!(status(&shared, id).collection, CollectionState::Pending);
+            end_quiet_rows(&shared, lapsed()).await;
+            let row = status(&shared, id);
+            assert_eq!(row.state, SessionState::Failed);
+            assert_eq!(row.collection, CollectionState::Failed);
+        }
+
+        /// A collecting row whose launcher redeemed it and went quiet
+        /// without reporting, after writing a collection plan naming
+        /// `process` when one is given. Returns its id, lapsed to unknown.
+        fn quiet_unreported(
+            f: &Fixture,
+            sessions: &mut SessionRegistry,
+            process: Option<ProcessIdentity>,
+        ) -> Uuid {
+            let prepared = sessions
+                .prepare(
+                    LaunchRequest {
+                        cli_options: None,
+                        model: None,
+                        collect_traces: true,
+                        purpose: LaunchPurpose::Coding,
+                        request_id: Uuid::new_v4(),
+                        tool: ToolId::Claude,
+                        connection: ConnectionKind::Subscription,
+                        account_id: f.account.id,
+                        cwd: f.store.dir().to_path_buf(),
+                        expected_generation: Generation(0),
+                        save_default: false,
+                        keep_saved_model: false,
+                        resume_of: None,
+                        background_model: None,
+                    },
+                    &f.account,
+                )
+                .unwrap();
+            let id = prepared.session_id;
+            sessions
+                .redeem(id, prepared.ticket.as_deref().unwrap())
+                .unwrap();
+            if let Some(process) = process {
+                let collection =
+                    NativeCollection::snapshot(&f.store, ToolId::Claude, f.account.id, id, None)
+                        .unwrap();
+                collection_plan::write(
+                    &f.store,
+                    &CollectionPlan {
+                        schema_version: 1,
+                        session_id: id,
+                        tool: ToolId::Claude,
+                        account_id: f.account.id,
+                        resume_root: None,
+                        cwd: f.store.dir().to_path_buf(),
+                        collect_traces: true,
+                        created_at: chrono::Utc::now(),
+                        native: Some(collection.plan()),
+                        opencode: None,
+                        process,
+                    },
+                )
+                .unwrap();
+            }
+            sessions.sweep(lapsed()).unwrap();
+            assert_eq!(
+                sessions.describe(id).map(|(_, s)| s),
+                Some(SessionState::Unknown)
+            );
+            id
+        }
+
+        fn can_dismiss(shared: &DaemonShared, id: Uuid) -> bool {
+            sessions_of(shared, |s| {
+                s.views()
+                    .unwrap()
+                    .iter()
+                    .find(|v| v.id == id)
+                    .unwrap()
+                    .can_dismiss
+            })
+        }
+
+        /// A launcher that spawned its tool and wrote a plan naming it, then
+        /// died before reporting, is not stuck: the daemon watches that
+        /// process, by its pid alone when the plan names no start time, and
+        /// the plan ends the row once it is gone.
+        #[tokio::test]
+        async fn a_plan_naming_the_tool_keeps_an_unreported_row_watched() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let mut tool = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap();
+            let watched = sessions_of(&shared, |s| {
+                quiet_unreported(&f, s, Some(ProcessIdentity::of(tool.id())))
+            });
+            let pid_only = sessions_of(&shared, |s| {
+                quiet_unreported(
+                    &f,
+                    s,
+                    Some(ProcessIdentity {
+                        pid: tool.id(),
+                        start_time: None,
+                    }),
+                )
+            });
+            assert!(!can_dismiss(&shared, watched));
+            assert!(!can_dismiss(&shared, pid_only));
+            tool.kill().unwrap();
+            tool.wait().unwrap();
+            collect_abandoned(&shared, lapsed()).await;
+            assert_eq!(status(&shared, watched).state, SessionState::Failed);
+            assert_eq!(status(&shared, pid_only).state, SessionState::Failed);
+        }
+
+        /// Dismissing a stuck collecting row (no plan, so nothing will
+        /// collect it) fails its collection; a row with a plan is watched,
+        /// so it is not the person's to dismiss.
+        #[tokio::test]
+        async fn dismissing_a_stuck_collecting_row_settles_its_collection() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let unplanned = sessions_of(&shared, |s| quiet_unreported(&f, s, None));
+            let planned = sessions_of(&shared, |s| {
+                quiet_unreported(&f, s, Some(ProcessIdentity::current()))
+            });
+            assert_eq!(
+                sessions_of(&shared, |s| s.dismiss(planned)),
+                Err(ManagedError::Conflict)
+            );
+            sessions_of(&shared, |s| s.dismiss(unplanned)).unwrap();
+            let row = status(&shared, unplanned);
+            assert_eq!(row.state, SessionState::Failed);
+            assert_eq!(row.collection, CollectionState::Failed);
         }
 
         #[tokio::test]
