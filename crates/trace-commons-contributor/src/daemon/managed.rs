@@ -187,8 +187,8 @@ impl ManagedService {
         let cwd = self
             .sessions
             .begin_terminal_launch(p.session_id, &p.ticket)?;
-        // The window list is the only way a session opens in an existing
-        // window; Start again and Resume open a new one (owner, 2026-11-02).
+        // The app sends `beside` from the dialog's window list, and for
+        // Start again and Resume the newest window (owner, 2026-11-03).
         // By setting, not `app()`: the setting reads Terminal only where
         // Terminal is offered, and tests run on every platform.
         let place = (choice == TerminalSetting::Terminal)

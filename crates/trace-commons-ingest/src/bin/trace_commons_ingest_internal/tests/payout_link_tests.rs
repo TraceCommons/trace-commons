@@ -691,19 +691,24 @@ async fn an_account_with_no_anchor_of_either_kind_links_nothing() {
     assert!(h.dump(&account.tenant).await.is_empty());
 }
 
-/// A wallet-origin account links through its wallet: NEAR AI signs a NEAR
-/// wallet user in as provider `near` with login address `{account}@near`,
-/// and that names the account's wallet anchor (owner fact 2026-11-02: every
-/// NEAR wallet here is also a NEAR AI login). No other step is needed.
+fn near_config(network: &str) -> Arc<trace_commons_server::config::NearConfig> {
+    Arc::new(trace_commons_server::config::NearConfig {
+        rpc_url: "http://near-rpc.invalid".to_owned(),
+        network: network.to_owned(),
+        recipient: "app.example.invalid".to_owned(),
+    })
+}
+
+/// Only a recorded NEAR AI login proves a link (owner, 2026-11-02: "It
+/// should just be NEAR AI login on both staging and production"). A
+/// wallet-origin account with no recorded NEAR AI login links nothing, even
+/// through NEAR AI's own wallet sign-in on mainnet, and the token is never
+/// spent. Its path to payouts is the change-account flow, which records a
+/// NEAR AI login.
 #[tokio::test]
-async fn a_wallet_account_links_through_its_near_ai_wallet_sign_in() {
+async fn a_wallet_account_with_no_recorded_login_links_nothing_through_a_wallet_sign_in() {
     let Some(mut h) = harness().await else { return };
-    Arc::get_mut(&mut h.state).unwrap().account_near_config =
-        Some(Arc::new(trace_commons_server::config::NearConfig {
-            rpc_url: "http://near-rpc.invalid".to_owned(),
-            network: "mainnet".to_owned(),
-            recipient: "app.example.invalid".to_owned(),
-        }));
+    Arc::get_mut(&mut h.state).unwrap().account_near_config = Some(near_config("mainnet"));
     let account = h
         .unanchored_account_in(
             &trace_commons_server::near_account_identity::random_near_tenant_id(),
@@ -711,72 +716,36 @@ async fn a_wallet_account_links_through_its_near_ai_wallet_sign_in() {
         .await;
     let wallet = format!("w{}.near", Uuid::new_v4().simple());
     h.insert_wallet_anchor(&account, "mainnet", &wallet).await;
-
-    // A GitHub sign-in names no wallet.
-    let (status, body) = h
-        .start(&account, link_body(Uuid::new_v4(), org(1), 0))
-        .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(body["error"], "subject_mismatch", "{body}");
-    // Another wallet's sign-in does not match.
     h.stub().auth_provider = "near";
-    h.stub().email = format!("other{}.near@near", Uuid::new_v4().simple());
+    h.stub().email = format!("{wallet}@near");
     let (status, body) = h
         .start(&account, link_body(Uuid::new_v4(), org(1), 0))
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["error"], "subject_mismatch", "{body}");
+    assert_eq!(h.stub().users_me_calls, 0, "the token is never spent");
     assert_eq!(h.request_rows(&account).await, 0);
-
-    // This wallet's own sign-in links, start to confirm.
-    h.stub().email = format!("{wallet}@near");
-    h.link(&account, org(1)).await;
-    assert_eq!(
-        h.links(&account, &[PayoutLinkState::Waiting]).await.len(),
-        1
-    );
-    // The request's audit row says the wallet path proved it, and nothing
-    // stores the wallet or the address.
-    assert_eq!(
-        h.request_proof_labels(&account).await,
-        vec![Some("near_wallet".to_owned())]
-    );
-    let dump = h.dump(&account.tenant).await;
-    assert!(!dump.contains(&wallet), "{dump}");
 }
 
-/// Wallet anchors are keyed under the deployment's NEAR network, and NEAR AI
-/// verifies wallet sign-ins on mainnet. With no NEAR configuration, or on
-/// testnet (where the same name is someone else's account), no wallet
-/// anchor can match and the token is never spent.
+/// A recorded NEAR AI login links on every deployment, whatever its NEAR
+/// network, and the request's audit row says it was a NEAR AI login.
 #[tokio::test]
-async fn a_wallet_account_off_mainnet_links_nothing() {
-    for network in [None, Some("testnet")] {
+async fn a_recorded_near_ai_login_links_on_mainnet_and_testnet() {
+    for network in ["mainnet", "testnet"] {
         let Some(mut h) = harness().await else { return };
-        if let Some(network) = network {
-            Arc::get_mut(&mut h.state).unwrap().account_near_config =
-                Some(Arc::new(trace_commons_server::config::NearConfig {
-                    rpc_url: "http://near-rpc.invalid".to_owned(),
-                    network: network.to_owned(),
-                    recipient: "app.example.invalid".to_owned(),
-                }));
-        }
-        let account = h
-            .unanchored_account_in(
-                &trace_commons_server::near_account_identity::random_near_tenant_id(),
-            )
-            .await;
-        let wallet = format!("w{}.near", Uuid::new_v4().simple());
-        h.insert_wallet_anchor(&account, network.unwrap_or("mainnet"), &wallet)
-            .await;
-        h.stub().auth_provider = "near";
-        h.stub().email = format!("{wallet}@near");
-        let (status, body) = h
-            .start(&account, link_body(Uuid::new_v4(), org(1), 0))
-            .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{network:?} {body}");
-        assert_eq!(body["error"], "subject_mismatch", "{body}");
-        assert_eq!(h.stub().users_me_calls, 0, "{network:?}");
+        Arc::get_mut(&mut h.state).unwrap().account_near_config = Some(near_config(network));
+        let account = h.account().await;
+        h.link(&account, org(1)).await;
+        assert_eq!(
+            h.links(&account, &[PayoutLinkState::Waiting]).await.len(),
+            1,
+            "{network}"
+        );
+        assert_eq!(
+            h.request_proof_labels(&account).await,
+            vec![Some("near_ai_login".to_owned())],
+            "{network}"
+        );
     }
 }
 
