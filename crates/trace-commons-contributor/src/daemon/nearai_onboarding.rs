@@ -362,6 +362,8 @@ async fn enroll_prepared(
     prepared: Prepared,
     expected: super::commons_credentials::Snapshot,
 ) -> Result<Enrolled> {
+    // The sign-in whose session this spends, read with it by `prepare`.
+    let signed_in = prepared.login.clone();
     let identity = DeviceIdentity::load_or_generate_async(&shared.store).await?;
     let provisioned = provision(shared, api, prepared, &identity).await?;
     let referral = provisioned.finished.referral;
@@ -369,7 +371,7 @@ async fn enroll_prepared(
     let store = shared.store.clone();
     let ingest_url = ingest_url.to_string();
     tokio::task::spawn_blocking(move || {
-        persist(
+        let value = persist(
             &store,
             Commons {
                 ingest_url: &ingest_url,
@@ -381,7 +383,10 @@ async fn enroll_prepared(
             &identity,
             provisioned.finished,
             Some(&expected),
-        )
+        )?;
+        // The account accepted this NEAR AI login: it is the account's login.
+        Login::accepted(signed_in.as_ref(), &store);
+        Ok(value)
     })
     .await
     .map_err(|_| anyhow!("commons_credential_worker_unavailable"))?
@@ -552,7 +557,7 @@ async fn ceremony(
     identity: &DeviceIdentity,
     referral_code: Option<&str>,
 ) -> Result<Finished> {
-    let started = start_ceremony(commons, identity).await?;
+    let started = start_ceremony(commons, identity, CeremonyFor::Enrolment).await?;
 
     // Spend the refresh token as late as possible, for the reason above. The
     // rotation is persisted inside `exchange` before the JWT is used.
@@ -576,6 +581,7 @@ async fn ceremony(
         started,
         &access_token.access_token,
         referral_code,
+        CeremonyFor::Enrolment,
     )
     .await
 }
@@ -587,24 +593,143 @@ struct StartedCeremony {
     device_signature: String,
 }
 
+/// Which caller's labels a ceremony's commons failures take.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CeremonyFor {
+    /// Enrolment and renewal: the labels their shells word.
+    Enrolment,
+    /// A fresh sign-in's check ([`check_fresh_login`]). No start answer
+    /// refuses a login, and at the finish only the commons's uniform `400`
+    /// deny and the revoked-key `409` do. Every other failure is a
+    /// [`FreshCheckFailure`]: no verdict, of a named kind.
+    FreshLogin,
+}
+
+/// Why a fresh sign-in's check got no verdict from the commons, carried in
+/// the error so the caller maps each kind exhaustively, never through a
+/// label string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FreshCheckFailure {
+    /// No answer came from the commons: no response (a connect or TLS
+    /// failure, a timeout), or a status that says it is busy or did not
+    /// get there -- a server error other than `511`, or `408`, `421`, `425`,
+    /// `429`, the set #1850 treats as transient. A TLS interception that
+    /// breaks the handshake lands here too: it is not told apart from a
+    /// failed connection.
+    Unanswered,
+    /// An answer came, but not one the commons sends: any other status (a
+    /// redirect, a proxy's or portal's `403` or `404`, the `511` a captive
+    /// portal is meant to send, a `4xx` that is not the commons's own deny),
+    /// or a body that does not parse or is too large. Often a misrouted or
+    /// intercepted address. Classified by the status when one arrived, so a
+    /// busy `503` with an oversized page is still [`Self::Unanswered`].
+    Unusable,
+    /// The commons answered the start with its own uniform `400` deny: it
+    /// was reached, and gave no verdict (not ready, a refused draw, a
+    /// database error). No start answer refuses a login.
+    NoVerdict,
+    /// Nothing was sent: a local failure building the request.
+    Local,
+}
+
+impl std::fmt::Display for FreshCheckFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unanswered => "near_ai_fresh_check_unanswered",
+            Self::Unusable => "near_ai_fresh_check_unusable",
+            Self::NoVerdict => "near_ai_fresh_check_no_verdict",
+            Self::Local => "near_ai_fresh_check_local",
+        })
+    }
+}
+
+impl std::error::Error for FreshCheckFailure {}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CeremonyStage {
+    Start,
+    Finish,
+}
+
+/// A status that says the commons is busy or the request did not get
+/// through: a server error other than `511`, and the retry-later client
+/// statuses #1850 treats as transient.
+fn commons_busy(status: reqwest::StatusCode) -> bool {
+    (status.is_server_error() && status != reqwest::StatusCode::NETWORK_AUTHENTICATION_REQUIRED)
+        || matches!(status.as_u16(), 408 | 421 | 425 | 429)
+}
+
+/// The kind of a fresh check's failure, from the operator client's error
+/// and the status that came with it (`None` when no response arrived).
+fn fresh_failure(
+    error: &trace_commons_operator_client::Error,
+    status: Option<reqwest::StatusCode>,
+    stage: CeremonyStage,
+) -> FreshCheckFailure {
+    use trace_commons_operator_client::Error;
+    match error {
+        Error::BearerMissing { .. }
+        | Error::InvalidEndpoint { .. }
+        | Error::HostNotAllowed { .. }
+        | Error::HeaderMalformed { .. } => FreshCheckFailure::Local,
+        Error::Transport { .. }
+        | Error::ResponseTooLarge { .. }
+        | Error::HttpFailure { .. }
+        | Error::ServerLabel { .. }
+        | Error::MalformedResponse { .. } => match status {
+            None => FreshCheckFailure::Unanswered,
+            Some(status) if commons_busy(status) => FreshCheckFailure::Unanswered,
+            Some(_) if stage == CeremonyStage::Start && is_uniform_finish_deny(error) => {
+                FreshCheckFailure::NoVerdict
+            }
+            Some(_) => FreshCheckFailure::Unusable,
+        },
+    }
+}
+
+/// A call's typed result, with the status the commons answered with.
+async fn call_with_status<Resp: serde::de::DeserializeOwned>(
+    commons: &trace_commons_operator_client::Client,
+    path: &str,
+    body: &serde_json::Value,
+) -> (
+    std::result::Result<Resp, trace_commons_operator_client::Error>,
+    Option<reqwest::StatusCode>,
+) {
+    let call = commons
+        .call_json_with_response_header::<serde_json::Value, Resp>(
+            reqwest::Method::POST,
+            path,
+            &[],
+            Some(body),
+            "retry-after",
+        )
+        .await;
+    (call.result, call.status)
+}
+
 /// The ceremony's start and the device proof over its answer.
 async fn start_ceremony(
     commons: &trace_commons_operator_client::Client,
     identity: &DeviceIdentity,
+    caller: CeremonyFor,
 ) -> Result<StartedCeremony> {
     let verifier = random()?;
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(Sha256::digest(verifier.as_bytes()));
 
-    let started: Started = commons
-        .call_json(
-            reqwest::Method::POST,
-            PROVISION_START_PATH,
-            &[],
-            Some(&start_payload(&code_challenge, &identity.public_key_b64)),
-        )
-        .await
-        .map_err(|_| anyhow!("near_ai_enroll_start_failed"))?;
+    let (started, status) = call_with_status::<Started>(
+        commons,
+        PROVISION_START_PATH,
+        &start_payload(&code_challenge, &identity.public_key_b64),
+    )
+    .await;
+    let started = started.map_err(|error| match caller {
+        CeremonyFor::Enrolment => anyhow!("near_ai_enroll_start_failed"),
+        CeremonyFor::FreshLogin => {
+            anyhow::Error::new(fresh_failure(&error, status, CeremonyStage::Start))
+        }
+    })?;
 
     let device_signature = device_proof_for_ceremony(
         identity,
@@ -629,8 +754,16 @@ async fn ceremony_with_access_token(
     identity: &DeviceIdentity,
     access_token: &str,
 ) -> Result<Finished> {
-    let started = start_ceremony(commons, identity).await?;
-    finish_ceremony(commons, identity, started, access_token, None).await
+    let started = start_ceremony(commons, identity, CeremonyFor::FreshLogin).await?;
+    finish_ceremony(
+        commons,
+        identity,
+        started,
+        access_token,
+        None,
+        CeremonyFor::FreshLogin,
+    )
+    .await
 }
 
 async fn finish_ceremony(
@@ -639,7 +772,23 @@ async fn finish_ceremony(
     started: StartedCeremony,
     access_token: &str,
     referral_code: Option<&str>,
+    caller: CeremonyFor,
 ) -> Result<Finished> {
+    // The commons refuses a finish in exactly two ways: its uniform `400`
+    // deny, and the revoked-key `409`. For a fresh sign-in's check, only
+    // those are a refusal; any other answer says nothing about the login.
+    let refusal = |(error, status): (
+        trace_commons_operator_client::Error,
+        Option<reqwest::StatusCode>,
+    )| {
+        let refused =
+            is_uniform_finish_deny(&error) || error.server_label() == Some(DEVICE_KEY_REVOKED_WIRE);
+        if caller == CeremonyFor::FreshLogin && !refused {
+            anyhow::Error::new(fresh_failure(&error, status, CeremonyStage::Finish))
+        } else {
+            finish_refusal(&error, "near_ai_enroll_verification_failed")
+        }
+    };
     // The JWT rides in the body, never a header: we are not
     // authenticating to the commons with it, we are handing it over to
     // be introspected.
@@ -651,19 +800,13 @@ async fn finish_ceremony(
         "access_token": access_token,
     });
     let finish = |body: serde_json::Value| async move {
-        commons
-            .call_json::<serde_json::Value, Finished>(
-                reqwest::Method::POST,
-                PROVISION_FINISH_PATH,
-                &[],
-                Some(&body),
-            )
-            .await
+        match call_with_status::<Finished>(commons, PROVISION_FINISH_PATH, &body).await {
+            (Ok(finished), _) => Ok(finished),
+            (Err(error), status) => Err((error, status)),
+        }
     };
     let Some(code) = referral_code else {
-        return finish(body)
-            .await
-            .map_err(|error| finish_refusal(&error, "near_ai_enroll_verification_failed"));
+        return finish(body).await.map_err(refusal);
     };
     // Only when there is one: a finish without a code is the body every
     // shipped commons parses.
@@ -677,15 +820,15 @@ async fn finish_ceremony(
         // it, on the same ceremony and token; the answer then carries no
         // `referral` and the code reads as not applied. A real refusal took
         // the ceremony, so the retry is refused the same way.
-        Err(error) if is_uniform_finish_deny(&error) => finish(body).await,
+        Err((error, _)) if is_uniform_finish_deny(&error) => finish(body).await,
         other => other,
     }
-    .map_err(|error| finish_refusal(&error, "near_ai_enroll_verification_failed"))
+    .map_err(refusal)
 }
 
 /// The label of the 400 an ingest answers for any refused native finish,
 /// one whose body it could not parse included (`native_generic_deny`).
-const UNIFORM_FINISH_DENY: &str = "native sign-in could not be completed";
+pub(super) const UNIFORM_FINISH_DENY: &str = "native sign-in could not be completed";
 
 /// That uniform deny, and nothing else: not a revoked key, not a 5xx, not
 /// a transport failure.
@@ -729,6 +872,15 @@ pub(super) struct Login {
 }
 
 impl Login {
+    /// The account accepted this sign-in's NEAR AI login: remember which
+    /// login it was, when the record names this sign-in. File I/O: call it
+    /// off the async runtime.
+    fn accepted(login: Option<&Self>, store: &ConfigStore) {
+        use super::nearai_credential::login_record;
+        let provider = login.and_then(|login| login_record::stored_login(store, &login.key_id));
+        login_record::accepted_by_commons(store, provider);
+    }
+
     fn of(settings: &super::settings::DaemonSettings) -> Option<Self> {
         settings.near_ai_inference.as_ref().map(|key| Self {
             key_id: key.key_id.clone(),
@@ -906,7 +1058,13 @@ pub(super) async fn renew_account_session(
     store_renewed_session(
         shared, cfg, identity, previous, account_id, finished, expected,
     )
-    .await
+    .await?;
+    // The account accepted the login this spent: remember it, checked
+    // against that sign-in (`login`, read with the session), off this
+    // runtime.
+    let store = shared.store.clone();
+    let _ = tokio::task::spawn_blocking(move || Login::accepted(login.as_ref(), &store)).await;
+    Ok(())
 }
 
 /// The stored record's account id, which a renewal's answer must name.
@@ -2008,7 +2166,35 @@ mod route_tests {
         commons: Commons,
         referral: SignupReferral,
     ) -> (Stub, DaemonShared, Result<Value>, tempfile::TempDir) {
+        enroll_against_signed_in_with(commons, referral, None).await
+    }
+
+    /// [`enroll_against_with`], with the NEAR AI session recorded as coming
+    /// from `login`.
+    async fn enroll_against_signed_in_with(
+        commons: Commons,
+        referral: SignupReferral,
+        login: Option<(&str, &str)>,
+    ) -> (Stub, DaemonShared, Result<Value>, tempfile::TempDir) {
         let (dir, shared) = shared_with_session();
+        // The retained session's sign-in minted "key-enroll"; the record
+        // names the login of the sign-in whose key it was given.
+        if let Some((login, key_id)) = login {
+            shared.settings.lock().unwrap().near_ai_inference =
+                Some(crate::daemon::settings::NearAiInferenceCredential {
+                    key: "sk-synthetic-enroll".into(),
+                    key_id: "key-enroll".into(),
+                    key_prefix: "sk-syn".into(),
+                    organization_id: "org-enroll".into(),
+                    workspace_id: "ws-enroll".into(),
+                    minted_at: Utc::now(),
+                });
+            crate::daemon::nearai_credential::login_record::record_stored_login(
+                &shared.store,
+                login,
+                key_id,
+            );
+        }
         let identity = DeviceIdentity::load_or_generate(&shared.store).unwrap();
         let stub = stub(commons, identity).await;
         let expected = super::super::commons_credentials::snapshot(
@@ -2074,6 +2260,46 @@ mod route_tests {
                 crate::config::WitnessOrigin::PublishedAtJoin
             ))
         );
+    }
+
+    /// An enrollment the Commons accepted remembers the login it came from
+    /// as the account's; one it refused remembers nothing.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[tokio::test]
+    async fn an_accepted_enrollment_remembers_the_accounts_login_and_a_refused_one_does_not() {
+        use crate::daemon::nearai_credential::login_record;
+        let (_stub, shared, result, _dir) = enroll_against_signed_in_with(
+            Commons::Production,
+            SignupReferral::None,
+            Some(("github", "key-enroll")),
+        )
+        .await;
+        result.expect("enrolled");
+        assert_eq!(login_record::commons_login(&shared.store), Some("github"));
+
+        let (_stub, shared, result, _dir) = enroll_against_signed_in_with(
+            Commons::ProductionFinishDenied,
+            SignupReferral::None,
+            Some(("github", "key-enroll")),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(login_record::commons_login(&shared.store), None);
+
+        // A tag written for another sign-in is not this session's login.
+        let (_stub, shared, result, _dir) = enroll_against_signed_in_with(
+            Commons::Production,
+            SignupReferral::None,
+            Some(("github", "key-of-another-sign-in")),
+        )
+        .await;
+        result.expect("enrolled");
+        assert_eq!(login_record::commons_login(&shared.store), None);
+
+        // A session whose login is not known leaves the record as it was.
+        let (_stub, shared, result, _dir) = enroll_against(Commons::Production).await;
+        result.expect("enrolled");
+        assert_eq!(login_record::commons_login(&shared.store), None);
     }
 
     /// A referral code typed at sign-up rides in the finish, canonical, and

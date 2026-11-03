@@ -956,7 +956,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     (
         "analytics_start_step_use_detail",
-        "Trace Commons picks up their sessions on this Mac.",
+        "This app picks up their sessions on this Mac.",
     ),
     ("analytics_start_step_share", "Choose what to share"),
     (

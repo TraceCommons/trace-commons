@@ -385,7 +385,7 @@ mod tests {
                 );
                 Json(serde_json::json!({
                     "valid": true,
-                    "issuer_display_name": "Trace Commons Pilot",
+                    "issuer_display_name": "Pilot Issuer",
                     "credit_range": {"min": 2, "max": 6, "unit": "points_per_accepted_trace"},
                 }))
             }),
@@ -400,10 +400,7 @@ mod tests {
             .await
             .unwrap();
         assert!(answer.valid);
-        assert_eq!(
-            answer.issuer_display_name.as_deref(),
-            Some("Trace Commons Pilot")
-        );
+        assert_eq!(answer.issuer_display_name.as_deref(), Some("Pilot Issuer"));
         let range = answer.credit_range.unwrap();
         assert_eq!((range.min, range.max), (2, 6));
     }

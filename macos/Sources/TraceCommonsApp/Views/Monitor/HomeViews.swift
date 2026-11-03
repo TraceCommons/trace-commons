@@ -441,9 +441,9 @@ private struct HomeOverview: View {
         else { return nil }
         return AnyView(HomeAccountSignIn(
             noData: noData, signIn: signIn, signInName: model.managedText("sign_in_near_ai_accessibility"),
-            choice: NearAiSignInChoice.of(model.privateInferenceCopy), busy: model.credentialBusy
-        ) { provider in
-            NearAiSignIn.begin(model, provider: provider, openURL: openURL)
+            busy: model.credentialBusy
+        ) {
+            NearAiSignIn.begin(model, openURL: openURL)
         })
     }
 
@@ -471,10 +471,9 @@ private struct HomeOverview: View {
                 } else {
                     HomePrivateAISignInCard(
                         line: words.privateAISignIn, button: model.managedText("sign_in_near_ai"),
-                        buttonName: model.managedText("sign_in_near_ai_accessibility"),
-                        choice: NearAiSignInChoice.of(model.privateInferenceCopy), busy: model.credentialBusy
-                    ) { provider in
-                        NearAiSignIn.begin(model, provider: provider, openURL: openURL)
+                        buttonName: model.managedText("sign_in_near_ai_accessibility"), busy: model.credentialBusy
+                    ) {
+                        NearAiSignIn.begin(model, openURL: openURL)
                     }
                 }
             }
@@ -607,16 +606,15 @@ enum HomeStatIcons {
 /// way.
 /// The Account heading's "No data - Sign in" (owner, 2026-11-02): the
 /// core's "No data" in secondary ink, a dash, and the managed copy's "Sign
-/// in" as a link, a menu of the logins when the build offers several, as
-/// the Private AI section's button is. The link is its own control, named
-/// for VoiceOver by what it signs in to.
+/// in" as a link, which starts the same sign-in as the Private AI
+/// section's button (the browser lists the logins, #1835). The link is
+/// its own control, named for VoiceOver by what it signs in to.
 private struct HomeAccountSignIn: View {
     let noData: String
     let signIn: String
     let signInName: String
-    let choice: NearAiSignInChoice
     let busy: Bool
-    let start: (String?) -> Void
+    let start: () -> Void
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s2) {
@@ -626,7 +624,7 @@ private struct HomeAccountSignIn: View {
                 .foregroundStyle(GlassColor.textTertiary)
                 .accessibilityHidden(true)
             NearAiSignInButton(
-                title: signIn, accessibilityName: signInName.isEmpty ? nil : signInName, choice: choice,
+                title: signIn, accessibilityName: signInName.isEmpty ? nil : signInName,
                 style: GlassButtonStyle(.link), start: start)
                 .fixedSize()
                 .disabled(busy)
@@ -642,10 +640,8 @@ private struct HomePrivateAISignInCard: View {
     /// The button's name for VoiceOver: "Sign in" alone does not say to
     /// what.
     let buttonName: String
-    /// Every login the build offers (`NearAiSignInChoice`).
-    let choice: NearAiSignInChoice
     let busy: Bool
-    let action: (String?) -> Void
+    let action: () -> Void
 
     var body: some View {
         HStack(alignment: .center, spacing: GlassTokens.Space.s3) {
@@ -655,7 +651,7 @@ private struct HomePrivateAISignInCard: View {
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: GlassTokens.Space.s4)
             NearAiSignInButton(
-                title: button, accessibilityName: buttonName, choice: choice,
+                title: button, accessibilityName: buttonName,
                 style: GlassButtonStyle(.primary, small: true), start: action)
                 .fixedSize()
                 .disabled(busy)

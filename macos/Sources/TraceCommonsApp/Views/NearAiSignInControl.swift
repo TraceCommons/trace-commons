@@ -44,71 +44,30 @@ enum NearAiSignInOffer {
     }
 }
 
-/// How a NEAR AI sign-in is offered (owner, 2026-11-01: "We are going back
-/// to supporting all the near.ai cloud sign in mechanisms. Github, google,
-/// or near wallet."): a menu with one item per login the core offers, in
-/// the core's order and with the core's titles
-/// (`CredentialSection.providerOptions`), or a plain button when the build
-/// offers one (staging's Google login). A new login is a change to
-/// `channel::NEAR_AI_SIGN_IN_PROVIDERS` and its title, not to this.
-///
-/// A menu starts the sign-in on the item chosen, so the wallet's notice
-/// (`credentialWalletNotice`), which Settings draws beside its picker
-/// before the button, has no place to be read first here.
-enum NearAiSignInChoice: Equatable {
-    /// One login, or none known (nil: the daemon's default).
-    case button(provider: String?)
-    /// Several logins, in the core's order.
-    case menu([CredentialSection.ProviderOption])
-
-    static func of(_ options: [CredentialSection.ProviderOption]) -> NearAiSignInChoice {
-        options.count > 1 ? .menu(options) : .button(provider: options.first?.tag)
-    }
-
-    /// The logins this build offers, titled with `copy`; with no copy, the
-    /// daemon's default alone.
-    static func of(_ copy: PrivateInferenceCopy?) -> NearAiSignInChoice {
-        of(copy.map { CredentialSection.providerOptions($0) } ?? [])
-    }
-}
-
-/// A sign-in control for `NearAiSignInChoice`: the caller's label and
-/// style either way, a native menu of the logins when there are several.
-/// `start` gets the chosen login's tag.
+/// Every NEAR AI Sign in outside Settings: one plain button with the
+/// caller's label and style. It names no login: the daemon's browser page
+/// lists the build's logins and the person picks one there (owner,
+/// 2026-11-02: "ideally the choosing of login types happens in the browser
+/// window rather than with a dropdown menu").
 struct NearAiSignInButton: View {
     let title: String
     /// VoiceOver's name for the control, when the label alone does not say
     /// what is signed in to.
     var accessibilityName: String?
-    let choice: NearAiSignInChoice
     let style: TCDesign.GlassButtonStyle
-    let start: (String?) -> Void
+    let start: () -> Void
 
     var body: some View {
-        switch choice {
-        case .button(let provider):
-            Button(title) { start(provider) }
-                .buttonStyle(style)
-                .accessibilityLabel(accessibilityName ?? title)
-        case .menu(let options):
-            Menu {
-                ForEach(options, id: \.tag) { option in
-                    Button(option.title) { start(option.tag) }
-                }
-            } label: {
-                Text(title)
-            }
-            .menuStyle(.button)
+        Button(title, action: start)
             .buttonStyle(style)
             .accessibilityLabel(accessibilityName ?? title)
-        }
     }
 }
 
 /// The balance card's Sign in (owner, 2026-11-02): a small primary button
 /// in the card head's trailing slot, where the re-read icon sits
 /// otherwise, that runs the one flow Settings' "Sign in again" runs
-/// (`AppModel.signInToNearAI`), offering the logins the core offers. It
+/// (`AppModel.signInToNearAI`); the browser lists the logins (#1835). It
 /// reads "Sign in", Home's word for the same sign-in. The card draws it
 /// only while `NearAiSignInOffer.balanceHeadSignIn` holds.
 struct NearAiSignInHeadButton: View {
@@ -119,9 +78,9 @@ struct NearAiSignInHeadButton: View {
         NearAiSignInButton(
             title: model.managedText("sign_in_near_ai"),
             accessibilityName: model.managedText("sign_in_near_ai_accessibility"),
-            choice: NearAiSignInChoice.of(copy), style: GlassButtonStyle(.primary, small: true)
-        ) { provider in
-            Task { await model.signInToNearAI(provider: provider) }
+            style: GlassButtonStyle(.primary, small: true)
+        ) {
+            Task { await model.signInToNearAI() }
         }
         .disabled(model.credentialBusy || (model.nearAiSigningIn && !model.canRestartNearAiBrowserSignIn))
         .fixedSize()

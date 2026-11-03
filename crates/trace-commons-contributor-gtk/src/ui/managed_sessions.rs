@@ -196,6 +196,7 @@ fn refusal_key(label: &str) -> &'static str {
         "managed-model-unavailable" => "model_unavailable",
         "managed-near-ai-balance-too-low" => "balance_too_low",
         "managed-project-chooses-model" => "project_chooses_model",
+        "managed-project-sets-auto-mode-server" => "project_sets_auto_mode_server",
         _ => "action_failed",
     }
 }
@@ -548,11 +549,16 @@ mod tests {
             refusal_key("managed-project-chooses-model"),
             "project_chooses_model"
         );
+        assert_eq!(
+            refusal_key("managed-project-sets-auto-mode-server"),
+            "project_sets_auto_mode_server"
+        );
         for key in [
             "balance_too_low",
             "sign_in_needed",
             "model_unavailable",
             "project_chooses_model",
+            "project_sets_auto_mode_server",
         ] {
             assert!(!super::text(key).is_empty(), "{key}");
         }
