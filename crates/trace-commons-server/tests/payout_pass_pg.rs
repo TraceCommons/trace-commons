@@ -68,8 +68,10 @@ const CEILING: u128 = 1_000_000_000_000;
 /// through its table-wide V62 grant; a database migrated straight to head
 /// lacks it, so this suite grants exactly these.
 const PASS_PILOT_GRANTS: &str = "GRANT SELECT ON trace_credit_settlement_batches, \
-    trace_credit_ledger, trace_account_principals, trace_accounts, trace_credit_holds \
-    TO trace_ingest_runtime;";
+    trace_credit_ledger, trace_account_principals, trace_accounts, trace_credit_holds, \
+    trace_near_account_anchors TO trace_ingest_runtime; \
+    GRANT INSERT ON trace_account_audit TO trace_ingest_runtime; \
+    GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_ingest_runtime;";
 
 struct Fixture {
     owner: PgBackend,
@@ -2449,4 +2451,146 @@ async fn ledger_event(
         ],
     )
     .await;
+}
+
+/// #1873: a legacy account opened after its tenant's payout link was carried
+/// (a later login link) is carried by the next pass over that tenant, so its
+/// credit is not left accruing unpaid until the NEAR AI account confirms
+/// again. Live mode: a dry run moves no link.
+#[tokio::test]
+async fn the_pass_carries_to_a_legacy_account_opened_after_the_carry() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let mock = Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let opener = Arc::new(TestOpener::default());
+
+    // The NEAR AI account, with a recorded login and a live link.
+    let near = format!("nearai-{}", Uuid::new_v4().simple().to_string().repeat(2));
+    let source = Uuid::new_v4();
+    owner_exec(
+        &fixture,
+        &near,
+        "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+        &[&near],
+    )
+    .await;
+    owner_exec(
+        &fixture,
+        &near,
+        "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+        &[&near, &source],
+    )
+    .await;
+    owner_exec(
+        &fixture,
+        &near,
+        "INSERT INTO trace_near_account_anchors
+            (tenant_id, account_id, anchor_hash, sealed_account_name, index_pepper_ref,
+             account_name_key_ref, identity_source, auth_provider)
+         VALUES ($1, $2, $3, '{}', 'p', 'k', 'near_ai_login', 'github')",
+        &[
+            &near,
+            &source,
+            &format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2)),
+        ],
+    )
+    .await;
+    link(
+        &fixture,
+        &near,
+        source,
+        rail.as_ref(),
+        &opener,
+        &org(7),
+        PayoutLinkState::Active,
+    )
+    .await;
+
+    // Its legacy tenant, linked through V81, with one account carried.
+    let legacy = format!("tenant-pass-{}", Uuid::new_v4().simple());
+    let first = Uuid::new_v4();
+    owner_exec(
+        &fixture,
+        &legacy,
+        "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+        &[&legacy],
+    )
+    .await;
+    owner_exec(
+        &fixture,
+        &legacy,
+        "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+        &[&legacy, &first],
+    )
+    .await;
+    let hex = |label: &str| format!("sha256:{}", label.repeat(64));
+    owner_exec(
+        &fixture,
+        &near,
+        "INSERT INTO trace_legacy_invite_links
+            (link_id, tenant_id, account_id, legacy_tenant_id, device_key_id,
+             invite_subject_hash, nonce, issued_at, device_signature, linked_at,
+             server_kid, server_signature)
+         VALUES ($1, $2, $3, $4, $5, $5, $6, 1, 'sig', 2, 'kid', 'sig')",
+        &[
+            &Uuid::new_v4(),
+            &near,
+            &source,
+            &legacy,
+            &hex("d"),
+            &"e".repeat(64),
+        ],
+    )
+    .await;
+    let programs = {
+        let rail = Arc::clone(&rail);
+        trace_commons_server::db::CarryPrograms(Arc::new(move |id| rail.program_for_link(id)))
+    };
+    let carried = fixture
+        .runtime
+        .carry_legacy_payout_links(&near, source, &rail.descriptor().rail_id, &programs, ACTOR)
+        .await
+        .unwrap();
+    assert_eq!(carried.carried, 1);
+
+    // A second legacy account opens afterwards.
+    let later = Uuid::new_v4();
+    owner_exec(
+        &fixture,
+        &legacy,
+        "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+        &[&legacy, &later],
+    )
+    .await;
+
+    completed(
+        &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
+            .run_once()
+            .await,
+    );
+
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&legacy],
+    )
+    .await
+    .unwrap();
+    let live: i64 = tx
+        .query_one(
+            "SELECT count(*) FROM trace_legacy_payout_carries
+              WHERE tenant_id = $1 AND account_id = $2 AND released_at IS NULL",
+            &[&legacy, &later],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(
+        live, 1,
+        "the account opened after the carry is carried by the pass"
+    );
 }

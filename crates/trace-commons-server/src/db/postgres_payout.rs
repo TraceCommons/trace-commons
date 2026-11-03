@@ -1664,6 +1664,35 @@ impl PayoutStore for PgBackend {
         Ok(report)
     }
 
+    async fn carry_legacy_payout_links_into(
+        &self,
+        legacy_tenant: &str,
+        rail: &RailId,
+        programs: &CarryPrograms,
+        actor_ref_hash: &str,
+    ) -> Result<LegacyCarryReport, DatabaseError> {
+        if trace_commons_protocol::admission::is_anchored_tenant(legacy_tenant) {
+            return Ok(LegacyCarryReport::default());
+        }
+        let source = {
+            let mut client = self.payout_tenant_client().await?;
+            let tx = Self::begin_trace_tenant_transaction(&mut client, legacy_tenant).await?;
+            let row = tx
+                .query_opt(
+                    "SELECT tenant_id, account_id FROM trace_legacy_payout_source_account($1)",
+                    &[&legacy_tenant],
+                )
+                .await?;
+            tx.commit().await?;
+            row.map(|row| (row.get::<_, String>(0), row.get::<_, Uuid>(1)))
+        };
+        let Some((tenant, account)) = source else {
+            return Ok(LegacyCarryReport::default());
+        };
+        self.carry_legacy_payout_links(&tenant, account, rail, programs, actor_ref_hash)
+            .await
+    }
+
     async fn payout_audit_actions(
         &self,
         tenant: &str,

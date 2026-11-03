@@ -756,8 +756,11 @@ async fn pooled_closed_and_own_link_accounts_are_not_carried() {
         &[&legacy, &claimed],
     )
     .await;
+    // Since V148 the close itself released the carry (#1872); the next
+    // carry has nothing left to release and still skips the own link.
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 0);
     let report = fx.carry(&near, account).await;
-    assert_eq!(report.released, 1);
+    assert_eq!(report.released, 0);
     assert_eq!(report.skipped, 1);
     assert_eq!(fx.live_carries(&legacy, claimed).await, 0);
 
@@ -772,7 +775,8 @@ async fn pooled_closed_and_own_link_accounts_are_not_carried() {
         &[&legacy],
     )
     .await;
-    assert_eq!(fx.carry(&near, account).await.released, 1);
+    // Released by the mark itself (V148), and never carried again.
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 0);
     assert_eq!(fx.carry(&near, account).await, LegacyCarryReport::default());
     assert_eq!(fx.live_carries(&legacy, claimed).await, 0);
 }
@@ -1035,10 +1039,12 @@ async fn a_revocation_after_a_change_and_before_activation_stops_both_carries() 
     assert_eq!(fx.live_carries(&legacy, claimed).await, 0);
 }
 
-/// Review of #1865, finding 4: the account standing checked before every
-/// send holds a live carry whose tenant was marked pooled, whose tenant link
-/// row is gone, whose source account closed or was put on a credit hold, or
-/// whose source link was unlinked, without waiting for another carry run.
+/// Review of #1865, finding 4, and #1872. A pooled mark, a deleted tenant
+/// link and a closed source account release the carry in their own
+/// transaction (V148), so nothing is left to hold. A credit hold on the
+/// source account, which is temporary, and a source link unlinked outside
+/// a confirm leave the carry live, and the account standing checked before
+/// every send holds it.
 #[tokio::test]
 async fn the_send_time_standing_holds_a_carry_that_no_longer_stands() {
     let Some(fx) = fixture().await else { return };
@@ -1055,15 +1061,12 @@ async fn the_send_time_standing_holds_a_carry_that_no_longer_stands() {
         &[&legacy],
     )
     .await;
-    assert!(fx.carry_invalid(&legacy, claimed).await);
     assert_eq!(
-        fx.payout_runtime
-            .payout_account_standing(&legacy, claimed)
-            .await
-            .unwrap()
-            .hold_label(),
-        Some(trace_commons_server::db::PAYOUT_LEGACY_CARRY_INVALID)
+        fx.live_carries(&legacy, claimed).await,
+        0,
+        "released by the mark"
     );
+    assert!(!fx.carry_invalid(&legacy, claimed).await);
 
     // The tenant link row deleted rather than revoked.
     let (near, account, legacy, claimed) = fx.linked_pair().await;
@@ -1074,7 +1077,11 @@ async fn the_send_time_standing_holds_a_carry_that_no_longer_stands() {
         &[&legacy],
     )
     .await;
-    assert!(fx.carry_invalid(&legacy, claimed).await);
+    assert_eq!(
+        fx.live_carries(&legacy, claimed).await,
+        0,
+        "released by the delete"
+    );
 
     // The NEAR AI account closed, then (another pair) put on a credit hold.
     let (near, account, legacy, claimed) = fx.linked_pair().await;
@@ -1085,7 +1092,11 @@ async fn the_send_time_standing_holds_a_carry_that_no_longer_stands() {
         &[&near, &account],
     )
     .await;
-    assert!(fx.carry_invalid(&legacy, claimed).await);
+    assert_eq!(
+        fx.live_carries(&legacy, claimed).await,
+        0,
+        "released by the close"
+    );
     let (near, account, legacy, claimed) = fx.linked_pair().await;
     fx.confirm(&near, account, PayoutLinkAction::Link, "org-4d")
         .await;
@@ -1102,6 +1113,14 @@ async fn the_send_time_standing_holds_a_carry_that_no_longer_stands() {
     )
     .await;
     assert!(fx.carry_invalid(&legacy, claimed).await);
+    assert_eq!(
+        fx.payout_runtime
+            .payout_account_standing(&legacy, claimed)
+            .await
+            .unwrap()
+            .hold_label(),
+        Some(trace_commons_server::db::PAYOUT_LEGACY_CARRY_INVALID)
+    );
 
     // The source link unlinked without a carry run.
     let (near, account, legacy, claimed) = fx.linked_pair().await;
@@ -1254,4 +1273,115 @@ async fn the_sql_hash_helpers_match_the_rust_hashes() {
             trace_commons_server::db::payout_legacy_link_hash(id)
         );
     }
+}
+
+impl Fixture {
+    /// A pair with the source and the carry both active, and a second legacy
+    /// account whose carry is still waiting.
+    async fn carried_pair(&self, seed: &str) -> (String, Uuid, String, Uuid, Uuid) {
+        let (near, account, legacy, claimed) = self.linked_pair().await;
+        let waiting = self.add_account(&legacy, false).await;
+        self.confirm(&near, account, PayoutLinkAction::Link, seed)
+            .await;
+        self.activate(&near, account).await;
+        self.activate(&legacy, claimed).await;
+        (near, account, legacy, claimed, waiting)
+    }
+
+    /// Both carries released in the event's own transaction: the active one
+    /// unlinked, the waiting one closed at zero, each audited with `label`.
+    async fn assert_released(&self, legacy: &str, active: Uuid, waiting: Uuid, label: &str) {
+        let row = self
+            .admin
+            .query_one(
+                "SELECT (SELECT bool_and(l.unlink_requested_at IS NOT NULL)
+                           FROM trace_payout_links l
+                          WHERE l.tenant_id = $1 AND l.account_id = $2 AND l.state = 'active'),
+                        (SELECT count(*) FROM trace_payout_links l
+                          WHERE l.tenant_id = $1 AND l.account_id = $3 AND l.state = 'waiting'),
+                        (SELECT count(*) FROM trace_legacy_payout_carries c
+                          WHERE c.tenant_id = $1 AND c.released_at IS NULL),
+                        (SELECT count(*) FROM trace_payout_audit a
+                          WHERE a.tenant_id = $1 AND a.label = $4)",
+                &[&legacy, &active, &waiting, &label],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            row.get::<_, Option<bool>>(0),
+            Some(true),
+            "active carry unlinked"
+        );
+        assert_eq!(row.get::<_, i64>(1), 0, "waiting carry closed");
+        assert_eq!(row.get::<_, i64>(2), 0, "no live carry left");
+        assert_eq!(row.get::<_, i64>(3), 2, "both releases audited as {label}");
+    }
+}
+
+/// #1872: marking a linked tenant pooled releases its carries at once, so
+/// nothing stays held until the next carry.
+#[tokio::test]
+async fn marking_a_tenant_pooled_releases_its_carries() {
+    let Some(fx) = fixture().await else { return };
+    let (_, _, legacy, active, waiting) = fx.carried_pair("org-p1").await;
+    fx.exec(
+        "INSERT INTO trace_legacy_invite_pooled_tenants (tenant_id, reason_label)
+         VALUES ($1, 'shared event invite')",
+        &[&legacy],
+    )
+    .await;
+    fx.assert_released(&legacy, active, waiting, "legacy_tenant_pooled")
+        .await;
+    assert!(
+        !fx.carry_invalid(&legacy, active).await,
+        "released, so not held"
+    );
+}
+
+/// #1872: closing the NEAR AI account releases its carries in every
+/// tenant it linked.
+#[tokio::test]
+async fn closing_the_source_account_releases_its_carries() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, legacy, active, waiting) = fx.carried_pair("org-c1").await;
+    fx.exec(
+        "UPDATE trace_accounts SET closed_at = now() WHERE tenant_id = $1 AND account_id = $2",
+        &[&near, &account],
+    )
+    .await;
+    fx.assert_released(&legacy, active, waiting, "legacy_source_account_closed")
+        .await;
+}
+
+/// #1872: closing a legacy account releases its own carry, and only its own.
+#[tokio::test]
+async fn closing_a_legacy_account_releases_its_own_carry() {
+    let Some(fx) = fixture().await else { return };
+    let (_, _, legacy, active, waiting) = fx.carried_pair("org-c2").await;
+    fx.exec(
+        "UPDATE trace_accounts SET closed_at = now() WHERE tenant_id = $1 AND account_id = $2",
+        &[&legacy, &active],
+    )
+    .await;
+    assert_eq!(fx.live_carries(&legacy, active).await, 0);
+    assert_eq!(
+        fx.live_carries(&legacy, waiting).await,
+        1,
+        "the other account keeps its carry"
+    );
+}
+
+/// #1872: deleting the tenant link row (rather than revoking it) releases
+/// its carries, as a revocation does.
+#[tokio::test]
+async fn deleting_the_tenant_link_releases_its_carries() {
+    let Some(fx) = fixture().await else { return };
+    let (_, _, legacy, active, waiting) = fx.carried_pair("org-d1").await;
+    fx.exec(
+        "DELETE FROM trace_legacy_invite_links WHERE legacy_tenant_id = $1",
+        &[&legacy],
+    )
+    .await;
+    fx.assert_released(&legacy, active, waiting, "legacy_tenant_link_deleted")
+        .await;
 }

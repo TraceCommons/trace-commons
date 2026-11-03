@@ -1997,6 +1997,16 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "legacy_payout_carries",
         include_str!("../../../../migrations/V146__legacy_payout_carries.sql"),
     ),
+    // V148: legacy payout carries follow their events. A pooled mark, an
+    // account closing and a tenant link deleted each release the carries
+    // they invalidate, in their own transaction (#1872); and the pass can
+    // ask which NEAR AI account a legacy tenant is linked to, to carry to
+    // legacy accounts opened after the last carry (#1873). V147 is #1868's.
+    (
+        148,
+        "legacy_payout_carry_events",
+        include_str!("../../../../migrations/V148__legacy_payout_carry_events.sql"),
+    ),
 ];
 
 /// Shared by verified claim issuance and the explicit historical repair.

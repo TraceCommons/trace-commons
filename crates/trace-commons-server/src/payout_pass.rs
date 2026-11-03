@@ -98,6 +98,9 @@ pub const PAYOUT_RECOVERY_UNMATCHED: &str = "payout_recovery_unmatched";
 pub const PAYOUT_LINK_CLOSE_BLOCKED: &str = "payout_link_close_blocked";
 pub const PAYOUT_RECEIPT_UNRECORDED: &str = "payout_receipt_unrecorded";
 const PAYOUT_SEND_WINDOW_EXHAUSTED: &str = "payout_send_window_exhausted";
+/// The pass could not carry a legacy tenant's link to its newer accounts
+/// (#1873). Nothing was carried; the tenant's sends go on.
+const LEGACY_PAYOUT_CARRY_FAILED: &str = "legacy_payout_carry_failed";
 const PAYOUT_STORE_FAILED: &str = "payout_store_failed";
 const PAYOUT_RAIL_SENDING_DISABLED: &str = "payout_rail_sending_disabled";
 pub const PAYOUT_RATE_UNAVAILABLE: &str = "payout_rate_unavailable";
@@ -777,6 +780,25 @@ impl PayoutPass {
         referral: &mut ReferralRun,
         report: &mut PayoutPassReport,
     ) -> Step<()> {
+        // #1873: a legacy tenant's NEAR AI account's link reaches legacy
+        // accounts opened since the last carry. Not in a dry run, which
+        // moves no link. A failure carries nothing (no one is paid wrongly)
+        // and never stops this tenant's sends.
+        if self.settings.mode != PayoutMode::DryRun
+            && !trace_commons_protocol::admission::is_anchored_tenant(tenant)
+        {
+            let rail = Arc::clone(&self.rail);
+            let programs =
+                crate::db::CarryPrograms(Arc::new(move |link_id| rail.program_for_link(link_id)));
+            if self
+                .payouts
+                .carry_legacy_payout_links_into(tenant, self.rail_id(), &programs, &self.actor)
+                .await
+                .is_err()
+            {
+                report.skip(LEGACY_PAYOUT_CARRY_FAILED);
+            }
+        }
         match accrue_rail(
             self.payouts.as_ref(),
             self.corpus.as_ref(),

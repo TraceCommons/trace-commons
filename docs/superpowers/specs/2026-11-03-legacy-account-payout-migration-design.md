@@ -715,15 +715,26 @@ Where the implementation differs from, or adds to, sections 3 to 5:
 - **Accounts created after a carry by a later login link** are carried
   only at the NEAR AI account's next confirm or tenant link. Their credit
   accrues but is not paid until then. (A claim at a V91 attestation goes
-  through the tenant-link route, which carries after it.) Tracked in
-  #1873.
+  through the tenant-link route, which carries after it.) **Fixed by V148
+  (#1873):** the payout pass, in live mode, carries a legacy tenant's NEAR
+  AI account's link again before each pass over that tenant
+  (`PayoutStore::carry_legacy_payout_links_into`, through the guard-owned
+  `trace_legacy_payout_source_account`), so a later account is carried at
+  the next pass.
 - **An invalid carry is held, not released.** A pooled mark, a closed or
   held NEAR AI account, or a deleted tenant link holds the legacy
   account's sends at once (fail closed), but the carried link is released
   only at the next carry or a revocation. The hold is per account, so it
-  also pauses that account's referral stream. Follow-up, #1872: release
-  from the event itself (triggers on the pooled marker, account close and
-  link delete) and keep the check as the backstop.
+  also pauses that account's referral stream. **Fixed by V148 (#1872):**
+  a pooled mark, an account closing (a legacy account's own carries, or a
+  NEAR AI account's carries in every tenant it linked) and a tenant link
+  deleted rather than revoked each release the carries they invalidate, in
+  their own transaction, under the tenant link's lock, audited as
+  `legacy_tenant_pooled`, `legacy_account_closed`,
+  `legacy_source_account_closed` and `legacy_tenant_link_deleted`. The
+  send-time check stays as the backstop and still holds a live carry while
+  its source account is on a credit hold (temporary, so not a release) or
+  its source link is unlinked outside a confirm.
 - **The hash formulas** (`legacy-invite-link-v1:`, `payout-link-v1:`,
   `payout-account-v1:`) are written inline in V146 and mirrored in Rust;
   the tests catch a drift that breaks a match. Follow-up, #1874: small

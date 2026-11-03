@@ -276,12 +276,19 @@ A tenant link also decides who is paid the legacy tenant's credit
   account's links' locks in tenant order; revoking several links in one
   transaction can deadlock with it, and PostgreSQL then aborts one side
   (retry it).
+- **Other events release carries too (V148).** Marking a tenant pooled,
+  closing an account (a legacy account's own carry, or every carry of a
+  NEAR AI account), and deleting a tenant link rather than revoking it
+  each release the carries they invalidate, in the same transaction. A
+  legacy account opened later (a new login link) is carried at the next
+  live payout pass over its tenant.
 - **Every send re-checks the carry.** The account standing the pass reads
   before each send holds a live carry (`payout_legacy_carry_invalid`) when
   its tenant was marked pooled, its tenant link is revoked or deleted, or
   the NEAR AI account is closed, on an account credit hold, or no longer
-  has the source link live. Marking a tenant pooled therefore stops its
-  carried payouts at once; revoking its link as well releases them.
+  has the source link live. It is the backstop now that the events above
+  release carries themselves; it still holds while the NEAR AI account is
+  on a credit hold.
 - **Instance-enrolled tenants link too** (no `onboarding_invites` row):
   the link records no invite grant and changes no trust
   (`legacy_instance_linked`). Only the tenant's earliest live device can
