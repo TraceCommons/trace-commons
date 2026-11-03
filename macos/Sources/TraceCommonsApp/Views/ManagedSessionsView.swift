@@ -17,9 +17,6 @@ struct ManagedSessionsSection: View {
     @State private var launching: ManagedFolderChoice?
     /// The terminal picked in the launch dialog while it asks for one.
     @State private var launchTerminal: String?
-    /// The window picked in the launch dialog, by its session; nil for a
-    /// new window.
-    @State private var launchBeside: String?
     /// The session whose stop is being confirmed.
     @State private var stopping: ManagedSession?
     /// The session whose row menu is open.
@@ -55,8 +52,7 @@ struct ManagedSessionsSection: View {
                     launching = nil
                     launch(choice.tool, in: path, settings: settings)
                 },
-                terminal: $launchTerminal,
-                beside: $launchBeside
+                terminal: $launchTerminal
             ).environmentObject(model)
         }
         .glassModal(item: $stopping) { session in
@@ -174,7 +170,6 @@ struct ManagedSessionsSection: View {
     private func start(_ tool: String) {
         guard !model.managedBusy else { return }
         launchTerminal = nil
-        launchBeside = nil
         launching = ManagedFolderChoice(tool: tool)
     }
 
@@ -192,8 +187,7 @@ struct ManagedSessionsSection: View {
         // A dialog that asked for a terminal saves it first, so this launch
         // opens there and later ones do not ask again.
         let terminal = model.managedSnapshot?.asksForTerminal == true ? launchTerminal : nil
-        let beside = terminal == nil ? launchBeside : nil
-        model.managedAction("managed_launch_prepare", params: params, openTerminal: true, terminal: terminal, beside: beside)
+        model.managedAction("managed_launch_prepare", params: params, openTerminal: true, terminal: terminal)
     }
 
     // MARK: Failures and connecting
@@ -588,10 +582,6 @@ struct ManagedLaunchSheet: View {
     @State private var project: URL?
     /// The terminal picked here while the sheet asks for one.
     @State private var launchTerminal: String?
-    /// The window picked here, by its session; nil for a new window.
-    @State private var beside: String?
-    /// The windows the sheet offers ([`ManagedLaunchWindowRow`]).
-    @State private var windowOptions: [ManagedWindowOption] = []
     /// Where the session opens: the terminal picked here while the sheet
     /// asks for one, else the daemon's.
     private var destination: String {
@@ -688,16 +678,11 @@ struct ManagedLaunchSheet: View {
                 // The first launch asks which terminal to open in.
                 if let snapshot = model.managedSnapshot, snapshot.asksForTerminal {
                     ManagedLaunchTerminalRow(snapshot: snapshot, selection: $launchTerminal)
-                } else {
-                    ManagedLaunchWindowRow(options: windowOptions, beside: $beside)
                 }
                 ManagedNote(text: model.managedText("launch_scope").replacingOccurrences(of: "{destination}", with: destination))
             }
         }
-        .onAppear {
-            loadModels(); loadFolderSettings()
-            ManagedLaunchWindowRow.load(model: model, beside: $beside, into: $windowOptions)
-        }
+        .onAppear { loadModels(); loadFolderSettings() }
         .onChange(of: accountID) { _, _ in loadModels(); loadFolderSettings() }
         .onChange(of: project) { _, _ in loadFolderSettings() }
     }
@@ -713,8 +698,7 @@ struct ManagedLaunchSheet: View {
                                           daemonReadsBackground: snapshot.capabilities.backgroundModel == true)
         }
         let terminal = snapshot.asksForTerminal ? launchTerminal : nil
-        model.managedAction("managed_launch_prepare", params: params, openTerminal: true, terminal: terminal,
-                            beside: terminal == nil ? beside : nil)
+        model.managedAction("managed_launch_prepare", params: params, openTerminal: true, terminal: terminal)
         onClose()
     }
 
