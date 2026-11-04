@@ -151,19 +151,26 @@ impl IngestPipelineRuntimeAssembler for ProductionPipelineAssembler {
 /// A-D6, A-D7, A-D8). Only that constructor names the concrete NEAR AI,
 /// fastembed and usearch types.
 #[cfg(feature = "near-ai-scorer")]
+///
+/// `lookup` resolves the three vector-index roots (the environment for a
+/// serving process, the scratch roots for `--prequalify`) and reads every
+/// other variable from the environment.
 pub(crate) async fn build_near_ai_gate_service_with_pipeline_components(
+    lookup: &(dyn Fn(&str) -> Option<String> + Sync),
     inputs: PipelineComponentInputs,
 ) -> anyhow::Result<(Arc<dyn TraceGateService>, Arc<PipelineGateComponents>)> {
-    let (components, shared) = PipelineGateComponents::from_env(inputs).await?;
+    let (components, shared) = PipelineGateComponents::from_lookup(inputs, lookup, None).await?;
     let wrapper = near_ai_gate_key_wrapper_from_env().await?;
+    let novelty_root = super::prequalify::novelty_index_root(lookup);
     Ok((
-        near_ai_gate_service_from_parts(near_ai_gate_parts(wrapper, shared)?),
+        near_ai_gate_service_from_parts(near_ai_gate_parts(wrapper, shared, &novelty_root)?),
         components,
     ))
 }
 
 #[cfg(not(feature = "near-ai-scorer"))]
 pub(crate) async fn build_near_ai_gate_service_with_pipeline_components(
+    _lookup: &(dyn Fn(&str) -> Option<String> + Sync),
     _inputs: PipelineComponentInputs,
 ) -> anyhow::Result<(Arc<dyn TraceGateService>, Arc<PipelineGateComponents>)> {
     anyhow::bail!(PIPELINE_RUNTIME_PRODUCTION_REQUIRES_NEAR_AI_SCORER_LABEL)
