@@ -1323,8 +1323,17 @@ extension DaemonData {
         public let approvedUnattended: Bool?
         /// `worked` / `partly` / `failed`, or `nil` when none was given.
         public let approvedVerdict: String?
+        /// The submission belongs to an account this Mac was enrolled under
+        /// before the current one: the row keeps what the server last said,
+        /// the current account cannot withdraw it, and its credit is not in
+        /// the rollup's totals. `nil` from a daemon that predates the field
+        /// reads as `false`.
+        public let previousAccount: Bool?
 
         public var id: String { submissionId }
+
+        /// Whether this row is a previous account's.
+        public var isPreviousAccount: Bool { previousAccount == true }
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case submissionId = "submission_id"
@@ -1342,6 +1351,7 @@ extension DaemonData {
             case uploadedBytes = "uploaded_bytes"
             case approvedUnattended = "approved_unattended"
             case approvedVerdict = "approved_verdict"
+            case previousAccount = "previous_account"
         }
 
         /// Render `.notRecorded` as "not recorded", never as "you approved".

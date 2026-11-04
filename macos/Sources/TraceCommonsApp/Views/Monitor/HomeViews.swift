@@ -1550,12 +1550,13 @@ enum HistoryList {
     /// read status, else the record's: `SessionDetailView.withdrawalStatus`).
     /// No record, no Withdraw. It offers Retry after a failed attempt, as
     /// the detail's action did, and needs an active account session: until
-    /// one is known, the row offers sign-in instead.
+    /// one is known, the row offers sign-in instead. A previous account's
+    /// row offers nothing: the current account cannot withdraw it.
     static func rowWithdraw(
         record: HistoryRecord?, detail: SessionDetail?, result: AppModel.WithdrawalResult?,
         account: AppModel.AccountSessionRead
     ) -> RowWithdraw {
-        guard let record,
+        guard let record, !record.previousAccount,
               ContributionStatusPresentation.offersWithdraw(SessionDetailView.withdrawalStatus(record, detail: detail))
         else { return .none }
         if case .withdrawn = result { return .none }
@@ -2053,8 +2054,13 @@ enum HomeFormat {
         var parts: [String] = []
         if let source = row.source { parts.append(InferenceTabView.toolName(source)) }
         if let date = row.submittedAt { parts.append(day(date)) }
+        if row.isPreviousAccount { parts.append(previousAccount) }
         return parts.isEmpty ? "—" : parts.joined(separator: " · ")
     }
+
+    /// What a previous account's row says in its meta line.
+    /// DRAFT copy, pending the owner's approval.
+    static let previousAccount = "Previous account"
 
     /// The community's accept rate as a whole percentage, or a dash when
     /// the commons did not say.

@@ -2397,7 +2397,17 @@ async fn refresh_history(
         Ok(u) => u,
         Err(_) => {
             // A failed poll serves the cache as-is; history is not worth a
-            // health failure of its own.
+            // health failure of its own. It is worth a line in the log,
+            // by fixed label only (the error's context can carry the
+            // ingest URL), and at most once per `HISTORY_POLL_WARN_EVERY`,
+            // since a failed poll is retried on every tick.
+            if history_poll_warning_due(shared.store.dir(), std::time::Instant::now()) {
+                tracing::warn!(
+                    pass = "history",
+                    reason = "status_read_failed",
+                    "history status read failed; serving the cache"
+                );
+            }
             return Ok(());
         }
     };
@@ -2428,6 +2438,32 @@ async fn refresh_history(
     let records = history::join(&receipts, &updates, &labels, &previous, now);
     history::HistoryCache::save(&shared.store, &records)?;
     record_history_poll(shared, &records, now)
+}
+
+/// How often a failing history status read is logged, at most.
+const HISTORY_POLL_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Per state directory: when a failed history status read was last logged.
+static HISTORY_POLL_WARNED: std::sync::Mutex<
+    Option<std::collections::HashMap<std::path::PathBuf, std::time::Instant>>,
+> = std::sync::Mutex::new(None);
+
+/// Whether a failed history status read for the state directory `dir`
+/// should be logged at `now`: the first time, then at most once per
+/// [`HISTORY_POLL_WARN_EVERY`]. Records `now` when it says yes.
+fn history_poll_warning_due(dir: &std::path::Path, now: std::time::Instant) -> bool {
+    let mut warned = HISTORY_POLL_WARNED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let by_dir = warned.get_or_insert_with(std::collections::HashMap::new);
+    if by_dir
+        .get(dir)
+        .is_some_and(|at| now.saturating_duration_since(*at) < HISTORY_POLL_WARN_EVERY)
+    {
+        return false;
+    }
+    by_dir.insert(dir.to_path_buf(), now);
+    true
 }
 
 /// Stamp a successful history poll and advance the verdict news (nudge
@@ -2763,6 +2799,21 @@ fn signal_stream() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + S
 mod tests {
     use super::*;
 
+    /// A failing history status read is logged once, then not again until
+    /// `HISTORY_POLL_WARN_EVERY` has passed, per state directory.
+    #[test]
+    fn a_failed_history_poll_is_logged_at_most_once_an_hour() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let t0 = std::time::Instant::now();
+        assert!(history_poll_warning_due(dir.path(), t0));
+        let minute = t0 + std::time::Duration::from_secs(60);
+        assert!(!history_poll_warning_due(dir.path(), minute));
+        assert!(history_poll_warning_due(other.path(), t0));
+        let hour = t0 + HISTORY_POLL_WARN_EVERY;
+        assert!(history_poll_warning_due(dir.path(), hour));
+    }
+
     /// Nudge S4: `record_history_poll` and the verdict high-water mark.
     mod verdict_news {
         use super::*;
@@ -2800,6 +2851,7 @@ mod tests {
                 approved_unattended: Some(false),
                 approved_verdict: None,
                 uploaded_bytes: None,
+                previous_account: false,
             }
         }
 
