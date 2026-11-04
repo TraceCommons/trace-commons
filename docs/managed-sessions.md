@@ -39,6 +39,9 @@ A session the app opened in Terminal can be shown (its tab brought to the
 front) and stopped from its row; a CLI launch cannot, because the app neither
 opened its window nor started its launcher. An ended session can be started
 again in the same folder with the same account while both still exist.
+Start again replaces the ended row it came from (owner, 2026-11-04): once the
+new session is starting or running, only it is listed; a Start again that
+never ran leaves the old row.
 Every launch, Start again and Resume included, opens a window of its own; none
 types into an existing tab. Opening a session in a window already open needed
 macOS's System Events Automation and Accessibility prompts, which the owner
