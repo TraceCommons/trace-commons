@@ -20,7 +20,9 @@ public static class ProjectIgnoreCopy
         "Stops this project being offered and clears what it has waiting. "
         + "Anything already submitted is unaffected, and you can undo this in Settings.";
 
-    public static string ConfirmationTitle(string project) => $"Ignore {project}?";
+    /// <summary>The core's title (`project_copy::ignore_project_title`): the
+    /// mode is named Never. DRAFT, NEEDS APPROVAL (2026-11-04).</summary>
+    public static string ConfirmationTitle(string project) => $"Set {project} to Never?";
 
     /// <summary>
     /// The removal clause is dropped when nothing is waiting.

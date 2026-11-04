@@ -3107,7 +3107,7 @@ mod tests {
 
     #[test]
     fn the_ignore_title_names_the_project() {
-        assert_eq!(ignore_project_title("api"), "Ignore api?");
+        assert_eq!(ignore_project_title("api"), "Set api to Never?");
     }
 
     /// This shell prints the shared words and not its own.

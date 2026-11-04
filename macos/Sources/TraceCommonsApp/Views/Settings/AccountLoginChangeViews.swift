@@ -177,8 +177,10 @@ struct PayoutsNeedLoginLine: View {
                     Button(copy.payoutsNeedsLoginAdd) { Task { await model.begin() } }
                         .buttonStyle(GlassButtonStyle(.glass))
                         .disabled(model.calling)
+                    // It adds a login: its own failure line, not "switch
+                    // accounts" (rule 7).
                     if model.startFailed {
-                        Text(copy.errorUnavailable)
+                        Text(copy.payoutsNeedsLoginAddFailed)
                             .glassType(GlassTokens.TypeScale.caption)
                             .foregroundStyle(GlassColor.textSecondary)
                     }

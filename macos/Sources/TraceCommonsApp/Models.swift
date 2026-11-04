@@ -1115,6 +1115,10 @@ struct TokenStorageView: Decodable, Equatable {
     let captureEnabled: Bool?
     let captureLabel: String?
     let captureConfirmation: String?
+    /// Turning capture on asks first: the question's title and its confirm
+    /// button, apart from the switch's own button (rule 4).
+    let captureConfirmTitle: String?
+    let captureConfirmLabel: String?
     let captureNotice: String?
     let stateLine: String
     let scopeNote: String
@@ -1128,6 +1132,7 @@ struct TokenStorageView: Decodable, Equatable {
     let failureLine: String
     enum CodingKeys: String, CodingKey {
         case captureEnabled = "capture_enabled", captureLabel = "capture_label", captureConfirmation = "capture_confirmation", captureNotice = "capture_notice"
+        case captureConfirmTitle = "capture_confirm_title", captureConfirmLabel = "capture_confirm_label"
         case stateLine = "state_line", scopeNote = "scope_note", cleanupLabel = "cleanup_label"
         case discardLabel = "discard_label", discardTitle = "discard_title", discardConfirmation = "discard_confirmation"
         case cancelLabel = "cancel_label", confirmLabel = "confirm_label", failureLine = "failure_line"

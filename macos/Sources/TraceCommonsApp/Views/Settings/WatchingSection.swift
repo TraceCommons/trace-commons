@@ -12,7 +12,7 @@ struct WatchingSection: View {
                 read: model.statusRead, lastReadFailed: model.statusReadFailed, startup: model.startup))
         }
         GlassEyebrowCard(SettingsLegacyWords.discoveryEyebrow, title: SettingsLegacyWords.discoveryTitle, accessory: {
-            GlassRefreshButton(SettingsLegacyWords.refresh, action: model.refreshSettings)
+            GlassRefreshButton(SettingsLegacyWords.refreshDiscovery, title: SettingsLegacyWords.refresh, action: model.refreshSettings)
         }) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 if model.daemonSettings == nil {

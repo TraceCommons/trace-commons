@@ -1353,7 +1353,7 @@ pub(crate) mod tests {
         let object = json.as_object().unwrap();
         assert_eq!(
             object.len(),
-            45,
+            49,
             "a field added to WitnessCopy must be counted here, or a shell can be handed \
              a word this test has never seen"
         );

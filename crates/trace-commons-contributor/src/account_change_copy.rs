@@ -77,6 +77,8 @@ pub const ACCOUNT_CHANGE_STEP_NEW: &str = "Sign in with the new account";
 /// [`ACCOUNT_CHANGE_STEP_NEW`]; each button's accessible name stays the
 /// longer one below. DRAFT, NEEDS APPROVAL (2026-11-04).
 pub const ACCOUNT_CHANGE_STEP_CURRENT_BUTTON: &str = "Confirm";
+/// Step 2's button: "Sign in", an approved term.
+/// DRAFT, NEEDS APPROVAL (2026-11-04).
 pub const ACCOUNT_CHANGE_STEP_NEW_BUTTON: &str = "Sign in";
 /// Owner-approved 2026-11-03. Step 1's sign-in was another login.
 pub const ACCOUNT_CHANGE_ERROR_CURRENT_LOGIN: &str =
@@ -92,8 +94,8 @@ pub const ACCOUNT_CHANGE_ERROR_TOO_SOON: &str =
 /// Owner-approved 2026-11-03. Anything else.
 pub const ACCOUNT_CHANGE_ERROR_UNAVAILABLE: &str = "Couldn't switch accounts. Try again.";
 /// Under "Add a NEAR AI login" when it could not start: it adds a login,
-/// so it does not say "switch accounts" (copy-guide rule 7). DRAFT, NEEDS
-/// APPROVAL (2026-11-04).
+/// so it does not say "switch accounts" (copy-guide rule 7).
+/// DRAFT, NEEDS APPROVAL (2026-11-04).
 pub const PAYOUTS_NEEDS_LOGIN_ADD_FAILED: &str = "Couldn't add a NEAR AI login. Try again.";
 /// Owner-approved 2026-11-03. An ordinary sign-in with a login a change
 /// retired, not in the sheet.
@@ -406,10 +408,13 @@ mod tests {
                 .any(|line| {
                     line.contains("Owner-approved 2026-11-03")
                         || line.contains("Owner-approved 2026-11-02")
+                        // The Settings copy audit's fixes, awaiting the
+                        // owner (2026-11-04).
+                        || line.contains("DRAFT, NEEDS APPROVAL (2026-11-04)")
                 });
-            assert!(doc, "not marked approved: {line}");
+            assert!(doc, "not marked approved or DRAFT: {line}");
         }
-        assert_eq!(declared, 25);
+        assert_eq!(declared, 28);
     }
 
     /// The spec's exact words (section 2), so a later edit is a decision.

@@ -5,6 +5,7 @@ import Foundation
 /// list, and the rule that opens each section in its body. Plain labels,
 /// in his order.
 public struct MonitorSettingsNavCopy: MonitorWordTable {
+    public let general: String
     public let connection: String
     public let startup: String
     public let watching: String
@@ -19,6 +20,7 @@ public struct MonitorSettingsNavCopy: MonitorWordTable {
     public let compute: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
+        case general
         case connection
         case startup
         case watching

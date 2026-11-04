@@ -2106,7 +2106,10 @@ mod tests {
         let screens = monitor_screens_copy();
         let nav = &screens.settings_nav;
         let names: Vec<String> = words_of(nav).into_iter().map(|(_, word)| word).collect();
-        assert_eq!(names.len(), 12, "#1146 lists twelve sections: {names:?}");
+        // #1146's twelve, and General, the first, whose name moved here
+        // from the macOS shell (2026-11-04).
+        assert_eq!(names.len(), 13, "#1146's twelve and General: {names:?}");
+        assert_eq!(nav.general, "General");
         assert_eq!(nav.startup, "Startup & notifications");
         assert_eq!(nav.uses, "Data uses");
         assert_eq!(nav.profile, "Public profile");

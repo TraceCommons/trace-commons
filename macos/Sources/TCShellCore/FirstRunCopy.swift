@@ -194,6 +194,10 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         /// grant, which finishes on Ask.
         public let sharingRefused: String
         public let sharingSaveFailed: String?
+        /// Settings > Projects' own lines for the same failures: setup's
+        /// name setup and its Start sharing button.
+        public let settingsSharingRefused: String
+        public let settingsSharingSaveFailed: String
         public let scopesFailed: String
         public let rulesFailed: String
         public let privateAiFailed: String

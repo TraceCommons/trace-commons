@@ -59,8 +59,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     func navName(_ nav: MonitorSettingsNavCopy?) -> String? {
         guard let nav else { return nil }
         switch self {
-        // Not in the core's table yet: a single word, as the others below.
-        case .general: return SettingsWords.general
+        case .general: return nav.general
         case .connection: return nav.connection
         case .startup: return nav.startup
         case .notifications, .updates: return nil
@@ -123,19 +122,19 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     }
 }
 
-/// The single words the section list shows for sections whose heading is
-/// a single word on the section itself too.
+/// The single words the section list and the sections' cards show, read
+/// from the core's tables (copy-guide rule 8; they were spelled here until
+/// 2026-11-04). Empty while a table has not loaded, never a Swift fallback.
 enum SettingsWords {
-    static let general = "General"
-    static let appearance = "Appearance"
-    static let light = "Light"
-    static let dark = "Dark"
-    static let system = "System"
-    static let connection = "Connection"
-    static let startup = "Startup"
-    static let updates = "Updates"
-    static let watching = "Watching"
-    static let projects = "Projects"
+    private static var nav: MonitorSettingsNavCopy? { MonitorWords.table?.settingsNav }
+    private static var shell: MonitorShellCopy? { MonitorWords.table?.shell }
+    static var appearance: String { shell?.appearance ?? "" }
+    static var light: String { shell?.appearanceLight ?? "" }
+    static var dark: String { shell?.appearanceDark ?? "" }
+    static var system: String { shell?.appearanceSystem ?? "" }
+    static var connection: String { nav?.connection ?? "" }
+    static var updates: String { shell?.updatesEyebrow ?? "" }
+    static var projects: String { nav?.projects ?? "" }
     /// The core's referral title (DRAFT, NEEDS APPROVAL), read once; nil
     /// while the export has not arrived, which the list draws as its
     /// placeholder row.
