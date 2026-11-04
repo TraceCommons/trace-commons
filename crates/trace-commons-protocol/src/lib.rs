@@ -31,6 +31,7 @@ pub mod settlement_estimate;
 pub mod submit_rate;
 pub mod trace_contribution;
 pub mod upload_allowance;
+pub mod usage_analytics;
 pub mod witness_pacing;
 pub mod witness_provenance;
 

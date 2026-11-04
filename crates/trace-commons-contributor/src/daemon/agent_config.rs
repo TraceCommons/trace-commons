@@ -54,6 +54,10 @@ pub(crate) fn schema() -> Value {
         ("notifications_enabled", "Master switch for notifications."),
         ("menu_bar_mark_enabled", "Show the menu-bar news mark."),
         (
+            "share_usage_data",
+            "Send weekly anonymous counts of screens opened and controls used. Sent only from the United States; never content, paths or identifiers. Off deletes unsent counts.",
+        ),
+        (
             "managed_herdr",
             "Open managed sessions as tabs of herdr's Near.ai workspace, hosted by managed_terminal.",
         ),

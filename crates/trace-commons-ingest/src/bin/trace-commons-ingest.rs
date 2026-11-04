@@ -49,6 +49,8 @@ mod rewards;
 mod token_bundles;
 #[path = "trace_commons_ingest_internal/upload_allowance.rs"]
 mod upload_allowance;
+#[path = "trace_commons_ingest_internal/usage_region.rs"]
+mod usage_region;
 
 #[cfg(test)]
 use public_run::validate_public_run_provenance;
@@ -8829,6 +8831,13 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/public/first-run-estimate",
             get(credit_estimate::first_run_estimate_handler),
+        )
+        // Same reason: whether this request may send anonymous usage
+        // counts (US only). Keeps nothing about the address; false when it
+        // cannot tell.
+        .route(
+            trace_commons_protocol::usage_analytics::USAGE_REGION_PATH,
+            get(usage_region::usage_region_handler),
         )
         // Same reason: the settlement table is public, non-personal data.
         // 404 when the operator installed none.

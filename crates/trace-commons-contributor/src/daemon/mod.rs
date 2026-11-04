@@ -127,6 +127,7 @@ mod token_cleanup;
 pub mod unenroll;
 pub mod unsure_spans;
 pub mod uploader;
+pub mod usage_analytics;
 pub mod watcher;
 #[cfg(windows)]
 pub mod win_pipe;
@@ -787,6 +788,10 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                         &mut mission_slot_schedule,
                     )
                     .await;
+                    // Anonymous usage counts, US only: asks the region every
+                    // few days and sends finished weeks. Most ticks find
+                    // nothing due and return without a request.
+                    usage_analytics::tick(shared, now).await;
                 }
                 // A fetched table ageing out is the clock alone: announced
                 // here, outside the `!dry_run` block, with no fetch.
