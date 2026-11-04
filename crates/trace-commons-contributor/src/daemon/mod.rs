@@ -21,6 +21,10 @@
 //!   never degrades to sending unfiltered text.
 
 pub mod account_admission;
+pub(crate) mod account_attention;
+#[cfg(test)]
+mod account_attention_tests;
+pub(crate) mod account_login_change;
 pub mod account_onboarding;
 pub(crate) mod account_session_renewal;
 pub mod activity_missions;
@@ -383,6 +387,15 @@ fn isolate_dev_dry_run_store(real: &ConfigStore, dir: std::path::PathBuf) -> Res
 /// false to every other reader. The one exception is a start that lost the
 /// `try_lock`: that file belongs to the daemon holding it, and this function
 /// must not touch it.
+/// Record the account's identity kind on a config that predates it (F10
+/// decision 4). `true` when it wrote. A recorded kind is never changed here.
+pub(crate) fn record_identity_once(store: &ConfigStore) -> bool {
+    let Ok(Some(mut cfg)) = store.load_config() else {
+        return false;
+    };
+    cfg.record_identity_from_namespace() && store.save_config(&cfg).is_ok()
+}
+
 pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
     // K2 (#1173): a dev dry run never opens the real state directory for
     // writing -- not even its lock file.
@@ -437,6 +450,12 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
     // a zero-byte `daemon.lock` from a failed start was read as proof the
     // daemon had started, and produced a confident wrong diagnosis.
     let started = async {
+        // F10 decision 4: a config written before the identity kind was
+        // recorded gets it once, from its tenant namespace, so nothing later
+        // reads the prefix to decide how this account signs in. Best effort:
+        // without it the namespace still decides.
+        let migrate = store.clone();
+        let _ = tokio::task::spawn_blocking(move || record_identity_once(&migrate)).await;
         let mut shared =
             Arc::new(tokio::task::spawn_blocking(move || ipc::DaemonShared::load(store)).await??);
         // K2 (#1173): the one place `dev_dry_run` is ever set to `true`.
@@ -602,6 +621,7 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
     // At most one abandoned-collection pass at a time; a slow one is not
     // started again until it finished.
     let mut collection_pass: Option<tokio::task::JoinHandle<()>> = None;
+    let mut lease_pass = tokio::task::JoinSet::new();
     let mut token_cleanup_tasks = tokio::task::JoinSet::new();
     // The published estimate table's fetch schedule (OWNER DECISION E11).
     // A local of this loop, so nothing that answers a request can reach it.
@@ -650,13 +670,21 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 });
             }
             _ = token_cleanup_tasks.join_next(), if !token_cleanup_tasks.is_empty() => {}
-            _ = managed_lease_tick.tick() => {
-                managed::sweep(shared, Utc::now()).await;
-                // Detached: a collection is recorded when it finishes.
-                if collection_pass.as_ref().is_none_or(|pass| pass.is_finished()) {
+            // Detached, so the loop never waits on its scan; one at a time.
+            _ = managed_lease_tick.tick(), if lease_pass.is_empty() => {
+                let shared = Arc::clone(shared);
+                lease_pass.spawn(async move { managed::lease_pass(&shared, Utc::now()).await });
+            }
+            Some(done) = lease_pass.join_next(), if !lease_pass.is_empty() => {
+                // Detached too: a collection is recorded when it finishes,
+                // and a long one holds back no later lease tick.
+                let plans = done.unwrap_or_default();
+                if !plans.is_empty()
+                    && collection_pass.as_ref().is_none_or(|pass| pass.is_finished())
+                {
                     let shared = Arc::clone(shared);
                     collection_pass = Some(tokio::spawn(async move {
-                        managed::collect_abandoned(&shared, Utc::now()).await;
+                        managed::collect_abandoned_rows(&shared, plans, Utc::now()).await;
                     }));
                 }
             }
@@ -866,6 +894,101 @@ fn cancel_account_admission_on_refusal(shared: &ipc::DaemonShared, reason_label:
     }
 }
 
+/// The diagnostics event an upload stopped in flight records, label-only.
+pub(crate) const UPLOAD_STOPPED_EVENT: &str = "upload_stopped";
+
+/// How long an upload that hung waits before it is tried again.
+const UPLOAD_HUNG_RETRY: chrono::Duration = chrono::Duration::minutes(10);
+
+/// Room for everything an upload does around its POST: the large-session
+/// gate, the witness, the privacy classifier and minting the claim. Each
+/// has its own timeout or none at all (the large-session gate waits as long
+/// as another build holds it); this bounds them together.
+const UPLOAD_PIPELINE_ALLOWANCE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// How long one entry's upload may take before it is stopped and its entry
+/// returned to `Approved`: the pipeline allowance plus four sends of a body
+/// the session's size (three attempts and one after a re-minted claim, each
+/// with `submit::upload_timeout`). Never shorter than a legitimate upload.
+fn upload_entry_bound(shared: &ipc::DaemonShared, size_bytes: u64) -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(bound) = test_upload_bound(shared.store.dir()) {
+        return bound;
+    }
+    #[cfg(not(test))]
+    let _ = shared;
+    UPLOAD_PIPELINE_ALLOWANCE
+        .saturating_add(crate::submit::upload_timeout(size_bytes).saturating_mul(4))
+}
+
+#[cfg(test)]
+static TEST_UPLOAD_BOUND: std::sync::Mutex<
+    Option<std::collections::HashMap<std::path::PathBuf, std::time::Duration>>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn test_upload_bound(dir: &std::path::Path) -> Option<std::time::Duration> {
+    TEST_UPLOAD_BOUND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .and_then(|map| map.get(dir).copied())
+}
+
+/// Shorten [`upload_entry_bound`] for one state directory.
+#[cfg(test)]
+pub(crate) fn set_upload_bound_for_test(dir: &std::path::Path, bound: std::time::Duration) {
+    TEST_UPLOAD_BOUND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_or_insert_with(std::collections::HashMap::new)
+        .insert(dir.to_path_buf(), bound);
+}
+
+/// Why an upload in flight was stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UploadStop {
+    /// It ran past [`upload_entry_bound`].
+    TimedOut,
+    /// `DaemonShared::upload_interrupt` was raised (`unenroll`).
+    Interrupted,
+}
+
+impl UploadStop {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::TimedOut => "timed_out",
+            Self::Interrupted => "interrupted",
+        }
+    }
+}
+
+/// An upload's outcome, or why it was stopped first.
+pub(crate) enum RacedUpload<T> {
+    Settled(T),
+    Stopped(UploadStop),
+}
+
+/// Race `upload` against `bound` and an interrupt. A stopped upload is
+/// dropped at its next await point.
+pub(crate) async fn race_upload<F: std::future::Future>(
+    upload: F,
+    bound: std::time::Duration,
+    interrupt: &mut tokio::sync::watch::Receiver<u64>,
+) -> RacedUpload<F::Output> {
+    let interrupted = async {
+        // A closed channel (the daemon is going away) never interrupts.
+        if interrupt.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        result = upload => RacedUpload::Settled(result),
+        () = interrupted => RacedUpload::Stopped(UploadStop::Interrupted),
+        () = tokio::time::sleep(bound) => RacedUpload::Stopped(UploadStop::TimedOut),
+    }
+}
+
 /// Upload everything that has been approved, whether by the contributor or by
 /// their standing opt-in for the project.
 ///
@@ -905,6 +1028,10 @@ async fn drain_approved(
     // the contributor's own persisted pause setting. See `DaemonShared::
     // quiesced`.
     if shared.quiesced.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    // Held while `unenroll` waits for an upload in flight to settle.
+    if shared.uploads_held.load(Ordering::SeqCst) {
         return Ok(());
     }
     // K2 (#1173): a dev dry run sends nothing, and leaves every entry as it
@@ -1183,6 +1310,9 @@ async fn drain_approved(
             }
             continue;
         }
+        // Subscribed before the claim, so an interrupt raised any time after
+        // the entry is `Uploading` is seen by the race below.
+        let mut interrupt = shared.upload_interrupt.subscribe();
         // Claim the entry, atomically, before anything is read or sent. A
         // `cancel` that landed between the snapshot above and here wins and
         // the entry is skipped; from this point `cancel` is refused,
@@ -1197,6 +1327,12 @@ async fn drain_approved(
             let mut q = shared.queue.lock().expect("queue lock");
             if policy.holds_every_send() {
                 continue;
+            }
+            // `unenroll` is settling uploads: nothing new goes in flight.
+            // Checked under the queue lock `unenroll` checks `Uploading`
+            // under, so the two cannot interleave.
+            if shared.uploads_held.load(Ordering::SeqCst) {
+                break;
             }
             drop(policy);
             let Some(current) = q.get(entry.entry_id).cloned() else {
@@ -1259,16 +1395,44 @@ async fn drain_approved(
             // burst window is checked against it, and a pass that sends many
             // sessions runs for a while.
             let entry_now = observed_at();
-            let result = up
-                .upload_entry(source, &session_ref, &entry, entry_now)
-                .await;
+            let raced = race_upload(
+                up.upload_entry(source, &session_ref, &entry, entry_now),
+                upload_entry_bound(shared, entry.size_bytes),
+                &mut interrupt,
+            )
+            .await;
             // Copied back on the failure path too: the uploader sets the
             // fail-closed health label (canary, notice, identity) right
             // before it returns `Err`, and that label is what suspends
-            // queue expiry.
-            *shared.state.lock().expect("state lock") = state;
-            *shared.health.lock().expect("health lock") = health;
-            result
+            // queue expiry. Not when the upload was stopped: nothing it
+            // began finished, so nothing it noted is true.
+            if let RacedUpload::Settled(_) = &raced {
+                *shared.state.lock().expect("state lock") = state;
+                *shared.health.lock().expect("health lock") = health;
+            }
+            raced
+        };
+        let result = match result {
+            RacedUpload::Settled(result) => result,
+            RacedUpload::Stopped(why) => {
+                // Dropped at an await point: no write of the upload's
+                // continues (blocking work runs in place, never detached).
+                // The entry goes back to `Approved` below
+                // (`release_in_flight`); one that hung waits before the
+                // next try, so a hang does not repeat at once.
+                crate::daemon::diagnostics_log::record_labels(
+                    tracing::Level::WARN,
+                    UPLOAD_STOPPED_EVENT,
+                    &[("reason", why.label())],
+                );
+                tracing::warn!(reason = why.label(), "upload stopped");
+                if why == UploadStop::TimedOut {
+                    let mut q = shared.queue.lock().expect("queue lock");
+                    q.defer_without_attempt(entry.entry_id, observed_at() + UPLOAD_HUNG_RETRY);
+                }
+                changed = true;
+                break;
+            }
         };
         let decision = match result {
             Ok(d) => d,
@@ -2916,6 +3080,8 @@ mod tests {
         witness_calls: Arc<std::sync::Mutex<Vec<Option<String>>>>,
         /// Non-zero makes the claim issuer answer with that status.
         issuer_status: Arc<AtomicU16>,
+        /// Set, ingest takes an upload and never answers it.
+        ingest_hang: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl TransientRetryHarness {
@@ -2956,6 +3122,7 @@ mod tests {
             let classifier_status = Arc::new(AtomicU16::new(0));
             let classifier_delay_ms = Arc::new(AtomicU64::new(0));
             let uploads = Arc::new(AtomicUsize::new(0));
+            let ingest_hang = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let ingest_reply = Arc::new(std::sync::Mutex::new(
                 None::<(StatusCode, serde_json::Value)>,
             ));
@@ -3038,11 +3205,16 @@ mod tests {
                 post({
                     let uploads = uploads.clone();
                     let ingest_reply = ingest_reply.clone();
+                    let ingest_hang = ingest_hang.clone();
                     move |Json(_): Json<serde_json::Value>| {
                         let uploads = uploads.clone();
                         let reply = ingest_reply.lock().unwrap().clone();
+                        let hang = ingest_hang.load(Ordering::SeqCst);
                         async move {
                             uploads.fetch_add(1, Ordering::SeqCst);
+                            if hang {
+                                std::future::pending::<()>().await;
+                            }
                             if let Some((status, body)) = reply {
                                 return (status, Json(body)).into_response();
                             }
@@ -3068,6 +3240,7 @@ mod tests {
                     inference_receipt_endpoint: None,
                     consent_scopes_chosen: Some(true),
                     witness_origin: None,
+                    account_identity: None,
                     inference_receipt_check_attestation: false,
                     schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
                     issuer_url: issuer,
@@ -3155,6 +3328,7 @@ mod tests {
                 witness_saturated,
                 witness_calls,
                 issuer_status,
+                ingest_hang,
             }
         }
 
@@ -4177,6 +4351,115 @@ mod tests {
         assert_eq!(label.as_deref(), Some(health::LABEL_INGEST_UNREACHABLE));
     }
 
+    /// The test double for an upload that never completes.
+    #[tokio::test]
+    async fn a_raced_upload_that_never_completes_is_stopped_by_its_bound() {
+        let (_tx, mut rx) = tokio::sync::watch::channel(0u64);
+        let raced = race_upload(
+            std::future::pending::<()>(),
+            std::time::Duration::from_millis(50),
+            &mut rx,
+        )
+        .await;
+        assert!(matches!(raced, RacedUpload::Stopped(UploadStop::TimedOut)));
+    }
+
+    #[tokio::test]
+    async fn a_raced_upload_is_stopped_by_an_interrupt_raised_before_it_awaits() {
+        let (tx, mut rx) = tokio::sync::watch::channel(0u64);
+        // Raised after subscribing and before the race: never lost.
+        tx.send_modify(|count| *count += 1);
+        let raced = race_upload(
+            std::future::pending::<()>(),
+            std::time::Duration::from_secs(60),
+            &mut rx,
+        )
+        .await;
+        assert!(matches!(
+            raced,
+            RacedUpload::Stopped(UploadStop::Interrupted)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_raced_upload_that_finishes_is_settled_and_a_closed_channel_never_interrupts() {
+        let (tx, mut rx) = tokio::sync::watch::channel(0u64);
+        drop(tx);
+        let raced = race_upload(async { 7 }, std::time::Duration::from_secs(60), &mut rx).await;
+        assert!(matches!(raced, RacedUpload::Settled(7)));
+        assert_eq!(UploadStop::TimedOut.label(), "timed_out");
+        assert_eq!(UploadStop::Interrupted.label(), "interrupted");
+    }
+
+    /// An upload ingest never answers is stopped at its bound: the entry
+    /// goes back to `Approved`, waits before its next try, and nothing is
+    /// recorded as sent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hung_upload_returns_its_entry_to_approved_within_its_bound() {
+        let h = TransientRetryHarness::new().await;
+        h.ingest_hang.store(true, Ordering::SeqCst);
+        set_upload_bound_for_test(h.shared.store.dir(), std::time::Duration::from_secs(5));
+        let now = TransientRetryHarness::now();
+
+        tokio::time::timeout(std::time::Duration::from_secs(30), h.pass(now))
+            .await
+            .expect("the pass ends within the bound");
+
+        let entry = h.entry();
+        assert_eq!(entry.state, queue::QueueState::Approved, "{entry:?}");
+        // Where it hung depends on how loaded the machine is; it was never
+        // answered either way.
+        assert!(h.uploads.load(Ordering::SeqCst) <= 1);
+        assert!(entry.retry_after.unwrap() >= now + UPLOAD_HUNG_RETRY);
+        assert_eq!(
+            entry.attempts, 0,
+            "a hang is not counted against the session"
+        );
+        assert!(entry.submission_id.is_none());
+    }
+
+    /// Setting up again while an upload hangs: the call stops it, the
+    /// entry leaves `Uploading`, and the enrollment goes, rather than
+    /// refusing `upload-in-flight` for as long as the upload hangs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unenroll_stops_a_hung_upload_and_proceeds() {
+        let h = TransientRetryHarness::new().await;
+        h.ingest_hang.store(true, Ordering::SeqCst);
+        let now = TransientRetryHarness::now();
+        let shared = h.shared.clone();
+        let pass = tokio::spawn(async move { drain_approved_for_test(&shared, now).await });
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while h.uploads.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the upload reaches ingest");
+        assert_eq!(h.entry().state, queue::QueueState::Uploading);
+
+        let request = ipc::Request {
+            id: 1,
+            method: "unenroll".into(),
+            params: serde_json::json!({}),
+        };
+        let response = ipc::handle_request_async(&h.shared, &request).await;
+        let result = response.result.expect("set up again went ahead");
+        assert_eq!(result["removed"], true);
+        tokio::time::timeout(std::time::Duration::from_secs(10), pass)
+            .await
+            .expect("the pass ended")
+            .unwrap()
+            .unwrap();
+        let entry = h.entry();
+        assert_ne!(entry.state, queue::QueueState::Uploading);
+        assert_ne!(entry.state, queue::QueueState::Uploaded);
+        assert!(!uploader::enrollment_is_live(&h.shared.store));
+        assert!(
+            !h.shared.uploads_held.load(Ordering::SeqCst),
+            "uploads are not left held"
+        );
+    }
+
     #[tokio::test]
     async fn transient_classifier_outage_retries_unchanged_approved_session() {
         let h = TransientRetryHarness::new().await;
@@ -5188,6 +5471,7 @@ mod tests {
                 inference_receipt_endpoint: None,
                 consent_scopes_chosen: Some(true),
                 witness_origin: None,
+                account_identity: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "http://127.0.0.1:9".to_string(),
@@ -5391,6 +5675,7 @@ mod tests {
                 inference_receipt_endpoint: None,
                 consent_scopes_chosen: Some(true),
                 witness_origin: None,
+                account_identity: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
                 issuer_url: ingest.to_string(),

@@ -33,6 +33,7 @@ enum PrivateInferenceCopyFixture {
     static let complete = """
         {"destination":"DESTINATION","subtitle":"SUBTITLE","subtitle_credit":"SUBTITLE-CREDIT",
          "offer_title":"T","offer_what":"WHAT","offer_exposure":"EXPOSURE","offer_exposure_short":"EXPOSURE SHORT","offer_learn_more":"MORE",
+         "offer_what_short":"WHAT SHORT","offer_exposure_shared":"EXPOSURE SHARED","offer_logged":"LOGGED",
          "offer_no_repoint":"NO-REPOINT","offer_accept":"ACCEPT",
          "offer_decline":"DECLINE","offer_asked_once":"ONCE",
          "settings_title":"S-TITLE","settings_toggle":"S-TOGGLE",
@@ -78,6 +79,8 @@ enum PrivateInferenceCopyFixture {
          "credential_wallet_notice":"WALLET-NOTICE",
          "credential_cancel":"C-CANCEL","credential_forget":"C-FORGET",
          "credential_forget_explains":"C-FORGET-EXPLAINS",
+         "credential_forget_not_revoked":"C-FORGET-NOT-REVOKED",
+         "near_ai_still_signed_in":"NEAR-AI-STILL-SIGNED-IN",
          "credential_migrate":"C-MIGRATE","credential_migrate_explains":"C-MIGRATE-EXPLAINS",
          "credential_absent":"C-ABSENT","credential_obtaining":"C-OBTAINING",
          "credential_failed":"C-FAILED","credential_cancelled":"C-CANCELLED",

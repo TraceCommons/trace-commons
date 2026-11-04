@@ -372,7 +372,7 @@ pub fn void_notice_title(project_label: Option<&str>) -> String {
 #[must_use]
 pub fn void_reason_line(label: &str) -> &'static str {
     match label {
-        "destination-changed" => "Your traces would now go to a different Trace Commons server.",
+        "destination-changed" => "Your traces would now go to a different server.",
         "identity-changed" => {
             "Your traces would now be sent under a different account, identity or device."
         }
@@ -960,8 +960,8 @@ pub fn witness_capacity_notice_for_wire(value: &serde_json::Value) -> Option<Wit
 /// `status.legacy_invite_migration.offered` is true.
 pub const LEGACY_MIGRATION_OFFER_TITLE: &str = "Move to your NEAR AI account";
 
-/// Reworded 2026-10-11 (owner direction), and its passkey clause deleted
-/// 2026-10-31 when passkeys were removed; not yet approved. The offer. Says it is optional and that
+/// Reworded 2026-10-11 (owner direction), and one clause deleted
+/// 2026-10-31; not yet approved. The offer. Says it is optional and that
 /// declining changes nothing, because coexistence is the default.
 pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. You can move your contributions to your NEAR AI account instead. Nothing changes unless you choose to, and your invite keeps working if you don't.";
 
@@ -979,16 +979,18 @@ pub const LEGACY_MIGRATION_OFFER_LATER: &str = "You can move later from Settings
 
 /// Not yet approved. Shown while the shell waits on the NEAR AI sign-in in
 /// the browser, which it starts itself when the move needs it
-/// (`legacy_migration_no_near_ai_session`), before it retries the move. The
-/// key keeps its old `passkey_` name.
-pub const LEGACY_MIGRATION_PASSKEY_WAITING: &str = "Waiting for your browser...";
+/// (`legacy_migration_no_near_ai_session`), before it retries the move. Its
+/// wire key keeps an older name (`LegacyMigrationOfferCopy`).
+pub const LEGACY_MIGRATION_NEAR_AI_LOGIN_WAITING: &str = "Waiting for your browser...";
 
-/// Not yet approved. The passkey step ended without finishing (it failed,
+/// DRAFT, NEEDS APPROVAL (2026-11-04; the owner asked for a shorter line).
+/// The NEAR AI sign-in in the browser ended without finishing (it failed,
 /// or ran out of time). Nothing ran.
-pub const LEGACY_MIGRATION_PASSKEY_FAILED: &str = "Your passkey step didn't finish, so nothing was moved. Your invite keeps working; try again when you're ready.";
+pub const LEGACY_MIGRATION_NEAR_AI_LOGIN_FAILED: &str =
+    "Sign-in didn't finish, so nothing was moved. Your invite keeps working.";
 
-/// Not yet approved. Stops waiting on the passkey step. Nothing is moved.
-pub const LEGACY_MIGRATION_PASSKEY_CANCEL: &str = "Cancel";
+/// Not yet approved. Stops waiting on the NEAR AI sign-in. Nothing is moved.
+pub const LEGACY_MIGRATION_NEAR_AI_LOGIN_CANCEL: &str = "Cancel";
 
 /// Not yet approved. The accessible name of the offer card's Move button,
 /// so a screen reader can tell it from the one in Settings
@@ -1082,7 +1084,7 @@ pub fn legacy_migration_refusal_line(label: &str) -> &'static str {
         "legacy_migration_admission_not_ready" => {
             "This commons isn't accepting contributions by account yet. Your invite keeps working; try again later."
         }
-        // Approved 2026-10-31, when passkeys were removed.
+        // Approved 2026-10-31.
         "legacy_migration_no_near_ai_session" => {
             "Sign in to NEAR AI in your browser first, then try again. Your invite keeps working."
         }
@@ -1136,12 +1138,17 @@ pub struct LegacyMigrationOfferCopy {
     pub dismiss: &'static str,
     /// Beside that dismiss: the move is still in Settings.
     pub later: &'static str,
-    /// While the shell waits on the passkey step in the browser.
-    pub passkey_waiting: &'static str,
-    /// The passkey step ended without finishing.
-    pub passkey_failed: &'static str,
-    /// Stops waiting on the passkey step.
-    pub passkey_cancel: &'static str,
+    /// While the shell waits on the NEAR AI sign-in in the browser. The wire
+    /// keys of this field and the next two keep their older names, which
+    /// shipped shells decode.
+    #[serde(rename = "passkey_waiting")]
+    pub near_ai_login_waiting: &'static str,
+    /// The NEAR AI sign-in ended without finishing.
+    #[serde(rename = "passkey_failed")]
+    pub near_ai_login_failed: &'static str,
+    /// Stops waiting on the NEAR AI sign-in.
+    #[serde(rename = "passkey_cancel")]
+    pub near_ai_login_cancel: &'static str,
     /// The accessible name of `action` on the offer card in the notices.
     pub action_name_notice: &'static str,
     /// The accessible name of `action` in Settings.
@@ -1159,9 +1166,9 @@ pub fn legacy_migration_offer() -> LegacyMigrationOfferCopy {
         start_failed: LEGACY_MIGRATION_START_FAILED,
         dismiss: LEGACY_MIGRATION_OFFER_DISMISS,
         later: LEGACY_MIGRATION_OFFER_LATER,
-        passkey_waiting: LEGACY_MIGRATION_PASSKEY_WAITING,
-        passkey_failed: LEGACY_MIGRATION_PASSKEY_FAILED,
-        passkey_cancel: LEGACY_MIGRATION_PASSKEY_CANCEL,
+        near_ai_login_waiting: LEGACY_MIGRATION_NEAR_AI_LOGIN_WAITING,
+        near_ai_login_failed: LEGACY_MIGRATION_NEAR_AI_LOGIN_FAILED,
+        near_ai_login_cancel: LEGACY_MIGRATION_NEAR_AI_LOGIN_CANCEL,
         action_name_notice: LEGACY_MIGRATION_OFFER_ACTION_NAME_NOTICE,
         action_name_settings: LEGACY_MIGRATION_OFFER_ACTION_NAME_SETTINGS,
     }
@@ -1529,7 +1536,7 @@ pub const DISCLOSURE_ROUTE_WITNESS_REFUSING: &str =
 /// The local redactor runs before upload; the hosted service applies its
 /// own privacy-filter pass at ingest. This does not promise complete PII
 /// removal. What an attached local filter receives is the next sentence's job.
-pub const DISCLOSURE_ROUTE_LOCAL: &str = "Traces are redacted on this computer. Trace Commons' servers apply an additional personal information (PII) removal pass.";
+pub const DISCLOSURE_ROUTE_LOCAL: &str = "Traces are redacted on this computer. The server that receives your traces applies an additional personal information (PII) removal pass.";
 
 /// The route line for a device that is not enrolled.
 ///
@@ -2444,9 +2451,8 @@ pub fn session_notification_copy() -> SessionNotificationCopy {
 //
 // The words for choosing the NEAR AI organization the commons sends payout
 // credit to. Every sentence here is DRAFT, NEEDS APPROVAL: none is approved
-// until the owner signs it off. The passkey lines of the spec's draft are
-// gone (D5 superseded 2026-10-23: the signed-in session confirms, and
-// nothing asks for a passkey). Templates carry `{org_name}`, which a shell
+// until the owner signs it off. The signed-in session confirms (D5
+// superseded 2026-10-23). Templates carry `{org_name}`, which a shell
 // fills with the name the daemon's `payout_link_orgs` returned
 // ([`render_org_name`]); the name never leaves the device.
 
@@ -2461,8 +2467,7 @@ pub const PAYOUT_LINK_TITLE: &str = "Get paid in NEAR AI credit";
 pub const PAYOUT_LINK_BODY: &str = "The commons will send NEAR AI credit to {org_name} for traces you contribute, as soon as their credit settles. This is on top of your Trace Credit, which you keep. Credit sent to {org_name} stays there and can't be moved. Other members of {org_name} can spend it too. If {org_name} owes NEAR AI for past use, new credit pays that first.";
 /// DRAFT, NEEDS APPROVAL. Beside the confirm button.
 pub const PAYOUT_LINK_SCOPE: &str = "Sends credit to {org_name} only.";
-/// DRAFT, NEEDS APPROVAL. The confirm button: chooses the org shown. The
-/// spec left this to be drafted after the passkey label was dropped.
+/// DRAFT, NEEDS APPROVAL. The confirm button: chooses the org shown.
 pub const PAYOUT_LINK_BUTTON: &str = "Choose";
 /// DRAFT, NEEDS APPROVAL. Leaves without choosing.
 pub const PAYOUT_LINK_SECONDARY: &str = "Not now";
@@ -2487,7 +2492,7 @@ pub const PAYOUT_LINK_STATUS_LINKED: &str = "Credit goes to {org_name}";
 /// DRAFT, NEEDS APPROVAL. Status: no link.
 pub const PAYOUT_LINK_STATUS_NONE: &str = "No organization chosen";
 /// DRAFT, NEEDS APPROVAL. Status: a confirmed link the rail has not made
-/// active yet (it replaces the spec's "Waiting for passkey confirmation").
+/// active yet.
 pub const PAYOUT_LINK_STATUS_WAITING: &str = "Credit goes to {org_name} from the next payout";
 /// DRAFT, NEEDS APPROVAL. Status: NEAR AI answered that the org is gone.
 pub const PAYOUT_LINK_STATUS_UNAVAILABLE: &str = "Organization unavailable. Choose another.";
@@ -2592,6 +2597,10 @@ pub const ACCOUNT_DEVICES_UNLINK_ACCESSIBILITY_NAME: &str = "Unlink {device}";
 pub const ACCOUNT_DEVICES_UNLINK_CONFIRM: &str =
     "Unlink {device}? It is signed out and can't upload or renew its sign-in.";
 pub const ACCOUNT_DEVICES_UNLINK_CONFIRM_BUTTON: &str = "Unlink";
+/// The confirmation's Unlink, apart from the row's (`Unlink {device}`):
+/// the same visible word, its own accessible name (copy-guide rule 5).
+/// DRAFT, NEEDS APPROVAL (2026-11-04).
+pub const ACCOUNT_DEVICES_UNLINK_CONFIRM_ACCESSIBILITY_NAME: &str = "Confirm: unlink {device}";
 pub const ACCOUNT_DEVICES_CANCEL_BUTTON: &str = "Cancel";
 pub const ACCOUNT_DEVICES_SESSION_ENDED: &str = PAYOUT_LINK_SESSION_ENDED;
 pub const ACCOUNT_DEVICES_TOO_MANY: &str = "Too many codes at once. Try again in a few minutes.";
@@ -2620,6 +2629,7 @@ pub struct AccountDevicesCopy {
     pub unlink_accessibility_name: &'static str,
     pub unlink_confirm: &'static str,
     pub unlink_confirm_button: &'static str,
+    pub unlink_confirm_accessibility_name: &'static str,
     pub cancel_button: &'static str,
     pub session_ended: &'static str,
     pub too_many: &'static str,
@@ -2649,10 +2659,260 @@ pub fn account_devices_copy() -> AccountDevicesCopy {
         unlink_accessibility_name: ACCOUNT_DEVICES_UNLINK_ACCESSIBILITY_NAME,
         unlink_confirm: ACCOUNT_DEVICES_UNLINK_CONFIRM,
         unlink_confirm_button: ACCOUNT_DEVICES_UNLINK_CONFIRM_BUTTON,
+        unlink_confirm_accessibility_name: ACCOUNT_DEVICES_UNLINK_CONFIRM_ACCESSIBILITY_NAME,
         cancel_button: ACCOUNT_DEVICES_CANCEL_BUTTON,
         session_ended: ACCOUNT_DEVICES_SESSION_ENDED,
         too_many: ACCOUNT_DEVICES_TOO_MANY,
         failed: ACCOUNT_DEVICES_FAILED,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The account needs attention (#1836 section 3.2a, fix F1). The daemon puts
+// `account_state`, `account_state_reason` and `near_ai_login_unconfirmed` in
+// every status; a shell passes them to `account_attention_for_wire` and
+// draws what comes back in its account section. A status there, never a
+// banner, notification or tray state. Every string approved by the owner
+// 2026-11-02.
+
+/// `status.account_state` while nothing about the account needs saying.
+pub const ACCOUNT_STATE_OK: &str = "ok";
+/// `status.account_state` while this app's account is locally broken: its
+/// record cannot be read, or the address it was set up with is refused.
+/// Signing in again does not fix it; setting up again does.
+pub const ACCOUNT_STATE_NEEDS_ATTENTION: &str = "needs_attention";
+/// `status.account_state_reason`: the stored account record is unreadable.
+pub const ACCOUNT_ATTENTION_RECORD_UNREADABLE: &str = "account_record_unreadable";
+/// `status.account_state_reason`: this build refuses the address the
+/// account was set up with.
+pub const ACCOUNT_ATTENTION_ADDRESS_REFUSED: &str = "account_address_refused";
+
+/// Approved 2026-11-02. The heading of the status.
+pub const ACCOUNT_ATTENTION_TITLE: &str = "This app's account needs attention";
+/// Approved 2026-11-02. For [`ACCOUNT_ATTENTION_RECORD_UNREADABLE`].
+pub const ACCOUNT_ATTENTION_RECORD_UNREADABLE_BODY: &str = "This app can't read its account details on this computer. Set it up again to keep sending traces.";
+/// Approved 2026-11-02. For [`ACCOUNT_ATTENTION_ADDRESS_REFUSED`].
+pub const ACCOUNT_ATTENTION_ADDRESS_REFUSED_BODY: &str = "This app can no longer reach the service it was set up with. Update the app, or set it up again.";
+/// Approved 2026-11-02. Only while a NEAR AI login is stored
+/// (`near_ai_login_unconfirmed`).
+pub const ACCOUNT_ATTENTION_PRIVATE_AI: &str = "Private AI still works with your NEAR AI account.";
+/// Approved 2026-11-02. The button: asks [`ACCOUNT_ATTENTION_CONFIRM_TITLE`]
+/// first, then unenrolls and opens the first run.
+pub const ACCOUNT_ATTENTION_ACTION: &str = "Set up again";
+/// Approved 2026-11-02. The confirmation before setting up again runs.
+pub const ACCOUNT_ATTENTION_CONFIRM_TITLE: &str = "Set up this app again?";
+/// Approved 2026-11-02. Under [`ACCOUNT_ATTENTION_CONFIRM_TITLE`].
+pub const ACCOUNT_ATTENTION_CONFIRM_BODY: &str =
+    "This signs out of NEAR AI on this computer. You'll sign in again to keep sending traces.";
+/// Approved 2026-11-02. The confirmation's button that goes ahead.
+pub const ACCOUNT_ATTENTION_CONFIRM_ACTION: &str = ACCOUNT_ATTENTION_ACTION;
+/// Approved 2026-11-02. The confirmation's button that changes nothing.
+pub const ACCOUNT_ATTENTION_CONFIRM_CANCEL: &str = ACCOUNT_DEVICES_CANCEL_BUTTON;
+/// Approved 2026-11-02 for this use. Shown under the button when the
+/// daemon refused to set up again. Its own constant, so a change to another
+/// surface's failure line does not change it.
+pub const ACCOUNT_ATTENTION_FAILED: &str = "Nothing changed. Try again.";
+
+/// What the account section shows while `status.account_state` is
+/// `needs_attention` (`tc_account_attention_copy_json`). The branch is the
+/// core's: a shell draws the fields it gets and chooses no words.
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct AccountAttentionCopy {
+    pub title: &'static str,
+    /// The reason's sentence; `None` for a reason this build does not know,
+    /// which is then shown with the title and button alone.
+    pub body: Option<&'static str>,
+    /// Present only while a NEAR AI login is stored.
+    pub private_ai: Option<&'static str>,
+    pub action: &'static str,
+    /// The confirmation [`Self::action`] opens; nothing runs until
+    /// [`Self::confirm_action`] is pressed.
+    pub confirm_title: &'static str,
+    pub confirm_body: &'static str,
+    pub confirm_action: &'static str,
+    pub confirm_cancel: &'static str,
+    /// Shown when the daemon refused to set up again.
+    pub failed: &'static str,
+}
+
+/// The account section's status for a `status` object (or any object with
+/// its `account_state`, `account_state_reason` and
+/// `near_ai_login_unconfirmed` keys). `None` while there is nothing to
+/// show: `account_state` is `ok`, absent (a daemon too old to say) or any
+/// other value, or the argument is not an object.
+#[must_use]
+pub fn account_attention_for_wire(status: &serde_json::Value) -> Option<AccountAttentionCopy> {
+    let object = status.as_object()?;
+    if object.get("account_state")?.as_str()? != ACCOUNT_STATE_NEEDS_ATTENTION {
+        return None;
+    }
+    let body = match object
+        .get("account_state_reason")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(ACCOUNT_ATTENTION_RECORD_UNREADABLE) => Some(ACCOUNT_ATTENTION_RECORD_UNREADABLE_BODY),
+        Some(ACCOUNT_ATTENTION_ADDRESS_REFUSED) => Some(ACCOUNT_ATTENTION_ADDRESS_REFUSED_BODY),
+        _ => None,
+    };
+    let unconfirmed = object
+        .get("near_ai_login_unconfirmed")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    Some(AccountAttentionCopy {
+        title: ACCOUNT_ATTENTION_TITLE,
+        body,
+        private_ai: unconfirmed.then_some(ACCOUNT_ATTENTION_PRIVATE_AI),
+        action: ACCOUNT_ATTENTION_ACTION,
+        confirm_title: ACCOUNT_ATTENTION_CONFIRM_TITLE,
+        confirm_body: ACCOUNT_ATTENTION_CONFIRM_BODY,
+        confirm_action: ACCOUNT_ATTENTION_CONFIRM_ACTION,
+        confirm_cancel: ACCOUNT_ATTENTION_CONFIRM_CANCEL,
+        failed: ACCOUNT_ATTENTION_FAILED,
+    })
+}
+
+/// The account section's own Set up again, for an enrolled app whose
+/// account needs no attention (`tc_set_up_again_copy_json`): the owner asked
+/// for a way to clear this computer's sign-in and start over at any time
+/// (2026-11-04). The same approved button, confirmation and failure line as
+/// [`AccountAttentionCopy`], with none of its status lines: nothing is wrong
+/// to report.
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct SetUpAgainCopy {
+    pub action: &'static str,
+    pub confirm_title: &'static str,
+    pub confirm_body: &'static str,
+    pub confirm_action: &'static str,
+    pub confirm_cancel: &'static str,
+    pub failed: &'static str,
+}
+
+/// The words for [`SetUpAgainCopy`], whatever the account's state.
+#[must_use]
+pub fn set_up_again_copy() -> SetUpAgainCopy {
+    SetUpAgainCopy {
+        action: ACCOUNT_ATTENTION_ACTION,
+        confirm_title: ACCOUNT_ATTENTION_CONFIRM_TITLE,
+        confirm_body: ACCOUNT_ATTENTION_CONFIRM_BODY,
+        confirm_action: ACCOUNT_ATTENTION_CONFIRM_ACTION,
+        confirm_cancel: ACCOUNT_ATTENTION_CONFIRM_CANCEL,
+        failed: ACCOUNT_ATTENTION_FAILED,
+    }
+}
+
+#[cfg(test)]
+mod account_attention_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The account section's own Set up again says exactly what the
+    /// attention block's button and confirmation say.
+    #[test]
+    fn set_up_again_is_the_attention_blocks_button_and_confirmation() {
+        let attention = account_attention_for_wire(&json!({
+            "account_state": "needs_attention",
+        }))
+        .unwrap();
+        let own = set_up_again_copy();
+        assert_eq!(own.action, attention.action);
+        assert_eq!(own.confirm_title, attention.confirm_title);
+        assert_eq!(own.confirm_body, attention.confirm_body);
+        assert_eq!(own.confirm_action, attention.confirm_action);
+        assert_eq!(own.confirm_cancel, attention.confirm_cancel);
+        assert_eq!(own.failed, attention.failed);
+        assert_eq!(own.action, "Set up again");
+    }
+
+    #[test]
+    fn each_reason_gets_its_own_sentence() {
+        let unreadable = account_attention_for_wire(&json!({
+            "account_state": "needs_attention",
+            "account_state_reason": "account_record_unreadable",
+            "near_ai_login_unconfirmed": false,
+        }))
+        .unwrap();
+        assert_eq!(unreadable.title, "This app's account needs attention");
+        assert_eq!(
+            unreadable.body,
+            Some(
+                "This app can't read its account details on this computer. Set it up again to keep sending traces."
+            )
+        );
+        assert_eq!(unreadable.private_ai, None);
+        assert_eq!(unreadable.action, "Set up again");
+
+        let refused = account_attention_for_wire(&json!({
+            "account_state": "needs_attention",
+            "account_state_reason": "account_address_refused",
+            "near_ai_login_unconfirmed": true,
+        }))
+        .unwrap();
+        assert_eq!(
+            refused.body,
+            Some(
+                "This app can no longer reach the service it was set up with. Update the app, or set it up again."
+            )
+        );
+        assert_eq!(
+            refused.private_ai,
+            Some("Private AI still works with your NEAR AI account.")
+        );
+    }
+
+    /// A healthy account, an old daemon's status (no keys), and anything
+    /// that is not an object show nothing.
+    #[test]
+    fn nothing_to_show_is_none() {
+        assert_eq!(
+            account_attention_for_wire(&json!({
+                "account_state": "ok",
+                "account_state_reason": null,
+                "near_ai_login_unconfirmed": false,
+            })),
+            None
+        );
+        assert_eq!(
+            account_attention_for_wire(&json!({"logged_in": true})),
+            None
+        );
+        assert_eq!(account_attention_for_wire(&json!(null)), None);
+        assert_eq!(account_attention_for_wire(&json!("needs_attention")), None);
+    }
+
+    /// Every shell asks before it unenrolls, in the owner's words, and the
+    /// unreadable-record sentence names no platform.
+    #[test]
+    fn setting_up_again_is_confirmed_first_and_names_no_platform() {
+        let copy = account_attention_for_wire(&json!({
+            "account_state": "needs_attention",
+            "account_state_reason": "account_record_unreadable",
+        }))
+        .unwrap();
+        assert_eq!(copy.confirm_title, "Set up this app again?");
+        assert_eq!(
+            copy.confirm_body,
+            "This signs out of NEAR AI on this computer. You'll sign in again to keep sending traces."
+        );
+        assert_eq!(copy.confirm_action, "Set up again");
+        assert_eq!(copy.confirm_cancel, "Cancel");
+        assert_eq!(copy.failed, "Nothing changed. Try again.");
+        for sentence in [copy.title, copy.body.unwrap(), copy.confirm_body] {
+            assert!(!sentence.contains("Mac"), "{sentence}");
+        }
+    }
+
+    /// A reason this build does not know still shows the state, with no
+    /// sentence the core did not choose.
+    #[test]
+    fn an_unknown_reason_shows_the_title_and_button_alone() {
+        let copy = account_attention_for_wire(&json!({
+            "account_state": "needs_attention",
+            "account_state_reason": "something_new",
+        }))
+        .unwrap();
+        assert_eq!(copy.body, None);
+        assert_eq!(copy.private_ai, None);
+        assert_eq!(copy.action, ACCOUNT_ATTENTION_ACTION);
     }
 }
 
@@ -3993,21 +4253,38 @@ mod tests {
     }
 
     /// The move leads with the browser step (owner, 2026-10-11): with no
-    /// session the shell runs the browser step itself. The offer and the
-    /// wait offer no passkey (removed 2026-10-31), and none of the step's
+    /// session the shell runs the browser step itself. None of the step's
     /// lines speaks of signing in. The step's own words are separate keys,
     /// and its button is short.
     #[test]
     fn the_migration_leads_with_the_browser_step() {
         let offer = legacy_migration_offer();
-        assert_eq!(offer.passkey_waiting, LEGACY_MIGRATION_PASSKEY_WAITING);
-        assert_eq!(offer.passkey_failed, LEGACY_MIGRATION_PASSKEY_FAILED);
-        assert_eq!(offer.passkey_cancel, LEGACY_MIGRATION_PASSKEY_CANCEL);
+        assert_eq!(
+            offer.near_ai_login_waiting,
+            LEGACY_MIGRATION_NEAR_AI_LOGIN_WAITING
+        );
+        assert_eq!(
+            offer.near_ai_login_failed,
+            LEGACY_MIGRATION_NEAR_AI_LOGIN_FAILED
+        );
+        assert_eq!(
+            offer.near_ai_login_cancel,
+            LEGACY_MIGRATION_NEAR_AI_LOGIN_CANCEL
+        );
         let no_session = legacy_migration_refusal_line("legacy_migration_no_near_ai_session");
-        for line in [offer.body, offer.passkey_waiting, no_session] {
+        for line in [
+            offer.body,
+            offer.near_ai_login_waiting,
+            offer.near_ai_login_failed,
+            no_session,
+        ] {
             assert!(!line.to_lowercase().contains("passkey"), "{line}");
         }
-        for line in [offer.body, offer.passkey_waiting, offer.passkey_failed] {
+        for line in [
+            offer.body,
+            offer.near_ai_login_waiting,
+            offer.near_ai_login_failed,
+        ] {
             assert!(!line.to_lowercase().contains("sign in"), "{line}");
         }
         // The refusal names the step it sends the contributor to (owner,
@@ -4016,11 +4293,11 @@ mod tests {
             no_session,
             "Sign in to NEAR AI in your browser first, then try again. Your invite keeps working."
         );
-        assert!(offer.passkey_failed.contains("nothing was moved"));
-        assert!(offer.passkey_failed.contains("keeps working"));
-        assert!(offer.passkey_cancel.split_whitespace().count() <= 2);
-        assert_ne!(offer.passkey_cancel, offer.dismiss);
-        assert_ne!(offer.passkey_waiting, offer.working);
+        assert!(offer.near_ai_login_failed.contains("nothing was moved"));
+        assert!(offer.near_ai_login_failed.contains("keeps working"));
+        assert!(offer.near_ai_login_cancel.split_whitespace().count() <= 2);
+        assert_ne!(offer.near_ai_login_cancel, offer.dismiss);
+        assert_ne!(offer.near_ai_login_waiting, offer.working);
     }
 
     #[test]

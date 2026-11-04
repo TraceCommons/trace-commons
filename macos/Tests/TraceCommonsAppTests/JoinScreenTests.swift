@@ -664,7 +664,7 @@ private final class NoDaemon: FirstRunDaemon {
     func lookupInvite(_ invite: String) async -> FirstRunLookup { .refused(label: "none") }
     func enrollInvite(_ invite: String) async -> Bool { false }
     func signInNearAI() async -> Bool { false }
-    func nearAILogin() async -> Bool { false }
+    func nearAILoginOutcome() async -> NearAILoginOutcome { .failed }
     func cancelNearAILogin() async -> Bool { false }
     func enrollNearAI(referralCode: String?) async -> FirstRunNearAIEnrolment { .refused(label: "near_ai_enroll_unavailable") }
     func setAskEachTime() async -> Bool { false }

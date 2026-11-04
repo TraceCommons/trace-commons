@@ -78,6 +78,8 @@ struct Service {
     organizations_status: Mutex<Option<StatusCode>>,
     mint_status: Mutex<Option<StatusCode>>,
     revoke_status: Mutex<Option<StatusCode>>,
+    /// The NEAR AI user `/v1/users/me` names; `None` answers 500.
+    user: Mutex<Option<String>>,
 }
 
 impl Service {
@@ -121,6 +123,7 @@ fn two_orgs() -> Value {
 async fn start(organizations: Value) -> (CloudApi, Arc<Service>) {
     let service = Arc::new(Service::default());
     *service.organizations.lock().unwrap() = organizations;
+    *service.user.lock().unwrap() = Some(USER_A.into());
     service.live_refresh.lock().unwrap().push("rt_first".into());
     let state = service.clone();
     let router = Router::new()
@@ -153,6 +156,26 @@ async fn start(organizations: Value) -> (CloudApi, Arc<Service>) {
                             "refresh_token_expiration": "2027-01-01T00:00:00Z",
                         }))
                         .into_response()
+                    }
+                }
+            }),
+        )
+        .route(
+            "/v1/users/me",
+            get({
+                let state = state.clone();
+                move || {
+                    let state = state.clone();
+                    async move {
+                        match state.user.lock().unwrap().clone() {
+                            Some(id) => Json(serde_json::json!({
+                                "id": id, "email": "someone@example.invalid",
+                                "username": "someone", "is_active": true,
+                                "auth_provider": "github", "organizations": [],
+                            }))
+                            .into_response(),
+                            None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                        }
                     }
                 }
             }),
@@ -518,7 +541,9 @@ async fn a_key_replaced_during_the_switch_is_left_alone_and_the_minted_key_is_re
         })
     };
     // Wait until the switch has minted, then replace the key underneath it.
-    for _ in 0..200 {
+    // Bounded generously: the switch reads the identity first, and a loaded
+    // machine is slow; the loop ends as soon as the mint is seen.
+    for _ in 0..2000 {
         if service.mints() == 1 {
             break;
         }
@@ -761,4 +786,693 @@ async fn choosing_ends_the_prompt_on_the_next_read_without_waiting_out_the_cache
         .await
         .to_value();
     assert_eq!(after["prompt"], false);
+}
+
+// ---- Owner rule 2026-11-02: a sign-in to another account switches organization ----
+
+/// What the sign-in ceremony does once it has stored a key minted in
+/// `minted`: the key replaces the stored one, then what belonged to another
+/// account is forgotten. `listed`: the account lists the remembered
+/// organization, active or not.
+fn sign_in_stored(fixture: &Fixture, remembered: Option<&str>, listed: bool, minted: &str) {
+    {
+        let mut settings = fixture.shared.settings.lock().unwrap();
+        settings.near_ai_inference = Some(key("key-new", minted));
+        settings.save_for_test(&fixture.shared.store).unwrap();
+    }
+    forget_other_account(&fixture.shared.store, remembered, listed, None, None);
+}
+
+#[test]
+fn the_account_changed_only_when_the_remembered_organization_is_not_listed() {
+    assert!(
+        !account_changed(None, false, None, None),
+        "no choice, nothing to forget"
+    );
+    assert!(
+        !account_changed(Some("org-a"), true, None, None),
+        "the same account"
+    );
+    assert!(
+        account_changed(Some("org-old"), false, None, None),
+        "another account"
+    );
+    // Known identities decide, whatever the listing says.
+    assert!(account_changed(
+        Some("org-a"),
+        true,
+        Some("sha256:a"),
+        Some("sha256:b")
+    ));
+    assert!(!account_changed(
+        Some("org-a"),
+        false,
+        Some("sha256:a"),
+        Some("sha256:a")
+    ));
+    // One unknown: the listing decides.
+    assert!(!account_changed(
+        Some("org-a"),
+        true,
+        Some("sha256:a"),
+        None
+    ));
+}
+
+/// Signing in again to the same account lands in the remembered
+/// organization, and the choice and its revocations stand: no prompt.
+#[tokio::test]
+async fn a_sign_in_to_the_same_account_keeps_the_choice() {
+    let fixture = Fixture::signed_in("org-b");
+    let (api, _) = start(two_orgs()).await;
+    remember_choice(&fixture.shared.store, "org-b").unwrap();
+    record_pending(
+        &fixture.shared.store,
+        &[PendingRevocation::new("ws-org-a", "key-older")],
+    )
+    .unwrap();
+    sign_in_stored(&fixture, Some("org-b"), true, "org-b");
+    assert_eq!(
+        chosen_organization(&fixture.shared.store).as_deref(),
+        Some("org-b")
+    );
+    assert_eq!(
+        load(&fixture.shared.store)
+            .unwrap()
+            .pending_revocations
+            .len(),
+        1
+    );
+    let value = organizations_with(&fixture.shared, &api, true)
+        .await
+        .to_value();
+    assert_eq!(value["chosen"], true);
+    assert_eq!(value["prompt"], false);
+}
+
+/// The chosen organization is inactive for now, so the key lands in
+/// another one of the same account. The account still lists it: the
+/// choice and the revocations stand.
+#[tokio::test]
+async fn an_inactive_chosen_organization_in_the_same_account_keeps_the_choice() {
+    let fixture = Fixture::signed_in("org-b");
+    remember_choice(&fixture.shared.store, "org-b").unwrap();
+    record_pending(
+        &fixture.shared.store,
+        &[PendingRevocation::new("ws-org-a", "key-older")],
+    )
+    .unwrap();
+    sign_in_stored(&fixture, Some("org-b"), true, "org-a");
+    let record = load(&fixture.shared.store).unwrap();
+    assert_eq!(record.chosen_organization_id.as_deref(), Some("org-b"));
+    assert_eq!(record.pending_revocations.len(), 1);
+}
+
+/// Another account with one organization: the key is there, the old choice
+/// is forgotten, and nothing is asked.
+#[tokio::test]
+async fn a_sign_in_to_another_account_with_one_organization_uses_it() {
+    let fixture = Fixture::signed_in("org-old");
+    let (api, _) = start(listing(vec![org("org-a", "Only example org")])).await;
+    remember_choice(&fixture.shared.store, "org-old").unwrap();
+    sign_in_stored(&fixture, Some("org-old"), false, "org-a");
+    assert_eq!(chosen_organization(&fixture.shared.store), None);
+    let value = organizations_with(&fixture.shared, &api, true)
+        .await
+        .to_value();
+    assert_eq!(value["current_organization_id"], "org-a");
+    assert_eq!(value["multiple"], false);
+    assert_eq!(value["prompt"], false);
+}
+
+/// Another account with several organizations: the key is in the first
+/// active one, the old choice is forgotten, and the chooser asks. The old
+/// account's revocations are kept, since they may still be revocable; the
+/// first sweep sends each once, and one the service answers `403` for --
+/// another account's key -- is dropped, so `revoke_pending` clears.
+#[tokio::test]
+async fn a_sign_in_to_another_account_with_several_organizations_prompts() {
+    let fixture = Fixture::signed_in("org-old");
+    let (api, service) = start(two_orgs()).await;
+    *service.revoke_status.lock().unwrap() = Some(StatusCode::FORBIDDEN);
+    remember_choice(&fixture.shared.store, "org-old").unwrap();
+    record_pending(
+        &fixture.shared.store,
+        &[PendingRevocation::new("ws-org-old", "key-older")],
+    )
+    .unwrap();
+    sign_in_stored(&fixture, Some("org-old"), false, "org-a");
+    let record = load(&fixture.shared.store).unwrap();
+    assert_eq!(record.chosen_organization_id, None);
+    assert_eq!(record.pending_revocations.len(), 1, "kept for the sweep");
+    let value = organizations_with(&fixture.shared, &api, true)
+        .await
+        .to_value();
+    assert_eq!(value["current_organization_id"], "org-a");
+    assert_eq!(value["chosen"], false);
+    assert_eq!(value["prompt"], true);
+    assert_eq!(value["revoke_pending"], false);
+    assert!(
+        load(&fixture.shared.store)
+            .unwrap()
+            .pending_revocations
+            .is_empty()
+    );
+    assert_eq!(
+        service
+            .requests()
+            .iter()
+            .filter(|line| line.starts_with("DELETE "))
+            .count(),
+        1
+    );
+}
+
+/// A revoke refused for another reason stays pending and is retried.
+#[tokio::test]
+async fn a_revoke_refused_for_another_reason_stays_pending() {
+    let fixture = Fixture::signed_in("org-a");
+    let (api, service) = start(two_orgs()).await;
+    *service.revoke_status.lock().unwrap() = Some(StatusCode::INTERNAL_SERVER_ERROR);
+    record_pending(
+        &fixture.shared.store,
+        &[PendingRevocation::new("ws-org-b", "key-older")],
+    )
+    .unwrap();
+    let value = organizations_with(&fixture.shared, &api, true)
+        .await
+        .to_value();
+    assert_eq!(value["revoke_pending"], true);
+    assert_eq!(
+        load(&fixture.shared.store)
+            .unwrap()
+            .pending_revocations
+            .len(),
+        1
+    );
+}
+
+/// A listing page that did not carry every organization cannot show the
+/// remembered one is absent: it counts as listed.
+#[tokio::test]
+async fn a_short_listing_page_counts_the_remembered_organization_as_listed() {
+    let session = crate::daemon::nearai_credential::loopback::SessionTokens {
+        access_token: "session-jwt".into(),
+        refresh_token: "rt_example".into(),
+    };
+    let mut page = listing(vec![org("org-a", "First example org")]);
+    page["total"] = serde_json::json!(250);
+    let (api, _) = start(page).await;
+    let (_, listed) = api
+        .mint_inference_key_listing(
+            &session,
+            "trace-commons-test",
+            OrganizationChoice::Prefer("org-far"),
+        )
+        .await
+        .unwrap();
+    assert!(listed);
+}
+
+/// The sign-in's mint reports whether the account lists the remembered
+/// organization at all: inactive is listed, absent is not.
+#[tokio::test]
+async fn the_mint_reports_whether_the_remembered_organization_is_listed() {
+    let session = crate::daemon::nearai_credential::loopback::SessionTokens {
+        access_token: "session-jwt".into(),
+        refresh_token: "rt_example".into(),
+    };
+    let mut inactive = org("org-b", "Paused example org");
+    inactive["is_active"] = serde_json::json!(false);
+    let (api, _) = start(listing(vec![org("org-a", "First example org"), inactive])).await;
+    let (minted, listed) = api
+        .mint_inference_key_listing(
+            &session,
+            "trace-commons-test",
+            OrganizationChoice::Prefer("org-b"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(minted.organization_id, "org-a");
+    assert!(listed, "an inactive organization is still the account's");
+    let (_, listed) = api
+        .mint_inference_key_listing(
+            &session,
+            "trace-commons-test",
+            OrganizationChoice::Prefer("org-old"),
+        )
+        .await
+        .unwrap();
+    assert!(!listed, "another account does not list it");
+}
+
+/// A new GitHub or Google NEAR AI account with no active organization fails
+/// the mint with its own control name, which the sign-in's line carries.
+#[tokio::test]
+async fn an_account_without_an_organization_is_labelled() {
+    let (api, _) = start(listing(vec![])).await;
+    let session = crate::daemon::nearai_credential::loopback::SessionTokens {
+        access_token: "session-jwt".into(),
+        refresh_token: "rt_example".into(),
+    };
+    let error = api
+        .mint_inference_key_in(
+            &session,
+            "trace-commons-test",
+            OrganizationChoice::Prefer("org-old"),
+        )
+        .await
+        .map_err(|error| error.context(super::super::ceremony::FailedStep::Mint))
+        .unwrap_err();
+    let fields = super::super::ceremony::failure_fields(&error, "github").unwrap();
+    assert_eq!(fields[0].1, "mint");
+    assert_eq!(fields[1].1, "near_ai_credential_no_organization");
+    let no_workspace = anyhow!("near_ai_credential_no_workspace")
+        .context(super::super::ceremony::FailedStep::Mint);
+    let fields = super::super::ceremony::failure_fields(&no_workspace, "google").unwrap();
+    assert_eq!(fields[1].1, "near_ai_credential_no_workspace");
+}
+
+// ---- Spec 2026-11-02 B8 / F5: revocations are tagged with the identity that recorded them ----
+
+const USER_A: &str = "user-a-6f1d2c3b";
+const USER_B: &str = "user-b-9c0d1e2f";
+
+fn tagged(store: &ConfigStore, workspace: &str, key: &str, user: &str) -> PendingRevocation {
+    let mut entry = PendingRevocation::new(workspace, key);
+    entry.identity = Some(identity_digest(store, user).unwrap());
+    entry
+}
+
+/// The digest is local: salted per install, never the id itself, and the
+/// same for the same user on this install.
+#[test]
+fn the_identity_digest_is_salted_and_never_the_id() {
+    let (_dir, store) = temp_store();
+    let (_other_dir, other) = temp_store();
+    let a = identity_digest(&store, USER_A).unwrap();
+    assert_eq!(a, identity_digest(&store, USER_A).unwrap());
+    assert_ne!(a, identity_digest(&store, USER_B).unwrap());
+    assert_ne!(
+        a,
+        identity_digest(&other, USER_A).unwrap(),
+        "salted per install"
+    );
+    assert!(!a.contains(USER_A));
+    assert!(a.starts_with("sha256:"));
+}
+
+/// A legacy record, written before tags, reads as untagged; a tagged entry
+/// round-trips.
+#[test]
+fn a_legacy_entry_reads_as_untagged() {
+    let (_dir, store) = temp_store();
+    store
+        .write_daemon_file(
+            SPEND_ORG_FILE,
+            br#"{"pending_revocations":[{"workspace_id":"ws-1","key_id":"key-1","recorded_at":"2026-11-01T00:00:00Z"}]}"#,
+        )
+        .unwrap();
+    assert_eq!(load(&store).unwrap().pending_revocations[0].identity, None);
+    record_pending(&store, &[tagged(&store, "ws-2", "key-2", USER_A)]).unwrap();
+    let record = load(&store).unwrap();
+    assert_eq!(record.pending_revocations.len(), 2);
+    assert!(record.pending_revocations[1].identity.is_some());
+}
+
+/// A switch tags both of the keys it records with the identity that minted
+/// them.
+#[tokio::test]
+async fn a_switch_tags_its_revocations_with_the_current_identity() {
+    let fixture = Fixture::signed_in("org-a");
+    let (api, service) = start(two_orgs()).await;
+    *service.revoke_status.lock().unwrap() = Some(StatusCode::INTERNAL_SERVER_ERROR);
+    select_with(&fixture.shared, &api, "org-b", Duration::ZERO)
+        .await
+        .unwrap();
+    let digest = identity_digest(&fixture.shared.store, USER_A).unwrap();
+    let pending = load(&fixture.shared.store).unwrap().pending_revocations;
+    assert!(!pending.is_empty());
+    assert!(
+        pending
+            .iter()
+            .all(|entry| entry.identity.as_deref() == Some(digest.as_str())),
+        "{pending:?}"
+    );
+}
+
+/// The sweep revokes only entries of the current identity and untagged
+/// legacy ones. Another identity's entries stay parked: never sent with
+/// this session, never dropped, and not reported pending.
+#[tokio::test]
+async fn the_sweep_parks_another_identitys_revocations() {
+    let fixture = Fixture::signed_in("org-a");
+    let (api, service) = start(two_orgs()).await;
+    let store = &fixture.shared.store;
+    record_pending(
+        store,
+        &[
+            tagged(store, "ws-mine", "key-mine", USER_A),
+            tagged(store, "ws-theirs", "key-theirs", USER_B),
+            PendingRevocation::new("ws-legacy", "key-legacy"),
+        ],
+    )
+    .unwrap();
+    let value = organizations_with(&fixture.shared, &api, true)
+        .await
+        .to_value();
+    assert_eq!(value["revoke_pending"], false);
+    let deletes = service.deletes();
+    assert!(deletes.contains(&"DELETE /v1/workspaces/ws-mine/api-keys/key-mine".to_string()));
+    assert!(deletes.contains(&"DELETE /v1/workspaces/ws-legacy/api-keys/key-legacy".to_string()));
+    assert!(
+        !deletes.iter().any(|line| line.contains("theirs")),
+        "{deletes:?}"
+    );
+    let pending = load(store).unwrap().pending_revocations;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].key_id, "key-theirs", "parked, not dropped");
+
+    // Signed in again as the other identity -- a new key and login -- the
+    // parked entry is revoked.
+    *service.user.lock().unwrap() = Some(USER_B.into());
+    store_key(&fixture, key("key-b", "org-a"));
+    organizations_with(&fixture.shared, &api, true).await;
+    assert!(
+        load(store).unwrap().pending_revocations.is_empty(),
+        "the parked entry is revoked under its own identity"
+    );
+    assert!(
+        service
+            .deletes()
+            .contains(&"DELETE /v1/workspaces/ws-theirs/api-keys/key-theirs".to_string())
+    );
+}
+
+/// When the identity cannot be read, tagged entries wait for a sweep that
+/// can read it; untagged legacy entries are still swept.
+#[tokio::test]
+async fn an_unread_identity_parks_every_tagged_entry() {
+    let fixture = Fixture::signed_in("org-a");
+    let (api, service) = start(two_orgs()).await;
+    let store = &fixture.shared.store;
+    record_pending(
+        store,
+        &[
+            tagged(store, "ws-mine", "key-mine", USER_A),
+            PendingRevocation::new("ws-legacy", "key-legacy"),
+        ],
+    )
+    .unwrap();
+    *service.user.lock().unwrap() = None;
+    let value = organizations_with(&fixture.shared, &api, true)
+        .await
+        .to_value();
+    assert_eq!(
+        value["revoke_pending"], true,
+        "a tagged entry waits, reported pending"
+    );
+    let deletes = service.deletes();
+    assert_eq!(
+        deletes,
+        ["DELETE /v1/workspaces/ws-legacy/api-keys/key-legacy"]
+    );
+    let pending = load(store).unwrap().pending_revocations;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].key_id, "key-mine");
+}
+
+/// Parked entries of another identity do not count toward the switch
+/// limit: they cannot jam this identity's switches.
+#[tokio::test]
+async fn another_identitys_parked_entries_do_not_block_a_switch() {
+    let fixture = Fixture::signed_in("org-a");
+    let (api, _) = start(two_orgs()).await;
+    let store = &fixture.shared.store;
+    let parked: Vec<_> = (0..MAX_PENDING)
+        .map(|n| {
+            tagged(
+                store,
+                &format!("ws-theirs-{n}"),
+                &format!("key-theirs-{n}"),
+                USER_B,
+            )
+        })
+        .collect();
+    record_pending(store, &parked).unwrap();
+    let outcome = select_with(&fixture.shared, &api, "org-b", Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(outcome.switched);
+}
+
+/// Replace the stored key, as a sign-in does.
+fn store_key(fixture: &Fixture, credential: NearAiInferenceCredential) {
+    let mut settings = fixture.shared.settings.lock().unwrap();
+    settings.near_ai_inference = Some(credential);
+    settings.save_for_test(&fixture.shared.store).unwrap();
+}
+
+impl Service {
+    fn identity_reads(&self) -> usize {
+        self.requests()
+            .iter()
+            .filter(|line| line.as_str() == "GET /v1/users/me")
+            .count()
+    }
+}
+
+/// The record keeps its newest entries when it is over its size: the
+/// oldest are another identity's parked keys, the newest a switch's.
+#[test]
+fn an_oversized_record_keeps_its_newest_entries() {
+    let (_dir, store) = temp_store();
+    let entries: Vec<_> = (0..MAX_PENDING * 2 + 2)
+        .map(|n| PendingRevocation::new(&format!("ws-{n}"), &format!("key-{n}")))
+        .collect();
+    let body = serde_json::to_vec(&serde_json::json!({ "pending_revocations": entries })).unwrap();
+    store.write_daemon_file(SPEND_ORG_FILE, &body).unwrap();
+    let pending = load(&store).unwrap().pending_revocations;
+    assert_eq!(pending.len(), MAX_PENDING * 2);
+    assert_eq!(pending.first().unwrap().key_id, "key-2");
+    assert_eq!(
+        pending.last().unwrap().key_id,
+        format!("key-{}", MAX_PENDING * 2 + 1)
+    );
+}
+
+/// With the identity unread, the switch limit counts every entry: it fails
+/// closed rather than letting a switch mint past it.
+#[tokio::test]
+async fn an_unread_identity_counts_every_entry_toward_the_limit() {
+    let fixture = Fixture::signed_in("org-a");
+    let (api, service) = start(two_orgs()).await;
+    let store = &fixture.shared.store;
+    let own: Vec<_> = (0..MAX_PENDING)
+        .map(|n| {
+            tagged(
+                store,
+                &format!("ws-own-{n}"),
+                &format!("key-own-{n}"),
+                USER_A,
+            )
+        })
+        .collect();
+    record_pending(store, &own).unwrap();
+    *service.user.lock().unwrap() = None;
+    assert_eq!(
+        select_with(&fixture.shared, &api, "org-b", Duration::ZERO)
+            .await
+            .unwrap_err()
+            .to_string(),
+        LABEL_SPEND_ORG_BUSY
+    );
+    assert_eq!(service.mints(), 0);
+}
+
+/// Only another identity's parked keys left, with the stored login's
+/// identity recorded: nothing a sweep could send, so the listing takes no
+/// session for one. Any own or untagged entry, or no recorded identity,
+/// sweeps.
+#[tokio::test]
+async fn only_parked_entries_skip_the_sweep() {
+    let fixture = Fixture::signed_in("org-a");
+    let (api, service) = start(two_orgs()).await;
+    let store = &fixture.shared.store;
+    record_pending(store, &[tagged(store, "ws-theirs", "key-theirs", USER_B)]).unwrap();
+    assert!(
+        !only_parked(&fixture.shared, &load(store).unwrap()),
+        "no recorded identity"
+    );
+    record_identity(store, "key-old", &identity_digest(store, USER_A).unwrap());
+    assert!(only_parked(&fixture.shared, &load(store).unwrap()));
+    let value = organizations_with(&fixture.shared, &api, true)
+        .await
+        .to_value();
+    assert_eq!(value["revoke_pending"], false);
+    assert_eq!(service.identity_reads(), 0);
+    assert!(service.deletes().is_empty());
+
+    record_pending(store, &[tagged(store, "ws-mine", "key-mine", USER_A)]).unwrap();
+    assert!(
+        !only_parked(&fixture.shared, &load(store).unwrap()),
+        "an own entry"
+    );
+    record_pending(store, &[PendingRevocation::new("ws-legacy", "key-legacy")]).unwrap();
+    assert!(
+        !only_parked(&fixture.shared, &load(store).unwrap()),
+        "an untagged entry"
+    );
+}
+
+/// The identity is read once and recorded with the key; a switch moves it
+/// to the new key, so later sweeps read nothing from NEAR AI.
+#[tokio::test]
+async fn the_identity_is_read_once_and_follows_a_switch() {
+    let fixture = Fixture::signed_in("org-a");
+    let (api, service) = start(two_orgs()).await;
+    *service.revoke_status.lock().unwrap() = Some(StatusCode::INTERNAL_SERVER_ERROR);
+    select_with(&fixture.shared, &api, "org-b", Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(service.identity_reads(), 1);
+    let record = load(&fixture.shared.store).unwrap();
+    let recorded = record.session_identity.unwrap();
+    assert_eq!(recorded.key_id, fixture.stored_key().key_id);
+    assert_eq!(
+        recorded.digest,
+        identity_digest(&fixture.shared.store, USER_A).unwrap()
+    );
+    organizations_with(&fixture.shared, &api, true).await;
+    assert_eq!(service.identity_reads(), 1, "the recorded identity is used");
+}
+
+/// A salt of the wrong length is replaced, and every tag made with it is
+/// removed first, with the recorded identity: the entries are tried with
+/// the current session again, as before tags, instead of parked for good.
+#[test]
+fn a_damaged_salt_is_replaced_and_its_tags_removed() {
+    let (_dir, store) = temp_store();
+    record_pending(&store, &[tagged(&store, "ws-1", "key-1", USER_A)]).unwrap();
+    record_identity(&store, "key-1", &identity_digest(&store, USER_A).unwrap());
+    store
+        .write_daemon_file(IDENTITY_SALT_FILE, b"short")
+        .unwrap();
+    let digest = identity_digest(&store, USER_A).unwrap();
+    assert!(digest.starts_with("sha256:"));
+    assert_eq!(
+        store
+            .read_daemon_file(IDENTITY_SALT_FILE)
+            .unwrap()
+            .unwrap()
+            .len(),
+        32
+    );
+    let record = load(&store).unwrap();
+    assert_eq!(record.pending_revocations[0].identity, None);
+    assert_eq!(record.session_identity, None);
+}
+
+/// An entry already held untagged takes the tag a later switch records for
+/// it, so a sweep under another identity parks it.
+#[test]
+fn an_untagged_entry_takes_a_later_tag() {
+    let (_dir, store) = temp_store();
+    record_pending(&store, &[PendingRevocation::new("ws-1", "key-1")]).unwrap();
+    let tag = tagged(&store, "ws-1", "key-1", USER_A);
+    record_pending(&store, std::slice::from_ref(&tag)).unwrap();
+    let pending = load(&store).unwrap().pending_revocations;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].identity, tag.identity);
+}
+
+/// A read made outside a sign-in or a switch never overwrites a recorded
+/// identity, and records into an empty record only while the key it read
+/// for is still the stored one: a sign-in landing between the read's
+/// session and its key keeps its own identity.
+#[tokio::test]
+async fn a_lazy_identity_read_never_overwrites_a_sign_ins() {
+    let fixture = Fixture::signed_in("org-a");
+    let (api, _) = start(two_orgs()).await;
+    let store = &fixture.shared.store;
+    let tokens = crate::daemon::nearai_credential::loopback::SessionTokens {
+        access_token: "session-jwt".into(),
+        refresh_token: String::new(),
+    };
+    let signed_in = identity_digest(store, USER_B).unwrap();
+    record_identity(store, "key-new", &signed_in);
+    let read = identity_of(&fixture.shared, &api, &tokens, "key-old").await;
+    assert_eq!(
+        read,
+        Some(identity_digest(store, USER_A).unwrap()),
+        "serves this call"
+    );
+    let recorded = load(store).unwrap().session_identity.unwrap();
+    assert_eq!(
+        (recorded.key_id.as_str(), recorded.digest.as_str()),
+        ("key-new", signed_in.as_str())
+    );
+
+    // An empty record, but the key read for is no longer the stored one.
+    let fixture = Fixture::signed_in("org-a");
+    identity_of(&fixture.shared, &api, &tokens, "key-replaced").await;
+    assert_eq!(load(&fixture.shared.store).unwrap().session_identity, None);
+
+    // An empty record and the stored key: recorded.
+    identity_of(&fixture.shared, &api, &tokens, "key-old").await;
+    assert_eq!(
+        load(&fixture.shared.store)
+            .unwrap()
+            .session_identity
+            .unwrap()
+            .key_id,
+        "key-old"
+    );
+}
+
+/// Over capacity, another identity's parked entries are dropped before
+/// this identity's own, however the two interleave in time.
+#[test]
+fn a_trim_drops_another_identitys_entries_first() {
+    let (_dir, store) = temp_store();
+    let own = |n: usize| tagged(&store, &format!("ws-b-{n}"), &format!("key-b-{n}"), USER_B);
+    let theirs = |n: usize| tagged(&store, &format!("ws-a-{n}"), &format!("key-a-{n}"), USER_A);
+    let older: Vec<_> = (0..12).map(own).collect();
+    let parked: Vec<_> = (0..20).map(theirs).collect();
+    record_pending(&store, &older).unwrap();
+    record_pending(&store, &parked).unwrap();
+    record_pending(&store, &[own(12), own(13)]).unwrap();
+    let pending = load(&store).unwrap().pending_revocations;
+    assert_eq!(pending.len(), MAX_PENDING * 2);
+    let b_digest = identity_digest(&store, USER_B).unwrap();
+    assert_eq!(
+        pending
+            .iter()
+            .filter(|entry| entry.identity.as_deref() == Some(b_digest.as_str()))
+            .count(),
+        14,
+        "every own entry is kept"
+    );
+}
+
+/// An entry naming the active key is not parked: the listing sweeps, which
+/// settles it, rather than skipping for good.
+#[tokio::test]
+async fn an_active_key_entry_is_settled_not_parked() {
+    let fixture = Fixture::signed_in("org-a");
+    let (api, _) = start(two_orgs()).await;
+    let store = &fixture.shared.store;
+    record_identity(store, "key-old", &identity_digest(store, USER_A).unwrap());
+    let mut active = PendingRevocation::new("ws-org-a", "key-old");
+    active.identity = Some(identity_digest(store, USER_A).unwrap());
+    record_pending(
+        store,
+        &[active, tagged(store, "ws-theirs", "key-theirs", USER_B)],
+    )
+    .unwrap();
+    assert!(!only_parked(&fixture.shared, &load(store).unwrap()));
+    organizations_with(&fixture.shared, &api, true).await;
+    let pending = load(store).unwrap().pending_revocations;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].key_id, "key-theirs");
 }

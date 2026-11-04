@@ -978,7 +978,12 @@ async fn restricted_merge_backend(backend: &PgBackend) -> PgBackend {
              GRANT SELECT,UPDATE ON trace_accounts,trace_account_merge_proposals,trace_account_principals,
                  trace_near_identities,trace_public_runs,trace_sessions TO trace_trust_merge_runtime;
              GRANT INSERT ON trace_account_audit TO trace_trust_merge_runtime;
-             GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_trust_merge_runtime;",
+             GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_trust_merge_runtime;
+             -- Since V148 a merge in a NEAR AI tenant reads the absorbed
+             -- account's live tenant links to take their locks before any
+             -- row lock; the runtime holds this column read from V146.
+             GRANT SELECT (tenant_id, account_id, legacy_tenant_id, revoked_at)
+                 ON trace_legacy_invite_links TO trace_trust_merge_runtime;",
         ))
         .await
         .expect("provision restricted merge login");

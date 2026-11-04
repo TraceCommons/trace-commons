@@ -127,7 +127,14 @@ async fn status(shared: &DaemonShared) -> Value {
 async fn sign_out(shared: &DaemonShared) -> Result<Value> {
     // Clear first even when Keychain is unavailable.
     let expected = commons_credentials::snapshot(&shared.store, Kind::Account).ok();
-    commons_credentials::clear(&shared.store, &[Kind::Account])?;
+    if let Err(error) = commons_credentials::clear(&shared.store, &[Kind::Account]) {
+        // A malformed account record refuses the Commons clear; the NEAR AI
+        // half is independent of it and still goes, so a sign-out never
+        // leaves Private AI signed in behind a record it cannot read.
+        let _ = super::nearai_credential::disconnect(shared).await;
+        return Err(error);
+    }
+    let held_session = expected.as_ref().is_some_and(|s| s.held_record());
     let config = expected
         .as_ref()
         .and_then(|s| s.configuration().ok().flatten());
@@ -137,45 +144,87 @@ async fn sign_out(shared: &DaemonShared) -> Result<Value> {
             .flatten()
     });
     let _ = commons_credentials::cleanup(&shared.store);
+    // The Commons session is revoked at the server and the NEAR AI half
+    // cleared and revoked at NEAR AI, side by side: the two are independent,
+    // and a slow NEAR AI must not hold up the account's own revoke. Private
+    // AI does not outlive the account (owner decision 2026-11-02).
+    let (server_revoked, near_ai) = tokio::join!(
+        revoke_at_server(config.as_ref(), raw, held_session),
+        super::nearai_credential::disconnect(shared)
+    );
+    // A NEAR AI half that could not be cleared is reported on its own: the
+    // Commons sign-out above has happened and is not undone or hidden by it.
+    let (near_ai_cleared, near_ai_revoked) = match near_ai {
+        Ok(done) => (true, done.revoked),
+        Err(_) => (false, None),
+    };
+    // `server_revoked`: whether the server accepted the account session's
+    // revoke, `null` when there was no session to revoke. `near_ai_revoked`:
+    // whether the NEAR AI key is gone at NEAR AI, `null` when none was
+    // stored; `false` is when a shell says `credential_forget_not_revoked`.
+    Ok(json!({
+        "signed_out": true,
+        "server_revoked": server_revoked,
+        "near_ai_cleared": near_ai_cleared,
+        "near_ai_revoked": near_ai_revoked,
+    }))
+}
+
+/// `POST /v1/account/logout` with the session just cleared. `None` when there
+/// was no session to revoke; `Some(false)` when there was one and the server
+/// did not accept the revoke, it could not be sent to an origin this build
+/// trusts, or the session's secret could not be read (`held_session` with no
+/// `raw`: stored, cleared here, never revoked there).
+async fn revoke_at_server(
+    config: Option<&crate::config::ContributorConfig>,
+    raw: Option<Vec<u8>>,
+    held_session: bool,
+) -> Option<bool> {
+    let Some(raw) = raw else {
+        return held_session.then_some(false);
+    };
     let origin = config
-        .as_ref()
         .map(|c| c.ingest_url.clone())
         .or_else(|| {
-            raw.as_ref()
-                .and_then(|raw| serde_json::from_slice::<Value>(raw).ok())
-                .and_then(|v| {
-                    v.get("ingest_origin")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
+            serde_json::from_slice::<Value>(&raw).ok().and_then(|v| {
+                v.get("ingest_origin")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
         })
         .and_then(|v| canonical_origin(&v).ok());
-    if let (Some(origin), Some(raw)) = (origin, raw) {
-        if let Ok(session) = serde_json::from_slice::<account_auth::AccountSession>(&raw) {
-            let allowed = config
-                .as_ref()
-                .map(crate::config::config_allowlist)
-                .map(Ok)
-                .unwrap_or_else(|| {
-                    unconfigured_origin(&origin)?;
-                    super::account_onboarding::signup_allowlist(&origin, &[])
-                });
-            if let Ok(allowed) = allowed {
-                if let Ok(client) =
-                    Client::builder(&origin, "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV")
-                        .bearer_token(session.access_token)
-                        .max_response_bytes(256 * 1024)
-                        .host_allowlist(allowed)
-                        .build()
-                {
-                    let _ = client
-                        .call_raw::<()>(Method::POST, "/v1/account/logout", &[], None)
-                        .await;
-                }
-            }
-        }
-    }
-    Ok(json!({"signed_out":true}))
+    // A stored session that does not parse was still a session, cleared
+    // here and never revoked there: not "nothing to revoke".
+    let Ok(session) = serde_json::from_slice::<account_auth::AccountSession>(&raw) else {
+        return Some(false);
+    };
+    let Some(origin) = origin else {
+        return Some(false);
+    };
+    let allowed = config
+        .map(crate::config::config_allowlist)
+        .map(Ok)
+        .unwrap_or_else(|| {
+            unconfigured_origin(&origin)?;
+            super::account_onboarding::signup_allowlist(&origin, &[])
+        });
+    let Ok(allowed) = allowed else {
+        return Some(false);
+    };
+    let Ok(client) = Client::builder(&origin, "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV")
+        .bearer_token(session.access_token)
+        .max_response_bytes(256 * 1024)
+        .host_allowlist(allowed)
+        .build()
+    else {
+        return Some(false);
+    };
+    Some(
+        client
+            .call_raw::<()>(Method::POST, "/v1/account/logout", &[], None)
+            .await
+            .is_ok(),
+    )
 }
 async fn handle_inner(shared: &DaemonShared, req: &Request) -> Result<Value> {
     match req.method.as_str() {

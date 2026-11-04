@@ -361,6 +361,13 @@ pub const NUDGE_MISSION_FIT_CLAUSE_ONE: &str = "1 of them fits a mission.";
 pub const LIST_ORDER_SUGGESTED: &str = "Suggested first";
 /// The Traces sort control, queue order. DRAFT, NEEDS APPROVAL.
 pub const LIST_ORDER_QUEUE: &str = "Oldest first";
+/// The Traces sort control, the folders in the order the person dragged
+/// them into (owner, 2026-11-02). DRAFT, NEEDS APPROVAL.
+pub const LIST_ORDER_ARRANGED: &str = "Your order";
+/// A folder row's actions that move it one place in that order, for
+/// VoiceOver and anyone not dragging. DRAFT, NEEDS APPROVAL.
+pub const LIST_ORDER_MOVE_UP: &str = "Move up";
+pub const LIST_ORDER_MOVE_DOWN: &str = "Move down";
 /// The Traces sort control's own accessible name, so it is not read with
 /// the tree's. DRAFT, NEEDS APPROVAL.
 pub const LIST_ORDER_LABEL: &str = "Order of waiting traces";
@@ -449,7 +456,7 @@ pub const MARK_A11Y_SETTLEMENT: &str = "An estimate for traces on this Mac is re
 pub const MARK_TOOLTIP_SETTLEMENT: &str = "Estimate ready";
 /// The estimate's info popover, in plain words (owner, 2026-10-19: the
 /// first wording read as too technical). DRAFT, NEEDS APPROVAL.
-pub const SETTLEMENT_ESTIMATE_EXPLAINER: &str = "This is a guess worked out on your Mac from how big your traces are and what's in them. Nothing was sent to make it, and the price comes from Trace Commons' published rates. The real amount is set once a trace is scored, and a guess for one trace is rougher than the total.";
+pub const SETTLEMENT_ESTIMATE_EXPLAINER: &str = "This is a guess worked out on your Mac from how big your traces are and what's in them. Nothing was sent to make it, and the price comes from the published rates. The real amount is set once a trace is scored, and a guess for one trace is rougher than the total.";
 // ---------------------------------------------------------------------
 // NEAR AI credit received. `{amount}` is a dollar figure from
 // `private_inference_copy::format_amount`. DRAFT, awaiting owner review
@@ -676,6 +683,9 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("NUDGE_MISSION_FIT_CLAUSE_ONE", NUDGE_MISSION_FIT_CLAUSE_ONE),
     ("LIST_ORDER_SUGGESTED", LIST_ORDER_SUGGESTED),
     ("LIST_ORDER_QUEUE", LIST_ORDER_QUEUE),
+    ("LIST_ORDER_ARRANGED", LIST_ORDER_ARRANGED),
+    ("LIST_ORDER_MOVE_UP", LIST_ORDER_MOVE_UP),
+    ("LIST_ORDER_MOVE_DOWN", LIST_ORDER_MOVE_DOWN),
     ("LIST_ORDER_LABEL", LIST_ORDER_LABEL),
     ("ENTRY_MISSION_FIT", ENTRY_MISSION_FIT),
     ("LIST_FILTER_IDLE", LIST_FILTER_IDLE),

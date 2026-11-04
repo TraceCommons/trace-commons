@@ -635,7 +635,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `near_account_start` | `ingest_url`, `account_id` | `attempt_id`, `browser_url`, `status` | explicit wallet ceremony; keys and PKCE stay in daemon |
 | `near_account_status` | `attempt_id` | `attempt_id`, `status` | no account token or signing material |
 | `near_account_cancel` | `attempt_id` | cancellation state | cancels the matching local attempt |
-| `near_ai_credential_start` | `provider` (optional; the build's `channel::NEAR_AI_SIGN_IN_PROVIDERS`: production `near`, `github`, `google`, default `near`; a `near-ai-staging` build `google` only, and `near` and `github` are refused) | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. The browser URL is returned **once** and no poll re-serves it |
+| `near_ai_credential_start` | `provider` (optional; one of the build's `channel::NEAR_AI_SIGN_IN_PROVIDERS`: production `near`, `github`, `google`; a `near-ai-staging` build `google` only, and `near` and `github` are refused). Shells send none | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. With no `provider`, `browser_url` is the daemon's own loopback page listing the build's logins, and the one picked there continues on the same port; a build with one login goes straight to it. When the Commons has accepted a NEAR AI login on this device (first enrollment, or a renewal with the stored login), the page lists that login first and marks it; the tag (`near`, `github` or `google`, nothing else) is kept in the daemon file `near-ai-login.json` and removed by `unenroll`. The browser URL is returned **once** and no poll re-serves it |
 | `near_ai_credential_status` | `attempt_id` (optional) | `state`, plus `attempt_id` and `attempt_status` for a caller that named the current attempt | never errors on a missing or stale `attempt_id`: `state` is a fact about the machine. See "The credential state" below |
 | `near_ai_credential_cancel` | `attempt_id` (optional) | `attempt_id`, `status` when named; `status` alone when not | stops this machine waiting on the browser; unnamed, it stops whatever sign-in is in flight and never echoes the id; `near_ai_credential_unknown` if a named id is not the current attempt, or if an unnamed cancel finds no sign-in in flight (none ever started, or the last one finished); a named cancel of the finished current attempt answers its terminal status and changes nothing |
 | `near_ai_credential_forget` | — | `removed`, `revoked: false` | removes the key from **this machine only**; `revoked` is always false and is not a placeholder. See "The credential state" below |
@@ -692,6 +692,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `get_config_schema` | empty object | versioned settings-patch JSON Schema, effects and patch semantics | read-only; credentials and read-only settings are not settable properties |
 | `preview_settings` | partial object accepted by `set_settings` | versioned canonical before/after changes; redacted values remain hidden | read-only; validates without persistence or runtime effects |
 | `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `subscription_usage_codex_enabled`, `subscription_usage_claude_on`, `subscription_usage_claude_enabled`, `managed_terminal`, `managed_favorite_models`, `managed_cli_options`, `managed_folder_settings` | updated settings | see "`set_settings`" below |
+| `set_managed_herdr` | `on` (**required** boolean; anything else is `bad_params` / `on-required`) | `managed_herdr` | "Group sessions in herdr": writes `managed_herdr` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -711,7 +712,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `nudge_opened` | `kind` (**required**: `idle_sessions`, `review_backlog` or `verdicts_landed`); `subject` (reserved, as above) | `opened: true` | sent only from the suggestion's own action, never for being shown; for `verdicts_landed` it acknowledges the news; local only; publishes `status_changed`; see "`status.nudge`" below |
 | `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
 | `set_menu_bar_mark_enabled` | `on` (**required**, boolean) | `menu_bar_mark_enabled` | the menu-bar news mark and halo switch; writes `menu_bar_mark_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
-| `set_managed_terminal` | `terminal` (**required**: one of this platform's ids -- macOS `terminal`, `ghostty`, `iterm2`; Windows `windows_terminal`; Linux `gnome_terminal`, `konsole`, `ghostty`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
+| `set_managed_terminal` | `terminal` (**required**: one of this platform's ids -- macOS `terminal`, `ghostty`, `iterm2`, `kitty`, `wezterm`, `alacritty`, `warp`, `rex`; Windows `windows_terminal`; Linux `gnome_terminal`, `konsole`, `ghostty`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
 | `managed_model_favorite_set` | `model` (**required**, a model id), `favorite` (**required**, boolean) | `favorites` (`[string]`, the stored list) | async only; stars or unstars one model for the Launch sheet's picker; writes `managed_favorite_models` through `set_settings`; see "Managed session model choice" below |
 | `managed_cli_model` | `tool` (**required**), `cli_options` (**required**, the session's CLI options text) | `model` (string or null) | local only, reads nothing from NEAR AI; the model the tool's own flag names in `cli_options` (Claude Code `--model`; Codex `-m`/`--model`), which the launcher runs instead of the picker's and weighs every secondary model against; options that do not parse name none. The macOS background picker reads `managed_model_catalogue`'s `background`/`background_sets` for this model |
 | `managed_cli_options_set` | `tool` (`claude`, `codex`, `opencode`), `options` (string) | `tool`, `options`, `revision` | validates and saves through `set_settings.managed_cli_options`; returns the current saved value and managed revision so older snapshots cannot undo an acknowledged save; invalid quoting or reserved flags return `managed-cli-options-invalid` |
@@ -6013,9 +6014,10 @@ defaults and refusals.
 
 `managed_terminal` (string) is the terminal app a managed session opens
 in, one of this platform's ids and nothing else: on macOS `terminal`
-(the default), `ghostty` or `iterm2`; on Windows `windows_terminal` (the
-default); on Linux `gnome_terminal` (the default), `konsole` or
-`ghostty`. Another platform's id is refused like any other. Any other
+(the default), `ghostty`, `iterm2`, `kitty`, `wezterm`, `alacritty`, `warp`
+or `rex`; on Windows `windows_terminal` (the default); on Linux
+`gnome_terminal` (the default), `konsole`, `ghostty`, `kitty`, `wezterm` or
+`alacritty`. Another platform's id is refused like any other. Any other
 value, `null` included, is `bad_params` / `settings-invalid-value`; no app name, path or command is ever accepted. A
 settings file holding a value this build does not know loads it as
 unrecognized: `managed_snapshot` then reports no `terminal_current` and no
@@ -6023,9 +6025,37 @@ unrecognized: `managed_snapshot` then reports no `terminal_current` and no
 the default. `set_managed_terminal` writes the same setting. The managed
 snapshot's `capabilities` carries `terminal_current` (the chosen id, or
 `null`), `terminal_choices` (`[{id, name}]` of the offered apps found on
-this computer; empty under Flatpak) and `terminal_destination` (the
-chosen app's name). A launch whose chosen app was not found is refused
-with `managed-terminal-not-found`.
+this computer; empty under Flatpak), `terminal_destination` (the
+chosen app's name: where tool setup opens, and what the install and update
+hints and the picker name) and `launch_destination` (where a session opens:
+the chosen app's name, or "herdr" while `managed_herdr` is on; `null`
+whenever `terminal_destination` is). A launch whose chosen app was not found
+is refused with `managed-terminal-not-found`. A shell fills `{destination}`
+and a launch refusal's `{terminal}` from `launch_destination`, and a tool
+setup refusal's `{terminal}` from `terminal_destination`; from a daemon
+that sends no `launch_destination`, `terminal_destination` serves for both.
+
+`managed_herdr` (boolean, default `false`) is "Group sessions in herdr":
+managed sessions open as tabs of herdr's "Near.ai" workspace, with
+`managed_terminal` hosting herdr when no herdr client is running (see
+`docs/managed-sessions.md`). Anything that is not a boolean is `bad_params`
+/ `settings-invalid-value`; `set_managed_herdr` writes the same setting. The
+managed snapshot's `capabilities` carries `herdr_available` (herdr was found
+and a terminal can host it) and `herdr_grouping` (the setting). With the
+setting on, `managed_terminal_launch` answers `destination: "herdr"`,
+`launch_destination` is "herdr" (so a launch refusal names herdr, while
+`terminal_destination` stays the chosen terminal), and a launch
+with no herdr found, or with herdr not answering within 10 s, is refused with
+`managed-terminal-not-found`. Something at herdr's socket path this account
+cannot trust is refused with `managed-herdr-socket-untrusted`. A herdr older
+than socket protocol 22 is refused with `managed-unsupported-version`.
+
+With `managed_terminal` set to `rex`, a launch whose Rex app does not connect
+within 10 s is refused with `managed-rex-not-ready`, and one whose `rex`
+call fails or gives nothing before the tab is opened with
+`managed-terminal-call-failed` (shells show the general failure line); a
+reply this build cannot read is `managed-unsupported-version`. Each of these
+comes before the ticket is sent and releases the launch.
 
 `managed_favorite_models` (object) stars or unstars NEAR AI models for the
 Launch sheet's model picker, merging like `notify`: `{"<model id>": true}`
@@ -6371,7 +6401,9 @@ state, the harness rows and the credential row:
   `harness_plan_no_config_path`;
 - `credential_title`, `credential_what`, `credential_cost`;
 - `credential_obtain`, `credential_cancel`, `credential_forget`,
-  `credential_forget_explains`, `credential_migrate`,
+  `credential_forget_explains`, `credential_forget_not_revoked`,
+  `near_ai_still_signed_in`,
+  `credential_migrate`,
   `credential_migrate_explains`;
 - `credential_absent`, `credential_obtaining`, `credential_failed`,
   `credential_cancelled`, `credential_present`, `credential_unknown`,
@@ -6908,10 +6940,25 @@ never re-served.
 action, and it is the counterpart of `offer_exposure`: getting a key opens a
 browser, signs the contributor in to a company that is not this app, and
 mints a key this app then keeps. `credential_forget_explains` is its
-counterpart at the other end -- forgetting is LOCAL, the key stays valid at
-the service until the contributor removes it there, and this app cannot do it
-for them, which is why `near_ai_credential_forget` answers `revoked: false`
-rather than leaving "removed" to be read as "revoked".
+counterpart at the other end: forgetting removes the key and saved sign-in
+from this computer and revokes the key at NEAR AI with the sign-in being
+removed, best effort (owner decision 2026-11-02). `near_ai_credential_forget`
+answers `revoked: true` when the key is gone at NEAR AI, `false` when a key
+was stored and the revoke did not happen (including when its secret could not
+be read), and `null` when no key was stored. It also answers
+`cleanup_pending: true` when an OS entry is left to delete; it stays
+journaled, and `near_ai_credential_status` reports `cleanup_required` until a
+later credential operation deletes it. It is async-only: the sync dispatcher
+refuses it with `near-ai-credential-forget-requires-async`. A shell draws
+`credential_forget_not_revoked` only on `removed: true, revoked: false`.
+
+Unenroll and `account_sign_out` clear the same NEAR AI sign-in and revoke the
+same way. Each answers `near_ai_revoked` with the same three values, and
+`near_ai_cleared: false` when the NEAR AI sign-in could not be cleared here
+(the rest of the call has happened). After an unenroll, a shell says so
+with `near_ai_still_signed_in`: Forget in Private AI removes what is left.
+`account_sign_out` also answers `server_revoked`: whether the server accepted
+the account session's revoke, `null` when there was no session.
 
 No sentence on this surface renders a key, a key prefix, an id or an account
 name, and none of them carries a hole a shell could fill with one.
@@ -8790,8 +8837,8 @@ keystroke. Display-name/range bounds must be validated before presentation.
 
 ### Native account identity
 
-Passkeys were removed on 2026-10-31: an account signs in through NEAR AI.
-The former `passkey_*`, `account_bind` and `account_binding` methods are gone
+An account signs in through NEAR AI (since 2026-10-31). The former
+`passkey_*`, `account_bind` and `account_binding` methods are gone
 and get the ordinary unknown-method answer. The app receives no native
 bearer, NEAR AI token, device key, tenant identity or secret-store reference.
 
@@ -8845,8 +8892,8 @@ refuses with `unavailable` / `account-enrollment-required`. Browser URL exposure
 uses the existing URL validation/opening controls. Tokens, rotations and
 atomic device/config persistence stay in Rust/Keychain.
 
-A daemon from before the removal kept a list of the passkeys used on the Mac
-(`remembered-passkeys.json` in the state directory). A daemon after it
+A daemon from before 2026-10-31 kept a list of sign-in credentials used on
+the Mac (`remembered-passkeys.json` in the state directory). A later daemon
 deletes that file when it starts.
 
 ## Events
@@ -9417,8 +9464,8 @@ ignore these fields; macOS renders them.
 Session views carry three additive booleans, computed on every read:
 
 - `can_focus`: the daemon opened the session itself through
-  `managed_terminal_launch`, in a terminal it can script, named the window it
-  opened (today a Terminal window id, printed by the launch script), and the
+  `managed_terminal_launch`, in a terminal it can script, named the tab it
+  opened (today a Terminal tty, printed by the launch script), and the
   session is a running coding session.
 - `can_stop`: the daemon opened the session itself, its launcher reports a
   running coding tool, and no stop has been asked for yet.
@@ -9449,6 +9496,44 @@ focusable or stoppable.
   account, `managed-invalid-request` for a sign-in (login) row or a missing
   folder, `managed-not-found` for a removed account, and
   `managed-near-ai-sign-in-required` for a sign-in session while signed out.
+
+`managed_terminal_launch {session_id, ticket}` opens a prepared session in a
+window of its own, in the chosen terminal. Every launch does, Start again and
+Resume included (owner, 2026-11-03); nothing is ever typed into an existing
+tab, whose prompt may hold input not yet run, and the daemon no longer asks
+macOS for the System Events and Accessibility permissions that a new tab
+needed. A launch still sends Apple Events to the terminal app it opens, so
+macOS may still ask once to let the app control that terminal; the bundle's
+`NSAppleEventsUsageDescription` for that prompt is "Near.ai opens Private AI
+sessions in Terminal." (owner, 2026-11-03; both channels).
+
+An older app may still send two fields, which are accepted so that app keeps
+launching, and ignored: `in_window_of` (the app built from #1839) and `beside`
+(the app built from #1852, a session id from the window list). Any other
+field is refused with `managed-invalid-request`. The same app also calls
+`managed_terminal_windows` and `managed_terminal_tab_access`, which the daemon
+no longer has: they are refused with `unknown_method` like any method it does
+not know, are not in `hello`'s `methods`, and run nothing. That app reads a
+refusal as "no windows to offer" and shows its launch dialog without a window
+list.
+
+A launch reads back its tab's tty and, on the next line, the id of Terminal's
+front window when that window's selected tab is the launch's, with no scan of
+other windows (#1853), and the row keeps both. Output that is not a tty,
+optionally followed by a line of digits only that is a window id, names no
+tab. When another window is in front by then, the row has its tab and no
+window id; that is normal. Nothing reads the window id or the row `again_of`
+records: the owner decided to keep both on the row (2026-11-03) although the
+window picker they were recorded for is gone.
+
+The terminal opens with the daemon's managed state unlocked and off the async
+worker: the launch is held first (a second `managed_terminal_launch` with the
+same ticket is refused with `managed-conflict`), and recorded after. A launch
+refused before anything ran (`managed-terminal-not-found`,
+`managed-invalid-request`, `managed-unsupported-version`) is released, and its ticket stands until it
+lapses. A launch that may have run (`managed-launch-unknown`: the script
+failed or was stopped after it started) stays held, so its ticket cannot open
+a second terminal.
 
 When `managed_launch_prepare` or `managed_session_start_again` passes the
 checks that come before preparing, other than the tool's version, and would
@@ -9501,11 +9586,21 @@ AI does not list as a chat model is refused when the proxy starts, with
 `managed-model-unavailable`: at `managed_launch_redeem` on the sign-in, in the
 launcher on a saved key.
 
-- `managed_model_catalogue {tool}` (async only) answers
+- `managed_model_catalogue {tool, cache_only?}` (async only) answers
   `{models: [{id, name?}], default: string | null}`: NEAR AI's chat models in
   its order, and the model `tool` gets when a launch names none. The catalogue
   is public; no key is read or sent. `managed-model-unavailable` when NEAR AI
-  cannot be read; `managed-invalid-request` for other parameters. It also
+  cannot be read; `managed-invalid-request` for other parameters. The
+  catalogue comes from the daemon's one cache (`managed/catalogue_cache.rs`),
+  shared with the favorites check: a copy under 15 minutes old answers with
+  no read; an older one still answers at once while one refresh runs in the
+  background; only with no copy at all does the call wait on NEAR AI. The
+  last copy is kept in `managed-model-catalogue.json` in the config
+  directory (ids, names, tiers and token limits only, mode 0600), so a
+  restart or an offline start has it too. With `cache_only: true` (default
+  false) the call reads that cache and nothing else, never waits on or starts
+  a read, and fails with `managed-model-unavailable` when it holds nothing:
+  for a row that only wants display names. It also
   carries `favorites` (`[string]`): the starred models NEAR AI offers `tool`,
   in its order; and `unavailable_favorites` (`[string]`): the starred ids
   NEAR AI no longer lists for any tool. A starred model it lists but `tool`

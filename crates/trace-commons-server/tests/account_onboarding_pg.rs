@@ -2154,15 +2154,15 @@ async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key()
     let legacy_session = unkeyed("native", "revoked-again-legacy").await;
     let caller_session = unkeyed("native", "revoked-again-caller").await;
     let browser_session = unkeyed("web", "revoked-again-browser").await;
-    // A native session that names a credential (only a passkey sign-in, before
-    // V144, minted one) whose credential row is gone, so V144's join missed it.
+    // A native session that names a credential (only a WebAuthn sign-in,
+    // before V144, minted one) whose credential row is gone, so V144's join missed it.
     // Nothing tells it apart from the device's own, so it ends with the device.
-    let passkey_native_session = session_hash("revoked-again-passkey-native");
+    let credential_native_session = session_hash("revoked-again-credential-native");
     admin
         .execute(
             "INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,auth_credential_id,expires_at)
-             VALUES($1,$2,$3,$4,'native','passkey-credential-1',now() + interval '1 hour')",
-            &[&tenant, &uuid::Uuid::new_v4(), &account, &passkey_native_session],
+             VALUES($1,$2,$3,$4,'native','webauthn-credential-1',now() + interval '1 hour')",
+            &[&tenant, &uuid::Uuid::new_v4(), &account, &credential_native_session],
         )
         .await
         .unwrap();
@@ -2216,9 +2216,9 @@ async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key()
             "a browser session is not a device session",
         ),
         (
-            &passkey_native_session,
+            &credential_native_session,
             false,
-            "a native session left over from a passkey sign-in ends too",
+            "a native session left over from a WebAuthn sign-in ends too",
         ),
     ] {
         assert_eq!(
@@ -2851,4 +2851,130 @@ async fn a_judgement_claim_backfills_the_near_ai_signup_grant_like_an_upload_cla
         vec![template_grant_row(SIGNUP_TEMPLATE)]
     );
     task.abort();
+}
+
+/// `is_database_unavailable` and `database_error_label` against errors a real
+/// PostgreSQL and a real pool raise.
+///
+/// Unavailable: nothing listening, a database that does not exist, an
+/// undefined table (a migration not run), a write in a read-only
+/// transaction (a demoted primary), a statement cancelled by
+/// `statement_timeout`. A refusal: a `query_opt` that matches two rows, and a
+/// statement that fails to parse on the client -- both follow the data, and
+/// the parse failure boxes an `io::Error` cause, so nothing may classify by
+/// that cause.
+#[tokio::test]
+async fn the_database_unavailable_predicate_reads_real_errors() {
+    use trace_commons_server::account_onboarding::{database_error_label, is_database_unavailable};
+    use trace_commons_server::error::DatabaseError;
+    let _serial = serial().lock().await;
+    let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
+        return;
+    };
+    assert!(
+        url.contains("127.0.0.1"),
+        "test requires explicitly isolated loopback DB"
+    );
+    let pool_for = |url: &str| {
+        let config: tokio_postgres::Config = url.parse().expect("url");
+        deadpool_postgres::Pool::builder(deadpool_postgres::Manager::new(
+            config,
+            tokio_postgres::NoTls,
+        ))
+        .max_size(1)
+        .build()
+        .expect("pool")
+    };
+
+    // Nothing listening: the database did not answer.
+    let closed_port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let unreachable = pool_for(&format!("postgres://nobody@127.0.0.1:{closed_port}/x"))
+        .get()
+        .await
+        .expect_err("nothing listens");
+    assert!(
+        matches!(&unreachable, deadpool_postgres::PoolError::Backend(error) if error.as_db_error().is_none()),
+        "a connect failure, with no server answer"
+    );
+    let unreachable = DatabaseError::PoolRuntime(unreachable);
+    assert!(is_database_unavailable(&unreachable));
+    assert_eq!(database_error_label(&unreachable), "postgres_unreachable");
+
+    // Deployment state: this database does not exist (3D000).
+    let mut missing = reqwest::Url::parse(&url).unwrap();
+    missing.set_path(&format!("/no_such_db_{}", uuid::Uuid::new_v4().simple()));
+    let missing = DatabaseError::PoolRuntime(
+        pool_for(missing.as_str())
+            .get()
+            .await
+            .expect_err("no such database"),
+    );
+    assert!(is_database_unavailable(&missing));
+    assert_eq!(database_error_label(&missing), "sqlstate_3D000");
+
+    let client = pool_for(&url).get().await.expect("connect");
+    // Client-side and data-dependent: more than one row for `query_opt`.
+    let row_count = client
+        .query_opt("SELECT 1 UNION ALL SELECT 2", &[])
+        .await
+        .expect_err("two rows");
+    assert!(row_count.as_db_error().is_none(), "a client-side error");
+    let row_count = DatabaseError::Postgres(row_count);
+    assert!(!is_database_unavailable(&row_count));
+    assert_eq!(database_error_label(&row_count), "postgres_client_error");
+
+    // Client-side parse failure, with an `io::Error` as its cause: still a
+    // refusal, because the predicate reads the kind.
+    let parse = client
+        .query("SELECT 1\0", &[])
+        .await
+        .expect_err("a NUL in the statement");
+    assert!(parse.as_db_error().is_none());
+    assert!(
+        std::error::Error::source(&parse).is_some_and(|cause| cause.is::<std::io::Error>()),
+        "the case an io-cause check gets wrong"
+    );
+    assert!(!is_database_unavailable(&DatabaseError::Postgres(parse)));
+
+    // Deployment state: a table a migration did not create (42P01).
+    let undefined = client
+        .batch_execute("SELECT 1 FROM no_such_table_from_a_migration")
+        .await
+        .expect_err("undefined table");
+    let undefined = DatabaseError::Postgres(undefined);
+    assert!(is_database_unavailable(&undefined));
+    assert_eq!(database_error_label(&undefined), "sqlstate_42P01");
+
+    // A demoted primary: every write in a read-only transaction (25006).
+    let read_only = client
+        .batch_execute(
+            "BEGIN READ ONLY; INSERT INTO trace_tenants(tenant_id) VALUES ('read-only-probe')",
+        )
+        .await
+        .expect_err("read-only write");
+    client.batch_execute("ROLLBACK").await.unwrap();
+    let read_only = DatabaseError::Postgres(read_only);
+    assert!(is_database_unavailable(&read_only));
+    assert_eq!(database_error_label(&read_only), "sqlstate_25006");
+
+    // Contention-shaped: a statement cancelled by statement_timeout (57014).
+    client
+        .batch_execute("SET statement_timeout = '50ms'")
+        .await
+        .unwrap();
+    let cancelled = client
+        .batch_execute("SELECT pg_sleep(1)")
+        .await
+        .expect_err("cancelled");
+    assert_eq!(
+        cancelled.code(),
+        Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
+    );
+    let cancelled = DatabaseError::Postgres(cancelled);
+    assert!(is_database_unavailable(&cancelled));
+    assert_eq!(database_error_label(&cancelled), "sqlstate_57014");
 }

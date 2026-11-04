@@ -44,6 +44,12 @@ export const coreStatusSchema = z.object({
     // value rather than letting it fail the whole status payload.
     arming_rewordings: z.unknown().optional(),
     automatic_contribution_held: z.unknown().optional(),
+    // Whether this app's account needs setting up again. Read by
+    // `accountAttentionWire`; the core words it. A daemon too old to say
+    // omits all three.
+    account_state: z.string().optional().catch(undefined),
+    account_state_reason: z.string().nullable().optional().catch(null),
+    near_ai_login_unconfirmed: z.boolean().optional().catch(undefined),
   }),
 });
 

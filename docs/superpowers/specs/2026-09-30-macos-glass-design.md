@@ -56,6 +56,24 @@ there are no consent, withdrawal or Private AI behaviour changes.
 
 ## Changes since 2026-09-30
 
+### Fifth revision (2026-11-04): Settings regrouped
+
+The owner approved the Settings information-architecture review's
+decisions D1-D20 on 2026-11-04 ("We don't need to wait on Ron. Go with
+recs"). The section list keeps the single scrolling body and the list
+mechanics, but changes in these ways:
+
+- Rows are grouped: Account, Capture, Sharing, Private AI, App, Advanced.
+  A hairline separates the groups, and there are no group headings.
+- Connection is renamed Account. Payouts and Insights are new rows.
+- Watched folders is drawn under Watching, and Updates has a row of its
+  own.
+- General's row never waits on the core's copy.
+- The list still has a hover state only: the selection state below is
+  open.
+
+The "Settings navigation" paragraph under Screens is updated to match.
+
 ### Fourth revision (2026-10-15): Settings in its own window
 
 Ron, 2026-10-15: Settings opens as its own window. This withdraws the
@@ -894,16 +912,31 @@ gaps").
   shield and hand-written routing copy remain excluded by Non-goals.
   #1146's binoculars focus and node-card hover and pin behaviour are open
   with Ron.
-- **Settings navigation.** Inside the Settings window, retain the
-  section list and grouped, independently scrolling content: Connection,
-  Startup, Notifications, Updates, Watching, How traces may be used, Public
-  profile, Watched folders, Tools, Private AI, Redaction witness, Projects,
-  and Changes on this machine, plus Compute (`SettingsSection`). A section
-  whose copy has not loaded is a disabled placeholder, never a missing row.
-  The selected section must match the displayed content. Opening or closing
-  Settings preserves the main window's tab, selection and pane visibility.
-  This adapts the reference's organisation without adopting its scrim or
-  close button inside the main window.
+- **Settings navigation.** Inside the Settings window, keep the section
+  list and the single scrolling body, in the groups the Settings IA review
+  set (owner, 2026-11-04):
+
+  - **Account:** Account (was Connection), Payouts (listed only while
+    something in it applies), Referrals.
+  - **Capture:** Watching, with Watched folders drawn under it; Tools;
+    Insights.
+  - **Sharing:** Projects, Data uses, Public profile, Change log.
+  - **Private AI.**
+  - **App:** General; Startup & notifications, with Notifications drawn
+    under it; Updates.
+  - **Advanced:** Redaction witness, Compute.
+
+  These are the `SettingsSection` cases. A hairline separates groups, and
+  the list has no group headings. A section whose copy has not loaded is a
+  disabled placeholder, never a missing row; General's row is this app's
+  own word and never waits.
+
+  The list highlights a row on hover only, as #1146 does. Whether it should
+  also mark the section on screen is open.
+
+  Opening or closing Settings preserves the main window's tab, selection
+  and pane visibility. This adapts the reference's organisation without
+  adopting its scrim or close button inside the main window.
 
 ### Data
 

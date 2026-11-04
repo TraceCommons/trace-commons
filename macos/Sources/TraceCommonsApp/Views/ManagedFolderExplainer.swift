@@ -96,7 +96,7 @@ struct ManagedFolderExplainerSheet: View {
                     .buttonStyle(GlassButtonStyle(.glass, small: true))
                     .fixedSize()
                 }
-                // The first launch asks which terminal to open in.
+                // Every launch asks which terminal to open in.
                 if let snapshot = model.managedSnapshot, snapshot.asksForTerminal {
                     ManagedLaunchTerminalRow(snapshot: snapshot, selection: $terminal)
                 }

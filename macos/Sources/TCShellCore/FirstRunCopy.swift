@@ -119,6 +119,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let neither: String
         /// `{tool}`: a tool watched in two rows.
         public let oneFolderPerTool: String
+        /// Beside Continue: finish setup for Private AI alone.
+        public let privateAiOnly: String
     }
 
     public struct Rules: Decodable, Equatable, Sendable {
@@ -194,6 +196,10 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         /// grant, which finishes on Ask.
         public let sharingRefused: String
         public let sharingSaveFailed: String?
+        /// Settings > Projects' own lines for the same failures: setup's
+        /// name setup and its Start sharing button.
+        public let settingsSharingRefused: String
+        public let settingsSharingSaveFailed: String
         public let scopesFailed: String
         public let rulesFailed: String
         public let privateAiFailed: String

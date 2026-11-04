@@ -70,6 +70,7 @@ public struct GlassCard<Content: View>: View {
 /// small round button, for a card's head.
 public struct GlassRefreshButton: View {
     private let label: String
+    private let title: String
     private let small: Bool
     private let isRefreshing: Bool
     private let action: () -> Void
@@ -81,8 +82,15 @@ public struct GlassRefreshButton: View {
     /// Align the refresh ring's optical centre with the round control.
     public static let opticalOffset = CGSize(width: 0.5, height: -0.6)
 
-    public init(_ label: String, small: Bool = false, isRefreshing: Bool = false, action: @escaping () -> Void) {
+    /// `label` is the control's accessible name and tooltip, naming what it
+    /// re-reads; `title` is the word drawn in the pill, the label when nil
+    /// (owner, 2026-11-02: "Refresh" to the left of the icon, in a pill).
+    public init(
+        _ label: String, title: String? = nil, small: Bool = false, isRefreshing: Bool = false,
+        action: @escaping () -> Void
+    ) {
         self.label = label
+        self.title = title ?? label
         self.small = small
         self.isRefreshing = isRefreshing
         self.action = action
@@ -104,13 +112,15 @@ public struct GlassRefreshButton: View {
         GlassAnimationTimeline(minimumInterval: 1 / 30,
             paused: !Self.animates(isRefreshing: isRefreshing, completingClick: completingClick, reduceMotion: reduceMotion)) { date in
             let elapsed = clickedAt.map { date.timeIntervalSince($0) } ?? (isRefreshing ? date.timeIntervalSinceReferenceDate : 0)
-            GlassRoundButton(label, icon: .symbol(Self.systemImage), small: small, opticalOffset: Self.opticalOffset,
-                symbolRotation: .degrees(Self.angle(elapsed: elapsed, isRefreshing: isRefreshing, reduceMotion: reduceMotion))) {
-                    clickedAt = Date()
-                    completingClick = true
-                    action()
-                }
-                .disabled(isRefreshing)
+            GlassRefreshPill(
+                title: title, label: label, small: small,
+                rotation: .degrees(Self.angle(elapsed: elapsed, isRefreshing: isRefreshing, reduceMotion: reduceMotion))
+            ) {
+                clickedAt = Date()
+                completingClick = true
+                action()
+            }
+            .disabled(isRefreshing)
         }
         .task(id: clickedAt) {
             guard clickedAt != nil else { return }
@@ -123,15 +133,60 @@ public struct GlassRefreshButton: View {
     }
 }
 
-/// An icon card's re-read control: its name and what it does.
+/// The refresh control's shape (owner, 2026-11-02): a pill on the control
+/// surface, the word then the icon, as tall as the round button it
+/// replaced. The icon turns as the round one did; the word stays still.
+struct GlassRefreshPill: View {
+    let title: String
+    let label: String
+    let small: Bool
+    let rotation: Angle
+    let action: () -> Void
+
+    /// The pill's height: the round button's at the same size.
+    static func height(small: Bool) -> CGFloat { small ? GlassTokens.Size.control : GlassTokens.Size.controlLarge }
+
+    var body: some View {
+        let height = Self.height(small: small)
+        Button(action: action) {
+            HStack(spacing: GlassTokens.Space.s2) {
+                Text(title)
+                    .glassType(GlassTokens.TypeScale.label.weight(.medium))
+                    .lineLimit(1)
+                Image(systemName: GlassRefreshButton.systemImage)
+                    .glassGlyph(GlassRoundButton.symbolSize(small: small), weight: .medium)
+                    .rotationEffect(rotation)
+                    .offset(x: GlassRefreshButton.opticalOffset.width, y: GlassRefreshButton.opticalOffset.height)
+                    .accessibilityHidden(true)
+            }
+            .foregroundStyle(GlassColor.textPrimary)
+            .padding(.horizontal, small ? GlassTokens.Space.s4 : GlassTokens.Space.s5)
+            .frame(height: height)
+            .fixedSize()
+            .glassSurface(.control, radius: height / 2, hover: GlassTokens.Color.controlHover)
+        }
+        .buttonStyle(GlassPressStyle())
+        .accessibilityLabel(label)
+        .help(label)
+    }
+}
+
+/// An icon card's re-read control: its name, the word in its pill, and
+/// what it does.
 public struct GlassCardRefresh {
     let label: String
+    let title: String?
     let isDisabled: Bool
     let isRefreshing: Bool
     let action: () -> Void
 
-    public init(_ label: String, isDisabled: Bool = false, isRefreshing: Bool = false, action: @escaping () -> Void) {
+    /// `title` is the pill's word, the label when nil.
+    public init(
+        _ label: String, title: String? = nil, isDisabled: Bool = false, isRefreshing: Bool = false,
+        action: @escaping () -> Void
+    ) {
         self.label = label
+        self.title = title
         self.isDisabled = isDisabled
         self.isRefreshing = isRefreshing
         self.action = action
@@ -185,6 +240,15 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
     /// top, measured from a render: the drawn top, not the frame, meets the
     /// title's capitals.
     static var iconTopInset: CGFloat { 2.25 }
+    /// Whether the title is centred on the icon rather than hung from its
+    /// top: on a card that is its title alone, with no subtitle and nothing
+    /// under the head (owner, 2026-11-02: the Private AI Settings card's
+    /// title sat high in its card). A card with more keeps the icon's top
+    /// on the title's cap height, so what follows lines up under it.
+    static func centersTitle(subtitle: [String], hasContent: Bool) -> Bool {
+        subtitle.isEmpty && !hasContent
+    }
+
     /// The title face's cap height: from its baseline to the top of its
     /// capitals.
     static var titleCapHeight: CGFloat {
@@ -234,9 +298,12 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
         let titleCapHeight = Self.titleCapHeight
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             HStack(alignment: .center, spacing: GlassTokens.Space.s5) {
-                HStack(alignment: .iconTitleTop, spacing: GlassTokens.Space.s5) {
+                HStack(alignment: Self.centersTitle(subtitle: subtitle, hasContent: Content.self != EmptyView.self)
+                       ? .center : .iconTitleTop, spacing: GlassTokens.Space.s5) {
                     // The icon's top on the title's cap height, the top
-                    // of its letters (owner, 2026-10-10), on every card.
+                    // of its letters (owner, 2026-10-10), on every card with
+                    // more than its title; a card that is its title alone
+                    // centres the title on the icon (`centersTitle`).
                     Image(systemName: systemImage)
                         .glassGlyph(Self.iconSize, weight: .regular)
                         .foregroundStyle(promo == nil ? GlassColor.textSecondary : GlassColor.accentText)
@@ -269,7 +336,8 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
                 // The re-read control at the head's trailing end (owner,
                 // 2026-10-20), before whatever else sits there.
                 if let refresh {
-                    GlassRefreshButton(refresh.label, small: true, isRefreshing: refresh.isRefreshing, action: refresh.action)
+                    GlassRefreshButton(refresh.label, title: refresh.title, small: true,
+                                       isRefreshing: refresh.isRefreshing, action: refresh.action)
                         .disabled(refresh.isDisabled)
                 }
                 accessory

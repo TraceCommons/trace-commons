@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 license = "AGPL-3.0-or-later"
 repository.workspace = true
+# The integration tests are listed as [[test]] targets at the end of this file.
+autotests = false
 
 [dependencies]
 aes-gcm = "0.10"
@@ -206,3 +208,149 @@ tower = { version = "0.5", features = ["util"] }
 # promoted to a normal dependency.
 trace-commons-contributor = { path = "../trace-commons-contributor" }
 wiremock = "0.6"
+
+# Integration tests. `it` holds every tests/*.rs file not listed below as a
+# module, so the dependency graph links once rather than once per file; see
+# tests/it.rs.
+[[test]]
+name = "it"
+path = "tests/it.rs"
+
+# Its own binary: it installs a process-wide tracing subscriber at TRACE
+# level and asserts on what it captures, which would then hold every other
+# test's logs.
+[[test]]
+name = "near_ai_rail_mock"
+path = "tests/near_ai_rail_mock.rs"
+
+# Its own binary: the `staging channel tests` CI step builds it with the
+# near-ai-staging feature. As a module of `it`, that step would build every
+# other test file under the feature too.
+[[test]]
+name = "staging_pins_tool"
+path = "tests/staging_pins_tool.rs"
+
+# Every PostgreSQL suite is its own binary, as before. Suites that point at
+# the same database must not run at the same time: their fixtures migrate and
+# count table-wide, and each suite's lock or once-cell covers only itself.
+# Separate binaries run one after another; modules of one binary would not.
+[[test]]
+name = "account_merge_pg"
+path = "tests/account_merge_pg.rs"
+[[test]]
+name = "account_onboarding_pg"
+path = "tests/account_onboarding_pg.rs"
+[[test]]
+name = "account_trust_external_pg"
+path = "tests/account_trust_external_pg.rs"
+[[test]]
+name = "account_trust_growth_pg"
+path = "tests/account_trust_growth_pg.rs"
+[[test]]
+name = "account_trust_live_pg"
+path = "tests/account_trust_live_pg.rs"
+[[test]]
+name = "account_trust_pg"
+path = "tests/account_trust_pg.rs"
+[[test]]
+name = "activity_missions_pg"
+path = "tests/activity_missions_pg.rs"
+[[test]]
+name = "admission_ledger_pg"
+path = "tests/admission_ledger_pg.rs"
+[[test]]
+name = "credit_settlement_enumerator_pg"
+path = "tests/credit_settlement_enumerator_pg.rs"
+[[test]]
+name = "device_invite_subject_pg"
+path = "tests/device_invite_subject_pg.rs"
+[[test]]
+name = "inference_connection_pg"
+path = "tests/inference_connection_pg.rs"
+[[test]]
+name = "legacy_invite_counts"
+path = "tests/legacy_invite_counts.rs"
+[[test]]
+name = "legacy_invite_link_pg"
+path = "tests/legacy_invite_link_pg.rs"
+[[test]]
+name = "legacy_payout_carry_pg"
+path = "tests/legacy_payout_carry_pg.rs"
+[[test]]
+name = "migration_atomicity_pg"
+path = "tests/migration_atomicity_pg.rs"
+[[test]]
+name = "mission_publication_pg"
+path = "tests/mission_publication_pg.rs"
+[[test]]
+name = "mission_rewards_cli_errors"
+path = "tests/mission_rewards_cli_errors.rs"
+[[test]]
+name = "mission_rewards_pg"
+path = "tests/mission_rewards_pg.rs"
+[[test]]
+name = "model_training_consent_pg"
+path = "tests/model_training_consent_pg.rs"
+[[test]]
+name = "onboarding_retention_pg"
+path = "tests/onboarding_retention_pg.rs"
+[[test]]
+name = "payout_pass_pg"
+path = "tests/payout_pass_pg.rs"
+[[test]]
+name = "payout_rails_pg"
+path = "tests/payout_rails_pg.rs"
+[[test]]
+name = "referral_bonus_pg"
+path = "tests/referral_bonus_pg.rs"
+[[test]]
+name = "referral_codes_pg"
+path = "tests/referral_codes_pg.rs"
+[[test]]
+name = "referral_rewards_pg"
+path = "tests/referral_rewards_pg.rs"
+[[test]]
+name = "referral_stream_pg"
+path = "tests/referral_stream_pg.rs"
+[[test]]
+name = "register_stats_rls"
+path = "tests/register_stats_rls.rs"
+[[test]]
+name = "reward_participant_pg"
+path = "tests/reward_participant_pg.rs"
+[[test]]
+name = "starter_plausibility_pg"
+path = "tests/starter_plausibility_pg.rs"
+[[test]]
+name = "token_bundle_pg"
+path = "tests/token_bundle_pg.rs"
+[[test]]
+name = "trace_corpus_pg_rls"
+path = "tests/trace_corpus_pg_rls.rs"
+[[test]]
+name = "trace_corpus_pg_store"
+path = "tests/trace_corpus_pg_store.rs"
+[[test]]
+name = "trace_invite_registry_pg"
+path = "tests/trace_invite_registry_pg.rs"
+[[test]]
+name = "trace_session_withdrawal_pg"
+path = "tests/trace_session_withdrawal_pg.rs"
+[[test]]
+name = "upload_principal_ownership_pg"
+path = "tests/upload_principal_ownership_pg.rs"
+[[test]]
+name = "upload_trust_frontier_plan_pg"
+path = "tests/upload_trust_frontier_plan_pg.rs"
+[[test]]
+name = "vector_replay_store_methods"
+path = "tests/vector_replay_store_methods.rs"
+[[test]]
+name = "versioned_pipeline_runtime_pg"
+path = "tests/versioned_pipeline_runtime_pg.rs"
+[[test]]
+name = "witness_evidence_pg"
+path = "tests/witness_evidence_pg.rs"
+[[test]]
+name = "r1_pipeline_measurement"
+path = "tests/r1_pipeline_measurement.rs"

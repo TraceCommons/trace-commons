@@ -1,10 +1,12 @@
 [package]
 name = "trace-commons-contributor"
-version = "0.21.0"
+version = "0.23.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+# The integration tests are listed as [[test]] targets at the end of this file.
+autotests = false
 
 [features]
 # TEST-ONLY. Routes both OS credential stores (device key, account session,
@@ -955,3 +957,50 @@ tokio = { version = "1", features = ["net", "test-util"] }
 [[example]]
 name = "compute-package"
 test = true
+
+# Integration tests. `it` holds every tests/*.rs file not listed below as a
+# module, so the dependency graph links once rather than once per file; see
+# tests/it.rs.
+[[test]]
+name = "it"
+path = "tests/it.rs"
+
+# Its own binary: it sets HOME, XDG_CONFIG_HOME and IRONWIRE_HOME for the
+# whole process, which every other test in a shared process would then read.
+[[test]]
+name = "k2_sample_recorder"
+path = "tests/k2_sample_recorder.rs"
+
+# Its own binary: it sends SIGHUP and SIGTERM to its own process, which every
+# other test in a shared process would receive too.
+[[test]]
+name = "managed_launcher_signals"
+path = "tests/managed_launcher_signals.rs"
+
+# Its own binary: the `staging channel tests` CI step builds it with the
+# near-ai-staging feature. As a module of `it`, that step would build every
+# other test file under the feature too.
+[[test]]
+name = "channel_hosts"
+path = "tests/channel_hosts.rs"
+
+# Its own binary: the `staging channel tests` CI step builds it with the
+# near-ai-staging feature. As a module of `it`, that step would build every
+# other test file under the feature too.
+[[test]]
+name = "credential_store_isolation"
+path = "tests/credential_store_isolation.rs"
+
+# Its own binary: the `staging channel tests` CI step builds it with the
+# near-ai-staging feature. As a module of `it`, that step would build every
+# other test file under the feature too.
+[[test]]
+name = "preflight"
+path = "tests/preflight.rs"
+
+# Its own binary: the `staging channel tests` CI step builds it with the
+# near-ai-staging feature. As a module of `it`, that step would build every
+# other test file under the feature too.
+[[test]]
+name = "version_channel"
+path = "tests/version_channel.rs"

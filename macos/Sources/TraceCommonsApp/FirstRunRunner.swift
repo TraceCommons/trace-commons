@@ -39,9 +39,12 @@ protocol FirstRunDaemon: AnyObject {
     func firstRunEstimate() async -> DaemonData.FirstRunEstimate?
     func enrollInvite(_ invite: String) async -> Bool
     func signInNearAI() async -> Bool
-    /// The near.ai login: true once the daemon keeps a near.ai session,
-    /// after the browser sign-in when it kept none.
-    func nearAILogin() async -> Bool
+    /// The near.ai login: signed in once the daemon keeps a near.ai
+    /// session, after the browser sign-in when it kept none; cancelled when
+    /// the daemon ended the attempt as the person's (see
+    /// `NearAILoginPoll.cancelled`), which the first run does not report as a
+    /// failure; failed otherwise.
+    func nearAILoginOutcome() async -> NearAILoginOutcome
     /// End the browser sign-in `nearAILogin` is waiting on
     /// (`near_ai_credential_cancel`). True only once the daemon took it.
     func cancelNearAILogin() async -> Bool
@@ -125,6 +128,9 @@ final class FirstRunRunner: ObservableObject {
     @Published private(set) var dollarEstimate: DaemonData.FirstRunEstimate?
     private var dollarEstimateAsked = false
     @Published private(set) var isCommitting = false
+    /// The commit running now, nil between commits: Join keeps Back on
+    /// screen during its sign-in (`JoinScreenLayout.backWhileCommitting`).
+    @Published private(set) var committing: CommitPoint?
     /// The near.ai login without an invite is running, which can wait on
     /// the browser for up to `NearAILoginPoll.limit`: Join offers Cancel
     /// beside the spinning Sign in only while this holds.
@@ -133,7 +139,7 @@ final class FirstRunRunner: ObservableObject {
     /// with the NEAR AI enrolment only; the daemon checks it.
     @Published var referralCode = ""
     /// The login `signInWaiting` covers, so Cancel can end its wait.
-    private var loginTask: Task<Bool, Never>?
+    private var loginTask: Task<NearAILoginOutcome, Never>?
     /// The daemon's answer to a Cancel, awaited before the commit ends so
     /// a Continue pressed straight after cannot start a sign-in the cancel
     /// then ends.
@@ -176,7 +182,11 @@ final class FirstRunRunner: ObservableObject {
     func commit(_ point: CommitPoint, carrying refusal: FirstRunFailure? = nil) async {
         guard !isCommitting else { return }
         isCommitting = true
-        defer { isCommitting = false }
+        committing = point
+        defer {
+            isCommitting = false
+            committing = nil
+        }
         failure = nil
         refusedGrant = nil
         carriedRefusal = refusal
@@ -251,10 +261,10 @@ final class FirstRunRunner: ObservableObject {
             state.signedIn = true
         case .nearAILogin:
             let daemon = self.daemon
-            let login = Task { await daemon.nearAILogin() }
+            let login = Task { await daemon.nearAILoginOutcome() }
             loginTask = login
             signInWaiting = true
-            let signedIn = await login.value
+            let outcome = await login.value
             signInWaiting = false
             loginTask = nil
             // The person cancelled: the step and the near.ai choice stay,
@@ -267,9 +277,15 @@ final class FirstRunRunner: ObservableObject {
                 if !(await cancel.value) { failure = .signInFailed }
                 return false
             }
+            // The person ended it in the browser (the wallet's Cancel, or the
+            // login page coming back after a pick, which already says to
+            // start again from the app): as a Cancel here, the step and the
+            // near.ai choice stay, nothing is said, and the next Continue
+            // signs in afresh.
+            if outcome == .cancelled { return false }
             // No Back to leave a sign-in that keeps failing: back to Join,
             // the choice cleared, which says why (`nearAINotice`).
-            guard signedIn else {
+            guard outcome == .signedIn else {
                 state = FirstRunNavigation.returnToJoin(afterNearAIFailure: state)
                 return fail(.signInFailed)
             }
@@ -325,6 +341,19 @@ final class FirstRunRunner: ObservableObject {
         loginCancel = cancel
         login.cancel()
         _ = await cancel.value
+    }
+
+    /// Back on Join while the near.ai browser sign-in waits: the wait is
+    /// ended as Cancel ends it (`cancelSignIn`: nothing enrolled, nothing
+    /// said), and once the commit is over the person goes back a step,
+    /// every answer kept. Not waiting, nothing done: the short daemon calls
+    /// around the wait are not left mid-way, so a late failure never
+    /// returns the person to Join from a step they moved to.
+    func backFromSignIn() async {
+        guard signInWaiting, committing == .signIn else { return }
+        await cancelSignIn()
+        while isCommitting { await Task.yield() }
+        state = FirstRunNavigation.back(state)
     }
 
     /// The marker is written. No suspension point separates this from the

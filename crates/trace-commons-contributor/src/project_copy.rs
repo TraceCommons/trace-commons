@@ -7,8 +7,10 @@ pub const KEEP_PROJECT: &str = "Keep project";
 pub const IGNORE_PROJECT_TOOLTIP: &str = "Stops this project being offered and clears what it has waiting. \
      Anything already submitted is unaffected, and you can undo this in Settings.";
 
+/// The mode is named Never, so the title says so (it was "Ignore
+/// {project}?"). DRAFT, NEEDS APPROVAL (2026-11-04).
 pub fn ignore_project_title(project: &str) -> String {
-    format!("Ignore {project}?")
+    format!("Set {project} to Never?")
 }
 
 pub fn ignore_project_body(pending: usize) -> String {
@@ -797,7 +799,7 @@ mod copy_table_tests {
     #[test]
     fn the_ignore_table_carries_the_project_and_the_count() {
         let copy = ignore_project_copy("api", 3);
-        assert_eq!(copy.title, "Ignore api?");
+        assert_eq!(copy.title, "Set api to Never?");
         assert_eq!(copy.body, ignore_project_body(3));
         assert!(copy.body.contains("3 waiting traces"));
         assert_eq!(copy.button, IGNORE_PROJECT);

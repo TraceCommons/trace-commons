@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn a_quoted_path_reaches_the_program_unchanged() {
         let dir = tempfile::tempdir().unwrap();
-        let odd = dir.path().join("Trace Commons's \"app\" $HOME `x` a\\b");
+        let odd = dir.path().join("Near.ai Staging's \"app\" $HOME `x` a\\b");
         std::fs::create_dir_all(&odd).unwrap();
         let exe = odd.join("print args");
         std::fs::write(
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn the_settings_name_only_a_command_status_line() {
         let settings = settings_for(
-            Path::new("/Applications/Trace Commons.app/Contents/MacOS/near-ai"),
+            Path::new("/Applications/Near.ai Staging.app/Contents/MacOS/near-ai"),
             Path::new("/Users/a/tc/managed-routes/1"),
             Shell::Posix,
         )
@@ -224,7 +224,7 @@ mod tests {
             value,
             serde_json::json!({"statusLine": {
                 "type": "command",
-                "command": "'/Applications/Trace Commons.app/Contents/MacOS/near-ai' statusline --home /Users/a/tc/managed-routes/1"
+                "command": "'/Applications/Near.ai Staging.app/Contents/MacOS/near-ai' statusline --home /Users/a/tc/managed-routes/1"
             }})
         );
     }

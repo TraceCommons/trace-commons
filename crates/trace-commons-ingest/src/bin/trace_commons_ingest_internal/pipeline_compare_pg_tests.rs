@@ -278,6 +278,7 @@ fn compare_main_gate(floors: DerivedFloors) -> MainGateConfig {
         chunk_cap: reference.chunk_cap,
         chunk_min_tokens: reference.chunk_min_tokens,
         novelty_utility_microcredits: 2_500_000,
+        credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
     }
 }
 

@@ -5,9 +5,18 @@
 # The pilot runs two services; both can change, so this deploys BOTH by default:
 #   - trace-commons-upload-claim-issuer  (EdDSA claims, device-key registration,
 #     per-user subject, /v1/enroll; serves the JWKS the ingest verifies at boot)
-#   - trace-commons-ingest               (account API; applies migrations on boot)
+#   - trace-commons-ingest               (account API; runs the migration runner on boot)
 # The issuer is installed first so its (possibly rotated) JWKS is up before ingest
 # restarts and fetches it.
+#
+# Migrations: both binaries run the migration runner at boot (the issuer only when
+# TRACE_COMMONS_INVITE_REGISTRY_DATABASE_URL is set), as whatever role they connect
+# as. On the pilot ingest connects as a runtime role that owns nothing, so a build
+# that carries a new migration must have it applied as the migrator first
+# (docs/operator/deployment.md, "Redeploying the binary"). And because `both`
+# restarts the issuer first, an issuer that migrates applies new migrations while
+# the OLD ingest is still serving: when a build carries migrations, stop both
+# units before running this (restart starts a stopped unit).
 #
 # Usage (on tc-pilot-host):
 #   deploy/pilot-gcp/pull-and-install.sh                    # both binaries (default)

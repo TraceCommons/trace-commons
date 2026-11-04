@@ -37,12 +37,18 @@ pub const PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE: &str = "vector_worker";
 /// Ruling T15-2: the ledger `reason` of a compatibility `NoveltyUtility`
 /// event, in `main`'s shape `novelty_utility:<version>`, with the
 /// compatibility Score rule as the version where `main` has its gate policy
-/// version.
-pub fn pipeline_novelty_utility_reason() -> String {
-    format!(
-        "novelty_utility:{}",
+/// version: `compatibility_quality_novelty_v1` for an unbatched leg (the
+/// flat rule), `compatibility_graded_perplexity_v1` for a batched one (the
+/// graded rule).
+pub fn pipeline_novelty_utility_reason(
+    event: crate::versioned_pipeline_bundle::PipelineTraceCreditEvent,
+) -> String {
+    let rule = if event.settles_into_batch() {
+        crate::versioned_pipeline_compat::COMPATIBILITY_GRADED_SCORE_RULE
+    } else {
         crate::versioned_pipeline_compat::COMPATIBILITY_SCORE_RULE
-    )
+    };
+    format!("novelty_utility:{rule}")
 }
 pub const PIPELINE_TEST_CREDIT_CAP_MICROCREDITS: u64 = 10_000_000;
 

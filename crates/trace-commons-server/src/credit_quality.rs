@@ -4,7 +4,9 @@
 //! Pure, deterministic per-decision credit-quality score `q in [0,1]`, computed
 //! from the gate's stored numeric signals. Multiplicative and log-concave
 //! (anti-Goodhart), with a peak-vs-representative anomaly term used ONLY as a
-//! fraud flag — never a bonus. Shadow-only: nothing here settles or pays.
+//! fraud flag — never a bonus. `q` itself is shadow-only and pays nothing; its
+//! perplexity and anomaly terms also price the graded compatibility credit
+//! rule (`versioned_pipeline_compat::graded_perplexity_award`).
 
 /// Pinned, versioned calibration constants. `*_CEIL` and `anomaly_*` are
 /// calibration outputs; the V1 defaults are seeded from the 2026-07-12 27B
@@ -164,21 +166,25 @@ fn graded_floor(sat: f64, floor_mult_micros: i64) -> f64 {
     floor_mult + (1.0 - floor_mult) * sat
 }
 
-pub fn credit_quality(
-    ppl_rep_micros: i64,
-    ppl_peak_micros: i64,
-    nov_rep_micros: i64,
-    k: &CreditQualityConstants,
-) -> CreditQualityScore {
-    let f = graded_floor(
+/// The perplexity term `f` of `q`: the concave, saturating map of the
+/// representative perplexity onto `[0, 1]`, with the graded floor applied.
+/// The graded compatibility credit rule prices its award with this same
+/// term, so the shadow `q` and the award never disagree about it.
+pub(crate) fn perplexity_term(ppl_rep_micros: i64, k: &CreditQualityConstants) -> f64 {
+    graded_floor(
         saturating_term(ppl_rep_micros, k.ppl_floor_micros, k.ppl_ceil_micros),
         k.ppl_floor_mult_micros,
-    );
-    let g = graded_floor(
-        saturating_term(nov_rep_micros, k.nov_floor_micros, k.nov_ceil_micros),
-        k.nov_floor_mult_micros,
-    );
+    )
+}
 
+/// The anomaly term `a` of `q`, from the spikiness ratio `peak / rep`: 1 up
+/// to the soft ratio, falling linearly to 0 at the hard ratio. Returns the
+/// term, the ratio in micros, and whether the hard ratio was reached.
+pub(crate) fn anomaly_term(
+    ppl_rep_micros: i64,
+    ppl_peak_micros: i64,
+    k: &CreditQualityConstants,
+) -> (f64, i64, bool) {
     // Spikiness ratio r = peak / rep (real units); rep <= 0 -> ratio 1.0 (no signal).
     let (ratio, anomaly_ratio_micros) = if ppl_rep_micros <= 0 {
         (1.0_f64, 1_000_000_i64)
@@ -196,6 +202,21 @@ pub fn credit_quality(
     } else {
         (1.0 - (ratio - soft) / (hard - soft), false)
     };
+    (a, anomaly_ratio_micros, withheld)
+}
+
+pub fn credit_quality(
+    ppl_rep_micros: i64,
+    ppl_peak_micros: i64,
+    nov_rep_micros: i64,
+    k: &CreditQualityConstants,
+) -> CreditQualityScore {
+    let f = perplexity_term(ppl_rep_micros, k);
+    let g = graded_floor(
+        saturating_term(nov_rep_micros, k.nov_floor_micros, k.nov_ceil_micros),
+        k.nov_floor_mult_micros,
+    );
+    let (a, anomaly_ratio_micros, withheld) = anomaly_term(ppl_rep_micros, ppl_peak_micros, k);
 
     let q = (f * g * a).clamp(0.0, 1.0);
     CreditQualityScore {

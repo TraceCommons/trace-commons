@@ -43,21 +43,20 @@ final class StagingSignInTests: XCTestCase {
         }
     }
 
-    /// The first run's near.ai login, and the Monitor's sign-in notice, name
-    /// no provider: the daemon starts the channel's default, so the app
-    /// cannot pick the wallet on a build that has none. The first-run
-    /// screens never choose a provider of their own.
+    /// The first run's near.ai login names no provider, and neither does
+    /// the Monitor's sign-in notice: the daemon's browser page offers the
+    /// channel's logins (owner, 2026-11-02), so the app cannot pick the
+    /// wallet on a build that has none. The first-run screens never choose
+    /// a provider of their own.
     func test_theFirstRunSignInNamesNoProvider() throws {
         let model = try Self.source("AppModel.swift")
-        let login = try XCTUnwrap(model.range(of: "func nearAILogin() async -> Bool {"))
-        let end = try XCTUnwrap(model.range(of: "func cancelNearAILogin()", range: login.upperBound..<model.endIndex))
-        let body = model[login.upperBound..<end.lowerBound]
-        XCTAssertTrue(body.contains("client.nearAiCredentialStart()"), "the first run's login names a provider")
-        XCTAssertFalse(body.contains("provider:"))
+        XCTAssertTrue(
+            model.contains("func nearAILoginOutcome() async -> NearAILoginOutcome { await nearAILoginOutcome(fresh: false) }"),
+            "the first run's login names a provider")
 
         let notices = try Self.source("Views/Monitor/MonitorNotices.swift")
-        XCTAssertTrue(notices.contains("await model.startNearAiCredential() else"))
-        XCTAssertFalse(notices.contains("provider: \"near\""))
+        XCTAssertTrue(notices.contains("NearAiSignIn.begin(model, openURL: openURL)"))
+        XCTAssertFalse(notices.contains("provider:"))
 
         let firstRun = GlassSurfaceRulesTests.root.appendingPathComponent("Views/FirstRun")
         for file in try FileManager.default.contentsOfDirectory(atPath: firstRun.path) where file.hasSuffix(".swift") {
@@ -74,23 +73,7 @@ final class StagingSignInTests: XCTestCase {
         let start = try XCTUnwrap(daemon.calls.first { $0.0 == CredentialSurface.startMethod })
         let params = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(start.1.utf8)) as? [String: Any])
         XCTAssertNil(params["provider"])
-    }
-
-    /// The Settings and Inference picker offers what the core offers: no
-    /// NEAR wallet on staging, and so never its wallet notice.
-    @MainActor
-    func test_thePickerOffersNoWalletOnStaging() throws {
-        let model = AppModel()
-        let copy = try XCTUnwrap(model.privateInferenceCopy)
-        let tags = CredentialSection.providerOptions(copy).map(\.tag)
-        XCTAssertEqual(tags, LinkedChannel.channel.nearAiSignInProviders)
-        XCTAssertEqual(CredentialSection.offeredProviders.first, LinkedChannel.channel.nearAiSignInProviders.first)
-        XCTAssertEqual(tags.contains("near"), !LinkedChannel.isStaging)
-        // A provider the core offers that this build has no title for is not
-        // drawn, and the order is the core's.
-        XCTAssertEqual(
-            CredentialSection.providerOptions(copy, offered: ["github", "unknown", "google"]).map(\.tag),
-            ["github", "google"])
+        XCTAssertTrue(params.isEmpty, "the start carries no parameters: \(params)")
     }
 
     /// When a near.ai join is refused, the first run words the daemon's

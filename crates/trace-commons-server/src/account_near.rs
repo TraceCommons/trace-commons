@@ -189,7 +189,62 @@ pub async fn near_account_has_full_access_key(
         .await
         .context("NEAR RPC response was not valid JSON")?;
 
-    Ok(key_list_has_full_access(&json, public_key))
+    Ok(access_key_list_answer(&json, public_key)?)
+}
+
+/// The NEAR RPC answered, but not about the account: a handler error about
+/// the node itself (still syncing, a shard it does not track, a block it does
+/// not know, an internal error or timeout), or a body that is neither a key
+/// list nor an error. nearcore sends these with HTTP `200`, so the status
+/// alone cannot tell them apart. Label only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("near_rpc_not_answered")]
+pub struct NearRpcNotAnswered;
+
+/// What a `view_access_key_list` answer says, deciding only on a well-formed
+/// one: a key list decides by [`key_list_has_full_access`]; an error naming
+/// the account (`UNKNOWN_ACCOUNT`, `INVALID_ACCOUNT`) or the request
+/// (`REQUEST_VALIDATION_ERROR`) is `false`; any other error, or a body that
+/// is neither, is [`NearRpcNotAnswered`]. An older node's error without a
+/// `cause` decides `false` only when its `data` says the account does not
+/// exist.
+pub fn access_key_list_answer(
+    rpc_json: &serde_json::Value,
+    public_key: &str,
+) -> std::result::Result<bool, NearRpcNotAnswered> {
+    if rpc_json
+        .get("result")
+        .and_then(|result| result.get("keys"))
+        .and_then(|keys| keys.as_array())
+        .is_some()
+    {
+        return Ok(key_list_has_full_access(rpc_json, public_key));
+    }
+    let Some(error) = rpc_json.get("error") else {
+        return Err(NearRpcNotAnswered);
+    };
+    if error.get("name").and_then(|name| name.as_str()) == Some("REQUEST_VALIDATION_ERROR") {
+        return Ok(false);
+    }
+    match error
+        .get("cause")
+        .and_then(|cause| cause.get("name"))
+        .and_then(|name| name.as_str())
+    {
+        Some("UNKNOWN_ACCOUNT" | "INVALID_ACCOUNT") => Ok(false),
+        Some(_) => Err(NearRpcNotAnswered),
+        None => {
+            let says_no_account = error
+                .get("data")
+                .and_then(|data| data.as_str())
+                .is_some_and(|data| data.contains("does not exist"));
+            if says_no_account {
+                Ok(false)
+            } else {
+                Err(NearRpcNotAnswered)
+            }
+        }
+    }
 }
 
 /// Test seam for the NEAR access-key binding check.
@@ -344,6 +399,67 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(kp.sign(digest.as_slice()).as_ref());
 
         assert!(verify_nep413(&pk, message, &nonce, recipient, None, &sig).is_err());
+    }
+
+    #[test]
+    fn only_a_well_formed_access_key_answer_decides() {
+        let list = serde_json::json!({"result": {"keys": [
+            {"public_key": "ed25519:full", "access_key": {"permission": "FullAccess"}}
+        ]}});
+        assert_eq!(access_key_list_answer(&list, "ed25519:full"), Ok(true));
+        assert_eq!(access_key_list_answer(&list, "ed25519:other"), Ok(false));
+        let error = |name: &str, cause: &str| {
+            serde_json::json!({"jsonrpc": "2.0", "id": "tc", "error": {
+                "name": name, "cause": {"name": cause, "info": {}},
+                "code": -32000, "message": "Server error", "data": "detail"
+            }})
+        };
+        // About the account or the request: decided.
+        for (name, cause) in [
+            ("HANDLER_ERROR", "UNKNOWN_ACCOUNT"),
+            ("HANDLER_ERROR", "INVALID_ACCOUNT"),
+            ("REQUEST_VALIDATION_ERROR", "PARSE_ERROR"),
+        ] {
+            assert_eq!(
+                access_key_list_answer(&error(name, cause), "ed25519:full"),
+                Ok(false),
+                "{cause}"
+            );
+        }
+        // About the node: not answered, though the HTTP status was 200.
+        for (name, cause) in [
+            ("HANDLER_ERROR", "NO_SYNCED_BLOCKS"),
+            ("HANDLER_ERROR", "UNAVAILABLE_SHARD"),
+            ("HANDLER_ERROR", "UNKNOWN_BLOCK"),
+            ("INTERNAL_ERROR", "INTERNAL_ERROR"),
+            ("HANDLER_ERROR", "TIMEOUT_ERROR"),
+        ] {
+            assert_eq!(
+                access_key_list_answer(&error(name, cause), "ed25519:full"),
+                Err(NearRpcNotAnswered),
+                "{cause}"
+            );
+        }
+        // Neither a key list nor an error.
+        for body in [serde_json::json!({}), serde_json::json!({"result": {}})] {
+            assert_eq!(
+                access_key_list_answer(&body, "ed25519:full"),
+                Err(NearRpcNotAnswered)
+            );
+        }
+        // An older node's error with no cause.
+        let legacy = |data: &str| serde_json::json!({"error": {"code": -32000, "data": data}});
+        assert_eq!(
+            access_key_list_answer(
+                &legacy("account alice.near does not exist while viewing"),
+                "ed25519:full"
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            access_key_list_answer(&legacy("node is syncing"), "ed25519:full"),
+            Err(NearRpcNotAnswered)
+        );
     }
 
     #[test]

@@ -41,7 +41,7 @@ export function AppShell() {
   const errors = [
     desktop.error,
     daemonEventError
-      ? "Live daemon updates are unavailable. Refresh data manually."
+      ? "Live updates are unavailable. Refresh data manually."
       : null,
   ].filter((error): error is string => error !== null);
   const requiresOnboarding =
