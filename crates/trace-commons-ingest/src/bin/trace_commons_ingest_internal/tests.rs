@@ -6668,6 +6668,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         referral_config: Default::default(),
         referral_network_mark_key: None,
         first_run_estimate: Default::default(),
+        first_run_copy: Default::default(),
         root,
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -31404,6 +31405,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         referral_config: Default::default(),
         referral_network_mark_key: None,
         first_run_estimate: Default::default(),
+        first_run_copy: Default::default(),
         root: temp.path().to_path_buf(),
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -103607,5 +103609,299 @@ fn read_last_nonempty_line_skips_unicode_blank_lines() {
             Some("{\"event\":1}"),
             "{body:?}"
         );
+    }
+}
+
+mod first_run_copy_tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use tower::ServiceExt;
+    use trace_commons_protocol::first_run_copy::{
+        DEFAULT_CREDIT_DEPENDS, DEFAULT_FOUND_COULD_CREDIT, DEFAULT_FOUND_CREDIT,
+        FIRST_RUN_COPY_MAX_REQUEST_BYTES, FirstRunCopyRequest, MIB,
+    };
+
+    // Synthetic operator settings: not a rate or wording anyone runs with.
+    const PER_TRACE: &str = "250000";
+    const CEILING: &str = "20000000";
+    const LINE: &str = "SAMPLE headline {amount}.";
+    const COULD: &str = "SAMPLE could headline {amount}.";
+
+    async fn post(state: Arc<AppState>, ip: &str, body: Vec<u8>) -> axum::response::Response {
+        app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    // The literal, so the route inventory's `^/v1/public/`
+                    // rule is the one that classifies it.
+                    .uri("/v1/public/first-run-copy")
+                    .header("content-type", "application/json")
+                    .header("x-forwarded-for", ip)
+                    .body(Body::from(body))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response")
+    }
+
+    async fn body_text(response: axum::response::Response) -> String {
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    #[test]
+    fn the_route_literal_is_the_protocol_path() {
+        assert_eq!(
+            trace_commons_protocol::first_run_copy::FIRST_RUN_COPY_PATH,
+            "/v1/public/first-run-copy"
+        );
+    }
+
+    /// Unauthenticated: no credential is sent, and with no setting the
+    /// answer is the default lines, not stored and not cached.
+    #[tokio::test]
+    async fn the_route_answers_the_default_lines() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let response = post(
+            test_state(temp.path().to_path_buf()),
+            "198.51.100.10",
+            br#"{"trace_count":4100,"total_bytes":985661440}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff")
+        );
+        let body: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "found_credit": DEFAULT_FOUND_CREDIT,
+                "found_could_credit": DEFAULT_FOUND_COULD_CREDIT,
+                "credit_depends": DEFAULT_CREDIT_DEPENDS,
+            })
+        );
+    }
+
+    /// Fail closed: anything a client following the protocol would not
+    /// send is a 400 that echoes no figure.
+    #[tokio::test]
+    async fn bad_input_is_a_400_that_echoes_nothing() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        for body in [
+            &b"not json"[..],
+            b"[]",
+            b"{}",
+            br#"{"trace_count":4100}"#,
+            br#"{"trace_count":4123,"total_bytes":0}"#,
+            br#"{"trace_count":4100,"total_bytes":4123}"#,
+            br#"{"trace_count":4100,"total_bytes":0,"path":"/Users/x"}"#,
+            br#"{"trace_count":-1,"total_bytes":0}"#,
+            br#"{"trace_count":1000000000,"total_bytes":0}"#,
+        ] {
+            let response = post(state.clone(), "198.51.100.11", body.to_vec()).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+            let text = body_text(response).await;
+            assert!(!text.contains("4123"), "{text}");
+            assert!(!text.contains("Users"), "{text}");
+        }
+        // Past the body bound: refused before it is read.
+        let big = vec![b' '; FIRST_RUN_COPY_MAX_REQUEST_BYTES + 1];
+        let response = post(state, "198.51.100.11", big).await;
+        assert!(response.status().is_client_error(), "{}", response.status());
+    }
+
+    /// Rate-limited per client address, like the other public routes.
+    #[tokio::test]
+    async fn the_route_is_rate_limited_per_address() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let body = br#"{"trace_count":10,"total_bytes":0}"#.to_vec();
+        let mut last = StatusCode::OK;
+        for _ in 0..40 {
+            last = post(state.clone(), "198.51.100.12", body.clone())
+                .await
+                .status();
+        }
+        assert_eq!(last, StatusCode::TOO_MANY_REQUESTS);
+        // Another address is not held up by it.
+        assert_eq!(
+            post(state, "198.51.100.13", body).await.status(),
+            StatusCode::OK
+        );
+    }
+
+    /// The dollar line is off unless all four settings are given.
+    #[test]
+    fn the_dollar_line_is_off_by_default() {
+        let config = first_run_copy::config_from_values(None, None, None, None).unwrap();
+        assert_eq!(config, first_run_copy::FirstRunCopyConfig::default());
+        let request = FirstRunCopyRequest {
+            trace_count: 4100,
+            total_bytes: 940 * MIB,
+        };
+        let (lines, served) = first_run_copy::lines_for(&config, &request);
+        assert_eq!(served, "default");
+        assert_eq!(
+            lines,
+            trace_commons_protocol::first_run_copy::default_lines()
+        );
+    }
+
+    /// Configured, the amount is the traces sent times the per-trace figure,
+    /// capped at the account ceiling, in the operator's words.
+    #[test]
+    fn a_configured_dollar_line_is_capped_at_the_ceiling() {
+        let config = first_run_copy::config_from_values(
+            Some(PER_TRACE),
+            Some(CEILING),
+            Some(LINE),
+            Some(COULD),
+        )
+        .unwrap();
+        let at = |trace_count| {
+            first_run_copy::lines_for(
+                &config,
+                &FirstRunCopyRequest {
+                    trace_count,
+                    total_bytes: 0,
+                },
+            )
+        };
+        let (few, served) = at(30);
+        assert_eq!(served, "usd");
+        assert_eq!(few.found_credit, "SAMPLE headline $7.50.");
+        assert_eq!(few.found_could_credit, "SAMPLE could headline $7.50.");
+        assert_eq!(few.credit_depends.as_deref(), Some(DEFAULT_CREDIT_DEPENDS));
+        let (many, _) = at(4100);
+        assert_eq!(many.found_credit, "SAMPLE headline $20.");
+        // Nothing found is the default lines, never "$0".
+        assert_eq!(at(0).1, "default");
+    }
+
+    /// Fail closed at boot: half set, not plain whole cents, a per-trace
+    /// figure above the ceiling, or a template that is not one valid line
+    /// with one `{amount}` refuses with one label that names no value.
+    #[test]
+    fn a_bad_dollar_setting_refuses_boot() {
+        let cases: [[Option<&str>; 4]; 10] = [
+            [Some(PER_TRACE), None, None, None],
+            [Some(PER_TRACE), Some(CEILING), Some(LINE), None],
+            [Some("0"), Some(CEILING), Some(LINE), Some(COULD)],
+            [Some("250001"), Some(CEILING), Some(LINE), Some(COULD)],
+            [Some(" 250000"), Some(CEILING), Some(LINE), Some(COULD)],
+            [Some(CEILING), Some(PER_TRACE), Some(LINE), Some(COULD)],
+            [
+                Some(PER_TRACE),
+                Some(CEILING),
+                Some("No amount."),
+                Some(COULD),
+            ],
+            [
+                Some(PER_TRACE),
+                Some(CEILING),
+                Some("{amount} and {amount}"),
+                Some(COULD),
+            ],
+            [
+                Some(PER_TRACE),
+                Some(CEILING),
+                Some("The daemon pays {amount}."),
+                Some(COULD),
+            ],
+            [
+                Some(PER_TRACE),
+                Some(CEILING),
+                Some(LINE),
+                Some("Two\nlines {amount}"),
+            ],
+        ];
+        for [a, b, c, d] in cases {
+            let err = first_run_copy::config_from_values(a, b, c, d).expect_err("refused");
+            assert_eq!(
+                err.to_string(),
+                "first_run_copy_usd_invalid",
+                "{a:?} {b:?} {c:?} {d:?}"
+            );
+        }
+    }
+
+    /// The log line carries two labels from a fixed set and never a figure.
+    #[test]
+    fn the_log_buckets_are_labels_never_figures() {
+        let known = [
+            "traces_0",
+            "traces_1_9",
+            "traces_10_99",
+            "traces_100_999",
+            "traces_1k_9k",
+            "traces_10k_99k",
+            "traces_100k_plus",
+            "mib_0",
+            "mib_1_9",
+            "mib_10_99",
+            "mib_100_999",
+            "mib_1k_9k",
+            "mib_10k_99k",
+            "mib_100k_plus",
+        ];
+        for (count, mib) in [
+            (0, 0),
+            (7, 3),
+            (41, 12),
+            (4100, 940),
+            (4100, 1200),
+            (99_000, 56_000),
+            (100_000_000, 1_000_000_000),
+        ] {
+            let request = FirstRunCopyRequest {
+                trace_count: count,
+                total_bytes: mib * MIB,
+            };
+            assert!(request.is_valid());
+            let (traces, size) = first_run_copy::log_buckets(&request);
+            assert!(known.contains(&traces), "{traces}");
+            assert!(known.contains(&size), "{size}");
+            for label in [traces, size] {
+                if count >= 10 {
+                    assert!(!label.contains(&count.to_string()), "{label}");
+                }
+                if mib >= 10 {
+                    assert!(!label.contains(&mib.to_string()), "{label}");
+                }
+            }
+        }
+        assert_eq!(
+            first_run_copy::log_buckets(&FirstRunCopyRequest {
+                trace_count: 4100,
+                total_bytes: 940 * MIB
+            }),
+            ("traces_1k_9k", "mib_100_999")
+        );
+    }
+
+    #[test]
+    fn dollar_figures_are_cut_to_cents_with_grouping() {
+        assert_eq!(first_run_copy::usd_figure(250_000), "$0.25");
+        assert_eq!(first_run_copy::usd_figure(20_000_000), "$20");
+        assert_eq!(first_run_copy::usd_figure(1_030_750_000), "$1,030.75");
+        assert_eq!(first_run_copy::usd_figure(19_999), "$0.01");
     }
 }
