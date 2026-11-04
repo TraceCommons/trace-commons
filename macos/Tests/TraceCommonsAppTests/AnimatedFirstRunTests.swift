@@ -115,13 +115,13 @@ final class AnimatedFirstRunTests: XCTestCase {
         XCTAssertNil(TracesScreenLayout.found(state, discovered: nil), "not counted yet")
 
         let copy = try words()
-        XCTAssertEqual([copy.traces.estimate.min, copy.traces.estimate.max], [3, 8])
+        XCTAssertEqual([copy.traces.estimate.min, copy.traces.estimate.max], [1, 1])
         XCTAssertEqual(
             TracesScreenLayout.estimate(found: 1365, lookup: nil, dollars: nil),
-            "An estimated $81.90–$341.25 in NEAR AI credit")
+            "An estimated $341.25 in NEAR AI credit")
         XCTAssertEqual(
             TracesScreenLayout.estimate(found: 4123, lookup: nil, dollars: nil),
-            "An estimated $247.38–$1,030.75 in NEAR AI credit")
+            "An estimated $1,030.75 in NEAR AI credit")
 
         let decode = { (json: String) in try JSONDecoder().decode(DaemonData.InviteLookup.self, from: Data(json.utf8)) }
         let invite = try decode(#"{"valid":true,"credit_range":{"min":2,"max":6,"unit":"points_per_accepted_trace"}}"#)
@@ -134,7 +134,7 @@ final class AnimatedFirstRunTests: XCTestCase {
         let foreign = try decode(#"{"valid":true,"credit_range":{"min":1,"max":2,"unit":"dollars"}}"#)
         XCTAssertEqual(
             TracesScreenLayout.estimate(found: 1, lookup: foreign, dollars: nil),
-            "An estimated $0.06–$0.25 in NEAR AI credit")
+            "An estimated $0.25 in NEAR AI credit")
 
         // The commons' range (synthetic): dollars replace points, whatever
         // the invite says.
@@ -147,7 +147,7 @@ final class AnimatedFirstRunTests: XCTestCase {
         let none = try JSONDecoder().decode(DaemonData.FirstRunEstimate.self, from: Data("{}".utf8))
         XCTAssertEqual(
             TracesScreenLayout.estimate(found: 1365, lookup: nil, dollars: none),
-            "An estimated $81.90–$341.25 in NEAR AI credit", "no range is the pilot price")
+            "An estimated $341.25 in NEAR AI credit", "no range is the pilot price")
 
         for found in [nil, 0] as [UInt64?] {
             XCTAssertNil(TracesScreenLayout.estimate(found: found, lookup: nil, dollars: commons))

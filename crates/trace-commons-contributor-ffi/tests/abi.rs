@@ -6371,7 +6371,7 @@ fn the_first_run_estimate_line_crosses_the_abi() {
     );
     assert_eq!(
         line(r#"{"traces":1365}"#).as_deref(),
-        Some("An estimated $81.90–$341.25 in NEAR AI credit")
+        Some("An estimated $341.25 in NEAR AI credit")
     );
     assert_eq!(
         line(

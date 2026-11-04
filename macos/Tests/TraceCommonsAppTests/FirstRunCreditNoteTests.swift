@@ -62,10 +62,10 @@ final class FirstRunCreditNoteTests: XCTestCase {
     func testTracesEstimateIsConditionalWhileTrainCodingModelsIsOff() throws {
         XCTAssertEqual(
             TracesScreenLayout.estimate(found: 1365, lookup: nil, dollars: nil, earnsCredit: false),
-            "You could earn an estimated $81.90–$341.25 in NEAR AI credit")
+            "You could earn an estimated $341.25 in NEAR AI credit")
         XCTAssertEqual(
             TracesScreenLayout.estimate(found: 1365, lookup: nil, dollars: nil, earnsCredit: true),
-            "An estimated $81.90–$341.25 in NEAR AI credit")
+            "An estimated $341.25 in NEAR AI credit")
         let commons = try JSONDecoder().decode(
             DaemonData.FirstRunEstimate.self,
             from: Data(#"{"usd_micros_per_accepted_trace":{"min":120000,"max":340000}}"#.utf8))

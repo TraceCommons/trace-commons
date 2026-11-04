@@ -1,50 +1,42 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The first run's dollar range per accepted trace, derived from the
+//! The first run's dollar estimate per accepted trace, derived from the
 //! pricing the server pays with (`GET /v1/public/first-run-estimate`, see
 //! `trace_commons_protocol::first_run_estimate`).
 //!
 //! An operator can still set the range by hand
 //! (`TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_MIN` / `_MAX`), and that
-//! wins. Without it, ingest derives the range from three things it already
-//! holds at boot:
+//! wins. Without it, ingest derives one figure, published as a range whose
+//! ends meet: **one point per accepted trace** (owner decision, 2026-11-04)
+//! at the price the server pays a point at.
 //!
-//! - **Dollars per credit**: the installed settlement table's
-//!   `usd_micros_per_credit` over `atomic_units_per_credit`. It is the rate
-//!   the NEAR AI payout rail records as its epoch and pays at
+//! - **Dollars per point**: the installed settlement table's
+//!   `usd_micros_per_credit` for `atomic_units_per_credit` units. It is the
+//!   rate the NEAR AI payout rail records as its epoch and pays at
 //!   (`payout_rate::SettlementTableRate`, owner decision D2 of the payout
 //!   design), so it is the price a paid trace is actually paid at. The v1
 //!   credit estimate table carries no dollar rate and is not used.
-//! - **Credit per accepted trace**: `main`'s `NoveltyUtility` delta and
-//!   credit rule, as the running gate holds them (`MainGateConfig`). Under
-//!   `flat` every passing trace earns the delta, so both ends are the delta,
-//!   but only on `main`'s legacy gate path, whose `NoveltyUtility` events
-//!   settle: with a pipeline runtime assembled, a `flat` compatibility leg is
-//!   never batched (Ruling S10) and the rail pays only from batches, so
-//!   nothing is published (2026-11-03 paying-bundle design, section 3).
-//!   Under `graded_perplexity_v1` the award is `delta * f * a`
-//!   ([`graded_perplexity_award`]): the top is a trace at or above the
-//!   perplexity ceiling (`f = 1`, `a = 1`), which is the delta; the bottom is
-//!   a trace at the perplexity floor with an ordinary profile (`f` at its
-//!   graded floor, `a = 1`). The anomaly term can take a spiky trace lower,
-//!   to no award at all, but a trace with no award is not paid, and the
-//!   2026-11-03 paying-bundle design prices its award table on `a = 1` (the
-//!   observed capped median ratio, 8.18, is well under the soft limit).
-//! - **Whether the rail pays at all**: with the NEAR AI rail `disabled` no
-//!   credit is paid at any rate, so nothing is published.
+//! - **One point, never more than the rule pays**: the figure is one point,
+//!   or `main`'s `NoveltyUtility` delta when that is smaller, since no
+//!   accepted trace earns more than the delta under either credit rule.
+//! - **A rule the rail pays**: `graded_perplexity_v1`, or `flat` on `main`'s
+//!   legacy gate path, whose `NoveltyUtility` events settle. With a pipeline
+//!   runtime assembled a `flat` compatibility leg is never batched (Ruling
+//!   S10) and the rail pays only from batches (2026-11-03 paying-bundle
+//!   design, section 3), so nothing is published.
+//! - **A rail that pays**: with the NEAR AI rail `disabled` no credit is
+//!   paid at any rate, so nothing is published.
 //!
-//! Both ends are cut down to whole cents (the protocol publishes only whole
-//! cents), never rounded up, so the range never says more than the rule
-//! pays. Anything missing, zero, or outside `UsdMicrosRange::is_valid` is
-//! `None`, and the route serves `{}` as before: a guessed number is never
-//! published.
+//! The figure is cut down to whole cents (the protocol publishes only whole
+//! cents), never rounded up. Anything missing, zero, or outside
+//! `UsdMicrosRange::is_valid` is an error, and the route serves `{}` as
+//! before: a guessed number is never published.
 
 use trace_commons_protocol::first_run_estimate::{USD_MICROS_PER_CENT, UsdMicrosRange};
 use trace_commons_protocol::settlement_estimate::SettlementEstimateTable;
 
-use crate::credit_quality::CreditQualityConstants;
-use crate::versioned_pipeline_compat::{CompatibilityCreditRule, graded_perplexity_award};
+use crate::versioned_pipeline_compat::CompatibilityCreditRule;
 
 /// Why no range was derived, as one safe label for the boot log. None
 /// carries a rate, a delta or a table version.
@@ -61,8 +53,8 @@ pub enum FirstRunUsdUnderived {
     /// The `flat` rule with a pipeline runtime assembled: its leg is never
     /// batched, so the rail never pays it.
     RuleUnpaid,
-    /// The derived range is not one the protocol publishes (an end below a
-    /// cent, or above the protocol's bound).
+    /// The derived figure is not one the protocol publishes (below a cent,
+    /// or above the protocol's bound).
     OutOfRange,
 }
 
@@ -91,11 +83,10 @@ pub struct FirstRunUsdInputs<'a> {
     /// `main`'s `NoveltyUtility` delta in trace-credit microcredits (the
     /// settlement table's atomic units).
     pub delta_microcredits: u64,
-    /// The credit-quality calibration in force now.
-    pub constants: &'a CreditQualityConstants,
 }
 
-/// The derived range, or why there is none. See the module docs.
+/// The derived figure as a range whose ends meet, or why there is none.
+/// See the module docs.
 pub fn derive_first_run_usd_range(
     inputs: FirstRunUsdInputs<'_>,
 ) -> Result<UsdMicrosRange, FirstRunUsdUnderived> {
@@ -115,30 +106,18 @@ pub fn derive_first_run_usd_range(
     if inputs.delta_microcredits == 0 {
         return Err(FirstRunUsdUnderived::NoDelta);
     }
-    let (min_units, max_units) = match inputs.credit_rule {
-        CompatibilityCreditRule::Flat if inputs.pipeline_runtime_assembled => {
-            return Err(FirstRunUsdUnderived::RuleUnpaid);
-        }
-        CompatibilityCreditRule::Flat => (inputs.delta_microcredits, inputs.delta_microcredits),
-        CompatibilityCreditRule::GradedPerplexityV1 => {
-            let k = inputs.constants;
-            // An ordinary profile: peak equals the representative, ratio 1.
-            let at = |ppl_micros: i64| {
-                let ppl = u64::try_from(ppl_micros.max(0)).unwrap_or(0);
-                graded_perplexity_award(inputs.delta_microcredits, ppl, ppl, k).microcredits
-            };
-            (at(k.ppl_floor_micros), at(k.ppl_ceil_micros))
-        }
-    };
-    let to_cents = |units: u64| -> u64 {
-        let usd_micros = u128::from(units) * u128::from(usd_micros_per_credit)
-            / u128::from(table.atomic_units_per_credit);
-        let cents = usd_micros / u128::from(USD_MICROS_PER_CENT);
-        u64::try_from(cents * u128::from(USD_MICROS_PER_CENT)).unwrap_or(u64::MAX)
-    };
+    if inputs.credit_rule == CompatibilityCreditRule::Flat && inputs.pipeline_runtime_assembled {
+        return Err(FirstRunUsdUnderived::RuleUnpaid);
+    }
+    // One point, or the delta when it pays less.
+    let units = table.atomic_units_per_credit.min(inputs.delta_microcredits);
+    let usd_micros = u128::from(units) * u128::from(usd_micros_per_credit)
+        / u128::from(table.atomic_units_per_credit);
+    let cents = usd_micros / u128::from(USD_MICROS_PER_CENT);
+    let figure = u64::try_from(cents * u128::from(USD_MICROS_PER_CENT)).unwrap_or(u64::MAX);
     let range = UsdMicrosRange {
-        min: to_cents(min_units),
-        max: to_cents(max_units),
+        min: figure,
+        max: figure,
     };
     if range.is_valid() {
         Ok(range)
@@ -150,7 +129,6 @@ pub fn derive_first_run_usd_range(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::credit_quality::{CREDIT_QUALITY_CONSTANTS_V3, constants_at};
 
     /// A synthetic settlement table in the protocol fixture's shape.
     fn table(usd_micros_per_credit: Option<u64>, units: u64) -> SettlementEstimateTable {
@@ -191,62 +169,60 @@ mod tests {
             pipeline_runtime_assembled: rule == CompatibilityCreditRule::GradedPerplexityV1,
             credit_rule: rule,
             delta_microcredits,
-            constants: &CREDIT_QUALITY_CONSTANTS_V3,
         }
     }
 
-    /// The pilot's settings on 2026-11-03: $0.25 a credit, the graded rule,
-    /// a delta of 1 point (1,000,000 microcredits), the V3 calibration. The
-    /// top is the delta, $0.25; the bottom is the graded floor 0.25 of it,
-    /// $0.0625, cut to $0.06.
+    fn one(figure: u64) -> UsdMicrosRange {
+        UsdMicrosRange {
+            min: figure,
+            max: figure,
+        }
+    }
+
+    /// The pilot's settings on 2026-11-03: $0.25 a point, the graded rule,
+    /// a delta of 1 point (1,000,000 microcredits). One point is $0.25.
     #[test]
-    fn the_pilot_settings_derive_six_to_twenty_five_cents() {
+    fn the_pilot_settings_derive_one_point_at_twenty_five_cents() {
         let t = table(Some(250_000), 1_000_000);
-        let range = derive_first_run_usd_range(inputs(
-            Some(&t),
-            CompatibilityCreditRule::GradedPerplexityV1,
-            1_000_000,
-        ))
-        .expect("derived");
         assert_eq!(
-            range,
-            UsdMicrosRange {
-                min: 60_000,
-                max: 250_000
-            }
+            derive_first_run_usd_range(inputs(
+                Some(&t),
+                CompatibilityCreditRule::GradedPerplexityV1,
+                1_000_000,
+            )),
+            Ok(one(250_000))
         );
-        // The calibration in force now is V3.
+    }
+
+    /// One point, whatever the delta above it; the delta when it pays less.
+    #[test]
+    fn the_figure_is_one_point_or_a_smaller_delta() {
+        let t = table(Some(250_000), 1_000_000);
+        let graded = CompatibilityCreditRule::GradedPerplexityV1;
         assert_eq!(
-            constants_at(chrono::Utc::now().timestamp()).version,
-            CREDIT_QUALITY_CONSTANTS_V3.version
+            derive_first_run_usd_range(inputs(Some(&t), graded, 2_500_000)),
+            Ok(one(250_000))
+        );
+        assert_eq!(
+            derive_first_run_usd_range(inputs(Some(&t), graded, 500_000)),
+            Ok(one(120_000)),
+            "half a point at $0.25 is $0.125, cut to $0.12"
+        );
+        assert_eq!(
+            derive_first_run_usd_range(inputs(Some(&t), CompatibilityCreditRule::Flat, 1_000_000)),
+            Ok(one(250_000)),
+            "flat on the legacy path"
         );
     }
 
     #[test]
-    fn a_flat_rule_pays_the_delta_at_both_ends() {
-        let t = table(Some(250_000), 1_000_000);
-        let range =
-            derive_first_run_usd_range(inputs(Some(&t), CompatibilityCreditRule::Flat, 2_500_000))
-                .expect("derived");
+    fn the_rate_is_per_point_in_the_tables_atomic_units() {
+        // A table with 1,000 atomic units a point at $0.40 a point.
+        let t = table(Some(400_000), 1_000);
         assert_eq!(
-            range,
-            UsdMicrosRange {
-                min: 620_000,
-                max: 620_000
-            },
-            "2.5 points at $0.25 is $0.625, cut to $0.62"
+            derive_first_run_usd_range(inputs(Some(&t), CompatibilityCreditRule::Flat, 1_000_000)),
+            Ok(one(400_000))
         );
-    }
-
-    #[test]
-    fn the_rate_is_per_credit_in_the_tables_atomic_units() {
-        // A table with 1,000 atomic units a credit: a delta of 1,000,000
-        // microcredits is 1,000 credits.
-        let t = table(Some(10_000), 1_000);
-        let range =
-            derive_first_run_usd_range(inputs(Some(&t), CompatibilityCreditRule::Flat, 1_000_000))
-                .expect("derived");
-        assert_eq!(range.max, 10_000_000);
     }
 
     #[test]
@@ -282,28 +258,26 @@ mod tests {
     }
 
     #[test]
-    fn a_range_the_protocol_would_refuse_derives_nothing() {
-        // A bottom under a cent: 0.25 of 1 credit at $0.02 is $0.005.
-        let cheap = table(Some(20_000), 1_000_000);
+    fn a_figure_the_protocol_would_refuse_derives_nothing() {
+        // Under a cent: one point at $0.005.
+        let cheap = table(Some(5_000), 1_000_000);
         assert_eq!(
             derive_first_run_usd_range(inputs(
                 Some(&cheap),
                 CompatibilityCreditRule::GradedPerplexityV1,
                 1_000_000
-            ))
-            .unwrap_err(),
-            FirstRunUsdUnderived::OutOfRange
+            )),
+            Err(FirstRunUsdUnderived::OutOfRange)
         );
-        // A top above the protocol's $100 bound.
-        let dear = table(Some(250_000), 1_000_000);
+        // Above the protocol's $100 bound.
+        let dear = table(Some(200_000_000), 1_000_000);
         assert_eq!(
             derive_first_run_usd_range(inputs(
                 Some(&dear),
                 CompatibilityCreditRule::Flat,
-                1_000_000_000
-            ))
-            .unwrap_err(),
-            FirstRunUsdUnderived::OutOfRange
+                1_000_000
+            )),
+            Err(FirstRunUsdUnderived::OutOfRange)
         );
     }
 }

@@ -181,10 +181,10 @@ pub(super) fn first_run_estimate_from_env(
     first_run_estimate_resolved(min.as_deref(), max.as_deref(), derived).map(Arc::new)
 }
 
-/// The derived range for the pricing this boot holds: the installed
-/// settlement table's dollar rate, whether the NEAR AI rail pays, and
-/// `main`'s `NoveltyUtility` delta and credit rule, under the calibration
-/// in force now. See `trace_commons_server::first_run_usd_estimate`.
+/// The derived figure for the pricing this boot holds: one point per
+/// accepted trace (owner, 2026-11-04) at the installed settlement table's
+/// dollar rate, provided the NEAR AI rail pays and `main`'s credit rule and
+/// delta pay a trace. See `trace_commons_server::first_run_usd_estimate`.
 pub(super) fn derive_first_run_usd(
     main_gate: &MainGateConfig,
     settlement_table: Option<&SettlementEstimateTable>,
@@ -197,7 +197,6 @@ pub(super) fn derive_first_run_usd(
         pipeline_runtime_assembled,
         credit_rule: main_gate.credit_rule,
         delta_microcredits: main_gate.novelty_utility_microcredits,
-        constants: trace_commons_server::credit_quality::constants_at(Utc::now().timestamp()),
     })
 }
 

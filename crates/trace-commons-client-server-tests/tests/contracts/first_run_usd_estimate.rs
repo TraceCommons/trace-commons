@@ -4,14 +4,14 @@
 
 use trace_commons_contributor::first_run_copy::PILOT_USD_MICROS_PER_ACCEPTED_TRACE;
 use trace_commons_protocol::settlement_estimate::SettlementEstimateTable;
-use trace_commons_server::credit_quality::constants_at;
 use trace_commons_server::first_run_usd_estimate::{FirstRunUsdInputs, derive_first_run_usd_range};
 use trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule;
 
 /// The pilot's pricing on 2026-11-03: the settlement table pays $0.25 a
-/// credit (1,000,000 atomic units), the rail is on, and the graded rule
-/// awards at most a delta of 1 point (1,000,000 microcredits). The table's
-/// other fields are synthetic.
+/// point (1,000,000 atomic units), the rail is on, and the graded rule
+/// awards at most a delta of 1 point (1,000,000 microcredits). One point per
+/// trace (owner, 2026-11-04) is $0.25. The table's other fields are
+/// synthetic.
 #[test]
 fn the_client_pilot_price_is_the_servers_derivation_of_the_pilot_pricing() {
     let mut table: SettlementEstimateTable = serde_json::from_value(serde_json::json!({
@@ -40,7 +40,6 @@ fn the_client_pilot_price_is_the_servers_derivation_of_the_pilot_pricing() {
         pipeline_runtime_assembled: true,
         credit_rule: CompatibilityCreditRule::GradedPerplexityV1,
         delta_microcredits: 1_000_000,
-        constants: constants_at(chrono::Utc::now().timestamp()),
     });
     assert_eq!(derived, Ok(PILOT_USD_MICROS_PER_ACCEPTED_TRACE));
 }

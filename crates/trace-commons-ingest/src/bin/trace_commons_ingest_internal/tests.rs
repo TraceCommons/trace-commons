@@ -103328,9 +103328,9 @@ mod first_run_estimate_tests {
         }
     }
 
-    /// The pilot's pricing (graded rule, delta 1 point, $0.25 a credit, the
-    /// rail on) derives $0.06 to $0.25 per accepted trace, and with neither
-    /// setting that is what the route serves.
+    /// The pilot's pricing (graded rule, delta 1 point, $0.25 a point, the
+    /// rail on) derives one point, $0.25, per accepted trace, and with
+    /// neither setting that is what the route serves.
     #[test]
     fn the_pilots_pricing_derives_the_served_range() {
         let table = pilot_shaped_table();
@@ -103341,7 +103341,7 @@ mod first_run_estimate_tests {
             true,
         );
         let pilot = UsdMicrosRange {
-            min: 60_000,
+            min: 250_000,
             max: 250_000,
         };
         assert_eq!(derived, Ok(pilot));
