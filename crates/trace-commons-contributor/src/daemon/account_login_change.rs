@@ -124,6 +124,191 @@ pub const ERR_WALLET_ACCOUNT_REQUIRED: &str = "account_login_change_wallet_accou
 /// No account session to present: the account is signed out.
 pub const ERR_ACCOUNT_SESSION_REQUIRED: &str = "account-session-required";
 
+// ---- Diagnostics ----
+//
+// Every step that fails records one label-only line in the daemon's
+// diagnostics log, so a sheet that only says "Couldn't switch accounts"
+// can be traced to its cause. Fixed labels only: never a token, URL,
+// account, subject or id. A value that is not label-shaped is written as
+// `invalid` by `diagnostics_log::label_value`, which is why every reason
+// here is lowercase letters and `_`.
+
+/// The event every failed step records.
+pub const FAILED_EVENT: &str = "account_login_change_failed";
+
+/// Why a step failed, as written in [`FAILED_EVENT`]'s `reason` field.
+pub mod reason {
+    pub const CONFIG_UNAVAILABLE: &str = "config_unavailable";
+    pub const NOT_OFFERED: &str = "not_offered";
+    pub const IDENTITY_KIND_UNKNOWN: &str = "identity_kind_unknown";
+    pub const PATHS_NOT_READY: &str = "paths_not_ready";
+    pub const COMMONS_UNREACHABLE: &str = "commons_unreachable";
+    pub const RANDOM_UNAVAILABLE: &str = "random_unavailable";
+    pub const NO_CEREMONY: &str = "no_ceremony";
+    pub const OUT_OF_ORDER: &str = "out_of_order";
+    pub const BROWSER_LEG_UNAVAILABLE: &str = "browser_leg_unavailable";
+    pub const BROWSER_LEG_FAILED: &str = "browser_leg_failed";
+    pub const CURRENT_LOGIN_MISMATCH: &str = "current_login_mismatch";
+    pub const WALLET_ACCOUNT_MISSING: &str = "wallet_account_missing";
+    pub const WALLET_CHALLENGE_MISSING: &str = "wallet_challenge_missing";
+    pub const WALLET_CHALLENGE_MISMATCH: &str = "wallet_challenge_mismatch";
+    pub const WALLET_URL_INVALID: &str = "wallet_url_invalid";
+    pub const INGEST_URL_INVALID: &str = "ingest_url_invalid";
+    pub const LOOPBACK_UNAVAILABLE: &str = "loopback_unavailable";
+    pub const WALLET_PAGE_UNAVAILABLE: &str = "wallet_page_unavailable";
+    pub const RUNTIME_UNAVAILABLE: &str = "runtime_unavailable";
+    pub const WALLET_LEG_FAILED: &str = "wallet_leg_failed";
+    pub const WALLET_ACCOUNT_MISMATCH: &str = "wallet_account_mismatch";
+    pub const WALLET_PENDING_MISSING: &str = "wallet_pending_missing";
+    pub const KEY_MINT_FAILED: &str = "key_mint_failed";
+    pub const NEW_LOGIN_IS_CURRENT: &str = "new_login_is_current";
+    pub const CLOUD_API_UNAVAILABLE: &str = "cloud_api_unavailable";
+    pub const NOT_CONFIRMED: &str = "not_confirmed";
+    pub const PROOFS_MISSING: &str = "proofs_missing";
+    pub const ACCOUNT_SESSION_UNAVAILABLE: &str = "account_session_unavailable";
+    pub const ACCOUNT_SESSION_RENEWAL_FAILED: &str = "account_session_renewal_failed";
+    pub const DEVICE_IDENTITY_UNAVAILABLE: &str = "device_identity_unavailable";
+    pub const DEVICE_IDENTITY_MISMATCH: &str = "device_identity_mismatch";
+    pub const DEVICE_IDENTITY_INVALID: &str = "device_identity_invalid";
+    pub const COMMONS_ROUTES_MISSING: &str = "commons_routes_missing";
+    /// The commons refused the start; the `refusal` field says how.
+    pub const COMMONS_START_FAILED: &str = "commons_start_failed";
+    pub const COMMONS_START_NONCE_INVALID: &str = "commons_start_nonce_invalid";
+    pub const COMMONS_START_ANSWER_INVALID: &str = "commons_start_answer_invalid";
+    pub const WALLET_CEREMONY_EXPIRING: &str = "wallet_ceremony_expiring";
+    pub const COMMONS_ANSWER_MISMATCH: &str = "commons_answer_mismatch";
+
+    /// Every reason, for the test that each is label-shaped.
+    #[cfg(test)]
+    pub const ALL: &[&str] = &[
+        CONFIG_UNAVAILABLE,
+        NOT_OFFERED,
+        IDENTITY_KIND_UNKNOWN,
+        PATHS_NOT_READY,
+        COMMONS_UNREACHABLE,
+        RANDOM_UNAVAILABLE,
+        NO_CEREMONY,
+        OUT_OF_ORDER,
+        BROWSER_LEG_UNAVAILABLE,
+        BROWSER_LEG_FAILED,
+        CURRENT_LOGIN_MISMATCH,
+        WALLET_ACCOUNT_MISSING,
+        WALLET_CHALLENGE_MISSING,
+        WALLET_CHALLENGE_MISMATCH,
+        WALLET_URL_INVALID,
+        INGEST_URL_INVALID,
+        LOOPBACK_UNAVAILABLE,
+        WALLET_PAGE_UNAVAILABLE,
+        RUNTIME_UNAVAILABLE,
+        WALLET_LEG_FAILED,
+        WALLET_ACCOUNT_MISMATCH,
+        WALLET_PENDING_MISSING,
+        KEY_MINT_FAILED,
+        NEW_LOGIN_IS_CURRENT,
+        CLOUD_API_UNAVAILABLE,
+        NOT_CONFIRMED,
+        PROOFS_MISSING,
+        ACCOUNT_SESSION_UNAVAILABLE,
+        ACCOUNT_SESSION_RENEWAL_FAILED,
+        DEVICE_IDENTITY_UNAVAILABLE,
+        DEVICE_IDENTITY_MISMATCH,
+        DEVICE_IDENTITY_INVALID,
+        COMMONS_ROUTES_MISSING,
+        COMMONS_START_FAILED,
+        COMMONS_START_NONCE_INVALID,
+        COMMONS_START_ANSWER_INVALID,
+        WALLET_CEREMONY_EXPIRING,
+        COMMONS_ANSWER_MISMATCH,
+    ];
+}
+
+/// The step names [`FAILED_EVENT`]'s `step` field carries: the wire's.
+const STEP_START: &str = "start";
+const STEP_PROVE_CURRENT: &str = "prove_current";
+const STEP_SIGN_IN_NEW: &str = "sign_in_new";
+const STEP_CONFIRM: &str = "confirm";
+
+/// A refusal or step label as a label-shaped value: the one hyphenated
+/// refusal mapped, everything else (already lowercase and `_`) as is.
+fn label_field(label: &'static str) -> &'static str {
+    match label {
+        ERR_ACCOUNT_SESSION_REQUIRED => reason::ACCOUNT_SESSION_UNAVAILABLE,
+        other => other,
+    }
+}
+
+/// Record one failed step, label-only. `refusal` is the commons' refusal
+/// as this module names it, when the commons refused.
+fn note_failure(dir: &Path, step: &'static str, why: &'static str, refusal: Option<&'static str>) {
+    let mut fields: Vec<(&'static str, &str)> = vec![("step", step), ("reason", why)];
+    if let Some(refusal) = refusal {
+        fields.push(("refusal", label_field(refusal)));
+    }
+    crate::daemon::diagnostics_log::record_labels(tracing::Level::WARN, FAILED_EVENT, &fields);
+    #[cfg(test)]
+    TEST_FAILURES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get_or_insert_with(HashMap::new)
+        .entry(dir.to_path_buf())
+        .or_default()
+        .push((step, why, refusal.map(label_field)));
+    #[cfg(not(test))]
+    let _ = dir;
+}
+
+/// A failure inside a step: the label the step answers with (unchanged by
+/// this record), why, and the commons' refusal when it refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Fail {
+    label: &'static str,
+    why: &'static str,
+    refusal: Option<&'static str>,
+}
+
+impl Fail {
+    const fn new(label: &'static str, why: &'static str) -> Self {
+        Self {
+            label,
+            why,
+            refusal: None,
+        }
+    }
+
+    fn note(self, dir: &Path, step: &'static str) -> &'static str {
+        note_failure(dir, step, self.why, self.refusal);
+        self.label
+    }
+}
+
+/// A claim's refusal as a reason.
+fn claim_reason(label: &'static str) -> &'static str {
+    if label == ERR_NO_CEREMONY {
+        reason::NO_CEREMONY
+    } else {
+        reason::OUT_OF_ORDER
+    }
+}
+
+/// One failure [`note_failure`] recorded: step, reason, refusal.
+#[cfg(test)]
+type TestFailure = (&'static str, &'static str, Option<&'static str>);
+
+/// What [`note_failure`] recorded per state directory, in order: the
+/// process-wide log is shared by every test, so each test reads its own.
+#[cfg(test)]
+static TEST_FAILURES: Mutex<Option<HashMap<PathBuf, Vec<TestFailure>>>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn failures_for_test(dir: &Path) -> Vec<TestFailure> {
+    TEST_FAILURES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .and_then(|map| map.get(dir).cloned())
+        .unwrap_or_default()
+}
+
 /// A login the commons refused as another NEAR AI account, or one signed in
 /// for step 2, held unstored for a change. Dropped, its key is revoked
 /// ([`UnstoredKey`]). Never logged: `Debug` names nothing secret.
@@ -378,7 +563,15 @@ pub(super) async fn handle(shared: &DaemonShared, req: &Request) -> Response {
         Some("sign_in_new") => sign_in_new(shared, req, change_id).await,
         Some("confirm") => match CloudApi::live() {
             Ok(api) => confirm(shared, req, change_id, &api).await,
-            Err(_) => Response::err(req.id, ERR_UNAVAILABLE, ERR_NOT_AVAILABLE),
+            Err(_) => {
+                note_failure(
+                    shared.store.dir(),
+                    STEP_CONFIRM,
+                    reason::CLOUD_API_UNAVAILABLE,
+                    None,
+                );
+                Response::err(req.id, ERR_UNAVAILABLE, ERR_NOT_AVAILABLE)
+            }
         },
         _ => Response::err(req.id, ERR_BAD_PARAMS, "step"),
     }
@@ -421,14 +614,18 @@ fn status(shared: &DaemonShared, req: &Request, change_id: Option<&str>) -> Resp
 /// skipped. A ceremony already running is answered as it stands.
 async fn start(shared: &DaemonShared, req: &Request) -> Response {
     let store = &shared.store;
+    let refuse = |why: &'static str, label: &'static str| {
+        note_failure(store.dir(), STEP_START, why, None);
+        Response::err(req.id, ERR_UNAVAILABLE, label)
+    };
     let Ok(Some(cfg)) = store.load_config() else {
-        return Response::err(req.id, ERR_UNAVAILABLE, ERR_NOT_AVAILABLE);
+        return refuse(reason::CONFIG_UNAVAILABLE, ERR_NOT_AVAILABLE);
     };
     if !available(store, &cfg) {
-        return Response::err(req.id, ERR_UNAVAILABLE, ERR_NOT_AVAILABLE);
+        return refuse(reason::NOT_OFFERED, ERR_NOT_AVAILABLE);
     }
     let Some(kind) = cfg.signs_in_with() else {
-        return Response::err(req.id, ERR_UNAVAILABLE, ERR_NOT_AVAILABLE);
+        return refuse(reason::IDENTITY_KIND_UNKNOWN, ERR_NOT_AVAILABLE);
     };
     // The commons publishes the change routes whatever their readiness:
     // ask whether the paths they need are ready before offering a ceremony.
@@ -441,17 +638,17 @@ async fn start(shared: &DaemonShared, req: &Request) -> Response {
             Ok(true) => {}
             Ok(false) => {
                 note_routes(store.dir(), false);
-                return Response::err(req.id, ERR_UNAVAILABLE, ERR_NOT_AVAILABLE);
+                return refuse(reason::PATHS_NOT_READY, ERR_NOT_AVAILABLE);
             }
             Err(()) => {
-                return Response::err(req.id, ERR_UNAVAILABLE, ERR_COMMONS_UNREACHABLE);
+                return refuse(reason::COMMONS_UNREACHABLE, ERR_COMMONS_UNREACHABLE);
             }
         }
     }
     let old_provider = super::nearai_credential::login_record::commons_login(store);
     let old_identity = super::nearai_credential::spend_org::last_identity(store);
     let Ok(id) = super::account_onboarding::random() else {
-        return Response::err(req.id, ERR_UNAVAILABLE, ERR_NOT_AVAILABLE);
+        return refuse(reason::RANDOM_UNAVAILABLE, ERR_NOT_AVAILABLE);
     };
     let view = with_slot(store.dir(), |slot| {
         if let Some(ceremony) = slot.ceremony.as_ref().filter(|c| !c.done) {
@@ -599,7 +796,10 @@ async fn prove_current(shared: &DaemonShared, req: &Request, change_id: Option<&
     let dir = shared.store.dir().to_path_buf();
     let (id, kind, old_provider) = match claim(&dir, change_id, Step::Current) {
         Ok(claimed) => claimed,
-        Err(label) => return Response::err(req.id, ERR_UNAVAILABLE, label),
+        Err(label) => {
+            note_failure(&dir, STEP_PROVE_CURRENT, claim_reason(label), None);
+            return Response::err(req.id, ERR_UNAVAILABLE, label);
+        }
     };
     let begun = match kind {
         IdentityKind::NearAiLogin => begin_current_near_ai(&shared.store, &id, old_provider).await,
@@ -612,7 +812,10 @@ async fn prove_current(shared: &DaemonShared, req: &Request, change_id: Option<&
                 .filter(|account| !account.is_empty());
             match account {
                 Some(account) => begin_current_wallet(shared, &id, account).await,
-                None => Err(ERR_WALLET_ACCOUNT_REQUIRED),
+                None => Err(Fail::new(
+                    ERR_WALLET_ACCOUNT_REQUIRED,
+                    reason::WALLET_ACCOUNT_MISSING,
+                )),
             }
         }
     };
@@ -623,7 +826,8 @@ async fn prove_current(shared: &DaemonShared, req: &Request, change_id: Option<&
             view["browser_url"] = browser_url.into();
             Response::ok(req.id, view)
         }
-        Err(label) => {
+        Err(fail) => {
+            let label = fail.note(&dir, STEP_PROVE_CURRENT);
             settle(&dir, &id, |ceremony| {
                 if label != ERR_WALLET_ACCOUNT_REQUIRED {
                     ceremony.error = Some(step_error(label));
@@ -641,7 +845,7 @@ async fn begin_current_near_ai(
     store: &ConfigStore,
     id: &str,
     old_provider: Option<&'static str>,
-) -> std::result::Result<(String, tokio::task::AbortHandle), &'static str> {
+) -> std::result::Result<(String, tokio::task::AbortHandle), Fail> {
     let offered = old_provider
         .and_then(offered_only)
         .unwrap_or(crate::channel::NEAR_AI_SIGN_IN_PROVIDERS);
@@ -666,7 +870,7 @@ async fn begin_current_near_ai(
         },
     )
     .await
-    .map_err(|_| ERR_NOT_AVAILABLE)
+    .map_err(|_| Fail::new(ERR_NOT_AVAILABLE, reason::BROWSER_LEG_UNAVAILABLE))
 }
 
 /// Record the outcome of the NEAR AI current-identity leg. `Err`: the leg
@@ -681,8 +885,12 @@ pub(crate) fn record_current_near_ai(
     id: &str,
     proof: std::result::Result<(String, Option<String>), &'static str>,
 ) {
+    let mut failed = None;
     settle(dir, id, |ceremony| match proof {
-        Err(label) => ceremony.error = leg_error(label, STEP_ERROR_UNAVAILABLE),
+        Err(label) => {
+            ceremony.error = leg_error(label, STEP_ERROR_UNAVAILABLE);
+            failed = ceremony.error.map(|_| reason::BROWSER_LEG_FAILED);
+        }
         Ok((access_token, identity)) => {
             let mismatch = matches!(
                 (&ceremony.old_identity, &identity),
@@ -690,11 +898,16 @@ pub(crate) fn record_current_near_ai(
             );
             if mismatch {
                 ceremony.error = Some(STEP_ERROR_CURRENT_LOGIN);
+                failed = Some(reason::CURRENT_LOGIN_MISMATCH);
             } else {
                 ceremony.current = Some(CurrentProofHeld::NearAi { access_token });
             }
         }
     });
+    // Outside the state lock: the log write is file I/O.
+    if let Some(why) = failed {
+        note_failure(dir, STEP_PROVE_CURRENT, why, None);
+    }
 }
 
 /// The wallet current-identity leg: the commons' start (its nonce is what
@@ -704,20 +917,26 @@ async fn begin_current_wallet(
     shared: &DaemonShared,
     id: &str,
     account: &str,
-) -> std::result::Result<(String, tokio::task::AbortHandle), &'static str> {
+) -> std::result::Result<(String, tokio::task::AbortHandle), Fail> {
     let (cfg, mut session, identity) = commons_inputs(shared).await?;
     let (started, commons) =
         commons_start(shared, &cfg, &mut session, &identity, Some(account)).await?;
     let Some(challenge) = started.wallet.as_ref() else {
-        return Err(ERR_NOT_AVAILABLE);
+        return Err(Fail::new(
+            ERR_NOT_AVAILABLE,
+            reason::WALLET_CHALLENGE_MISSING,
+        ));
     };
-    let device = device_bytes(&identity).map_err(|_| ERR_NOT_AVAILABLE)?;
+    let device = device_bytes(&identity)
+        .map_err(|_| Fail::new(ERR_NOT_AVAILABLE, reason::DEVICE_IDENTITY_INVALID))?;
     // The sign-up leg's hardening: the wallet signs only the message this
     // device expects, so a commons cannot have it sign something else.
     let expected =
         wire::rebind_wallet_message(&challenge.network, account, &device, started.expires_at);
-    let wallet_url = reqwest::Url::parse(&challenge.wallet_url).map_err(|_| ERR_NOT_AVAILABLE)?;
-    let base = reqwest::Url::parse(&cfg.ingest_url).map_err(|_| ERR_NOT_AVAILABLE)?;
+    let wallet_url = reqwest::Url::parse(&challenge.wallet_url)
+        .map_err(|_| Fail::new(ERR_NOT_AVAILABLE, reason::WALLET_URL_INVALID))?;
+    let base = reqwest::Url::parse(&cfg.ingest_url)
+        .map_err(|_| Fail::new(ERR_NOT_AVAILABLE, reason::INGEST_URL_INVALID))?;
     if started.current_kind != IdentityKind::Wallet
         || challenge.message != expected
         || wallet_url.origin() != base.origin()
@@ -726,17 +945,22 @@ async fn begin_current_wallet(
         || wallet_url.fragment().is_some()
         || !matches!(challenge.network.as_str(), "mainnet" | "testnet")
     {
-        return Err(ERR_NOT_AVAILABLE);
+        return Err(Fail::new(
+            ERR_NOT_AVAILABLE,
+            reason::WALLET_CHALLENGE_MISMATCH,
+        ));
     }
+    let loopback = || Fail::new(ERR_NOT_AVAILABLE, reason::LOOPBACK_UNAVAILABLE);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .map_err(|_| ERR_NOT_AVAILABLE)?;
-    let port = listener.local_addr().map_err(|_| ERR_NOT_AVAILABLE)?.port();
+        .map_err(|_| loopback())?;
+    let port = listener.local_addr().map_err(|_| loopback())?.port();
     let callback = format!(
         "http://127.0.0.1:{port}{}",
         super::account_onboarding::LOOPBACK_PATH
     );
-    let state = super::account_onboarding::random().map_err(|_| ERR_NOT_AVAILABLE)?;
+    let state = super::account_onboarding::random()
+        .map_err(|_| Fail::new(ERR_NOT_AVAILABLE, reason::RANDOM_UNAVAILABLE))?;
     let fragment = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
         serde_json::to_vec(&serde_json::json!({
             "account_id": account,
@@ -748,7 +972,7 @@ async fn begin_current_wallet(
             "loopback": callback,
             "state": state,
         }))
-        .map_err(|_| ERR_NOT_AVAILABLE)?,
+        .map_err(|_| Fail::new(ERR_NOT_AVAILABLE, reason::WALLET_PAGE_UNAVAILABLE))?,
     );
     let browser_url = format!("{}#{fragment}", challenge.wallet_url);
     let dir = shared.store.dir().to_path_buf();
@@ -760,10 +984,10 @@ async fn begin_current_wallet(
             });
         }
     });
-    let listener = listener.into_std().map_err(|_| ERR_NOT_AVAILABLE)?;
+    let listener = listener.into_std().map_err(|_| loopback())?;
     let id_owned = id.to_owned();
     let task = super::account_onboarding::signup_runtime()
-        .map_err(|_| ERR_NOT_AVAILABLE)?
+        .map_err(|_| Fail::new(ERR_NOT_AVAILABLE, reason::RUNTIME_UNAVAILABLE))?
         .spawn(async move {
             let received = async {
                 let listener = tokio::net::TcpListener::from_std(listener)?;
@@ -797,8 +1021,10 @@ pub(crate) fn record_current_wallet(
     id: &str,
     proof: std::result::Result<(String, String, String), &'static str>,
 ) {
+    let mut failed = None;
     settle(dir, id, |ceremony| {
         let Some(pending) = ceremony.wallet_pending.take() else {
+            failed = Some(reason::WALLET_PENDING_MISSING);
             return;
         };
         match proof {
@@ -812,10 +1038,19 @@ pub(crate) fn record_current_wallet(
                     commons: pending.commons,
                 });
             }
-            Ok(_) => ceremony.error = Some(STEP_ERROR_WALLET),
-            Err(label) => ceremony.error = leg_error(label, STEP_ERROR_WALLET),
+            Ok(_) => {
+                ceremony.error = Some(STEP_ERROR_WALLET);
+                failed = Some(reason::WALLET_ACCOUNT_MISMATCH);
+            }
+            Err(label) => {
+                ceremony.error = leg_error(label, STEP_ERROR_WALLET);
+                failed = ceremony.error.map(|_| reason::WALLET_LEG_FAILED);
+            }
         }
     });
+    if let Some(why) = failed {
+        note_failure(dir, STEP_PROVE_CURRENT, why, None);
+    }
 }
 
 /// Step 2: sign in with the new login. Every login is offered, none marked;
@@ -824,7 +1059,10 @@ async fn sign_in_new(shared: &DaemonShared, req: &Request, change_id: Option<&st
     let dir = shared.store.dir().to_path_buf();
     let (id, _, _) = match claim(&dir, change_id, Step::New) {
         Ok(claimed) => claimed,
-        Err(label) => return Response::err(req.id, ERR_UNAVAILABLE, label),
+        Err(label) => {
+            note_failure(&dir, STEP_SIGN_IN_NEW, claim_reason(label), None);
+            return Response::err(req.id, ERR_UNAVAILABLE, label);
+        }
     };
     let leg_dir = dir.clone();
     let leg_id = id.clone();
@@ -872,6 +1110,12 @@ async fn sign_in_new(shared: &DaemonShared, req: &Request, change_id: Option<&st
             settle(&dir, &id, |ceremony| {
                 ceremony.error = Some(STEP_ERROR_UNAVAILABLE);
             });
+            note_failure(
+                &dir,
+                STEP_SIGN_IN_NEW,
+                reason::BROWSER_LEG_UNAVAILABLE,
+                None,
+            );
             Response::err(req.id, ERR_UNAVAILABLE, ERR_NOT_AVAILABLE)
         }
     }
@@ -887,9 +1131,16 @@ pub(crate) fn record_new_login(
     held: std::result::Result<std::result::Result<HeldLogin, ()>, &'static str>,
 ) {
     let mut refused = None;
+    let mut failed = None;
     settle(dir, id, |ceremony| match held {
-        Err(label) => ceremony.error = leg_error(label, STEP_ERROR_UNAVAILABLE),
-        Ok(Err(())) => ceremony.error = Some(STEP_ERROR_UNAVAILABLE),
+        Err(label) => {
+            ceremony.error = leg_error(label, STEP_ERROR_UNAVAILABLE);
+            failed = ceremony.error.map(|_| reason::BROWSER_LEG_FAILED);
+        }
+        Ok(Err(())) => {
+            ceremony.error = Some(STEP_ERROR_UNAVAILABLE);
+            failed = Some(reason::KEY_MINT_FAILED);
+        }
         Ok(Ok(login)) => {
             let same = matches!(
                 (&ceremony.old_identity, &login.identity),
@@ -897,6 +1148,7 @@ pub(crate) fn record_new_login(
             );
             if same {
                 ceremony.error = Some(STEP_ERROR_IN_USE);
+                failed = Some(reason::NEW_LOGIN_IS_CURRENT);
                 refused = Some(login);
             } else {
                 ceremony.new_login = Some(login);
@@ -905,6 +1157,9 @@ pub(crate) fn record_new_login(
     });
     // Revoked as it drops, outside the state lock.
     drop(refused);
+    if let Some(why) = failed {
+        note_failure(dir, STEP_SIGN_IN_NEW, why, None);
+    }
 }
 
 /// What the commons calls need: the config, the account session, and this
@@ -917,24 +1172,41 @@ async fn commons_inputs(
         crate::account_auth::LoadedAccountSession,
         DeviceIdentity,
     ),
-    &'static str,
+    Fail,
 > {
     // An expired session is renewed first, as every account feature does.
-    let api = CloudApi::live().map_err(|_| STEP_ERROR_UNAVAILABLE)?;
+    let api = CloudApi::live()
+        .map_err(|_| Fail::new(STEP_ERROR_UNAVAILABLE, reason::CLOUD_API_UNAVAILABLE))?;
     let via = super::account_session_renewal::RenewVia::live(&api);
     let session = match super::account_session_renewal::account_session(shared, Some(&via)).await {
         Ok(Some(session)) => session,
-        Ok(None) => return Err(ERR_ACCOUNT_SESSION_REQUIRED),
-        Err(_) => return Err(STEP_ERROR_UNAVAILABLE),
+        Ok(None) => {
+            return Err(Fail::new(
+                ERR_ACCOUNT_SESSION_REQUIRED,
+                reason::ACCOUNT_SESSION_UNAVAILABLE,
+            ));
+        }
+        Err(_) => {
+            return Err(Fail::new(
+                STEP_ERROR_UNAVAILABLE,
+                reason::ACCOUNT_SESSION_RENEWAL_FAILED,
+            ));
+        }
     };
     let Ok(Some(cfg)) = shared.store.load_config() else {
-        return Err(ERR_NOT_AVAILABLE);
+        return Err(Fail::new(ERR_NOT_AVAILABLE, reason::CONFIG_UNAVAILABLE));
     };
     let Ok(Some(identity)) = DeviceIdentity::load(&shared.store) else {
-        return Err(ERR_NOT_AVAILABLE);
+        return Err(Fail::new(
+            ERR_NOT_AVAILABLE,
+            reason::DEVICE_IDENTITY_UNAVAILABLE,
+        ));
     };
     if identity.device_key_id != cfg.device_key_id {
-        return Err(ERR_NOT_AVAILABLE);
+        return Err(Fail::new(
+            ERR_NOT_AVAILABLE,
+            reason::DEVICE_IDENTITY_MISMATCH,
+        ));
     }
     Ok((cfg, session, identity))
 }
@@ -1011,6 +1283,20 @@ fn refusal(error: &trace_commons_operator_client::Error, fallback: &'static str)
     }
 }
 
+/// How the commons refused a start, as a fixed label: one of the wire's
+/// named refusals, `commons_unanswered`, or `commons_refused` for the
+/// uniform deny. Never the server's own text, which is not ours to log.
+fn start_refusal(error: &trace_commons_operator_client::Error) -> &'static str {
+    match error.server_label() {
+        Some(wire::REBIND_IN_USE) => wire::REBIND_IN_USE,
+        Some(wire::REBIND_TOO_SOON) => wire::REBIND_TOO_SOON,
+        Some(wire::REBIND_PAYOUT_REVIEW_REQUIRED) => wire::REBIND_PAYOUT_REVIEW_REQUIRED,
+        Some(wire::REBIND_WALLET_ACCOUNT_REQUIRED) => wire::REBIND_WALLET_ACCOUNT_REQUIRED,
+        _ if super::nearai_onboarding::commons_unanswered(error) => "commons_unanswered",
+        _ => "commons_refused",
+    }
+}
+
 /// The commons' start, with a fresh PKCE pair. Answers the start and the
 /// ceremony this device keeps for the finish.
 async fn commons_start(
@@ -1019,8 +1305,9 @@ async fn commons_start(
     session: &mut crate::account_auth::LoadedAccountSession,
     identity: &DeviceIdentity,
     wallet_account_id: Option<&str>,
-) -> std::result::Result<(RebindStartResponse, CommonsCeremony), &'static str> {
-    let verifier = super::account_onboarding::random().map_err(|_| STEP_ERROR_UNAVAILABLE)?;
+) -> std::result::Result<(RebindStartResponse, CommonsCeremony), Fail> {
+    let verifier = super::account_onboarding::random()
+        .map_err(|_| Fail::new(STEP_ERROR_UNAVAILABLE, reason::RANDOM_UNAVAILABLE))?;
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(Sha256::digest(verifier.as_bytes()));
     let request = RebindStartRequest {
@@ -1041,9 +1328,14 @@ async fn commons_start(
                         if status.as_u16() == 404
                 ) {
                     note_routes(shared.store.dir(), false);
-                    return Err(ERR_NOT_AVAILABLE);
+                    return Err(Fail::new(ERR_NOT_AVAILABLE, reason::COMMONS_ROUTES_MISSING));
                 }
-                return Err(refusal(&error, STEP_ERROR_UNAVAILABLE));
+                let label = refusal(&error, STEP_ERROR_UNAVAILABLE);
+                return Err(Fail {
+                    label,
+                    why: reason::COMMONS_START_FAILED,
+                    refusal: Some(start_refusal(&error)),
+                });
             }
         };
     note_routes(shared.store.dir(), true);
@@ -1051,15 +1343,24 @@ async fn commons_start(
         .decode(&started.nonce)
         .ok()
         .and_then(|bytes| bytes.try_into().ok())
-        .ok_or(STEP_ERROR_UNAVAILABLE)?;
+        .ok_or(Fail::new(
+            STEP_ERROR_UNAVAILABLE,
+            reason::COMMONS_START_NONCE_INVALID,
+        ))?;
     let now = Utc::now().timestamp();
+    let kind = cfg
+        .signs_in_with()
+        .ok_or(Fail::new(ERR_NOT_AVAILABLE, reason::IDENTITY_KIND_UNKNOWN))?;
     if started.ceremony_id.is_empty()
         || started.ceremony_id.len() > 64
         || started.expires_at <= now
         || started.expires_at > now + wire::REBIND_CEREMONY_TTL_SECS + 60
-        || started.current_kind != cfg.signs_in_with().ok_or(ERR_NOT_AVAILABLE)?
+        || started.current_kind != kind
     {
-        return Err(STEP_ERROR_UNAVAILABLE);
+        return Err(Fail::new(
+            STEP_ERROR_UNAVAILABLE,
+            reason::COMMONS_START_ANSWER_INVALID,
+        ));
     }
     let commons = CommonsCeremony {
         ceremony_id: started.ceremony_id.clone(),
@@ -1089,13 +1390,17 @@ pub(super) async fn confirm(
     let dir = shared.store.dir().to_path_buf();
     let (id, kind, _) = match claim(&dir, change_id, Step::Confirm) {
         Ok(claimed) => claimed,
-        Err(label) => return Response::err(req.id, ERR_UNAVAILABLE, label),
+        Err(label) => {
+            note_failure(&dir, STEP_CONFIRM, claim_reason(label), None);
+            return Response::err(req.id, ERR_UNAVAILABLE, label);
+        }
     };
     if !matches!(
         req.params.get("confirmed"),
         Some(serde_json::Value::Bool(true))
     ) {
         settle(&dir, &id, |_| {});
+        note_failure(&dir, STEP_CONFIRM, reason::NOT_CONFIRMED, None);
         return Response::err(req.id, ERR_BAD_PARAMS, "confirmed");
     }
     // The proofs leave the ceremony for the call, and go back if it fails
@@ -1109,6 +1414,7 @@ pub(super) async fn confirm(
     });
     let Some(proofs) = proofs else {
         settle(&dir, &id, |c| c.error = Some(STEP_ERROR_UNAVAILABLE));
+        note_failure(&dir, STEP_CONFIRM, reason::PROOFS_MISSING, None);
         return Response::err(req.id, ERR_UNAVAILABLE, ERR_OUT_OF_ORDER);
     };
     let outcome = finish(shared, &id, kind, proofs, api).await;
@@ -1149,13 +1455,14 @@ async fn finish(
     let Proofs { current, new_login } = proofs;
     let (cfg, mut session, identity) = match commons_inputs(shared).await {
         Ok(inputs) => inputs,
-        Err(label) => {
+        Err(fail) => {
             restore(Some(current), Some(new_login), STEP_ERROR_UNAVAILABLE);
-            return Err(label);
+            return Err(fail.note(&dir, STEP_CONFIRM));
         }
     };
     let Ok(device) = device_bytes(&identity) else {
         restore(Some(current), Some(new_login), STEP_ERROR_UNAVAILABLE);
+        note_failure(&dir, STEP_CONFIRM, reason::DEVICE_IDENTITY_INVALID, None);
         return Err(STEP_ERROR_UNAVAILABLE);
     };
     // The commons ceremony and the current proof as the wire carries it.
@@ -1164,7 +1471,8 @@ async fn finish(
             let started = commons_start(shared, &cfg, &mut session, &identity, None).await;
             let commons = match started {
                 Ok((_, commons)) => commons,
-                Err(label) => {
+                Err(fail) => {
+                    let label = fail.note(&dir, STEP_CONFIRM);
                     restore(
                         Some(CurrentProofHeld::NearAi { access_token }),
                         Some(new_login),
@@ -1191,6 +1499,7 @@ async fn finish(
             if commons.expires_at - Utc::now().timestamp() < WALLET_FINISH_MARGIN_SECS {
                 // Bound to the old nonce: the wallet signs again (spec 2.4).
                 restore(None, Some(new_login), STEP_ERROR_WALLET);
+                note_failure(&dir, STEP_CONFIRM, reason::WALLET_CEREMONY_EXPIRING, None);
                 return Err(STEP_ERROR_WALLET);
             }
             (
@@ -1259,6 +1568,7 @@ async fn finish(
         // The commons moved something this device cannot recognize as its
         // account. Nothing local changes; the person signs in again.
         restore(None, Some(new_login), STEP_ERROR_UNAVAILABLE);
+        note_failure(&dir, STEP_CONFIRM, reason::COMMONS_ANSWER_MISMATCH, None);
         return Err(STEP_ERROR_UNAVAILABLE);
     }
     rebind(shared, id, cfg, new_login, api).await

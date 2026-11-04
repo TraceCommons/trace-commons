@@ -20,6 +20,11 @@
 //! record, with the key revoked at NEAR AI, best effort (owner decision
 //! 2026-11-02, `nearai_credential::disconnect`).
 //!
+//! So does the change of login (F10): a ceremony in progress and a login
+//! held aside for one (each held key revoked as it drops), and the last
+//! NEAR AI sign-in's outcome, so `login_change_available`,
+//! `login_change_held` and `login_mismatch` all read false afterwards.
+//!
 //! What stays: receipts, history and the audit log (the local record of what
 //! this device did -- the audit log also records this call), settings, folder
 //! rules, the queue, and the NEAR AI notice marker, which are not an
@@ -142,6 +147,9 @@ fn holds_enrollment(store: &ConfigStore) -> bool {
 /// fails, the next unenroll call (enrolled or not) tries again.
 fn forget_accounts_login(shared: &DaemonShared) {
     crate::daemon::account_login_change::forget(shared.store.dir());
+    // And the last NEAR AI sign-in's outcome: one refused as another
+    // account is this account's mismatch, not the next one's.
+    super::nearai_credential::ceremony::forget_attempt(shared.store.dir());
     if super::nearai_credential::login_record::forget_commons_login_or_remove(&shared.store)
         .is_err()
     {
