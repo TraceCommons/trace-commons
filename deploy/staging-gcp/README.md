@@ -417,6 +417,17 @@ sudo TC_ARTIFACT_BUCKET=tc-staging-artifacts-20261021 TC_EXPECT_STAGING=1 \
   deploy/pilot-gcp/pull-and-install.sh both <tag>
 ```
 
+When the build carries a migration the database does not have (`git diff
+--name-only <running build_commit> <tag> -- migrations`), stop both units
+first: `sudo systemctl stop trace-commons-ingest
+trace-commons-upload-claim-issuer`. Here the issuer connects as `app` and
+applies migrations at boot, and `both` restarts it before the ingest, so
+without the stop the new schema lands under the old ingest. On 2026-11-01
+that window (V144) was about 80 s and served one HTTP 500, and a migration
+such as V147, which revokes payout links, says the old service must be
+stopped before the new one starts. `restart` starts a stopped unit, so the
+command above then brings both up in order.
+
 which installs and restarts in place, reads the new ingest's `/health`, and,
 unless it reports `near_ai_staging: true`, puts the previous ingest binary
 back, restarts it and fails. The issuer, installed first, is not rolled back

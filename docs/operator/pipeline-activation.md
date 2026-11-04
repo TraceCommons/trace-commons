@@ -1043,10 +1043,16 @@ on A until a full set for tree A is signed and posted to a process of A. A
 build from before this rule does not make the check at all
 ([deployment.md](deployment.md), "Binary rollback to an older build").
 
-A commit that changes only a document. The revision of the tree changes,
-because every tracked file is hashed. The revision of a process is fixed when
-its binary is built. So intake changes only when a binary that was built from
-the new tree is deployed, and then steps 1 to 5 apply.
+A commit that changes only a document outside the revision. The revision
+does not hash every file: it covers the crates the pipeline builds from, the
+paths listed in `CODE_REVISION_COVERED`, and the files those crates include
+(`scripts/operator/pipeline_tooling/environment.py`, `_code_revision_paths`).
+A document, client shell, CI or `deploy/` change outside them builds the same
+revision, as "First compare revisions" above says. It hashes untracked files
+that are not ignored too, so build from a clean tree. The revision of a
+process is fixed when its binary is built: intake changes only when a binary
+built from a tree with a new revision is deployed, and then steps 1 to 5
+apply.
 
 ### Evidence age, rollback, and a first rollout
 

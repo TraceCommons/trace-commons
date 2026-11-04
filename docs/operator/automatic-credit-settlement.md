@@ -130,6 +130,23 @@ SELECT l.tenant_id, l.state, count(*) FROM trace_payout_links l
  GROUP BY l.tenant_id, l.state;
 ```
 
+Two things about running this count:
+
+- **Row security binds the owner too.** Every one of these tables has
+  `FORCE ROW LEVEL SECURITY`, so a role without `BYPASSRLS` (the migration
+  owner included, unless it is a true superuser) sees no rows and reports
+  nothing. Use a `BYPASSRLS` or superuser role (staging: `postgres` over the
+  local socket), or, as the owner, lift `FORCE` inside a transaction that ends
+  in `ROLLBACK` (`ALTER TABLE ... NO FORCE ROW LEVEL SECURITY` on each table
+  read). That takes an `ACCESS EXCLUSIVE` lock on each table until the
+  rollback, so do it with the services stopped or with a short
+  `lock_timeout`. The same applies to the other counts in this section and
+  in the spec's section 8.
+- **Before V146** (a database that has not applied it yet, such as a pilot
+  still on V144), `trace_legacy_payout_carries` does not exist and the query
+  fails. Drop the last `NOT EXISTS (... trace_legacy_payout_carries ...)`
+  clause: no carry can exist before V146, so the result is the same.
+
 V147 refuses to run, and the service does not start, if an unanchored
 account's waiting link has a payout line (the store never writes one; it
 would have to be resolved by hand). A `lock_timeout` failure also stops
