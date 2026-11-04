@@ -52,6 +52,7 @@
   "missions_enabled": false,
   "notifications_enabled": true,
   "menu_bar_mark_enabled": true,
+  "share_usage_data": true,
   "managed_terminal": "terminal",
   "managed_terminal_chosen": false,
   "managed_herdr": false,
