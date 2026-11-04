@@ -49,6 +49,8 @@ permissions = [
   "allow-acknowledge-legacy-invite-migration",
   "allow-arming-reworded-notice",
   "allow-gate-held-notice",
+  "allow-account-attention-copy",
+  "allow-set-up-again",
   "allow-acknowledge-arming-rewordings",
   "allow-automatic-grant",
   "allow-grant-automatic",

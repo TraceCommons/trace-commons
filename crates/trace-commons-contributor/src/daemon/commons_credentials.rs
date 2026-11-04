@@ -179,8 +179,16 @@ pub(crate) struct Snapshot {
     config: Option<Vec<u8>>,
     previous: Option<Vec<u8>>,
     kind: Kind,
+    /// [`Snapshot::record_key`], computed once when the snapshot is taken.
+    record_key: [u8; 32],
 }
 impl Snapshot {
+    /// Whether a record of this kind was stored when the snapshot was taken,
+    /// whether or not its secret can be read now.
+    pub(crate) fn held_record(&self) -> bool {
+        self.previous.is_some()
+    }
+
     /// Configuration captured with this credential generation; never a later
     /// config selected during an in-flight request or sign-out.
     pub(crate) fn configuration(&self) -> Result<Option<ContributorConfig>> {
@@ -198,6 +206,21 @@ impl Snapshot {
         self.generation == other.generation
             && self.config == other.config
             && self.kind == other.kind
+    }
+
+    /// Whether a record is stored for this kind (files only, no OS read).
+    pub(crate) fn holds_record(&self) -> bool {
+        self.previous.is_some()
+    }
+
+    /// What identifies the stored record and the account it is read for:
+    /// the credential generation, the record file, and the authority the
+    /// configuration gives it -- not the whole configuration, which unrelated
+    /// settings rewrite. The OS entry a record names is immutable, so two
+    /// equal keys name the same stored secret read the same way: a reader
+    /// may keep what it learned from it until this changes.
+    pub(crate) fn record_key(&self) -> [u8; 32] {
+        self.record_key
     }
 }
 
@@ -250,19 +273,69 @@ pub(crate) fn scope_for_snapshot(snapshot: &Snapshot) -> Result<String> {
     Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
 }
 
+/// The three files a snapshot holds: generation, configuration, record.
+type SnapshotFiles = (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>);
+
+fn read_snapshot_files(store: &ConfigStore, kind: Kind) -> Result<SnapshotFiles> {
+    Ok((
+        read(&store.daemon_path(EPOCH))?,
+        read(&store.daemon_path("contributor.json"))?,
+        read(&kind.file(store))?,
+    ))
+}
+
 fn snapshot_locked(store: &ConfigStore, kind: Kind) -> Result<Snapshot> {
+    let (generation, config, previous) = read_snapshot_files(store, kind)?;
+    let record_key = record_key(kind, &generation, &config, &previous);
     Ok(Snapshot {
-        generation: read(&store.daemon_path(EPOCH))?,
-        config: read(&store.daemon_path("contributor.json"))?,
-        previous: read(&kind.file(store))?,
+        generation,
+        config,
+        previous,
         kind,
+        record_key,
     })
 }
+
+/// What identifies the stored record and the account it is read for:
+/// the credential generation, the record file, and the authority the
+/// configuration gives it -- not the whole configuration, which unrelated
+/// settings rewrite. The OS entry a record names is immutable, so two equal
+/// keys name the same stored secret read the same way.
+fn record_key(
+    kind: Kind,
+    generation: &Option<Vec<u8>>,
+    config: &Option<Vec<u8>>,
+    previous: &Option<Vec<u8>>,
+) -> [u8; 32] {
+    let authority = config
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<ContributorConfig>(bytes).ok())
+        .as_ref()
+        .map(authority);
+    let mut hash = Sha256::new();
+    hash.update(kind.domain().as_bytes());
+    for part in [
+        generation.as_deref(),
+        previous.as_deref(),
+        authority.as_deref().map(str::as_bytes),
+    ] {
+        match part {
+            Some(bytes) => {
+                hash.update([1]);
+                hash.update((bytes.len() as u64).to_be_bytes());
+                hash.update(bytes);
+            }
+            None => hash.update([0]),
+        }
+    }
+    hash.finalize().into()
+}
+
 fn ensure_current(store: &ConfigStore, expected: &Snapshot) -> Result<()> {
-    let current = snapshot_locked(store, expected.kind)?;
-    if current.generation != expected.generation
-        || current.config != expected.config
-        || current.previous != expected.previous
+    let (generation, config, previous) = read_snapshot_files(store, expected.kind)?;
+    if generation != expected.generation
+        || config != expected.config
+        || previous != expected.previous
     {
         return Err(changed());
     }
@@ -277,42 +350,289 @@ pub(crate) fn load_with_snapshot(
     store: &ConfigStore,
     kind: Kind,
 ) -> Result<Option<(Vec<u8>, Snapshot)>> {
+    Ok(match load_or_snapshot(store, kind)? {
+        (Some(payload), expected) => Some((payload, expected)),
+        (None, _) => None,
+    })
+}
+
+/// [`load_with_snapshot`], answering the snapshot when nothing is stored
+/// too, so a caller that writes against an absent record needs no second
+/// read of credential storage.
+pub(crate) fn load_or_snapshot(
+    store: &ConfigStore,
+    kind: Kind,
+) -> Result<(Option<Vec<u8>>, Snapshot)> {
+    load_observed(store, kind).map_err(LoadFailure::into_error)
+}
+
+/// Why the account record could not be read ([`load_account`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AccountLoadFailure {
+    /// Storage did not answer, or the files moved under the read: may pass.
+    Storage,
+    /// The record is stored but cannot be read, and no retry reads it: the
+    /// reference is malformed, its OS entry is gone or does not match it, or
+    /// the payload is not JSON.
+    Unreadable,
+}
+
+/// The account record and the snapshot it was read under, telling a record
+/// no retry reads from storage that may answer later. Every account-record
+/// read goes through here or [`load_with_snapshot`], and each leaves what
+/// it found for [`observed_account_read`].
+pub(crate) fn load_account(
+    store: &ConfigStore,
+) -> std::result::Result<(Option<Vec<u8>>, Snapshot), AccountLoadFailure> {
+    match load_observed(store, Kind::Account) {
+        Ok((Some(payload), _)) if !payload_is_json(&payload) => Err(AccountLoadFailure::Unreadable),
+        Ok(loaded) => Ok(loaded),
+        Err(LoadFailure::Permanent(..)) => Err(AccountLoadFailure::Unreadable),
+        Err(LoadFailure::Transient(_)) => Err(AccountLoadFailure::Storage),
+    }
+}
+
+/// What the last read of the account record found for `snapshot`'s record
+/// ([`Snapshot::record_key`]), or `None` when nothing has read it since it
+/// last changed. Reads no OS store and writes nothing, so `status` can ask
+/// on every build; it survives a restart in [`OBSERVATION_FILE`].
+pub(crate) fn observed_account_read(
+    store: &ConfigStore,
+    snapshot: &Snapshot,
+) -> Option<AccountLoadFailure> {
+    let (key, unreadable) = remembered_observation(store)?;
+    (key == snapshot.record_key() && unreadable).then_some(AccountLoadFailure::Unreadable)
+}
+
+/// The last account-record read's answer, in the state directory: the
+/// record key (a hash) and whether the record was unreadable. Nothing else.
+pub(crate) const OBSERVATION_FILE: &str = "account-record-observation.json";
+
+/// Per state directory: [`OBSERVATION_FILE`]'s content, once read or written.
+#[allow(clippy::type_complexity)]
+static ACCOUNT_READS: std::sync::Mutex<
+    Option<std::collections::HashMap<std::path::PathBuf, ([u8; 32], bool)>>,
+> = std::sync::Mutex::new(None);
+
+#[derive(Serialize, Deserialize)]
+struct Observation {
+    record_key: String,
+    unreadable: bool,
+}
+
+type Observations = std::collections::HashMap<std::path::PathBuf, ([u8; 32], bool)>;
+
+fn remembered_observation(store: &ConfigStore) -> Option<([u8; 32], bool)> {
+    let mut held = ACCOUNT_READS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    remembered_locked(store, held.get_or_insert_with(Default::default))
+}
+
+fn remembered_locked(store: &ConfigStore, held: &mut Observations) -> Option<([u8; 32], bool)> {
+    if let Some(found) = held.get(store.dir()) {
+        return Some(*found);
+    }
+    let found = saved_observation(store)?;
+    held.insert(store.dir().to_path_buf(), found);
+    Some(found)
+}
+
+fn saved_observation(store: &ConfigStore) -> Option<([u8; 32], bool)> {
+    let bytes = store.read_daemon_file(OBSERVATION_FILE).ok()??;
+    let observation: Observation = serde_json::from_slice(&bytes).ok()?;
+    let key: [u8; 32] = hex::decode(observation.record_key).ok()?.try_into().ok()?;
+    Some((key, observation.unreadable))
+}
+
+/// Remember a read's answer. `saved` answers outlive a restart in
+/// [`OBSERVATION_FILE`], written only when it differs, and kept in memory
+/// only once written, so a failed write is tried again by the next read.
+/// An answer that depends on this build rather than the files (`saved`
+/// false: an entry this binary is not entitled to, or a version it does not
+/// know) is kept in memory only, so an update that can read the entry is
+/// not told otherwise. Compare, write and remember happen under one lock.
+fn observe_account(store: &ConfigStore, key: [u8; 32], unreadable: bool, saved: bool) {
+    let mut held = ACCOUNT_READS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let held = held.get_or_insert_with(Default::default);
+    if saved && saved_observation(store) != Some((key, unreadable)) {
+        let observation = Observation {
+            record_key: hex::encode(key),
+            unreadable,
+        };
+        let written = serde_json::to_vec(&observation)
+            .ok()
+            .is_some_and(|bytes| store.write_daemon_file(OBSERVATION_FILE, &bytes).is_ok());
+        if !written {
+            return;
+        }
+    }
+    held.insert(store.dir().to_path_buf(), (key, unreadable));
+}
+
+/// Forget `store`'s in-process observation, as a restart does.
+#[cfg(test)]
+pub(crate) fn forget_observations_for_test(store: &ConfigStore) {
+    if let Some(held) = ACCOUNT_READS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
+        held.remove(store.dir());
+    }
+}
+
+fn payload_is_json(payload: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(payload).is_ok()
+}
+
+/// A failed load: [`LoadFailure::Permanent`] when no retry reads this
+/// snapshot's record, with its [`Snapshot::record_key`] and whether the
+/// answer depends on the files alone ([`Saved::Yes`]) or also on this build.
+enum LoadFailure {
+    Transient(anyhow::Error),
+    Permanent(anyhow::Error, [u8; 32], Saved),
+}
+/// Whether a permanent answer may be saved across a restart.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Saved {
+    Yes,
+    No,
+}
+
+impl LoadFailure {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Transient(error) | Self::Permanent(error, ..) => error,
+        }
+    }
+}
+
+/// [`load_inner`], leaving an account read's answer for
+/// [`observed_account_read`].
+fn load_observed(
+    store: &ConfigStore,
+    kind: Kind,
+) -> std::result::Result<(Option<Vec<u8>>, Snapshot), LoadFailure> {
+    let loaded = load_inner(store, kind);
+    if kind == Kind::Account {
+        match &loaded {
+            Ok((Some(payload), snapshot)) => {
+                observe_account(
+                    store,
+                    snapshot.record_key(),
+                    !payload_is_json(payload),
+                    true,
+                );
+            }
+            Err(LoadFailure::Permanent(_, key, saved)) => {
+                observe_account(store, *key, true, *saved == Saved::Yes);
+            }
+            Ok((None, _)) | Err(LoadFailure::Transient(_)) => {}
+        }
+    }
+    loaded
+}
+
+fn load_inner(
+    store: &ConfigStore,
+    kind: Kind,
+) -> std::result::Result<(Option<Vec<u8>>, Snapshot), LoadFailure> {
     if needs_native_thread() {
         return std::thread::scope(|scope| {
             scope
-                .spawn(|| load_with_snapshot(store, kind))
+                .spawn(|| load_inner(store, kind))
                 .join()
-                .map_err(|_| unavailable())?
+                .map_err(|_| LoadFailure::Transient(unavailable()))?
         });
     }
-    let expected = snapshot(store, kind)?;
-    let Some(bytes) = &expected.previous else {
-        return Ok(None);
+    let expected = snapshot(store, kind).map_err(LoadFailure::Transient)?;
+    match read_expected(store, kind, &expected) {
+        Ok(None) => {
+            // A legacy file migrated into the OS store: read it again.
+            load_inner(store, kind)
+        }
+        Ok(Some(payload)) => Ok((payload, expected)),
+        // A renewal, switch or sign-out that landed during the read (a new
+        // OS entry, the old one cleaned up, a rewritten configuration) looks
+        // like a record no retry reads. It is permanent only if the files
+        // are still the ones this read started from.
+        Err(LoadFailure::Permanent(error, key, saved)) => match still_current(store, &expected) {
+            true => Err(LoadFailure::Permanent(error, key, saved)),
+            false => Err(LoadFailure::Transient(error)),
+        },
+        Err(transient) => Err(transient),
+    }
+}
+
+/// Whether `expected` still describes the files, checked under the commit
+/// lock. A lock that cannot be taken answers no.
+fn still_current(store: &ConfigStore, expected: &Snapshot) -> bool {
+    let Ok(locks) = coordination(store.dir()) else {
+        return false;
     };
-    let Some(record) = record(bytes)? else {
+    let Ok(_commit) = locks.commit.lock() else {
+        return false;
+    };
+    ensure_current(store, expected).is_ok()
+}
+
+/// [`load_inner`]'s read of the record `expected` holds. `Ok(None)` after
+/// migrating a legacy file, which the caller reads again; `Ok(Some(None))`
+/// when nothing is stored.
+#[allow(clippy::option_option)]
+fn read_expected(
+    store: &ConfigStore,
+    kind: Kind,
+    expected: &Snapshot,
+) -> std::result::Result<Option<Option<Vec<u8>>>, LoadFailure> {
+    let transient = LoadFailure::Transient;
+    let key = expected.record_key();
+    let permanent = |error: anyhow::Error| LoadFailure::Permanent(error, key, Saved::Yes);
+    let Some(bytes) = &expected.previous else {
+        return Ok(Some(None));
+    };
+    let Some(record) = record(bytes).map_err(permanent)? else {
         // Migration keeps the original file intact until an immutable OS entry
         // has passed readback. The same filename then becomes a rollback guard.
-        replace(store, &expected, bytes, None)?;
-        return load_with_snapshot(store, kind);
+        replace(store, expected, bytes, None).map_err(transient)?;
+        return Ok(None);
     };
-    if record.kind != kind
-        || (kind == Kind::Account && record.authority != current_authority(store)?)
-    {
-        return Err(changed());
+    if record.kind != kind {
+        return Err(permanent(changed()));
     }
-    let credentials = native(store)?;
-    let stored = credentials
-        .load_bytes(&record.reference)
-        .map_err(|_| unavailable())?;
-    let bundle: Bundle = serde_json::from_slice(&stored).map_err(|_| unavailable())?;
-    if bundle.version != 1 || bundle.binding != binding(store, &record)? {
-        return Err(unavailable());
+    if kind == Kind::Account && record.authority != current_authority(store).map_err(transient)? {
+        return Err(permanent(changed()));
     }
-    let payload = STANDARD.decode(bundle.payload).map_err(|_| unavailable())?;
-    let locks = coordination(store.dir())?;
-    let _commit = locks.commit.lock()?;
-    ensure_current(store, &expected)?;
-    Ok(Some((payload, expected)))
+    let credentials = native(store).map_err(transient)?;
+    let stored = credentials.load_bytes(&record.reference).map_err(|error| {
+        use super::credential_store::CredentialError;
+        match error {
+            // No retry, unlock or later attempt reads these.
+            CredentialError::NoEntry
+            | CredentialError::InvalidReference
+            | CredentialError::TooLarge
+            | CredentialError::InvalidBundle => permanent(unavailable()),
+            // Properties of this build: another build may read the entry.
+            CredentialError::Unentitled | CredentialError::UnsupportedVersion => {
+                LoadFailure::Permanent(unavailable(), key, Saved::No)
+            }
+            _ => LoadFailure::Transient(unavailable()),
+        }
+    })?;
+    let bundle: Bundle = serde_json::from_slice(&stored).map_err(|_| permanent(unavailable()))?;
+    if bundle.version != 1 || bundle.binding != binding(store, &record).map_err(transient)? {
+        return Err(permanent(unavailable()));
+    }
+    let payload = STANDARD
+        .decode(bundle.payload)
+        .map_err(|_| permanent(unavailable()))?;
+    let locks = coordination(store.dir()).map_err(transient)?;
+    let _commit = locks.commit.lock().map_err(transient)?;
+    ensure_current(store, expected).map_err(transient)?;
+    Ok(Some(Some(payload)))
 }
 
 /// Publish a secret, optionally publishing its first enrollment config in the
@@ -564,6 +884,17 @@ fn test_backend(store: &ConfigStore) -> Arc<dyn SecretBackend> {
         .entry(store.dir().to_path_buf())
         .or_insert_with(|| Arc::new(super::cloud_credential_test_support::MemoryBackend::default()))
         .clone()
+}
+
+/// Delete the OS entry `kind`'s record names, leaving the record: what a
+/// keychain entry removed behind the app's back looks like.
+#[cfg(test)]
+pub(crate) fn remove_os_entry_for_test(store: &ConfigStore, kind: Kind) {
+    let bytes = std::fs::read(kind.file(store)).expect("a record is stored");
+    let record = record(&bytes)
+        .unwrap()
+        .expect("a credential record, not a legacy file");
+    native(store).unwrap().delete(&record.reference).unwrap();
 }
 
 #[cfg(test)]

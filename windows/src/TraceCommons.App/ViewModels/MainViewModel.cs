@@ -135,15 +135,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _host.Lagged += OnLagged;
         _host.PreviewReady += OnPreviewReady;
 
-        // The offer to move a legacy invite identity. Passkey first: the
+        // The offer to move a legacy invite identity. Sign-in first: the
         // move runs the NEAR AI browser sign-in itself when the daemon has no
         // session, through the same daemon calls Private AI uses. Status is
         // re-read after it settles, so the daemon decides whether the offer
         // is still made and whether the notice takes over.
-        var passkey = new NearAiPasskeyStep(
+        var login = new NearAiLoginStep(
             (method, payload) => _host.CallAsync(method, payload),
             async uri => await Windows.System.Launcher.LaunchUriAsync(uri));
-        var move = new LegacyMigrationMove((method, payload) => _host.CallAsync(method, payload), passkey);
+        var move = new LegacyMigrationMove((method, payload) => _host.CallAsync(method, payload), login);
         move.Settled += () => _ = RefreshAsync();
         LegacyOffer = new LegacyMigrationOfferViewModel(move);
 
@@ -1536,8 +1536,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _decisionsOwed = status.IsError ? null : status.ResultAs<DaemonStatus>()?.DecisionsOwed;
             RaiseShield();
 
+            // DRAFT, NEEDS APPROVAL (2026-11-04).
             StatusText = status.IsError
-                ? "Daemon unavailable"
+                ? "Status unavailable"
                 : DescribeQueue(Pending.Count);
 
             // The banner comes out of the status read this method already

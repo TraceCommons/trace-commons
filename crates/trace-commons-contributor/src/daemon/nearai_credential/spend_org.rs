@@ -50,6 +50,144 @@ mod tests;
 /// The daemon file holding the explicit choice and pending revocations.
 pub const SPEND_ORG_FILE: &str = "near-ai-spend-org.json";
 
+/// The per-install salt [`identity_digest`] hashes with. Local only.
+pub const IDENTITY_SALT_FILE: &str = "near-ai-identity-salt";
+
+/// A digest of a NEAR AI user id, salted per install: `sha256:` and hex.
+/// Local only -- never logged, never sent -- so the record can tell one
+/// identity's revocations from another's without holding the id.
+pub(crate) fn identity_digest(store: &ConfigStore, user_id: &str) -> Result<String> {
+    use sha2::Digest as _;
+    let salt = match store
+        .read_daemon_file(IDENTITY_SALT_FILE)
+        .map_err(|_| anyhow!(LABEL_SPEND_ORG_UNAVAILABLE))?
+    {
+        Some(salt) if salt.len() == 32 => salt,
+        // A salt of the wrong length is damage. Every tag made with the old
+        // salt is now meaningless, so they are removed first -- the entries
+        // become untagged, tried with the current session and dropped on a
+        // `403`, as before tags -- and only then is a new salt made. Kept,
+        // the damaged salt would park every tagged entry for good.
+        Some(_) => {
+            update(store, |record| {
+                for entry in &mut record.pending_revocations {
+                    entry.identity = None;
+                }
+                record.session_identity = None;
+            })?;
+            crate::daemon::diagnostics_log::record_labels(
+                tracing::Level::WARN,
+                "near_ai_spend_org_identity_salt_replaced",
+                &[("reason", "damaged")],
+            );
+            new_salt(store)?
+        }
+        None => new_salt(store)?,
+    };
+
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(&salt);
+    hasher.update(user_id.as_bytes());
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+fn new_salt(store: &ConfigStore) -> Result<Vec<u8>> {
+    let mut salt = vec![0u8; 32];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut salt)
+        .map_err(|_| anyhow!(LABEL_SPEND_ORG_UNAVAILABLE))?;
+    store
+        .write_daemon_file(IDENTITY_SALT_FILE, &salt)
+        .map_err(|_| anyhow!(LABEL_SPEND_ORG_UNAVAILABLE))?;
+    Ok(salt)
+}
+
+/// The digest of the identity `tokens` belong to, read from NEAR AI, or
+/// `None` when it cannot be read.
+pub(crate) async fn read_identity(
+    store: &ConfigStore,
+    api: &CloudApi,
+    tokens: &SessionTokens,
+) -> Option<String> {
+    let user_id = api.current_user_id(tokens).await.ok()?;
+    identity_digest(store, &user_id).ok()
+}
+
+/// The identity of the stored login, recorded once and bound to the stored
+/// inference key: a sign-in writes it, a switch moves it to the key it
+/// minted (a switch never changes the identity), and a forget removes the
+/// file. Valid only while `key_id` is the stored key.
+///
+/// Only a sign-in and a switch, which hold the login and the key they
+/// record together, write it outright. A read made elsewhere
+/// ([`identity_of`]) records only into an empty record and only while the
+/// key is still the stored one: its session tokens were taken before it
+/// looked at the key, and a sign-in landing between the two must not have
+/// its identity overwritten with the replaced login's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SessionIdentity {
+    pub(crate) key_id: String,
+    pub(crate) digest: String,
+}
+
+/// The recorded identity of the login whose key is `key_id`, if any.
+pub(super) fn recorded_identity(record: &SpendOrgRecord, key_id: &str) -> Option<String> {
+    record
+        .session_identity
+        .as_ref()
+        .filter(|identity| identity.key_id == key_id)
+        .map(|identity| identity.digest.clone())
+}
+
+/// Record `digest` as the identity of the login whose key is `key_id`,
+/// outright: for a sign-in and a switch, which hold both. Best effort: a
+/// lost write is read again.
+pub(crate) fn record_identity(store: &ConfigStore, key_id: &str, digest: &str) {
+    let recorded = update(store, |record| {
+        record.session_identity = Some(SessionIdentity {
+            key_id: key_id.to_owned(),
+            digest: digest.to_owned(),
+        });
+    });
+    if recorded.is_err() {
+        tracing::warn!(target: "near_ai_spend_org", "near_ai_spend_org_identity_unrecorded");
+    }
+}
+
+/// The identity of the stored login whose key is `key_id`: the recorded
+/// one, else read from NEAR AI with `tokens`. The read is recorded only
+/// into an empty record, and only if `key_id` is still the stored key
+/// after it ([`SessionIdentity`]); otherwise it serves this call alone.
+async fn identity_of(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    tokens: &SessionTokens,
+    key_id: &str,
+) -> Option<String> {
+    let store = &shared.store;
+    if let Some(recorded) = load(store)
+        .ok()
+        .and_then(|record| recorded_identity(&record, key_id))
+    {
+        return Some(recorded);
+    }
+    let digest = read_identity(store, api, tokens).await?;
+    let still_stored = current_key(shared)
+        .ok()
+        .flatten()
+        .is_some_and(|key| key.key_id == key_id);
+    if still_stored {
+        let _ = update(store, |record| {
+            if record.session_identity.is_none() {
+                record.session_identity = Some(SessionIdentity {
+                    key_id: key_id.to_owned(),
+                    digest: digest.clone(),
+                });
+            }
+        });
+    }
+    Some(digest)
+}
+
 /// More pending revocations than this and a switch is refused: something is
 /// persistently refusing revokes, and minting further keys would only add to
 /// what has to be cleaned up.
@@ -85,6 +223,9 @@ pub(crate) struct SpendOrgRecord {
     /// Keys this install minted that should no longer exist.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) pending_revocations: Vec<PendingRevocation>,
+    /// The stored login's identity ([`SessionIdentity`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) session_identity: Option<SessionIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +233,13 @@ pub(crate) struct PendingRevocation {
     pub(crate) workspace_id: String,
     pub(crate) key_id: String,
     pub(crate) recorded_at: DateTime<Utc>,
+    /// The NEAR AI identity that recorded it, as [`identity_digest`]: only
+    /// that identity's session can revoke the key, so the sweep runs it with
+    /// no other (spec 2026-11-02 B8). `None` for an entry recorded before
+    /// tags, or when the identity could not be read; the sweep tries those
+    /// with the current session and drops one answered `403`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) identity: Option<String>,
 }
 
 impl PendingRevocation {
@@ -100,6 +248,22 @@ impl PendingRevocation {
             workspace_id: workspace_id.to_owned(),
             key_id: key_id.to_owned(),
             recorded_at: Utc::now(),
+            identity: None,
+        }
+    }
+
+    fn tagged(mut self, identity: Option<&str>) -> Self {
+        self.identity = identity.map(str::to_owned);
+        self
+    }
+
+    /// Whether the sweep may run this entry with a session of `identity`:
+    /// an untagged entry, or one tagged with that identity.
+    pub(super) fn belongs_to(&self, identity: Option<&str>) -> bool {
+        match (&self.identity, identity) {
+            (None, _) => true,
+            (Some(tag), Some(current)) => tag == current,
+            (Some(_), None) => false,
         }
     }
 
@@ -133,8 +297,36 @@ pub(crate) fn load(store: &ConfigStore) -> Result<SpendOrgRecord> {
     record
         .pending_revocations
         .retain(|entry| is_path_segment(&entry.workspace_id) && is_path_segment(&entry.key_id));
-    record.pending_revocations.truncate(MAX_PENDING * 2);
+    // A record written past its size by an older build: oldest first.
+    // `record_pending` keeps it in bounds from here on.
+    trim(&mut record.pending_revocations, None);
     Ok(record)
+}
+
+/// Bring the entries within `2 * MAX_PENDING`, dropping another identity's
+/// parked entries first, oldest first, then the oldest of the rest. `keep`
+/// is the identity whose entries go last; with none known, the oldest go
+/// first. A dropped entry's key stays at NEAR AI, so each trim is logged.
+fn trim(entries: &mut Vec<PendingRevocation>, keep: Option<&str>) {
+    let mut dropped = false;
+    while entries.len() > MAX_PENDING * 2 {
+        let index = keep
+            .and_then(|keep| {
+                entries
+                    .iter()
+                    .position(|entry| !entry.belongs_to(Some(keep)))
+            })
+            .unwrap_or(0);
+        entries.remove(index);
+        dropped = true;
+    }
+    if dropped {
+        crate::daemon::diagnostics_log::record_labels(
+            tracing::Level::WARN,
+            "near_ai_spend_org_revocations_trimmed",
+            &[("reason", "over_capacity")],
+        );
+    }
 }
 
 /// Change the record under the credential commit lock, so two writers in
@@ -162,6 +354,78 @@ pub(crate) fn chosen_organization(store: &ConfigStore) -> Option<String> {
         .and_then(|record| record.chosen_organization_id)
 }
 
+/// Whether a sign-in landed in another NEAR AI account (owner, 2026-11-02:
+/// signing in to a different account with a different NEAR AI organization
+/// switches to its organization if it has one, or asks).
+///
+/// The signal, when both are known, is the identity: the recorded identity
+/// of the login being replaced and that of the new one
+/// ([`identity_digest`]), compared in memory and never logged. When either
+/// is unknown, it is the organization listing the sign-in's mint reads
+/// anyway ([`super::api::CloudApi::mint_inference_key_listing`]): a choice is
+/// remembered and the account does not list that organization at all --
+/// most often a GitHub or Google login beside a wallet one. An organization
+/// the account still lists but that is inactive for now is the same
+/// account, and the choice stands.
+pub(crate) fn account_changed(
+    remembered: Option<&str>,
+    remembered_listed: bool,
+    previous_identity: Option<&str>,
+    new_identity: Option<&str>,
+) -> bool {
+    remembered.is_some()
+        && match (previous_identity, new_identity) {
+            (Some(previous), Some(new)) => previous != new,
+            _ => !remembered_listed,
+        }
+}
+
+/// The recorded identity of the stored login, whatever key it is bound
+/// to. Only for [`account_changed`] at a sign-in, where a wrong answer at
+/// worst asks the chooser again or keeps a preference the mint falls back
+/// from.
+pub(crate) fn last_identity(store: &ConfigStore) -> Option<String> {
+    load(store)
+        .ok()?
+        .session_identity
+        .map(|identity| identity.digest)
+}
+
+/// After a sign-in to another account stored its key: forget the choice
+/// made in the old one, so the new account's organization stands. With one
+/// organization nothing is asked; with several,
+/// [`OrganizationsReport::prompt`] asks again, since no choice is recorded
+/// for this account.
+///
+/// Pending revocations are kept: a missing organization is not proof of
+/// another account (it may have been deleted or left in the same one), and
+/// those keys may still be revocable. An entry tagged with the old identity
+/// is parked: never sent with the new session, and counted toward neither
+/// `revoke_pending` nor the [`MAX_PENDING`] limit, until that identity signs
+/// in again. An untagged entry is tried with the new session, and dropped
+/// on a `403` ([`RevokeOutcome::NotThisAccount`]). Best effort: a record that
+/// cannot be written keeps the old preference, which the mint already falls
+/// back from.
+pub(crate) fn forget_other_account(
+    store: &ConfigStore,
+    remembered: Option<&str>,
+    remembered_listed: bool,
+    previous_identity: Option<&str>,
+    new_identity: Option<&str>,
+) {
+    if !account_changed(
+        remembered,
+        remembered_listed,
+        previous_identity,
+        new_identity,
+    ) {
+        return;
+    }
+    if update(store, |record| record.chosen_organization_id = None).is_err() {
+        tracing::warn!(target: "near_ai_spend_org", "near_ai_spend_org_choice_not_cleared");
+    }
+}
+
 /// Forget the record. The caller holds the credential commit lock: this is
 /// the forget path's, which removes the session every revoke needs, and the
 /// forget sentence already says keys are not revoked at NEAR AI. Best
@@ -177,17 +441,46 @@ pub(crate) fn clear_locked(store: &ConfigStore) {
     }
 }
 
+/// After a sign-out removed the record: write back the pending entries the
+/// sign-out's session could not send (another identity's, or one it cannot
+/// tell), and nothing else -- no choice, no identity binding, both of which
+/// belonged to the login just removed. The caller holds the commit lock.
+/// Best effort, as `clear_locked`: a lost write loses only those entries,
+/// and a label line says so.
+pub(crate) fn keep_pending_locked(store: &ConfigStore, kept: Vec<PendingRevocation>) {
+    if kept.is_empty() {
+        return;
+    }
+    let record = SpendOrgRecord {
+        pending_revocations: kept,
+        ..SpendOrgRecord::default()
+    };
+    let written = serde_json::to_vec_pretty(&record)
+        .ok()
+        .is_some_and(|bytes| store.write_daemon_file(SPEND_ORG_FILE, &bytes).is_ok());
+    if !written {
+        tracing::warn!(target: "near_ai_spend_org", "near_ai_spend_org_parked_revocations_lost");
+    }
+}
+
+/// Record `entries`. An entry already held keeps its place; one held
+/// untagged takes the incoming tag, so a later sweep under another
+/// identity parks it instead of sending it.
 pub(crate) fn record_pending(store: &ConfigStore, entries: &[PendingRevocation]) -> Result<()> {
     update(store, |record| {
         for entry in entries {
-            if !record
+            match record
                 .pending_revocations
-                .iter()
-                .any(|held| held.same_key(entry))
+                .iter_mut()
+                .find(|held| held.same_key(entry))
             {
-                record.pending_revocations.push(entry.clone());
+                Some(held) if held.identity.is_none() => held.identity = entry.identity.clone(),
+                Some(_) => {}
+                None => record.pending_revocations.push(entry.clone()),
             }
         }
+        let keep = entries.iter().find_map(|entry| entry.identity.clone());
+        trim(&mut record.pending_revocations, keep.as_deref());
     })
 }
 
@@ -345,6 +638,10 @@ pub(crate) async fn organizations_with(
     // asking again is the safe side of not knowing.
     let chosen = recorded.is_some();
     let revoke_pending = match &record {
+        // Only another identity's parked keys (or the active one): there is
+        // nothing this session can revoke, so no session is taken and no
+        // call is made.
+        Some(record) if only_parked(shared, record) => false,
         Some(record) if !record.pending_revocations.is_empty() => {
             balance::with_management_session(shared, api, |tokens| sweep(shared, api, tokens))
                 .await
@@ -369,8 +666,30 @@ fn not_listed(report: BalanceReport) -> &'static str {
     }
 }
 
+/// Whether every pending entry is tagged with an identity other than the
+/// stored login's recorded one: nothing a sweep could send. An entry naming
+/// the active key is not parked: only a sweep settles it.
+fn only_parked(shared: &DaemonShared, record: &SpendOrgRecord) -> bool {
+    let Ok(Some(active)) = current_key(shared) else {
+        return false;
+    };
+    let Some(identity) = recorded_identity(record, &active.key_id) else {
+        return false;
+    };
+    let active = PendingRevocation::of(&active);
+    !record.pending_revocations.is_empty()
+        && record
+            .pending_revocations
+            .iter()
+            .all(|entry| !entry.same_key(&active) && !entry.belongs_to(Some(&identity)))
+}
+
 /// Revoke every recorded key that is not the active one. Answers whether any
 /// remain. Never revokes the active key: an entry naming it is dropped.
+///
+/// It reads the active key and the record again, under the commit lock,
+/// rather than taking them from the caller: the management session it runs
+/// in may have re-exchanged, and a sign-in may have landed, since.
 async fn sweep(shared: &DaemonShared, api: &CloudApi, tokens: SessionTokens) -> Result<bool> {
     let pending = load(&shared.store)?.pending_revocations;
     if pending.is_empty() {
@@ -379,7 +698,17 @@ async fn sweep(shared: &DaemonShared, api: &CloudApi, tokens: SessionTokens) -> 
     // Which key is active must be known for certain before anything is
     // revoked. A daemon whose memory and disk disagree answers an error
     // here, and nothing is touched.
-    let active = current_key(shared)?.map(|key| PendingRevocation::of(&key));
+    let active_key = current_key(shared)?;
+    let active = active_key.as_ref().map(PendingRevocation::of);
+    // The identity is needed only to tell a tagged entry's owner.
+    let needs_identity = pending.iter().any(|entry| {
+        entry.identity.is_some() && !active.as_ref().is_some_and(|active| active.same_key(entry))
+    });
+    let identity = match (&active_key, needs_identity) {
+        (_, false) => None,
+        (Some(key), true) => identity_of(shared, api, &tokens, &key.key_id).await,
+        (None, true) => read_identity(&shared.store, api, &tokens).await,
+    };
     let mut settled = Vec::new();
     let mut remaining = false;
     for entry in pending {
@@ -390,11 +719,29 @@ async fn sweep(shared: &DaemonShared, api: &CloudApi, tokens: SessionTokens) -> 
             settled.push(entry);
             continue;
         }
+        // Another identity's key stays parked: this session cannot revoke
+        // it, and it is not this identity's to report. With the identity
+        // unread, a tagged entry waits for a sweep that can read it.
+        if !entry.belongs_to(identity.as_deref()) {
+            remaining |= identity.is_none();
+            continue;
+        }
         match api
             .revoke_inference_key(&tokens, &entry.workspace_id, &entry.key_id)
             .await
         {
             Ok(RevokeOutcome::Revoked | RevokeOutcome::AlreadyGone) => settled.push(entry),
+            // Another account's key: this session can never revoke it, and
+            // keeping it would hold `revoke_pending` and the limit forever.
+            // The key stays at NEAR AI in that account, as after a forget.
+            Ok(RevokeOutcome::NotThisAccount) => {
+                crate::daemon::diagnostics_log::record_labels(
+                    tracing::Level::WARN,
+                    "near_ai_spend_org_revocation_dropped",
+                    &[("reason", "not_this_account")],
+                );
+                settled.push(entry);
+            }
             Err(_) => {
                 tracing::warn!(target: "near_ai_spend_org", "near_ai_key_revoke_deferred");
                 remaining = true;
@@ -500,7 +847,17 @@ async fn switch_step(
         remember_choice(&shared.store, target)?;
         return Ok(false);
     }
-    if load(&shared.store)?.pending_revocations.len() >= MAX_PENDING {
+    // Tagged with the identity that mints, so the sweep never runs these
+    // with another's session. Only this identity's entries (and untagged
+    // ones) count toward the limit: another's parked entries cannot jam it.
+    let identity = identity_of(shared, api, &tokens, &old.key_id).await;
+    // With the identity unknown, every entry counts: the limit fails closed.
+    let actionable = load(&shared.store)?
+        .pending_revocations
+        .iter()
+        .filter(|entry| identity.is_none() || entry.belongs_to(identity.as_deref()))
+        .count();
+    if actionable >= MAX_PENDING {
         bail!(LABEL_SPEND_ORG_BUSY)
     }
     let key_name = super::ceremony::key_name(&super::loopback::random_state()?);
@@ -521,10 +878,12 @@ async fn switch_step(
             });
         }
     };
-    let fresh = PendingRevocation::new(&minted.workspace_id, &minted.key_id);
+    let fresh =
+        PendingRevocation::new(&minted.workspace_id, &minted.key_id).tagged(identity.as_deref());
     // Recorded before the new key is relied on. Whichever of the two is not
     // active when a sweep runs is revoked; the active one never is.
-    if record_pending(&shared.store, &[PendingRevocation::of(&old), fresh.clone()]).is_err() {
+    let old_entry = PendingRevocation::of(&old).tagged(identity.as_deref());
+    if record_pending(&shared.store, &[old_entry, fresh.clone()]).is_err() {
         // Nothing recorded means nothing would ever revoke the new key, so
         // it is revoked now, and the switch fails having changed nothing.
         let _ = api
@@ -553,6 +912,10 @@ async fn switch_step(
     // the honest state, and the switch itself has happened.
     if remember_choice(&shared.store, target).is_err() {
         tracing::warn!(target: "near_ai_spend_org", "near_ai_spend_org_choice_unsaved");
+    }
+    // Same login, new key: the recorded identity moves to it.
+    if let Some(identity) = identity.as_deref() {
+        record_identity(&shared.store, &fresh.key_id, identity);
     }
     Ok(true)
 }

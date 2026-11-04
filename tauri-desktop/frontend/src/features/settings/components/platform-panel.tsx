@@ -135,7 +135,7 @@ export function PlatformPanel() {
           />
           <CapabilityRow
             label="Tray"
-            detail="Daemon-derived counts and review navigation."
+            detail="Counts and review navigation."
             state={data.tray.state}
           />
         </div>

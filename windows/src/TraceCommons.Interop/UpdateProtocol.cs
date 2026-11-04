@@ -153,12 +153,14 @@ public static class UpdateProtocol
             "Ready to update.",
         TcQuiesceOutcome.TimedOut =>
             "An upload is still finishing. The update will install the next time you open the app.",
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
         TcQuiesceOutcome.Busy =>
-            "The daemon is busy. The update will install the next time you open the app.",
+            "The app is busy. The update will install the next time you open the app.",
         TcQuiesceOutcome.Unsupported =>
             "This version cannot pause uploads to update safely. Windows will install the update the next time you open the app.",
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
         _ =>
-            "The daemon is not available. The update will install the next time you open the app.",
+            "The background service is not available. The update will install the next time you open the app.",
     };
 
     /// <summary>

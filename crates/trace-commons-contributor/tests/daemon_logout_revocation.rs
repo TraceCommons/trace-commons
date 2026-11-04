@@ -33,6 +33,7 @@ fn enrolled_store(dir: &std::path::Path) -> ConfigStore {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: Some(true),
             witness_origin: None,
+            account_identity: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "https://issuer.example.ai".into(),
@@ -86,9 +87,12 @@ async fn logout_stops_a_running_daemon_and_removes_all_of_its_state() {
 
     // Logout runs blocking socket I/O, so keep it off the async worker.
     let logout_store = ConfigStore::open(store.dir().to_path_buf()).unwrap();
-    tokio::task::spawn_blocking(move || commands::logout(&logout_store, true).unwrap())
-        .await
-        .unwrap();
+    tokio::task::spawn_blocking(move || {
+        { tokio::runtime::Handle::current().block_on(commands::logout(&logout_store, true)) }
+            .unwrap()
+    })
+    .await
+    .unwrap();
 
     for name in [
         DAEMON_PROJECTS_FILE,
@@ -119,9 +123,12 @@ async fn logout_succeeds_when_no_daemon_is_running() {
     let dir = tempfile::tempdir().unwrap();
     let store = enrolled_store(&dir.path().join("state"));
     let logout_store = ConfigStore::open(store.dir().to_path_buf()).unwrap();
-    tokio::task::spawn_blocking(move || commands::logout(&logout_store, true).unwrap())
-        .await
-        .unwrap();
+    tokio::task::spawn_blocking(move || {
+        { tokio::runtime::Handle::current().block_on(commands::logout(&logout_store, true)) }
+            .unwrap()
+    })
+    .await
+    .unwrap();
     assert!(store.load_config().unwrap().is_none());
 }
 
@@ -136,7 +143,9 @@ async fn logout_is_not_blocked_by_a_stale_socket_from_a_crashed_daemon() {
     let logout_store = ConfigStore::open(store.dir().to_path_buf()).unwrap();
     let done = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio::task::spawn_blocking(move || commands::logout(&logout_store, true)),
+        tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(commands::logout(&logout_store, true))
+        }),
     )
     .await
     .expect("logout must not hang on a stale socket")
@@ -194,9 +203,12 @@ async fn logout_makes_a_real_running_daemon_exit() {
     );
 
     let logout_store = ConfigStore::open(state_dir).unwrap();
-    tokio::task::spawn_blocking(move || commands::logout(&logout_store, true).unwrap())
-        .await
-        .unwrap();
+    tokio::task::spawn_blocking(move || {
+        { tokio::runtime::Handle::current().block_on(commands::logout(&logout_store, true)) }
+            .unwrap()
+    })
+    .await
+    .unwrap();
 
     let exited = tokio::time::timeout(Duration::from_secs(10), daemon).await;
     assert!(

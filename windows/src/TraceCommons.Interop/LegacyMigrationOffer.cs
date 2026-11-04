@@ -40,14 +40,14 @@ public sealed record LegacyMigrationOfferCopy
     /// <summary>Beside the dismiss: the move is still in Settings.</summary>
     [JsonPropertyName("later")] public string Later { get; init; } = string.Empty;
 
-    /// <summary>While the passkey step is open in the browser.</summary>
-    [JsonPropertyName("passkey_waiting")] public string PasskeyWaiting { get; init; } = string.Empty;
+    /// <summary>While the sign-in step is open in the browser.</summary>
+    [JsonPropertyName("passkey_waiting")] public string LoginWaiting { get; init; } = string.Empty;
 
-    /// <summary>The passkey step ended without finishing.</summary>
-    [JsonPropertyName("passkey_failed")] public string PasskeyFailed { get; init; } = string.Empty;
+    /// <summary>The sign-in step ended without finishing.</summary>
+    [JsonPropertyName("passkey_failed")] public string LoginFailed { get; init; } = string.Empty;
 
-    /// <summary>Stops waiting on the passkey step.</summary>
-    [JsonPropertyName("passkey_cancel")] public string PasskeyCancel { get; init; } = string.Empty;
+    /// <summary>Stops waiting on the sign-in step.</summary>
+    [JsonPropertyName("passkey_cancel")] public string LoginCancel { get; init; } = string.Empty;
 
     /// <summary>The accessible name of <see cref="Action"/> on the offer card.</summary>
     [JsonPropertyName("action_name_notice")] public string ActionNameNotice { get; init; } = string.Empty;
@@ -71,8 +71,8 @@ public sealed record LegacyMigrationOfferCopy
 /// </summary>
 public static class LegacyMigrationOffers
 {
-    /// <summary>The refusal that means "run the passkey step, then try again".</summary>
-    public const string PasskeyNeededLabel = "legacy_migration_no_near_ai_session";
+    /// <summary>The refusal that means "run the sign-in step, then try again".</summary>
+    public const string LoginNeededLabel = "legacy_migration_no_near_ai_session";
 
     /// <summary>The refusal that means "ask the contributor for their invite".</summary>
     public const string InviteNeededLabel = "legacy_migration_invite_needed";
@@ -103,7 +103,7 @@ public static class LegacyMigrationOffers
             foreach (string sentence in new[]
             {
                 copy.Title, copy.Body, copy.Action, copy.Working, copy.InvitePrompt, copy.StartFailed,
-                copy.Dismiss, copy.Later, copy.PasskeyWaiting, copy.PasskeyFailed, copy.PasskeyCancel,
+                copy.Dismiss, copy.Later, copy.LoginWaiting, copy.LoginFailed, copy.LoginCancel,
                 copy.ActionNameNotice, copy.ActionNameSettings,
             })
             {

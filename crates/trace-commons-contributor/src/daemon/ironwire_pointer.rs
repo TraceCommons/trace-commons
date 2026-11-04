@@ -121,7 +121,7 @@ pub(crate) fn trustworthy_file(path: &Path) -> Option<std::fs::Metadata> {
 /// fails [`trustworthy_file`] closed, which costs routing enrichment on a
 /// machine in that state and is the same outcome as no proxy at all.
 #[cfg(unix)]
-fn current_uid() -> Option<u32> {
+pub(crate) fn current_uid() -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
     use std::sync::OnceLock;
 

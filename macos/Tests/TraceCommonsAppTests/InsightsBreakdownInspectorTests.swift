@@ -101,7 +101,7 @@ final class InsightsBreakdownInspectorTests: XCTestCase {
         XCTAssertTrue(window.contains("} else if shownTab == .insights, let detail = insightsInspector.detail {"))
         XCTAssertTrue(window.contains(".union(insightsInspector.demandKey.map { [$0] } ?? [])"))
         let detail = try InsightsGlassConventionsTests.text("Views/InsightsBreakdownInspector.swift")
-        XCTAssertTrue(detail.contains("InsightsBreakdownTitle(day: nil, copy: copy, showWeek: {})\n"
+        XCTAssertTrue(detail.contains("InsightsBreakdownTitle(day: nil, copy: copy)\n"
             + "                    Text(text(\"analytics_unavailable\")).insightsNote()"))
     }
 }

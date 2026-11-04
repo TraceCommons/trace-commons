@@ -117,9 +117,11 @@ public final class TCDaemon: @unchecked Sendable {
 
         public var description: String {
             switch self {
-            case .startFailed(let msg): return "tc_daemon_start failed: \(msg)"
+            // DRAFT, NEEDS APPROVAL (2026-11-04). Rule 8: shell-local.
+            case .startFailed(let msg): return "App start failed: \(msg)"
             case .previewFailed(let msg): return "tc_preview_open failed: \(msg)"
-            case .daemonGone: return "daemon handle already freed"
+            // DRAFT, NEEDS APPROVAL (2026-11-04). Rule 8: shell-local.
+            case .daemonGone: return "The app has already stopped."
             case .rootsNotDeclared:
                 return """
                     This app hasn't been told which session folders to watch, and it \

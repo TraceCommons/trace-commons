@@ -88,7 +88,9 @@ struct SettingsUnavailable: View {
 
     static func line(_ read: SettingsRead, screens: MonitorScreensCopy?) -> String {
         guard let screens else { return "\u{2014}" }
-        return read == .coreDown ? screens.coreUnreachable : screens.requestFailed
+        // Settings' own core-down line: it shows nothing the core last
+        // reported, so it never says it does.
+        return read == .coreDown ? screens.settingsCoreUnreachable : screens.requestFailed
     }
 
     static func offersRetry(_ read: SettingsRead) -> Bool { read == .failed }

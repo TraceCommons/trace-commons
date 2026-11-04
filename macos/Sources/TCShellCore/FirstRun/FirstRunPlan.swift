@@ -37,23 +37,40 @@ public enum FirstRunCall: Equatable, Sendable {
 public enum NearAILoginPoll: Equatable, Sendable {
     case signedIn
     case waiting
+    /// The daemon ended the attempt as cancelled (`ceremony::ended_by_person`),
+    /// not a fault. That word has several sources: the wallet's own Cancel;
+    /// the browser's login page coming back after a pick, which tells the
+    /// person to start again from the app; this app's own Cancel (Settings,
+    /// the first run); an unnamed cancel from another client (the CLI,
+    /// another shell); and a Forget that won the race with the sign-in's
+    /// persist. In the last two the browser may still be on the login page
+    /// with nothing said. Either way, callers report no failure for it, and
+    /// Sign in stays offered for another try.
+    case cancelled
     case ended
 
     /// The ceremony's waiting word (`nearai_credential::ceremony`).
     public static let waitingForBrowser = "waiting_for_browser"
+    /// The ceremony's word for an attempt the person ended
+    /// (`ceremony::ended_by_person`).
+    public static let cancelledWord = "cancelled"
     /// How long the first run waits on the browser before it gives up and
     /// says the sign-in did not finish.
     public static let limit: TimeInterval = 600
 
     /// A kept session is signed in. An attempt still waiting on the
-    /// browser, or a poll that could not be read, waits. Any other attempt
-    /// word -- cancelled, failed, finished without a session, or one this
-    /// build does not know -- is over.
+    /// browser, or a poll that could not be read, waits. A cancelled one is
+    /// the person's. Any other attempt word -- failed, finished without a
+    /// session, or one this build does not know -- is over.
     public static func verdict(_ status: CredentialStatus?) -> NearAILoginPoll {
         guard let status else { return .waiting }
         if status.sessionState == CredentialSurface.statePresent { return .signedIn }
         guard let attempt = status.attemptStatus else { return .waiting }
-        return attempt == waitingForBrowser ? .waiting : .ended
+        switch attempt {
+        case waitingForBrowser: return .waiting
+        case cancelledWord: return .cancelled
+        default: return .ended
+        }
     }
 
     /// The ceremony's word for an attempt that stored its session.
@@ -69,9 +86,18 @@ public enum NearAILoginPoll: Equatable, Sendable {
         switch attempt {
         case complete: return .signedIn
         case waitingForBrowser: return .waiting
+        case cancelledWord: return .cancelled
         default: return .ended
         }
     }
+}
+
+/// How a browser sign-in to NEAR AI ended, for its callers: signed in, ended
+/// by the person (no failure to report), or did not finish.
+public enum NearAILoginOutcome: Equatable, Sendable {
+    case signedIn
+    case cancelled
+    case failed
 }
 
 /// Where the first run commits answers to the daemon.
@@ -135,6 +161,18 @@ public enum FirstRunPlan {
         return calls
     }
 
+    /// Private AI only: the enrollment's completion marker, after telling
+    /// the daemon to watch nothing if it still watches anything (an earlier
+    /// Customize started it with tools ticked). No consent scopes, no Ask
+    /// or grant, no folder rule, no past session and no Private AI switch:
+    /// nothing is consented to, queued or sent. Without an enrollment, or
+    /// with anything still watched, nothing at all (fail closed;
+    /// `canContinue` keeps Start off for both).
+    private static func privateAIOnlyStart(_ state: FirstRunState) -> [FirstRunCall] {
+        guard state.holdsEnrolment, !state.watchesAnything else { return [] }
+        return roots(state) + [.markComplete]
+    }
+
     /// The declarations in `current` that differ from `started`, as a sorted
     /// `set_settings` object, or nil when nothing changed.
     ///
@@ -187,6 +225,7 @@ public enum FirstRunPlan {
     /// daemon is logged in. Join does not offer watch only then, and
     /// `canContinue` keeps Start off for it.
     private static func start(_ state: FirstRunState) -> [FirstRunCall] {
+        if state.privateAIOnly { return privateAIOnlyStart(state) }
         let watchOnly = state.account == .watchOnly
         if watchOnly, state.daemonHoldsEnrolment { return [] }
         guard watchOnly || state.holdsEnrolment else { return [] }

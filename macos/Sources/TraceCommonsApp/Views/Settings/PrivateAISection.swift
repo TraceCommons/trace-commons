@@ -26,16 +26,18 @@ struct PrivateAISection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             PrivateAISettingsPanels(store: store)
+            // Switch the account's NEAR AI login (F10), under the
+            // connection card where the sign-in is, by the account
+            // section's rule.
+            AccountLoginChangeButton(offersMismatchChange: true, carded: true)
             // Which NEAR AI organization Private AI spends from. Drawn only
             // with two or more organizations.
             SpendOrganizationCard()
             if let copy = model.privateInferenceCopy {
                 FundingRow(copy: copy)
             }
-            // NEAR AI credit payout: which owned organization earned credit
-            // goes to. Hides itself unless the commons lists the rail as
-            // enabled.
-            PayoutLinkView()
+            // The NEAR AI credit payout and its login line are Settings >
+            // Payouts' since the Settings IA review (D2).
             // Count Private AI tokens (Ron's #1287 review: moved here from
             // Tools). This section is open before first run (R-38), so the
             // switch waits for it (R-43): no Insights write is reachable
@@ -49,7 +51,14 @@ struct PrivateAISection: View {
             // only managed sessions. Drawn only when the daemon found an
             // app to offer.
             if let snapshot = model.managedSnapshot, !snapshot.terminalChoices.isEmpty {
-                GlassCard { ManagedTerminalPicker(snapshot: snapshot) }
+                GlassCard {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                        ManagedTerminalPicker(snapshot: snapshot)
+                        if snapshot.offersHerdrGrouping {
+                            ManagedHerdrGroupingSwitch(snapshot: snapshot)
+                        }
+                    }
+                }
             }
             // The models listed first in the Launch sheet's picker, with
             // the ones NEAR AI stopped offering marked. Drawn only while

@@ -317,10 +317,14 @@ async fn forget_cleanup_failure_withdraws_proxy_authority_and_allows_retry() {
     let shared = running_proxy(store, &home).await;
     backend.fail_delete.store(true, Ordering::SeqCst);
     let response = handle_request_async(&shared, &forget_request()).await;
-    assert_eq!(
-        response.error.unwrap().message,
-        "near_ai_credential_cleanup_required"
-    );
+    // The clear and the revoke attempt happened, so the answer is ok and
+    // keeps the revoke's outcome; the OS entry left to delete is said
+    // beside it and in the status below. No NEAR AI client in a test build,
+    // so the stored key was not revoked.
+    let body = response.result.expect("forget answers");
+    assert_eq!(body["removed"], true);
+    assert_eq!(body["cleanup_pending"], true);
+    assert_eq!(body["revoked"], false);
     assert_withdrawn(&shared).await;
     assert_eq!(journal(&shared.store).len(), 1);
     let status = crate::daemon::nearai_credential::handle_status(&shared, &forget_request())

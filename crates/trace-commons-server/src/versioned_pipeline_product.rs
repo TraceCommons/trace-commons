@@ -402,8 +402,10 @@ pub struct PipelineForensicTrace {
 /// (the stored string `TraceCreditEventType::NoveltyUtility`'s own serde
 /// produces, `trace_corpus_storage.rs`, `rename_all = "snake_case"`; the
 /// same string `versioned_pipeline.rs`'s `settle_internal_credit` writes,
-/// Ruling S10) reports `not_settlement_eligible` rather than `pending`
-/// forever, since `main` never batches or pays that event type. A
+/// Ruling S10) with no carrying batch reports `not_settlement_eligible`
+/// rather than `pending` forever, since `main` never batches or pays that
+/// event type; under the graded credit rule (owner decision D2, 2026-11-03)
+/// the pipeline batches it, and it reports its batch's state. A
 /// `trace_credit` row that completed with no ledger event is one of `main`'s
 /// credit checks refused (Ruling T15-12): `withheld`. Every query that
 /// embeds this must alias its rows exactly as this text assumes, and must
@@ -416,6 +418,7 @@ const INTERNAL_SETTLEMENT_STATE_CASE: &str = "
                                          AND settlement.credit_event_id IS NULL
                                             THEN 'withheld'
                                         WHEN ledger.event_type = 'novelty_utility'
+                                         AND batch.status IS NULL
                                             THEN 'not_settlement_eligible'
                                         WHEN batch.status IS NOT NULL THEN batch.status
                                         WHEN settlement.credit_event_id IS NOT NULL THEN 'pending'

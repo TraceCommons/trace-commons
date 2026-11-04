@@ -18,10 +18,28 @@ struct FirstRunFooter {
     /// A link left of the action that opens more of the step in place
     /// (Customize on Tools, Ron 2026-10-21).
     let link: Link?
+    /// A second way off the step, beside the action, in the secondary
+    /// style (Private AI only on Tools).
+    let secondary: Secondary?
+    /// Back while a commit runs, when the screen has a safe one (Join's
+    /// sign-in, `JoinScreenLayout.backWhileCommitting`); otherwise Back is
+    /// withdrawn while committing.
+    let backWhileCommitting: BackWhileCommitting?
     let action: () -> Void
 
     struct Cancel {
         let title: String
+        let action: () -> Void
+    }
+
+    struct Secondary {
+        let title: String
+        let isEnabled: Bool
+        let action: () -> Void
+    }
+
+    struct BackWhileCommitting {
+        let isEnabled: Bool
         let action: () -> Void
     }
 
@@ -34,7 +52,8 @@ struct FirstRunFooter {
 
     init(
         title: String, isEnabled: Bool, note: String? = nil, busy: Bool = false, cancel: Cancel? = nil,
-        link: Link? = nil, action: @escaping () -> Void
+        link: Link? = nil, secondary: Secondary? = nil, backWhileCommitting: BackWhileCommitting? = nil,
+        action: @escaping () -> Void
     ) {
         self.title = title
         self.isEnabled = isEnabled
@@ -42,6 +61,8 @@ struct FirstRunFooter {
         self.busy = busy
         self.cancel = cancel
         self.link = link
+        self.secondary = secondary
+        self.backWhileCommitting = backWhileCommitting
         self.action = action
     }
 }
@@ -64,6 +85,12 @@ extension FirstRunCopy {
     /// there, this only names each step.
     var threadLabels: [String] {
         FirstRunNavigation.threadSteps.compactMap(threadLabel(for:))
+    }
+
+    /// The names of the steps on this first run's path (Private AI only
+    /// has no Uses or Traces).
+    func threadLabels(for state: FirstRunState) -> [String] {
+        FirstRunNavigation.threadSteps(for: state).compactMap(threadLabel(for:))
     }
 }
 
@@ -104,7 +131,17 @@ enum FirstRunFrameLayout {
     /// is withdrawn while a commit runs, so the runner never moves the step
     /// on from a step the person has already left.
     static func offersBack(_ state: FirstRunState, isCommitting: Bool = false) -> Bool {
-        !isCommitting && FirstRunNavigation.steps.first != state.step
+        back(state, isCommitting: isCommitting, whileCommitting: nil) == true
+    }
+
+    /// Back as drawn: nil for none, else whether it is enabled. While a
+    /// commit runs it is withdrawn, unless the screen offers one for that
+    /// commit (`whileCommitting`, Join's sign-in), which keeps it on screen
+    /// so nobody is trapped behind a spinner.
+    static func back(_ state: FirstRunState, isCommitting: Bool, whileCommitting: Bool?) -> Bool? {
+        guard FirstRunNavigation.steps.first != state.step else { return nil }
+        guard isCommitting else { return true }
+        return whileCommitting
     }
 
     /// The notes above the action bar: the footer's, when it has one.
@@ -203,11 +240,18 @@ struct FirstRunFrame<Graphic: View, Title: View, Content: View>: View {
 
     private var actionBar: some View {
         HStack(spacing: GlassTokens.Space.s4) {
-            if FirstRunFrameLayout.offersBack(state, isCommitting: isCommitting) {
+            if let enabled = FirstRunFrameLayout.back(
+                state, isCommitting: isCommitting, whileCommitting: footer.backWhileCommitting?.isEnabled)
+            {
                 Button(copy.frame.back) {
-                    state = FirstRunNavigation.back(state)
+                    if isCommitting {
+                        footer.backWhileCommitting?.action()
+                    } else {
+                        state = FirstRunNavigation.back(state)
+                    }
                 }
                 .buttonStyle(GlassButtonStyle(.glass, size: .stage))
+                .disabled(!enabled)
             }
             Spacer(minLength: 0)
             if let link = footer.link {
@@ -228,6 +272,11 @@ struct FirstRunFrame<Graphic: View, Title: View, Content: View>: View {
             if let cancel = footer.cancel {
                 Button(cancel.title, action: cancel.action)
                     .buttonStyle(GlassButtonStyle(.secondary, size: .stage))
+            }
+            if let secondary = footer.secondary {
+                Button(secondary.title, action: secondary.action)
+                    .buttonStyle(GlassButtonStyle(.secondary, size: .stage))
+                    .disabled(!secondary.isEnabled)
             }
             Button(action: footer.action) {
                 HStack(spacing: GlassTokens.Space.s3) {

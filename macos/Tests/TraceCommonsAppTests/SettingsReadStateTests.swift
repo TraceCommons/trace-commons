@@ -99,7 +99,8 @@ final class SettingsReadStateTests: XCTestCase {
     func testTheUnavailableLineIsTheCoresAndOnlyAFailedReadOffersRetry() throws {
         let screens = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON()))
         XCTAssertEqual(SettingsUnavailable.line(.failed, screens: screens), screens.requestFailed)
-        XCTAssertEqual(SettingsUnavailable.line(.coreDown, screens: screens), screens.coreUnreachable)
+        XCTAssertEqual(SettingsUnavailable.line(.coreDown, screens: screens), screens.settingsCoreUnreachable)
+        XCTAssertFalse(SettingsUnavailable.line(.coreDown, screens: screens).contains("last reported"))
         XCTAssertTrue(SettingsUnavailable.offersRetry(.failed))
         XCTAssertFalse(SettingsUnavailable.offersRetry(.coreDown))
         // With the table missing, a dash: never nothing.

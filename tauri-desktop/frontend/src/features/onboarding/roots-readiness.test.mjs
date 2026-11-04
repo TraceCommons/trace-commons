@@ -42,7 +42,7 @@ test("a declared roots step advances only once the daemon reports running", () =
 test("a failed start is reported as a start failure, not an enrollment failure", () => {
   assert.equal(rootsContinueError(new Error("roots-not-declared")), "roots_required");
   assert.equal(
-    rootsContinueError(new Error("starting embedded contributor daemon failed")),
+    rootsContinueError(new Error("starting the app failed")),
     "start_failed",
   );
   assert.equal(rootsContinueError(null), "start_failed");

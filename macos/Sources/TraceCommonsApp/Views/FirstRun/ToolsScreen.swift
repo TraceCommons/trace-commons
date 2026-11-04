@@ -192,6 +192,16 @@ enum ToolsScreenLayout {
             state, candidates: rows(discovered, state: state), requiredScope: nil)
     }
 
+    /// Private AI only, beside Continue (tester report, owner-approved
+    /// path 2026-11-04): offered once discovery has answered, whatever is
+    /// ticked, since it answers every tool Not used. Not while a folder is
+    /// being added or a commit runs.
+    static func canChoosePrivateAIOnly(
+        discovered: [SourceCandidate]?, pending: Bool, isCommitting: Bool, scanned: Bool = true
+    ) -> Bool {
+        discovered != nil && scanned && !pending && !isCommitting
+    }
+
     /// Customize, beside Continue, opens once a tool is watched, as Continue
     /// does (Ron, 2026-10-21), and closes again at any time.
     static func customizeEnabled(state: FirstRunState, open: Bool, scanned: Bool, isCommitting: Bool) -> Bool {
@@ -1156,7 +1166,19 @@ struct ToolsScreen: View {
                         state: runner.state, open: customizing, scanned: scanned, isCommitting: runner.isCommitting),
                     isOpen: customizing,
                     action: toggleCustomize),
-                action: { Task { await runner.commit(.leaveTools) } }),
+                secondary: FirstRunFooter.Secondary(
+                    title: copy.tools.privateAiOnly,
+                    isEnabled: ToolsScreenLayout.canChoosePrivateAIOnly(
+                        discovered: discovery.rows, pending: adding.pending != nil,
+                        isCommitting: runner.isCommitting, scanned: scanned),
+                    action: {
+                        runner.state = FirstRunNavigation.choosePrivateAIOnly(runner.state)
+                        Task { await runner.commit(.leaveTools) }
+                    }),
+                action: {
+                    runner.state = FirstRunNavigation.continueSharing(runner.state)
+                    Task { await runner.commit(.leaveTools) }
+                }),
             open: customizing
         ) {
             ToolsRing(rows: rows, state: runner.state, scanStart: memory.scanStartedAt)

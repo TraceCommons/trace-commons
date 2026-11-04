@@ -72,7 +72,7 @@ export function SettingsPage({
       <PlatformPanel />
       {settings.state === "loading" && (
         <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
-          Reading daemon settings…
+          Reading settings…
         </p>
       )}
       {settings.state === "error" && (
@@ -85,7 +85,7 @@ export function SettingsPage({
           <div className="flex items-start justify-between gap-[18px]">
             <div>
               <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
-                DAEMON
+                CONTRIBUTION
               </span>
               <h2>Contribution watcher</h2>
             </div>
@@ -155,7 +155,7 @@ export function SettingsPage({
             <SettingRow
               label="Notifications"
               value={settingValue(snapshot, "local_notifications", "off")}
-              detail="Daemon-level notifications"
+              detail="Notifications from this app"
             />
           </section>
           <SourceRootsPanel

@@ -68,8 +68,10 @@ const CEILING: u128 = 1_000_000_000_000;
 /// through its table-wide V62 grant; a database migrated straight to head
 /// lacks it, so this suite grants exactly these.
 const PASS_PILOT_GRANTS: &str = "GRANT SELECT ON trace_credit_settlement_batches, \
-    trace_credit_ledger, trace_account_principals, trace_accounts, trace_credit_holds \
-    TO trace_ingest_runtime;";
+    trace_credit_ledger, trace_account_principals, trace_accounts, trace_credit_holds, \
+    trace_near_account_anchors TO trace_ingest_runtime; \
+    GRANT INSERT ON trace_account_audit TO trace_ingest_runtime; \
+    GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_ingest_runtime;";
 
 struct Fixture {
     owner: PgBackend,
@@ -1419,6 +1421,235 @@ async fn reads_and_sends_together_stay_inside_the_send_window() {
     assert!(rows.iter().all(|row| row.state == "confirmed"), "{rows:?}");
 }
 
+/// Revokes `link` exactly as V147 does: a waiting link closes at
+/// `final_paid` 0 with the guard trigger set aside for that one UPDATE, an
+/// active link gets the unlink mark. Same statements as the migration,
+/// narrowed to one link.
+async fn v147_revoke(fixture: &Fixture, tenant: &str, link: &PayoutLinkWrite) {
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    let revoked = match link.state {
+        PayoutLinkState::Waiting => {
+            tx.batch_execute(
+                "ALTER TABLE trace_payout_links DISABLE TRIGGER trace_payout_links_guard_update",
+            )
+            .await
+            .unwrap();
+            let closed = tx
+                .execute(
+                    "UPDATE trace_payout_links
+                        SET state = 'closed', final_paid = 0, version = version + 1,
+                            updated_at = clock_timestamp()
+                      WHERE tenant_id = $1 AND link_id = $2 AND state = 'waiting'",
+                    &[&tenant, &link.link_id],
+                )
+                .await
+                .unwrap();
+            tx.batch_execute(
+                "ALTER TABLE trace_payout_links ENABLE TRIGGER trace_payout_links_guard_update",
+            )
+            .await
+            .unwrap();
+            closed
+        }
+        PayoutLinkState::Active => tx
+            .execute(
+                "UPDATE trace_payout_links
+                    SET unlink_requested_at = clock_timestamp(), version = version + 1,
+                        updated_at = clock_timestamp()
+                  WHERE tenant_id = $1 AND link_id = $2 AND state = 'active'
+                    AND unlink_requested_at IS NULL",
+                &[&tenant, &link.link_id],
+            )
+            .await
+            .unwrap(),
+        other => panic!("V147 revokes waiting and active links, not {other:?}"),
+    };
+    tx.commit().await.unwrap();
+    assert_eq!(revoked, 1, "V147 revoked the link");
+}
+
+/// #1884: the pass over links V147 revoked pays nothing to any of them and
+/// closes each revoked active link with one zero send. An active link with
+/// the unlink mark is closed at the program's total so far; a revoked
+/// waiting successor (closed at 0) is never loaded, so the active link
+/// beside it closes with no successor and nothing is activated. The owed
+/// credit stays owed, for a later link.
+#[tokio::test]
+async fn the_pass_pays_nothing_to_links_v147_revoked() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let mock = Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let opener = Arc::new(TestOpener::default());
+    let (tenant, accounts) = tenant_with_accounts(&fixture, 2).await;
+    settle(&fixture, &tenant, accounts[0], 3_000).await;
+    settle(&fixture, &tenant, accounts[1], 3_000).await;
+    // Account 0: an active link that was paid 1,000 before the deploy.
+    let marked = link(
+        &fixture,
+        &tenant,
+        accounts[0],
+        rail.as_ref(),
+        &opener,
+        &org(31),
+        PayoutLinkState::Active,
+    )
+    .await;
+    let paid_before = mock.seed(recipient_org(31), &marked.program, 1_000);
+    v147_revoke(&fixture, &tenant, &marked).await;
+    // Account 1: an active link and its waiting successor, both revoked.
+    let active = link(
+        &fixture,
+        &tenant,
+        accounts[1],
+        rail.as_ref(),
+        &opener,
+        &org(32),
+        PayoutLinkState::Active,
+    )
+    .await;
+    let successor = link(
+        &fixture,
+        &tenant,
+        accounts[1],
+        rail.as_ref(),
+        &opener,
+        &org(33),
+        PayoutLinkState::Waiting,
+    )
+    .await;
+    v147_revoke(&fixture, &tenant, &successor).await;
+    v147_revoke(&fixture, &tenant, &active).await;
+
+    let report = pass(&fixture, rail.clone(), &opener, settings(PayoutMode::Live))
+        .run_once()
+        .await;
+    completed(&report);
+    assert_eq!(
+        mock.transfers().iter().map(|t| t.id).collect::<Vec<_>>(),
+        vec![paid_before],
+        "nothing is paid to a revoked link"
+    );
+    assert_eq!(mock.posts(), 2, "one zero send per revoked active link");
+    assert_eq!((report.closed, report.activated), (2, 0), "{report:?}");
+    assert_eq!(
+        link_state(&fixture, &tenant, marked.link_id).await,
+        ("closed".into(), Some("1000".into()))
+    );
+    assert_eq!(
+        link_state(&fixture, &tenant, active.link_id).await,
+        ("closed".into(), Some("0".into()))
+    );
+    assert_eq!(
+        link_state(&fixture, &tenant, successor.link_id).await,
+        ("closed".into(), Some("0".into())),
+        "the revoked successor is never activated"
+    );
+    assert!(lines(&fixture, &tenant, "near_ai").await.is_empty());
+    // Still owed, to no link.
+    for account in &accounts {
+        let owed = fixture
+            .runtime
+            .payout_owed(&tenant, *account, &rail_id("near_ai"))
+            .await
+            .unwrap();
+        assert_eq!(owed.net(), Some(3_000));
+    }
+
+    // A later pass has nothing to do.
+    completed(
+        &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
+            .run_once()
+            .await,
+    );
+    assert_eq!(mock.posts(), 2);
+    assert_eq!(mock.transfers().len(), 1);
+}
+
+/// #1884: V147 revoking many active links at once costs one zero send each,
+/// and those sends come out of the rail's send window like any other. A
+/// pass closes only as many as its window allows and leaves the rest for
+/// the next; across passes each link is closed with exactly one zero send
+/// and nothing is paid.
+#[tokio::test]
+async fn many_v147_revocations_close_one_zero_send_each_inside_the_window() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let mock = Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let opener = Arc::new(TestOpener::default());
+    let (tenant, accounts) = tenant_with_accounts(&fixture, 5).await;
+    let mut revoked = Vec::new();
+    for (n, account) in accounts.iter().enumerate() {
+        settle(&fixture, &tenant, *account, 2_000).await;
+        let made = link(
+            &fixture,
+            &tenant,
+            *account,
+            rail.as_ref(),
+            &opener,
+            &org(40 + n as u128),
+            PayoutLinkState::Active,
+        )
+        .await;
+        // Some were paid part of what they were owed before the deploy.
+        let paid = 100 * n as i64;
+        if paid > 0 {
+            mock.seed(recipient_org(40 + n as u128), &made.program, paid);
+        }
+        v147_revoke(&fixture, &tenant, &made).await;
+        revoked.push((made, paid));
+    }
+    let seeded = mock.transfers().len();
+
+    const WINDOW: i64 = 2;
+    mock.set_sends_remaining(WINDOW);
+    let report = pass(&fixture, rail.clone(), &opener, settings(PayoutMode::Live))
+        .run_once()
+        .await;
+    completed(&report);
+    assert_eq!(mock.posts(), WINDOW as usize, "{report:?}");
+    assert_eq!(report.closed, WINDOW as u64, "{report:?}");
+    assert!(
+        report.skipped.contains_key("payout_send_window_exhausted"),
+        "{report:?}"
+    );
+
+    // Each later pass gets a fresh window and closes at most that many.
+    for _ in 0..3 {
+        mock.set_sends_remaining(WINDOW);
+        let before = mock.posts();
+        completed(
+            &pass(&fixture, rail.clone(), &opener, settings(PayoutMode::Live))
+                .run_once()
+                .await,
+        );
+        assert!(mock.posts() - before <= WINDOW as usize);
+    }
+    assert_eq!(
+        mock.posts(),
+        revoked.len(),
+        "one zero send per revoked link"
+    );
+    assert_eq!(mock.transfers().len(), seeded, "nothing is paid");
+    for (made, paid) in &revoked {
+        assert_eq!(
+            link_state(&fixture, &tenant, made.link_id).await,
+            ("closed".into(), Some(paid.to_string()))
+        );
+    }
+    assert!(lines(&fixture, &tenant, "near_ai").await.is_empty());
+}
+
 #[tokio::test]
 async fn a_credit_hold_or_closed_account_stops_sends_on_every_rail() {
     let Some(fixture) = fixture().await else {
@@ -2449,4 +2680,416 @@ async fn ledger_event(
         ],
     )
     .await;
+}
+
+/// The device that signed `legacy`'s tenant link in these fixtures: one per
+/// tenant, since device key ids are unique across the database.
+fn linking_device(legacy: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "sha256:{:x}",
+        Sha256::digest(format!("device:{legacy}").as_bytes())
+    )
+}
+
+/// A NEAR AI account with a recorded login and an active payout link, and
+/// a legacy tenant linked to it through V81 with no account yet.
+async fn legacy_pair(
+    fixture: &Fixture,
+    rail: &Arc<dyn PayoutRail>,
+    opener: &TestOpener,
+) -> (String, Uuid, String) {
+    let near = format!("nearai-{}", Uuid::new_v4().simple().to_string().repeat(2));
+    let source = Uuid::new_v4();
+    owner_exec(
+        fixture,
+        &near,
+        "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+        &[&near],
+    )
+    .await;
+    owner_exec(
+        fixture,
+        &near,
+        "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+        &[&near, &source],
+    )
+    .await;
+    owner_exec(
+        fixture,
+        &near,
+        "INSERT INTO trace_near_account_anchors
+            (tenant_id, account_id, anchor_hash, sealed_account_name, index_pepper_ref,
+             account_name_key_ref, identity_source, auth_provider)
+         VALUES ($1, $2, $3, '{}', 'p', 'k', 'near_ai_login', 'github')",
+        &[
+            &near,
+            &source,
+            &format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2)),
+        ],
+    )
+    .await;
+    link(
+        fixture,
+        &near,
+        source,
+        rail.as_ref(),
+        opener,
+        &org(7),
+        PayoutLinkState::Active,
+    )
+    .await;
+    let legacy = format!("tenant-pass-{}", Uuid::new_v4().simple());
+    owner_exec(
+        fixture,
+        &legacy,
+        "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+        &[&legacy],
+    )
+    .await;
+    // The linking device, live in the legacy tenant: only a live device
+    // proves accounts (V148).
+    owner_exec(
+        fixture,
+        &legacy,
+        "INSERT INTO device_keys (device_key_id, tenant_id, public_key, invite_subject_hash)
+         VALUES ($1, $2, 'test', $1)",
+        &[&linking_device(&legacy), &legacy],
+    )
+    .await;
+    owner_exec(
+        fixture,
+        &near,
+        "INSERT INTO trace_legacy_invite_links
+            (link_id, tenant_id, account_id, legacy_tenant_id, device_key_id,
+             invite_subject_hash, nonce, issued_at, device_signature, linked_at,
+             server_kid, server_signature)
+         VALUES ($1, $2, $3, $4, $5, $5, $6, 1, 'sig', 2, 'kid', 'sig')",
+        &[
+            &Uuid::new_v4(),
+            &near,
+            &source,
+            &legacy,
+            &linking_device(&legacy),
+            &"e".repeat(64),
+        ],
+    )
+    .await;
+    (near, source, legacy)
+}
+
+async fn open_legacy_account(fixture: &Fixture, legacy: &str) -> Uuid {
+    let account = Uuid::new_v4();
+    owner_exec(
+        fixture,
+        legacy,
+        "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+        &[&legacy, &account],
+    )
+    .await;
+    account
+}
+
+/// A legacy account holding the app-form signed-upload principal of the
+/// tenant's linking device (`legacy_pair`'s), so a carry treats it as
+/// proven (owner, 2026-11-03).
+async fn open_proven_legacy_account(fixture: &Fixture, legacy: &str) -> Uuid {
+    let account = open_legacy_account(fixture, legacy).await;
+    let device = linking_device(legacy);
+    let actor = trace_commons_server::account_trust::device_claim_actor(
+        legacy,
+        &device,
+        Some(&trace_commons_protocol::onboarding::user_subject_hash(
+            &device,
+        )),
+    );
+    let principal =
+        trace_commons_server::account_trust::device_upload_principal_refs(legacy, &device, &actor)
+            .unwrap()[0]
+            .clone();
+    owner_exec(
+        fixture,
+        legacy,
+        "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+         VALUES ($1, $2, $3)",
+        &[&legacy, &account, &principal],
+    )
+    .await;
+    // What the tenant link's claim would have recorded for the device
+    // (V148 proves only by those records); these fixtures insert the link
+    // row directly, so no claim ran.
+    let link: Uuid = fixture
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT link_id FROM trace_legacy_invite_links
+              WHERE legacy_tenant_id = $1 AND revoked_at IS NULL",
+            &[&legacy],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    owner_exec(
+        fixture,
+        legacy,
+        "INSERT INTO trace_legacy_link_claimed_principals
+             (tenant_id, legacy_link_hash, device_key_id, principal_ref)
+         VALUES ($1, $2, $3, $4)",
+        &[
+            &legacy,
+            &trace_commons_server::db::payout_legacy_link_hash(link),
+            &device,
+            &principal,
+        ],
+    )
+    .await;
+    account
+}
+
+async fn live_carries(fixture: &Fixture, legacy: &str, account: Uuid) -> i64 {
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&legacy],
+    )
+    .await
+    .unwrap();
+    let live: i64 = tx
+        .query_one(
+            "SELECT count(*) FROM trace_legacy_payout_carries
+              WHERE tenant_id = $1 AND account_id = $2 AND released_at IS NULL",
+            &[&legacy, &account],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    live
+}
+
+fn carry_programs(rail: &Arc<dyn PayoutRail>) -> trace_commons_server::db::CarryPrograms {
+    let rail = Arc::clone(rail);
+    trace_commons_server::db::CarryPrograms(Arc::new(move |id| rail.program_for_link(id)))
+}
+
+/// Owner decision, 2026-11-03 (review of #1879): the pass never carries.
+/// Carries happen only at events (a confirm, a tenant link, an account
+/// opened in a linked tenant), so a legacy account that appears without one
+/// of those is left for its event, not picked up by a pass.
+#[tokio::test]
+async fn the_pass_does_not_carry() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let mock = Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let opener = Arc::new(TestOpener::default());
+    let (near, source, legacy) = legacy_pair(&fixture, &rail, &opener).await;
+    let first = open_proven_legacy_account(&fixture, &legacy).await;
+    let carried = fixture
+        .runtime
+        .carry_legacy_payout_links(
+            &near,
+            source,
+            &rail.descriptor().rail_id,
+            &carry_programs(&rail),
+            ACTOR,
+        )
+        .await
+        .unwrap();
+    assert_eq!(carried.carried, 1);
+    // An account inserted with no event behind it.
+    let other = open_legacy_account(&fixture, &legacy).await;
+    completed(
+        &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
+            .run_once()
+            .await,
+    );
+    assert_eq!(live_carries(&fixture, &legacy, first).await, 1);
+    assert_eq!(
+        live_carries(&fixture, &legacy, other).await,
+        0,
+        "the pass carries nothing"
+    );
+}
+
+/// Owner decision, 2026-11-03 (V148:444): a carry whose account stops being
+/// proven is released at send time. The live pass finds the account
+/// unproven, unlinks its active carried link with a hash-only audit row
+/// (`legacy_carry_unproven`), and the account's standing no longer holds it,
+/// so its other streams resume. The pass still creates no carry.
+#[tokio::test]
+async fn the_pass_releases_a_carry_whose_account_stopped_being_proven() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let mock = Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let opener = Arc::new(TestOpener::default());
+    let (near, source, legacy) = legacy_pair(&fixture, &rail, &opener).await;
+    let account = open_proven_legacy_account(&fixture, &legacy).await;
+    fixture
+        .runtime
+        .carry_legacy_payout_links(
+            &near,
+            source,
+            &rail.descriptor().rail_id,
+            &carry_programs(&rail),
+            ACTOR,
+        )
+        .await
+        .unwrap();
+    owner_exec(
+        &fixture,
+        &legacy,
+        "UPDATE trace_payout_links SET state = 'active'
+          WHERE tenant_id = $1 AND account_id = $2 AND state = 'waiting'",
+        &[&legacy, &account],
+    )
+    .await;
+    assert_eq!(live_carries(&fixture, &legacy, account).await, 1);
+    // Its proving principal is unlinked.
+    owner_exec(
+        &fixture,
+        &legacy,
+        "UPDATE trace_account_principals SET unlinked_at = now()
+          WHERE tenant_id = $1 AND account_id = $2",
+        &[&legacy, &account],
+    )
+    .await;
+    completed(
+        &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
+            .run_once()
+            .await,
+    );
+    assert_eq!(
+        live_carries(&fixture, &legacy, account).await,
+        0,
+        "released at send time"
+    );
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&legacy],
+    )
+    .await
+    .unwrap();
+    let row = tx
+        .query_one(
+            "SELECT (SELECT bool_and(unlink_requested_at IS NOT NULL OR state IN ('closing', 'closed'))
+                       FROM trace_payout_links WHERE tenant_id = $1 AND account_id = $2),
+                    (SELECT count(*) FROM trace_payout_audit
+                      WHERE tenant_id = $1 AND label = 'legacy_carry_unproven')",
+            &[&legacy, &account],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        row.get::<_, Option<bool>>(0),
+        Some(true),
+        "the carried link is ending"
+    );
+    assert_eq!(row.get::<_, i64>(1), 1, "audited");
+    // The holder's side records it too (review of #1879), hash-only.
+    let holder: i64 = {
+        let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+        let tx = client.transaction().await.unwrap();
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&near],
+        )
+        .await
+        .unwrap();
+        let n: i64 = tx
+            .query_one(
+                "SELECT count(*) FROM trace_account_audit
+                  WHERE tenant_id = $1 AND action = 'legacy_payout_carry_released'
+                    AND outcome = 'legacy_carry_unproven'",
+                &[&near],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        n
+    };
+    assert_eq!(holder, 1, "the holder's tenant has a row");
+    assert!(
+        !fixture
+            .runtime
+            .payout_account_standing(&legacy, account)
+            .await
+            .unwrap()
+            .carry_invalid,
+        "no longer held: its other streams resume"
+    );
+}
+
+/// Review of #1879: a dry-run pass moves no link, so it releases nothing,
+/// even a carry on an account that stopped being proven; and the release is
+/// per rail, so another rail's call leaves this rail's carry alone.
+#[tokio::test]
+async fn a_dry_run_or_another_rail_releases_nothing() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let mock = Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let opener = Arc::new(TestOpener::default());
+    let (near, source, legacy) = legacy_pair(&fixture, &rail, &opener).await;
+    let account = open_proven_legacy_account(&fixture, &legacy).await;
+    fixture
+        .runtime
+        .carry_legacy_payout_links(
+            &near,
+            source,
+            &rail.descriptor().rail_id,
+            &carry_programs(&rail),
+            ACTOR,
+        )
+        .await
+        .unwrap();
+    owner_exec(
+        &fixture,
+        &legacy,
+        "UPDATE trace_account_principals SET unlinked_at = now()
+          WHERE tenant_id = $1 AND account_id = $2",
+        &[&legacy, &account],
+    )
+    .await;
+    completed(
+        &pass(
+            &fixture,
+            rail.clone(),
+            &opener,
+            settings(PayoutMode::DryRun),
+        )
+        .run_once()
+        .await,
+    );
+    assert_eq!(
+        live_carries(&fixture, &legacy, account).await,
+        1,
+        "a dry run moves no link"
+    );
+    let other = RailId::new("other_rail").unwrap();
+    assert_eq!(
+        fixture
+            .runtime
+            .release_unproven_legacy_carries(&legacy, &other, ACTOR)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        live_carries(&fixture, &legacy, account).await,
+        1,
+        "another rail's call"
+    );
 }

@@ -19,19 +19,21 @@ final class ComponentContractTests: XCTestCase {
         XCTAssertEqual(GlassPress.washOpacity(false), 0)
     }
 
-    /// The tab label and the toolbar glyph are labels: pressed darkens a fill
-    /// or a wash behind them, never the label itself.
+    /// The toolbar glyph is a label: pressed darkens a wash behind it, never
+    /// the glyph itself. No tab draws a press at all (owner, 2026-11-02: no
+    /// click fill on any tab), neither a wash nor a darker selected fill;
+    /// the selection moving is the answer.
     func test_pressedNeverDarkensATabLabelOrAToolbarGlyph() throws {
         let sources = Dictionary(uniqueKeysWithValues: try Self.componentSources())
         let navigation = try XCTUnwrap(sources["Navigation.swift"])
         let tabs = try XCTUnwrap(navigation.range(of: "struct GlassSegmentedTabs")
             .map { String(navigation[$0.lowerBound...].prefix(4000)) })
-        XCTAssertFalse(tabs.contains("}\n                    .glassPressedFill()"), "the tab label darkens")
-        XCTAssertTrue(tabs.contains(".glassPressedWash("), "the tab has no pressed wash")
+        XCTAssertFalse(tabs.contains(".glassPressedFill()"), "a segmented tab darkens on a press")
+        XCTAssertFalse(tabs.contains(".glassPressedWash("), "a segmented tab draws a press wash")
         let ruleTabs = try XCTUnwrap(navigation.range(of: "struct GlassRuleTabs")
-            .map { String(navigation[$0.lowerBound...].prefix(5000)) })
-        XCTAssertFalse(ruleTabs.contains(".glassPressedFill()"), "the rule tab label darkens")
-        XCTAssertTrue(ruleTabs.contains(".glassPressedWash("), "the rule tab has no pressed wash")
+            .map { String(navigation[$0.lowerBound...].prefix(9000)) })
+        XCTAssertFalse(ruleTabs.contains(".glassPressedFill()"), "the rule tab darkens on a press")
+        XCTAssertFalse(ruleTabs.contains(".glassPressedWash("), "the rule tab draws a press wash")
         let controls = try XCTUnwrap(sources["Controls.swift"])
         let toolbar = try XCTUnwrap(controls.range(of: "struct GlassToolbarButton")
             .map { String(controls[$0.lowerBound...].prefix(1500)) })

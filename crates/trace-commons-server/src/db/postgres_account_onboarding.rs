@@ -160,23 +160,24 @@ async fn link_provisioned_principal(
 /// sealed subject is the only copy of that id we keep -- the same shape the
 /// wallet path uses for an account name, so rotation reads both rows
 /// identically.
-struct NearAiAnchorMaterial {
-    anchor_hash: String,
-    sealed_json: serde_json::Value,
-    pepper_ref: String,
-    key_ref: String,
+pub(super) struct NearAiAnchorMaterial {
+    pub(super) anchor_hash: String,
+    pub(super) sealed_json: serde_json::Value,
+    pub(super) pepper_ref: String,
+    pub(super) key_ref: String,
 }
 
 impl NearAiAnchorMaterial {
-    fn for_login(
+    pub(super) fn for_login(
         login: &crate::near_ai_login::VerifiedNearAiLogin,
         identity: &NearAccountIdentity,
     ) -> Result<Self, DatabaseError> {
         let anchor_hash = identity.login_index_label(login.subject_id());
         let sealed_subject = identity
             .seal_login_subject(login.subject_id())
-            .map_err(|_| refused())?;
-        let sealed_json = serde_json::to_value(&sealed_subject).map_err(|_| refused())?;
+            .map_err(|_| named_refusal(crate::account_onboarding::SEAL_FAILED))?;
+        let sealed_json = serde_json::to_value(&sealed_subject)
+            .map_err(|_| named_refusal(crate::account_onboarding::SEAL_FAILED))?;
         Ok(Self {
             anchor_hash,
             sealed_json,
@@ -249,13 +250,14 @@ impl PgBackend {
     /// ceremony and are written once here. Two enrollment ceremonies with two
     /// copies of the RLS handshake is a rule that eventually diverges, and the
     /// half that diverges silently is whichever has the thinner tests.
-    async fn store_ceremony_payload<T: serde::Serialize>(
+    pub(super) async fn store_ceremony_payload<T: serde::Serialize>(
         &self,
         hash: &str,
         pending: &T,
         expires_at: i64,
     ) -> Result<(), DatabaseError> {
-        let payload = serde_json::to_value(pending).map_err(|_| refused())?;
+        let payload = serde_json::to_value(pending)
+            .map_err(|_| named_refusal(crate::account_onboarding::CEREMONY_UNWRITABLE))?;
         let mut client = self.trace_pool().get().await?;
         let tx = client.transaction().await?;
         tx.execute(
@@ -300,7 +302,7 @@ impl PgBackend {
     /// The delete and the liveness test are one statement on purpose: a
     /// select-then-delete would let two racing finishes both read a live
     /// ceremony, and a ceremony is single use.
-    async fn take_ceremony_payload<T: serde::de::DeserializeOwned>(
+    pub(super) async fn take_ceremony_payload<T: serde::de::DeserializeOwned>(
         &self,
         hash: &str,
     ) -> Result<Option<T>, DatabaseError> {
@@ -315,7 +317,8 @@ impl PgBackend {
         tx.commit().await?;
         match row {
             Some(row) if row.get::<_, bool>("live") => Ok(Some(
-                serde_json::from_value(row.get("payload")).map_err(|_| refused())?,
+                serde_json::from_value(row.get("payload"))
+                    .map_err(|_| named_refusal(crate::account_onboarding::CEREMONY_UNREADABLE))?,
             )),
             _ => Ok(None),
         }
@@ -362,8 +365,9 @@ impl PgBackend {
         // `NearAccountIdentity::context`.
         let (anchor_hash, sealed_account_name) = identity
             .seal(proof.network(), proof.account_id())
-            .map_err(|_| refused())?;
-        let sealed_json = serde_json::to_value(&sealed_account_name).map_err(|_| refused())?;
+            .map_err(|_| named_refusal(crate::account_onboarding::SEAL_FAILED))?;
+        let sealed_json = serde_json::to_value(&sealed_account_name)
+            .map_err(|_| named_refusal(crate::account_onboarding::SEAL_FAILED))?;
         let pepper_ref = identity.pepper_ref_hash().to_string();
         let key_ref = identity.key_ref_hash();
         // A returning contributor keeps their existing tenant; a new one gets a
@@ -490,8 +494,14 @@ impl PgBackend {
             &[&tenant],
         )
         .await?;
-        let existing = tx.query_opt("SELECT a.account_id FROM trace_near_account_anchors n JOIN trace_accounts a USING(tenant_id,account_id) WHERE n.anchor_hash=$1 AND a.closed_at IS NULL", &[&anchor_hash]).await?;
+        let existing = tx.query_opt("SELECT a.account_id, n.retired_at IS NOT NULL FROM trace_near_account_anchors n JOIN trace_accounts a USING(tenant_id,account_id) WHERE n.anchor_hash=$1 AND a.closed_at IS NULL", &[&anchor_hash]).await?;
         let account = if let Some(row) = existing {
+            // F10: a wallet a change retired no longer signs in to the
+            // account, and its row keeps it from claiming a fresh one. The
+            // uniform refusal, as every other wallet refusal.
+            if row.get::<_, bool>(1) {
+                return Err(refused());
+            }
             row.get::<_, Uuid>(0)
         } else {
             let id = Uuid::new_v4();
@@ -616,8 +626,15 @@ impl PgBackend {
             &[&tenant],
         )
         .await?;
-        let existing = tx.query_opt("SELECT a.account_id FROM trace_near_account_anchors n JOIN trace_accounts a USING(tenant_id,account_id) WHERE n.anchor_hash=$1 AND a.closed_at IS NULL", &[&anchor_hash]).await?;
+        let existing = tx.query_opt("SELECT a.account_id, n.retired_at IS NOT NULL FROM trace_near_account_anchors n JOIN trace_accounts a USING(tenant_id,account_id) WHERE n.anchor_hash=$1 AND a.closed_at IS NULL", &[&anchor_hash]).await?;
         let account = if let Some(row) = existing {
+            // F10: a login a change retired signs in nowhere. Its row stays,
+            // so it cannot claim a fresh account either.
+            if row.get::<_, bool>(1) {
+                return Err(named_refusal(
+                    crate::account_onboarding::NEAR_AI_LOGIN_RETIRED_REFUSAL,
+                ));
+            }
             row.get::<_, Uuid>(0)
         } else {
             let id = Uuid::new_v4();

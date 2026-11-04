@@ -66,6 +66,6 @@ public class ProjectIgnoreCopyTests
     [Fact]
     public void TitleNamesTheProject()
     {
-        Assert.Equal("Ignore api?", ProjectIgnoreCopy.ConfirmationTitle("api"));
+        Assert.Equal("Set api to Never?", ProjectIgnoreCopy.ConfirmationTitle("api"));
     }
 }

@@ -1,5 +1,6 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
 import {
+  getAccountAttentionCopy,
   getArmingOfferCopy,
   getArmingRewordedNotice,
   getAutomaticGrantCopy,
@@ -33,6 +34,8 @@ export const routeDisclosureKey = (account: string) =>
   ["account", account, "route-disclosure"] as const;
 
 const copyKeys = {
+  accountAttention: (wire: string) =>
+    ["contributor-copy", "account-attention", wire] as const,
   certificateDetail: (entryId: string) =>
     ["contributor-copy", "certificate-detail", entryId] as const,
   armingOffer: (projectLabel: string, count: number) =>
@@ -160,6 +163,19 @@ export function useGateHeldNotice(wire: Record<string, unknown>) {
   return useQuery({
     queryKey: copyKeys.gateHeld(JSON.stringify(wire)),
     queryFn: () => getGateHeldNotice(wire),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/**
+ * The account section's status while the app's account needs attention.
+ * Keyed by the keys the core reads, which are all its words depend on.
+ */
+export function useAccountAttentionCopy(wire: Record<string, unknown> | null) {
+  return useQuery({
+    queryKey: copyKeys.accountAttention(JSON.stringify(wire)),
+    queryFn: () => getAccountAttentionCopy(wire as Record<string, unknown>),
+    enabled: wire !== null,
     staleTime: Number.POSITIVE_INFINITY,
   });
 }

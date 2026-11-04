@@ -155,7 +155,8 @@ pub(crate) async fn daemon_call(
         return match method.as_str() {
             "get_settings" => bootstrap_settings(&state),
             "get_public_profile" => Ok(bootstrap_profile()),
-            _ => Err("Rust core daemon is not started; choose source roots".to_owned()),
+            // DRAFT, NEEDS APPROVAL (2026-11-04).
+            _ => Err("Rust core is not started; choose source roots".to_owned()),
         };
     };
     call_daemon(shared, &method, params.unwrap_or_default()).await
