@@ -691,7 +691,7 @@ struct ToolChecks: View {
                 Text(row.source.displayName)
                     .glassType(GlassTokens.TypeScale.bodyStrong)
                     .foregroundStyle(GlassColor.textPrimary)
-                Text(FirstRunCopy.fill(copy.frame.sessionCount, ["count": row.sessionCount.formatted()]))
+                Text(copy.frame.sessionCountLine(row.sessionCount))
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
             }

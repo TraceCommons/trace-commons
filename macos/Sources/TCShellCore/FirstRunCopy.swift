@@ -24,6 +24,13 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let answerEveryTool: String
         /// `{count}`: a tool's or a repo's sessions.
         public let sessionCount: String
+        /// The same for exactly one session.
+        public let sessionCountOne: String
+
+        /// A tool's or a repo's trace count line, singular for one.
+        public func sessionCountLine(_ count: Int) -> String {
+            count == 1 ? sessionCountOne : FirstRunCopy.fill(sessionCount, ["count": count.formatted()])
+        }
         /// Takes back a choice not yet acted on.
         public let undo: String
         /// What an unanswered picker reads (Ron's `Picker` placeholder).
