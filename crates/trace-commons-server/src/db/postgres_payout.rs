@@ -1240,8 +1240,10 @@ impl PayoutStore for PgBackend {
                      tenant_id, account_id, rail_id, idempotency_key, handle_hash,
                      request_digest, action, expected_current_version, recipient_kind,
                      sealed_recipient, recipient_index, recipient_key_ref,
-                     index_pepper_ref, subject_index, expires_at, recipient_ref
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                     index_pepper_ref, subject_index, expires_at, recipient_ref,
+                     proving_anchor_hash
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                           $17)
                  ON CONFLICT (tenant_id, account_id, rail_id, idempotency_key) DO NOTHING",
                 &[
                     &tenant,
@@ -1260,6 +1262,7 @@ impl PayoutStore for PgBackend {
                     &recipient.map(|recipient| recipient.subject_index.as_str()),
                     &request.expires_at,
                     &recipient.and_then(|recipient| recipient.recipient_ref.as_deref()),
+                    &request.proving_anchor_hash,
                 ],
             )
             .await?;
@@ -1465,7 +1468,8 @@ impl PayoutStore for PgBackend {
                   RETURNING action, expected_current_version, recipient_kind,
                             sealed_recipient, recipient_index, recipient_key_ref,
                             index_pepper_ref, subject_index, recipient_ref,
-                            expires_at <= clock_timestamp(), created_at",
+                            expires_at <= clock_timestamp(), created_at,
+                            proving_anchor_hash",
                 &[&tenant, &account, &rail.as_str(), &handle_hash],
             )
             .await?
@@ -1521,25 +1525,32 @@ impl PayoutStore for PgBackend {
                     tx.commit().await?;
                     return Ok(PayoutLinkConfirm::ChangePending);
                 }
-                // The start checked the account's NEAR AI login, but a
-                // request can outlive that check: one started by an older
-                // service across a deploy (V147), or before the account
-                // lost its last login. Re-read it here, in the transaction
-                // that writes the link, so no topology lets a link land on
-                // an account with none. This checks for any login, not the
-                // one that proved the request: `subject_index` is a payout
-                // label and cannot be compared with an anchor.
-                let anchored: bool = tx
-                    .query_one(
-                        "SELECT EXISTS (
-                             SELECT 1 FROM trace_near_account_anchors
-                              WHERE tenant_id = $1 AND account_id = $2
-                                AND identity_source = 'near_ai_login'
-                                AND retired_at IS NULL)",
-                        &[&tenant, &account],
-                    )
-                    .await?
-                    .get(0);
+                // The start matched the NEAR AI login against one of the
+                // account's anchors and recorded which (V151), but a
+                // request can outlive that check: the login changed (F10
+                // retires the old anchor), a merge, or a request started by
+                // an older service across a deploy (V147), which recorded
+                // none. Re-read that exact anchor here, in the transaction
+                // that writes the link: it must still be one of the
+                // account's live `near_ai_login` anchors. Another live
+                // login on the account does not stand in for it (#1882),
+                // and a request with none recorded is refused.
+                let proving: Option<String> = row.get(11);
+                let anchored = match proving {
+                    None => false,
+                    Some(anchor) => tx
+                        .query_one(
+                            "SELECT EXISTS (
+                                 SELECT 1 FROM trace_near_account_anchors
+                                  WHERE tenant_id = $1 AND account_id = $2
+                                    AND anchor_hash = $3
+                                    AND identity_source = 'near_ai_login'
+                                    AND retired_at IS NULL)",
+                            &[&tenant, &account, &anchor],
+                        )
+                        .await?
+                        .get(0),
+                };
                 if !anchored {
                     tx.commit().await?;
                     return Ok(PayoutLinkConfirm::NoLoginAnchor);

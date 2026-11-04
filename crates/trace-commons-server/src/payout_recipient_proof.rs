@@ -96,6 +96,10 @@ pub struct VerifiedRecipient {
     pub recipient: RecipientRef,
     pub subject_id: Zeroizing<String>,
     pub proof: ProofKind,
+    /// The `anchor_hash` of the account's login anchor the subject matched:
+    /// the one the confirm requires to be live still (V151, #1882). A keyed
+    /// label already stored on the anchor row, never the subject.
+    pub anchor_hash: String,
 }
 
 impl std::fmt::Debug for VerifiedRecipient {
@@ -267,7 +271,8 @@ impl RecipientProofVerifier for NearAiOrgVerifier {
         let user = self.users_me(&access_token).await?;
         drop(access_token);
         let subject_id = Zeroizing::new(user.id.trim().to_owned());
-        if !login_anchors.contains(&self.identity.login_index_label(&subject_id)) {
+        let anchor_hash = self.identity.login_index_label(&subject_id);
+        if !login_anchors.contains(&anchor_hash) {
             return Err(RecipientProofRefusal::SubjectMismatch);
         }
         let proof = ProofKind::NearAiLogin;
@@ -289,6 +294,7 @@ impl RecipientProofVerifier for NearAiOrgVerifier {
             recipient,
             subject_id,
             proof,
+            anchor_hash,
         })
     }
 }
@@ -463,6 +469,27 @@ mod tests {
         assert_eq!(mock.users_me_calls, 0);
         assert!(mock.bearer_seen.is_empty());
         assert!(mock.probe_bodies.is_empty());
+    }
+
+    /// The verified recipient names the anchor the subject matched, out of
+    /// all the account's anchors, so the confirm can require that one
+    /// (#1882).
+    #[tokio::test]
+    async fn the_verified_recipient_names_the_anchor_that_matched() {
+        let (base, _mock) = serve(Mock {
+            users_me: Some((200, me(owned_org("owner", true)))),
+            probe: Some(no_op()),
+            ..Mock::default()
+        })
+        .await;
+        let other = identity().login_index_label("another-subject");
+        let matched = identity().login_index_label(SUBJECT);
+        let verified = verifier(&base)
+            .verify(proof(), &[other.clone(), matched.clone()])
+            .await
+            .unwrap();
+        assert_eq!(verified.anchor_hash, matched);
+        assert_ne!(verified.anchor_hash, other);
     }
 
     #[tokio::test]

@@ -20,11 +20,13 @@
 //!   takes the request from the same account and, in one transaction, writes
 //!   the `waiting` link (or the unlink mark) and its audit rows, refusing if
 //!   the link changed since the request, a newer request superseded it, or
-//!   it expired, or (for a link) the account has no NEAR AI login anchor
-//!   any more. A confirmed change wakes the rail. The confirm re-reads the
-//!   anchors because a request can outlive the start's check: one started
-//!   by an older service across a deploy (V147 revokes what exists then),
-//!   or before the account lost its login.
+//!   it expired, or (for a link) the NEAR AI login anchor that proved the
+//!   request at the start is no longer live on the account, even if another
+//!   is (V151, #1882). A confirmed change wakes the rail. The confirm
+//!   re-reads that anchor because a request can outlive the start's check:
+//!   one started by an older service across a deploy (V147 revokes what
+//!   exists then; such a request recorded no anchor and is refused), or
+//!   before the account changed or lost its login.
 //! - `GET /v1/account/payout-rails` lists each rail that is not `disabled`:
 //!   link state, version and recipient ref, never a recipient or a name.
 //!
@@ -344,8 +346,8 @@ pub(super) async fn start_handler(
     let expected_version = body.expected_version();
     let idempotency_key = body.idempotency_key;
     let wire_action = body.action;
-    let (action, recipient, recipient_ref, proof_kind) = match body.proof {
-        None => (PayoutLinkAction::Unlink, None, None, None),
+    let (action, recipient, recipient_ref, proof_kind, proving_anchor_hash) = match body.proof {
+        None => (PayoutLinkAction::Unlink, None, None, None, None),
         Some(proof) => {
             let organization_id = match &proof {
                 PayoutLinkProof::NearAi {
@@ -397,6 +399,8 @@ pub(super) async fn start_handler(
                 Some((rail.descriptor().recipient_kind.clone(), sealed)),
                 Some(recipient_ref),
                 Some(verified.proof),
+                // The confirm lands the link only while this anchor is live.
+                Some(verified.anchor_hash),
             )
         }
     };
@@ -416,6 +420,7 @@ pub(super) async fn start_handler(
                 expires_at,
                 actor_ref_hash: account_actor_hash(&ctx),
                 proof_label: proof_kind.map(ProofKind::label),
+                proving_anchor_hash,
             },
         )
         .await

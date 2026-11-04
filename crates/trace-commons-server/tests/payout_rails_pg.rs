@@ -1584,6 +1584,7 @@ async fn a_link_request_is_replayed_once_and_taken_once() {
         expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
         actor_ref_hash: ACTOR.into(),
         proof_label: Some("near_ai_login"),
+        proving_anchor_hash: Some(sha(&format!("anchor:{key}"))),
     };
     assert_eq!(
         store
@@ -1622,6 +1623,35 @@ async fn a_link_request_is_replayed_once_and_taken_once() {
             .insert_payout_link_request(&tenant, &bad_unlink)
             .await
             .is_err()
+    );
+    // V151: a link records the anchor that proved it, and an unlink none.
+    let unproved_link = PayoutLinkRequestWrite {
+        idempotency_key: Uuid::new_v4(),
+        handle_hash: sha(&format!("handle:unproved:{key}")),
+        proving_anchor_hash: None,
+        ..request.clone()
+    };
+    assert!(
+        store
+            .insert_payout_link_request(&tenant, &unproved_link)
+            .await
+            .is_err(),
+        "a link request with no proving anchor"
+    );
+    let anchored_unlink = PayoutLinkRequestWrite {
+        idempotency_key: Uuid::new_v4(),
+        handle_hash: sha(&format!("handle:anchored-unlink:{key}")),
+        action: PayoutLinkAction::Unlink,
+        recipient: None,
+        proof_label: None,
+        ..request.clone()
+    };
+    assert!(
+        store
+            .insert_payout_link_request(&tenant, &anchored_unlink)
+            .await
+            .is_err(),
+        "an unlink request naming an anchor"
     );
     // Another tenant cannot take it.
     let (other, _) = tenant_with_accounts(&fixture.owner, 1).await;
@@ -2260,6 +2290,7 @@ async fn the_pass_reads_and_marks_links_and_purges_expired_requests() {
         expires_at: expires,
         actor_ref_hash: ACTOR.into(),
         proof_label: None,
+        proving_anchor_hash: None,
     };
     let soon = request(
         Uuid::new_v4(),

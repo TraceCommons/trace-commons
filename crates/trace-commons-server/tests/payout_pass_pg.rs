@@ -1421,6 +1421,235 @@ async fn reads_and_sends_together_stay_inside_the_send_window() {
     assert!(rows.iter().all(|row| row.state == "confirmed"), "{rows:?}");
 }
 
+/// Revokes `link` exactly as V147 does: a waiting link closes at
+/// `final_paid` 0 with the guard trigger set aside for that one UPDATE, an
+/// active link gets the unlink mark. Same statements as the migration,
+/// narrowed to one link.
+async fn v147_revoke(fixture: &Fixture, tenant: &str, link: &PayoutLinkWrite) {
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    let revoked = match link.state {
+        PayoutLinkState::Waiting => {
+            tx.batch_execute(
+                "ALTER TABLE trace_payout_links DISABLE TRIGGER trace_payout_links_guard_update",
+            )
+            .await
+            .unwrap();
+            let closed = tx
+                .execute(
+                    "UPDATE trace_payout_links
+                        SET state = 'closed', final_paid = 0, version = version + 1,
+                            updated_at = clock_timestamp()
+                      WHERE tenant_id = $1 AND link_id = $2 AND state = 'waiting'",
+                    &[&tenant, &link.link_id],
+                )
+                .await
+                .unwrap();
+            tx.batch_execute(
+                "ALTER TABLE trace_payout_links ENABLE TRIGGER trace_payout_links_guard_update",
+            )
+            .await
+            .unwrap();
+            closed
+        }
+        PayoutLinkState::Active => tx
+            .execute(
+                "UPDATE trace_payout_links
+                    SET unlink_requested_at = clock_timestamp(), version = version + 1,
+                        updated_at = clock_timestamp()
+                  WHERE tenant_id = $1 AND link_id = $2 AND state = 'active'
+                    AND unlink_requested_at IS NULL",
+                &[&tenant, &link.link_id],
+            )
+            .await
+            .unwrap(),
+        other => panic!("V147 revokes waiting and active links, not {other:?}"),
+    };
+    tx.commit().await.unwrap();
+    assert_eq!(revoked, 1, "V147 revoked the link");
+}
+
+/// #1884: the pass over links V147 revoked pays nothing to any of them and
+/// closes each revoked active link with one zero send. An active link with
+/// the unlink mark is closed at the program's total so far; a revoked
+/// waiting successor (closed at 0) is never loaded, so the active link
+/// beside it closes with no successor and nothing is activated. The owed
+/// credit stays owed, for a later link.
+#[tokio::test]
+async fn the_pass_pays_nothing_to_links_v147_revoked() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let mock = Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let opener = Arc::new(TestOpener::default());
+    let (tenant, accounts) = tenant_with_accounts(&fixture, 2).await;
+    settle(&fixture, &tenant, accounts[0], 3_000).await;
+    settle(&fixture, &tenant, accounts[1], 3_000).await;
+    // Account 0: an active link that was paid 1,000 before the deploy.
+    let marked = link(
+        &fixture,
+        &tenant,
+        accounts[0],
+        rail.as_ref(),
+        &opener,
+        &org(31),
+        PayoutLinkState::Active,
+    )
+    .await;
+    let paid_before = mock.seed(recipient_org(31), &marked.program, 1_000);
+    v147_revoke(&fixture, &tenant, &marked).await;
+    // Account 1: an active link and its waiting successor, both revoked.
+    let active = link(
+        &fixture,
+        &tenant,
+        accounts[1],
+        rail.as_ref(),
+        &opener,
+        &org(32),
+        PayoutLinkState::Active,
+    )
+    .await;
+    let successor = link(
+        &fixture,
+        &tenant,
+        accounts[1],
+        rail.as_ref(),
+        &opener,
+        &org(33),
+        PayoutLinkState::Waiting,
+    )
+    .await;
+    v147_revoke(&fixture, &tenant, &successor).await;
+    v147_revoke(&fixture, &tenant, &active).await;
+
+    let report = pass(&fixture, rail.clone(), &opener, settings(PayoutMode::Live))
+        .run_once()
+        .await;
+    completed(&report);
+    assert_eq!(
+        mock.transfers().iter().map(|t| t.id).collect::<Vec<_>>(),
+        vec![paid_before],
+        "nothing is paid to a revoked link"
+    );
+    assert_eq!(mock.posts(), 2, "one zero send per revoked active link");
+    assert_eq!((report.closed, report.activated), (2, 0), "{report:?}");
+    assert_eq!(
+        link_state(&fixture, &tenant, marked.link_id).await,
+        ("closed".into(), Some("1000".into()))
+    );
+    assert_eq!(
+        link_state(&fixture, &tenant, active.link_id).await,
+        ("closed".into(), Some("0".into()))
+    );
+    assert_eq!(
+        link_state(&fixture, &tenant, successor.link_id).await,
+        ("closed".into(), Some("0".into())),
+        "the revoked successor is never activated"
+    );
+    assert!(lines(&fixture, &tenant, "near_ai").await.is_empty());
+    // Still owed, to no link.
+    for account in &accounts {
+        let owed = fixture
+            .runtime
+            .payout_owed(&tenant, *account, &rail_id("near_ai"))
+            .await
+            .unwrap();
+        assert_eq!(owed.net(), Some(3_000));
+    }
+
+    // A later pass has nothing to do.
+    completed(
+        &pass(&fixture, rail, &opener, settings(PayoutMode::Live))
+            .run_once()
+            .await,
+    );
+    assert_eq!(mock.posts(), 2);
+    assert_eq!(mock.transfers().len(), 1);
+}
+
+/// #1884: V147 revoking many active links at once costs one zero send each,
+/// and those sends come out of the rail's send window like any other. A
+/// pass closes only as many as its window allows and leaves the rest for
+/// the next; across passes each link is closed with exactly one zero send
+/// and nothing is paid.
+#[tokio::test]
+async fn many_v147_revocations_close_one_zero_send_each_inside_the_window() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let mock = Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let opener = Arc::new(TestOpener::default());
+    let (tenant, accounts) = tenant_with_accounts(&fixture, 5).await;
+    let mut revoked = Vec::new();
+    for (n, account) in accounts.iter().enumerate() {
+        settle(&fixture, &tenant, *account, 2_000).await;
+        let made = link(
+            &fixture,
+            &tenant,
+            *account,
+            rail.as_ref(),
+            &opener,
+            &org(40 + n as u128),
+            PayoutLinkState::Active,
+        )
+        .await;
+        // Some were paid part of what they were owed before the deploy.
+        let paid = 100 * n as i64;
+        if paid > 0 {
+            mock.seed(recipient_org(40 + n as u128), &made.program, paid);
+        }
+        v147_revoke(&fixture, &tenant, &made).await;
+        revoked.push((made, paid));
+    }
+    let seeded = mock.transfers().len();
+
+    const WINDOW: i64 = 2;
+    mock.set_sends_remaining(WINDOW);
+    let report = pass(&fixture, rail.clone(), &opener, settings(PayoutMode::Live))
+        .run_once()
+        .await;
+    completed(&report);
+    assert_eq!(mock.posts(), WINDOW as usize, "{report:?}");
+    assert_eq!(report.closed, WINDOW as u64, "{report:?}");
+    assert!(
+        report.skipped.contains_key("payout_send_window_exhausted"),
+        "{report:?}"
+    );
+
+    // Each later pass gets a fresh window and closes at most that many.
+    for _ in 0..3 {
+        mock.set_sends_remaining(WINDOW);
+        let before = mock.posts();
+        completed(
+            &pass(&fixture, rail.clone(), &opener, settings(PayoutMode::Live))
+                .run_once()
+                .await,
+        );
+        assert!(mock.posts() - before <= WINDOW as usize);
+    }
+    assert_eq!(
+        mock.posts(),
+        revoked.len(),
+        "one zero send per revoked link"
+    );
+    assert_eq!(mock.transfers().len(), seeded, "nothing is paid");
+    for (made, paid) in &revoked {
+        assert_eq!(
+            link_state(&fixture, &tenant, made.link_id).await,
+            ("closed".into(), Some(paid.to_string()))
+        );
+    }
+    assert!(lines(&fixture, &tenant, "near_ai").await.is_empty());
+}
+
 #[tokio::test]
 async fn a_credit_hold_or_closed_account_stops_sends_on_every_rail() {
     let Some(fixture) = fixture().await else {
