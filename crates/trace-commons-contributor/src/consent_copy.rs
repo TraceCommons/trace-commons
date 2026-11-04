@@ -983,11 +983,9 @@ pub const LEGACY_MIGRATION_OFFER_LATER: &str = "You can move later from Settings
 /// key keeps its old `passkey_` name.
 pub const LEGACY_MIGRATION_PASSKEY_WAITING: &str = "Waiting for your browser...";
 
-/// The NEAR AI sign-in step ended without finishing (it failed, or ran out
-/// of time). Nothing ran. It no longer says "passkey": passkeys were
-/// removed 2026-10-31; the key keeps its old `passkey_` name. DRAFT, NEEDS
-/// APPROVAL (2026-11-04).
-pub const LEGACY_MIGRATION_PASSKEY_FAILED: &str = "Your sign-in step didn't finish, so nothing was moved. Your invite keeps working; try again when you're ready.";
+/// Not yet approved. The passkey step ended without finishing (it failed,
+/// or ran out of time). Nothing ran.
+pub const LEGACY_MIGRATION_PASSKEY_FAILED: &str = "Your passkey step didn't finish, so nothing was moved. Your invite keeps working; try again when you're ready.";
 
 /// Not yet approved. Stops waiting on the passkey step. Nothing is moved.
 pub const LEGACY_MIGRATION_PASSKEY_CANCEL: &str = "Cancel";
