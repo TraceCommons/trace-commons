@@ -37,7 +37,7 @@ private final class ContributionDaemon: DaemonCalling {
         if refused { return #"{"id":1,"error":{"code":"unavailable","message":"synthetic_refusal"}}"# }
         if blockReady { started.signal(); resume.wait() }
         let body = (try? JSONSerialization.jsonObject(with: Data(params.utf8))) as? [String: String]
-        return "{\"id\":1,\"result\":{\"account_scope\":\"\(body?["account_scope"] ?? "scope-a")\",\"status\":{\"authority\":\"bounded\",\"ready\":true,\"policy_version\":\"v1\"},\"line\":\"Ready to contribute. Accepted contributions may earn pending credit.\"}}"
+        return "{\"id\":1,\"result\":{\"account_scope\":\"\(body?["account_scope"] ?? "scope-a")\",\"status\":{\"authority\":\"bounded\",\"ready\":true,\"policy_version\":\"v1\"},\"line\":\"Ready to contribute.\"}}"
     }
     func searchOriginal(entryID: String, needle: String) -> Int? { nil }
     func openPreview(entryID: String) throws -> TCPreview { throw TCDaemon.TCError.daemonGone }
@@ -70,7 +70,9 @@ final class ContributionAccountTests: XCTestCase {
         let secondBody = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(calls[1].1.utf8)) as? [String: String])
         XCTAssertEqual(firstBody["idempotency_key"], secondBody["idempotency_key"])
         XCTAssertNotNil(UUID(uuidString: try XCTUnwrap(firstBody["idempotency_key"])))
-        XCTAssertTrue(model.contributionLine.contains("pending credit"))
+        // Owner dropped "may earn pending credit" 2026-11-04 (Settings copy
+        // pass 2, P24): the ready line is the core's, word for word.
+        XCTAssertTrue(model.contributionLine.contains("Ready to contribute"))
         let refreshed = await model.updateContributionAccount()
         XCTAssertTrue(refreshed)
         XCTAssertEqual(daemon.calls.last?.0, "account_contribution_status")
@@ -83,7 +85,9 @@ final class ContributionAccountTests: XCTestCase {
         var status = DaemonStatus.unknown; status.accountScope = "scope-a"; model.setStatusForTesting(status)
         _ = await model.updateContributionAccount(inviteCode: "SYNTHETICINVITE01")
         _ = await model.updateContributionAccount()
-        XCTAssertTrue(model.contributionLine.contains("pending credit"))
+        // Owner dropped "may earn pending credit" 2026-11-04 (Settings copy
+        // pass 2, P24): the ready line is the core's, word for word.
+        XCTAssertTrue(model.contributionLine.contains("Ready to contribute"))
         status.accountScope = "scope-b"; model.setStatusForTesting(status)
         XCTAssertEqual(model.contributionLine, model.privateInferenceCopy?.accountContributionRefresh)
         _ = await model.updateContributionAccount(inviteCode: "SYNTHETICINVITE01")

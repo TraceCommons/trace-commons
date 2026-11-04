@@ -134,15 +134,25 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
 public protocol MonitorWordTable: Decodable, Equatable, Sendable {
     /// The payload fields this shell decodes, by wire name.
     static var consumedFields: [String] { get }
+    /// The words the owner cut, by property name: each arrives "" and is
+    /// drawn as nothing, so it does not make the table unwhole.
+    static var ownerCut: Set<String> { get }
 }
 
 extension MonitorWordTable {
+    public static var ownerCut: Set<String> { [] }
+
     /// Every word in the table, so a decode can refuse an empty one.
     var words: [String] { Mirror(reflecting: self).children.compactMap { $0.value as? String } }
 
     /// Whether every word is there: an empty one is a table this shell
-    /// cannot render, never a blank label.
-    var isWhole: Bool { !words.contains(where: \.isEmpty) }
+    /// cannot render, never a blank label. An `ownerCut` word may be empty.
+    var isWhole: Bool {
+        !Mirror(reflecting: self).children.contains { child in
+            guard let text = child.value as? String, text.isEmpty else { return false }
+            return !Self.ownerCut.contains(child.label ?? "")
+        }
+    }
 }
 
 /// The Traces tree's rows and the Dismiss-session confirmation (`traces-tree.tsx`).
@@ -694,6 +704,10 @@ public struct MonitorShellCopy: MonitorWordTable {
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
+
+    /// Settings' consent, discovery and watcher eyebrows, cut by the owner
+    /// 2026-11-04 (Settings copy pass 2, P140, P84, P79): each arrives "".
+    public static var ownerCut: Set<String> { ["consentEyebrow", "discoveryEyebrow", "watcherEyebrow"] }
 
     /// Watching N tools: the singular is its own line.
     public func watching(tools: Int) -> String {

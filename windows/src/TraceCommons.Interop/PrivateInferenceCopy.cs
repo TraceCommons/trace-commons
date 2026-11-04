@@ -206,6 +206,9 @@ public sealed record PrivateInferenceCopy
     /// only when that sentence is drawn -- a scope line on its own qualifies
     /// a figure that is not on screen.
     /// </summary>
+    [JsonPropertyName("harnesses_precedence_tooltip")]
+    public string HarnessesPrecedenceTooltip { get; init; } = string.Empty;
+
     [JsonPropertyName("harnesses_spend_scope")]
     public string HarnessesSpendScope { get; init; } = string.Empty;
 
@@ -380,6 +383,10 @@ public sealed record PrivateInferenceCopy
     /// </remarks>
     [JsonPropertyName("credential_cost")]
     public string CredentialCost { get; init; } = string.Empty;
+
+    /// <summary>Tooltip on the Sign in button (P3): the key is revocable; what the saved sign-in reaches.</summary>
+    [JsonPropertyName("sign_in_tooltip")]
+    public string SignInTooltip { get; init; } = string.Empty;
 
     [JsonPropertyName("credential_obtain")]
     public string CredentialObtain { get; init; } = string.Empty;
@@ -782,6 +789,22 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("harness_caption_not_connected")]
     public string HarnessCaptionNotConnected { get; init; } = string.Empty;
 
+    /// <summary>
+    /// The fields the owner cut 2026-11-04 (Settings copy pass 2, P8, P10,
+    /// P177, P209). The core still sends them, as the empty string, so no
+    /// decoder loses a field; a shell draws no line for an empty one. They are
+    /// deliberately outside <see cref="Sentences"/>, whose members must be
+    /// non-empty, and nothing else is exempt.
+    /// </summary>
+    public string[] CutByOwner =>
+        new[]
+        {
+            AccountContributionPendingCredit,
+            CredentialWhat,
+            HarnessesWhat,
+            HarnessNotConnected,
+        };
+
     /// <summary>Every sentence for the complete-payload check, not a rendering order.</summary>
     public string[] Sentences =>
         new[]
@@ -789,7 +812,6 @@ public sealed record PrivateInferenceCopy
             AccountContributionRefresh,
             AccountContributionChecking,
             AccountContributionUnavailable,
-            AccountContributionPendingCredit,
             AccountContributionHeading,
             AccountContributionRefreshAction,
             AccountContributionInviteCode,
@@ -830,9 +852,8 @@ public sealed record PrivateInferenceCopy
             TrayTurnOff,
             TrayOpenToTurnOn,
             HarnessesTitle,
-            HarnessesWhat,
+            HarnessesPrecedenceTooltip,
             HarnessesSpendScope,
-            HarnessNotConnected,
             HarnessConnectedNothingSeen,
             HarnessAnswering,
             HarnessConnect,
@@ -849,13 +870,13 @@ public sealed record PrivateInferenceCopy
             HarnessPlanEntryUnusable,
             HarnessPlanNoConfigPath,
             CredentialTitle,
-            CredentialWhat,
             CredentialProviderLabel,
             CredentialProviderGithub,
             CredentialProviderGoogle,
             CredentialProviderNear,
             CredentialWalletNotice,
             CredentialCost,
+            SignInTooltip,
             CredentialObtain,
             CredentialCancel,
             CredentialForget,

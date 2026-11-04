@@ -71,6 +71,7 @@ struct ConsentSection: View {
                     }
                 }
                 caption(SettingsLegacyWords.rewardOpportunities)
+                    .helpIfAny(SettingsLegacyWords.rewardOpportunitiesTooltip)
                 ForEach(optional) { scope in
                     ConsentScopeToggle(scope: scope)
                 }

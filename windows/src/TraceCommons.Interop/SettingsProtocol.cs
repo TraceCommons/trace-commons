@@ -319,6 +319,8 @@ public sealed class ProbabilityStorageView {
     [JsonPropertyName("state_line")] public string StateLine { get; set; } = "";
     [JsonPropertyName("scope_note")] public string ScopeNote { get; set; } = "";
     [JsonPropertyName("cleanup_label")] public string CleanupLabel { get; set; } = "";
+    /// <summary>Tooltip on the Clean up button (P279); empty from an older daemon.</summary>
+    [JsonPropertyName("cleanup_tooltip")] public string CleanupTooltip { get; set; } = "";
     [JsonPropertyName("discard_label")] public string DiscardLabel { get; set; } = "";
     /// <summary>The discard confirmation's title; empty from an older daemon.</summary>
     [JsonPropertyName("discard_title")] public string DiscardTitle { get; set; } = "";

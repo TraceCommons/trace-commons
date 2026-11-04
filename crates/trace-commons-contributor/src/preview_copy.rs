@@ -134,8 +134,9 @@ pub const MONITOR_CORE_UNREACHABLE: &str =
 
 /// What the Traces tab says when a request the
 /// core answered failed (a refused write, or a reply this build could not
-/// read).
-pub const MONITOR_REQUEST_FAILED: &str = "That didn't go through. Try again.";
+/// read). The Retry control sits beside it, so it names no action.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P1).
+pub const MONITOR_REQUEST_FAILED: &str = "That didn't go through.";
 
 /// Every fixed word of the monitor's Traces tab. The row labels are single
 /// words; `keep` and `undo_keep` are Customize's (K5) so the two surfaces
@@ -607,8 +608,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             session_trimmed: "trimmed to fit",
             session_waiting: "waiting",
             folder_mark: "dir",
-            unresolved_bucket_note: "These traces cannot be contributed automatically. \
-                You'll always be asked.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P128).
+            unresolved_bucket_note: "You'll always be asked about these traces.",
         },
         counts: MonitorCountsCopy {
             sessions_waiting_one: "1 trace waiting",
@@ -1607,13 +1608,16 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             history_empty: "No submissions recorded on this device yet.",
             history_filter_empty: "No submissions match this filter.",
             open: "Open",
-            pause_watcher: "Pause watcher",
-            resume_watcher: "Resume watcher",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P82).
+            pause_watcher: "Pause",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P83).
+            resume_watcher: "Resume",
             pause_hour: "1 hour",
             pause_morning: "Until morning",
             pause_until_resumed: "Until resumed",
             start_at_login: concat!("Start ", crate::app_name!(), " at login"),
-            projects_empty: "No projects seen yet. Traces appear here after discovery.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P124).
+            projects_empty: "No projects yet.",
             changes_heading: "Change log",
             tab_home: "Home",
             tab_inference: "Private AI",
@@ -1626,16 +1630,21 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             settings_refresh_discovery: "Refresh trace discovery",
             settings_refresh_uses: "Refresh data uses",
             updates_eyebrow: "Updates",
-            consent_eyebrow: "Consent",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P140).
+            consent_eyebrow: "",
             desktop_eyebrow: "Desktop",
             desktop_title: "System integrations",
-            discovery_eyebrow: "Watcher",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P84).
+            discovery_eyebrow: "",
             discovery_title: "Trace discovery",
-            watcher_eyebrow: "Background service",
-            watcher_title: "Contribution watcher",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P79).
+            watcher_eyebrow: "",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P85).
+            watcher_title: "Watcher",
             watcher_watching: "Watching",
             watcher_paused: "Paused",
-            watcher_caption: "Pausing stops contribution processing. It does not delete queued traces or change consent.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P78).
+            watcher_caption: "Pausing stops contribution. Queued traces and consent are unchanged.",
             connection_ready: "Ready",
             connection_local_only: "Local only",
             notice_details: "Details",
@@ -1709,7 +1718,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             kept_here: "{count} kept on this Mac",
             style_title: "Traces map",
             style_toggle: "Rocket mode",
-            style_caption: "Only changes how the map looks. Contributions fly to the library (space station) by rocket animation.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P231).
+            style_caption: "Changes only how the map looks.",
             credential: "NEAR AI credential",
             none_found: "No configured tools found.",
         },
@@ -1749,8 +1759,10 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             missions_action: "Review drafts",
             insights_action: "See insights",
             promotions_title: "Home",
-            promotions_toggle: "Show promotions on Home",
-            promotions_caption: "News from NEAR AI, such as a new model. A promotion you close comes back only when it changes.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P234).
+            promotions_toggle: "Show promotions",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P232).
+            promotions_caption: "News from NEAR AI, such as a new model.",
             submissions: "Submissions",
             contribution_history: "Contribution history",
             reading_history: "Reading local history\u{2026}",
@@ -1793,7 +1805,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         },
         edge_rail: MonitorEdgeRailCopy {
             setting_toggle: "Show the edge rail",
-            setting_caption: "Rest the pointer on the right edge of the screen to glance at Home, Private AI and your traces.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P233).
+            setting_caption: "Point at the screen's right edge to glance at Home, Private AI and traces.",
             rail_label: "Edge rail",
             handle_label: "Open the edge rail",
             open_app: concat!("Open ", crate::app_name!()),
@@ -1812,7 +1825,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             not_installed: "Not installed",
             installed: "Installed: {path}",
             stale: "Link out of date: {path}",
-            foreign: "{path} already exists and wasn't installed by this app.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P250).
+            foreign: "Another file is already at {path}.",
             install: "Install",
             uninstall: "Uninstall",
             update_link: "Update link",
@@ -1857,10 +1871,41 @@ mod tests {
         out
     }
 
+    /// The Settings card eyebrows the owner cut 2026-11-04 (Settings copy
+    /// pass 2, P140, P84, P79): each is empty, and the only words allowed
+    /// to be.
+    const OWNER_CUT_KEYS: [&str; 3] = [
+        "/shell/consent_eyebrow",
+        "/shell/discovery_eyebrow",
+        "/shell/watcher_eyebrow",
+    ];
+
+    /// Whether `key` (a path from [`words_of`] over the whole screens
+    /// table) is one of [`OWNER_CUT_KEYS`]; asserts that it is empty if so.
+    fn owner_cut(key: &str, word: &str) -> bool {
+        let cut = OWNER_CUT_KEYS.contains(&key);
+        if cut {
+            // Owner dropped this eyebrow 2026-11-04 (Settings copy pass 2).
+            assert!(word.is_empty(), "{key} was cut but says {word:?}");
+        }
+        cut
+    }
+
+    #[test]
+    fn the_owner_cut_eyebrows_are_empty() {
+        let shell = monitor_screens_copy().shell;
+        assert_eq!(shell.consent_eyebrow, "");
+        assert_eq!(shell.discovery_eyebrow, "");
+        assert_eq!(shell.watcher_eyebrow, "");
+    }
+
     #[test]
     fn the_monitor_screens_copy_is_whole_and_shares_the_traces_lines() {
         let copy = monitor_screens_copy();
         for (key, word) in words_of(&copy) {
+            if owner_cut(&key, &word) {
+                continue;
+            }
             assert!(!word.is_empty(), "{key} is empty");
         }
         let traces = monitor_traces_copy();
@@ -1936,7 +1981,10 @@ mod tests {
         let mut words = words_of(&monitor_traces_copy());
         words.extend(words_of(&monitor_screens_copy()));
         for (key, word) in &words {
-            assert!(!word.trim().is_empty(), "{key} is empty");
+            assert!(
+                owner_cut(key, word) || !word.trim().is_empty(),
+                "{key} is empty"
+            );
             assert!(!word.contains("Share automatically"), "{key}: {word}");
         }
         for table in [
@@ -2047,6 +2095,9 @@ mod tests {
         let screens = monitor_screens_copy();
         let shell = &screens.shell;
         for (key, word) in words_of(shell) {
+            if owner_cut(&format!("/shell{key}"), &word) {
+                continue;
+            }
             assert!(!word.is_empty(), "{key} is empty");
         }
         assert_eq!(screens.view, "View options");

@@ -6,7 +6,8 @@ import XCTest
 /// `TCBridgeTests/CoreCopyExportTests`.
 final class ProjectIgnoreCopyTests: XCTestCase {
     private let fixture = """
-        {"title": "T", "body": "B", "button": "Btn", "tooltip": "Tip", "keep": "K"}
+        {"title": "T", "body": "B", "button": "Btn", "tooltip": "Tip", "keep": "K",
+         "ignore_project_tooltip": "NeverTip"}
         """
 
     func testDecodesEveryField() throws {
@@ -16,6 +17,7 @@ final class ProjectIgnoreCopyTests: XCTestCase {
         XCTAssertEqual(copy.button, "Btn")
         XCTAssertEqual(copy.tooltip, "Tip")
         XCTAssertEqual(copy.keep, "K")
+        XCTAssertEqual(copy.ignoreProjectTooltip, "NeverTip")
     }
 
     /// Nil, never a partly-filled value: the confirmation is not offered

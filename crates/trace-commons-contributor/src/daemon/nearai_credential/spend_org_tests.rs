@@ -668,11 +668,17 @@ fn the_view_carries_every_word_the_mac_app_reads() {
             "what",
         ]
     );
+    // Every word is a string, and every one but `what` has text: the owner
+    // cut `what` 2026-11-04 (Settings copy pass 2), so the view draws nothing
+    // for it.
+    assert!(object.values().all(|value| value.as_str().is_some()));
     assert!(
         object
-            .values()
-            .all(|value| value.as_str().is_some_and(|text| !text.is_empty()))
+            .iter()
+            .filter(|(key, _)| key.as_str() != "what")
+            .all(|(_, value)| value.as_str().is_some_and(|text| !text.is_empty()))
     );
+    assert_eq!(object["what"], "");
     assert!(
         view["prompt_line"]
             .as_str()

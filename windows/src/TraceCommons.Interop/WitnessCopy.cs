@@ -56,6 +56,8 @@ public sealed record WitnessCopy
     [JsonPropertyName("token_scope_note")] public string TokenScopeNote { get; init; } = "";
     [JsonPropertyName("token_enable")] public string TokenEnable { get; init; } = "";
     [JsonPropertyName("token_disable")] public string TokenDisable { get; init; } = "";
+    /// <summary>Tooltip on the Token distribution Enable button (P270).</summary>
+    [JsonPropertyName("token_enable_tooltip")] public string TokenEnableTooltip { get; init; } = "";
     [JsonPropertyName("token_confirm")] public string TokenConfirm { get; init; } = "";
     [JsonPropertyName("token_cancel")] public string TokenCancel { get; init; } = "";
     [JsonPropertyName("token_enabled")] public string TokenEnabled { get; init; } = "";
@@ -67,6 +69,10 @@ public sealed record WitnessCopy
     [JsonPropertyName("inference_scope_note")] public string InferenceScopeNote { get; init; } = "";
     [JsonPropertyName("inference_enable")] public string InferenceEnable { get; init; } = "";
     [JsonPropertyName("inference_disable")] public string InferenceDisable { get; init; } = "";
+    /// <summary>Tooltips on the model-call evidence Enable, Disable and row (P262, P264, P265).</summary>
+    [JsonPropertyName("inference_enable_tooltip")] public string InferenceEnableTooltip { get; init; } = "";
+    [JsonPropertyName("inference_disable_tooltip")] public string InferenceDisableTooltip { get; init; } = "";
+    [JsonPropertyName("inference_scope_tooltip")] public string InferenceScopeTooltip { get; init; } = "";
     [JsonPropertyName("inference_confirm")] public string InferenceConfirm { get; init; } = "";
     [JsonPropertyName("inference_cancel")] public string InferenceCancel { get; init; } = "";
     [JsonPropertyName("inference_enabled")] public string InferenceEnabled { get; init; } = "";
@@ -112,8 +118,14 @@ public sealed record WitnessCopy
         InferenceEnabled,
         InferenceDisabled,
         InferenceSaveFailed,
+        TokenEnableTooltip,
+        InferenceEnableTooltip,
+        InferenceDisableTooltip,
+        InferenceScopeTooltip,
         PrivacyConfirmTitle,
-        PrivacyConfirmDescription,
+        // PrivacyConfirmDescription and TokenScopeNote are not here: the owner
+        // cut both 2026-11-04 (Settings copy pass 2, P285, P263). The core
+        // still sends them as "" and a shell draws no line for an empty one.
     };
 }
 

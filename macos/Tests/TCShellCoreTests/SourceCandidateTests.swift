@@ -7,9 +7,9 @@ final class SourceCandidateTests: XCTestCase {
     /// `SourceCheckExportTests` reads them from the dylib; this target
     /// cannot load it.
     static let words = SourceEvidenceWords(
-        missing: "Not found on this machine", empty: "Found, but holding no traces yet",
+        missing: "Not found on this machine", empty: "Found, no traces yet",
         countOne: "1 trace", count: "{count} traces", mostRecent: "{traces}, most recent {age}",
-        relocated: "{evidence} (moved here by an environment variable)", ageJustNow: "just now",
+        relocated: "{evidence} (set by an environment variable)", ageJustNow: "just now",
         ageMinutes: "{n} minutes ago", ageHour: "1 hour ago", ageHours: "{n} hours ago",
         ageYesterday: "yesterday", ageDays: "{n} days ago")
 
@@ -87,7 +87,7 @@ final class SourceCandidateTests: XCTestCase {
             mostRecent: nil,
             relocatedByEnv: false
         )
-        XCTAssertEqual(empty.evidence(now: Date(), words: Self.words), "Found, but holding no traces yet")
+        XCTAssertEqual(empty.evidence(now: Date(), words: Self.words), "Found, no traces yet")
     }
 
     func testEvidenceCountsSessionsAndSaysHowRecent() {
@@ -127,7 +127,7 @@ final class SourceCandidateTests: XCTestCase {
         )
         // Without this the screen shows a path the contributor did not
         // expect and offers no reason for it.
-        XCTAssertTrue(candidate.evidence(now: Date(), words: Self.words).contains("moved here by an environment variable"))
+        XCTAssertTrue(candidate.evidence(now: Date(), words: Self.words).contains("set by an environment variable"))
     }
 
     func testDisplayNamesAreTheProductNamesNotTheAdapterSlugs() {

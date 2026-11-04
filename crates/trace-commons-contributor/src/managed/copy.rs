@@ -136,8 +136,8 @@
 //!   "Remove from favorites" -- the accessible name and tooltip of the star
 //!   beside the model picker, for the chosen model, while it is not and is a
 //!   favorite. Favorites are listed first in the picker.
-//! - `model_favorite_unavailable` "{model} is no longer available on NEAR
-//!   AI." -- a row beside the picker for each favorite NEAR AI stopped
+//! - `model_favorite_unavailable` "{model} is no longer available." -- a
+//!   row beside the picker for each favorite NEAR AI stopped
 //!   listing, with a `remove` button whose accessible name is
 //!   `model_favorite_remove_named` "Remove {model} from favorites". Shells
 //!   fill `{model}` with the model id.
@@ -192,6 +192,28 @@
 //!   The macOS launch sheet also shows it as a caption under the model
 //!   pickers, for a folder `managed_folder_settings_get` reports
 //!   `project_workflows` for, on a NEAR AI session (owner, 2026-11-01).
+//!
+//! Settings copy pass 2. The JSON below cannot carry comments, so each
+//! approval is recorded here:
+//! - `cli_options_title` "CLI options". Approved by the owner 2026-11-04
+//!   (Settings copy pass 2, P114).
+//! - `cli_options_scope` "Used by new sessions you launch from this app."
+//!   Approved by the owner 2026-11-04 (Settings copy pass 2, P95).
+//! - `cli_options_tooltip` "Quote values that contain spaces. Choose the
+//!   OpenCode model when you launch." -- the tooltip on the CLI options
+//!   field. Approved by the owner 2026-11-04 (Settings copy pass 2, P95).
+//! - `cli_options_invalid` "Check quotes. Account, profile, session and
+//!   model flags can't be set here." Approved by the owner 2026-11-04
+//!   (Settings copy pass 2, P100).
+//! - `cli_options_unavailable` "Update the app to edit these options."
+//!   Approved by the owner 2026-11-04 (Settings copy pass 2, P115).
+//! - `action_failed` "That didn't work." -- the generic managed failure
+//!   under a row, beside the control that retries. Approved by the owner
+//!   2026-11-04 (Settings copy pass 2, P112).
+//! - `global_scope` "Applies after you restart the tool." Approved by the
+//!   owner 2026-11-04 (Settings copy pass 2, P211).
+//! - `model_favorite_unavailable` "{model} is no longer available."
+//!   Approved by the owner 2026-11-04 (Settings copy pass 2, P217).
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "My Private AI sessions",
@@ -204,13 +226,14 @@ pub fn copy() -> serde_json::Value {
             "folder_settings_reset": "Reset",
             "folder_settings_reset_accessibility": "Reset {tool} folder settings",
             "folder_model_unavailable": "The saved model is no longer available, so the default is selected.",
-            "cli_options_title": "Agent CLI options",
-            "cli_options_scope": "Applies to new managed sessions. Quote values that contain spaces. Account routing, profiles and session identity are managed by this app.",
+            "cli_options_title": "CLI options",
+            "cli_options_scope": "Used by new sessions you launch from this app.",
+            "cli_options_tooltip": "Quote values that contain spaces. Choose the OpenCode model when you launch.",
             "cli_options_label": "CLI options",
             "cli_options_save": "Save",
             "cli_options_save_accessibility": "Save {tool} CLI options",
-            "cli_options_invalid": "Check quotes and escapes. Account routing, profile and session overrides are unavailable here; choose the OpenCode model when launching.",
-            "cli_options_unavailable": "Update this app to edit managed session options.",
+            "cli_options_invalid": "Check quotes. Account, profile, session and model flags can't be set here.",
+            "cli_options_unavailable": "Update the app to edit these options.",
             "cli_options_read_failed": "Could not read managed session options. Try Refresh.",
             "provider_openai": "OpenAI",
             "provider_anthropic": "Anthropic",
@@ -274,7 +297,7 @@ pub fn copy() -> serde_json::Value {
             "model_unavailable": "That model isn't available on NEAR AI. Choose another.",
             "model_favorite_add": "Add to favorites",
             "model_favorite_remove": "Remove from favorites",
-            "model_favorite_unavailable": "{model} is no longer available on NEAR AI.",
+            "model_favorite_unavailable": "{model} is no longer available.",
             "model_favorite_remove_named": "Remove {model} from favorites",
             "favorites_title": "Favorite models",
             "balance_too_low": "Add funds to your NEAR AI balance to start a session.",
@@ -306,9 +329,9 @@ pub fn copy() -> serde_json::Value {
             "launch_short": "Launch",
             "terminal": "your terminal",
             "global_title": "Standard settings",
-            "global_scope": "These apply to standard sessions once you restart the tool.",
+            "global_scope": "Applies after you restart the tool.",
             "launch_unknown": "Refresh, then try again.",
-            "action_failed": "That didn't work. Try again.",
+            "action_failed": "That didn't work.",
             "accounts_title": "Saved accounts",
             "accounts_refresh_accessibility": "Refresh saved accounts",
             "state_starting": "Starting",
@@ -433,9 +456,10 @@ mod tests {
         let copy = copy();
         assert_eq!(copy["model_favorite_add"], "Add to favorites");
         assert_eq!(copy["model_favorite_remove"], "Remove from favorites");
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P217).
         assert_eq!(
             copy["model_favorite_unavailable"],
-            "{model} is no longer available on NEAR AI."
+            "{model} is no longer available."
         );
         assert_eq!(
             copy["model_favorite_remove_named"],

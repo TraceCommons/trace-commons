@@ -2064,6 +2064,12 @@ fn the_routing_vocabulary_crossing_the_abi_is_the_one_in_the_rust() {
         let text = value
             .as_str()
             .unwrap_or_else(|| panic!("{field} is not a string"));
+        // Owner dropped the Tools heading 2026-11-04 (Settings copy pass 2, P117)
+        // and the applies-at-once line (P105); both cross as "".
+        if matches!(field.as_str(), "tools_heading" | "applies_at_once") {
+            assert_eq!(text, "", "{field} is cut and crosses empty");
+            continue;
+        }
         assert!(!text.is_empty(), "{field} crossed the boundary empty");
     }
 }
@@ -3438,6 +3444,18 @@ fn the_private_inference_payload_crosses_whole_and_finished() {
     let fields = value.as_object().expect("an object");
     for (field, value) in fields {
         let text = value.as_str().expect("every field is a string");
+        // Owner dropped these lines 2026-11-04 (Settings copy pass 2, P8, P10,
+        // P177, P209): they cross as "".
+        if matches!(
+            field.as_str(),
+            "account_contribution_pending_credit"
+                | "credential_what"
+                | "harnesses_what"
+                | "harness_not_connected"
+        ) {
+            assert_eq!(text, "", "{field} is cut and crosses empty");
+            continue;
+        }
         assert!(!text.trim().is_empty(), "{field} arrived empty");
         for marker in ["{}", "{port}", "%@", "%s", "%d"] {
             assert!(
@@ -5714,7 +5732,7 @@ fn the_account_change_copy_crosses_the_abi() {
     let copy = json_owned(tc_account_change_copy_json());
     assert_eq!(copy, serde_json::to_value(account_change_copy()).unwrap());
     assert!(copy["body"].as_str().unwrap().contains("{new_provider}"));
-    assert_eq!(copy["mismatch_change"], "Use a different account");
+    assert_eq!(copy["mismatch_change"], "Switch account");
     assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
 }
 

@@ -73,6 +73,7 @@
                                    Style="{StaticResource TcTitleSectionTextStyle}"
                                    TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind ViewModel.CredentialWhat, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasCredentialWhat, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />
                         <!--
@@ -122,6 +123,7 @@
                                    TextWrapping="Wrap" />
                         <Button Content="{x:Bind ViewModel.CredentialActionText, Mode=OneWay}"
                                 Visibility="{x:Bind ViewModel.ShowCredentialSignIn, Mode=OneWay}"
+                                ToolTipService.ToolTip="{x:Bind ViewModel.SignInTooltip, Mode=OneWay}"
                                 IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
                                 Style="{StaticResource TcPrimaryButtonStyle}"
                                 HorizontalAlignment="Left"
@@ -283,9 +285,11 @@
                         Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
                     <StackPanel Spacing="10">
                         <TextBlock Text="{x:Bind ViewModel.HarnessesTitle, Mode=OneWay}"
+                                   ToolTipService.ToolTip="{x:Bind ViewModel.HarnessesPrecedenceTooltip, Mode=OneWay}"
                                    Style="{StaticResource TcTitleSectionTextStyle}"
                                    TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind ViewModel.HarnessesWhat, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasHarnessesWhat, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />
                         <!--

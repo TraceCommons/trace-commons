@@ -22,6 +22,9 @@ public struct NudgeCopy: Equatable, Sendable {
         case settingMark = "SETTING_MARK"
         case settingMarkHelp = "SETTING_MARK_HELP"
         case settingNotifyMaster = "SETTING_NOTIFY_MASTER"
+        /// The master switch's hover tip.
+        /// Approved by the owner 2026-11-04 (Settings copy pass 2, P237).
+        case settingNotifyMasterTooltip = "SETTING_NOTIFY_MASTER_TOOLTIP"
         case settingDigest = "SETTING_DIGEST"
         case settingNotifyVerdicts = "SETTING_NOTIFY_VERDICTS"
         case settingNotifyIdle = "SETTING_NOTIFY_IDLE"
@@ -172,6 +175,8 @@ public enum NudgeSettings {
         /// False under an off broader switch: the mark under suggestions,
         /// each kind under the master. The stored value is still shown.
         public let enabled: Bool
+        /// A hover tip on the switch, never drawn as a line.
+        public var tooltip: String? = nil
     }
 
     /// A one-time offer to turn a kind on.
@@ -212,16 +217,20 @@ public enum NudgeSettings {
     public static func rows(_ settings: DaemonData.Settings?, copy: NudgeCopy?, digestHelp: String?) -> [Row] {
         guard let settings, let copy else { return [] }
         var rows: [Row] = []
-        func add(_ id: Switch, _ label: NudgeCopy.Key, help: String?, value: Bool?, enabled: Bool = true) {
+        func add(
+            _ id: Switch, _ label: NudgeCopy.Key, help: String?, value: Bool?, enabled: Bool = true,
+            tooltip: String? = nil
+        ) {
             guard let value, let text = copy[label] else { return }
-            rows.append(Row(id: id, label: text, help: help, isOn: value, enabled: enabled))
+            rows.append(Row(id: id, label: text, help: help, isOn: value, enabled: enabled, tooltip: tooltip))
         }
         add(.suggestions, .settingSuggestions, help: copy[.settingSuggestionsHelp], value: settings.suggestionsEnabled)
         add(.menuBarMark, .settingMark, help: copy[.settingMarkHelp], value: settings.menuBarMarkEnabled,
             enabled: settings.suggestionsEnabled == true)
         add(.settlementEstimate, .settingSettlementEstimate, help: copy[.settingSettlementEstimateHelp],
             value: settings.settlementEstimateEnabled)
-        add(.notifications, .settingNotifyMaster, help: nil, value: settings.notificationsEnabled)
+        add(.notifications, .settingNotifyMaster, help: nil, value: settings.notificationsEnabled,
+            tooltip: copy[.settingNotifyMasterTooltip])
         let master = settings.notificationsEnabled != false
         for kind in shownKinds {
             switch kind {

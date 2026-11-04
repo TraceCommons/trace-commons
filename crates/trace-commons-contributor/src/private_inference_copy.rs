@@ -129,7 +129,14 @@ pub const OFFER_TITLE: &str = "Route AI requests through NEAR AI";
 
 /// Requests still go to the configured provider; enabling the service does
 /// not change existing tool connections.
-pub const OFFER_WHAT: &str = "Lets your tools send AI requests through this app, answered by NEAR AI once you sign in. No tool switches over until you connect it. Requests are logged on this computer.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P178).
+pub const OFFER_WHAT: &str = "Your connected tools send AI requests through this app to NEAR AI.";
+
+/// First run's Private AI offer, unchanged by the Settings copy pass: its
+/// card splits these sentences into a lead and the rest it discloses (owner,
+/// 2026-10-08). It was [`OFFER_WHAT`]'s text until the Settings pass
+/// shortened that one (P178).
+pub const OFFER_WHAT_FIRST_RUN: &str = "Lets your tools send AI requests through this app, answered by NEAR AI once you sign in. No tool switches over until you connect it. Requests are logged on this computer.";
 
 /// What turning it on exposes. **Required, not optional.**
 ///
@@ -139,7 +146,8 @@ pub const OFFER_WHAT: &str = "Lets your tools send AI requests through this app,
 /// deciding on a single-user laptop and a contributor deciding on a shared
 /// build box are answering different questions, and this is the sentence that
 /// lets them tell which one they are.
-pub const OFFER_EXPOSURE: &str = "While it's on, anything else running on this computer can send requests through it, charged to your accounts. On a shared computer, that includes anyone who can log in.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P204).
+pub const OFFER_EXPOSURE: &str = "While it's on, anything else running on this computer, including other users on a shared one, can send requests charged to your accounts.";
 
 /// [`OFFER_EXPOSURE`] in one line, for the offer card, which shows only its
 /// first paragraph and this until the contributor opens "Learn more" (owner,
@@ -171,8 +179,8 @@ pub const OFFER_EXPOSURE_SHARED: &str =
 pub const OFFER_LOGGED: &str = "Requests are logged on this computer.";
 
 /// Saying yes to this is not saying yes to repointing a tool.
-pub const OFFER_NO_REPOINT: &str =
-    "Turning it on doesn't change where any tool sends requests. You connect tools one at a time.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P187).
+pub const OFFER_NO_REPOINT: &str = "Each tool switches only when you connect it.";
 
 /// The accept button. Approved 2026-10-08 (button rule).
 pub const OFFER_ACCEPT: &str = "Turn on";
@@ -209,11 +217,9 @@ pub const SETTINGS_TOGGLE: &str = "Answer AI calls here";
 
 /// Changes are not deferred to a restart, and the line beneath the switch is
 /// what actually happened rather than what was asked for.
-/// The switch's caption, in Ron's #1146 words (`private-ai-connection-panel.tsx`).
-/// Approved 2026-10-07: it was "Changes here
-/// apply straight away, and the line below says what happened."
-pub const SETTINGS_APPLIES_AT_ONCE: &str =
-    "This doesn't share any traces. Signing in to NEAR AI is separate.";
+/// The switch's caption.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P197).
+pub const SETTINGS_APPLIES_AT_ONCE: &str = "This doesn't share any traces.";
 
 /// `off`.
 pub const STATE_OFF: &str = "Off.";
@@ -227,10 +233,12 @@ pub const STATE_UNREPORTED: &str = "This version can't report its status.";
 pub const STATE_UNKNOWN: &str = "Status unavailable.";
 
 /// The switch records a request; retained ownership reports actual cleanup.
-pub const STATE_STOPPING: &str = "Stopping. Finishing calls in progress.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P212).
+pub const STATE_STOPPING: &str = "Stopping.";
 
 /// `running`.
-pub const STATE_RUNNING: &str = "On. Answering calls sent here.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P225).
+pub const STATE_RUNNING: &str = "On and answering.";
 
 /// `running_answered_elsewhere`.
 ///
@@ -250,8 +258,9 @@ pub const STATE_RUNNING: &str = "On. Answering calls sent here.";
 /// May only be shown on a fresh affirmative reading. It accuses the product
 /// of not doing what a person expects, so a guess is worse here than silence
 /// -- see [`STATE_RUNNING_DESTINATION_UNKNOWN`].
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P218).
 pub const STATE_RUNNING_ANSWERED_ELSEWHERE: &str =
-    "On. Calls use the accounts your tools already have, because NEAR AI isn't connected.";
+    "On. NEAR AI isn't connected, so your tools' own accounts answer.";
 
 /// `running_destination_unknown`.
 ///
@@ -272,32 +281,34 @@ pub const STATE_RUNNING_DESTINATION_UNKNOWN: &str = "On. Couldn't tell which acc
 /// the same as [`STATE_RUNNING`] would show a working light over something
 /// that cannot work. Its tone is [`PrivateInferenceTone::Attention`] and
 /// never [`PrivateInferenceTone::Clear`].
-pub const STATE_RUNNING_NO_BACKENDS: &str = "On, but nothing is set up to answer calls yet.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P213).
+pub const STATE_RUNNING_NO_BACKENDS: &str = "On, but nothing can answer yet.";
 
 /// `running_elsewhere`.
 ///
 /// Not a fault and not this app's doing. Something already holds the place
-/// this would have taken; it was left alone, and nothing here was started or
-/// stopped. Saying "left alone" rather than "already on" matters: a
-/// contributor reading "already on" would go looking in this app's settings
-/// for something this app does not control.
-pub const STATE_RUNNING_ELSEWHERE: &str = "Another app is using this setup. This app started nothing and stopped nothing. Calls may not get through.";
+/// this would have taken, and it was left alone. Saying it is another app's
+/// rather than "already on" matters: a contributor reading "already on" would
+/// go looking in this app's settings for something this app does not control.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P191).
+pub const STATE_RUNNING_ELSEWHERE: &str =
+    "Another app is handling this. Calls may not get through.";
 
 /// `port_in_use`.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P219).
 pub const STATE_PORT_IN_USE: &str =
-    "Couldn't start: another app is using its port. Close that app, then turn this off and on.";
+    "Another app is using the port. Close it, then turn this off and on.";
 
 /// `start_failed`.
 pub const STATE_START_FAILED: &str = "Couldn't start. Turn it off and on to retry.";
 
 /// `crashed`.
 ///
-/// Sticky on purpose, and the sentence says so rather than leaving a
-/// contributor to discover it. A listener that cannot stay up and is retried
-/// on every poll tick reads as a light flickering, which is how a real fault
-/// becomes invisible.
-pub const STATE_CRASHED: &str =
-    "May have stopped unexpectedly. It won't retry on its own: turn it off and on.";
+/// Sticky on purpose, and the sentence names the way out (off and on). A
+/// listener that cannot stay up and is retried on every poll tick reads as a
+/// light flickering, which is how a real fault becomes invisible.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P198).
+pub const STATE_CRASHED: &str = "May have stopped. Turn it off and on.";
 
 /// Said at the moment of quitting, on the two platforms where the app is the
 /// daemon.
@@ -524,7 +535,8 @@ pub fn write_confirmed(
 }
 
 /// A transport failure may arrive after persistence; do not claim nothing changed.
-pub const WRITE_UNCONFIRMED: &str = "Couldn't confirm the change. Try again.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P226).
+pub const WRITE_UNCONFIRMED: &str = "Couldn't confirm the change.";
 
 /// Whether quitting may end this app's model-call work. Requested off does
 /// not prove cleanup completed; foreign ownership is never this app's work.
@@ -592,6 +604,9 @@ pub struct PrivateInferenceCopy {
     pub tray_open_to_turn_on: &'static str,
     pub harnesses_title: &'static str,
     pub harnesses_what: &'static str,
+    /// [`HARNESSES_PRECEDENCE_TOOLTIP`], the tooltip on the
+    /// `harnesses_title` heading.
+    pub harnesses_precedence_tooltip: &'static str,
     pub harnesses_spend_scope: &'static str,
     pub harness_not_installed: &'static str,
     pub harness_not_connected: &'static str,
@@ -671,6 +686,9 @@ pub struct PrivateInferenceCopy {
     pub credential_provider_near: &'static str,
     pub credential_wallet_notice: &'static str,
     pub credential_cost: &'static str,
+    /// [`SIGN_IN_TOOLTIP`], the tooltip on the `credential_obtain` (Sign in)
+    /// button.
+    pub sign_in_tooltip: &'static str,
     pub credential_obtain: &'static str,
     pub credential_cancel: &'static str,
     pub credential_forget: &'static str,
@@ -864,15 +882,17 @@ pub const TRAY_OPEN_TO_TURN_ON: &str = "Private AI…";
 /// first.
 pub const HARNESSES_TITLE: &str = "Default tool connections";
 
-/// The one line under that heading.
-///
-/// Two things have to be said in it. That the choice is per tool -- the same
-/// promise [`OFFER_NO_REPOINT`] makes -- and that the list is what this app
-/// knows how to look for, not a claim about every tool that exists. An
-/// unqualified list reads as the second, and a contributor whose tool is
-/// missing from it would conclude their tool cannot be connected rather than
-/// that this app has not been taught about it yet.
-pub const HARNESSES_WHAT: &str = "Choose supported tools to send AI requests through this app by default. Project settings or environment overrides can take precedence.";
+/// The one line under that heading, cut: the Connect buttons below say the
+/// choice is per tool, and the precedence fact moved to
+/// [`HARNESSES_PRECEDENCE_TOOLTIP`]. The empty string is drawn as no line.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P177).
+pub const HARNESSES_WHAT: &str = "";
+
+/// The tooltip on the [`HARNESSES_TITLE`] heading: why a connected tool may
+/// still not send its calls here.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P177).
+pub const HARNESSES_PRECEDENCE_TOOLTIP: &str =
+    "Project settings or environment overrides can take precedence.";
 
 /// What the amount [`harness_spend_line`] names does and does not cover.
 ///
@@ -889,8 +909,11 @@ pub const HARNESSES_WHAT: &str = "Choose supported tools to send AI requests thr
 /// which nothing was billed -- but a contributor who saw a busy afternoon
 /// come back as nothing would conclude the number was broken rather than
 /// that it was narrow.
-pub const HARNESSES_SPEND_SCOPE: &str =
-    "Counts calls answered on this computer only: not other machines, browsers or prepaid plans.";
+///
+/// The spend line above it already says "on this computer", so this line
+/// names only what is left out.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P199).
+pub const HARNESSES_SPEND_SCOPE: &str = "Excludes other computers, browsers and prepaid plans.";
 
 /// A tool this app could not find on this computer.
 ///
@@ -902,13 +925,15 @@ pub const HARNESSES_SPEND_SCOPE: &str =
 /// It must be rendered INSTEAD of [`HARNESS_NOT_CONNECTED`] and never
 /// beside it. A missing executable and an inactive proxy connection are
 /// different facts; the row needs the installation status in that case.
-pub const HARNESS_NOT_INSTALLED: &str = "Not found on this computer.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P220).
+pub const HARNESS_NOT_INSTALLED: &str = "Not found.";
 
 /// A tool whose own settings still send its calls wherever they went before.
 ///
-/// Said as a fact about the tool's settings rather than as a fault. Nothing
-/// is wrong with a tool nobody has connected.
-pub const HARNESS_NOT_CONNECTED: &str = "Not connected to this app.";
+/// Cut: the row's caption ([`HARNESS_CAPTION_NOT_CONNECTED`]) already says
+/// "Not connected", so the state line is the empty string, drawn as no line.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P209).
+pub const HARNESS_NOT_CONNECTED: &str = "";
 
 /// A tool whose settings are right and from which nothing has arrived yet.
 ///
@@ -916,7 +941,8 @@ pub const HARNESS_NOT_CONNECTED: &str = "Not connected to this app.";
 /// value in it is not evidence that a single call was ever answered, and a
 /// surface that showed those two the same way would tell a contributor their
 /// tool was working while it sent every call somewhere else.
-pub const HARNESS_CONNECTED_NOTHING_SEEN: &str = "No calls from it yet.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P227).
+pub const HARNESS_CONNECTED_NOTHING_SEEN: &str = "No calls yet.";
 
 /// A tool a call actually arrived from. The only state that means it works.
 ///
@@ -924,7 +950,8 @@ pub const HARNESS_CONNECTED_NOTHING_SEEN: &str = "No calls from it yet.";
 /// stops at what this computer did, because which tool a call came from is
 /// worked out from how the call was phrased, and two tools that phrase calls
 /// the same way cannot be told apart.
-pub const HARNESS_ANSWERING: &str = "A call from it was answered here.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P228).
+pub const HARNESS_ANSWERING: &str = "A call was answered here.";
 
 /// The action that connects one tool.
 pub const HARNESS_CONNECT: &str = "Connect";
@@ -960,22 +987,25 @@ pub const HARNESS_PREVIEW_CANCEL: &str = "Cancel";
 /// telling them. So this sentence reports what was left alone and stops
 /// there: it must not read as an error to be cleared, and it must not
 /// suggest that this app could take the slot if asked.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P229).
 pub const HARNESS_SLOT_TAKEN: &str =
-    "This tool already has a connection set up, so it was left alone.";
+    "It already has a connection set up, so it was left unchanged.";
 
 /// A tool holding an old setting in a process that is still running.
 ///
 /// Kept in front of the contributor until a call actually arrives, because
 /// the alternative is a list claiming a tool sends its calls here while the
 /// window in front of them does not.
-pub const HARNESS_NEEDS_RESTART: &str = "If it's open, restart it to pick up the change.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P214).
+pub const HARNESS_NEEDS_RESTART: &str = "Restart it to apply the change.";
 
 /// No tool was found.
 ///
 /// Says what was looked for. An empty list that explains nothing cannot be
 /// told apart from a broken one, and the contributor's next question is
 /// always which tools were even considered.
-pub const HARNESSES_NONE_FOUND: &str = "No supported tools found on this computer.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P221).
+pub const HARNESSES_NONE_FOUND: &str = "No supported tools found.";
 
 /// A settings file that could not be read, and was therefore not touched.
 ///
@@ -984,7 +1014,8 @@ pub const HARNESSES_NONE_FOUND: &str = "No supported tools found on this compute
 /// say the right thing or nothing at all; either way it is refused, so that
 /// somebody's own mistake in their own file never comes back looking like
 /// this app's.
-pub const HARNESS_UNREADABLE_CONFIG: &str = "Couldn't read this tool's settings, so nothing changed. Review the settings file, then try again.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P200).
+pub const HARNESS_UNREADABLE_CONFIG: &str = "Couldn't read its settings file, so nothing changed.";
 
 /// A plan that found the file already saying what the action wanted.
 ///
@@ -992,7 +1023,8 @@ pub const HARNESS_UNREADABLE_CONFIG: &str = "Couldn't read this tool's settings,
 /// plan with nothing in it opened a preview holding a title, a path and
 /// nothing else, which reads as this app having lost the change rather than
 /// as there being none to make.
-pub const HARNESS_PLAN_NOTHING_TO_CHANGE: &str = "No changes were prepared.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P230).
+pub const HARNESS_PLAN_NOTHING_TO_CHANGE: &str = "Nothing to change.";
 
 /// This app's own description of a tool did not survive checking.
 ///
@@ -1000,24 +1032,23 @@ pub const HARNESS_PLAN_NOTHING_TO_CHANGE: &str = "No changes were prepared.";
 /// contributor's and this one is not their doing. A refusal that let them
 /// think their own file was at fault would send them to edit something that
 /// is already right.
-pub const HARNESS_PLAN_ENTRY_UNUSABLE: &str =
-    "Something went wrong in this app, so nothing changed. Your files aren't the problem.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P202).
+pub const HARNESS_PLAN_ENTRY_UNUSABLE: &str = "Something went wrong in this app. Nothing changed.";
 
 /// This build could not work out where a tool keeps its settings.
 ///
-/// Names the way forward rather than stopping at the refusal: the command
-/// shown on the row does by hand exactly what this app could not work out
-/// how to do.
-pub const HARNESS_PLAN_NO_CONFIG_PATH: &str =
-    "Couldn't find this tool's settings file. Check its configuration directory, then try again.";
+/// The command shown on the row does by hand exactly what this app could
+/// not work out how to do.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P195).
+pub const HARNESS_PLAN_NO_CONFIG_PATH: &str = "Couldn't find this tool's settings file.";
 
 /// OpenCode's installed major version could not be qualified.
-pub const HARNESS_PLAN_UNSUPPORTED_VERSION: &str =
-    "Couldn't identify a supported OpenCode version. Check its installation, then try again.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P203).
+pub const HARNESS_PLAN_UNSUPPORTED_VERSION: &str = "Couldn't find a supported OpenCode version.";
 
 /// No actual model can be selected for a persistent provider configuration.
-pub const HARNESS_PLAN_MODELS_UNAVAILABLE: &str =
-    "No models are available from Private AI. Check its connection, then try again.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P196).
+pub const HARNESS_PLAN_MODELS_UNAVAILABLE: &str = "No Private AI models are available.";
 
 /// Why a tool this app hosts the answering for cannot be connected yet.
 ///
@@ -1031,16 +1062,14 @@ pub const HARNESS_PLAN_MODELS_UNAVAILABLE: &str =
 /// A proxy the contributor declared and runs themselves answers from an
 /// account whose key was never handed to us; `destination_credentialed` is
 /// true for it, this sentence is never drawn for it, and the wording does not
-/// claim a tool needs our sign-in in general. It says what would answer, and
-/// what is missing from the thing that would answer.
+/// claim a tool needs our sign-in in general.
 ///
 /// The next step is spelled the way the button that performs it is spelled --
 /// see [`CREDENTIAL_OBTAIN`] -- so a contributor reading this sentence is
 /// looking for words that exist somewhere on the screen.
 ///
-/// Approved 2026-10-06: the button's words changed to #1146's, so this
-/// sentence did too.
-pub const HARNESS_NEEDS_CREDENTIAL: &str = "This computer would be the one answering, and it has no NEAR AI key yet. Sign in first, then connect your tools.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P182).
+pub const HARNESS_NEEDS_CREDENTIAL: &str = "Sign in to NEAR AI before connecting tools.";
 
 /// The sentence for one tool's state, or the empty string.
 ///
@@ -1054,9 +1083,9 @@ pub const HARNESS_NEEDS_CREDENTIAL: &str = "This computer would be the one answe
 /// all, and the emptiness is the point:
 ///
 /// - [`HarnessState::ActivityShared`] must not borrow [`HARNESS_ANSWERING`].
-///   That sentence says a call from *it* was answered here, and the pronoun
-///   names the row's own tool -- which is precisely what this state says
-///   cannot be worked out. Nor may it borrow
+///   Drawn on a tool's row, that sentence says a call from that tool was
+///   answered here -- which is precisely what this state says cannot be
+///   worked out. Nor may it borrow
 ///   [`HARNESS_CONNECTED_NOTHING_SEEN`], which would be false: something did
 ///   arrive.
 /// - [`HarnessState::Unknown`], and a label this build has never heard of,
@@ -1065,8 +1094,13 @@ pub const HARNESS_NEEDS_CREDENTIAL: &str = "This computer would be the one answe
 /// A row with no state line claims nothing, and claiming nothing is the
 /// honest answer to a question the ledger cannot settle.
 ///
+/// [`HarnessState::NotConnected`] answers the empty string too, since
+/// 2026-11-04 (Settings copy pass 2, P209): its row's "Not connected"
+/// caption already says it.
+///
 /// [`HarnessState::ActivityShared`]: crate::harness_state::HarnessState::ActivityShared
 /// [`HarnessState::Unknown`]: crate::harness_state::HarnessState::Unknown
+/// [`HarnessState::NotConnected`]: crate::harness_state::HarnessState::NotConnected
 #[must_use]
 pub fn harness_state_line(state: &str) -> &'static str {
     use crate::harness_state::HarnessState;
@@ -1233,13 +1267,11 @@ pub fn harness_spend_line(micros: Option<u64>) -> String {
 /// and check. #1146's word for what it holds (owner ruling, 2026-10-06).
 pub const CREDENTIAL_TITLE: &str = "NEAR AI credential";
 
-/// Why the card is there at all.
-///
-/// Stops at what is missing and what can be done about it. It does not say
-/// that calls fail without one -- they do not; they are answered using
-/// whatever accounts a contributor's tools already had, which is what
-/// [`STATE_RUNNING_ANSWERED_ELSEWHERE`] says on the state row above.
-pub const CREDENTIAL_WHAT: &str = "Sign in to NEAR AI to use it with your tools.";
+/// Why the card is there at all, cut: [`CREDENTIAL_COST`] under it says the
+/// same, and while signed in the state line says it. The empty string is
+/// drawn as no line.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P10).
+pub const CREDENTIAL_WHAT: &str = "";
 
 /// Provider selector copy shared by every native shell.
 pub const CREDENTIAL_PROVIDER_LABEL: &str = "Sign in with";
@@ -1304,11 +1336,17 @@ pub(crate) fn wallet_browser_copy() -> serde_json::Value {
 /// tap, and a surface that draws it as one has decided on the contributor's
 /// behalf.
 ///
-/// The last clause is the part a contributor needs later rather than now:
-/// the key is theirs and it is listed in their own account. Forget revokes
-/// it ([`CREDENTIAL_FORGET_EXPLAINS`]), and when that fails,
-/// [`CREDENTIAL_FORGET_NOT_REVOKED`] sends them there.
-pub const CREDENTIAL_COST: &str = "Sign in through your browser. The app creates an API key in your NEAR AI account for your tools. You can revoke this key in NEAR AI.\n\nThe app also keeps you signed in to check your balance and, when you ask, join a commons. This saved sign-in can read your account and create more keys.\n\nYour key and saved sign-in are stored in this computer's system credential store. You may be asked to allow access when the app starts.";
+/// The revoke and key-scope facts a contributor needs later rather than now
+/// are on the Sign in button's tooltip, [`SIGN_IN_TOOLTIP`]. Forget revokes
+/// the key ([`CREDENTIAL_FORGET_EXPLAINS`]), and when that fails,
+/// [`CREDENTIAL_FORGET_NOT_REVOKED`] sends them to their NEAR AI account.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P3).
+pub const CREDENTIAL_COST: &str = "Sign in through your browser. The app makes a NEAR AI key for your tools and keeps you signed in.";
+
+/// The tooltip on the Sign in button ([`CREDENTIAL_OBTAIN`]): the key is the
+/// contributor's to revoke, and the saved sign-in's reach.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P3).
+pub const SIGN_IN_TOOLTIP: &str = "You can revoke the key in NEAR AI. The saved sign-in can read your account and make more keys.";
 
 /// The button that starts the ceremony.
 pub const CREDENTIAL_OBTAIN: &str = "Sign in";
@@ -1342,9 +1380,10 @@ pub const CREDENTIAL_FORGET_NOT_REVOKED: &str =
 
 /// Drawn after an unenroll that removed the enrollment but could not clear
 /// the NEAR AI sign-in (`near_ai_cleared: false`): the key and session are
-/// still on this computer, and Forget in Private AI removes them. Owner
-/// wording, approved 2026-11-03.
-pub const NEAR_AI_STILL_SIGNED_IN: &str = "NEAR AI is still signed in. Use Forget in Private AI.";
+/// still on this computer. Sign out stays drawn beside it, and a second
+/// press re-runs the same clear.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P34).
+pub const NEAR_AI_STILL_SIGNED_IN: &str = "NEAR AI is still signed in.";
 
 /// The button behind `migration_available`: copy the sign-in an earlier
 /// build kept in the login keychain into the store this build uses.
@@ -1357,11 +1396,8 @@ pub const CREDENTIAL_MIGRATE: &str = "Move";
 /// password to allow it. A dialog nobody warned about is the interruption
 /// this whole change exists to remove; one the contributor was told about
 /// and asked for is not.
-///
-/// Says the old copy stays, because it does: the move copies, and the
-/// login-keychain entry is only removed when a later sign-in or Forget
-/// supersedes it.
-pub const CREDENTIAL_MIGRATE_EXPLAINS: &str = "macOS may ask for your login password once. After that, updates stop asking. The old copy stays in the login keychain until you next sign in or choose Forget.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P4).
+pub const CREDENTIAL_MIGRATE_EXPLAINS: &str = "macOS may ask for your login password once.";
 
 /// `migration_available`.
 ///
@@ -1369,7 +1405,9 @@ pub const CREDENTIAL_MIGRATE_EXPLAINS: &str = "macOS may ask for your login pass
 /// upgraded contributor saw before this state existed, and it was false:
 /// the store opened fine, the sign-in simply lives in the login keychain an
 /// earlier build used, and no number of restarts moves it.
-pub const CREDENTIAL_MIGRATION_AVAILABLE: &str = "Your sign-in from an earlier version is still in the login keychain. Move it to keep using it.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P15).
+pub const CREDENTIAL_MIGRATION_AVAILABLE: &str =
+    "Your sign-in from an earlier version needs to be moved.";
 
 /// `storage_unentitled`.
 ///
@@ -1389,16 +1427,19 @@ pub const CREDENTIAL_ABSENT: &str = "Not signed in to NEAR AI.";
 /// Names the five minutes because the listener gives the browser exactly
 /// that long and then releases the port. A contributor who walked away and
 /// came back to a card still saying "waiting" would be waiting on nothing.
-pub const CREDENTIAL_OBTAINING: &str =
-    "Finish signing in in your browser. This app waits up to 5 minutes.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P42).
+pub const CREDENTIAL_OBTAINING: &str = "Finish signing in in your browser within 5 minutes.";
 
 /// `failed`.
 ///
-/// A refusal with a way out -- the rule every failure sentence on this
-/// surface follows. What went wrong is not named because the service's own
-/// refusal is a 400 with an empty body: there is nothing more specific to
-/// say that would be true, and a sentence that guessed would be carrying a
-/// guess into a contributor's head.
+/// The way out is the Sign in button drawn beside it. What went wrong is not
+/// named because the service's own refusal is a 400 with an empty body:
+/// there is nothing more specific to say that would be true, and a sentence
+/// that guessed would be carrying a guess into a contributor's head.
+/// Settings copy pass 2 (P58) proposed cutting "Try again." It stays:
+/// first run's Join screen shows this line, and its tester-report rule of
+/// 2026-11-04 requires the line to say "try again"
+/// (`first_run_copy::tests::the_sign_in_failure_offers_no_skip`).
 pub const CREDENTIAL_FAILED: &str = "Sign-in didn't finish. Try again.";
 
 /// `cancelled`.
@@ -1409,11 +1450,10 @@ pub const CREDENTIAL_CANCELLED: &str = "Sign-in cancelled. Nothing was saved.";
 
 /// `present`.
 ///
-/// Says the key is here and that this screen will not show it. It does not
-/// say the key stays on this computer, which would be false: every call
-/// answered with it carries it to whoever answers.
-pub const CREDENTIAL_PRESENT: &str =
-    "Your NEAR AI key is stored on this computer. It's never shown here.";
+/// It does not say the key stays on this computer, which would be false:
+/// every call answered with it carries it to whoever answers.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P16).
+pub const CREDENTIAL_PRESENT: &str = "Signed in to NEAR AI.";
 
 /// A state this build has no words for, or a read that did not arrive.
 ///
@@ -1427,8 +1467,9 @@ pub const CREDENTIAL_PRESENT: &str =
 /// The same shape as [`STATE_RUNNING_DESTINATION_UNKNOWN`], for the same
 /// reason: an unread fact gets its own sentence rather than borrowing a
 /// known one.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P43).
 pub const CREDENTIAL_UNKNOWN: &str =
-    "Couldn't check for a saved key. Check again before signing in, or you may make a second key.";
+    "Couldn't check for a saved key. Signing in now may make a second key.";
 
 /// A daemon that does not answer this at all.
 ///
@@ -1474,8 +1515,9 @@ pub fn credential_state_line(label: &str) -> &'static str {
         LABEL_CREDENTIAL_STORAGE_UNAVAILABLE => {
             "Couldn't read your sign-in. Unlock your credential store, then restart the app."
         }
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P44).
         LABEL_CREDENTIAL_CLEANUP_REQUIRED => {
-            "Signed out, but saved credentials couldn't be deleted. Unlock your credential store, then choose Forget again."
+            "Signed out, but couldn't delete saved credentials. Unlock your credential store first."
         }
         LABEL_CREDENTIAL_STORAGE_UNENTITLED => CREDENTIAL_STORAGE_UNENTITLED,
         LABEL_CREDENTIAL_MIGRATION_AVAILABLE => CREDENTIAL_MIGRATION_AVAILABLE,
@@ -1887,11 +1929,9 @@ pub fn eligibility_reason_line(label: &str) -> &'static str {
 /// in your Private AI account", then #1146's "NEAR AI usage".
 pub const BALANCE_TITLE: &str = "NEAR AI balance";
 pub const FUNDING_TITLE: &str = "Billing";
-/// Ron's #1146 caption (`private-ai-funding-panel.tsx`), without his
-/// machinery word, rewritten plainly at the owner's request. Approved 2026-10-07 (owner rewrite): it
-/// was "Choose a payment method or staking option in Cloud. Your browser
-/// may ask you to sign in again."
-pub const FUNDING_WHAT: &str = "Opens billing for the organization shown above.";
+/// The info icon's text. The organization is in this card's own subtitle.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P222).
+pub const FUNDING_WHAT: &str = "Opens billing for this organization.";
 /// Kept over #1146's "Manage credits" (owner ruling): the offer surface
 /// keeps contribution credit apart from NEAR AI billing.
 pub const FUNDING_MANAGE: &str = "Manage billing";
@@ -1901,10 +1941,10 @@ pub const FUNDING_REFRESH: &str = "Check account";
 /// verified billing page as [`FUNDING_MANAGE`]. "Funds", not "credits", so
 /// NEAR AI billing stays apart from contribution credit.
 pub const BALANCE_ADD_FUNDS: &str = "Add funds";
-/// #1146's "Account destination not read.", then the remedy, by the
-/// [`FUNDING_REFRESH`] control's name. Approved 2026-10-07: it was "The billing destination could not be
-/// verified. Refresh account to try again."
-pub const FUNDING_UNAVAILABLE: &str = "Your account hasn't been read. Check again.";
+/// #1146's "Account destination not read." The remedy is the
+/// [`FUNDING_REFRESH`] button beside it.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P223).
+pub const FUNDING_UNAVAILABLE: &str = "Your account hasn't been read.";
 
 // ---- Spending organization (DRAFT, awaiting owner review) ----
 //
@@ -1912,25 +1952,30 @@ pub const FUNDING_UNAVAILABLE: &str = "Your account hasn't been read. Check agai
 // organizations chooses which one's balance Private AI spends from, in
 // Settings, and the Private AI screen says so when no choice has been made.
 // That request is the approval for the prompt existing (ui-copy-guide rule
-// 9). The WORDING below is a draft and is not approved.
+// 9). The WORDING below is a draft and is not approved, except the items
+// that carry their own approval line (Settings copy pass 2, 2026-11-04).
 
 /// The Settings card's heading. DRAFT.
 pub const SPEND_ORG_TITLE: &str = "Spending organization";
-/// What the card is a choice about. DRAFT.
-pub const SPEND_ORG_WHAT: &str = "Private AI spends from this organization's NEAR AI balance.";
+/// What the card is a choice about, cut: the title and picker label say it.
+/// The empty string is drawn as no line.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P188).
+pub const SPEND_ORG_WHAT: &str = "";
 /// The picker's label, also its accessible name. Picking an organization
 /// switches to it; there is no separate button. DRAFT.
 pub const SPEND_ORG_PICKER: &str = "Organization to spend from";
-/// Shown while a switch is in flight; it takes about ten seconds. DRAFT.
-pub const SPEND_ORG_SWITCHING: &str = "Switching. This takes a few seconds.";
+/// Shown while a switch is in flight; it takes about ten seconds.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P206).
+pub const SPEND_ORG_SWITCHING: &str = "Switching.";
 /// A switch that failed. Every failure changes nothing. DRAFT.
 pub const SPEND_ORG_FAILED: &str = "Couldn't switch. Nothing changed.";
-/// A switch refused because the sign-in ended. DRAFT.
-pub const SPEND_ORG_SESSION_EXPIRED: &str = "Sign in to NEAR AI again, then switch.";
+/// A switch refused because the sign-in ended.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P224).
+pub const SPEND_ORG_SESSION_EXPIRED: &str = "Sign in to NEAR AI again.";
 /// A switch NEAR AI refused for that organization (for example, a role that
-/// may not create access there). DRAFT.
-pub const SPEND_ORG_REFUSED: &str =
-    "NEAR AI didn't allow Private AI to use that organization. Nothing changed.";
+/// may not create access there).
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P207).
+pub const SPEND_ORG_REFUSED: &str = "NEAR AI refused that organization. Nothing changed.";
 /// The previous organization's access is still being removed. DRAFT.
 pub const SPEND_ORG_REVOKE_PENDING: &str = "Still removing access from the previous organization.";
 /// The Private AI screen's prompt heading. DRAFT.
@@ -1998,7 +2043,8 @@ pub fn funding_message(
         }
         FundingReport::NoInferenceKey => "Sign in to NEAR AI to set up billing.".into(),
         FundingReport::NoOrganization => "Couldn't find your organization. Sign in again.".into(),
-        FundingReport::Changed => "Your account changed. Check it again, then retry.".into(),
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P208).
+        FundingReport::Changed => "Your account changed.".into(),
         FundingReport::InvalidRequest | FundingReport::Unavailable => FUNDING_UNAVAILABLE.into(),
     }
 }
@@ -2511,6 +2557,7 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         tray_open_to_turn_on: TRAY_OPEN_TO_TURN_ON,
         harnesses_title: HARNESSES_TITLE,
         harnesses_what: HARNESSES_WHAT,
+        harnesses_precedence_tooltip: HARNESSES_PRECEDENCE_TOOLTIP,
         harnesses_spend_scope: HARNESSES_SPEND_SCOPE,
         harness_not_installed: HARNESS_NOT_INSTALLED,
         harness_not_connected: HARNESS_NOT_CONNECTED,
@@ -2560,6 +2607,7 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         credential_provider_near: CREDENTIAL_PROVIDER_NEAR,
         credential_wallet_notice: CREDENTIAL_WALLET_NOTICE,
         credential_cost: CREDENTIAL_COST,
+        sign_in_tooltip: SIGN_IN_TOOLTIP,
         credential_obtain: CREDENTIAL_OBTAIN,
         credential_cancel: CREDENTIAL_CANCEL,
         credential_forget: CREDENTIAL_FORGET,
@@ -3538,8 +3586,16 @@ mod tests {
     /// fact the short exposure line leaves out has a line of its own.
     #[test]
     fn the_offer_notice_says_each_thing_once() {
-        assert!(OFFER_WHAT.starts_with(OFFER_WHAT_SHORT));
-        assert!(OFFER_WHAT.ends_with(OFFER_LOGGED));
+        // Owner dropped OFFER_WHAT's composition from OFFER_WHAT_SHORT and
+        // OFFER_LOGGED 2026-11-04 (Settings copy pass 2, P178).
+        assert_eq!(
+            OFFER_WHAT,
+            "Your connected tools send AI requests through this app to NEAR AI."
+        );
+        assert!(
+            !OFFER_WHAT.contains("logged"),
+            "rule 1: no logging location"
+        );
         assert!(
             !OFFER_WHAT_SHORT.contains("connect"),
             "the no-repoint line says that"
@@ -3618,10 +3674,12 @@ mod tests {
     /// waiting for a retry that will not come.
     #[test]
     fn the_crashed_state_says_it_will_stay_that_way() {
-        assert!(
-            state_line(LABEL_CRASHED).contains("won't retry on its own"),
-            "the crashed sentence stopped saying it is sticky: {}",
-            state_line(LABEL_CRASHED)
+        // Owner dropped "won't retry on its own" 2026-11-04 (Settings copy
+        // pass 2, P198); the sentence still names the manual way out.
+        assert_eq!(
+            state_line(LABEL_CRASHED),
+            "May have stopped. Turn it off and on.",
+            "the crashed sentence stopped naming the manual way out"
         );
     }
 
@@ -3633,8 +3691,10 @@ mod tests {
             PrivateInferenceTone::Held
         );
         let line = state_line(LABEL_RUNNING_ELSEWHERE);
-        assert!(
-            line.contains("started nothing and stopped nothing"),
+        // Owner dropped "started nothing and stopped nothing" 2026-11-04
+        // (Settings copy pass 2, P191).
+        assert_eq!(
+            line, "Another app is handling this. Calls may not get through.",
             "{line}"
         );
     }
@@ -3776,8 +3836,7 @@ mod tests {
             copy.harness_answering
         );
         assert!(
-            copy.harness_connected_nothing_seen
-                .contains("No calls from it yet"),
+            copy.harness_connected_nothing_seen.contains("No calls yet"),
             "the connected state stopped saying nothing has arrived: {}",
             copy.harness_connected_nothing_seen
         );
@@ -3789,9 +3848,11 @@ mod tests {
     #[test]
     fn an_occupied_slot_is_reported_and_never_offered() {
         let taken = private_inference_copy().harness_slot_taken;
+        // "left alone" became "left unchanged" 2026-11-04 (Settings copy
+        // pass 2, P229).
         assert!(
-            taken.contains("left alone"),
-            "the occupied sentence stopped saying it was left alone: {taken}"
+            taken.contains("left unchanged"),
+            "the occupied sentence stopped saying it was left unchanged: {taken}"
         );
         for word in ["error", "failed", "instead", "take over", "override"] {
             assert!(
@@ -3826,10 +3887,13 @@ mod tests {
             "the empty-list sentence stopped saying what was looked for: {}",
             copy.harnesses_none_found
         );
-        assert!(
-            copy.harnesses_what.contains("supported tools"),
-            "the list's line stopped qualifying what the list is: {}",
-            copy.harnesses_what
+        // Owner dropped the list's line ("Choose supported tools...")
+        // 2026-11-04 (Settings copy pass 2, P177); the empty-list sentence
+        // above still qualifies what was looked for.
+        assert_eq!(copy.harnesses_what, "");
+        assert_eq!(
+            copy.harnesses_precedence_tooltip,
+            "Project settings or environment overrides can take precedence."
         );
     }
 
@@ -3879,8 +3943,11 @@ mod tests {
             assert_eq!(line, "", "{label} grew a sentence");
             assert_ne!(line, copy.harness_answering);
             assert_ne!(line, copy.harness_connected_nothing_seen);
-            assert_ne!(line, copy.harness_not_connected);
         }
+        // Owner dropped the not-connected sentence 2026-11-04 (Settings copy
+        // pass 2, P209): that row relies on its "Not connected" caption, so
+        // it too draws no state line.
+        assert_eq!(copy.harness_not_connected, "");
     }
 
     /// A tool that is not on this machine says so, and does not borrow the
@@ -3900,8 +3967,7 @@ mod tests {
             copy.harness_not_installed
         );
         assert!(
-            copy.harness_not_installed
-                .contains("Not found on this computer"),
+            copy.harness_not_installed.contains("Not found"),
             "the missing-tool sentence stopped saying it is missing: {}",
             copy.harness_not_installed
         );
@@ -4018,7 +4084,12 @@ mod tests {
     #[test]
     fn the_amount_names_its_own_window() {
         assert!(harness_spend_line(Some(1_230_000)).contains("Today"));
-        assert!(HARNESSES_SPEND_SCOPE.contains("this computer"));
+        // Owner dropped "this computer" from the scope line 2026-11-04
+        // (Settings copy pass 2, P199); it still names what is left out.
+        assert_eq!(
+            HARNESSES_SPEND_SCOPE,
+            "Excludes other computers, browsers and prepaid plans."
+        );
     }
 
     /// Whole cents, rounded once, and never a carry that spills a third
@@ -4163,25 +4234,27 @@ mod tests {
     #[test]
     fn getting_a_key_says_what_it_costs() {
         let copy = private_inference_copy();
-        for fragment in [
-            "browser",
-            "creates an API key",
-            "system credential store",
-            "keeps you signed in",
-            "can read your account and create more keys",
-        ] {
+        // Owner dropped "creates an API key", "system credential store" and
+        // "your NEAR AI account" from the cost line 2026-11-04 (Settings copy
+        // pass 2, P3); the revoke and key-scope facts moved to the Sign in
+        // button's tooltip.
+        for fragment in ["browser", "makes a NEAR AI key", "keeps you signed in"] {
             assert!(
                 copy.credential_cost.contains(fragment),
                 "the cost sentence stopped saying {fragment:?}: {}",
                 copy.credential_cost
             );
         }
-        // The key is the contributor's, and where to go for it is named.
-        assert!(
-            copy.credential_cost.contains("your NEAR AI account"),
-            "the cost sentence stopped naming where the key lives: {}",
-            copy.credential_cost
-        );
+        for fragment in [
+            "revoke the key in NEAR AI",
+            "can read your account and make more keys",
+        ] {
+            assert!(
+                copy.sign_in_tooltip.contains(fragment),
+                "the Sign in tooltip stopped saying {fragment:?}: {}",
+                copy.sign_in_tooltip
+            );
+        }
     }
 
     /// Forgetting revokes, and the sentence says so; the failure sentence
@@ -4197,10 +4270,9 @@ mod tests {
             copy.credential_forget_not_revoked,
             "Couldn't revoke the key. Delete it in your NEAR AI account."
         );
-        assert_eq!(
-            copy.near_ai_still_signed_in,
-            "NEAR AI is still signed in. Use Forget in Private AI."
-        );
+        // Owner dropped "Use Forget in Private AI." 2026-11-04 (Settings
+        // copy pass 2, P34).
+        assert_eq!(copy.near_ai_still_signed_in, "NEAR AI is still signed in.");
     }
 
     /// NOTHING ON THIS SURFACE RENDERS A KEY. Hash-only and label-only, in
@@ -4213,6 +4285,7 @@ mod tests {
             copy.credential_title,
             copy.credential_what,
             copy.credential_cost,
+            copy.sign_in_tooltip,
             copy.credential_obtain,
             copy.credential_cancel,
             copy.credential_forget,
@@ -4235,13 +4308,10 @@ mod tests {
                 );
             }
         }
-        // The one that would be tempting to fill in says instead that it
-        // will not be.
-        assert!(
-            copy.credential_present.contains("never shown"),
-            "the present sentence stopped refusing to show the key: {}",
-            copy.credential_present
-        );
+        // The one that would be tempting to fill in carries nothing but the
+        // signed-in fact. Owner dropped "never shown" 2026-11-04 (Settings
+        // copy pass 2, P16).
+        assert_eq!(copy.credential_present, "Signed in to NEAR AI.");
     }
 
     /// A hidden connect control says why it is hidden, and says it as a next
@@ -4281,10 +4351,11 @@ mod tests {
     #[test]
     fn the_notice_never_claims_a_key_is_needed_to_connect_anything_anywhere() {
         let notice = private_inference_copy().harness_needs_credential;
-        assert!(
-            notice.contains("This computer would be the one answering"),
-            "the notice stopped scoping itself to what this app answers: {notice}"
-        );
+        // Owner dropped "This computer would be the one answering" 2026-11-04
+        // (Settings copy pass 2, P182); the generalisation ban below still
+        // holds, and the sentence is only drawn for a destination this app
+        // hosts.
+        assert_eq!(notice, "Sign in to NEAR AI before connecting tools.");
         for claim in [
             "every tool",
             "any tool",
@@ -5063,14 +5134,29 @@ mod tests {
         let payload =
             serde_json::to_value(private_inference_copy()).expect("the payload serialises");
         let fields = payload.as_object().expect("a JSON object");
+        // 187 plus `sign_in_tooltip` and `harnesses_precedence_tooltip`
+        // (Settings copy pass 2, P3 and P177, 2026-11-04).
         assert_eq!(
             fields.len(),
-            187,
+            189,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
+        // Lines the owner cut 2026-11-04 (Settings copy pass 2, P8, P10,
+        // P177, P209). They stay in the payload as the empty string, which a
+        // shell draws as no line, so a decoder never loses a field.
+        let cut = [
+            "account_contribution_pending_credit",
+            "credential_what",
+            "harnesses_what",
+            "harness_not_connected",
+        ];
         for (field, value) in fields {
             let text = value.as_str().expect("every field is a string");
+            if cut.contains(&field.as_str()) {
+                assert_eq!(text, "", "{field} was cut and is drawn as no line");
+                continue;
+            }
             assert!(!text.trim().is_empty(), "{field} is empty");
             for marker in ["{}", "{0}", "{port}", "%@", "%s", "%d"] {
                 assert!(!text.contains(marker), "{field} carries {marker}: {text}");

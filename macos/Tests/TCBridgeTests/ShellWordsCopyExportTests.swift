@@ -51,6 +51,18 @@ final class ShellWordsCopyExportTests: XCTestCase {
         XCTAssertEqual(copy.pausedNotice.notNow, "Not now")
     }
 
+    /// The lines the owner cut 2026-11-04 (Settings copy pass 2) arrive ""
+    /// and still decode; every other string stays non-empty.
+    func testTheOwnerCutLinesDecodeEmpty() throws {
+        let copy = try XCTUnwrap(ShellWordsCopy.decode(fromJSON: TCCoreCopy.shellWordsCopyJSON()))
+        XCTAssertEqual(copy.publicProfile.footnote, "")
+        XCTAssertEqual(copy.publicProfile.goPublicFootnote, "")
+        XCTAssertEqual(copy.settings.atMostOneNotification, "")
+        XCTAssertEqual(copy.settings.atMostOneNotificationOne, "")
+        XCTAssertEqual(copy.settings.notificationsRenderedHere, "")
+        XCTAssertEqual(copy.settings.projectModeFailed, "Couldn't change this folder's setting.")
+    }
+
     /// A table with an empty string is refused whole.
     func testAnEmptyStringRefusesTheTable() throws {
         let json = try XCTUnwrap(TCCoreCopy.shellWordsCopyJSON())

@@ -1226,12 +1226,10 @@ mod tests {
         }))
         .expect("status decodes");
         let copy = status.account_attention().expect("shown");
-        assert_eq!(copy.title, "This app's account needs attention");
+        assert_eq!(copy.title, "Needs attention");
         assert_eq!(
             copy.body,
-            Some(
-                "This app can't read its account details on this computer. Set it up again to keep sending traces."
-            )
+            Some("Can't read the account details, so traces can't be sent.")
         );
         assert_eq!(
             copy.private_ai,
@@ -1245,7 +1243,7 @@ mod tests {
         );
         assert_eq!(copy.confirm_action, "Set up again");
         assert_eq!(copy.confirm_cancel, "Cancel");
-        assert_eq!(copy.failed, "Nothing changed. Try again.");
+        assert_eq!(copy.failed, "Nothing changed.");
 
         let status: Status = serde_json::from_value(serde_json::json!({
             "account_state": "needs_attention",
@@ -1256,9 +1254,7 @@ mod tests {
         let copy = status.account_attention().expect("shown");
         assert_eq!(
             copy.body,
-            Some(
-                "This app can no longer reach the service it was set up with. Update the app, or set it up again."
-            )
+            Some("Can no longer reach the service this app was set up with. An update may fix it.")
         );
         assert_eq!(copy.private_ai, None);
     }
@@ -1816,6 +1812,9 @@ pub struct TokenStorage {
     pub state_line: String,
     pub scope_note: String,
     pub cleanup_label: String,
+    /// The Clean up button's tooltip (Settings copy pass 2, P279); empty from an older daemon.
+    #[serde(default)]
+    pub cleanup_tooltip: String,
     pub discard_label: String,
     /// The discard confirmation's title; empty from an older daemon.
     #[serde(default)]

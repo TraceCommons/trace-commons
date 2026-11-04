@@ -3101,11 +3101,21 @@ mod tests {
     fn the_ignore_confirmation_always_names_the_way_back() {
         for n in [0usize, 1, 7] {
             let body = ignore_project_body(n);
-            assert!(body.contains("undo this in Settings"), "n={n}: {body}");
-            assert!(
-                body.contains("Nothing already submitted is affected."),
-                "n={n}"
-            );
+            // Owner dropped "undo this in Settings" from the body for n > 0
+            // 2026-11-04 (Settings copy pass 2, P121); its way back is now
+            // IGNORE_PROJECT_BODY_TOOLTIP.
+            if n == 0 {
+                assert!(body.contains("undo this in Settings"), "n={n}: {body}");
+                assert!(
+                    body.contains("Nothing already submitted is affected."),
+                    "n={n}"
+                );
+            } else {
+                assert!(
+                    body.contains("Traces already sent aren't affected."),
+                    "n={n}: {body}"
+                );
+            }
         }
     }
 

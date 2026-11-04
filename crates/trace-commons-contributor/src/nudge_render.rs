@@ -826,11 +826,11 @@ mod tests {
     fn digest_help_is_whole_hours_and_singular_at_one() {
         assert_eq!(
             digest_help(false, Some(3_600)).as_deref(),
-            Some("At most one notification an hour, and none when nothing is waiting.")
+            Some("At most one an hour, only when traces are waiting.")
         );
         assert_eq!(
             digest_help(false, Some(21_600)).as_deref(),
-            Some("At most one notification every 6 hours, and none when nothing is waiting.")
+            Some("At most one every 6 hours, only when traces are waiting.")
         );
         assert_eq!(digest_help(false, Some(5_400)), None);
         assert_eq!(digest_help(false, Some(1_800)), None);

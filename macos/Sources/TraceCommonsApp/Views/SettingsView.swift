@@ -104,6 +104,7 @@ enum SettingsLegacyWords {
     /// #1146's group name ("Optional data use").
     static var optionalEachOne: String { words?.optionalDataUse ?? "" }
     static var rewardOpportunities: String { words?.rewardOpportunities ?? "" }
+    static var rewardOpportunitiesTooltip: String { words?.rewardOpportunitiesTooltip ?? "" }
     static var credit: String { words?.credit ?? "" }
     /// The always-on scope's tag, the core's one spelling ("always on"),
     /// matching the first run's "Always on" line.

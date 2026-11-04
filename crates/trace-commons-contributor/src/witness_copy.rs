@@ -31,32 +31,22 @@ use crate::witness::status::{InferenceReceiptCount, WitnessLastResult, WitnessTr
 /// The card's heading.
 pub const WITNESS_HEADING: &str = "Redaction witness";
 
-/// What the card is for, in Ron's #1146 words (`witness-panel.tsx`).
-/// Rewritten plainly at the owner's request. Approved 2026-10-07 (owner rewrite): it was "A witness is a
-/// sealed machine that removes private material from a session for you,
-/// instead of this app doing it here. ..."
-pub const WITNESS_INTRO: &str = concat!(
-    "A witness gets your raw traces only after you agree and its measurement ",
-    "checks out. If its pin isn't valid, nothing is sent. With no witness, redaction ",
-    "happens on this computer."
-);
+/// What the card is for. Approved by the owner 2026-11-04 (Settings copy pass 2, P269).
+pub const WITNESS_INTRO: &str =
+    "A witness gets your raw traces only after you agree and its pin checks out.";
 
 /// What the certificate proves, stated where a contributor reads it, so no
 /// shell has to summarise it and no shell summarises it wrongly.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P293).
 pub const WITNESS_CERTIFICATE_MEANS: &str = concat!(
-    "A certificate records what the witness removed and the risk it judged was left. ",
+    "A certificate records what was removed and the risk left. ",
     "It is not a statement that a trace is clean."
 );
 
-/// How the pin list is written, in Ron's #1146 words, then why more than
-/// one is pinned: an upgrade changes the measurement. Approved 2026-10-07: #1146's two lines dropped the upgrade
-/// explanation, which was "More than one measurement can be pinned. An
-/// upgrade to the witness changes its measurement, so the new one is added
-/// here before the change happens; a client that holds only the old one
-/// will refuse the upgraded witness."
+/// How the pin list is written, then why more than one is pinned: an
+/// upgrade changes the measurement. Approved by the owner 2026-11-04 (Settings copy pass 2, P277).
 pub const WITNESS_MEASUREMENTS_NOTE: &str = concat!(
-    "One measurement set per line. At least one valid pin required. A witness upgrade ",
-    "changes its measurement: add the new set before the upgrade, or the upgraded witness ",
+    "One set per line. Add a new set before a witness upgrade, or the upgraded witness ",
     "is refused."
 );
 
@@ -88,13 +78,13 @@ pub const WITNESS_CLEAR: &str = "Return";
 
 /// What clearing actually does. Not "off": the redaction still happens, on
 /// this machine, and saying "off" would read as no redaction at all.
-pub const WITNESS_CLEAR_NOTE: &str = concat!(
-    "Traces go back to being redacted on this machine, and are sent with this app's own ",
-    "judgement of what was left rather than a certificate."
-);
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P273).
+pub const WITNESS_CLEAR_NOTE: &str =
+    "Traces are redacted on this computer and sent without a certificate.";
 
 /// Changes take effect on the next upload, with no restart.
-pub const WITNESS_APPLIES_AT_ONCE: &str = "Changes here apply to the next trace sent.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P297).
+pub const WITNESS_APPLIES_AT_ONCE: &str = "Applies to the next trace sent.";
 
 /// Consent to carry inference content is independent of observing a proxy's
 /// ledger, configuring a witness, and acknowledging the extra privacy scan.
@@ -113,11 +103,16 @@ pub fn token_review_summary(
 /// Approved 2026-10-07: it was "Token
 /// probabilities".
 pub const WITNESS_TOKEN_HEADING: &str = "Token distribution contribution";
-pub const WITNESS_TOKEN_DISCLOSURE: &str = "Include token probabilities and alternative tokens in traces you review with your witness. Alternatives can contain personal information even when the chosen text does not. The witness filters them before contribution; they remain restricted research data.";
-/// "IronWire", as everywhere else (it said "Ironwire"). DRAFT, NEEDS
-/// APPROVAL (2026-11-04).
-pub const WITNESS_TOKEN_CAPTURE_NOTE: &str = "Capture is configured separately in IronWire for supported models. This permission does not turn on capture.";
-pub const WITNESS_TOKEN_SCOPE_NOTE: &str = "After the server confirms durable storage, this app removes its local bundle and releases its capture lease. Your agent trace files stay on this device. Withdrawing a contribution is a separate action.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P270).
+pub const WITNESS_TOKEN_DISCLOSURE: &str = "Adds token probabilities and alternatives to traces your witness reviews. Alternatives can hold personal information even when the chosen text doesn't.";
+/// The token card's Enable button's tooltip: what the witness does with
+/// the alternatives, moved off the disclosure. Approved by the owner 2026-11-04 (Settings copy pass 2, P270).
+pub const WITNESS_TOKEN_ENABLE_TOOLTIP: &str =
+    "The witness filters alternatives before contribution. They stay restricted research data.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P278).
+pub const WITNESS_TOKEN_CAPTURE_NOTE: &str = "Needs IronWire capture, set up separately.";
+/// Cut by the owner: empty, and a shell skips empty text. Approved by the owner 2026-11-04 (Settings copy pass 2, P263).
+pub const WITNESS_TOKEN_SCOPE_NOTE: &str = "";
 /// Approved 2026-10-07: they were "Include
 /// token probabilities" and "Stop including token probabilities".
 pub const WITNESS_TOKEN_ENABLE: &str = "Enable";
@@ -133,31 +128,43 @@ pub const WITNESS_TOKEN_DISABLE_ACCESSIBILITY_NAME: &str =
 pub const WITNESS_TOKEN_CONFIRM: &str = "Enable";
 /// Approved 2026-10-07: it was "Not now".
 pub const WITNESS_TOKEN_CANCEL: &str = "Cancel";
-pub const WITNESS_TOKEN_ENABLED: &str = "Token probabilities will be included in explicit witness reviews when a matching capture is available.";
-pub const WITNESS_TOKEN_DISABLED: &str = "Token probabilities are not included.";
-pub const WITNESS_TOKEN_SAVE_FAILED: &str =
-    "The change could not be confirmed. Check the saved setting before trying again.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P282).
+pub const WITNESS_TOKEN_ENABLED: &str = "On: included in witness reviews when captured.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P295).
+pub const WITNESS_TOKEN_DISABLED: &str = "Off: not included.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P289).
+pub const WITNESS_TOKEN_SAVE_FAILED: &str = "Couldn't confirm the change saved. Reload to check.";
 
 /// Approved 2026-10-07: it was "Include
 /// captured inference evidence".
 pub const WITNESS_INFERENCE_HEADING: &str = "Model-call evidence";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P262).
 pub const WITNESS_INFERENCE_DISCLOSURE: &str = concat!(
-    "When a contribution uses a witness, this allows the final model call's exact request ",
-    "and response to be sent to that remote witness before redaction. These may include ",
-    "prompts, conversation history, tool results, and secrets. The witness checks the ",
-    "evidence and removes these attached bodies from the contribution it returns. ",
-    "Looking up a receipt with NEAR AI can also reveal which call you are contributing."
+    "Sends the last model call's exact request and response, which may hold prompts and ",
+    "secrets, to the witness before redaction. NEAR AI may learn which call you contribute."
 );
+/// The model-call card's Enable button's tooltip: the rest of what the
+/// disclosure used to say. Approved by the owner 2026-11-04 (Settings copy pass 2, P262).
+pub const WITNESS_INFERENCE_ENABLE_TOOLTIP: &str = concat!(
+    "The witness removes these bodies from the contribution it returns. They can also hold ",
+    "conversation history and tool results."
+);
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P264).
 pub const WITNESS_INFERENCE_CAPTURE_NOTE: &str = concat!(
-    "IronWire capture must be configured separately. When capture is enabled, request ",
-    "and response bodies are stored on this machine. Turning this permission off stops ",
-    "including bodies in future contributions; it does not turn off IronWire capture ",
-    "or delete bodies already stored. Work already in progress may still finish."
+    "Needs IronWire capture, set up separately. Turning this off doesn't stop capture or ",
+    "delete stored bodies."
 );
-pub const WITNESS_INFERENCE_SCOPE_NOTE: &str = concat!(
-    "This permission does not connect an agent to NEAR AI, fund inference, or prove a ",
-    "receipt was verified. A supported desktop app asks separately before sending a ",
-    "trace for witness review. This permission alone does not make it ready to send."
+/// The model-call card's Disable button's tooltip. Approved by the owner 2026-11-04 (Settings copy pass 2, P264).
+pub const WITNESS_INFERENCE_DISABLE_TOOLTIP: &str =
+    "Stops bodies going into future contributions. Work already in progress may still finish.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P265).
+pub const WITNESS_INFERENCE_SCOPE_NOTE: &str =
+    "A supported app asks separately before sending a trace for witness review.";
+/// The model-call row's tooltip: what this permission does not do.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P265).
+pub const WITNESS_INFERENCE_SCOPE_TOOLTIP: &str = concat!(
+    "This doesn't connect an agent to NEAR AI, pay for inference, or prove a receipt was ",
+    "checked."
 );
 /// Approved 2026-10-07: they were "Review
 /// permission" and "Stop including inference bodies".
@@ -177,18 +184,19 @@ pub const WITNESS_INFERENCE_CANCEL: &str = "Cancel";
 /// `privacy-controls-panel.tsx`); the disclosure itself is unchanged.
 /// Approved 2026-10-07.
 pub const WITNESS_PRIVACY_CONFIRM_TITLE: &str = "Review privacy change";
-/// Approved 2026-10-07.
-pub const WITNESS_PRIVACY_CONFIRM_DESCRIPTION: &str =
-    "Changing local privacy behavior requires explicit confirmation.";
+/// Cut by the owner: empty, and a shell skips empty text. Approved by the owner 2026-11-04 (Settings copy pass 2, P285).
+pub const WITNESS_PRIVACY_CONFIRM_DESCRIPTION: &str = "";
 /// The local capture row's and the token-review storage block's names
 /// (#1146).
 pub const WITNESS_LOCAL_CAPTURE: &str = "Local token capture";
 pub const WITNESS_LOCAL_STORAGE: &str = "Local token-review storage";
-pub const WITNESS_INFERENCE_ENABLED: &str =
-    "Permission saved. Captured bodies may be included when a contribution uses a witness.";
-pub const WITNESS_INFERENCE_DISABLED: &str = "Captured inference bodies are not included.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P290).
+pub const WITNESS_INFERENCE_ENABLED: &str = "On: captured bodies may go to the witness.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P299).
+pub const WITNESS_INFERENCE_DISABLED: &str = "Off: captured bodies aren't sent.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P292).
 pub const WITNESS_INFERENCE_SAVE_FAILED: &str =
-    "Couldn't confirm this permission was saved. Reload settings to check before continuing.";
+    "Couldn't confirm the change saved. Reload to check.";
 
 /// How a witness sentence is painted.
 ///
@@ -259,35 +267,27 @@ impl WitnessTone {
 #[must_use]
 pub fn witness_state_line(state: WitnessTrustState) -> &'static str {
     match state {
-        WitnessTrustState::Absent => concat!(
-            "Not in use. Traces are redacted on this machine before they are sent, ",
-            "which is the normal arrangement."
-        ),
-        WitnessTrustState::Pinned => concat!(
-            "In use. Each trace is redacted by the pinned witness, which signs a record ",
-            "of what it removed and the risk it judged was left."
-        ),
-        WitnessTrustState::RefusingUnpinned => concat!(
-            "Nothing is being sent. A witness is set but no measurement is pinned, and this ",
-            "app will not hand a trace to a machine it cannot check. Pin the measurement ",
-            "this witness reports."
-        ),
-        WitnessTrustState::RefusingPinMalformed => concat!(
-            "Nothing is being sent. The pinned measurement could not be read, so this app ",
-            "cannot check the witness. Check what was entered against what the witness ",
-            "reports."
-        ),
-        WitnessTrustState::RefusingInferenceReceiptsMissing => concat!(
-            "Nothing is being sent. The witness requires a receipt for each model call, and ",
-            "these traces carried none."
-        ),
-        WitnessTrustState::NotEnrolled => {
-            "Not set up yet. Join an instance first, and a witness can be chosen after that."
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P280).
+        WitnessTrustState::Absent => "Not in use. Traces are redacted on this computer.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P274).
+        WitnessTrustState::Pinned => {
+            "In use. The pinned witness redacts each trace and signs a certificate."
         }
-        WitnessTrustState::SettingsUnreadable => concat!(
-            "Nothing is being sent. This app could not read its own settings, so it cannot ",
-            "say what would happen to a trace."
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P266).
+        WitnessTrustState::RefusingUnpinned => "Nothing is being sent. No measurement is pinned.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P268).
+        WitnessTrustState::RefusingPinMalformed => {
+            "Nothing is being sent. The pinned measurement can't be read."
+        }
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P301).
+        WitnessTrustState::RefusingInferenceReceiptsMissing => concat!(
+            "Nothing is being sent. The witness needs a receipt for each model call, and ",
+            "these traces have none."
         ),
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P283).
+        WitnessTrustState::NotEnrolled => "Not set up yet. Join a commons first.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P271).
+        WitnessTrustState::SettingsUnreadable => "Nothing is being sent. Can't read settings.",
     }
 }
 
@@ -353,15 +353,13 @@ pub fn witness_last_result_line(result: &WitnessLastResult) -> String {
         WitnessLastResult::NotObserved => {
             "Nothing has been sent since this app started.".to_string()
         }
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P300).
         WitnessLastResult::LocalRedaction => {
-            "Last sent: redacted on this machine, with no certificate.".to_string()
+            "Last sent: redacted on this computer, no certificate.".to_string()
         }
         WitnessLastResult::Certified { n_of_m } => {
-            let mut line = concat!(
-                "Last sent: redacted by the witness, which signed a record of what it ",
-                "removed and the risk it judged was left."
-            )
-            .to_string();
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P275).
+            let mut line = "Last sent: redacted and certified by the witness.".to_string();
             if let Some(count) = n_of_m {
                 line.push(' ');
                 line.push_str(&witness_n_of_m_line(*count));
@@ -378,14 +376,12 @@ pub fn witness_last_result_line(result: &WitnessLastResult) -> String {
             ..
         } => {
             if *certificate_obtained {
-                concat!(
-                    "Last send was refused. The witness answered, but its certificate did not ",
-                    "match what it returned, so nothing was sent."
-                )
-                .to_string()
-            } else {
-                "Last send was refused. The witness could not be used, so nothing was sent."
+                // Approved by the owner 2026-11-04 (Settings copy pass 2, P284).
+                "Last send refused: the witness's certificate didn't match, so nothing was sent."
                     .to_string()
+            } else {
+                // Approved by the owner 2026-11-04 (Settings copy pass 2, P296).
+                "Last send refused: the witness couldn't be used, so nothing was sent.".to_string()
             }
         }
     }
@@ -578,6 +574,8 @@ pub struct WitnessCopy {
     pub token_disable: &'static str,
     pub token_enable_accessibility_name: &'static str,
     pub token_disable_accessibility_name: &'static str,
+    /// The token card's Enable button's tooltip. Approved by the owner 2026-11-04 (Settings copy pass 2, P270).
+    pub token_enable_tooltip: &'static str,
     pub token_confirm: &'static str,
     pub token_cancel: &'static str,
     pub token_enabled: &'static str,
@@ -591,6 +589,12 @@ pub struct WitnessCopy {
     pub inference_disable: &'static str,
     pub inference_enable_accessibility_name: &'static str,
     pub inference_disable_accessibility_name: &'static str,
+    /// The model-call card's Enable button's tooltip. Approved by the owner 2026-11-04 (Settings copy pass 2, P262).
+    pub inference_enable_tooltip: &'static str,
+    /// The model-call card's Disable button's tooltip. Approved by the owner 2026-11-04 (Settings copy pass 2, P264).
+    pub inference_disable_tooltip: &'static str,
+    /// The model-call row's tooltip. Approved by the owner 2026-11-04 (Settings copy pass 2, P265).
+    pub inference_scope_tooltip: &'static str,
     pub inference_confirm: &'static str,
     pub inference_cancel: &'static str,
     pub inference_enabled: &'static str,
@@ -755,6 +759,7 @@ pub fn witness_copy() -> WitnessCopy {
         token_disable: WITNESS_TOKEN_DISABLE,
         token_enable_accessibility_name: WITNESS_TOKEN_ENABLE_ACCESSIBILITY_NAME,
         token_disable_accessibility_name: WITNESS_TOKEN_DISABLE_ACCESSIBILITY_NAME,
+        token_enable_tooltip: WITNESS_TOKEN_ENABLE_TOOLTIP,
         token_confirm: WITNESS_TOKEN_CONFIRM,
         token_cancel: WITNESS_TOKEN_CANCEL,
         token_enabled: WITNESS_TOKEN_ENABLED,
@@ -768,6 +773,9 @@ pub fn witness_copy() -> WitnessCopy {
         inference_disable: WITNESS_INFERENCE_DISABLE,
         inference_enable_accessibility_name: WITNESS_INFERENCE_ENABLE_ACCESSIBILITY_NAME,
         inference_disable_accessibility_name: WITNESS_INFERENCE_DISABLE_ACCESSIBILITY_NAME,
+        inference_enable_tooltip: WITNESS_INFERENCE_ENABLE_TOOLTIP,
+        inference_disable_tooltip: WITNESS_INFERENCE_DISABLE_TOOLTIP,
+        inference_scope_tooltip: WITNESS_INFERENCE_SCOPE_TOOLTIP,
         inference_confirm: WITNESS_INFERENCE_CONFIRM,
         inference_cancel: WITNESS_INFERENCE_CANCEL,
         inference_enabled: WITNESS_INFERENCE_ENABLED,
@@ -1353,11 +1361,16 @@ pub(crate) mod tests {
         let object = json.as_object().unwrap();
         assert_eq!(
             object.len(),
-            49,
+            53,
             "a field added to WitnessCopy must be counted here, or a shell can be handed \
              a word this test has never seen"
         );
         for (key, value) in object {
+            if key == "token_scope_note" || key == "privacy_confirm_description" {
+                // Owner dropped the token scope note and the confirmation's description 2026-11-04 (Settings copy pass 2, P263, P285).
+                assert_eq!(value.as_str(), Some(""), "{key} was cut by the owner");
+                continue;
+            }
             assert!(
                 value.as_str().is_some_and(|text| !text.is_empty())
                     || value.as_object().is_some_and(|fields| fields

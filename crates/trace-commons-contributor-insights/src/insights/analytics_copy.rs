@@ -98,9 +98,10 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_subscriptions_provider_claude", "Claude"),
     // "Claude", not "Claude Code", in Insights and usage (owner, approved
     // 2026-10-28).
+    // Approved by the owner 2026-11-04 (Settings copy pass 2, P118).
     (
         "analytics_subscriptions_claude_detail",
-        "Reads your Claude sign-in only when you press Refresh. macOS may ask to allow access.",
+        "Reads your Claude sign-in only when you press Refresh.",
     ),
     (
         "analytics_subscriptions_refresh_hint",
@@ -291,9 +292,10 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_subscriptions_unavailable",
         "Usage couldn't be read.",
     ),
+    // Approved by the owner 2026-11-04 (Settings copy pass 2, P119).
     (
         "analytics_subscriptions_change_failed",
-        "The usage setting couldn't be saved.",
+        "Couldn't save that change.",
     ),
     // 2. Coverage.
     // The line is the trace count alone (owner, 2026-10-29); what is known

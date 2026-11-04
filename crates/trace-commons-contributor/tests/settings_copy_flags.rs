@@ -30,7 +30,8 @@ fn settings_sharing_failures_do_not_name_setup() {
 #[test]
 fn folder_mode_is_named_never_not_ignore() {
     let uses = first_run_copy::first_run_copy().uses;
-    assert!(uses.automatic_scope.contains("Never"));
+    // The scope line no longer names a folder mode at all since the owner's
+    // Settings copy pass 2 (P120); it must still never say "Ignore".
     assert!(!uses.automatic_scope.contains("Ignore"));
     let title = project_copy::ignore_project_title("acme");
     assert!(title.contains("Never"), "{title}");
@@ -41,8 +42,10 @@ fn folder_mode_is_named_never_not_ignore() {
 #[test]
 fn uses_save_failure_names_refresh() {
     let line = source_copy::source_settings_copy().consent_save_failed;
-    assert!(line.contains("Refresh"), "{line}");
-    assert!(!line.contains("retry"), "{line}");
+    // Owner dropped the pointer at Refresh 2026-11-04 (Settings copy pass 2):
+    // the control beside it is the fix. It must still not say "retry",
+    // which Uses has no control for.
+    assert!(!line.to_lowercase().contains("retry"), "{line}");
 }
 
 #[test]

@@ -31,8 +31,9 @@ final class CoreCopyExportTests: XCTestCase {
 
     func testTheIgnoreBodyAgreesInNumber() throws {
         let one = try ignoreCopy(1).body
-        XCTAssertTrue(one.contains("1 waiting trace "), one)
-        XCTAssertFalse(one.contains("traces"), one)
+        XCTAssertTrue(one.contains("1 waiting trace."), one)
+        // "Traces already sent" follows, so the check is on the count's noun.
+        XCTAssertFalse(one.contains("waiting traces"), one)
         let many = try ignoreCopy(12).body
         XCTAssertTrue(many.contains("12 waiting traces"), many)
     }
@@ -46,10 +47,16 @@ final class CoreCopyExportTests: XCTestCase {
     }
 
     func testTheIgnoreBodyAlwaysNamesTheWayBack() throws {
-        for n in [0, 1, 7] {
-            let body = try ignoreCopy(n).body
-            XCTAssertTrue(body.contains("undo this in Settings"), "n=\(n): \(body)")
-            XCTAssertTrue(body.contains("Nothing already submitted is affected."), "n=\(n)")
+        let none = try ignoreCopy(0).body
+        XCTAssertTrue(none.contains("undo this in Settings"), none)
+        XCTAssertTrue(none.contains("Nothing already submitted is affected."), none)
+        // Owner dropped "undo this in Settings" and "Nothing already submitted is affected." from
+        // the body with traces waiting 2026-11-04 (Settings copy pass 2, P121); the way back is the
+        // Never button's tooltip.
+        for n in [1, 7] {
+            let copy = try ignoreCopy(n)
+            XCTAssertTrue(copy.body.contains("Traces already sent aren't affected."), "n=\(n): \(copy.body)")
+            XCTAssertEqual(copy.ignoreProjectTooltip, "Setting it back to Ask can offer the removed traces again.")
         }
     }
 
@@ -88,8 +95,9 @@ final class CoreCopyExportTests: XCTestCase {
     /// Settings' confirmation before Automatic, in Ron's #1146 words.
     func testTheSettingsConfirmationIsRons() throws {
         let copy = try armingCopy(0)
-        XCTAssertEqual(copy.settingsQuestion, "Enable automatic contribution for api?")
-        XCTAssertEqual(copy.settingsDescription, "Confirm project-wide automatic contribution.")
+        XCTAssertEqual(copy.settingsQuestion, "Set api to Automatic?")
+        // Owner cut the subtitle 2026-11-04 (Settings copy pass 2, P127).
+        XCTAssertEqual(copy.settingsDescription, "")
         XCTAssertEqual(copy.settingsDecline, "Ask")
         XCTAssertEqual(copy.settingsConfirm, "Enable")
     }

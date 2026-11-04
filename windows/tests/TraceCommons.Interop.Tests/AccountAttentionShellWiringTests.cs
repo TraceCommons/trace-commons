@@ -110,7 +110,7 @@ public class AccountAttentionShellWiringTests
         Assert.Matches(
             new Regex(@"if \(response\.IsError\)\s*\{\s*AccountAttentionFailedLine = AccountAttention\?\.Failed \?\? string\.Empty;\s*return false;", RegexOptions.Singleline),
             viewModel);
-        Assert.DoesNotContain("\"Nothing changed. Try again.\"", viewModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"Nothing changed.\"", viewModel, StringComparison.Ordinal);
 
         string settings = ShellSource("TraceCommons.App/Controls/SettingsView.xaml");
         Assert.Matches(

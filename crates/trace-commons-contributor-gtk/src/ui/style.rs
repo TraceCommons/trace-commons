@@ -564,7 +564,13 @@ pub fn body(text: impl AsRef<str>) -> gtk::Label {
 }
 
 /// Build a [`body`] label and append it to `parent` in one step.
+///
+/// An empty text appends nothing: the owner cut some core lines to "" (Settings
+/// copy pass 2, 2026-11-04) and an empty label would still take its spacing.
 pub fn append_body(parent: &gtk::Box, text: impl AsRef<str>) {
+    if text.as_ref().is_empty() {
+        return;
+    }
     parent.append(&body(text));
 }
 
@@ -581,7 +587,12 @@ pub fn caveat(text: impl AsRef<str>) -> gtk::Label {
 }
 
 /// Build a [`caveat`] label and append it to `parent` in one step.
+///
+/// An empty text appends nothing, as with [`append_body`].
 pub fn append_caveat(parent: &gtk::Box, text: impl AsRef<str>) {
+    if text.as_ref().is_empty() {
+        return;
+    }
     parent.append(&caveat(text));
 }
 

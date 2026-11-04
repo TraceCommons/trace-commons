@@ -91,7 +91,7 @@ struct ProjectsSection: View {
                 // reversible from this same picker. Ron's #1146 heading,
                 // line and buttons; the body is the arming disclosure.
                 GlassConfirmation(
-                    title: copy.settingsQuestion, subtitle: copy.settingsDescription, message: copy.body,
+                    title: copy.settingsQuestion, subtitle: copy.settingsDescription.isEmpty ? nil : copy.settingsDescription, message: copy.body,
                     actions: [
                         .cancel(copy.settingsDecline) { armingCandidate = nil },
                         GlassModalAction(copy.settingsConfirm, isDefault: true) {
@@ -111,7 +111,7 @@ struct ProjectsSection: View {
                     title: copy.title, message: copy.body,
                     actions: [
                         .cancel(copy.keep) { ignoreCandidate = nil },
-                        .destructive(copy.button) {
+                        .destructive(copy.button, help: copy.ignoreProjectTooltip) {
                             model.setProjectMode(project, mode: .ignore)
                             ignoreCandidate = nil
                         },

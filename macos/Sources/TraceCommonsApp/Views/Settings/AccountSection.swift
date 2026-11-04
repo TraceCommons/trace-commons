@@ -247,7 +247,9 @@ struct ContributionAccountCard: View {
                     }
                     .buttonStyle(GlassButtonStyle(.glass))
                     .disabled(inviteCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    if let pending = copy.accountContributionPendingCredit {
+                    // Cut by the owner 2026-11-04 (Settings copy pass 2, P8):
+                    // an empty line draws nothing.
+                    if let pending = copy.accountContributionPendingCredit, !pending.isEmpty {
                         Text(pending)
                             .glassType(GlassTokens.TypeScale.caption)
                             .foregroundStyle(GlassColor.textSecondary)

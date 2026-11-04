@@ -156,6 +156,7 @@ struct NudgeSettingsSection: View {
                         set: { on in Task { await store.set(row.id, on: on) } }))
                         .toggleStyle(GlassToggleStyle(.settings))
                         .disabled(!row.enabled || store.writing)
+                        .helpIfAny(row.tooltip ?? "")
                     if let help = row.help {
                         Text(help)
                             .glassType(GlassTokens.TypeScale.caption)

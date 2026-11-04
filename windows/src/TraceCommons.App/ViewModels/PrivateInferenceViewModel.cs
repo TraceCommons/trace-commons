@@ -289,6 +289,12 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
 
     public string HarnessesWhat => _copy?.HarnessesWhat ?? string.Empty;
 
+    /// <summary>The owner cut this line (Settings copy pass 2, P177); an empty one draws nothing.</summary>
+    public bool HasHarnessesWhat => HarnessesWhat.Length > 0;
+
+    /// <summary>Tooltip on the tool list heading: project settings or environment can take precedence.</summary>
+    public string HarnessesPrecedenceTooltip => _copy?.HarnessesPrecedenceTooltip ?? string.Empty;
+
     /// <summary>
     /// What today's calls cost, assembled on the far side, or the empty
     /// string when nobody could measure it.
@@ -426,6 +432,12 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     public string CredentialTitle => _copy?.CredentialTitle ?? string.Empty;
 
     public string CredentialWhat => _copy?.CredentialWhat ?? string.Empty;
+
+    /// <summary>The owner cut this line (Settings copy pass 2, P10); an empty one draws nothing.</summary>
+    public bool HasCredentialWhat => CredentialWhat.Length > 0;
+
+    /// <summary>Tooltip on the Sign in button (P3).</summary>
+    public string SignInTooltip => _copy?.SignInTooltip ?? string.Empty;
 
     /// <summary>The sentence for whatever the daemon last reported.</summary>
     public string CredentialStateText => _copy is null

@@ -173,7 +173,8 @@ final class SettingsParityTests: XCTestCase {
                               "disclosure.copy.title", "model.routeDisclosureUnreadableCopy?.title",
                               "model.routeDisclosureUnreadableCopy?.panel", "MonitorScreensCopy.decode(",
                               "monitorScreensCopyJSON()",
-                              "TCInsights.copy()", "\"analytics_setting_ledger_feed\"", "\"analytics_feed_ledger\""],
+                              // Owner dropped the ledger feed's explanation from Settings 2026-11-04 (Settings copy pass 2, P189).
+                              "TCInsights.copy()", "\"analytics_setting_ledger_feed\""],
                 confirmations: [],
                 accessibility: [".accessibilityElement(children: .combine)", "GlassToggleStyle(.settings)"]),
         Section(glass: "Views/Settings/WitnessSection.swift",
@@ -239,18 +240,18 @@ final class SettingsParityTests: XCTestCase {
         // The core's one tag, matching the first run's "Always on" line
         // (owner, 2026-10-28), so the two never differ.
         XCTAssertEqual(SettingsLegacyWords.alwaysOn, "always on")
-        XCTAssertTrue(SettingsLegacyWords.appliesFromNow.hasPrefix("Applies to traces sent from now on."))
+        XCTAssertTrue(SettingsLegacyWords.appliesFromNow.hasPrefix("Changes apply to traces sent from now on."))
         XCTAssertEqual(SettingsLegacyWords.sessionFinishedAfter(30), "A trace counts as finished after 30 seconds of quiet.")
         XCTAssertEqual(SettingsLegacyWords.auditSentence("armed-auto-upload", project: "demo"),
-                       "Automatic contributing turned on for demo")
+                       "Automatic turned on for demo")
         XCTAssertEqual(SettingsLegacyWords.auditSentence("a-future-action", project: nil), "Changed")
         XCTAssertEqual(PublicProfileCopy.heading, "Public profile")
-        XCTAssertEqual(PublicProfileCopy.saveProfile, "Update profile")
+        XCTAssertEqual(PublicProfileCopy.saveProfile, "Save")
         XCTAssertEqual(PublicProfileCopy.leaveRoster, "Withdraw")
         XCTAssertEqual(PublicProfileCopy.onRosterSince("May 1"), "On the roster since May 1")
         XCTAssertEqual(PublicProfileCopy.failureSentence("handle-too-short"),
                        "Handle must be at least 3 characters. Profile was not published.")
-        XCTAssertTrue(PublicProfileCopy.leaveFailureSentence("not-logged-in").hasPrefix("This device isn't connected"))
+        XCTAssertTrue(PublicProfileCopy.leaveFailureSentence("not-logged-in").hasPrefix("This computer isn't connected"))
         XCTAssertEqual(PublicProfileCopyCheck.failures(), [])
     }
 

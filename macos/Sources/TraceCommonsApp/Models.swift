@@ -1140,6 +1140,9 @@ struct TokenStorageView: Decodable, Equatable {
     let stateLine: String
     let scopeNote: String
     let cleanupLabel: String
+    /// Clean up's hover tip. Optional so an older daemon still decodes.
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P279).
+    let cleanupTooltip: String?
     let discardLabel: String
     /// The discard confirmation's title: the full name the short button drops.
     let discardTitle: String?
@@ -1151,6 +1154,7 @@ struct TokenStorageView: Decodable, Equatable {
         case captureEnabled = "capture_enabled", captureLabel = "capture_label", captureConfirmation = "capture_confirmation", captureNotice = "capture_notice"
         case captureConfirmTitle = "capture_confirm_title", captureConfirmLabel = "capture_confirm_label"
         case stateLine = "state_line", scopeNote = "scope_note", cleanupLabel = "cleanup_label"
+        case cleanupTooltip = "cleanup_tooltip"
         case discardLabel = "discard_label", discardTitle = "discard_title", discardConfirmation = "discard_confirmation"
         case cancelLabel = "cancel_label", confirmLabel = "confirm_label", failureLine = "failure_line"
     }

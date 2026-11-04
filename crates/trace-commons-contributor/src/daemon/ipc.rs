@@ -4417,16 +4417,16 @@ fn decorate_token_storage(value: &mut serde_json::Value, enabled: Option<bool>) 
     // DRAFT, NEEDS APPROVAL (2026-11-04).
     value["capture_confirm_title"] = serde_json::json!("Enable token capture?");
     value["capture_confirm_label"] = serde_json::json!("Enable capture");
-    value["capture_confirmation"] = serde_json::json!(
-        "Token capture stores raw request and response data on this device. It requires configured, supported model targets and restarts the hosted proxy. Contribution and witness sharing remain separate choices."
-    );
+    // Approved by the owner 2026-11-04 (Settings copy pass 2, P267).
+    value["capture_confirmation"] =
+        serde_json::json!("Saves raw model requests and responses, and restarts the proxy.");
     value["capture_notice"] = serde_json::json!(match enabled {
-        Some(true) =>
-            "Local capture requested. The Private AI connection status reports whether the proxy started successfully.",
-        Some(false) =>
-            "Local capture disabled for the hosted proxy. Existing captures retain their expiry and cleanup rules.",
-        None =>
-            "Local capture follows the proxy configuration. External proxies are configured separately.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P286).
+        Some(true) => "Capture requested. Private AI shows whether it started.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P276).
+        Some(false) => "Capture is off.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P287).
+        None => "Capture follows the proxy's settings.",
     });
 }
 

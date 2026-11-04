@@ -53,7 +53,7 @@ final class MonitorTracesCopyExportTests: XCTestCase {
         // core's, the note keeping "You'll always be asked".
         XCTAssertEqual(copy.tree.folderMark, "dir")
         XCTAssertEqual(copy.tree.unresolvedBucketNote,
-                       "These traces cannot be contributed automatically. You'll always be asked.")
+                       "You'll always be asked about these traces.")
         XCTAssertEqual(copy.counts.sessionsWaiting, "{count} traces waiting")
         XCTAssertEqual(copy.inspector.noRule, "This folder has no rule of its own yet.")
         XCTAssertEqual(copy.inspector.applyOutcome, "Apply one outcome to {count} eligible traces.")

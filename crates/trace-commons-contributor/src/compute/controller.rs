@@ -79,18 +79,25 @@ impl Default for ComputeCopy {
             destination: "Compute",
             subtitle: "Contribute compute independently of your traces.",
             retry: "Try again",
-            introduction: "Contribute compute to Holonear independently of trace contribution. Enabling compute does not authorize access to your local traces. The test pilot does not promise paid earnings.",
-            allowance_label: "RAM scheduling allowance (GiB)",
-            allowance_detail: "Capacity advertised to the pool, not a hard memory limit. Actual memory use may differ.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P311).
+            introduction: "Lend this computer's compute to Holonear. It gets no access to your traces, and the pilot promises no pay.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P338).
+            allowance_label: "RAM allowance (GiB)",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P317).
+            allowance_detail: "Not a hard limit; actual memory use may differ.",
             enable: "Enable compute",
-            resume: "Resume compute",
-            pause: "Pause compute",
-            disable: "Disable compute",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P339).
+            resume: "Resume",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P340).
+            pause: "Pause",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P341).
+            disable: "Disable",
             // #1146 (`settings-modal.tsx`, `use-compute-status.ts`).
             loading: "Reading compute settings…",
             unavailable: "Compute settings unavailable.",
             quit_detail: "Enabled compute must stop before the app quits. Worker termination and coordinator drain acknowledgement are separate; a forced exit does not confirm a completed handoff.",
-            quit_refused: "Quit was cancelled because worker termination was not confirmed in time. Keep the app open until stopping finishes, then try quitting again.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P305).
+            quit_refused: "Quit cancelled: compute hasn't stopped yet. Quit again once it has.",
         }
     }
 }
@@ -238,28 +245,36 @@ impl Inner {
         let (title, detail) = match self.reason {
             "invalid-allowance" => (
                 "Check RAM allowance",
-                "Choose a positive RAM scheduling allowance.",
+                // Approved by the owner 2026-11-04 (Settings copy pass 2, P345).
+                "Enter a whole number above zero.",
             ),
             "consent-required" => (
                 "Compute is disabled",
-                "Compute requires your separate consent before it can start.",
+                // Approved by the owner 2026-11-04 (Settings copy pass 2, P309).
+                // Cut: the shells draw this detail unconditionally, so it renders as an empty line.
+                "",
             ),
             "settings-write-failed" => (
-                "Compute settings could not be saved",
-                "Your previous consent setting is unchanged. Try again.",
+                // Approved by the owner 2026-11-04 (Settings copy pass 2, P330).
+                "Couldn't save compute settings",
+                // Approved by the owner 2026-11-04 (Settings copy pass 2, P314).
+                "Nothing changed.",
             ),
             _ => match self.state {
                 ComputeState::Paused => (
                     "Compute is paused",
-                    "Resume will require a compatible packaged worker. Compute never resumes automatically after restarting the app.",
+                    // Approved by the owner 2026-11-04 (Settings copy pass 2, P315).
+                    "It never resumes on its own after a restart.",
                 ),
                 ComputeState::Disabled => (
                     "Compute is disabled",
-                    "A compatible packaged Holonear worker is not available in this build.",
+                    // Approved by the owner 2026-11-04 (Settings copy pass 2, P316).
+                    "Not available in this build.",
                 ),
                 _ => (
                     "Compute is unavailable",
-                    "A compatible packaged Holonear worker is not available in this build.",
+                    // Approved by the owner 2026-11-04 (Settings copy pass 2, P316).
+                    "Not available in this build.",
                 ),
             },
         };
@@ -293,7 +308,8 @@ fn error_snapshot() -> ComputeSnapshot {
         state: ComputeState::Error,
         reason: "controller-unavailable",
         title: "Compute status is unavailable",
-        detail: "Restart the app to read compute settings again.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P331).
+        detail: "Restart the app to try again.",
         consent_granted: false,
         ram_allowance_gib: None,
         available: false,

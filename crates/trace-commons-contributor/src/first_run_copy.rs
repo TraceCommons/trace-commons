@@ -368,7 +368,7 @@ pub struct UsesCopy {
     /// Settings > Projects' sharing choice, the setup choice made
     /// changeable (owner, 2026-10-30; #1753 A2): the line under it, and the
     /// question Automatic asks when folders are set to Ask, with `{count}`
-    /// those folders. DRAFT, NEEDS APPROVAL.
+    /// those folders.
     pub settings_sharing_note: &'static str,
     pub keep_asks_title: &'static str,
     pub keep_asks_body: &'static str,
@@ -392,7 +392,7 @@ pub struct UsesCopy {
     pub sharing_save_failed: &'static str,
     /// Settings > Projects' own lines for the same two failures: setup's
     /// name setup and its Start sharing button, which Settings does not
-    /// show (copy-guide rule 7). DRAFT, NEEDS APPROVAL (2026-11-04).
+    /// show (copy-guide rule 7).
     pub settings_sharing_refused: &'static str,
     pub settings_sharing_save_failed: &'static str,
     /// Start stopped before anything it sends was saved: the data uses.
@@ -438,12 +438,12 @@ pub struct PrivateAiCopy {
     /// While the offer's words cannot be read. The step has had no switch
     /// since #1685, so it says nothing about enabling.
     pub unavailable: &'static str,
-    /// The first two sentences of `private_inference_copy::OFFER_WHAT`,
+    /// The first two sentences of `private_inference_copy::OFFER_WHAT_FIRST_RUN`,
     /// the only words the Uses card shows before "Learn more" (owner,
-    /// 2026-10-08). `offer_lead`, a space and `offer_more` are `OFFER_WHAT`
+    /// 2026-10-08). `offer_lead`, a space and `offer_more` are `OFFER_WHAT_FIRST_RUN`
     /// exactly, so nothing of the disclosure is reworded or lost.
     pub offer_lead: &'static str,
-    /// The rest of `OFFER_WHAT`, shown with the exposure and no-repoint
+    /// The rest of `OFFER_WHAT_FIRST_RUN`, shown with the exposure and no-repoint
     /// sentences once "Learn more" is pressed.
     pub offer_more: &'static str,
     /// Discloses the rest of the Private AI offer in place. Approved
@@ -600,16 +600,18 @@ pub fn first_run_copy() -> FirstRunCopy {
             required: crate::consent_copy::SCOPE_TAG_REQUIRED,
             all_optional: "All optional uses",
             reward_opportunities: crate::consent_copy::DATA_USE_REWARD_OPPORTUNITIES,
-            // "Set a folder to Never" was "Ignore a folder": the mode is
-            // named Never. DRAFT, NEEDS APPROVAL (2026-11-04).
-            automatic_scope: "Upload older traces first, then new traces, from all watched folders. Traces must be unchanged for 24 hours. Set a folder to Never to exclude it.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P120).
+            automatic_scope: "Sends past and new traces once they've been unchanged for 24 hours.",
             ask_each_time: "Ask each time",
-            // DRAFT, NEEDS APPROVAL (2026-10-30).
-            settings_sharing_note: "A folder set to Ask keeps asking, even when Automatic is on. A folder set to Never is never shared.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P122).
+            settings_sharing_note: "Folders set to Ask or Never keep their own setting.",
             keep_asks_title: "Keep folders set to Ask?",
-            keep_asks_body: "Folders set to Ask: {count}. Keep them asking, or make every folder Automatic.",
-            keep_asks_keep: "Keep them on Ask",
-            keep_asks_all: "Make all Automatic",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P123).
+            keep_asks_body: "Folders set to Ask: {count}.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P130).
+            keep_asks_keep: "Keep Ask",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P132).
+            keep_asks_all: "All Automatic",
             optional_all_on: "{count} optional uses, all on",
             optional_all_off: "{count} optional uses, all off",
             optional_some_on: "{count} optional uses · {selected} on",
@@ -620,9 +622,10 @@ pub fn first_run_copy() -> FirstRunCopy {
             start: "Start sharing",
             sharing_refused: "Setup finished, but Automatic wasn't turned on. Sharing is on Ask.",
             sharing_save_failed: "Sharing couldn't be saved. Setup hasn't finished; try Start sharing again.",
-            // DRAFT, NEEDS APPROVAL (2026-11-04).
-            settings_sharing_refused: "Automatic wasn't turned on. Sharing is on Ask.",
-            settings_sharing_save_failed: "Sharing couldn't be saved. Choose again.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P126).
+            settings_sharing_refused: "Automatic wasn't turned on.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P131).
+            settings_sharing_save_failed: "Sharing couldn't be saved.",
             scopes_failed: "How your traces may be used couldn't be saved. Setup hasn't finished; try Start sharing again.",
             rules_failed: "A folder rule or past-trace choice couldn't be saved. Setup hasn't finished; try Start sharing again.",
             private_ai_failed: "The Private AI setting couldn't be saved. Setup hasn't finished; try Start sharing again.",
@@ -956,14 +959,15 @@ mod tests {
     }
 
     /// The Private AI card's lead and the rest it discloses are the offer's
-    /// own sentences, split once: together they are `OFFER_WHAT` exactly,
-    /// in the core's NEAR AI spelling (owner, 2026-10-08).
+    /// own sentences, split once: together they are first run's offer
+    /// exactly, in the core's NEAR AI spelling (owner, 2026-10-08). Settings
+    /// reads the shorter `OFFER_WHAT` since the Settings copy pass (P178).
     #[test]
     fn the_private_ai_lead_and_rest_are_the_offer_split_once() {
         let copy = first_run_copy().private_ai;
         assert_eq!(
             format!("{} {}", copy.offer_lead, copy.offer_more),
-            crate::private_inference_copy::OFFER_WHAT
+            crate::private_inference_copy::OFFER_WHAT_FIRST_RUN
         );
         assert!(
             copy.offer_lead
