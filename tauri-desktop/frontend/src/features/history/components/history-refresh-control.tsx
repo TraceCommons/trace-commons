@@ -28,7 +28,7 @@ export function HistoryRefreshControl() {
       </Button>
       {refresh.isSuccess && (
         <span className="text-right text-xs text-muted-foreground" role="status">
-          Refresh requested. The daemon checks server results asynchronously.
+          Refresh requested. Server results are checked in the background.
         </span>
       )}
       {refresh.isError && (

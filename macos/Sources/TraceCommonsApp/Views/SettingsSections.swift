@@ -173,19 +173,21 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     }
 }
 
-/// The single words the section list shows for sections whose heading is
-/// a single word on the section itself too.
+/// The single words the section list and the sections' cards show.
+/// General's are this shell's own: General never waits on the core (owner
+/// decision D20, 2026-11-04). The rest are read from the core's tables
+/// (copy-guide rule 8; spelled here until 2026-11-04), empty while a table
+/// has not loaded, never a Swift fallback.
 enum SettingsWords {
+    private static var nav: MonitorSettingsNavCopy? { MonitorWords.table?.settingsNav }
+    private static var shell: MonitorShellCopy? { MonitorWords.table?.shell }
     static let general = "General"
     static let appearance = "Appearance"
     static let light = "Light"
     static let dark = "Dark"
     static let system = "System"
-    static let connection = "Connection"
-    static let startup = "Startup"
-    static let updates = "Updates"
-    static let watching = "Watching"
-    static let projects = "Projects"
+    static var updates: String { shell?.updatesEyebrow ?? "" }
+    static var projects: String { nav?.projects ?? "" }
     /// The core's referral title (DRAFT, NEEDS APPROVAL), read once; nil
     /// while the export has not arrived, which the list draws as its
     /// placeholder row.

@@ -34,8 +34,10 @@ final class SettingsAccessoryTests: XCTestCase {
         }
         let refreshButtons = nodes(hosting).filter {
             ($0.accessibilityRole?() ?? nil) == .button
-                && ($0.accessibilityLabel?() ?? nil) == SettingsLegacyWords.refresh
+                && ($0.accessibilityLabel?() ?? nil) == SettingsLegacyWords.refreshDiscovery
         }
+        // Named by what it re-reads, apart from Startup's and Uses' (rule 5).
+        XCTAssertNotEqual(SettingsLegacyWords.refreshDiscovery, SettingsLegacyWords.refresh)
         XCTAssertEqual(refreshButtons.count, 1, "Discovery must expose its Refresh button beside the heading")
     }
 }

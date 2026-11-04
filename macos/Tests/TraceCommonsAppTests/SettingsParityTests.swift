@@ -148,7 +148,7 @@ final class SettingsParityTests: XCTestCase {
                               "copy.folderNote", "copy.checking", "copy.apply", "copy.appliesAtOnce", "copy.derivedOrigin"],
                 confirmations: ["FolderPanel.choose()"],
                 accessibility: ["GlassToggleStyle(.settings)", ".accessibilityLabel(copy.portTitle)",
-                                ".accessibilityLabel(copy.folderTitle)", ".accessibilityElement(children: .combine)"]),
+                                "GlassFolderButton(copy.chooseFolder)", ".accessibilityElement(children: .combine)"]),
         Section(glass: "Views/Settings/InsightsSettingsCard.swift",
                 bindings: ["settings.insightsRecapCardEnabled",
                            "model.setInsightsSwitch(.recapCard,",

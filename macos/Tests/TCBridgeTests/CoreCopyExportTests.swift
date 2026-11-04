@@ -25,7 +25,8 @@ final class CoreCopyExportTests: XCTestCase {
     }
 
     func testTheIgnoreTitleNamesTheProject() throws {
-        XCTAssertEqual(try ignoreCopy(1).title, "Ignore api?")
+        // The mode is named Never (rule 7; DRAFT 2026-11-04).
+        XCTAssertEqual(try ignoreCopy(1).title, "Set api to Never?")
     }
 
     func testTheIgnoreBodyAgreesInNumber() throws {

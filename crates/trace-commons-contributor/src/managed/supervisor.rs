@@ -474,8 +474,9 @@ async fn run_native(
         super::collection_plan::finish(store, row.id);
     }
     if final_report.is_err() && persisted.is_err() {
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
         best_effort_stderr(&format!(
-            "Native session exited; {} status is unknown until the daemon reconnects.",
+            "Native session exited; its {} status is unknown until the app reconnects.",
             crate::brand::APP_NAME
         ));
     }

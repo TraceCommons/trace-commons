@@ -192,6 +192,8 @@ pub struct SourceSettingsCopy {
     pub heading: &'static str,
     pub explanation: &'static str,
     pub save_failed: &'static str,
+    /// Names Refresh, the control Uses shows (it said "retry", which
+    /// Uses has no control for). DRAFT, NEEDS APPROVAL (2026-11-04).
     pub consent_save_failed: &'static str,
     pub unavailable: &'static str,
     pub selected_folder: &'static str,
@@ -199,7 +201,14 @@ pub struct SourceSettingsCopy {
     /// Approved 2026-10-08 (button rule).
     pub watch_candidate: &'static str,
     pub choose_folder: &'static str,
+    /// The accessible name of a row's Watch, decline and folder buttons:
+    /// `{action}` is the button's visible words, `{tool}` the row's tool,
+    /// so the same button on every row is told apart (copy-guide rule 5).
+    /// DRAFT, NEEDS APPROVAL (2026-11-04).
+    pub tool_action_accessibility_name: &'static str,
     pub retry: &'static str,
+    /// The line under a found folder, saying what agreeing would mean.
+    pub evidence: SourceEvidenceCopy,
     pub opencode_version_title: &'static str,
     pub opencode_version_detail: &'static str,
     pub tools: std::collections::BTreeMap<&'static str, SourceSettingsToolCopy>,
@@ -207,6 +216,34 @@ pub struct SourceSettingsCopy {
     /// (`trajectory_source`), shown while `get_settings` reports
     /// `trajectory_source_mode` as `watch` or `off`.
     pub trajectory: TrajectorySettingsCopy,
+}
+
+/// The line under a folder discovery found, and how long ago its newest
+/// trace was written. Moved verbatim from the macOS shell
+/// (`SourceCandidate.evidence`, copy-guide rule 8); the shell picks the
+/// line and fills it. "Not found" and "found but empty" stay apart: one
+/// says the agent is not used, the other that it is and has no trace yet.
+#[derive(serde::Serialize)]
+pub struct SourceEvidenceCopy {
+    pub missing: &'static str,
+    pub empty: &'static str,
+    pub count_one: &'static str,
+    /// `{count}` traces.
+    pub count: &'static str,
+    /// `{traces}`: `count_one` or `count`; `{age}`: one of the ages below.
+    pub most_recent: &'static str,
+    /// `{evidence}`: the line so far, when an environment variable moved
+    /// the folder.
+    pub relocated: &'static str,
+    pub age_just_now: &'static str,
+    /// `{n}` minutes.
+    pub age_minutes: &'static str,
+    pub age_hour: &'static str,
+    /// `{n}` hours.
+    pub age_hours: &'static str,
+    pub age_yesterday: &'static str,
+    /// `{n}` days.
+    pub age_days: &'static str,
 }
 
 /// The Watched folders row for a declared folder of exported traces. It is
@@ -279,13 +316,28 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
         heading: "Watched folders",
         explanation: "Source settings control future discovery. Turning a source off does not remove traces already queued.",
         save_failed: "Couldn't confirm that folder change. The last available settings are shown; retry to check the current state.",
-        consent_save_failed: "Couldn't confirm that permission change. The last available permissions are shown; retry to check the current state.",
+        consent_save_failed: "Couldn't confirm that permission change. The last available permissions are shown; choose Refresh to check the current state.",
         unavailable: "Current folder settings aren't available.",
         selected_folder: "Selected folder",
         no_candidate: "No standard location found — choose a folder, or decline",
         watch_candidate: "Watch",
         choose_folder: "Choose a different folder…",
+        tool_action_accessibility_name: "{tool}: {action}",
         retry: "Retry",
+        evidence: SourceEvidenceCopy {
+            missing: "Not found on this machine",
+            empty: "Found, but holding no traces yet",
+            count_one: "1 trace",
+            count: "{count} traces",
+            most_recent: "{traces}, most recent {age}",
+            relocated: "{evidence} (moved here by an environment variable)",
+            age_just_now: "just now",
+            age_minutes: "{n} minutes ago",
+            age_hour: "1 hour ago",
+            age_hours: "{n} hours ago",
+            age_yesterday: "yesterday",
+            age_days: "{n} days ago",
+        },
         tools,
         trajectory: TrajectorySettingsCopy {
             title: "Exported traces",

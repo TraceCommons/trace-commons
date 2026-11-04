@@ -250,7 +250,9 @@ struct AccountAttentionBlock: View {
     }
 
     var body: some View {
-        GlassEyebrowCard(attention.title, title: attention.title) {
+        // The section's name over the card's own title, as the Account card
+        // above it: the title once, not as eyebrow and heading both.
+        GlassEyebrowCard(AccountSection.eyebrow, title: attention.title) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 ForEach(Self.lines(attention, failed: failed), id: \.self) { line in
                     Text(line)

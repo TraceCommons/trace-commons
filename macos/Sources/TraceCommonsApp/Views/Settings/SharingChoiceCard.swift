@@ -203,7 +203,7 @@ struct SharingChoiceCard: View {
         case .askMe:
             working = true
             Task {
-                if !(await model.setAskEachTime()) { refusal = Self.copy?.uses.sharingSaveFailed }
+                if !(await model.setAskEachTime()) { refusal = Self.copy?.uses.settingsSharingSaveFailed }
                 await toolbar?.saved()
                 working = false
             }
@@ -227,14 +227,14 @@ struct SharingChoiceCard: View {
         let request = SharingDisclosureFlow.grantRequest(
             flow.progress(connected: model.status.loggedIn, scopes: Set(model.status.consentScopes)))
         guard let request, request.ready else {
-            refusal = Self.copy?.uses.sharingRefused
+            refusal = Self.copy?.uses.settingsSharingRefused
             return
         }
         working = true
         let keep = keepFolderAsks
         Task {
             if case .refused = await model.grantAutomatic(witness: request.witnessSigningAddress, keepFolderAsks: keep) {
-                refusal = Self.copy?.uses.sharingRefused
+                refusal = Self.copy?.uses.settingsSharingRefused
             }
             await toolbar?.saved()
             working = false

@@ -45,10 +45,14 @@ public struct ShellWordsCopy: Decodable, Equatable, Sendable {
         public let bio: String
         public let updateProfile: String
         public let withdraw: String
+        /// Withdraw's accessible name, naming the profile (rule 5).
+        public let withdrawAccessibilityName: String
         public let onRosterSince: String
         public let goPublicHeadline: String
         public let goPublicDescription: String
         public let goPublic: String
+        /// The card's button that opens the dialog; `goPublic` confirms it.
+        public let goPublicOpen: String
         public let goingPublic: String
         public let notNow: String
         public let publishedHeading: String

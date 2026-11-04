@@ -19,7 +19,7 @@ struct StartupSection: View {
         // #1146's `DESKTOP / System integrations`, with Refresh re-reading
         // the login item from the system.
         GlassEyebrowCard(SettingsLegacyWords.desktopEyebrow, title: SettingsLegacyWords.desktopTitle, accessory: {
-            GlassRefreshButton(SettingsLegacyWords.refresh) { loginItemState = LoginItemManager.currentState }
+            GlassRefreshButton(SettingsLegacyWords.refreshDesktop, title: SettingsLegacyWords.refresh) { loginItemState = LoginItemManager.currentState }
         }) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 switch loginItemState {
