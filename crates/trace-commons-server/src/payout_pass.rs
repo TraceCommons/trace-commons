@@ -2185,7 +2185,7 @@ mod tests {
     /// calling line, never its text.
     #[test]
     fn a_store_failure_logs_its_class_and_site_but_not_its_text() {
-        let logs = crate::trace_upload_claim_issuer::tests::invite_lookup::capture_logs(|| {
+        let logs = crate::trace_upload_claim_issuer::tests::log_capture::capture_logs(|| {
             let step: Step<()> = store(Err(crate::error::DatabaseError::Pool(
                 "recipient row 7 is sealed".into(),
             )));

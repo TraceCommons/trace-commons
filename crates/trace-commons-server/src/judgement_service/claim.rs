@@ -6,7 +6,8 @@
 //!
 //! The upload-claim issuer mints an EdDSA JWT with
 //! `aud = "trace-commons-insights-judgement"`, a lifetime of at most 15
-//! minutes and an `account_ref` claim (the issuer side is slice 4). The
+//! minutes and an `account_ref` claim, at `POST /v1/insights-judgement/claim`
+//! (`trace_upload_claim_issuer::judgement_claim`). The
 //! service verifies it against the issuer's Ed25519 public keys from its
 //! measured compose environment (`TRACE_COMMONS_JUDGEMENT_ISSUER_PUBLIC_KEYS`)
 //! and makes no call to ingest.

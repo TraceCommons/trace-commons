@@ -19,8 +19,9 @@
 	# site access logger. Filter it too, or an ordinary upstream restart can
 	# persist a login code to stderr/journald even while access logs are safe.
 	# All three loggers share one policy: the login code is replaced, tenant
-	# identifiers in admin query strings are hashed, and client addresses are
-	# kept only to their /24 (IPv4) or /48 (IPv6) network.
+	# identifiers in admin query strings are hashed, client addresses are
+	# kept only to their /24 (IPv4) or /48 (IPv6) network, and the device-key
+	# headers are deleted.
 	log default {
 		format filter {
 			request>uri query {
@@ -43,6 +44,12 @@
 				ipv4 24
 				ipv6 48
 			}
+			# Caddy logs request headers by default. The device-key headers
+			# name the device, and through it the account, so a line for
+			# POST /v1/insights-judgement/claim would record which account
+			# asked for a judgement claim, and when.
+			request>headers>X-Trace-Device-Key-Id delete
+			request>headers>X-Trace-Device-Signature delete
 			wrap json
 		}
 	}
@@ -100,6 +107,12 @@ ingest.pilot.example.invalid {
 				ipv4 24
 				ipv6 48
 			}
+			# Caddy logs request headers by default. The device-key headers
+			# name the device, and through it the account, so a line for
+			# POST /v1/insights-judgement/claim would record which account
+			# asked for a judgement claim, and when.
+			request>headers>X-Trace-Device-Key-Id delete
+			request>headers>X-Trace-Device-Signature delete
 			wrap json
 		}
 	}
@@ -149,6 +162,12 @@ issuer.pilot.example.invalid {
 				ipv4 24
 				ipv6 48
 			}
+			# Caddy logs request headers by default. The device-key headers
+			# name the device, and through it the account, so a line for
+			# POST /v1/insights-judgement/claim would record which account
+			# asked for a judgement claim, and when.
+			request>headers>X-Trace-Device-Key-Id delete
+			request>headers>X-Trace-Device-Signature delete
 			wrap json
 		}
 	}
