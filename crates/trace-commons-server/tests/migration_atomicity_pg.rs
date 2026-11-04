@@ -3835,3 +3835,481 @@ async fn v150_keeps_one_live_anchor_per_account_as_a_non_superuser_owner() {
         "{OWNER} is per server and must not outlive the test (#1335)"
     );
 }
+
+/// #1883: V146 carry, V147 revocation and the next carry, end to end, on a
+/// database migrated in order by its non-superuser owner, with a live pass
+/// against the loopback `near_ai` mock.
+///
+/// Seeded before V147 (the V146 schema): a NEAR AI account S with a login
+/// anchor and an active link; a legacy tenant linked to S through V81; a
+/// legacy account C with a V146 carry of S's link; a legacy account A with
+/// its own active link (no login ever proved it), already paid 2,000 of the
+/// 5,000 it is owed; and a link request S started before V151, which
+/// recorded no proving anchor.
+///
+/// Then V147 revokes A's own link (the unlink mark) and leaves C's carry and
+/// S's link alone; the remaining migrations apply; the pre-V151 request is
+/// refused at confirm (#1882); the carry event (the tenant-link carry ingest
+/// runs) lands S's link on A as the waiting successor of its own; and the
+/// pass closes A's own link at what it had already paid and pays the rest
+/// through the carry. A is paid exactly what it is owed, the part after
+/// V147 through its carry only, never through both links.
+#[tokio::test]
+async fn v146_carry_v147_revocation_and_the_next_carry_pay_through_the_carry_only() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use trace_commons_gate_api::pipeline::AtomicUnits;
+    use trace_commons_gate_api::{PayoutRail, RailRate, RecipientRef};
+    use trace_commons_server::db::{
+        CarryPrograms, PayoutLink, PayoutLinkConfirm, PayoutLinkConfirmWrite, PayoutStore,
+        payout_legacy_link_hash, payout_link_id_hash,
+    };
+    use trace_commons_server::payout_pass::{
+        PayoutPass, PayoutPassOutcome, PayoutPassSettings, PayoutRecipientOpener,
+    };
+    use trace_commons_server::payout_rate::PayoutMode;
+    use uuid::Uuid;
+
+    /// Opens a link by its recipient index, so a carried copy of a link
+    /// opens to the same org as its source.
+    struct IndexOpener(HashMap<String, String>);
+    impl PayoutRecipientOpener for IndexOpener {
+        fn open(&self, link: &PayoutLink) -> Option<RecipientRef> {
+            let org = self.0.get(&link.recipient.recipient_index)?;
+            RecipientRef::new(org.clone()).ok()
+        }
+    }
+
+    let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+    else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return;
+    };
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let _turn = VIRGIN_DATABASE.lock().await;
+
+    const OWNER: &str = "tc_e2e_carry_owner_probe";
+    const DB: &str = "trace_e2e_carry_owner_probe_db";
+    let probe = ProbeRole::claim(&url, OWNER, &[DB]).await;
+    let admin = owned_database(&url, OWNER, DB, Standing::Creator).await;
+    let owner_url = with_user(&with_database(&url, DB), OWNER, "probe");
+    let mut owner = connect(&owner_url).await;
+    owner
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS _trace_commons_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );",
+        )
+        .await
+        .expect("create the recording table");
+    for (version, name, sql) in registered_migrations()
+        .iter()
+        .filter(|(version, ..)| *version < 147)
+    {
+        apply_and_record_migration(&mut owner, *version, name, sql)
+            .await
+            .unwrap_or_else(|error| panic!("V{version} before V147: {error:?}"));
+    }
+
+    let mock = near_ai_payout_mock::Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let org = near_ai_payout_mock::recipient_org;
+    let sha = |value: &str| {
+        use sha2::{Digest, Sha256};
+        format!("sha256:{:x}", Sha256::digest(value.as_bytes()))
+    };
+
+    // The V146 world, seeded as the superuser.
+    let seed = connect(&with_database(&url, DB)).await;
+    let near = format!("nearai-{}", "ab".repeat(32));
+    let legacy = "tenant-e2e-legacy".to_owned();
+    let (source, carried, own) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let device = sha("e2e-linking-device");
+    let tenant_link = Uuid::new_v4();
+    let (source_link, carried_link, own_link) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let source_index = sha("index:source-org");
+    let own_index = sha("index:own-org");
+    let insert_link = "INSERT INTO trace_payout_links (
+             tenant_id, account_id, rail_id, link_id, recipient_kind, state,
+             sealed_recipient, recipient_index, recipient_key_ref, index_pepper_ref,
+             subject_index, program
+         ) VALUES ($1, $2, 'near_ai', $3, 'near_ai_org', 'active', '{\"v\": 1}', $4, 'key',
+                   'pepper', $5, $6)";
+    for tenant in [&near, &legacy] {
+        seed.execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+            &[tenant],
+        )
+        .await
+        .expect("seed tenant");
+    }
+    for (tenant, account) in [(&near, source), (&legacy, carried), (&legacy, own)] {
+        seed.execute(
+            "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+            &[tenant, &account],
+        )
+        .await
+        .expect("seed account");
+    }
+    let source_anchor = sha("e2e-source-login");
+    seed.execute(
+        "INSERT INTO trace_near_account_anchors
+            (tenant_id, account_id, anchor_hash, sealed_account_name, index_pepper_ref,
+             account_name_key_ref, identity_source, auth_provider)
+         VALUES ($1, $2, $3, '{\"fixture\": true}', 'pepper', 'key', 'near_ai_login', 'github')",
+        &[&near, &source, &source_anchor],
+    )
+    .await
+    .expect("seed the source's login anchor");
+    for (tenant, account, link, index) in [
+        (&near, source, source_link, &source_index),
+        (&legacy, carried, carried_link, &source_index),
+        (&legacy, own, own_link, &own_index),
+    ] {
+        seed.execute(
+            insert_link,
+            &[
+                tenant,
+                &account,
+                &link,
+                index,
+                &sha(&format!("subject:{index}")),
+                &rail.program_for_link(link),
+            ],
+        )
+        .await
+        .expect("seed link");
+    }
+    seed.execute(
+        "INSERT INTO device_keys (device_key_id, tenant_id, public_key, invite_subject_hash)
+         VALUES ($1, $2, 'test', $1)",
+        &[&device, &legacy],
+    )
+    .await
+    .expect("seed the linking device");
+    seed.execute(
+        "INSERT INTO trace_legacy_invite_links
+            (link_id, tenant_id, account_id, legacy_tenant_id, device_key_id,
+             invite_subject_hash, nonce, issued_at, device_signature, linked_at,
+             server_kid, server_signature)
+         VALUES ($1, $2, $3, $4, $5, $5, $6, 1, 'sig', 2, 'kid', 'sig')",
+        &[
+            &tenant_link,
+            &near,
+            &source,
+            &legacy,
+            &device,
+            &"e".repeat(64),
+        ],
+    )
+    .await
+    .expect("seed the tenant link");
+    seed.execute(
+        "INSERT INTO trace_legacy_payout_carries
+            (tenant_id, account_id, rail_id, link_id, legacy_link_hash, source_link_hash)
+         VALUES ($1, $2, 'near_ai', $3, $4, $5)",
+        &[
+            &legacy,
+            &carried,
+            &carried_link,
+            &payout_legacy_link_hash(tenant_link),
+            &payout_link_id_hash(source_link),
+        ],
+    )
+    .await
+    .expect("seed the V146 carry");
+    // A link request the source started before V151: no proving anchor.
+    let pre_v151_handle = sha("e2e-pre-v151-handle");
+    seed.execute(
+        "INSERT INTO trace_payout_link_requests (
+             tenant_id, account_id, rail_id, idempotency_key, handle_hash, request_digest,
+             action, expected_current_version, recipient_kind, sealed_recipient,
+             recipient_index, recipient_key_ref, index_pepper_ref, subject_index, expires_at
+         ) VALUES ($1, $2, 'near_ai', $3, $4, $5, 'link', 1, 'near_ai_org', '{\"v\": 1}',
+                   $6, 'key', 'pepper', $7, now() + interval '5 minutes')",
+        &[
+            &near,
+            &source,
+            &Uuid::new_v4(),
+            &pre_v151_handle,
+            &sha("e2e-pre-v151-digest"),
+            &sha("index:new-org"),
+            &sha("subject:new-org"),
+        ],
+    )
+    .await
+    .expect("seed the pre-V151 request");
+    // A's own link was paid 2,000 before the deploy.
+    let own_paid = mock.seed(org(9), &rail.program_for_link(own_link), 2_000);
+
+    let (version, name, sql) = registered_migrations()
+        .iter()
+        .find(|(version, ..)| *version == 147)
+        .expect("V147 is wired into the runner");
+    apply_and_record_migration(&mut owner, *version, name, sql)
+        .await
+        .expect("V147 applies as the owner");
+    let state_of = |link: Uuid| {
+        let seed = &seed;
+        async move {
+            let row = seed
+                .query_one(
+                    "SELECT state || ':' || COALESCE(final_paid::TEXT, '-'),
+                            unlink_requested_at IS NOT NULL
+                       FROM trace_payout_links WHERE link_id = $1",
+                    &[&link],
+                )
+                .await
+                .expect("read link");
+            (row.get::<_, String>(0), row.get::<_, bool>(1))
+        }
+    };
+    let mut problems: Vec<String> = Vec::new();
+    for (label, link, expected) in [
+        (
+            "the source's link",
+            source_link,
+            ("active:-".to_owned(), false),
+        ),
+        (
+            "C's carried link",
+            carried_link,
+            ("active:-".to_owned(), false),
+        ),
+        ("A's own link", own_link, ("active:-".to_owned(), true)),
+    ] {
+        let got = state_of(link).await;
+        if got != expected {
+            problems.push(format!("after V147, {label} is {got:?}, not {expected:?}"));
+        }
+    }
+
+    // The rest of the migrations, then the deployment's own grants.
+    let backend = Arc::new(
+        PgBackend::new(&DatabaseConfig {
+            url: SecretString::from(owner_url.clone()),
+            pool_size: 4,
+            ssl_mode: SslMode::Prefer,
+            login_resolver_url: None,
+            gate_driver_url: None,
+            pii_backstop_driver_url: None,
+            invite_registry_url: None,
+        })
+        .await
+        .expect("owner backend"),
+    );
+    backend
+        .run_migrations()
+        .await
+        .expect("V148 onward apply over the V147 world");
+    admin
+        .batch_execute(&format!(
+            "GRANT trace_payout_enumerator, trace_payout_config_writer
+                 TO {OWNER} WITH INHERIT FALSE, SET TRUE;"
+        ))
+        .await
+        .expect("grant the payout roles like the staging README");
+    let rail_id = rail.descriptor().rail_id.clone();
+    backend
+        .record_payout_rate_epoch(&rail_id, &RailRate::new("v1", 1, 1).unwrap(), None)
+        .await
+        .expect("record the rate epoch");
+    // What the tenant link's claim records for the signing device's
+    // principals (V148), so C and A are proven accounts.
+    for account in [carried, own] {
+        let principal = format!("principal_{}", sha(&format!("device-upload:{account}")));
+        seed.execute(
+            "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+             VALUES ($1, $2, $3)",
+            &[&legacy, &account, &principal],
+        )
+        .await
+        .expect("seed the account's principal");
+        seed.execute(
+            "INSERT INTO trace_legacy_link_claimed_principals
+                 (tenant_id, legacy_link_hash, device_key_id, principal_ref)
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &legacy,
+                &payout_legacy_link_hash(tenant_link),
+                &device,
+                &principal,
+            ],
+        )
+        .await
+        .expect("seed the claimed principal");
+    }
+    // Credit: A is owed 5,000, C 1,000, both settled in the legacy tenant.
+    let batch = Uuid::new_v4();
+    let line = |account: Uuid, micros: i64| {
+        serde_json::json!({
+            "credit_account_ref": format!("account:{account}"),
+            "credit_account_hash": sha(&format!("credit-account:{account}")),
+            "settled_credit_delta_micros": micros,
+            "source_credit_event_ids": [],
+            "source_submission_ids": [],
+            "source_list_hash": sha(&format!("items:{account}")),
+            "near_status": "disabled",
+            "near_outbox_id": null,
+            "near_payout_hold_reason": null,
+        })
+    };
+    seed.execute(
+        "INSERT INTO trace_credit_settlement_batches (
+             tenant_id, settlement_batch_id, policy_version, status, reason_hash,
+             source_credit_event_ids, source_list_hash, settled_credit_points,
+             settled_credit_micros, line_items_json, actor_principal_ref, created_at
+         ) VALUES ($1, $2, 'test', 'finalized', $3, '{}', $4, '1', 1000000, $5, 'operator',
+                   now() - interval '2 seconds')",
+        &[
+            &legacy,
+            &batch,
+            &sha(&format!("reason:{batch}")),
+            &sha(&format!("list:{batch}")),
+            &serde_json::json!([line(own, 5_000), line(carried, 1_000)]),
+        ],
+    )
+    .await
+    .expect("settle the legacy credit");
+
+    // #1882: the request from before V151 names no proving anchor; the
+    // source's live login does not stand in for it.
+    let refused = backend
+        .confirm_payout_link_request(
+            &near,
+            source,
+            &rail_id,
+            &pre_v151_handle,
+            &PayoutLinkConfirmWrite {
+                link_id: Uuid::new_v4(),
+                program: rail.program_for_link(Uuid::new_v4()),
+                actor_ref_hash: sha("e2e-actor"),
+                carry_programs: None,
+            },
+        )
+        .await
+        .expect("confirm the pre-V151 request");
+    if refused != PayoutLinkConfirm::NoLoginAnchor {
+        problems.push(format!("the pre-V151 request confirmed as {refused:?}"));
+    }
+
+    // The carry event: the tenant-link carry ingest runs after a link.
+    let programs = {
+        let rail = Arc::clone(&rail);
+        CarryPrograms(Arc::new(move |id| rail.program_for_link(id)))
+    };
+    let report = backend
+        .carry_legacy_payout_links(&near, source, &rail_id, &programs, &sha("e2e-actor"))
+        .await
+        .expect("carry");
+    if report.carried != 1 {
+        problems.push(format!("the carry event carried {report:?}, not A alone"));
+    }
+    let a_carry: Option<Uuid> = seed
+        .query_opt(
+            "SELECT c.link_id FROM trace_legacy_payout_carries c
+               JOIN trace_payout_links l USING (tenant_id, link_id)
+              WHERE c.tenant_id = $1 AND c.account_id = $2 AND c.released_at IS NULL
+                AND l.state = 'waiting'",
+            &[&legacy, &own],
+        )
+        .await
+        .expect("read A's carry")
+        .map(|row| row.get(0));
+    let Some(a_carry) = a_carry else {
+        problems.push("A's carry did not land as a waiting link".into());
+        panic!("#1883:\n  {}", problems.join("\n  "));
+    };
+
+    let opener = Arc::new(IndexOpener(HashMap::from([
+        (source_index.clone(), org(7).to_string()),
+        (own_index.clone(), org(9).to_string()),
+    ])));
+    let run = || {
+        PayoutPass::new(
+            rail.clone(),
+            backend.clone() as Arc<dyn PayoutStore>,
+            backend.clone() as Arc<dyn Database>,
+            opener.clone() as Arc<dyn PayoutRecipientOpener>,
+            PayoutPassSettings {
+                mode: PayoutMode::Live,
+                account_ceiling: AtomicUnits::from_raw(1_000_000),
+                local_send_limit: 50,
+                rate_in_force: true,
+            },
+        )
+    };
+    for n in 0..3 {
+        let report = run().run_once().await;
+        if report.outcome != PayoutPassOutcome::Completed {
+            problems.push(format!("pass {n}: {report:?}"));
+        }
+    }
+    let sent_to = |program: String| -> i64 {
+        mock.transfers()
+            .iter()
+            .filter(|t| t.program == program)
+            .map(|t| t.amount)
+            .sum()
+    };
+    let own_program = rail.program_for_link(own_link);
+    let carry_program = rail.program_for_link(a_carry);
+    let after_passes = mock.transfers().len();
+    if mock
+        .transfers()
+        .iter()
+        .any(|t| t.program == own_program && t.id != own_paid)
+    {
+        problems.push("A's revoked own link was sent to after V147".into());
+    }
+    let got = (sent_to(own_program.clone()), sent_to(carry_program.clone()));
+    if got != (2_000, 3_000) {
+        problems.push(format!(
+            "A was paid {got:?} (own link, carry), not (2000, 3000): owed 5000 once"
+        ));
+    }
+    if state_of(own_link).await.0 != "closed:2000" {
+        problems.push(format!(
+            "A's own link is {:?}, not closed at what it had paid",
+            state_of(own_link).await
+        ));
+    }
+    if state_of(a_carry).await.0 != "active:-" {
+        problems.push(format!(
+            "A's carry is {:?}, not active",
+            state_of(a_carry).await
+        ));
+    }
+    let c_got = sent_to(rail.program_for_link(carried_link));
+    if c_got != 1_000 {
+        problems.push(format!(
+            "C was paid {c_got} through its V146 carry, not 1000"
+        ));
+    }
+    if sent_to(rail.program_for_link(source_link)) != 0 {
+        problems.push("the source, owed nothing, was sent to".into());
+    }
+    // Settled: another pass sends nothing.
+    let report = run().run_once().await;
+    if report.outcome != PayoutPassOutcome::Completed || mock.transfers().len() != after_passes {
+        problems.push(format!("a later pass sent more: {report:?}"));
+    }
+
+    drop(seed);
+    drop(owner);
+    drop(backend);
+    admin
+        .execute(&format!("DROP DATABASE IF EXISTS {DB} WITH (FORCE)"), &[])
+        .await
+        .expect("drop the probe database");
+    assert!(problems.is_empty(), "#1883:\n  {}", problems.join("\n  "));
+    probe.release().await;
+    assert!(
+        !role_exists(&url, OWNER).await,
+        "{OWNER} is per server and must not outlive the test (#1335)"
+    );
+}
