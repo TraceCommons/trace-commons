@@ -37,7 +37,9 @@ use trace_commons_gate_enclave::chunk_aggregate::{
     aggregate_chunked_novelty, aggregate_chunked_perplexity,
 };
 use trace_commons_gate_enclave::chunker::{ChunkerConfig, chunk_envelope_plaintext};
-use trace_commons_gate_enclave::embedder::embed_chunk_mean_pooled;
+use trace_commons_gate_enclave::embedder::{
+    EmbedderFailureClass, classify_embedder_error, embed_chunk_mean_pooled,
+};
 use uuid::Uuid;
 
 use crate::credit_quality::{
@@ -525,6 +527,41 @@ fn settle_invalid<E>(_: E) -> PolicyError {
     permanent("settle_output_invalid")
 }
 
+/// Maps an embedder failure to the Score's policy error, and logs its class.
+/// A refusal of the trace's own input (`EmbedderInputRejected`) is
+/// permanent: the runner fails the run under
+/// `PIPELINE_SCORE_INPUT_UNEMBEDDABLE_LABEL`. Anything else is treated as
+/// an outage and stays the retryable `embedder_unavailable`. The log
+/// carries static labels, the tenant storage ref, the run's hash and the
+/// chunk's position only: never the error's message, never text.
+fn embedder_policy_error(
+    error: &anyhow::Error,
+    input: &ScoreInput,
+    chunk_index: u32,
+) -> PolicyError {
+    let failure = classify_embedder_error(error);
+    let (class_label, policy_error) = match failure.class {
+        EmbedderFailureClass::InputRejected => (
+            "input_rejected",
+            permanent(crate::versioned_pipeline::PIPELINE_SCORE_INPUT_UNEMBEDDABLE_LABEL),
+        ),
+        EmbedderFailureClass::Dependency => ("dependency", transient("embedder_unavailable")),
+    };
+    tracing::warn!(
+        label = "pipeline_score_embedder_failed",
+        failure_class = class_label,
+        reason_label = failure.reason_label,
+        policy_label = policy_error.label(),
+        tenant_storage_ref = input.tenant_storage_ref.as_str(),
+        run_ref_hash = %crate::versioned_pipeline::sha256_prefixed(
+            input.run_id.to_string().as_bytes()
+        ),
+        chunk_index,
+        "a compatibility Score's embedder failed"
+    );
+    policy_error
+}
+
 #[async_trait]
 impl ScorePolicy for CompatibilityScorePolicy {
     /// The scorer, the embedder and the index reader are synchronous, and a
@@ -581,7 +618,7 @@ impl CompatibilityScorePolicy {
         let mut neighbors = Vec::new();
         for chunk in &plan.chunks {
             let embedding = embed_chunk_mean_pooled(self.embedder.as_ref(), &chunk.text)
-                .map_err(|_| transient("embedder_unavailable"))?;
+                .map_err(|error| embedder_policy_error(&error, input, chunk.chunk_index))?;
             let found = self
                 .index_reader
                 .nearest(
@@ -1372,6 +1409,28 @@ mod tests {
         }
         fn content_descriptor(&self) -> Vec<u8> {
             b"failing-embedder-test-only.v1".to_vec()
+        }
+    }
+
+    /// Refuses every input as the fastembed embedder refuses whitespace-only
+    /// text: the input's fault, not an outage.
+    struct InputRejectingEmbedder;
+
+    impl Embedder for InputRejectingEmbedder {
+        fn embed(&self, _plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+            Err(trace_commons_gate_enclave::embedder::EmbedderInputRejected::EmptyInput.into())
+        }
+    }
+
+    impl IdentifiedEmbedder for InputRejectingEmbedder {
+        fn dependency_identity(&self) -> &str {
+            "input_rejecting_embedder_test_only"
+        }
+        fn model_id(&self) -> &str {
+            "input-rejecting-embedder-v1"
+        }
+        fn content_descriptor(&self) -> Vec<u8> {
+            b"input-rejecting-embedder-test-only.v1".to_vec()
         }
     }
 
@@ -2177,6 +2236,33 @@ mod tests {
             .unwrap_err();
         assert!(error.is_transient());
         assert_eq!(error.label(), "index_unavailable");
+    }
+
+    /// An embedder that refuses the trace's own input fails the same way on
+    /// every attempt, so Score raises a permanent error under its own label
+    /// (the runner fails the run on it) instead of the transient
+    /// `embedder_unavailable` an outage raises, which retries forever.
+    #[tokio::test]
+    async fn an_embedder_input_rejection_is_permanent_under_its_own_label() {
+        let config = CompatibilityBundleConfig::local_reference();
+        let manifest = manifest_pinning_trace_credit(&config);
+        let policy = CompatibilityScorePolicy::new(
+            manifest,
+            config,
+            Arc::new(FixedPerplexityScorer::uniform(100, 10.0, 0.0)),
+            Arc::new(InputRejectingEmbedder),
+            RecordingIndexReader::new(),
+        )
+        .unwrap();
+        let error = policy
+            .execute(&score_input(b"hello world"))
+            .await
+            .unwrap_err();
+        assert!(!error.is_transient(), "{error:?}");
+        assert_eq!(
+            error.label(),
+            crate::versioned_pipeline::PIPELINE_SCORE_INPUT_UNEMBEDDABLE_LABEL
+        );
     }
 
     /// Zaki review 1, round 2, N-6: the scorer, the embedder and the index
