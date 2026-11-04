@@ -4,4 +4,5 @@
 
 mod e2e_client_admission_seam;
 mod e2e_enroll_and_submit;
+mod first_run_usd_estimate;
 mod native_auth;
