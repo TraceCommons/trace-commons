@@ -721,9 +721,9 @@ final class HistoryParityTests: XCTestCase {
         let stats = Self.flat(String(home[start.lowerBound..<end.lowerBound]))
         for needle in [
             "let creditTile = HomeFormat.creditTile(final: rollup?.creditFinal, pending: rollup?.creditPending, accepted: rollup?.allTime?.accepted, credit: credit)",
-            "HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value, detail: creditTile.detail)",
-            "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(rollup?.allTime?.accepted))",
-            "HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined))",
+            "HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value, detail: creditTile.detail,",
+            "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(rollup),",
+            "HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined),",
         ] {
             XCTAssertTrue(stats.contains(needle), "History's stat cards lack \(needle)")
         }

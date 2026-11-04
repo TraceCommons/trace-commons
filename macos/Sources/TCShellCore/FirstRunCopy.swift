@@ -28,7 +28,7 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let sessionCountOne: String
 
         /// A tool's or a repo's trace count line, singular for one.
-        public func sessionCountLine(_ count: Int) -> String {
+        public func sessionCountLine(_ count: UInt64) -> String {
             count == 1 ? sessionCountOne : FirstRunCopy.fill(sessionCount, ["count": count.formatted()])
         }
         /// Takes back a choice not yet acted on.

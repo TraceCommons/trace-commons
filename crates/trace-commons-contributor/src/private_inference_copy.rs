@@ -5254,16 +5254,27 @@ mod tests {
     fn limit_spent_and_left_agree_to_the_cent() {
         let scale = 9;
         let (limit, spent) = (130_000_000_000_i64, 18_185_000_000_i64);
-        assert_eq!(balance_remaining_line(Some(limit - spent), scale), "$111.81 left");
+        assert_eq!(
+            balance_remaining_line(Some(limit - spent), scale),
+            "$111.81 left"
+        );
         assert_eq!(balance_limit_line(Some(limit), scale), "Limit: $130.00");
         assert_eq!(balance_spent_line(Some(spent), scale), "Spent: $18.19");
         // Whole cents are unchanged, and a sub-cent spend is a cent.
-        assert_eq!(balance_spent_line(Some(18_180_000_000), scale), "Spent: $18.18");
+        assert_eq!(
+            balance_spent_line(Some(18_180_000_000), scale),
+            "Spent: $18.18"
+        );
         assert_eq!(balance_spent_line(Some(1), scale), "Spent: $0.01");
         for spent in (0..2_000_000_000_i64).step_by(7_654_321) {
             let left = format_amount(limit - spent, scale);
             let shown = format_amount_ceil(spent, scale);
-            let cents = |s: &str| s.trim_start_matches('$').replace('.', "").parse::<i64>().unwrap();
+            let cents = |s: &str| {
+                s.trim_start_matches('$')
+                    .replace('.', "")
+                    .parse::<i64>()
+                    .unwrap()
+            };
             assert_eq!(cents("$130.00") - cents(&shown), cents(&left), "{spent}");
         }
     }
