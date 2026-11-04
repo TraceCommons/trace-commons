@@ -114,6 +114,84 @@
                 </Border>
 
                 <!--
+                    F10, entry point 1: the last NEAR AI sign-in was refused
+                    as another account. The approved mismatch body and Sign in
+                    (with the account's own login), and, only while that login
+                    is held aside for a change, Use a different account. A
+                    status in the account section, never a banner. Every
+                    string is bound, from the Rust.
+                -->
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind Settings.HasLoginMismatch, Mode=OneWay}">
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="{x:Bind Settings.LoginMismatchBody, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="{x:Bind Settings.LoginMismatchSignIn, Mode=OneWay}"
+                                    IsEnabled="{x:Bind Settings.MismatchSignInEnabled, Mode=OneWay}"
+                                    Click="OnLoginMismatchSignIn" />
+                            <Button Content="{x:Bind Settings.LoginMismatchChange, Mode=OneWay}"
+                                    Visibility="{x:Bind Settings.ShowsLoginMismatchChange, Mode=OneWay}"
+                                    IsEnabled="{x:Bind Settings.LoginChangeIdle, Mode=OneWay}"
+                                    Click="OnUseDifferentAccount" />
+                        </StackPanel>
+                        <TextBlock Text="{x:Bind Settings.LoginChangeStartFailedLine, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.HasLoginChangeStartFailedLine, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <!--
+                    F10, entry point 2: deliberately, from the account
+                    section. Drawn while the change is offered and no refused
+                    login is held (the mismatch block offers it then) and the
+                    payouts line does not offer it either.
+                -->
+                <StackPanel Spacing="6"
+                            Visibility="{x:Bind Settings.ShowsLoginChangeButton, Mode=OneWay}">
+                    <Button Content="{x:Bind Settings.LoginChangeLabel, Mode=OneWay}"
+                            IsEnabled="{x:Bind Settings.LoginChangeIdle, Mode=OneWay}"
+                            Click="OnUseDifferentAccount" />
+                    <TextBlock Text="{x:Bind Settings.LoginChangeStartFailedLine, Mode=OneWay}"
+                               Visibility="{x:Bind Settings.HasLoginChangeStartFailedLine, Mode=OneWay}"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+
+                <!--
+                    F10, entry point 3: a wallet-origin account's payouts need
+                    a NEAR AI login. This shell has no payouts section, so the
+                    line sits here in the account section, where macOS shows
+                    the payout link status. Cleared once the account records a
+                    NEAR AI login.
+                -->
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind Settings.ShowsPayoutsNeedLogin, Mode=OneWay}">
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="{x:Bind Settings.PayoutsNeedsLoginBody, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <Button Content="{x:Bind Settings.PayoutsNeedsLoginAdd, Mode=OneWay}"
+                                IsEnabled="{x:Bind Settings.LoginChangeIdle, Mode=OneWay}"
+                                Click="OnUseDifferentAccount" />
+                        <TextBlock Text="{x:Bind Settings.LoginChangeStartFailedLine, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.HasLoginChangeStartFailedLine, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <!--
                     Move a legacy invite identity to the contributor's NEAR AI
                     account. Shown only while the daemon offers it. The same
                     control the main window's notices card uses, here without

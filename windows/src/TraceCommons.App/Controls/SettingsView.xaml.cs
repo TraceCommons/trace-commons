@@ -132,6 +132,38 @@ public sealed partial class SettingsView : UserControl
         }
     }
 
+    private bool _loginChangeDialogOpen;
+
+    /// <summary>
+    /// "Use a different account" and "Add a NEAR AI login" (F10): starts or
+    /// resumes the ceremony, then shows its three-step dialog. A refused
+    /// start shows the generic line under the entry point instead.
+    /// </summary>
+    private async void OnUseDifferentAccount(object sender, RoutedEventArgs e)
+    {
+        if (_loginChangeDialogOpen || Settings.LoginChange.Calling)
+        {
+            return;
+        }
+
+        _loginChangeDialogOpen = true;
+        try
+        {
+            await Settings.LoginChange.BeginAsync();
+            await AccountLoginChangeDialog.ShowAsync(XamlRoot, Settings.LoginChange, Settings.WalletAccountLabel);
+        }
+        finally
+        {
+            _loginChangeDialogOpen = false;
+        }
+    }
+
+    /// <summary>The mismatch block's Sign in: a NEAR AI sign-in with the account's own login.</summary>
+    private async void OnLoginMismatchSignIn(object sender, RoutedEventArgs e)
+    {
+        await Settings.MismatchSignInAsync();
+    }
+
     private async void OnDisableInferenceEvidence(object sender, RoutedEventArgs e)
     {
         await Settings.SetInferenceEvidenceAsync(false);

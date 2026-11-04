@@ -220,15 +220,27 @@ pub fn render(app: &Rc<App>, state: &str) {
     while let Some(child) = view.status.first_child() {
         view.status.remove(&child);
     }
+    // A sign-in the account refused as another NEAR AI account says so in
+    // #1836's approved words (F10), not the generic failure line.
+    let mismatch = app
+        .status
+        .borrow()
+        .as_ref()
+        .is_some_and(|status| status.login_mismatch);
+    let action = copy::credential_action(state);
+    let line = if mismatch && action == CredentialAction::Obtain {
+        trace_commons_contributor::account_change_copy::ACCOUNT_LOGIN_MISMATCH_BODY
+    } else {
+        copy::credential_state_line(state)
+    };
     view.status.append(&private_inference::tone_row(
-        copy::credential_state_line(state),
+        line,
         private_inference::indicator_tone(copy::credential_state_tone(state)),
     ));
     if view.not_revoked.get() {
         style::append_body(&view.status, copy::CREDENTIAL_FORGET_NOT_REVOKED);
     }
 
-    let action = copy::credential_action(state);
     app.private_inference
         .balance
         .root

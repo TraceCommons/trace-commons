@@ -328,6 +328,15 @@ internal static class NativeMethods
     internal static extern IntPtr tc_legacy_migration_offer_json();
 
     /// <summary>
+    /// The words for changing the NEAR AI login an account uses (F10), as an
+    /// owned JSON object of owner-approved sentences and templates
+    /// (<c>account_change_copy</c>). Free it the way
+    /// <see cref="TakeOwnedString"/> does. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_account_change_copy_json();
+
+    /// <summary>
     /// The sentence for a refused <c>legacy_invite_migrate</c>, from the IPC
     /// error's label. A label this build does not know gets the core's own
     /// fallback sentence. Free it the way <see cref="TakeOwnedString"/> does.
