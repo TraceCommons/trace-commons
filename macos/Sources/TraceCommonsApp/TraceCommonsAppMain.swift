@@ -501,8 +501,10 @@ private struct Launcher: View {
             // The person launched the app and is looking at it. The first
             // activation's request (`AppDelegate`) can be lost at a cold
             // launch, so the Monitor is asked for again here, once the
-            // core has answered, unless a window is already up.
-            guard !NSApp.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) else { return }
+            // core has answered, unless a titled window (the Monitor,
+            // first run, Settings) is already up. The status item and the
+            // edge rail are borderless, so they do not count.
+            guard !NSApp.windows.contains(where: { $0.isVisible && $0.styleMask.contains(.titled) }) else { return }
             OpenMonitor.request()
         case .nothing, .wait:
             break

@@ -427,7 +427,7 @@ final class MonitorNavigationTests: XCTestCase {
                 case .focusedMonitor:
         """), "first run must open alone, and a refused daemon's Monitor quietly")
         XCTAssertTrue(main.contains("""
-                    guard !NSApp.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) else { return }
+                    guard !NSApp.windows.contains(where: { $0.isVisible && $0.styleMask.contains(.titled) }) else { return }
                     OpenMonitor.request()
                 case .nothing, .wait:
                     break

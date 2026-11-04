@@ -156,11 +156,12 @@ final class LaunchRoutingTests: XCTestCase {
     }
 
     /// The delegate reads the login-item mark from the launch's own event,
-    /// before launching finishes, and the model's launch opening passes the
+    /// in didFinishLaunching, where that event is current, and the model's launch opening passes the
     /// kind through.
     func test_theLaunchKindIsWired() throws {
         let delegate = try MonitorNavigationTests.text("AppDelegate.swift")
-        XCTAssertTrue(delegate.contains("func applicationWillFinishLaunching"))
+        XCTAssertFalse(delegate.contains("func applicationWillFinishLaunching"),
+                       "the open-application event is not current until didFinishLaunching")
         XCTAssertTrue(delegate.contains("NSAppleEventManager.shared().currentAppleEvent"))
         XCTAssertTrue(delegate.contains("LaunchRouting.launchedAsLoginItem = LaunchRouting.isLoginItemLaunch("))
         let model = try MonitorNavigationTests.text("AppModel.swift")
