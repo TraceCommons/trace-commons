@@ -1,0 +1,95 @@
+# The Insights judgement service, production profile, as a dstack app.
+#
+# THIS FILE IS MEASURED. dstack hashes the compose into MRCONFIGID, so every
+# value below -- the caps, the issuer keys, the model, the signer pins -- is
+# part of the enclave's identity. Changing one is a new measurement, and
+# release daemons refuse a measurement until a release compiles it in
+# (spec section 4). That is the intended property.
+#
+# NOT DEPLOYABLE YET, on purpose. Owner decision 1 (2026-10-20): there is
+# no interim production model. The production allowlist is empty until the
+# TEE-hosted decision model is in NEAR AI's catalog, returns a per-request
+# `provider_tee` receipt and passes spec section 5, so a production image
+# refuses to boot (`judgement_model_not_allowlisted`) whatever it is told.
+# Slice 9 fills in the image digest, the model, the issuer key and the
+# signer pins below, and deploys.
+#
+# Its own dstack app, never the development app: the limiter key derives
+# from the app id, so the two can never share one. Deploy with
+# `--no-public-logs --no-public-sysinfo` and read the manifest back before
+# recording anything; upgrade in place (`phala cvms upgrade`), never delete
+# and recreate. See README.md, "Deploy".
+
+services:
+  judgement:
+    # By digest, from the `judgement-image` workflow with profile
+    # `production`. A placeholder until slice 9: it is not a digest, so a
+    # deploy of this file fails at the pull rather than running anything.
+    image: ghcr.io/tracecommons/trace-commons-judgement@sha256:SET_FROM_THE_JUDGEMENT_IMAGE_WORKFLOW
+
+    restart: always
+
+    # The only writable paths: a small tmpfs, and the limiter volume.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    volumes:
+      # GetKey and GetQuote.
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      # The sealed limiter ledger, the service's only state (spec section
+      # 6). It must survive an in-place upgrade; Phala reattaches a volume
+      # declared here. The service refuses to boot if nothing is mounted.
+      - judgement-data:/data
+
+    environment:
+      # 0.0.0.0 inside the container, so dstack-gateway reaches it.
+      TRACE_COMMONS_JUDGEMENT_BIND: "0.0.0.0:8089"
+
+      # The model, by catalog id. Unset until slice 9: the boot refuses
+      # with `judgement_model_unconfigured`.
+      # TRACE_COMMONS_JUDGEMENT_MODEL: "<decision model id>"
+
+      # Its receipt signers, `model=key[,model=key...]`, each key the 64-hex
+      # ed25519 key from the gateway report's `model_attestations`
+      # (`signing_algo=ed25519`). The boot fetches that report, DCAP-verifies
+      # each quote, and refuses a pin no verified quote binds. Public keys,
+      # so measured here rather than secret. Derivation: deploy/witness/
+      # docker-compose.yml, `TRACE_COMMONS_WITNESS_MODEL_KEY_PINS`.
+      # TRACE_COMMONS_JUDGEMENT_MODEL_KEY_PINS: "<model>=<key>"
+
+      # The upload-claim issuer's Ed25519 public key(s), 64 hex each,
+      # comma-separated; list both during an issuer key rotation. Judgement
+      # claims are verified offline against these.
+      # TRACE_COMMONS_JUDGEMENT_ISSUER_PUBLIC_KEYS: "<issuer public key hex>"
+
+      # $5 of NEAR AI spend per account per UTC month (addendum decision 3)
+      # and $100 operator-wide (owner decision 4). Whole USD. Setting the
+      # account cap to 0 is the roll-back switch: every call becomes a
+      # capacity refusal.
+      TRACE_COMMONS_JUDGEMENT_ACCOUNT_MONTHLY_CAP_USD: "5"
+      TRACE_COMMONS_JUDGEMENT_OPERATOR_MONTHLY_BUDGET_USD: "100"
+
+      TRACE_COMMONS_JUDGEMENT_DATA_DIR: "/data"
+
+      # The one secret, injected encrypted at deploy and listed in
+      # `allowed_envs`. The NAME is measured; the VALUE never appears here.
+      # A Phala upgrade replaces every secret, so each upgrade passes it.
+      TRACE_COMMONS_JUDGEMENT_NEAR_AI_API_KEY: ${TRACE_COMMONS_JUDGEMENT_NEAR_AI_API_KEY:?set at deploy time}
+
+      TRACE_COMMONS_JUDGEMENT_MAX_CONCURRENT_REQUESTS: "8"
+      TRACE_COMMONS_JUDGEMENT_REQUEST_TIMEOUT_SECS: "240"
+
+      # The service logs hash-only lines at info. Do not raise it.
+      RUST_LOG: "info"
+
+    ports:
+      - "8089:8089"
+
+volumes:
+  judgement-data:

@@ -144,6 +144,14 @@ impl ProductionCheck {
         Self::with_allowlist(allowlist, pins)
     }
 
+    /// A development build's check over its own allowlist: the
+    /// development models it compiles in. Never in a production build, so
+    /// a development model cannot pass a production check.
+    #[cfg(feature = "judgement-development-models")]
+    pub fn development(allowlist: &[&str], pins: BTreeMap<String, Vec<String>>) -> Self {
+        Self::with_allowlist(allowlist, pins)
+    }
+
     fn with_allowlist(allowlist: &[&str], pins: BTreeMap<String, Vec<String>>) -> Self {
         Self {
             allowlist: allowlist.iter().map(|m| (*m).to_string()).collect(),
