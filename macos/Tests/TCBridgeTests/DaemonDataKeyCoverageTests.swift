@@ -41,7 +41,8 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             // Token capture and its storage notice: `TokenStorageView` owns
             // them, with copy from the core.
             "token_capture_enabled", "token_distributions_contribution", "token_storage",
-            "token_storage.cancel_label", "token_storage.capture_confirmation", "token_storage.capture_enabled",
+            "token_storage.cancel_label", "token_storage.capture_confirmation",
+            "token_storage.capture_confirm_label", "token_storage.capture_confirm_title", "token_storage.capture_enabled",
             "token_storage.capture_label", "token_storage.capture_notice", "token_storage.cleanup_label",
             "token_storage.cleanup_pending", "token_storage.confirm_label", "token_storage.discard_confirmation",
             "token_storage.discard_label", "token_storage.discard_title", "token_storage.failure_line",
@@ -53,6 +54,10 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             // `set_managed_terminal`. Whether it was chosen is read the same
             // way (`capabilities.terminal_chosen`).
             "managed_terminal", "managed_terminal_chosen",
+            // "Group sessions in herdr": read from the managed snapshot
+            // (`capabilities.herdr_grouping`) and written with
+            // `set_managed_herdr`.
+            "managed_herdr",
             // Favorite models: the Launch sheet's picker reads them from
             // `managed_model_catalogue`'s `favorites` and writes them with
             // `managed_model_favorite_set`.

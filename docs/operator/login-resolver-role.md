@@ -131,8 +131,8 @@ A failed/missing resolver connection surfaces as redeem returning 400 with the
 session never establishing; check that the URL points at a role that (a) can
 log in and (b) is or inherits `trace_login_resolver`.
 
-## Passkeys removed (V144)
+## WebAuthn sign-in removed (V144)
 
-Passkey login used this role for a `(tenant_id, credential_id)` read on
+WebAuthn sign-in used this role for a `(tenant_id, credential_id)` read on
 `trace_webauthn_credentials`. V144 drops that table with its grant and
 policy, so the resolver keeps only its login-link and NEAR-identity reads.

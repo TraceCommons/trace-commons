@@ -88,9 +88,10 @@ final class HomeViewTests: XCTestCase {
         XCTAssertTrue(home.contains(
             "let tiles = HomeFormat.creditTiles(final: freshRollup?.creditFinal, "
                 + "pending: freshRollup?.creditPending, credit: freshCredit)"))
+        // No sign-in line under it (owner, 2026-11-02): the heading's.
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: HomeFormat.creditReceivedWord, value: tiles.received, "
-                + "detail: signIn, systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
+                + "detail: creditDetail, systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: HomeFormat.creditPendingTitleWord, value: tiles.pending, action: openPrivateAI)"))
         // What is not contributed is an upsell two tiles tall across both
@@ -103,10 +104,10 @@ final class HomeViewTests: XCTestCase {
         // (owner, 2026-10-20: it had no fill and a turning glow edge).
         XCTAssertTrue(home.contains("detail: uncontributed.detail(words), action: openTraces)"))
         XCTAssertTrue(home.contains(".glassTier(.card, hover: GlassTokens.Color.cardHover)"))
-        // No border; light glances across it instead (owner, 2026-10-27;
-        // a duller shimmer crossed it from 2026-10-20, and a light turned
-        // round its edge from 2026-10-22).
-        XCTAssertTrue(home.contains(".glassCardShimmer()"))
+        // No border and no shimmer (owner, 2026-11-02; light glanced across
+        // it from 2026-10-27, a duller shimmer crossed it from 2026-10-20,
+        // and a light turned round its edge from 2026-10-22).
+        XCTAssertFalse(home.contains(".glassCardShimmer()"), "the shimmer is back")
         XCTAssertFalse(home.contains("glassCardBeacon"), "the beacon is back")
         XCTAssertFalse(home.contains("strokeBorder(Self.border"), "the border is back")
         XCTAssertFalse(home.contains(".overlay(GlassGlowEdge("), "the glow edge is back")
@@ -117,12 +118,11 @@ final class HomeViewTests: XCTestCase {
         // The figure counts while credit arrives (`BalanceArrivalFlourish`),
         // and the 24-hour change sits under it in its ink (owner,
         // 2026-10-23), with no second line of what was received (owner,
-        // 2026-10-27).
+        // 2026-10-27), and nothing beside the dash (owner, 2026-11-02).
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: copy.balanceTitle, value: counting ?? balance.value, "
                 + "detail: balance.detail, detailInk: balance.detailInk, "
-                + "systemImage: HomeStatIcons.balance, valueAccessory: balance.beside, "
-                + "action: openPrivateAI)"))
+                + "systemImage: HomeStatIcons.balance, action: openPrivateAI)"))
         let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))
         let upsell = try XCTUnwrap(home.range(of: "notContributed(uncontributed, title: title)"))
         let credit = try XCTUnwrap(home.range(of: "HomeStatTile(label: HomeFormat.creditPendingWord"))
@@ -197,21 +197,63 @@ final class HomeViewTests: XCTestCase {
             DaemonData.CommonsCreditSummary.self, from: JSONSerialization.data(withJSONObject: object))
     }
 
-    /// A summary whose points are unknown because no account session could
-    /// be used or renewed says "Sign in again" (the payout link's own
-    /// constant, from the core) in place of the silent dash. Any other
-    /// unknown, a known figure, and a core that sends no reason keep the dash.
-    func test_creditTileSaysSignInAgainOnlyWhenTheSessionIsMissing() throws {
-        let line = "Sign in again"
-        XCTAssertEqual(
-            HomeFormat.creditSignIn(try creditSummary(reason: "account-session-required"), line: line), line)
-        XCTAssertNil(HomeFormat.creditSignIn(try creditSummary(reason: nil), line: line))
-        XCTAssertNil(HomeFormat.creditSignIn(try creditSummary(reason: "something-else"), line: line))
-        XCTAssertNil(HomeFormat.creditSignIn(
-            try creditSummary(reason: "account-session-required", pointsState: "known"), line: line))
-        XCTAssertNil(HomeFormat.creditSignIn(nil, line: line))
-        XCTAssertNil(HomeFormat.creditSignIn(try creditSummary(reason: "account-session-required"), line: nil))
-        XCTAssertNil(HomeFormat.creditSignIn(try creditSummary(reason: "account-session-required"), line: ""))
+    /// The Account heading asks for a sign-in (owner, 2026-11-02) when the
+    /// commons' points are unknown for want of an account session, or when
+    /// the NEAR AI balance would offer one: signed out, expired, a renewal
+    /// that needs a NEAR AI sign-in, or a sign-in that failed. A read that
+    /// failed while signed in, any other unknown, and a known balance ask
+    /// for nothing.
+    func test_theAccountHeadingAsksForASignInOnlyWhenOneIsMissing() throws {
+        let needs = HomeFormat.accountNeedsSignIn
+        XCTAssertTrue(needs(try creditSummary(reason: "account-session-required"), "known", nil, false))
+        XCTAssertFalse(needs(try creditSummary(reason: nil), "known", nil, false))
+        XCTAssertFalse(needs(try creditSummary(reason: "something-else"), "known", nil, false))
+        XCTAssertFalse(needs(
+            try creditSummary(reason: "account-session-required", pointsState: "known"), "known", nil, false))
+        XCTAssertFalse(needs(nil, "known", nil, false))
+        for state in ["no_session", "session_expired"] {
+            XCTAssertTrue(needs(nil, state, nil, false), state)
+        }
+        XCTAssertTrue(needs(nil, "known", "near_ai_sign_in_required", false))
+        XCTAssertTrue(needs(nil, "known", nil, true), "a failed sign-in is offered again")
+        XCTAssertFalse(needs(nil, "unavailable", nil, false), "a failed read is not fixed by signing in")
+        XCTAssertFalse(needs(nil, "", nil, false))
+    }
+
+    /// The heading's Sign in signs in to what is missing (#1888 review):
+    /// the account session, by the account's own path, when the Credit
+    /// figures wait on it; NEAR AI otherwise. A non-NEAR AI account whose
+    /// session lapsed is never sent to NEAR AI's sign-in, which would not
+    /// bring that session back.
+    func test_theAccountHeadingSignsInToWhatIsMissing() throws {
+        let route = HomeFormat.accountSignInRoute
+        XCTAssertEqual(route(try creditSummary(reason: "account-session-required")), .account)
+        XCTAssertEqual(route(try creditSummary(reason: nil)), .nearAi)
+        XCTAssertEqual(route(nil), .nearAi)
+        let home = try String(
+            contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent("Views/Monitor/HomeViews.swift"), encoding: .utf8)
+        XCTAssertTrue(home.contains("case .account: Task { await model.signInToAccount() }"))
+        XCTAssertTrue(home.contains("busy: model.credentialBusy || model.accountSigningIn"))
+    }
+
+    /// The heading's words: the core's "No data", a dash, then the managed
+    /// copy's "Sign in" as a link that begins the same NEAR AI sign-in as
+    /// the Private AI section's button (the browser lists the logins,
+    /// #1835); the heading draws it just after its title.
+    func test_theAccountHeadingSaysNoDataAndLinksTheSignIn() throws {
+        XCTAssertEqual(try XCTUnwrap(MonitorWords.table).homeHistory.accountNoData, "No data")
+        let home = try Self.flat("Views/Monitor/HomeViews.swift")
+        XCTAssertTrue(home.contains("HomeSection(words?.sectionAccount, accessory: accountSignIn) {"))
+        XCTAssertTrue(home.contains("guard let noData = HomeFormat.cardHeading(words?.accountNoData), "
+            + "let signIn = HomeFormat.cardHeading(model.managedText(\"sign_in_near_ai\")),"))
+        XCTAssertTrue(home.contains("NearAiSignIn.begin(model, openURL: openURL)"))
+        XCTAssertFalse(home.contains("NearAiSignInChoice"), "no login menu on Home (#1835)")
+        XCTAssertTrue(home.contains("style: GlassButtonStyle(.link), start: start)"))
+        XCTAssertTrue(home.contains("HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s5) { "
+            + "Text(title) .glassType(Self.titleType) .foregroundStyle(GlassColor.textPrimary) "
+            + ".accessibilityAddTraits(.isHeader) if let accessory { accessory } }"))
+        // Only the Account section has one.
+        XCTAssertEqual(home.components(separatedBy: "accessory: accountSignIn").count - 1, 1)
     }
 
     /// The tile reads the line from the core's payout-link export, not a
@@ -229,7 +271,10 @@ final class HomeViewTests: XCTestCase {
     func test_creditSignInLineIsThePayoutLinkConstant() throws {
         XCTAssertEqual(HomeFormat.creditSignInLine, "Sign in again")
         let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("detail: signIn, systemImage: HomeStatIcons.credit"))
+        // The tile no longer draws it (owner, 2026-11-02), and no string of
+        // this shell's stands in for it.
+        XCTAssertFalse(home.contains("detail: signIn"))
+        XCTAssertFalse(home.contains("creditSignIn("))
         XCTAssertFalse(home.contains("\"Sign in again\""))
     }
 }

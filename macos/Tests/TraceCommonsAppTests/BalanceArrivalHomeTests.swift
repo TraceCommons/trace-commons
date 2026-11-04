@@ -10,7 +10,7 @@ import XCTest
 /// is synthetic.
 @MainActor
 final class BalanceArrivalHomeTests: XCTestCase {
-    private func tile(_ json: String) throws -> (value: String, beside: String?, detail: String?, detailInk: GlassRGBA?) {
+    private func tile(_ json: String) throws -> (value: String, detail: String?, detailInk: GlassRGBA?) {
         let model = AppModel()
         let copy = try XCTUnwrap(model.privateInferenceCopy)
         return HomeFormat.balance(BalanceStatus.parse(fromJSON: json), copy: copy, calls: model.balanceCalls)

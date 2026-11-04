@@ -59,7 +59,7 @@ export function PrivateAiConnectionPanel({
       <p>
         The production flow keeps privacy-filter credentials, inference
         credentials, and retained sessions separate. This surface reports their
-        presence and daemon runtime state without exposing secrets.
+        presence and runtime state without exposing secrets.
       </p>
       <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
         Turning this on starts a local listener for configured tools.

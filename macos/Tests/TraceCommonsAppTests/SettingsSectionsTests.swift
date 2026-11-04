@@ -6,32 +6,60 @@ import XCTest
 /// navigation") chooses which part of the existing settings is drawn.
 @MainActor
 final class SettingsSectionsTests: XCTestCase {
-    /// The spec's sections, in its order, plus Compute. Every one is
-    /// drawn in the body; Notifications and Updates follow Startup.
-    func test_theSectionsAreTheSpecsInItsOrder() {
+    /// The Settings IA review's order (owner, 2026-11-04, D1-D20): Account,
+    /// Capture, Sharing, Private AI, App, Advanced. Every section is drawn in
+    /// the body; Watched folders follows Watching and Notifications follows
+    /// Startup.
+    func test_theSectionsAreTheReviewsGroupedOrder() {
         XCTAssertEqual(SettingsSection.allCases, [
-            .general, .connection, .startup, .notifications, .updates, .watching, .consent, .publicProfile,
-            .watchedFolders, .tools, .privateAI, .referrals, .witness, .projects, .changes, .compute,
+            .account, .payouts, .referrals,
+            .watching, .watchedFolders, .tools, .insights,
+            .projects, .consent, .publicProfile, .changes,
+            .privateAI,
+            .general, .startup, .notifications, .updates,
+            .witness, .compute,
         ])
         XCTAssertEqual(Set(SettingsSection.allCases.map(\.symbol)).count, SettingsSection.allCases.count)
+        let groups: [SettingsSection.Group] = [.account, .capture, .sharing, .privateAI, .app, .advanced]
+        XCTAssertEqual(SettingsSection.allCases.map(\.group).reduce(into: [SettingsSection.Group]()) {
+            if $0.last != $1 { $0.append($1) }
+        }, groups, "a group is split")
     }
 
-    /// The list is #1146's twelve (`sections.ts`), in his order and his
-    /// words, from the core: Notifications and Updates sit under "Startup &
-    /// notifications", and nothing truncates to "Private AI on this com…".
-    func test_theListIsRonsTwelveInTheCoresWords() throws {
+    /// The list names sixteen rows in the core's words, with a hairline
+    /// before the first row of every group but the first (D17: no group
+    /// headings). Watched folders sits under Watching (D12) and Notifications
+    /// under "Startup & notifications"; Updates has its own row (D19).
+    func test_theListIsGroupedInTheCoresWords() throws {
         XCTAssertEqual(SettingsSection.listed, [
-            .general, .connection, .startup, .watching, .consent, .publicProfile, .watchedFolders, .tools,
-            .privateAI, .referrals, .witness, .projects, .changes, .compute,
+            .account, .payouts, .referrals, .watching, .tools, .insights, .projects, .consent, .publicProfile,
+            .changes, .privateAI, .general, .startup, .updates, .witness, .compute,
         ])
         let nav = try XCTUnwrap(MonitorWords.table?.settingsNav)
         XCTAssertEqual(SettingsSection.listed.map { $0.listRow(nav).text }, [
-            "General", "Connection", "Startup & notifications", "Watching", "Data uses", "Public profile",
-            "Watched folders", "Tools", "Private AI", "Referrals", "Redaction witness", "Projects",
-            "Change log", "Compute",
+            "Account", "Payouts", "Referrals", "Watching", "Tools", "Insights", "Projects", "Data uses",
+            "Public profile", "Change log", "Private AI", "General", "Startup & notifications", "Updates",
+            "Redaction witness", "Compute",
         ])
         XCTAssertNil(SettingsSection.notifications.navName(nav))
-        XCTAssertNil(SettingsSection.updates.navName(nav))
+        XCTAssertNil(SettingsSection.watchedFolders.navName(nav))
+        let rows = SettingsSection.listed
+        XCTAssertEqual(rows.filter { SettingsSection.startsGroup($0, in: rows) },
+                       [.watching, .projects, .privateAI, .general, .witness])
+        // Payouts is listed only while something in it applies (D2); the
+        // hairlines follow the rows actually drawn.
+        let withoutPayouts = SettingsModal.rows(payoutsShown: false)
+        XCTAssertFalse(withoutPayouts.contains(.payouts))
+        XCTAssertEqual(SettingsModal.rows(payoutsShown: true), rows)
+        XCTAssertFalse(SettingsSection.startsGroup(.referrals, in: withoutPayouts))
+    }
+
+    /// Before first run only the sections that write nothing first run asks
+    /// are open (R-43). Account and Private AI are open; Payouts and
+    /// Referrals wait, as there is no account to pay yet.
+    func test_onlyTheSectionsFirstRunDoesNotOwnAreOpenBeforeOnboarding() {
+        XCTAssertEqual(Set(SettingsSection.allCases.filter(\.availableBeforeOnboarding)),
+                       [.account, .privateAI, .general, .startup, .notifications, .updates, .compute])
     }
 
     /// A section whose copy has not loaded is a disabled placeholder row,
@@ -40,9 +68,17 @@ final class SettingsSectionsTests: XCTestCase {
         XCTAssertEqual(SettingsSection.ListRow.row(title: nil), .init(text: "—", enabled: false))
         XCTAssertEqual(SettingsSection.ListRow.row(title: ""), .init(text: "—", enabled: false))
         XCTAssertEqual(SettingsSection.ListRow.row(title: "Private AI"), .init(text: "Private AI", enabled: true))
-        for section in SettingsSection.listed {
+        for section in SettingsSection.listed where section != .general {
             XCTAssertEqual(section.listRow(nil), .init(text: "—", enabled: false), "\(section)")
         }
+    }
+
+    /// General's name is this app's own word and its content never waits on
+    /// the core, so its row is never the placeholder: with the core's table
+    /// missing it still reads General and still opens the section.
+    func test_generalsRowNeverWaitsOnTheCoresTable() {
+        XCTAssertEqual(SettingsSection.general.navName(nil), SettingsWords.general)
+        XCTAssertEqual(SettingsSection.general.listRow(nil), .init(text: SettingsWords.general, enabled: true))
     }
 
     /// Every section but Compute (its own view) draws its own glass view
@@ -64,27 +100,88 @@ final class SettingsSectionsTests: XCTestCase {
         XCTAssertEqual(drawn.count, Set(drawn).count, "a view is drawn by two sections: \(drawn)")
     }
 
-    /// Connection carries the account contribution card, and the card's
-    /// heading and controls are the core's words, not this shell's.
-    func test_connectionDrawsTheAccountContributionCardInCoreWords() throws {
-        let connection = try SettingsParityTests.text("Views/Settings/ConnectionSection.swift")
-        XCTAssertTrue(connection.contains("ContributionAccountCard()"), "Connection no longer draws the card")
+    /// Account (was Connection, D1) carries the account contribution card in
+    /// the core's words, the connected line with the account's login (D6),
+    /// the NEAR AI login without Forget (D3, D8), and Sign out over Set up
+    /// again at its foot.
+    func test_accountDrawsItsCardsInCoreWords() throws {
+        let account = try SettingsParityTests.text("Views/Settings/AccountSection.swift")
+        XCTAssertTrue(account.contains("ContributionAccountCard()"), "Account no longer draws the card")
         for field in [
             "accountContributionHeading", "accountContributionRefreshAction",
             "accountContributionInviteCode", "accountContributionRedeemAction",
         ] {
-            XCTAssertTrue(connection.contains("copy.\(field)"), "the card does not read \(field)")
+            XCTAssertTrue(account.contains("copy.\(field)"), "the card does not read \(field)")
         }
-        // #1146's head: Connected or Not connected as the h2 and Ready or
-        // Local only as the chip, neither before the core has answered.
+        // #1146's head: the connected line as the h2 and Ready or Local only
+        // as the chip, neither before the core has answered.
         for needle in ["guard model.statusRead == .answered else { return nil }",
-                       "model.status.loggedIn ? SettingsLegacyWords.connected : SettingsLegacyWords.notConnected",
                        "GlassChip(glass: model.status.loggedIn ? SettingsLegacyWords.connectionReady",
-                       ": SettingsLegacyWords.connectionLocalOnly,"] {
-            XCTAssertTrue(connection.contains(needle), "ConnectionSection.swift lacks \(needle)")
+                       ": SettingsLegacyWords.connectionLocalOnly,",
+                       "AccountAttentionCard()", "AccountLoginMismatchBlock()", "AccountLoginChangeButton()",
+                       "AccountDevicesView()", "LegacyMigrationSettingsCard()", "AccountLeaveCard()",
+                       "SetUpAgainControl()"] {
+            XCTAssertTrue(account.contains(needle), "AccountSection.swift lacks \(needle)")
         }
+        // Sign out comes before Set up again, its body above its button.
+        let body = try XCTUnwrap(account.range(of: "Text(copy.signOutBody)"))
+        let button = try XCTUnwrap(account.range(of: "Button(copy.signOut)"))
+        let setUpAgain = try XCTUnwrap(account.range(of: "SetUpAgainControl()\n"))
+        XCTAssertLessThan(body.lowerBound, button.lowerBound)
+        XCTAssertLessThan(button.lowerBound, setUpAgain.lowerBound)
         XCTAssertNotEqual(SettingsLegacyWords.connectionReady, SettingsLegacyWords.connectionLocalOnly)
         XCTAssertFalse(SettingsLegacyWords.connectionReady.isEmpty)
+    }
+
+    /// "Connected with {provider}" only for an enrolled account whose login
+    /// is known and which needs no attention (D6, F1); otherwise the plain
+    /// words.
+    func test_theConnectedLineNamesTheLoginOnlyWhenItIsTheAccountsKnownLogin() throws {
+        let copy = try XCTUnwrap(AccountLoginChangeModel.shared.copy)
+        XCTAssertEqual(AccountSection.connectedTitle(
+            loggedIn: true, accountLogin: "github", needsAttention: false, copy: copy), "Connected with GitHub")
+        XCTAssertEqual(AccountSection.connectedTitle(
+            loggedIn: true, accountLogin: "github", needsAttention: true, copy: copy), SettingsLegacyWords.connected)
+        XCTAssertEqual(AccountSection.connectedTitle(
+            loggedIn: true, accountLogin: nil, needsAttention: false, copy: copy), SettingsLegacyWords.connected)
+        XCTAssertEqual(AccountSection.connectedTitle(
+            loggedIn: true, accountLogin: "myspace", needsAttention: false, copy: copy), SettingsLegacyWords.connected)
+        XCTAssertEqual(AccountSection.connectedTitle(
+            loggedIn: false, accountLogin: "github", needsAttention: false, copy: copy), SettingsLegacyWords.notConnected)
+    }
+
+    /// Forget is drawn nowhere (D3); Private AI's card offers only the way
+    /// in (D8); Account keeps the move from the keychain.
+    func test_forgetIsGoneAndPrivateAIKeepsOnlyTheWayIn() {
+        for placement in [CredentialSection.Placement.account, .signInShortcut] {
+            XCTAssertFalse(CredentialSection.draws(.forget, in: placement))
+            XCTAssertFalse(CredentialSection.draws(.none, in: placement))
+            XCTAssertTrue(CredentialSection.draws(.obtain, in: placement))
+            XCTAssertTrue(CredentialSection.draws(.cancel, in: placement))
+        }
+        XCTAssertTrue(CredentialSection.draws(.migrate, in: .account))
+        XCTAssertFalse(CredentialSection.draws(.migrate, in: .signInShortcut))
+        // The shortcut steps aside while a login is held, unless the balance
+        // asks for a sign-in; it stays before a login and while unread.
+        XCTAssertFalse(CredentialSection.shows(action: .forget, balanceAction: .none, in: .signInShortcut))
+        XCTAssertFalse(CredentialSection.shows(action: .migrate, balanceAction: .none, in: .signInShortcut))
+        XCTAssertTrue(CredentialSection.shows(action: .forget, balanceAction: .obtain, in: .signInShortcut))
+        XCTAssertTrue(CredentialSection.shows(action: .obtain, balanceAction: .none, in: .signInShortcut))
+        XCTAssertTrue(CredentialSection.shows(action: .none, balanceAction: .none, in: .signInShortcut))
+        XCTAssertTrue(CredentialSection.shows(action: .forget, balanceAction: .none, in: .account))
+    }
+
+    /// Payouts holds the payout link and the payouts-need-a-login line, and
+    /// is present only while one of them is (D2).
+    func test_payoutsIsPresentOnlyWhileSomethingInItApplies() throws {
+        XCTAssertFalse(PayoutsSection.present(linkVisible: false, loginLine: false))
+        XCTAssertTrue(PayoutsSection.present(linkVisible: true, loginLine: false))
+        XCTAssertTrue(PayoutsSection.present(linkVisible: false, loginLine: true))
+        let privateAI = try SettingsParityTests.text("Views/Settings/PrivateAISection.swift")
+        XCTAssertFalse(privateAI.contains("PayoutLinkView("), "Private AI still draws the payout link")
+        XCTAssertFalse(privateAI.contains("PayoutsNeedLoginLine()"), "Private AI still draws the payouts line")
+        XCTAssertTrue(privateAI.contains("AccountLoginChangeButton(offersMismatchChange: true, carded: true)"),
+                      "Private AI lost #1912's Use a different account (D10)")
     }
 
     /// Startup no longer hides Notifications and Updates behind its row, and
@@ -95,6 +192,8 @@ final class SettingsSectionsTests: XCTestCase {
         XCTAssertEqual(Self.view(drawnFor: .notifications, in: content), "NotificationsSection()")
         XCTAssertEqual(Self.view(drawnFor: .updates, in: content), "UpdatesSection()")
         XCTAssertEqual(Self.view(drawnFor: .privateAI, in: content), "PrivateAISection()")
+        XCTAssertEqual(Self.view(drawnFor: .insights, in: content), "InsightsSection()")
+        XCTAssertEqual(Self.view(drawnFor: .tools, in: content), "ToolsSection()")
 
         let startup = try SettingsParityTests.text("Views/Settings/StartupSection.swift")
         let startupBody = try XCTUnwrap(startup.components(separatedBy: "struct NotificationsSection").first)
@@ -112,7 +211,10 @@ final class SettingsSectionsTests: XCTestCase {
     func test_eachSectionIsHeadedByTheListsTitleSource() throws {
         let headings: [SettingsSection: (file: String, source: String)] = [
             .general: ("GeneralSection", "GlassEyebrowCard(SettingsWords.appearance)"),
-            .connection: ("ConnectionSection", "GlassEyebrowCard(SettingsWords.connection, title: connectionTitle, accessory: {"),
+            .account: ("AccountSection", "GlassEyebrowCard(Self.eyebrow, title: connectionTitle, accessory: {"),
+            // Payouts' cards head themselves (the payout link's title).
+            .payouts: ("PayoutsSection", "PayoutLinkView(onVisibility:"),
+            .insights: ("InsightsSettingsCard", "GlassEyebrowCard(text(\"title\"))"),
             .startup: ("StartupSection",
                        "GlassEyebrowCard(SettingsLegacyWords.desktopEyebrow, title: SettingsLegacyWords.desktopTitle, accessory: {"),
             .notifications: ("StartupSection", "if let heading = Notifier.copy?.notificationHeading"),

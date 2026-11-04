@@ -20,8 +20,6 @@ mod model_training_consent_tests;
 mod native_session_sliding_expiry_tests;
 #[path = "tests/near_ai_provisioning_tests.rs"]
 mod near_ai_provisioning_tests;
-#[path = "tests/passkey_removal_tests.rs"]
-mod passkey_removal_tests;
 #[path = "tests/payout_link_tests.rs"]
 mod payout_link_tests;
 #[path = "tests/payout_rails_tests.rs"]
@@ -34,6 +32,8 @@ mod public_run_tests;
 mod referral_admin_tests;
 #[path = "tests/referral_tests.rs"]
 mod referral_tests;
+#[path = "tests/removed_account_routes_tests.rs"]
+mod removed_account_routes_tests;
 #[path = "tests/reward_participant_tests.rs"]
 mod reward_participant_tests;
 
@@ -12426,6 +12426,47 @@ fn the_main_gate_configuration_is_read_only_for_an_assembled_pipeline() {
     unsafe { std::env::remove_var(TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS) };
 }
 
+/// Owner decision D1 (2026-11-03): the credit rule is part of `main`'s gate
+/// configuration, read only for an assembled pipeline. Unset or empty is
+/// `flat`; `graded_perplexity_v1` selects the graded rule; anything else
+/// refuses the start with a safe label naming the variable.
+#[test]
+fn the_credit_rule_is_read_with_the_main_gate_configuration() {
+    use trace_commons_server::versioned_pipeline_compat::{
+        CompatibilityCreditRule, NOVELTY_UTILITY_CREDIT_RULE_ENV,
+    };
+    // SAFETY: env mutation in tests is OK here -- only startup reads this
+    // variable, and no other test sets it.
+    unsafe { std::env::remove_var(NOVELTY_UTILITY_CREDIT_RULE_ENV) };
+    assert_eq!(
+        pipeline_main_gate_config_from_env(true, 0.0)
+            .unwrap()
+            .credit_rule,
+        CompatibilityCreditRule::Flat
+    );
+    unsafe { std::env::set_var(NOVELTY_UTILITY_CREDIT_RULE_ENV, "graded_perplexity_v1") };
+    assert_eq!(
+        pipeline_main_gate_config_from_env(true, 1.0)
+            .unwrap()
+            .credit_rule,
+        CompatibilityCreditRule::GradedPerplexityV1
+    );
+    assert_eq!(
+        pipeline_main_gate_config_from_env(false, 1.0)
+            .unwrap()
+            .credit_rule,
+        CompatibilityCreditRule::Flat,
+        "no pipeline: the rule is not read"
+    );
+    unsafe { std::env::set_var(NOVELTY_UTILITY_CREDIT_RULE_ENV, "graded") };
+    let error = pipeline_main_gate_config_from_env(true, 1.0).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "novelty_utility_credit_rule_invalid (TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_RULE)"
+    );
+    unsafe { std::env::remove_var(NOVELTY_UTILITY_CREDIT_RULE_ENV) };
+}
+
 #[test]
 fn pipeline_receipt_tenants_require_an_injected_runtime() {
     let gates = TraceTenantRolloutGates::for_feature(
@@ -13549,6 +13590,13 @@ async fn pipeline_runtime_compatibility_holds_mains_gate_configuration() {
         ),
         (
             MainGateConfig {
+                credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::GradedPerplexityV1,
+                ..TEST_MAIN_GATE
+            },
+            "a credit rule main does not run (owner decision D1, 2026-11-03)",
+        ),
+        (
+            MainGateConfig {
                 novelty_floor_micros: Some(400_000),
                 ..TEST_MAIN_GATE
             },
@@ -14424,6 +14472,7 @@ const TEST_MAIN_GATE: trace_commons_server::versioned_pipeline_compat::MainGateC
         chunk_cap: 16,
         chunk_min_tokens: 64,
         novelty_utility_microcredits: 0,
+        credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
     };
 
 /// The `main` gate configuration `config` holds, for a test assembler that
@@ -14431,18 +14480,10 @@ const TEST_MAIN_GATE: trace_commons_server::versioned_pipeline_compat::MainGateC
 fn main_gate_of(
     config: &trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig,
 ) -> trace_commons_server::versioned_pipeline_compat::MainGateConfig {
-    trace_commons_server::versioned_pipeline_compat::MainGateConfig {
-        perplexity_floor_micros: Some(config.perplexity_floor_micros),
-        tail_fraction_floor_micros: Some(config.tail_fraction_floor_micros),
-        novelty_floor_micros: Some(config.novelty_floor_micros),
-        embed_insert_novelty_micros: config.embed_insert_novelty_micros,
-        top_k: config.top_k,
-        chunk_target_tokens: config.chunk_target_tokens,
-        chunk_max_tokens: config.chunk_max_tokens,
-        chunk_cap: config.chunk_cap,
-        chunk_min_tokens: config.chunk_min_tokens,
-        novelty_utility_microcredits: config.novelty_utility_microcredits,
-    }
+    // The configuration's own inverse, every field included: a hand-copied
+    // field list here dropped the credit rule once, and the production
+    // corpus harness then refused a graded package (stage 2, 2026-11-03).
+    config.main_gate()
 }
 
 /// `main`'s NEAR payout controls the pipeline tests assemble with: the
@@ -61915,14 +61956,29 @@ fn legacy_scoring_award_event(
 
 /// A `NoveltyUtility` event as a compatibility pipeline run writes it
 /// (`settle_internal_credit`): the pipeline's ledger source key as its
-/// `external_ref`. The pipeline never batches that leg (Ruling S10).
+/// `external_ref`. Under the flat rule the pipeline never batches that leg
+/// (Ruling S10).
 fn pipeline_scoring_award_event(
     submission_id: Uuid,
     credit_points_delta: f32,
 ) -> TraceCommonsCreditLedgerRecord {
+    pipeline_scoring_award_event_of(
+        submission_id,
+        credit_points_delta,
+        trace_commons_server::versioned_pipeline_bundle::PipelineTraceCreditEvent::NoveltyUtility,
+    )
+}
+
+/// As [`pipeline_scoring_award_event`], for the leg `event` writes: under
+/// the graded rule (`SettledNoveltyUtility`) the pipeline batches it itself.
+fn pipeline_scoring_award_event_of(
+    submission_id: Uuid,
+    credit_points_delta: f32,
+    event: trace_commons_server::versioned_pipeline_bundle::PipelineTraceCreditEvent,
+) -> TraceCommonsCreditLedgerRecord {
     TraceCommonsCreditLedgerRecord {
         reason: Some(
-            trace_commons_server::versioned_pipeline_credit::pipeline_novelty_utility_reason(),
+            trace_commons_server::versioned_pipeline_credit::pipeline_novelty_utility_reason(event),
         ),
         external_ref: Some(
             trace_commons_server::versioned_pipeline_credit::pipeline_ledger_source_key(
@@ -61950,6 +62006,22 @@ fn only_the_legacy_gate_scoring_award_counts_toward_legacy_settlement() {
     // `main` paying it would pay what the pipeline chose not to.
     assert!(!trace_credit_event_counts_toward_settlement(
         &pipeline_scoring_award_event(submission_id, 1.0),
+        settle_from
+    ));
+    // Owner decision D2 (2026-11-03): a graded-rule leg, which the pipeline
+    // batches and a payout rail pays, is never `main`'s to settle either, so
+    // it is paid once.
+    let graded = pipeline_scoring_award_event_of(
+        submission_id,
+        1.0,
+        trace_commons_server::versioned_pipeline_bundle::PipelineTraceCreditEvent::SettledNoveltyUtility,
+    );
+    assert_eq!(
+        graded.reason.as_deref(),
+        Some("novelty_utility:compatibility_graded_perplexity_v1")
+    );
+    assert!(!trace_credit_event_counts_toward_settlement(
+        &graded,
         settle_from
     ));
     // Fail closed on a scoring award with no gate provenance.
@@ -85272,7 +85344,7 @@ async fn near_login_rejects_malformed_public_key_shape() {
 // is applied at the top of NEAR enroll start/finish, NEAR identity remove and
 // payout designation. A STRONG session (`client_kind='near'`) may always change
 // authenticators; a WEAK session (a device-link `'web'` cookie, a native token,
-// or a pre-removal `'passkey'` session) may add/remove only while the account
+// or a pre-V144 `'passkey'` session) may add/remove only while the account
 // holds ZERO strong authenticators (the bootstrapping carve-out). Rename/list are
 // NOT gated (label-only) and are not exercised here.
 // ============================================================================
@@ -99801,6 +99873,10 @@ mod migrated_pg_fixture;
 #[path = "nearai_ceremony_pg_tests.rs"]
 mod nearai_ceremony_pg_tests;
 
+/// F10, changing an account's NEAR AI login, against PostgreSQL. Selected in
+/// CI by `near_ai_rebind_pg_tests -- --ignored`, like the two suites above.
+#[path = "near_ai_rebind_pg_tests.rs"]
+mod near_ai_rebind_pg_tests;
 /// Full wallet v2 completion through the router, real signatures and PostgreSQL.
 /// CI selects this ignored module explicitly with a fresh database.
 #[path = "wallet_v2_pg_tests.rs"]
@@ -103294,6 +103370,242 @@ mod first_run_estimate_tests {
         assert_eq!(
             body,
             serde_json::json!({"usd_micros_per_accepted_trace": {"min": 120_000, "max": 340_000}})
+        );
+    }
+}
+
+#[test]
+fn read_last_nonempty_line_matches_a_whole_file_scan() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("audit.jsonl");
+    let long_line = format!("{{\"pad\":\"{}\"}}", "x".repeat(50_000));
+    let cases: Vec<(String, Option<&str>)> = vec![
+        (String::new(), None),
+        ("\n\n  \n".to_string(), None),
+        ("only".to_string(), Some("only")),
+        ("first\nsecond\n".to_string(), Some("second")),
+        ("first\r\nsecond\r\n\r\n".to_string(), Some("second")),
+        ("first\n  second  \n \n\t\n".to_string(), Some("second")),
+        (format!("first\n{long_line}\n\n"), Some(long_line.as_str())),
+        (format!("{long_line}\nlast\n"), Some("last")),
+        (long_line.clone(), Some(long_line.as_str())),
+        (format!("first\n{}\n", " ".repeat(20_000)), Some("first")),
+        ("a\n\u{e9}t\u{e9}\n".to_string(), Some("\u{e9}t\u{e9}")),
+    ];
+    for (body, expected) in cases {
+        std::fs::write(&path, &body).expect("write");
+        let scanned = body
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty());
+        assert_eq!(scanned, expected, "whole-file scan disagrees with the case");
+        assert_eq!(
+            read_last_nonempty_line(&path).expect("read").as_deref(),
+            expected,
+            "tail read of a {}-byte body",
+            body.len()
+        );
+    }
+}
+
+#[test]
+fn internal_error_answers_a_pool_timeout_with_503_database_busy() {
+    let timeout = || deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait);
+    let busy: Vec<(&str, (StatusCode, Json<ApiError>))> = vec![
+        ("raw pool error", internal_error(timeout())),
+        (
+            "database error",
+            internal_error(DatabaseError::PoolRuntime(timeout())),
+        ),
+        (
+            "anyhow with context",
+            internal_error(
+                anyhow::Error::new(DatabaseError::PoolRuntime(timeout()))
+                    .context("failed to read the routing row"),
+            ),
+        ),
+        (
+            "create timeout",
+            internal_error(deadpool_postgres::PoolError::Timeout(
+                deadpool_postgres::TimeoutType::Create,
+            )),
+        ),
+        (
+            "closed pool",
+            internal_error(DatabaseError::PoolRuntime(
+                deadpool_postgres::PoolError::Closed,
+            )),
+        ),
+    ];
+    for (case, (status, Json(body))) in busy {
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{case}");
+        assert_eq!(body.error, DATABASE_BUSY_LABEL, "{case}");
+        assert!(
+            body.retry_after_seconds.is_some_and(|seconds| seconds > 0),
+            "{case} carries a retry hint"
+        );
+    }
+
+    let failed: Vec<(&str, (StatusCode, Json<ApiError>))> = vec![
+        (
+            "unconfigured pool",
+            internal_error(DatabaseError::Pool("gate_driver_pool_unconfigured".into())),
+        ),
+        (
+            "query failure",
+            internal_error(DatabaseError::Query("boom".into())),
+        ),
+        ("plain text", internal_error("boom")),
+        ("anyhow", internal_error(anyhow::anyhow!("boom"))),
+    ];
+    for (case, (status, Json(body))) in failed {
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{case}");
+        assert_eq!(body.retry_after_seconds, None, "{case}");
+    }
+}
+
+/// A content read-back that failed on a busy pool answers 503 without
+/// waiting for its failed-read audit: the audit is only spawned. On this
+/// single-threaded runtime the spawned task cannot run until the test
+/// yields, so finding no audit row right after the call shows the answer
+/// did not wait for it. The audit still lands once the task runs, and is
+/// skipped (with the read still refused) when the background budget is
+/// full.
+#[tokio::test]
+async fn a_busy_pool_content_read_answers_before_its_audit_runs() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let audit_tenant = TenantAuth {
+        tenant_id: "tenant-a".to_string(),
+        role: TokenRole::Contributor,
+        principal_ref: "account-actor".to_string(),
+        legacy_principal_ref: None,
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    };
+    let read_failure_rows = |submission_id: Uuid| {
+        read_all_audit_events(temp.path(), "tenant-a")
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|event| {
+                event.kind == "trace_content_read"
+                    && event.submission_id == submission_id
+                    && event
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("surface=account_trace_content"))
+            })
+            .count()
+    };
+    let error = anyhow::Error::new(DatabaseError::PoolRuntime(
+        deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait),
+    ))
+    .context("failed to read the envelope object ref");
+    assert!(
+        database_busy_response(&error).is_some(),
+        "the read-back path answers this error with 503"
+    );
+
+    // The background budget is full: the audit is skipped, nothing waits.
+    let held = Arc::clone(&ACCOUNT_CONTENT_BACKGROUND_AUDITS)
+        .try_acquire_many_owned(ACCOUNT_CONTENT_BACKGROUND_AUDIT_LIMIT as u32)
+        .expect("no other test holds the background audit budget");
+    let skipped = Uuid::new_v4();
+    assert!(
+        spawn_account_content_read_failure_audit(
+            Arc::clone(&state),
+            audit_tenant.clone(),
+            skipped,
+        )
+        .is_none()
+    );
+    drop(held);
+
+    let submission_id = Uuid::new_v4();
+    let audit = spawn_account_content_read_failure_audit(
+        Arc::clone(&state),
+        audit_tenant.clone(),
+        submission_id,
+    )
+    .expect("the budget has room");
+    assert_eq!(
+        read_failure_rows(submission_id),
+        0,
+        "the caller has its answer before the audit runs"
+    );
+    audit.await.expect("audit task");
+    assert_eq!(
+        read_failure_rows(submission_id),
+        1,
+        "the failed read is still audited"
+    );
+    assert_eq!(
+        read_failure_rows(skipped),
+        0,
+        "a skipped audit writes nothing"
+    );
+    assert_eq!(
+        ACCOUNT_CONTENT_BACKGROUND_AUDITS.available_permits(),
+        ACCOUNT_CONTENT_BACKGROUND_AUDIT_LIMIT,
+        "a finished audit gives its slot back"
+    );
+}
+
+#[test]
+fn a_database_pool_error_never_uses_up_a_scoring_or_pii_backstop_attempt() {
+    let pool_errors = [
+        anyhow::Error::new(DatabaseError::PoolRuntime(
+            deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait),
+        ))
+        .context("failed to load the gate decision"),
+        anyhow::Error::new(deadpool_postgres::PoolError::Closed),
+        anyhow::Error::new(DatabaseError::PoolRuntime(
+            deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Create),
+        )),
+    ];
+    for error in &pool_errors {
+        assert!(is_transient_gate_scoring_failure(error), "{error:#}");
+        assert!(is_transient_pii_backstop_failure(error), "{error:#}");
+    }
+    let permanent = [
+        anyhow::anyhow!("envelope failed to decode"),
+        anyhow::Error::new(DatabaseError::Query("constraint".into())),
+        anyhow::Error::new(DatabaseError::Pool("pool unconfigured".into())),
+    ];
+    for error in &permanent {
+        assert!(!is_transient_gate_scoring_failure(error), "{error:#}");
+        assert!(!is_transient_pii_backstop_failure(error), "{error:#}");
+    }
+}
+
+#[test]
+fn read_last_nonempty_line_skips_unicode_blank_lines() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("audit.jsonl");
+    for body in [
+        "{\"event\":1}\n\u{a0}\n",
+        "{\"event\":1}\n\u{2028}\n\u{85}\n",
+        "{\"event\":1}\n\u{b}\n",
+    ] {
+        std::fs::write(&path, body).expect("write");
+        assert_eq!(
+            read_last_nonempty_line(&path).expect("read").as_deref(),
+            Some("{\"event\":1}"),
+            "{body:?}"
         );
     }
 }

@@ -372,6 +372,7 @@ mod tests {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: Some(false),
             witness_origin: None,
+            account_identity: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.invalid".to_string(),

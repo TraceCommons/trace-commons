@@ -196,6 +196,10 @@ pub enum LinkDbOutcome {
         record: Box<LegacyInviteLinkRecord>,
         server_signature: String,
         trust_version: i64,
+        /// The account's admission authority after the link: `invited` for
+        /// an invite link, or the account's current one (`none` without a
+        /// trust row) for an instance link, which confers none (V146).
+        authority: String,
     },
     Refused(LinkRefusal),
 }
@@ -369,10 +373,11 @@ pub async fn link_legacy_invite(
             record,
             server_signature,
             trust_version,
+            authority,
         } => Ok(LegacyInviteLinkResponse {
             record: *record,
             server_signature,
-            authority: "invited".to_string(),
+            authority,
             trust_version,
         }),
         LinkDbOutcome::Refused(refusal) => Err(refusal),

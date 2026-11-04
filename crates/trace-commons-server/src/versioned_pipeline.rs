@@ -186,6 +186,12 @@ pub const PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL: &str =
 /// (`ScoreInput::operator_review`). The run fails closed under this label
 /// rather than going back to the review queue, so a hold cannot loop.
 pub const PIPELINE_SCORE_HOLD_REPEATED_LABEL: &str = "pipeline_score_hold_repeated";
+/// A compatibility Score's embedder refused the trace's own text (for
+/// example a chunk with no text in it, only whitespace). The same input
+/// fails the same way on every attempt, so the run fails terminally under
+/// this label on its first Score instead of retrying. An embedder outage
+/// stays the transient `embedder_unavailable`.
+pub const PIPELINE_SCORE_INPUT_UNEMBEDDABLE_LABEL: &str = "pipeline_score_input_unembeddable";
 /// Settle refuses to commit when the submission already has a pipeline gate
 /// decision row written by another run (V116 allows one per submission).
 pub const PIPELINE_GATE_DECISION_CONFLICT_LABEL: &str = "pipeline_gate_decision_conflict";
@@ -4321,6 +4327,11 @@ impl PgPipelineStore {
             // `NoveltyUtility` leg, is seeded `disabled`. A seeded leg is
             // marked payout-eligible: Settle writes its batch line under the
             // account's settlement key and hold.
+            //
+            // This seeds the NEP-141 outbox payout only. A graded-rule leg
+            // (`SettledNoveltyUtility`) is batched and paid by the NEAR AI
+            // rail, which reads finalized batches, not this state; it keeps
+            // the NEP-141 outbox off, as every `NoveltyUtility` leg does.
             let paid = instrument_id == InstrumentId::trace_credit().as_str()
                 && trace_credit_event == PipelineTraceCreditEvent::PipelineScore;
             let payout_eligible = payout_rail == "near" && payout_enabled && paid;
@@ -10949,10 +10960,51 @@ impl PipelineService {
                 .await
                 .map_err(|_| anyhow::anyhow!(PIPELINE_TENANT_BUNDLE_UNREADABLE_LABEL))?
                 .ok_or_else(|| anyhow::anyhow!(PIPELINE_TENANT_BUNDLE_UNREADABLE_LABEL))?;
-            self.check_runnable_package(&package, main_gate, require_qualifiable)
+            self.check_tenant_package(&package, main_gate, require_qualifiable)
                 .map_err(|label| anyhow::anyhow!(label))?;
         }
         Ok(())
+    }
+
+    /// The checks of a bundle a tenant already selected, or is being moved
+    /// to by an activation or a rollback: [`Self::check_runnable_package`],
+    /// except that a compatibility package may also hold `main`'s scoring
+    /// configuration with no award at all (delta 0, rule `flat`), where
+    /// `main` now awards more (owner decision D6, 2026-11-03). Such a bundle
+    /// scores exactly as `main` does and pays less, never more, so a tenant
+    /// that selected it keeps running it after the delta or the credit rule
+    /// is raised, until the default-routing loop or an operator moves it.
+    /// The default package and an armed default-routing set never take this
+    /// path: they must hold `main`'s configuration exactly.
+    pub fn check_tenant_package(
+        &self,
+        package: &BundlePackage,
+        main_gate: &crate::versioned_pipeline_compat::MainGateConfig,
+        require_qualifiable: bool,
+    ) -> Result<(), &'static str> {
+        self.check_package(package, main_gate, require_qualifiable, true)
+    }
+
+    /// Whether `tenant_id`'s bundle `bundle_id` is a compatibility package
+    /// that awards nothing under `main`'s scoring configuration (owner
+    /// decision D6): the bundles the default-routing loop moves to the armed
+    /// bundle once the delta or the credit rule is raised. `false` for a
+    /// bundle that matches `main` exactly, of another family, or unreadable.
+    pub async fn bundle_awards_nothing_under(
+        &self,
+        tenant_id: &str,
+        bundle_id: &str,
+        main_gate: &crate::versioned_pipeline_compat::MainGateConfig,
+    ) -> bool {
+        let Ok(Some(package)) = self.store.load_bundle(tenant_id, bundle_id).await else {
+            return false;
+        };
+        crate::versioned_pipeline_bundle::package_compatibility_config(&package).is_some_and(
+            |config| {
+                !config.matches_main_gate(main_gate)
+                    && config.matches_main_gate_without_award(main_gate)
+            },
+        )
     }
 
     /// `check_tenant_bundles`'s checks of one package. The activation route
@@ -10966,6 +11018,16 @@ impl PipelineService {
         main_gate: &crate::versioned_pipeline_compat::MainGateConfig,
         require_qualifiable: bool,
     ) -> Result<(), &'static str> {
+        self.check_package(package, main_gate, require_qualifiable, false)
+    }
+
+    fn check_package(
+        &self,
+        package: &BundlePackage,
+        main_gate: &crate::versioned_pipeline_compat::MainGateConfig,
+        require_qualifiable: bool,
+        allow_without_award: bool,
+    ) -> Result<(), &'static str> {
         let bundle = self.construct(package.clone()).map_err(|label| {
             if label == PIPELINE_DEPENDENCY_MISSING_LABEL {
                 PIPELINE_TENANT_BUNDLE_DEPENDENCY_MISSING_LABEL
@@ -10976,14 +11038,16 @@ impl PipelineService {
         if let Some(config) =
             crate::versioned_pipeline_bundle::package_compatibility_config(package)
         {
-            if !config.matches_main_gate(main_gate) {
+            if !config.matches_main_gate(main_gate)
+                && !(allow_without_award && config.matches_main_gate_without_award(main_gate))
+            {
                 return Err("pipeline_runtime_main_gate_config_mismatch");
             }
         }
         // Keyed on the Trace Credit event the bundle settles under, not on
         // its family: a compatibility bundle settles under `NoveltyUtility`,
         // and so does a bundle whose registered Score policy declares it.
-        if bundle.trace_credit_event == PipelineTraceCreditEvent::NoveltyUtility
+        if bundle.trace_credit_event.is_novelty_utility()
             && self.novelty_utility_checks.issuer_principal_ref.is_none()
         {
             return Err("pipeline_credit_issuer_principal_missing");
@@ -13417,6 +13481,24 @@ impl PipelineService {
                 // than retrying it (below); a permanent policy failure is
                 // charged like any other labeled retry.
                 if let Some(policy) = error.downcast_ref::<PolicyError>() {
+                    // A Score whose embedder refused the trace's own input
+                    // would fail the same way on every attempt: the run
+                    // fails terminally on the attempt the claim charged,
+                    // like a repeated hold above, rather than spending its
+                    // budget and ending `attempts_exhausted` under a label
+                    // that no longer says why. Nothing of the Score was
+                    // committed.
+                    if !policy.is_transient()
+                        && policy.label() == PIPELINE_SCORE_INPUT_UNEMBEDDABLE_LABEL
+                        && run.next_phase == Some(Phase::Score)
+                    {
+                        return self
+                            .mark_failed_or_record_lease_expired(
+                                &run,
+                                PIPELINE_SCORE_INPUT_UNEMBEDDABLE_LABEL,
+                            )
+                            .await;
+                    }
                     return if policy.is_transient() {
                         // A Review quarantine
                         // waiting on a human assessment parks the run
@@ -15047,12 +15129,14 @@ impl PipelineService {
                 }
                 // A held Trace Credit account is checked before any external
                 // effect, so a held account never reaches its adapter. Only a
-                // leg that settles into a batch is held: a `NoveltyUtility`
-                // leg never settles, and `main` writes that credit regardless
-                // of holds (owner ruling, Zaki review 1, round 2, finding 13).
+                // leg that settles into a batch is held: a flat-rule
+                // `NoveltyUtility` leg never settles, and `main` writes that
+                // credit regardless of holds (owner ruling, Zaki review 1,
+                // round 2, finding 13); a graded-rule leg settles, so it is
+                // held (owner decision D7, 2026-11-03).
                 let credit_account_ref = if instrument_id == InstrumentId::trace_credit() {
                     let account_ref = self.credit_account_ref(&run).await?;
-                    if bundle.trace_credit_event == PipelineTraceCreditEvent::PipelineScore
+                    if bundle.trace_credit_event.settles_into_batch()
                         && self
                             .credit_account_is_held(&run.tenant_id, &account_ref)
                             .await?
@@ -15080,7 +15164,7 @@ impl PipelineService {
                 // (`settle_internal_credit`), since the tenant policy can change
                 // between the two.
                 if instrument_id == InstrumentId::trace_credit()
-                    && bundle.trace_credit_event == PipelineTraceCreditEvent::NoveltyUtility
+                    && bundle.trace_credit_event.is_novelty_utility()
                 {
                     let amount =
                         InstrumentAward::new(InstrumentId::trace_credit(), settlement.atomic_units)
@@ -15803,7 +15887,15 @@ impl PipelineService {
                 TraceCreditEventType::NoveltyUtility,
                 PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE,
                 "final",
-                pipeline_novelty_utility_reason(),
+                pipeline_novelty_utility_reason(trace_credit_event),
+            ),
+            // Owner decision D2 (2026-11-03): the graded rule's leg is the
+            // same event, written `pending` so its batch composes it below.
+            PipelineTraceCreditEvent::SettledNoveltyUtility => (
+                TraceCreditEventType::NoveltyUtility,
+                PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE,
+                "pending",
+                pipeline_novelty_utility_reason(trace_credit_event),
             ),
         };
         let ledger_event_type_label = enum_string(&ledger_event_type)?;
@@ -15817,7 +15909,8 @@ impl PipelineService {
         // stands in for the issuer. A `PipelineScore` event keeps the
         // contributor, as PR 2 wrote it.
         let actor_principal_ref = match trace_credit_event {
-            PipelineTraceCreditEvent::NoveltyUtility => {
+            PipelineTraceCreditEvent::NoveltyUtility
+            | PipelineTraceCreditEvent::SettledNoveltyUtility => {
                 self.novelty_utility_checks.issuer_principal_ref.clone()
             }
             PipelineTraceCreditEvent::PipelineScore => Some(account_ref.to_string()),
@@ -15830,7 +15923,8 @@ impl PipelineService {
         // finish before the credit transaction takes one.
         let (settlement_key, payout_hold_reason) = match trace_credit_event {
             PipelineTraceCreditEvent::NoveltyUtility => (account_ref.to_string(), None),
-            PipelineTraceCreditEvent::PipelineScore => {
+            PipelineTraceCreditEvent::PipelineScore
+            | PipelineTraceCreditEvent::SettledNoveltyUtility => {
                 self.settlement_key_and_hold(&run.tenant_id, account_ref)
                     .await?
             }
@@ -15842,12 +15936,11 @@ impl PipelineService {
         // resolved now, before the credit transaction takes a pooled
         // connection: `main` reads the tenant policy, then credits in a
         // separate transaction, and so does this.
-        let novelty_utility_authority =
-            if trace_credit_event == PipelineTraceCreditEvent::NoveltyUtility {
-                self.resolve_authority(&run.tenant_id).await?
-            } else {
-                None
-            };
+        let novelty_utility_authority = if trace_credit_event.is_novelty_utility() {
+            self.resolve_authority(&run.tenant_id).await?
+        } else {
+            None
+        };
         let mut client = self.backend.trace_pool().get().await?;
         let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
         ensure_current_lease(&tx, run, lease_token).await?;
@@ -15861,8 +15954,9 @@ impl PipelineService {
         // settlement batches and payouts, and writes `NoveltyUtility` credit
         // regardless of holds (its hold filter covers only settlement-eligible
         // events). So a hold stops only a leg that settles into a batch
-        // (owner ruling on Zaki review 1, round 2, finding 13).
-        if trace_credit_event == PipelineTraceCreditEvent::PipelineScore
+        // (owner ruling on Zaki review 1, round 2, finding 13): the minimal
+        // family's, and the graded rule's (owner decision D7, 2026-11-03).
+        if trace_credit_event.settles_into_batch()
             && crate::credit_hold_ownership::active_credit_holds_on_tx(&tx, &run.tenant_id)
                 .await?
                 .contains(account_ref)
@@ -15926,7 +16020,7 @@ impl PipelineService {
         // only when its credit checks pass. A compatibility leg one of them
         // refuses completes here with no ledger row, under `main`'s label;
         // the Score decision stays as it was.
-        if trace_credit_event == PipelineTraceCreditEvent::NoveltyUtility {
+        if trace_credit_event.is_novelty_utility() {
             if let Some(label) = self
                 .novelty_utility_withheld_reason(
                     &tx,
@@ -16006,13 +16100,16 @@ impl PipelineService {
             .await?
             .ok_or_else(|| anyhow::anyhow!("settlement_operation_mismatch"))?
             .get("settlement_state");
-        // Ruling S10: a `NoveltyUtility` leg is never composed or finalized
-        // into a batch -- it completes with no `settlement_batch_id`, same
-        // as `main` never pays that event. `PipelineScore` keeps PR 2's
-        // batch-or-reuse behavior unchanged.
+        // Ruling S10: a flat-rule `NoveltyUtility` leg is never composed or
+        // finalized into a batch -- it completes with no
+        // `settlement_batch_id`, same as `main` never pays that event.
+        // `PipelineScore` keeps PR 2's batch-or-reuse behavior, and the
+        // graded rule's leg takes it too (owner decision D2, 2026-11-03), so
+        // a payout rail pays it from the batch.
         let batch_id = match trace_credit_event {
             PipelineTraceCreditEvent::NoveltyUtility => None,
-            PipelineTraceCreditEvent::PipelineScore => Some(if event_state == "final" {
+            PipelineTraceCreditEvent::PipelineScore
+            | PipelineTraceCreditEvent::SettledNoveltyUtility => Some(if event_state == "final" {
                 // The event already settled in an earlier batch: reuse that
                 // batch rather than composing a second one that carries it.
                 let carrying = tx

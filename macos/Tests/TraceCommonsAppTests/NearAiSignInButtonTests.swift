@@ -320,10 +320,10 @@ final class NearAiSignInButtonTests: XCTestCase {
         XCTAssertTrue(account.contains("NearAiSignInControl(copy: copy)"))
         let funding = try source("Views/FundingRow.swift")
         XCTAssertTrue(funding.contains("NearAiSignInOffer.billingOffers"))
-        XCTAssertTrue(funding.contains("model.signInToNearAI()"))
+        XCTAssertTrue(funding.contains("Task { await model.signInToNearAI() }"))
         let control = try source("Views/NearAiSignInControl.swift")
         XCTAssertTrue(control.contains("copy.credentialObtaining"), "the core's waiting line")
         XCTAssertTrue(control.contains("copy.credentialFailed"), "the core's failure line")
-        XCTAssertTrue(control.contains("signInToNearAI()"))
+        XCTAssertTrue(control.contains("Task { await model.signInToNearAI() }"))
     }
 }

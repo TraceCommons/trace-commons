@@ -46,7 +46,6 @@ final class ShellWordingTests: XCTestCase {
         "TCShellCore/RedactionLabels.swift": 1,
         "TCShellCore/RedactionMarks.swift": 2,
         "TCShellCore/ScrubDetectors.swift": 2,
-        "TCShellCore/SourceCandidate.swift": 5,
         "TCShellCore/StateDirectory.swift": 2,
         "TCShellCore/SubagentCopy.swift": 6,
         "TCShellCore/SubmitToast.swift": 10,

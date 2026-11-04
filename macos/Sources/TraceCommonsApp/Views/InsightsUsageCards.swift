@@ -111,7 +111,7 @@ struct InsightsUsageCards: View {
         let name = text("analytics_subscriptions_provider_" + row.provider)
         let accessibility = InsightsOverviewWords.fill(text("analytics_subscriptions_refresh_login_accessibility"),
                                                        ["harness": name, "login": row.loginLabel])
-        return GlassRefreshButton(accessibility, small: true,
+        return GlassRefreshButton(accessibility, title: SettingsLegacyWords.refresh, small: true,
                                   isRefreshing: subscriptions?.isRefreshing(provider: row.provider, login: row.loginId) ?? false) {
             subscriptions?.refresh(provider: row.provider, login: row.loginId)
         }

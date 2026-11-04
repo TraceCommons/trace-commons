@@ -170,6 +170,42 @@ public enum CredentialSurface {
     public static let forgetMethod = "near_ai_credential_forget"
     public static let migrateMethod = "near_ai_credential_migrate"
 
+    /// What an `unenroll` or `account_sign_out` answer says about the NEAR AI
+    /// sign-in that went with it.
+    public enum SignOutNearAi: Equatable, Sendable {
+        /// Cleared, and revoked at NEAR AI or nothing was stored.
+        case done
+        /// Cleared here, but the stored key was not revoked at NEAR AI
+        /// (`near_ai_revoked: false`): `credentialForgetNotRevoked`.
+        case notRevoked
+        /// Not cleared here (`near_ai_cleared: false`): the key, session and
+        /// record are still on this Mac. The shell says so with
+        /// `nearAiStillSignedIn`; Forget in Private AI removes them.
+        case notCleared
+    }
+
+    /// Reads `near_ai_cleared` and `near_ai_revoked`. Not cleared outranks
+    /// not revoked: nothing was attempted. A daemon that answers neither
+    /// field is `.done`, as before these fields existed.
+    public static func signOutNearAi(nearAiCleared: Bool?, nearAiRevoked: Bool?) -> SignOutNearAi {
+        if nearAiCleared == false { return .notCleared }
+        if nearAiRevoked == false { return .notRevoked }
+        return .done
+    }
+
+    /// Whether a forget's answer says the key was removed here but not
+    /// revoked at NEAR AI, the one answer `credentialForgetNotRevoked` is
+    /// drawn for. `revoked` is `null` when no key was stored, which draws
+    /// nothing; nor does anything unreadable.
+    public static func forgetLeftKeyAtService(resultJSON: String) -> Bool {
+        guard let data = resultJSON.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["removed"] as? Bool == true,
+              let revoked = object["revoked"] as? Bool
+        else { return false }
+        return !revoked
+    }
+
     // MARK: - The state
 
     /// The sentence under the title. Falls back to the payload's unreported
@@ -220,9 +256,8 @@ public enum CredentialSurface {
     ///
     /// Returned FROM THE ACTION rather than left to a view's own `if`, so the
     /// pairing cannot be broken by a layout change. `.obtain` carries the
-    /// three consequences of pressing it; `.forget` carries the fact that
-    /// forgetting is local and the key stays valid until the contributor
-    /// removes it in their own account. `.cancel` stops a ceremony this app
+    /// three consequences of pressing it; `.forget` says the key is removed
+    /// here and revoked at NEAR AI. `.cancel` stops a ceremony this app
     /// started and costs nothing, and `.none` has no button to qualify.
     public static func actionExplains(
         _ action: CredentialAction, copy: PrivateInferenceCopy

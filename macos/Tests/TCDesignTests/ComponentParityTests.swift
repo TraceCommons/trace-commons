@@ -90,6 +90,33 @@ final class ComponentParityTests: XCTestCase {
         XCTAssertEqual(GlassBarGraph.labelInk(hovered: true), GlassTokens.Color.textPrimary)
     }
 
+    /// A round button given `isOn` is a toggle: on, the selected fill and
+    /// its ink, and assistive tech hears a selected toggle; off, the plain
+    /// button, still a toggle; without `isOn`, a plain button (owner,
+    /// 2026-11-02: the Traces toolbar's Automatic eye).
+    @MainActor
+    func test_theRoundButtonCanBeAToggle() {
+        XCTAssertEqual(GlassRoundButton.fill(isOn: true), GlassTokens.Color.controlSelected)
+        XCTAssertEqual(GlassRoundButton.onGlyph(isOn: true), GlassTokens.Color.textOnSelected)
+        XCTAssertNil(GlassRoundButton.fill(isOn: false))
+        XCTAssertNil(GlassRoundButton.onGlyph(isOn: false))
+        XCTAssertNil(GlassRoundButton.fill(isOn: nil))
+        XCTAssertEqual(GlassRoundButton.traits(isOn: true), [.isToggle, .isSelected])
+        XCTAssertEqual(GlassRoundButton.traits(isOn: false), .isToggle)
+        XCTAssertEqual(GlassRoundButton.traits(isOn: nil), [])
+    }
+
+    /// Lit dots are shared purple over kept blue, and both the menu bar's
+    /// paused grey while watching is paused (product owner, 2026-10-29,
+    /// #1753: the popover's graph greys while paused again).
+    @MainActor
+    func test_theBarGraphGreysWhilePaused() {
+        XCTAssertEqual(GlassBarGraph.dotInks(paused: false).shared, GlassTokens.Color.dataShared)
+        XCTAssertEqual(GlassBarGraph.dotInks(paused: false).kept, GlassTokens.Color.dataKept)
+        XCTAssertEqual(GlassBarGraph.dotInks(paused: true).shared, GlassTokens.Color.menuBarsPaused)
+        XCTAssertEqual(GlassBarGraph.dotInks(paused: true).kept, GlassTokens.Color.menuBarsPaused)
+    }
+
     /// The tapered matrix: nothing lit for nothing, one dot for a count of
     /// one, a full column at the maximum brightening to the tip, and a
     /// partial last dot that keeps 9 apart from 11.

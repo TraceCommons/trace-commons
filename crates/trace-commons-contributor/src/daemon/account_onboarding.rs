@@ -77,11 +77,11 @@ struct Challenge {
     network: String,
 }
 #[derive(Deserialize)]
-struct WalletResult {
+pub(super) struct WalletResult {
     state: String,
-    account_id: String,
-    wallet_public_key: String,
-    wallet_signature: String,
+    pub(super) account_id: String,
+    pub(super) wallet_public_key: String,
+    pub(super) wallet_signature: String,
 }
 #[derive(Deserialize)]
 struct Completed {
@@ -105,7 +105,7 @@ struct Attempt {
 static ATTEMPTS: OnceLock<Mutex<HashMap<PathBuf, Attempt>>> = OnceLock::new();
 // Embedded FFI creates a short-lived runtime per IPC call. Wallet work and its
 // reactor must outlive that call, including while the app waits in the browser.
-fn signup_runtime() -> Result<&'static tokio::runtime::Runtime> {
+pub(super) fn signup_runtime() -> Result<&'static tokio::runtime::Runtime> {
     static RUNTIME: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
     RUNTIME
         .get_or_init(|| {
@@ -122,7 +122,7 @@ fn signup_runtime() -> Result<&'static tokio::runtime::Runtime> {
 fn attempts() -> &'static Mutex<HashMap<PathBuf, Attempt>> {
     ATTEMPTS.get_or_init(Default::default)
 }
-fn random() -> Result<String> {
+pub(super) fn random() -> Result<String> {
     let mut bytes = [0; 32];
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes)
         .map_err(|_| anyhow!("near_signup_unavailable"))?;
@@ -237,10 +237,10 @@ fn derive_signup_allowlist(
     Ok(HostAllowlist::from_hosts(hosts))
 }
 
-pub(super) fn client(
-    url: &str,
-    allowed: &HostAllowlist,
-) -> Result<trace_commons_operator_client::Client> {
+/// The address checks [`client`] makes before it builds anything: an
+/// enforcing allowlist that holds `url`, over HTTPS, with no credentials,
+/// query or fragment.
+pub(super) fn check_address(url: &str, allowed: &HostAllowlist) -> Result<()> {
     let parsed = reqwest::Url::parse(url)?;
     if !allowed.is_enforcing()
         || parsed.scheme() != "https"
@@ -252,6 +252,14 @@ pub(super) fn client(
         bail!("near_signup_endpoint_refused");
     }
     allowed.check(&parsed)?;
+    Ok(())
+}
+
+pub(super) fn client(
+    url: &str,
+    allowed: &HostAllowlist,
+) -> Result<trace_commons_operator_client::Client> {
+    check_address(url, allowed)?;
     trace_commons_operator_client::Client::builder(
         url,
         "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
@@ -303,15 +311,18 @@ pub(super) enum Path {
 }
 
 impl Path {
-    /// The path an already-enrolled config was enrolled by, read from the
-    /// tenant namespace it holds.
+    /// The path an already-enrolled config signs in by: the identity kind it
+    /// records, or for a config written before that was recorded, its tenant
+    /// namespace ([`ContributorConfig::signs_in_with`], F10 decision 4). A
+    /// wallet-origin account that changed to a NEAR AI login keeps its
+    /// `near-` tenant and signs in by the login path.
     ///
     /// A client asking its commons a readiness question after enrollment must
-    /// ask it for the path it actually took. Asking as the wallet on behalf of
+    /// ask it for the path it actually takes. Asking as the wallet on behalf of
     /// a login-enrolled contributor is the same class of mistake as gating the
     /// login ceremony on `ready`: a check belonging to the other mechanism.
-    pub(super) fn for_tenant(tenant_id: &str) -> Self {
-        if crate::daemon::nearai_onboarding::is_near_ai_tenant_id(tenant_id) {
+    pub(super) fn for_config(cfg: &ContributorConfig) -> Self {
+        if cfg.signs_in_with_near_ai() {
             Self::NearAiLogin
         } else {
             Self::Wallet
@@ -341,6 +352,34 @@ impl Path {
             Self::NearAiLogin => capability.near_ai_login_ready.unwrap_or(capability.ready),
         }
     }
+}
+
+/// Whether the commons says the sign-in paths a change of login needs are
+/// ready (F10): the NEAR AI login path, and for a wallet-origin account the
+/// wallet path too. The commons publishes the change routes whatever their
+/// readiness, and refuses a start while either is not ready. Reads the
+/// readiness flags only.
+// A test build answers readiness itself (`account_login_change::paths_ready`).
+#[cfg_attr(test, allow(dead_code))]
+pub(super) async fn change_paths_ready(
+    url: &str,
+    wallet: bool,
+) -> std::result::Result<bool, SignupRefusal> {
+    let capability: Capability = origin_only_client(url)?
+        .call_json(
+            reqwest::Method::GET,
+            "/v1/account/near/provision/capabilities",
+            &[],
+            None::<&serde_json::Value>,
+        )
+        .await
+        .map_err(|_| SignupRefusal::Unreachable)?;
+    Ok(change_ready_for(&capability, wallet))
+}
+
+/// [`change_paths_ready`]'s decision on a capability document.
+fn change_ready_for(capability: &Capability, wallet: bool) -> bool {
+    Path::NearAiLogin.ready_for(capability) && (!wallet || Path::Wallet.ready_for(capability))
 }
 
 pub(super) async fn validated_capability(
@@ -888,7 +927,7 @@ async fn finish(
     if result.account_id != options.account_id {
         bail!("near_signup_account_changed")
     }
-    client.call_json(reqwest::Method::POST,"/v1/account/near/provision/finish",&[],Some(&serde_json::json!({"ceremony_id":signed.ceremony_id,"account_id":options.account_id,"device_public_key":identity.public_key_b64,"wallet_public_key":result.wallet_public_key,"wallet_signature":result.wallet_signature,"device_signature":device_signature,"code_verifier":verifier}))).await.map_err(|error| super::nearai_onboarding::finish_refusal(&error, "near_signup_verification_failed"))
+    client.call_json(reqwest::Method::POST,"/v1/account/near/provision/finish",&[],Some(&serde_json::json!({"ceremony_id":signed.ceremony_id,"account_id":options.account_id,"device_public_key":identity.public_key_b64,"wallet_public_key":result.wallet_public_key,"wallet_signature":result.wallet_signature,"device_signature":device_signature,"code_verifier":verifier}))).await.map_err(|error| super::nearai_onboarding::finish_refusal(&error, "near_signup_verification_failed", "near_signup_unavailable"))
 }
 
 fn parse_callback(target: &str, state: &str) -> Result<WalletResult> {
@@ -911,7 +950,12 @@ fn parse_callback(target: &str, state: &str) -> Result<WalletResult> {
     }
     Ok(result)
 }
-async fn receive_wallet(listener: tokio::net::TcpListener, state: &str) -> Result<WalletResult> {
+/// The wallet page's signed callback on `listener`, for `state`. Shared with
+/// the change of login's wallet proof (F10 W1), which signs on the same page.
+pub(super) async fn receive_wallet(
+    listener: tokio::net::TcpListener,
+    state: &str,
+) -> Result<WalletResult> {
     // Ignore unrelated local requests, but bound both each connection and total
     // waiting time so a process cannot monopolize the callback listener.
     loop {
@@ -1108,6 +1152,9 @@ fn persist(
         inference_receipt_endpoint: receipt_endpoint,
         consent_scopes_chosen: Some(false),
         inference_receipt_check_attestation: true,
+        // Joined with a NEAR wallet: signs in with it until a change of
+        // login (F10) records otherwise.
+        account_identity: Some(trace_commons_protocol::account_login_change::IdentityKind::Wallet),
     };
     let session = crate::account_auth::AccountSession {
         access_token: result.access_token,
@@ -1130,7 +1177,11 @@ fn persist(
         expected,
         &serde_json::to_vec(&session)?,
         Some(&config),
-    )
+    )?;
+    // A new account, joined without a NEAR AI login: no earlier account's
+    // login may stand as this one's.
+    super::nearai_credential::login_record::enrolled_with(&store, None);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1306,22 +1357,71 @@ mod tests {
         assert!(!accepted(shape(false, None), Path::NearAiLogin));
     }
 
-    /// An enrolled config asks its commons for the path it took, not for the
-    /// other one.
+    fn enrolled(tenant: &str, identity: Option<&str>) -> ContributorConfig {
+        let mut value = serde_json::json!({
+            "schema_version": "1", "issuer_url": "https://i", "ingest_url": "https://g",
+            "audience": "a", "tenant_id": tenant, "instance_id": "", "user_subject": "s",
+            "device_key_id": "d", "consent_scopes": []
+        });
+        if let Some(identity) = identity {
+            value["account_identity"] = identity.into();
+        }
+        serde_json::from_value(value).expect("config")
+    }
+
+    /// An enrolled config asks its commons for the path it signs in by, not
+    /// for the other one: the namespace when nothing is recorded.
     #[test]
     fn the_path_is_read_from_the_enrolled_tenant_namespace() {
+        let wallet = format!("near-{}", "ab".repeat(32));
+        let near_ai = format!("nearai-{}", "ab".repeat(32));
+        assert_eq!(Path::for_config(&enrolled(&wallet, None)), Path::Wallet);
         assert_eq!(
-            Path::for_tenant(&format!("near-{}", "ab".repeat(32))),
-            Path::Wallet
-        );
-        assert_eq!(
-            Path::for_tenant(&format!("nearai-{}", "ab".repeat(32))),
+            Path::for_config(&enrolled(&near_ai, None)),
             Path::NearAiLogin
         );
-        // Anything that is not a well-formed login tenant is treated as the
+        // Anything that is not a well-formed account tenant is treated as the
         // wallet path, which is the pre-existing behaviour and the safe
-        // default: it is the stricter readiness flag of the two.
-        assert_eq!(Path::for_tenant("tenant-whatever"), Path::Wallet);
+        // default: it is the stricter readiness flag of the two -- whatever
+        // a config records.
+        assert_eq!(
+            Path::for_config(&enrolled("tenant-whatever", Some("near_ai_login"))),
+            Path::Wallet
+        );
+    }
+
+    /// F10: a change needs the NEAR AI login path ready, and for a
+    /// wallet-origin account the wallet path too.
+    #[test]
+    fn a_change_needs_its_sign_in_paths_ready() {
+        let doc = |ready: bool, login: Option<bool>| -> Capability {
+            serde_json::from_value(serde_json::json!({
+                "ready": ready, "near_ai_login_ready": login, "witness": null,
+                "issuer_url": null, "audience": null, "inference_receipt_endpoint": null,
+            }))
+            .unwrap()
+        };
+        assert!(change_ready_for(&doc(false, Some(true)), false));
+        assert!(!change_ready_for(&doc(false, Some(true)), true));
+        assert!(change_ready_for(&doc(true, Some(true)), true));
+        assert!(!change_ready_for(&doc(true, Some(false)), false));
+        assert!(change_ready_for(&doc(true, None), false));
+    }
+
+    /// F10 decision 4: a wallet-origin account that changed to a NEAR AI
+    /// login keeps its `near-` tenant and signs in by the login path. The
+    /// recorded kind decides, not the namespace.
+    #[test]
+    fn a_near_tenant_that_records_a_near_ai_login_takes_the_login_path() {
+        let wallet = format!("near-{}", "ab".repeat(32));
+        assert_eq!(
+            Path::for_config(&enrolled(&wallet, Some("near_ai_login"))),
+            Path::NearAiLogin
+        );
+        assert_eq!(
+            Path::for_config(&enrolled(&wallet, Some("wallet"))),
+            Path::Wallet
+        );
     }
 
     #[test]

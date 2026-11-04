@@ -61,6 +61,20 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("offer_exposure_short")]
     public string OfferExposureShort { get; init; } = string.Empty;
 
+    /// <summary>
+    /// The macOS offer notice's own lines: its opening line, the shared-machine
+    /// fact <see cref="OfferExposureShort"/> leaves out, and the local log.
+    /// This shell's offer card keeps the full sentences.
+    /// </summary>
+    [JsonPropertyName("offer_what_short")]
+    public string OfferWhatShort { get; init; } = string.Empty;
+
+    [JsonPropertyName("offer_exposure_shared")]
+    public string OfferExposureShared { get; init; } = string.Empty;
+
+    [JsonPropertyName("offer_logged")]
+    public string OfferLogged { get; init; } = string.Empty;
+
     /// <summary>The offer's link to its longer paragraphs.</summary>
     [JsonPropertyName("offer_learn_more")]
     public string OfferLearnMore { get; init; } = string.Empty;
@@ -377,13 +391,27 @@ public sealed record PrivateInferenceCopy
     public string CredentialForget { get; init; } = string.Empty;
 
     /// <summary>
-    /// That forgetting is local: the key stays valid at the service until the
-    /// contributor removes it in their own account there. Drawn wherever the
+    /// What forgetting does: the key leaves this computer and is revoked at
+    /// NEAR AI. Drawn wherever the
     /// forget action is, for the same reason the cost sentence is drawn
     /// wherever the obtain action is.
     /// </summary>
     [JsonPropertyName("credential_forget_explains")]
     public string CredentialForgetExplains { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Drawn only after a forget that answered <c>removed: true, revoked:
+    /// false</c>: the revoke at NEAR AI did not happen.
+    /// </summary>
+    [JsonPropertyName("credential_forget_not_revoked")]
+    public string CredentialForgetNotRevoked { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Drawn after an unenroll or sign-out that answered
+    /// <c>near_ai_cleared: false</c>: the NEAR AI sign-in is still here.
+    /// </summary>
+    [JsonPropertyName("near_ai_still_signed_in")]
+    public string NearAiStillSignedIn { get; init; } = string.Empty;
 
     /// <summary>
     /// The button behind <c>migration_available</c>, and the sentence drawn
@@ -770,6 +798,9 @@ public sealed record PrivateInferenceCopy
             OfferWhat,
             OfferExposure,
             OfferExposureShort,
+            OfferWhatShort,
+            OfferExposureShared,
+            OfferLogged,
             OfferLearnMore,
             OfferNoRepoint,
             OfferAccept,
@@ -829,6 +860,8 @@ public sealed record PrivateInferenceCopy
             CredentialCancel,
             CredentialForget,
             CredentialForgetExplains,
+            CredentialForgetNotRevoked,
+            NearAiStillSignedIn,
             CredentialMigrate,
             CredentialMigrateExplains,
             CredentialAbsent,

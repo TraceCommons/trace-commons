@@ -21,7 +21,7 @@ export function useDaemonControl() {
 
   return {
     busy: mutation.isPending,
-    error: mutation.isError ? "Daemon state was not changed." : null,
+    error: mutation.isError ? "Watcher state was not changed." : null,
     command: async (name: "pause_daemon" | "resume_daemon") => {
       try {
         await mutation.mutateAsync(name);

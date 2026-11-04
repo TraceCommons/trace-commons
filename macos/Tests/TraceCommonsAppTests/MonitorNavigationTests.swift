@@ -872,7 +872,10 @@ final class MonitorNavigationTests: XCTestCase {
         // The sections are gated in Ron's Settings modal (#1241 Task 10).
         let modal = try Self.text("Views/Monitor/SettingsModal.swift")
         XCTAssertTrue(modal.contains("""
-                ).forSettings(availableBeforeOnboarding: item.availableBeforeOnboarding) {
+                ).forSettings(availableBeforeOnboarding: item.availableBeforeOnboarding)
+        """), "a writing section is gated on onboarding (M2)")
+        XCTAssertTrue(modal.contains("""
+                switch gate(for: item) {
                 case .awaiting:
                     SettingsAwaiting()
         """), "a writing section waits for the core, then gates (M2)")

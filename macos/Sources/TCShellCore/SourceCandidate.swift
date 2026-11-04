@@ -66,27 +66,28 @@ public struct SourceCandidate: Equatable, Sendable {
         self.answersAt = answersAt
     }
 
-    /// The one line under the path that says what agreeing would mean.
+    /// The one line under the path that says what agreeing would mean, in
+    /// the core's words (`source_copy::SourceEvidenceCopy`).
     ///
     /// "Not there" and "there but empty" are kept apart on purpose. They
     /// look alike in a count and they are not alike in a decision: one says
     /// the contributor does not use this agent, the other says they do and
     /// have not started a session yet.
-    public func evidence(now: Date) -> String {
+    public func evidence(now: Date, words: SourceEvidenceWords) -> String {
         var line: String
         if !exists {
-            line = "Not found on this machine"
+            line = words.missing
         } else if sessionCount == 0 {
-            line = "Found, but holding no traces yet"
+            line = words.empty
         } else {
-            let noun = sessionCount == 1 ? "trace" : "traces"
-            line = "\(sessionCount) \(noun)"
+            line = sessionCount == 1
+                ? words.countOne : Self.fill(words.count, ["count": String(sessionCount)])
             if let mostRecent {
-                line += ", most recent \(Self.age(of: mostRecent, at: now))"
+                line = Self.fill(words.mostRecent, ["traces": line, "age": Self.age(of: mostRecent, at: now, words: words)])
             }
         }
         if relocatedByEnv {
-            line += " (moved here by an environment variable)"
+            line = Self.fill(words.relocated, ["evidence": line])
         }
         return line
     }
@@ -96,16 +97,20 @@ public struct SourceCandidate: Equatable, Sendable {
     /// assertions into something that passes on the machine that wrote them.
     /// The vocabulary here is small because the decision it supports is
     /// small -- recent, or not.
-    static func age(of date: Date, at now: Date) -> String {
+    static func age(of date: Date, at now: Date, words: SourceEvidenceWords) -> String {
         let seconds = max(0, now.timeIntervalSince(date))
         switch seconds {
-        case ..<120: return "just now"
-        case ..<3600: return "\(Int(seconds / 60)) minutes ago"
-        case ..<7200: return "1 hour ago"
-        case ..<86400: return "\(Int(seconds / 3600)) hours ago"
-        case ..<172_800: return "yesterday"
-        default: return "\(Int(seconds / 86400)) days ago"
+        case ..<120: return words.ageJustNow
+        case ..<3600: return fill(words.ageMinutes, ["n": String(Int(seconds / 60))])
+        case ..<7200: return words.ageHour
+        case ..<86400: return fill(words.ageHours, ["n": String(Int(seconds / 3600))])
+        case ..<172_800: return words.ageYesterday
+        default: return fill(words.ageDays, ["n": String(Int(seconds / 86400))])
         }
+    }
+
+    private static func fill(_ template: String, _ values: [String: String]) -> String {
+        values.reduce(template) { $0.replacingOccurrences(of: "{\($1.key)}", with: $1.value) }
     }
 
     /// Decode the JSON array `tc_discover_sources` returns.
@@ -173,5 +178,32 @@ public struct SourceCandidate: Equatable, Sendable {
             let truncated = raw[..<dot] + "." + digits + raw[zone...]
             return DaemonTimestamp.parseFractionalOnly(String(truncated))
         }
+    }
+}
+
+/// The core's words for `SourceCandidate.evidence` (`source_copy::
+/// SourceEvidenceCopy`): the shell picks a line and fills it, and spells
+/// none of it.
+public struct SourceEvidenceWords: Equatable, Sendable {
+    public let missing, empty, countOne, count, mostRecent, relocated: String
+    public let ageJustNow, ageMinutes, ageHour, ageHours, ageYesterday, ageDays: String
+
+    public init(
+        missing: String, empty: String, countOne: String, count: String, mostRecent: String,
+        relocated: String, ageJustNow: String, ageMinutes: String, ageHour: String, ageHours: String,
+        ageYesterday: String, ageDays: String
+    ) {
+        self.missing = missing
+        self.empty = empty
+        self.countOne = countOne
+        self.count = count
+        self.mostRecent = mostRecent
+        self.relocated = relocated
+        self.ageJustNow = ageJustNow
+        self.ageMinutes = ageMinutes
+        self.ageHour = ageHour
+        self.ageHours = ageHours
+        self.ageYesterday = ageYesterday
+        self.ageDays = ageDays
     }
 }

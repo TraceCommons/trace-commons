@@ -109,6 +109,13 @@ public static class DaemonProtocol
         public const string AcknowledgeLegacyInviteMigration = "acknowledge_legacy_invite_migration";
 
         /// <summary>
+        /// Drops this device's enrollment, locally only. The account
+        /// section's "Set up again" sends it while the account needs
+        /// attention, then the first run starts.
+        /// </summary>
+        public const string Unenroll = "unenroll";
+
+        /// <summary>
         /// Moves this legacy invite identity to the contributor's NEAR AI
         /// account, because they pressed Move. Blocks for the whole move; a
         /// refusal is an error whose message is a <c>legacy_migration_*</c> label.
@@ -208,6 +215,17 @@ public static class DaemonProtocol
 
         /// <summary>Stops waiting on the browser. Requires the attempt id.</summary>
         public const string NearAiCredentialCancel = "near_ai_credential_cancel";
+
+        /// <summary>
+        /// One step of changing the NEAR AI login an account uses (F10):
+        /// <c>start</c>, <c>status</c>, <c>prove_current</c>,
+        /// <c>sign_in_new</c> or <c>confirm</c>. Answers the ceremony's state;
+        /// see <see cref="AccountLoginChangeClient"/>.
+        /// </summary>
+        public const string AccountLoginChange = "account_login_change";
+
+        /// <summary>Drops the change ceremony and any login held aside for it.</summary>
+        public const string AccountLoginChangeCancel = "account_login_change_cancel";
 
         /// <summary>
         /// Removes the stored key from this machine.

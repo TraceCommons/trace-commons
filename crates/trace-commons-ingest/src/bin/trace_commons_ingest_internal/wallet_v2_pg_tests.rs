@@ -446,6 +446,8 @@ async fn wallet_v2_signed_completion_and_refusal_boundaries() {
         None,
     )
     .await;
+    // v1 needs a witness this commons does not publish: a path it does not
+    // offer, which will not start working on retry, so the uniform deny.
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
@@ -691,4 +693,195 @@ async fn wallet_v2_refuses_a_device_key_registered_to_another_tenant() {
         before,
         "a refused finish writes no account, identity, device, principal or session"
     );
+}
+
+/// A NEAR RPC that answers only `status`, for any request.
+async fn rpc_status_fixture(status: StatusCode) -> String {
+    let router = axum::Router::new().route("/", axum::routing::post(move || async move { status }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    url
+}
+
+fn assert_wallet_unavailable(status: StatusCode, body: &serde_json::Value, cause: &str) {
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{cause}: {body}");
+    assert_eq!(
+        body,
+        &serde_json::json!({ "error": "near_ai_sign_in_unavailable" }),
+        "{cause}: one label, naming no dependency"
+    );
+}
+
+/// The wallet ceremony tells busy and unready from refused the same way the
+/// NEAR AI ceremony does: over the rate limit is `429`; not ready, a database
+/// that does not answer, and a NEAR RPC that does not answer are `503`; and
+/// what the RPC says about the account stays the uniform `400`.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_WALLET_V2_PG_TEST_URL"]
+async fn wallet_v2_answers_busy_and_unready_with_429_or_503() {
+    let _serial = serial().lock().await;
+    let WalletDb { admin, runtime: db } = fresh_db().await;
+    let wallet = keypair();
+    let (rpc_url, _calls) = rpc_fixture(wallet_key(&wallet)).await;
+    let (state, _temp) = state(db.clone(), rpc_url);
+    let (verifier, challenge) = challenge_pair();
+    let before = global_provisioned_counts(&admin).await;
+
+    // Rate limit: 30 refusals of an empty body, then 429 with Retry-After.
+    for path in [
+        "/v1/account/near/provision/start/v2",
+        "/v1/account/near/provision/finish/v2",
+    ] {
+        reset_account_rate_limiter_for_db_test().await;
+        for _ in 0..30 {
+            let (status, _) =
+                request(&state, "POST", path, Some(serde_json::json!({})), None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        }
+        let (status, body) = request(&state, "POST", path, Some(serde_json::json!({})), None).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{path}: {body}");
+        assert_eq!(body["error"], "near_ai_sign_in_rate_limited", "{path}");
+    }
+    reset_account_rate_limiter_for_db_test().await;
+
+    // Not ready: no public origin.
+    let mut unready = state.clone();
+    Arc::make_mut(&mut unready).near_provisioning_public_origin = None;
+    let device = keypair();
+    let public_key = base64::engine::general_purpose::STANDARD.encode(device.public_key().as_ref());
+    let start_body = serde_json::json!({
+        "account_id":WALLET_ACCOUNT,"device_public_key":public_key,
+        "code_challenge":challenge,"code_challenge_method":"S256"
+    });
+    let (status, body) = request(
+        &unready,
+        "POST",
+        "/v1/account/near/provision/start/v2",
+        Some(start_body.clone()),
+        None,
+    )
+    .await;
+    assert_wallet_unavailable(status, &body, "start, not ready");
+
+    // The database does not answer: nothing listens where it points.
+    let closed_port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let down = Arc::new(
+        PgBackend::new(&DatabaseConfig {
+            url: SecretString::from(format!("postgres://nobody@127.0.0.1:{closed_port}/x")),
+            pool_size: 1,
+            ssl_mode: trace_commons_server::config::SslMode::Disable,
+            login_resolver_url: None,
+            gate_driver_url: None,
+            pii_backstop_driver_url: None,
+            invite_registry_url: None,
+        })
+        .await
+        .unwrap(),
+    );
+    let mut no_database = state.clone();
+    Arc::make_mut(&mut no_database).db_mirror = Some(down as Arc<dyn Database>);
+    let (status, body) = request(
+        &no_database,
+        "POST",
+        "/v1/account/near/provision/start/v2",
+        Some(start_body),
+        None,
+    )
+    .await;
+    assert_wallet_unavailable(status, &body, "start, database down");
+
+    // The NEAR RPC does not answer (503, or nothing listening) at a finish
+    // whose signatures all verify: 503, and nothing written. A 400 from the
+    // RPC is its answer, and stays the refusal.
+    let closed_rpc = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        url
+    };
+    for (cause, rpc, expected) in [
+        (
+            "rpc 503",
+            rpc_status_fixture(StatusCode::SERVICE_UNAVAILABLE).await,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "rpc unreachable",
+            closed_rpc,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "rpc 400",
+            rpc_status_fixture(StatusCode::BAD_REQUEST).await,
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let mut busy_rpc = state.clone();
+        Arc::make_mut(&mut busy_rpc).account_near_config =
+            Some(Arc::new(trace_commons_server::config::NearConfig {
+                rpc_url: rpc,
+                network: "testnet".into(),
+                recipient: WALLET_RECIPIENT.into(),
+            }));
+        let device = keypair();
+        let public_key =
+            base64::engine::general_purpose::STANDARD.encode(device.public_key().as_ref());
+        let started = start(&busy_rpc, WALLET_ACCOUNT, &public_key, &challenge).await;
+        let (status, body) = finish(
+            &busy_rpc,
+            finish_body(&started, WALLET_ACCOUNT, &device, &wallet, &verifier),
+        )
+        .await;
+        if expected == StatusCode::SERVICE_UNAVAILABLE {
+            assert_wallet_unavailable(status, &body, cause);
+        } else {
+            assert_eq!(status, expected, "{cause}: {body}");
+            assert_eq!(
+                body,
+                serde_json::json!({ "error": "native sign-in could not be completed" }),
+                "{cause}"
+            );
+        }
+    }
+    assert_eq!(
+        global_provisioned_counts(&admin).await,
+        before,
+        "no busy or unready answer writes an account, identity, device, principal or session"
+    );
+
+    // An unanswered finish consumes its ceremony all the same (the wire
+    // contract: a `503` at finish means start again), so the same finish is
+    // refused, and still writes nothing.
+    let mut down_rpc = state.clone();
+    Arc::make_mut(&mut down_rpc).account_near_config =
+        Some(Arc::new(trace_commons_server::config::NearConfig {
+            rpc_url: rpc_status_fixture(StatusCode::SERVICE_UNAVAILABLE).await,
+            network: "testnet".into(),
+            recipient: WALLET_RECIPIENT.into(),
+        }));
+    let device = keypair();
+    let public_key = base64::engine::general_purpose::STANDARD.encode(device.public_key().as_ref());
+    let started = start(&down_rpc, WALLET_ACCOUNT, &public_key, &challenge).await;
+    let body = finish_body(&started, WALLET_ACCOUNT, &device, &wallet, &verifier);
+    let (status, unanswered) = finish(&down_rpc, body.clone()).await;
+    assert_wallet_unavailable(status, &unanswered, "rpc 503");
+    let (status, resent) = finish(&down_rpc, body).await;
+    assert_eq!(
+        (status, resent),
+        (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": "native sign-in could not be completed" })
+        ),
+        "resent after the 503"
+    );
+    assert_eq!(
+        global_provisioned_counts(&admin).await,
+        before,
+        "an unanswered finish and its resend write nothing"
+    );
+    reset_account_rate_limiter_for_db_test().await;
 }

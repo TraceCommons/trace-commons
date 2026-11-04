@@ -129,6 +129,7 @@ jobs:
     env:
       PG_SUITE_DATABASES: >-
         admission_test_onboarding
+        admission_test_graded_corpus
         admission_test_ledger
         admission_test_account_ledger
         admission_test_account_trust_external
@@ -161,7 +162,9 @@ jobs:
         admission_test_referral_bonus
         admission_test_referral_stream
         admission_test_walletv2
+        admission_test_rebind
         admission_test_legacy_invite_link
+        admission_test_legacy_payout_carry
         admission_test_device_invite_subject
         admission_test_pipeline
         admission_test_pipeline_http
@@ -317,6 +320,16 @@ jobs:
         run: cargo test -p trace-commons-ingest --lib client_upload_trust_scheduler_pg_tests -- --ignored --test-threads=1
         env:
           TRACE_COMMONS_CLIENT_UPLOAD_TRUST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_upload_trust_scheduler_ci
+      # Stage 2 of the paying bundle failed Phase A on a graded package
+      # (2026-11-03): the corpus harness's production assembly dropped the
+      # package's credit rule. This runs main's corpus through that harness,
+      # in production mode over doubles, on a graded package. Ignored in the
+      # whole-bin job because it writes the corpus tenant's fixed fixtures,
+      # so it runs alone here, on its own database.
+      - name: corpus check on a graded production package
+        run: cargo test -p trace-commons-ingest --lib a_graded_production_package_passes_the_corpus_check -- --ignored --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_graded_corpus
       # NEAR AI starter advance, first slice (V131): write-once plausibility
       # features, the account read's filters, the ingest runtime's grants,
       # and the dry-run report over the earned-trust enumeration seam.
@@ -344,6 +357,15 @@ jobs:
         run: cargo test -p trace-commons-server --test legacy_invite_link_pg
         env:
           TRACE_COMMONS_LEGACY_INVITE_LINK_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_legacy_invite_link
+      # V146: the legacy account payout migration. The decision-5 principal
+      # claim through the real tenant link, carrying a confirmed payout link
+      # to linked legacy accounts, release on unlink, change and revocation
+      # (revoked by a non-superuser login), pooled and closed accounts, the
+      # instance-enrolled link, and readiness left alone. Runtime logins only.
+      - name: legacy_payout_carry_pg
+        run: cargo test -p trace-commons-server --test legacy_payout_carry_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_legacy_payout_carry
       # A device reading back its own invite subject hash from the issuer,
       # onboarded through the real /v1/onboard path, with the named refusals
       # against real rows. Feeds the legacy invite link statement.
@@ -694,6 +716,11 @@ jobs:
         run: cargo test -p trace-commons-ingest --lib wallet_v2_pg_tests -- --ignored
         env:
           TRACE_COMMONS_WALLET_V2_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_walletv2
+      # F10: changing an account's NEAR AI login, against the real handlers.
+      - name: NEAR AI login change against PostgreSQL
+        run: cargo test -p trace-commons-ingest --lib near_ai_rebind_pg_tests -- --ignored --test-threads=1
+        env:
+          TRACE_COMMONS_REBIND_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_rebind
       # A suite that runs nothing passes, so the steps above cannot prove
       # themselves. `trace_invite_registry_pg` reports "21 passed" in 0.00s with
       # no database configured; a pass count is not evidence that anything ran.
@@ -772,7 +799,7 @@ jobs:
       # base role exactly as V30 creates it (NOLOGIN NOBYPASSRLS -- V30 creates
       # it only if absent, so creating it first changes nothing), plus a
       # separate LOGIN role that is a member of it. Without the resolver URL,
-      # about 74 account, passkey and login tests fail with
+      # about 74 account and login tests fail with
       # `redeem succeeds: left 400 right 303`, because the redeem path fails
       # closed when its resolver pool cannot connect.
       - name: Create the database and the login-resolver roles

@@ -251,6 +251,11 @@
           Exclude="$(MSBuildThisFileDirectory)../../src/**/obj/**;$(MSBuildThisFileDirectory)../../src/**/bin/**"
           Link="shell-source/%(RecursiveDir)%(Filename)%(Extension).txt"
           CopyToOutputDirectory="PreserveNewest" />
+    <!-- The MSIX manifest, for the display names Windows shows (NoCommonsNameTests).
+         Outside shell-source/ so the wording ratchet does not count it. -->
+    <None Include="$(MSBuildThisFileDirectory)../../packaging/Package.appxmanifest"
+          Link="manifest-source/Package.appxmanifest.txt"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <PropertyGroup>

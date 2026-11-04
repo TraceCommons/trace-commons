@@ -25,8 +25,9 @@ public struct GlassInfoButton: View {
         self.text = text
     }
 
-    /// The popover's width: the text wraps inside it.
-    static let popoverWidth: CGFloat = 260
+    /// The popover's width: the text wraps inside it. Public so a popover
+    /// of text elsewhere (the Traces toolbar eye's refusal) wraps alike.
+    public static let popoverWidth: CGFloat = 260
 
     /// Shown while hovered or pinned.
     static func isShown(hovering: Bool, pinned: Bool) -> Bool {

@@ -13,7 +13,8 @@ final class GlassSurfaceRulesTests: XCTestCase {
     /// Glass files, relative to `Sources/TraceCommonsApp`. Append, never remove.
     static let files: [String] = [
         "Views/Settings/GlassSettingsContent.swift",
-        "Views/Settings/ConnectionSection.swift",
+        "Views/Settings/AccountSection.swift",
+        "Views/Settings/PayoutsSection.swift",
         "Views/Settings/StartupSection.swift",
         "Views/Settings/WatchingSection.swift",
         "Views/Settings/ConsentSection.swift",
@@ -84,6 +85,9 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/FirstRun/WelcomeScreen.swift",
         "Views/FirstRun/TracesScreen.swift",
         "Views/FirstRun/PrivateAIScreen.swift",
+        // The getting-started card the Insights, Private AI and Home
+        // walkthrough cards share (owner, 2026-11-02).
+        "Views/GetStartedCard.swift",
     ]
 
     static func text(_ rel: String) throws -> String {

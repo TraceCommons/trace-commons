@@ -14,19 +14,20 @@ import TCShellCore
 struct MonitorWindowView: View {
     /// Opens the Settings window from the gear.
     @Environment(\.openWindow) private var openWindow
-    /// The gate's button, which opens first run: the core's first-run
-    /// Continue. With no table the word is empty, never a Swift fallback.
-    static let openFirstRun = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.frame.continueButton ?? ""
+    /// The signed-out gate's button, which opens first run to sign in: the
+    /// core's "Sign in" (it was first run's Continue, which does not name
+    /// the click). With no table the word is empty, never a Swift fallback.
+    static var openFirstRun: String { MonitorWords.table?.signIn ?? "" }
     /// The window's tabs, in their default order. Home is always first;
     /// the person drags the other three into any order (owner, 2026-10-30,
-    /// `ordered(_:)`).
+    /// `ordered(_:)`), holding a tab to lift it (owner, 2026-11-02).
     enum Tab: String, CaseIterable, Identifiable {
         case home = "Home"
-        /// Traces second and Private AI third by default (owner,
-        /// 2026-10-28: the macOS MVP is "contribute traces, earn credit";
-        /// kept 2026-10-30 while the default is decided).
-        case traces = "Traces"
+        /// Private AI second and Traces third by default (owner,
+        /// 2026-11-02, deciding the default left open on 2026-10-30). An
+        /// order the person dragged into is theirs and is kept.
         case inference = "Inference"
+        case traces = "Traces"
         /// Insights' own tab (2026-10-15), no longer a Home page.
         case insights = "Insights"
 
@@ -438,6 +439,9 @@ struct MonitorWindowView: View {
         // The sheet for sent traces without Train coding models, when the
         // Insights line's Review or the first run raised it.
         .modifier(SentTracesTrainingPresenter(site: .monitor))
+        // The change of login's sheet (F10), raised from Settings'
+        // Connection and Private AI sections, once for the window.
+        .modifier(AccountLoginChangePresenter())
         // Modals and confirmations raised anywhere in the window cover all
         // of it, Settings' sections' own included: the Settings modal sits
         // inside this host.
@@ -472,6 +476,9 @@ struct MonitorWindowView: View {
         // view, picking Traces its Traces view; Home keeps the choice.
         .onChange(of: tab) { _, picked in
             if let view = Self.mapTab(for: picked) { mapTab = view }
+            // Opening Traces is a new visit: the resume notice's Not now
+            // from the last one no longer hides it.
+            closedNotices = PausedResumeNotice.closed(closedNotices, afterOpeningTraces: picked == .traces)
         }
         // The app's own settings read saw Private AI move (a NEAR AI sign-in
         // or sign-out landed, a status change, a switch write): this
@@ -1122,7 +1129,7 @@ private struct MonitorMapPane: View {
                     // Settings' Devices section, which starts linking a
                     // server on the request (owner, 2026-10-27).
                     AccountDeviceLinkRequest.shared.ask()
-                    OpenMonitor.request(.settings(.connection))
+                    OpenMonitor.request(.settings(.account))
                 },
                 addDeviceLabel: devices.surface?.copy.linkAccessibilityName ?? "")
         case .privateAI:

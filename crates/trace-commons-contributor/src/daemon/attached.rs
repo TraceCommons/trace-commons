@@ -67,21 +67,30 @@ const METHOD_SHUTDOWN: &str = "shutdown";
 #[derive(Debug, thiserror::Error)]
 pub enum AttachError {
     /// Nothing is listening on this store's endpoint.
-    #[error("no daemon is listening")]
+    /// DRAFT, NEEDS APPROVAL (2026-11-04).
+    #[error("{} is not running", crate::brand::APP_NAME)]
     NotListening,
     /// The daemon accepted the connection and then stopped answering.
-    #[error("the attached daemon closed the connection")]
+    /// DRAFT, NEEDS APPROVAL (2026-11-04).
+    #[error("{} closed the connection", crate::brand::APP_NAME)]
     Disconnected,
-    #[error("the attached daemon did not answer in time")]
+    /// DRAFT, NEEDS APPROVAL (2026-11-04).
+    #[error("{} did not answer in time", crate::brand::APP_NAME)]
     TimedOut,
     /// Asking an attached client to stop a daemon it did not start.
-    #[error("an attached shell may not stop a daemon it did not start")]
+    /// DRAFT, NEEDS APPROVAL (2026-11-04).
+    #[error(
+        "{} was started elsewhere and cannot be stopped from here",
+        crate::brand::APP_NAME
+    )]
     StopRefused,
     /// This platform's daemon endpoint cannot carry a held-open connection.
     /// See the module doc for the supported Unix and Windows transports.
-    #[error("this platform's daemon transport cannot be attached to")]
+    /// DRAFT, NEEDS APPROVAL (2026-11-04).
+    #[error("this platform cannot connect to a running {}", crate::brand::APP_NAME)]
     UnsupportedTransport,
-    #[error("attached daemon transport: {0}")]
+    /// DRAFT, NEEDS APPROVAL (2026-11-04).
+    #[error("could not connect to {app}: {0}", app = crate::brand::APP_NAME)]
     Transport(String),
 }
 

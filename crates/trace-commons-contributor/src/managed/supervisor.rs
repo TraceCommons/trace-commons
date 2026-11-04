@@ -71,11 +71,15 @@ const PARENT_SESSION_ENV: &[&str] = &[
     "CLAUDE_EFFORT",
 ];
 
-/// Drop every [`PARENT_SESSION_ENV`] marker from the tool's environment.
+/// Drop every [`PARENT_SESSION_ENV`] marker from the tool's environment,
+/// and the launch ticket a herdr pane hands the helper
+/// ([`super::terminal::LAUNCH_TICKET_ENV`]): it is spent by now, and the tool
+/// has no use for it.
 fn clear_parent_session(command: &mut std::process::Command) {
     for key in PARENT_SESSION_ENV {
         command.env_remove(key);
     }
+    command.env_remove(super::terminal::LAUNCH_TICKET_ENV);
 }
 
 pub async fn redeem_and_run(store: &ConfigStore, prepared: PreparedLaunch) -> anyhow::Result<i32> {
@@ -349,6 +353,26 @@ async fn run_native(
     } else {
         None
     };
+    // Setup (the snapshot above) can outlast the lease, and the person may
+    // have dismissed the row meanwhile: check in first, so a dismissed row
+    // never gets a tool running untracked.
+    let check_in: anyhow::Result<Value> = call(
+        store,
+        "managed_session_report",
+        json!(LifecycleReport {
+            model: None,
+            collection: None,
+            session_id: row.id,
+            proof: context.proof.clone(),
+            state: SessionState::Starting,
+            process_id: None,
+            process_identity: None,
+            exit_code: None,
+        }),
+    );
+    if check_in_refused(&check_in) {
+        return Err(ManagedError::LaunchUnknown.into());
+    }
     clear_parent_session(&mut command);
     #[cfg(unix)]
     let command = with_open_files_floor(command);
@@ -450,8 +474,9 @@ async fn run_native(
         super::collection_plan::finish(store, row.id);
     }
     if final_report.is_err() && persisted.is_err() {
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
         best_effort_stderr(&format!(
-            "Native session exited; {} status is unknown until the daemon reconnects.",
+            "Native session exited; its {} status is unknown until the app reconnects.",
             crate::brand::APP_NAME
         ));
     }
@@ -737,7 +762,23 @@ fn near_ai_route(
         super::ToolId::Claude => {
             command
                 .env("ANTHROPIC_BASE_URL", format!("{base}/anthropic"))
-                .env("ANTHROPIC_AUTH_TOKEN", "managed-local-session");
+                .env("ANTHROPIC_AUTH_TOKEN", "managed-local-session")
+                // Auto mode's server-side classifier review rides on the
+                // Anthropic API: an `anthropic-beta` value and a `safeguards`
+                // request field, answered by `safeguard_results` in the
+                // reply. This route translates to NEAR AI's Chat Completions,
+                // where neither survives, so Claude Code would ask, get no
+                // review, fall back to its own classifier requests anyway,
+                // and hold the first checked action behind a notice saying
+                // so. Tell it not to ask: the classifier requests go to the
+                // session's NEAR AI models as they always have.
+                // https://code.claude.com/docs/en/auto-mode-classifier-billing
+                // The page above says: "CLAUDE_CODE_AUTO_MODE_SERVER is a
+                // temporary setting and may be removed in a later release."
+                // If the "isn't eligible" notice comes back on managed
+                // sessions, look here first: it was probably removed, and
+                // the route itself has to stop Claude Code asking.
+                .env("CLAUDE_CODE_AUTO_MODE_SERVER", "0");
             for (name, value) in super::models::claude_env(in_use, choices.background, models) {
                 match value {
                     Some(value) => command.env(name, value),
@@ -819,6 +860,15 @@ fn status_line(command: &mut std::process::Command, tool: super::ToolId, home: &
             "managed session runs without a status line"
         ),
     }
+}
+
+/// Whether the daemon refused this launcher's check-in before spawn: the
+/// row was ended (the person dismissed it) or is not this launcher's. Any
+/// other answer spawns, as before the check-in existed: an older daemon
+/// refuses a `starting` report as invalid, an unreachable one answers
+/// nothing.
+fn check_in_refused(answer: &anyhow::Result<Value>) -> bool {
+    matches!(answer, Err(error) if error.to_string() == "managed-conflict")
 }
 
 /// Whether the daemon's answer to a running report asks for a stop. Only
@@ -1020,6 +1070,25 @@ impl TerminalSignals {
 
 #[cfg(test)]
 mod tests {
+    /// Only a refusal of the check-in stops the spawn: the row was ended
+    /// (dismissed) or is not this launcher's. An older daemon refuses a
+    /// `starting` report as invalid, and an unreachable daemon answers
+    /// nothing; both spawn, as before the check-in existed.
+    #[test]
+    fn only_a_refused_check_in_stops_the_spawn() {
+        use serde_json::json;
+        assert!(!super::check_in_refused(&Ok(json!({"accepted":true}))));
+        assert!(super::check_in_refused(&Err(anyhow::anyhow!(
+            "managed-conflict"
+        ))));
+        assert!(!super::check_in_refused(&Err(anyhow::anyhow!(
+            "managed-invalid-request"
+        ))));
+        assert!(!super::check_in_refused(&Err(
+            super::ManagedError::DaemonUnavailable.into()
+        )));
+    }
+
     /// The workflows notice is the owner's approved line, from the shared
     /// copy table.
     #[test]
@@ -1125,6 +1194,9 @@ mod tests {
             env("ANTHROPIC_SMALL_FAST_MODEL"),
             Some(Some("deepseek-ai/DeepSeek-V3.1".into()))
         );
+        // NEAR AI cannot run auto mode's server-side classifier review,
+        // so Claude Code is told not to ask for it.
+        assert_eq!(env("CLAUDE_CODE_AUTO_MODE_SERVER"), Some(Some("0".into())));
         // Removed, not left to the person's shell.
         assert_eq!(env("CLAUDE_CODE_SUBAGENT_MODEL"), Some(None));
         assert_eq!(env("ANTHROPIC_CUSTOM_MODEL_OPTION"), Some(None));
@@ -1784,6 +1856,7 @@ mod tests {
         for key in PARENT_SESSION_ENV {
             command.env(key, "1");
         }
+        command.env(crate::managed::terminal::LAUNCH_TICKET_ENV, "abcdef");
         command.env("KEPT", "yes");
         clear_parent_session(&mut command);
         let out = with_open_files_floor(command).output().unwrap();
@@ -1795,6 +1868,10 @@ mod tests {
         for key in PARENT_SESSION_ENV {
             assert!(!names.contains(key), "{key} reached the tool");
         }
+        assert!(
+            !names.contains(&crate::managed::terminal::LAUNCH_TICKET_ENV),
+            "the launch ticket reached the tool"
+        );
         assert!(names.contains(&"KEPT"), "{text}");
     }
 
