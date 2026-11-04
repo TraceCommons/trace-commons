@@ -511,12 +511,21 @@ pub(crate) fn status_fields(
     // approved mismatch body), whether or not the change is offered here.
     let mismatch = super::nearai_credential::ceremony::attempt_status(store.dir())
         == Some(super::nearai_credential::ceremony::STATUS_DIFFERENT_ACCOUNT);
-    serde_json::json!({
+    let mut fields = serde_json::json!({
         "login_change_available": available,
         "payouts_need_login": payouts_need_login,
         "login_change_held": available && held,
         "login_mismatch": mismatch || (available && held),
-    })
+    });
+    // The login the account last accepted, as its tag (`near`, `github`,
+    // `google`), for the account section's "Connected with {provider}"
+    // (Settings IA D6). A label only, never an account id or subject. Absent
+    // while it is not known, and while this device is not enrolled
+    // (`commons_login`'s rule).
+    if let Some(tag) = super::nearai_credential::login_record::commons_login(store) {
+        fields["account_login"] = serde_json::Value::from(tag);
+    }
+    fields
 }
 
 /// Hold a login the commons refused as another account aside for a change

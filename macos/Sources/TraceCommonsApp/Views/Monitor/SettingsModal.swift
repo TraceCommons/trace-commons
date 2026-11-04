@@ -28,8 +28,18 @@ struct SettingsModal: View {
     /// Every section, in order, in one body.
     static let sections: [SettingsSection] = SettingsSection.allCases
 
-    /// The sections the list names: #1146's twelve.
+    /// The sections the list can name, in order (the Settings IA review's
+    /// groups, owner 2026-11-04).
     static let listed: [SettingsSection] = SettingsSection.listed
+
+    /// Whether anything in Payouts applies; its row is listed only then (D2).
+    @State private var payoutsShown = false
+
+    /// The rows the list draws now: every listed section but Payouts while
+    /// nothing in it applies.
+    static func rows(payoutsShown: Bool) -> [SettingsSection] {
+        listed.filter { $0 != .payouts || payoutsShown }
+    }
 
     var body: some View {
         // The window's own surface, edge to edge on the opaque pane base:
@@ -80,7 +90,15 @@ struct SettingsModal: View {
             HStack(alignment: .top, spacing: 0) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 1) {
-                        ForEach(Self.listed) { item in
+                        let rows = Self.rows(payoutsShown: payoutsShown)
+                        ForEach(rows) { item in
+                            // A hairline between groups, and no group
+                            // headings (D17).
+                            if SettingsSection.startsGroup(item, in: rows) {
+                                GlassHairline(GlassColor.ink(Self.navRuleInk))
+                                    .padding(.vertical, GlassTokens.Space.s3)
+                                    .accessibilityHidden(true)
+                            }
                             // A section whose copy has not loaded is a
                             // disabled placeholder, never a missing row.
                             let row = item.listRow(words?.settingsNav)
@@ -107,7 +125,8 @@ struct SettingsModal: View {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(Self.sections) { item in
                             VStack(alignment: .leading, spacing: 0) {
-                                if let name = item.navName(words?.settingsNav) {
+                                if item != .payouts || payoutsShown,
+                                   let name = item.navName(words?.settingsNav) {
                                     GlassSectionRule(name)
                                         .padding(.horizontal, Self.bodyInset)
                                         .padding(.top, Self.sectionGap)
@@ -142,17 +161,28 @@ struct SettingsModal: View {
         // core or on first run.
         if item == .general {
             GlassSettingsContent(navigation: navigation, section: item)
+        } else if item == .payouts {
+            // Payouts says nothing until it applies: no onboarding notice
+            // and no rule over an empty body (D2).
+            if gate(for: item) == .open {
+                GlassSettingsContent(navigation: navigation, section: item,
+                                     onPayoutsPresence: { payoutsShown = $0 })
+            }
         } else {
             gatedSection(item)
         }
     }
 
-    @ViewBuilder
-    private func gatedSection(_ item: SettingsSection) -> some View {
-        switch MonitorGate.of(
+    private func gate(for item: SettingsSection) -> MonitorGate {
+        MonitorGate.of(
             startup: model.startup, onboardingKnown: model.onboardingKnown,
             requiresOnboarding: model.requiresOnboarding
-        ).forSettings(availableBeforeOnboarding: item.availableBeforeOnboarding) {
+        ).forSettings(availableBeforeOnboarding: item.availableBeforeOnboarding)
+    }
+
+    @ViewBuilder
+    private func gatedSection(_ item: SettingsSection) -> some View {
+        switch gate(for: item) {
         case .awaiting:
             SettingsAwaiting()
                 .padding(.horizontal, Self.bodyInset)

@@ -388,6 +388,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var settingUpAgain = false
     /// The daemon refused the last "Set up again"; cleared by the next one.
     @Published private(set) var setUpAgainFailed = false
+    /// The account section's "Sign out" is running (Settings IA D3).
+    @Published private(set) var signingOut = false
+    /// The daemon refused the last "Sign out"; cleared by the next one.
+    @Published private(set) var signOutFailed = false
     /// Words `status.legacy_invite_migration.notice`. The ABI in the app;
     /// replaced only by tests.
     var legacyMigrationWording: (String) -> String? = TCConsentCopy.legacyMigrationNoticeJSON(
@@ -4734,6 +4738,38 @@ extension AppModel: FirstRunDaemon {
         let done = await unenroll()
         setUpAgainFailed = !done
         return done
+    }
+
+    /// "Sign out" (Settings IA D3): the daemon clears this computer's
+    /// account session and its NEAR AI login, and revokes both, best effort
+    /// (`account_sign_out`). The enrollment stays: signing in again picks
+    /// the account back up. It replaces NEAR AI "Forget" on macOS, so the
+    /// NEAR AI result is said as Forget said it: the failed-revoke sentence
+    /// when the key could not be revoked at NEAR AI, `nearAiStillSignedIn`
+    /// when it could not be cleared here. True when the daemon signed out.
+    @discardableResult
+    func signOut() async -> Bool {
+        guard !signingOut else { return false }
+        signingOut = true
+        signOutFailed = false
+        defer { signingOut = false }
+        guard case .success(let nearAi) = await firstRunCall({ try $0.accountSignOut() }) else {
+            signOutFailed = true
+            return false
+        }
+        switch nearAi {
+        case .notRevoked:
+            lastActionError = privateInferenceCopy?.credentialForgetNotRevoked
+        case .notCleared:
+            lastActionError = privateInferenceCopy?.nearAiStillSignedIn
+        case .done:
+            break
+        }
+        refreshStatus()
+        refreshNearAiCredential()
+        refreshAccountSession()
+        refreshSettings()
+        return true
     }
 
     /// One blocking client call off the main actor. Nil without a daemon.

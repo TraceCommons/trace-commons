@@ -960,8 +960,8 @@ pub fn witness_capacity_notice_for_wire(value: &serde_json::Value) -> Option<Wit
 /// `status.legacy_invite_migration.offered` is true.
 pub const LEGACY_MIGRATION_OFFER_TITLE: &str = "Move to your NEAR AI account";
 
-/// Reworded 2026-10-11 (owner direction), and its passkey clause deleted
-/// 2026-10-31 when passkeys were removed; not yet approved. The offer. Says it is optional and that
+/// Reworded 2026-10-11 (owner direction), and one clause deleted
+/// 2026-10-31; not yet approved. The offer. Says it is optional and that
 /// declining changes nothing, because coexistence is the default.
 pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. You can move your contributions to your NEAR AI account instead. Nothing changes unless you choose to, and your invite keeps working if you don't.";
 
@@ -979,16 +979,17 @@ pub const LEGACY_MIGRATION_OFFER_LATER: &str = "You can move later from Settings
 
 /// Not yet approved. Shown while the shell waits on the NEAR AI sign-in in
 /// the browser, which it starts itself when the move needs it
-/// (`legacy_migration_no_near_ai_session`), before it retries the move. The
-/// key keeps its old `passkey_` name.
-pub const LEGACY_MIGRATION_PASSKEY_WAITING: &str = "Waiting for your browser...";
+/// (`legacy_migration_no_near_ai_session`), before it retries the move. Its
+/// wire key keeps an older name (`LegacyMigrationOfferCopy`).
+pub const LEGACY_MIGRATION_NEAR_AI_LOGIN_WAITING: &str = "Waiting for your browser...";
 
-/// Not yet approved. The passkey step ended without finishing (it failed,
-/// or ran out of time). Nothing ran.
-pub const LEGACY_MIGRATION_PASSKEY_FAILED: &str = "Your passkey step didn't finish, so nothing was moved. Your invite keeps working; try again when you're ready.";
+/// DRAFT, NEEDS APPROVAL (reworded 2026-11-04). The NEAR AI
+/// sign-in in the browser ended without finishing (it failed, or ran out of
+/// time). Nothing ran.
+pub const LEGACY_MIGRATION_NEAR_AI_LOGIN_FAILED: &str = "Your browser step didn't finish, so nothing was moved. Your invite keeps working; try again when you're ready.";
 
-/// Not yet approved. Stops waiting on the passkey step. Nothing is moved.
-pub const LEGACY_MIGRATION_PASSKEY_CANCEL: &str = "Cancel";
+/// Not yet approved. Stops waiting on the NEAR AI sign-in. Nothing is moved.
+pub const LEGACY_MIGRATION_NEAR_AI_LOGIN_CANCEL: &str = "Cancel";
 
 /// Not yet approved. The accessible name of the offer card's Move button,
 /// so a screen reader can tell it from the one in Settings
@@ -1082,7 +1083,7 @@ pub fn legacy_migration_refusal_line(label: &str) -> &'static str {
         "legacy_migration_admission_not_ready" => {
             "This commons isn't accepting contributions by account yet. Your invite keeps working; try again later."
         }
-        // Approved 2026-10-31, when passkeys were removed.
+        // Approved 2026-10-31.
         "legacy_migration_no_near_ai_session" => {
             "Sign in to NEAR AI in your browser first, then try again. Your invite keeps working."
         }
@@ -1136,12 +1137,17 @@ pub struct LegacyMigrationOfferCopy {
     pub dismiss: &'static str,
     /// Beside that dismiss: the move is still in Settings.
     pub later: &'static str,
-    /// While the shell waits on the passkey step in the browser.
-    pub passkey_waiting: &'static str,
-    /// The passkey step ended without finishing.
-    pub passkey_failed: &'static str,
-    /// Stops waiting on the passkey step.
-    pub passkey_cancel: &'static str,
+    /// While the shell waits on the NEAR AI sign-in in the browser. The wire
+    /// keys of this field and the next two keep their older names, which
+    /// shipped shells decode.
+    #[serde(rename = "passkey_waiting")]
+    pub near_ai_login_waiting: &'static str,
+    /// The NEAR AI sign-in ended without finishing.
+    #[serde(rename = "passkey_failed")]
+    pub near_ai_login_failed: &'static str,
+    /// Stops waiting on the NEAR AI sign-in.
+    #[serde(rename = "passkey_cancel")]
+    pub near_ai_login_cancel: &'static str,
     /// The accessible name of `action` on the offer card in the notices.
     pub action_name_notice: &'static str,
     /// The accessible name of `action` in Settings.
@@ -1159,9 +1165,9 @@ pub fn legacy_migration_offer() -> LegacyMigrationOfferCopy {
         start_failed: LEGACY_MIGRATION_START_FAILED,
         dismiss: LEGACY_MIGRATION_OFFER_DISMISS,
         later: LEGACY_MIGRATION_OFFER_LATER,
-        passkey_waiting: LEGACY_MIGRATION_PASSKEY_WAITING,
-        passkey_failed: LEGACY_MIGRATION_PASSKEY_FAILED,
-        passkey_cancel: LEGACY_MIGRATION_PASSKEY_CANCEL,
+        near_ai_login_waiting: LEGACY_MIGRATION_NEAR_AI_LOGIN_WAITING,
+        near_ai_login_failed: LEGACY_MIGRATION_NEAR_AI_LOGIN_FAILED,
+        near_ai_login_cancel: LEGACY_MIGRATION_NEAR_AI_LOGIN_CANCEL,
         action_name_notice: LEGACY_MIGRATION_OFFER_ACTION_NAME_NOTICE,
         action_name_settings: LEGACY_MIGRATION_OFFER_ACTION_NAME_SETTINGS,
     }
@@ -2444,9 +2450,8 @@ pub fn session_notification_copy() -> SessionNotificationCopy {
 //
 // The words for choosing the NEAR AI organization the commons sends payout
 // credit to. Every sentence here is DRAFT, NEEDS APPROVAL: none is approved
-// until the owner signs it off. The passkey lines of the spec's draft are
-// gone (D5 superseded 2026-10-23: the signed-in session confirms, and
-// nothing asks for a passkey). Templates carry `{org_name}`, which a shell
+// until the owner signs it off. The signed-in session confirms (D5
+// superseded 2026-10-23). Templates carry `{org_name}`, which a shell
 // fills with the name the daemon's `payout_link_orgs` returned
 // ([`render_org_name`]); the name never leaves the device.
 
@@ -2461,8 +2466,7 @@ pub const PAYOUT_LINK_TITLE: &str = "Get paid in NEAR AI credit";
 pub const PAYOUT_LINK_BODY: &str = "The commons will send NEAR AI credit to {org_name} for traces you contribute, as soon as their credit settles. This is on top of your Trace Credit, which you keep. Credit sent to {org_name} stays there and can't be moved. Other members of {org_name} can spend it too. If {org_name} owes NEAR AI for past use, new credit pays that first.";
 /// DRAFT, NEEDS APPROVAL. Beside the confirm button.
 pub const PAYOUT_LINK_SCOPE: &str = "Sends credit to {org_name} only.";
-/// DRAFT, NEEDS APPROVAL. The confirm button: chooses the org shown. The
-/// spec left this to be drafted after the passkey label was dropped.
+/// DRAFT, NEEDS APPROVAL. The confirm button: chooses the org shown.
 pub const PAYOUT_LINK_BUTTON: &str = "Choose";
 /// DRAFT, NEEDS APPROVAL. Leaves without choosing.
 pub const PAYOUT_LINK_SECONDARY: &str = "Not now";
@@ -2487,7 +2491,7 @@ pub const PAYOUT_LINK_STATUS_LINKED: &str = "Credit goes to {org_name}";
 /// DRAFT, NEEDS APPROVAL. Status: no link.
 pub const PAYOUT_LINK_STATUS_NONE: &str = "No organization chosen";
 /// DRAFT, NEEDS APPROVAL. Status: a confirmed link the rail has not made
-/// active yet (it replaces the spec's "Waiting for passkey confirmation").
+/// active yet.
 pub const PAYOUT_LINK_STATUS_WAITING: &str = "Credit goes to {org_name} from the next payout";
 /// DRAFT, NEEDS APPROVAL. Status: NEAR AI answered that the org is gone.
 pub const PAYOUT_LINK_STATUS_UNAVAILABLE: &str = "Organization unavailable. Choose another.";
@@ -4248,21 +4252,38 @@ mod tests {
     }
 
     /// The move leads with the browser step (owner, 2026-10-11): with no
-    /// session the shell runs the browser step itself. The offer and the
-    /// wait offer no passkey (removed 2026-10-31), and none of the step's
+    /// session the shell runs the browser step itself. None of the step's
     /// lines speaks of signing in. The step's own words are separate keys,
     /// and its button is short.
     #[test]
     fn the_migration_leads_with_the_browser_step() {
         let offer = legacy_migration_offer();
-        assert_eq!(offer.passkey_waiting, LEGACY_MIGRATION_PASSKEY_WAITING);
-        assert_eq!(offer.passkey_failed, LEGACY_MIGRATION_PASSKEY_FAILED);
-        assert_eq!(offer.passkey_cancel, LEGACY_MIGRATION_PASSKEY_CANCEL);
+        assert_eq!(
+            offer.near_ai_login_waiting,
+            LEGACY_MIGRATION_NEAR_AI_LOGIN_WAITING
+        );
+        assert_eq!(
+            offer.near_ai_login_failed,
+            LEGACY_MIGRATION_NEAR_AI_LOGIN_FAILED
+        );
+        assert_eq!(
+            offer.near_ai_login_cancel,
+            LEGACY_MIGRATION_NEAR_AI_LOGIN_CANCEL
+        );
         let no_session = legacy_migration_refusal_line("legacy_migration_no_near_ai_session");
-        for line in [offer.body, offer.passkey_waiting, no_session] {
+        for line in [
+            offer.body,
+            offer.near_ai_login_waiting,
+            offer.near_ai_login_failed,
+            no_session,
+        ] {
             assert!(!line.to_lowercase().contains("passkey"), "{line}");
         }
-        for line in [offer.body, offer.passkey_waiting, offer.passkey_failed] {
+        for line in [
+            offer.body,
+            offer.near_ai_login_waiting,
+            offer.near_ai_login_failed,
+        ] {
             assert!(!line.to_lowercase().contains("sign in"), "{line}");
         }
         // The refusal names the step it sends the contributor to (owner,
@@ -4271,11 +4292,11 @@ mod tests {
             no_session,
             "Sign in to NEAR AI in your browser first, then try again. Your invite keeps working."
         );
-        assert!(offer.passkey_failed.contains("nothing was moved"));
-        assert!(offer.passkey_failed.contains("keeps working"));
-        assert!(offer.passkey_cancel.split_whitespace().count() <= 2);
-        assert_ne!(offer.passkey_cancel, offer.dismiss);
-        assert_ne!(offer.passkey_waiting, offer.working);
+        assert!(offer.near_ai_login_failed.contains("nothing was moved"));
+        assert!(offer.near_ai_login_failed.contains("keeps working"));
+        assert!(offer.near_ai_login_cancel.split_whitespace().count() <= 2);
+        assert_ne!(offer.near_ai_login_cancel, offer.dismiss);
+        assert_ne!(offer.near_ai_login_waiting, offer.working);
     }
 
     #[test]

@@ -209,7 +209,7 @@ final class FlowMapDevicesTests: XCTestCase {
         let window = try MonitorNavigationTests.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains(".addingDevices(devicesOnMap, offersLink: devices.devices != nil && devices.surface != nil)"))
         XCTAssertTrue(window.contains("AccountDeviceLinkRequest.shared.ask()"))
-        XCTAssertTrue(window.contains("OpenMonitor.request(.settings(.connection))"))
+        XCTAssertTrue(window.contains("OpenMonitor.request(.settings(.account))"))
         let view = try MonitorNavigationTests.text("Views/AccountDevicesView.swift")
         XCTAssertTrue(view.contains("await model.linkIfRequested()"))
         let map = try MonitorNavigationTests.text("Views/Monitor/FlowMapView.swift")

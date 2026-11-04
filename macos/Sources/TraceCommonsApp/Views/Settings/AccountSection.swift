@@ -3,8 +3,16 @@ import TCBridge
 import TCDesign
 import TCShellCore
 
-struct ConnectionSection: View {
+/// Settings > Account (Settings IA, owner 2026-11-04): who you are on this
+/// computer. It was #1146's Connection section (D1). In order: the account's
+/// state (the attention block, the mismatch block and the connected card, as
+/// before: D11 keeps both blocks able to show), the NEAR AI login (moved
+/// here from Private AI), the account's contributions, its devices, the
+/// legacy move, and last the ways to leave: Sign out (D3), then Set up
+/// again. The source-mode lines are gone (D7): Watching holds the switches.
+struct AccountSection: View {
     @EnvironmentObject private var model: AppModel
+    @ObservedObject private var change = AccountLoginChangeModel.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
@@ -15,15 +23,24 @@ struct ConnectionSection: View {
             // held aside for a change of login (F10).
             AccountLoginMismatchBlock()
             connection
+            // The NEAR AI login, moved from Private AI (D8): its state and
+            // Sign in, Cancel or move-from-the-keychain. Never Forget: Sign
+            // out below replaces it (D3).
+            if let copy = model.privateInferenceCopy {
+                GlassEyebrowCard(copy.credentialTitle) {
+                    CredentialSection(copy: copy, titled: false, placement: .account)
+                }
+            }
             ContributionAccountCard()
             // The devices linked to this account, and Link a server.
             AccountDevicesView()
             LegacyMigrationSettingsCard()
+            AccountLeaveCard()
         }
     }
 
     private var connection: some View {
-        GlassEyebrowCard(SettingsWords.connection, title: connectionTitle, accessory: {
+        GlassEyebrowCard(Self.eyebrow, title: connectionTitle, accessory: {
             if model.statusRead == .answered {
                 GlassChip(glass: model.status.loggedIn ? SettingsLegacyWords.connectionReady
                                                        : SettingsLegacyWords.connectionLocalOnly,
@@ -39,63 +56,88 @@ struct ConnectionSection: View {
                         .foregroundStyle(GlassColor.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if model.daemonSettings == nil {
-                    // One indicator for the card while neither has answered.
-                    if model.statusRead == .answered {
-                        SettingsReadNotice(model.settingsRead, retry: model.refreshSettings)
-                    }
-                } else if let settings = model.daemonSettings {
-                    sourceLine(TCSourceChecks.claude, settings.routingSourceModes.claude)
-                    sourceLine(TCSourceChecks.codex, settings.routingSourceModes.codex)
-                    sourceLine(TCSourceChecks.gemini, settings.routingSourceModes.gemini)
-                    sourceLine(TCSourceChecks.cline, settings.routingSourceModes.cline)
-                    // #1146 lists OpenCode too; its sentence is the core's.
-                    sourceLine(TCSourceChecks.opencode, settings.opencodeSourceMode ?? "unset")
-                    SettingsStateRow(title: SettingsLegacyWords.extraScanConfigured,
-                                     isOn: settings.nearAIConfigured)
-                }
-                // Change the NEAR AI login this account uses (F10).
+                // Change the NEAR AI login this account uses (F10), beside
+                // the connected line.
                 AccountLoginChangeButton()
-                // Clear this computer's sign-in and start over (owner,
-                // 2026-11-04), behind the attention block's confirmation.
-                SetUpAgainControl()
             }
         }
     }
 
-    /// Connected or Not connected beside the Ready or Local only chip.
-    /// Before the core's first answer, use the Connection heading and no
+    /// The card's eyebrow: the section's own name, from the core.
+    static var eyebrow: String { MonitorWords.table?.settingsNav.account ?? "" }
+
+    /// The connected line. Before the core's first answer, no title and no
     /// chip: "Not connected" would be an answer nothing gave.
     private var connectionTitle: String? {
         guard model.statusRead == .answered else { return nil }
-        return model.status.loggedIn ? SettingsLegacyWords.connected : SettingsLegacyWords.notConnected
+        return Self.connectedTitle(
+            loggedIn: model.status.loggedIn, accountLogin: model.status.accountLogin,
+            needsAttention: model.accountAttention != nil, copy: change.copy)
     }
 
-    /// The core's sentence for one source's MODE (it words watch and off
-    /// differently, so the line carries the state); nothing when the ABI
-    /// refused, as the legacy row does.
-    @ViewBuilder
-    private func sourceLine(_ tool: String, _ mode: String) -> some View {
-        if let line = TCSourceChecks.checkLine(tool: tool, sourceMode: mode) {
-            GlassStatusLabel(
-                line, status: Self.sourceStatus(tool: tool, mode: mode, copy: TCSourceChecks.settingsCopy()))
+    /// "Connected with {provider}" (D6) while the account's login is known
+    /// and the account needs no attention (F1: a login stored without the
+    /// check is never presented as the account's); otherwise "Connected", or
+    /// "Not connected" for an app that is not enrolled.
+    static func connectedTitle(
+        loggedIn: Bool, accountLogin: String?, needsAttention: Bool, copy: AccountChangeCopy?
+    ) -> String {
+        guard loggedIn else { return SettingsLegacyWords.notConnected }
+        if !needsAttention, let copy, let line = copy.render(copy.connected, provider: accountLogin) {
+            return line
         }
+        return SettingsLegacyWords.connected
+    }
+}
+
+/// The account section's foot: leaving this computer's account. "Sign out"
+/// (D3) with the line that says what it does above it, as Forget's was, then
+/// #1912's "Set up again" behind its confirmation. Sign out is drawn while
+/// there is something to sign out of: an account session or a NEAR AI login.
+struct AccountLeaveCard: View {
+    @EnvironmentObject private var model: AppModel
+    @ObservedObject private var change = AccountLoginChangeModel.shared
+
+    private var signedInSomewhere: Bool {
+        model.accountSession == .signedIn
+            || CredentialSurface.action(model.credentialStatus, calls: model.credentialCalls) == .forget
     }
 
-    /// The dot for one source's mode. Only a declined source is off. An
-    /// unset source is on when the core says it is read from the usual
-    /// place (`unset_scans_conventional`, Claude Code and Codex), and is
-    /// otherwise not decided. With no core copy, or a mode the shell does
-    /// not know, nothing says whether it is read, so it is neither on nor
-    /// off.
-    static func sourceStatus(tool: String, mode: String, copy: SourceSettingsCopy?) -> GlassStatus {
-        switch mode {
-        case "watch": return .on
-        case "off": return .off
-        case "unset":
-            let scans = copy?.tools.values.first { $0.key == tool }?.unsetScansConventional
-            return scans == true ? .on : .ask
-        default: return .ask
+    private var showsSetUpAgain: Bool {
+        SetUpAgainSurface.showsInAccountSection(
+            loggedIn: model.status.loggedIn, needsAttention: model.accountAttention != nil)
+            && model.setUpAgainCopy != nil
+    }
+
+    var body: some View {
+        let signOut = signedInSomewhere ? change.copy : nil
+        if signOut != nil || showsSetUpAgain {
+            GlassCard {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                    if let copy = signOut {
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                            Text(copy.signOutBody)
+                                .glassType(GlassTokens.TypeScale.body)
+                                .foregroundStyle(GlassColor.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Button(copy.signOut) { Task { await model.signOut() } }
+                                .buttonStyle(GlassButtonStyle(.glass))
+                                .disabled(model.signingOut)
+                            // The account section's approved refusal ("Nothing
+                            // changed. Try again."), as Set up again says it.
+                            if model.signOutFailed, let failed = model.setUpAgainCopy?.failed {
+                                Text(failed)
+                                    .glassType(GlassTokens.TypeScale.caption)
+                                    .foregroundStyle(GlassColor.textSecondary)
+                            }
+                        }
+                    }
+                    // Clear this computer's sign-in and start over (owner,
+                    // 2026-11-04), behind the attention block's confirmation.
+                    SetUpAgainControl()
+                }
+            }
+            .task { if model.accountSession == .unread { model.refreshAccountSession() } }
         }
     }
 }
@@ -208,9 +250,9 @@ struct AccountAttentionBlock: View {
     }
 
     var body: some View {
-        // The section's name over the card's own title, as the Connection
-        // card above it: the title once, not as eyebrow and heading both.
-        GlassEyebrowCard(SettingsWords.connection, title: attention.title) {
+        // The section's name over the card's own title, as the Account card
+        // above it: the title once, not as eyebrow and heading both.
+        GlassEyebrowCard(AccountSection.eyebrow, title: attention.title) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 ForEach(Self.lines(attention, failed: failed), id: \.self) { line in
                     Text(line)

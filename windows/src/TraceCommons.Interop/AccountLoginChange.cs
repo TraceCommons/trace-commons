@@ -32,6 +32,11 @@ public sealed record AccountChangeCopy
     [JsonPropertyName("mismatch_sign_in")] public string? MismatchSignIn { get; init; }
     [JsonPropertyName("mismatch_change")] public string? MismatchChange { get; init; }
     [JsonPropertyName("change")] public string? Change { get; init; }
+    /// <summary>"Connected with {provider}" (owner, 2026-11-04, Settings IA D6).</summary>
+    [JsonPropertyName("connected")] public string? Connected { get; init; }
+    /// <summary>"Sign out" and the line drawn above it (owner, 2026-11-04, Settings IA D3).</summary>
+    [JsonPropertyName("sign_out")] public string? SignOut { get; init; }
+    [JsonPropertyName("sign_out_body")] public string? SignOutBody { get; init; }
     [JsonPropertyName("payouts_needs_login_body")] public string? PayoutsNeedsLoginBody { get; init; }
     [JsonPropertyName("payouts_needs_login_add")] public string? PayoutsNeedsLoginAdd { get; init; }
     /// <summary>Under "Add a NEAR AI login" when it could not start (DRAFT,
@@ -71,11 +76,11 @@ public sealed record AccountChangeCopy
     /// </summary>
     public static readonly IReadOnlyList<string> ConsumedFields = new[]
     {
-        "mismatch_body", "mismatch_sign_in", "mismatch_change", "change",
-        "payouts_needs_login_body", "payouts_needs_login_add", "payouts_needs_login_add_failed",
-        "title", "body", "body_old_unknown", "body_wallet", "private_ai", "confirm", "cancel",
-        "step_current", "step_current_wallet", "step_new", "step_current_button",
-        "step_new_button", "error_current_login", "error_wallet", "error_in_use",
+        "mismatch_body", "mismatch_sign_in", "mismatch_change", "change", "connected", "sign_out",
+        "sign_out_body", "payouts_needs_login_body", "payouts_needs_login_add",
+        "payouts_needs_login_add_failed", "title", "body", "body_old_unknown", "body_wallet",
+        "private_ai", "confirm", "cancel", "step_current", "step_current_wallet", "step_new",
+        "step_current_button", "step_new_button", "error_current_login", "error_wallet", "error_in_use",
         "error_too_soon", "error_unavailable", "error_retired", "step_current_accessibility_name",
         "step_new_accessibility_name", "confirm_accessibility_name", "provider_near",
         "provider_github", "provider_google",
@@ -84,10 +89,10 @@ public sealed record AccountChangeCopy
     /// <summary>Every field, in <see cref="ConsumedFields"/> order.</summary>
     public IReadOnlyList<string?> Sentences => new[]
     {
-        MismatchBody, MismatchSignIn, MismatchChange, Change, PayoutsNeedsLoginBody,
-        PayoutsNeedsLoginAdd, PayoutsNeedsLoginAddFailed, Title, Body, BodyOldUnknown,
-        BodyWallet, PrivateAi, Confirm, Cancel, StepCurrent, StepCurrentWallet, StepNew,
-        StepCurrentButton, StepNewButton, ErrorCurrentLogin, ErrorWallet,
+        MismatchBody, MismatchSignIn, MismatchChange, Change, Connected, SignOut, SignOutBody,
+        PayoutsNeedsLoginBody, PayoutsNeedsLoginAdd, PayoutsNeedsLoginAddFailed, Title, Body,
+        BodyOldUnknown, BodyWallet, PrivateAi, Confirm, Cancel, StepCurrent, StepCurrentWallet,
+        StepNew, StepCurrentButton, StepNewButton, ErrorCurrentLogin, ErrorWallet,
         ErrorInUse, ErrorTooSoon, ErrorUnavailable, ErrorRetired, StepCurrentAccessibilityName,
         StepNewAccessibilityName, ConfirmAccessibilityName, ProviderNear, ProviderGithub,
         ProviderGoogle,

@@ -14,9 +14,8 @@
 //! - `GET /v1/account/payout-rails` lists each enabled rail's link state,
 //!   never a recipient or a name.
 //!
-//! The owner superseded the passkey confirmation on 2026-10-23: the signed-in
-//! session is the authority, there is no step-up page, and nothing requires
-//! a passkey. The two calls stay so the app can show the consent between
+//! The signed-in session is the authority (owner, 2026-10-23), and there is
+//! no step-up page. The two calls stay so the app can show the consent between
 //! them. `expected_current_version` is the "changed since shown" check: the
 //! server refuses a start or a confirm when the account's link on that rail
 //! changed after the app read its status.

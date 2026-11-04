@@ -281,6 +281,24 @@ async fn status_offers_the_change_in_both_account_namespaces_only() {
     );
 }
 
+/// The account's login tag rides on status for "Connected with {provider}"
+/// (Settings IA D6): absent until the account has accepted a login, then the
+/// tag alone.
+#[tokio::test]
+async fn status_names_the_accounts_login_by_tag_only_once_known() {
+    let fx = Fixture::new(&near_ai_tenant(), None).await;
+    let status = fx.status();
+    assert!(
+        status.get("account_login").is_none(),
+        "no login recorded yet: {status}"
+    );
+    crate::daemon::nearai_credential::login_record::accepted_by_commons(
+        &fx.shared.store,
+        Some("github"),
+    );
+    assert_eq!(fx.status()["account_login"], "github");
+}
+
 #[tokio::test]
 async fn a_device_that_joined_by_code_cannot_start_a_change() {
     let fx = Fixture::new(&near_ai_tenant(), None).await;

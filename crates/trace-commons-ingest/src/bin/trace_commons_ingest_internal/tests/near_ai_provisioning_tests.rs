@@ -19,9 +19,6 @@
 //! The readiness check reads process-global environment variables, which
 //! [`ProvisioningEnv`] sets and restores; like the rest of the PostgreSQL
 //! suite these tests assume `--test-threads=1`.
-//!
-//! These tests lived beside the passkey bind tests until passkeys were
-//! removed.
 
 use super::*;
 use axum::body::Body;

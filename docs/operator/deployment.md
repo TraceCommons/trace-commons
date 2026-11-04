@@ -205,11 +205,12 @@ read.
 The same resolver role and pool also serve the NEAR sign-in bootstrap below;
 no additional login role is needed.
 
-Passkeys are removed (migration V144, see "V144: passkey removal" below). The
+WebAuthn sign-in is removed (migration V144, see "V144: WebAuthn sign-in
+removal" below). The
 `TRACE_COMMONS_WEBAUTHN_RP_*`, `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING`,
 `TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY` and
 `TRACE_COMMONS_UNBOUND_REAPER_*` variables are accepted and ignored; see
-[`env-reference.md`](env-reference.md#removed-variables-passkeys).
+[`env-reference.md`](env-reference.md#removed-variables-webauthn-sign-in).
 
 ### Login-with-NEAR (contributor NEAR sign-in, Slice 3a)
 
@@ -675,15 +676,15 @@ seven days. A contributor who wants it gone now should sign in again and call
 `POST /v1/account/sessions/revoke-all`, which revokes every session on the
 account, the old one and the current one alike, and then sign in once more.
 
-### V144: passkey removal
+### V144: WebAuthn sign-in removal
 
-V144 removes passkeys. It is forward-only and runs in one transaction:
+V144 removes WebAuthn sign-in. It is forward-only and runs in one transaction:
 
-- Every passkey-origin account in state `unbound` or `closed` is closed and
+- Every account WebAuthn sign-in created in state `unbound` or `closed` is closed and
   its sessions revoked, then deleted; its sessions, credentials and login
   links go with it. An account that a non-cascading row keeps from being
   deleted stays closed with its sessions revoked.
-- `bound` passkey accounts are kept and sign in with their NEAR AI login.
+- `bound` accounts it created are kept and sign in with their NEAR AI login.
 - The functions `trace_unbound_passkey_account_count()` and
   `trace_reap_unbound_accounts(...)` and the tables `trace_account_bindings`
   and `trace_webauthn_credentials` are dropped.

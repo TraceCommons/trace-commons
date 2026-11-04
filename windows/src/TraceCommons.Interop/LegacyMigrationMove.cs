@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 namespace TraceCommons.Interop;
 
 /// <summary>
-/// The passkey step of the legacy invite move: the NEAR AI browser sign-in
+/// The sign-in step of the legacy invite move: the NEAR AI browser sign-in
 /// the move needs a session from. It starts the same ceremony Private AI
 /// does, opens the browser on it and polls the daemon until the session is
 /// kept or the attempt is over.
@@ -17,7 +17,7 @@ namespace TraceCommons.Interop;
 /// says is the Rust's (<see cref="LegacyMigrationOfferCopy"/>). Transport and
 /// browser are injected so the loop runs off Windows.
 /// </remarks>
-public sealed class NearAiPasskeyStep
+public sealed class NearAiLoginStep
 {
     /// <summary>The ceremony's waiting word (<c>nearai_credential::ceremony</c>).</summary>
     public const string WaitingForBrowser = "waiting_for_browser";
@@ -32,7 +32,7 @@ public sealed class NearAiPasskeyStep
     private readonly TimeSpan _limit;
     private string? _attemptId;
 
-    public NearAiPasskeyStep(
+    public NearAiLoginStep(
         Func<string, string, Task<DaemonResponse>> call,
         Func<Uri, Task<bool>> open,
         Func<TimeSpan, CancellationToken, Task>? delay = null,
@@ -136,7 +136,7 @@ public sealed class NearAiPasskeyStep
         }
         catch (Exception e) when (e is not OperationCanceledException)
         {
-            System.Diagnostics.Trace.TraceWarning(nameof(NearAiPasskeyStep));
+            System.Diagnostics.Trace.TraceWarning(nameof(NearAiLoginStep));
             return false;
         }
     }
@@ -153,7 +153,7 @@ public sealed class NearAiPasskeyStep
         }
         catch
         {
-            System.Diagnostics.Trace.TraceWarning(nameof(NearAiPasskeyStep));
+            System.Diagnostics.Trace.TraceWarning(nameof(NearAiLoginStep));
         }
     }
 
@@ -173,11 +173,11 @@ public sealed class NearAiPasskeyStep
 }
 
 /// <summary>
-/// The Move on the legacy invite offer, passkey first: the daemon is asked to
+/// The Move on the legacy invite offer, sign-in first: the daemon is asked to
 /// move the identity, and when it has no NEAR AI session to provision the
-/// account with the passkey step runs and the move is asked once more,
+/// account with the sign-in step runs and the move is asked once more,
 /// without a second press. A refusal changes nothing and is said in the
-/// core's words; a passkey step that does not finish moves nothing.
+/// core's words; a sign-in step that does not finish moves nothing.
 /// </summary>
 /// <remarks>
 /// One instance serves the Settings section and the notices card, so the two
@@ -186,23 +186,23 @@ public sealed class NearAiPasskeyStep
 public sealed class LegacyMigrationMove : INotifyPropertyChanged
 {
     private readonly Func<string, string, Task<DaemonResponse>> _call;
-    private readonly NearAiPasskeyStep _passkey;
+    private readonly NearAiLoginStep _login;
     private readonly Func<string, string?> _refusalLine;
-    private CancellationTokenSource? _passkeyCancel;
+    private CancellationTokenSource? _loginCancel;
     private bool _busy;
-    private bool _awaitingPasskey;
-    private bool _passkeyFailed;
+    private bool _awaitingLogin;
+    private bool _loginFailed;
     private bool _startFailed;
     private bool _inviteNeeded;
     private string? _refusal;
 
     public LegacyMigrationMove(
         Func<string, string, Task<DaemonResponse>> call,
-        NearAiPasskeyStep passkey,
+        NearAiLoginStep login,
         Func<string, string?>? refusalLine = null)
     {
         _call = call ?? throw new ArgumentNullException(nameof(call));
-        _passkey = passkey ?? throw new ArgumentNullException(nameof(passkey));
+        _login = login ?? throw new ArgumentNullException(nameof(login));
         _refusalLine = refusalLine ?? LegacyMigrationOffers.RefusalLine;
     }
 
@@ -216,11 +216,11 @@ public sealed class LegacyMigrationMove : INotifyPropertyChanged
 
     public bool Busy => _busy;
 
-    /// <summary>The move is waiting on the passkey step in the browser.</summary>
-    public bool AwaitingPasskey => _awaitingPasskey;
+    /// <summary>The move is waiting on the sign-in step in the browser.</summary>
+    public bool AwaitingLogin => _awaitingLogin;
 
-    /// <summary>The passkey step ended without finishing; nothing was moved.</summary>
-    public bool PasskeyFailed => _passkeyFailed;
+    /// <summary>The sign-in step ended without finishing; nothing was moved.</summary>
+    public bool LoginFailed => _loginFailed;
 
     /// <summary>The move could not be started at all (no usable answer).</summary>
     public bool StartFailed => _startFailed;
@@ -234,7 +234,7 @@ public sealed class LegacyMigrationMove : INotifyPropertyChanged
     /// <summary>The core's sentence for the last refused move, or null.</summary>
     public string? Refusal => _refusal;
 
-    /// <summary>Move, and on the passkey refusal run the passkey step and retry once.</summary>
+    /// <summary>Move, and on the no-session refusal run the sign-in step and retry once.</summary>
     public async Task MoveAsync(string? invite)
     {
         if (_busy)
@@ -245,24 +245,24 @@ public sealed class LegacyMigrationMove : INotifyPropertyChanged
         string? sent = _inviteNeeded && !string.IsNullOrWhiteSpace(invite) ? invite : null;
         _refusal = null;
         _startFailed = false;
-        _passkeyFailed = false;
+        _loginFailed = false;
         _busy = true;
         Changed();
 
         DaemonResponse outcome = await AskAsync(sent).ConfigureAwait(true);
-        if (outcome.Error?.Message == LegacyMigrationOffers.PasskeyNeededLabel)
+        if (outcome.Error?.Message == LegacyMigrationOffers.LoginNeededLabel)
         {
             using var cancel = new CancellationTokenSource();
-            _passkeyCancel = cancel;
-            _awaitingPasskey = true;
+            _loginCancel = cancel;
+            _awaitingLogin = true;
             Changed();
-            bool finished = await _passkey.RunAsync(cancel.Token).ConfigureAwait(true);
+            bool finished = await _login.RunAsync(cancel.Token).ConfigureAwait(true);
             bool cancelled = cancel.IsCancellationRequested;
-            _passkeyCancel = null;
-            _awaitingPasskey = false;
+            _loginCancel = null;
+            _awaitingLogin = false;
             if (!finished || cancelled)
             {
-                _passkeyFailed = !cancelled;
+                _loginFailed = !cancelled;
                 _busy = false;
                 Changed();
                 Settled?.Invoke();
@@ -299,12 +299,12 @@ public sealed class LegacyMigrationMove : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// Cancel while waiting on the passkey: stop waiting and end the browser
+    /// Cancel while waiting on the sign-in: stop waiting and end the browser
     /// step. Nothing is moved, and the offer stays.
     /// </summary>
-    public async Task CancelPasskeyAsync()
+    public async Task CancelLoginAsync()
     {
-        CancellationTokenSource? cancel = _passkeyCancel;
+        CancellationTokenSource? cancel = _loginCancel;
         if (cancel is null)
         {
             return;
@@ -319,7 +319,7 @@ public sealed class LegacyMigrationMove : INotifyPropertyChanged
             return;
         }
 
-        await _passkey.CancelAsync().ConfigureAwait(true);
+        await _login.CancelAsync().ConfigureAwait(true);
     }
 
     private async Task<DaemonResponse> AskAsync(string? invite)

@@ -27,14 +27,24 @@ final class SettingsParityTests: XCTestCase {
     }
 
     static let sections: [Section] = [
-        Section(glass: "Views/Settings/ConnectionSection.swift",
-                bindings: ["model.status.loggedIn", "routingSourceModes.claude", "routingSourceModes.codex",
-                           "routingSourceModes.gemini", "routingSourceModes.cline", "nearAIConfigured"],
-                copySources: ["TCSourceChecks.checkLine(", "TCSourceChecks.claude", "TCSourceChecks.codex",
-                              "TCSourceChecks.gemini", "TCSourceChecks.cline",
-                              "SettingsLegacyWords.queuedNothingSent", "SettingsLegacyWords.connected",
-                              "SettingsLegacyWords.notConnected", "SettingsLegacyWords.extraScanConfigured",
-                              "SettingsStateRow(title: SettingsLegacyWords.extraScanConfigured"],
+        // Settings IA (owner, 2026-11-04): #1146's Connection is Account (D1).
+        // The source-mode lines left it (D7): Watching holds the switches,
+        // and the extra-scan line is the Redaction witness's.
+        Section(glass: "Views/Settings/AccountSection.swift",
+                bindings: ["model.status.loggedIn", "model.status.accountLogin", "model.accountAttention",
+                           "model.signOut()", "model.signingOut", "model.signOutFailed",
+                           "CredentialSection(copy: copy, titled: false, placement: .account)"],
+                copySources: ["SettingsLegacyWords.queuedNothingSent", "SettingsLegacyWords.connected",
+                              "SettingsLegacyWords.notConnected", "copy.render(copy.connected, provider: accountLogin)",
+                              "copy.signOutBody", "Button(copy.signOut)", "model.setUpAgainCopy?.failed"],
+                confirmations: [],
+                accessibility: [],
+                forbidden: ["routingSourceModes", "TCSourceChecks.checkLine(", "nearAIConfigured",
+                            "SettingsLegacyWords.extraScanConfigured"]),
+        Section(glass: "Views/Settings/PayoutsSection.swift",
+                bindings: ["PayoutLinkView(onVisibility:", "PayoutsNeedLoginLine()",
+                           "model.status.loginChange.showsPayoutsLine"],
+                copySources: [],
                 confirmations: [],
                 accessibility: []),
         Section(glass: "Views/Settings/StartupSection.swift",
@@ -43,7 +53,7 @@ final class SettingsParityTests: XCTestCase {
                            "NSApplication.didBecomeActiveNotification",
                            "updates.currentVersion", "updates.mode", "updates.lastCheckDate", "updates.canCheckNow",
                            "updates.checkNow()", "NSPasteboard.general.setString",
-                           "if let status = notificationStatus"],
+                           "if let status = notificationStatus", "digestIntervalSecs", "localNotifications"],
                 copySources: ["Notifier.copy?.notificationHeading", "Notifier.copy?.notificationAllowed",
                               "Notifier.copy?.notificationDenied", "Notifier.copy?.notificationNotAsked",
                               "Notifier.copy?.notificationAllow", "Notifier.copy?.notificationUnknown",
@@ -52,7 +62,8 @@ final class SettingsParityTests: XCTestCase {
                               "SettingsLegacyWords.startAtLogin", "SettingsLegacyWords.waitingOnApproval",
                               "SettingsLegacyWords.checksAutomatically", "SettingsLegacyWords.homebrewReplaces",
                               "SettingsLegacyWords.notCheckedYet", "SettingsLegacyWords.lastChecked(",
-                              "SettingsLegacyWords.updatesOff"],
+                              "SettingsLegacyWords.updatesOff", "SettingsLegacyWords.atMostOneNotification(",
+                              "SettingsStateRow(title: SettingsLegacyWords.notificationsRenderedHere"],
                 confirmations: [],
                 accessibility: ["GlassToggleStyle(.settings)"]),
         Section(glass: "Views/Settings/ConsentSection.swift",
@@ -69,15 +80,17 @@ final class SettingsParityTests: XCTestCase {
                               "SettingsLegacyWords.rewardOpportunities"],
                 confirmations: [],
                 accessibility: ["GlassCheckboxStyle()", ".accessibilityElement(children: .combine)"]),
+        // D16: the queue limit stays (a consequence said nowhere else); the
+        // quiet period and the paused line are gone, and the two
+        // notification lines are Notifications'.
         Section(glass: "Views/Settings/WatchingSection.swift",
-                bindings: ["quiescenceSecs", "digestIntervalSecs", "queueTtlDays", "localNotifications",
-                           "model.status.paused"],
-                copySources: ["SettingsLegacyWords.sessionFinishedAfter(", "SettingsLegacyWords.atMostOneNotification(",
-                              "SettingsLegacyWords.undecidedDropped(", "SettingsLegacyWords.notificationsRenderedHere",
-                              "SettingsLegacyWords.pausedNothingSent",
-                              "SettingsStateRow(title: SettingsLegacyWords.notificationsRenderedHere"],
+                bindings: ["queueTtlDays", "model.status.paused"],
+                copySources: ["SettingsLegacyWords.undecidedDropped("],
                 confirmations: [],
-                accessibility: []),
+                accessibility: [],
+                forbidden: ["SettingsLegacyWords.sessionFinishedAfter(", "SettingsLegacyWords.pausedNothingSent",
+                            "SettingsLegacyWords.atMostOneNotification(",
+                            "SettingsLegacyWords.notificationsRenderedHere"]),
         Section(glass: "Views/Settings/ProjectsSection.swift",
                 bindings: ["model.projects", "model.setProjectMode(", "model.lastActionError", "armingCandidate",
                            "project.offerableModes", "project.isUnresolvedBucket", "project.displayLabel",
@@ -171,7 +184,8 @@ final class SettingsParityTests: XCTestCase {
                            "model.inferenceEvidenceSaveFailed", "model.tokenContributionSaveFailed",
                            "model.configureWitness(", "model.clearWitness()", "model.setInferenceEvidence(",
                            "model.setTokenContribution(", "model.setLocalTokenCapture(", "model.cleanTokenStorage(discard:",
-                           "model.refreshWitness()", "WitnessForm.fromStatus(", "form.canConfigure"],
+                           "model.refreshWitness()", "WitnessForm.fromStatus(", "form.canConfigure",
+                           "settings.nearAIConfigured"],
                 copySources: ["WitnessSurface.stateLine(", "WitnessSurface.tone(forState:", "WitnessSurface.lastResultLine(",
                               "WitnessSurface.lastResultTone(", "WitnessSurface.offersConfigure(", "WitnessSurface.offersClear(",
                               "copy.heading", "copy.intro", "copy.certificateMeans", "Button(copy.clear)", "copy.clearNote",
@@ -184,7 +198,8 @@ final class SettingsParityTests: XCTestCase {
                               "copy.tokenConfirm", "copy.tokenCancel", "copy.tokenSaveFailed", "storage.captureLabel",
                               "storage.captureNotice", "storage.captureConfirmation", "storage.cancelLabel", "storage.stateLine",
                               "storage.scopeNote", "storage.cleanupLabel", "storage.discardLabel", "storage.confirmLabel",
-                              "storage.discardConfirmation"],
+                              "storage.discardConfirmation",
+                              "SettingsStateRow(title: SettingsLegacyWords.extraScanConfigured"],
                 confirmations: ["showingInferenceDisclosure", "showingTokenDisclosure", "showingTokenCapture", "showingTokenDiscard",
                                 ".glassModal(isPresented:", "GlassConfirmation("],
                 accessibility: [".accessibilityLabel(copy.urlTitle)", ".accessibilityLabel(copy.signingAddressTitle)",
@@ -398,10 +413,10 @@ final class SettingsParityTests: XCTestCase {
     /// and what that branch draws. Every branch is the absent case written
     /// first, so the text up to its closing brace is exactly what it draws.
     static let daemonAbsentBranches: [SettingsSection: (file: String, branches: [(marker: String, draws: String)])] = [
-        .connection: ("ConnectionSection", [
+        .account: ("AccountSection", [
             ("if model.statusRead != .answered {", "SettingsReadNotice(model.statusRead"),
-            ("if model.daemonSettings == nil {", "SettingsReadNotice(model.settingsRead"),
         ]),
+        .insights: ("InsightsSettingsCard", [("if model.daemonSettings == nil {", "SettingsReadNotice(model.settingsRead")]),
         .watching: ("WatchingSection", [("if model.daemonSettings == nil {", "SettingsReadNotice(model.settingsRead")]),
         .notifications: ("NudgeSettingsSection", [("if store.settings == nil {", "SettingsReadNotice(settingsRead")]),
         .consent: ("ConsentSection", [("if model.statusRead != .answered {", "SettingsReadNotice(model.statusRead")]),
@@ -427,6 +442,15 @@ final class SettingsParityTests: XCTestCase {
     /// hidden `Color.clear` does not count.
     func test_everySectionHasAnUnavailableBranch() throws {
         for section in SettingsSection.allCases where section != .compute {
+            // Payouts draws nothing, and has no row, until something in it
+            // applies (D2): its section is gated on that in the window.
+            if section == .payouts {
+                let modal = try Self.text("Views/Monitor/SettingsModal.swift")
+                XCTAssertTrue(modal.contains("if item != .payouts || payoutsShown,"), "Payouts' rule is drawn while empty")
+                XCTAssertTrue(modal.contains("listed.filter { $0 != .payouts || payoutsShown }"),
+                              "Payouts is listed while empty")
+                continue
+            }
             if Self.localOnlySections.contains(section) {
                 XCTAssertNil(Self.daemonAbsentBranches[section], "\(section) is both local-only and daemon-read")
                 continue
@@ -475,8 +499,8 @@ final class SettingsParityTests: XCTestCase {
         // Each answer waits on the read it is drawn from: `status` answering
         // says nothing about `list_audit`, `list_projects` or the profile.
         for (file, gate, answer) in [
-            ("ConnectionSection", "model.statusRead != .answered {", "SettingsLegacyWords.notConnected"),
-            ("ConnectionSection", "model.statusRead != .answered {", "SettingsLegacyWords.queuedNothingSent"),
+            ("AccountSection", "model.statusRead != .answered {", "SettingsLegacyWords.notConnected"),
+            ("AccountSection", "model.statusRead != .answered {", "SettingsLegacyWords.queuedNothingSent"),
             ("ProjectsSection", "model.projectsRead != .answered {", "SettingsLegacyWords.noProjectsYet"),
             ("ChangesSection", "model.auditRead != .answered {", "SettingsLegacyWords.nothingChanged"),
             ("PublicProfileSection", "model.publicProfileRead != .answered {", "optInCard\n"),

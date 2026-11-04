@@ -1724,14 +1724,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "near_ai_bind",
         include_str!("../../../../migrations/V100__near_ai_bind.sql"),
     ),
-    // Z2 S5: the unbound passkey-account reaper. Depends only on V30, V32
+    // Z2 S5: the unbound-account reaper. Depends only on V30, V32
     // and V97.
     (
         101,
         "unbound_account_reaper",
         include_str!("../../../../migrations/V101__unbound_account_reaper.sql"),
     ),
-    // #1135 review: closed-but-not-yet-reaped passkey accounts count against
+    // #1135 review: closed-but-not-yet-reaped unbound accounts count against
     // the unbound ceiling. Supersedes V101's note that closed rows fall
     // outside V98's count. Depends only on V97 and V98.
     (
@@ -2024,8 +2024,8 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "referral_earn_promise_in_hours",
         include_str!("../../../../migrations/V143__referral_earn_promise_in_hours.sql"),
     ),
-    // V144: passkeys removed. Unbound and closed passkey-origin accounts are
-    // closed, their sessions revoked, and deleted where nothing refuses it;
+    // V144: WebAuthn sign-in removed. Unbound and closed accounts it created
+    // are closed, their sessions revoked, and deleted where nothing refuses it;
     // then the binding and credential tables and their definer functions go.
     (
         144,

@@ -30,11 +30,10 @@
 //! - `GET /v1/account/payout-rails` lists each rail that is not `disabled`:
 //!   link state, version and recipient ref, never a recipient or a name.
 //!
-//! **Authority (owner decision 2026-10-23, superseding D5).** "We aren't
-//! using passkeys at all in the app right now." The contributor's signed-in
-//! account session is enough to link, change and unlink: a native token or a
-//! same-origin cookie session, weak or strong. There is no passkey gate, no
-//! step-up page section, and nothing requires the account to have a passkey.
+//! **Authority (owner decision 2026-10-23, superseding D5).** The
+//! contributor's signed-in account session is enough to link, change and
+//! unlink: a native token or a same-origin cookie session, weak or strong.
+//! There is no step-up gate or page section.
 //! A device bearer is not an account session and is refused. The owner
 //! accepted the trade-off that anyone holding the app session could redirect
 //! future payouts; what still stands behind a link is the server's own

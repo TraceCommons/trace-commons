@@ -19,7 +19,7 @@
 //! the probe program, which writes nothing). The token is dropped when the
 //! call returns; it is never stored, logged or placed in an error.
 //!
-//! Since the owner superseded the passkey confirmation on 2026-10-23, this
+//! Since the owner superseded D5 on 2026-10-23, this
 //! check and the account session are what stand behind a link: the session
 //! says which account, this says the person can sign in to NEAR AI as an
 //! owner of the org.
