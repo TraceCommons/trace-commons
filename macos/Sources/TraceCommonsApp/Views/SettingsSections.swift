@@ -57,9 +57,11 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     /// loaded; the list then draws a disabled placeholder (`ListRow`)
     /// rather than inventing a name or hiding the section.
     func navName(_ nav: MonitorSettingsNavCopy?) -> String? {
+        // General's name is this app's own word, and its section never
+        // waits on the core, so its row does not either.
+        if self == .general { return SettingsWords.general }
         guard let nav else { return nil }
         switch self {
-        // Not in the core's table yet: a single word, as the others below.
         case .general: return SettingsWords.general
         case .connection: return nav.connection
         case .startup: return nav.startup
