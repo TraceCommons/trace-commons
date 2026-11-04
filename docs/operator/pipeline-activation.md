@@ -846,6 +846,16 @@ refused, for every bundle. So a fix-forward to a new bundle is not possible
 while runs wait under a suspended policy. "Suspend a policy" gives the ways
 forward. A rollback reads no readiness.
 
+An embedder failure in a compatibility Score counts the same way while it
+retries. An outage is the transient `embedder_unavailable`: the run waits in
+`retry` and holds the tenant's activation until the embedder answers. When
+the embedder refuses the trace's own text (a chunk with only whitespace in
+it), every attempt would fail the same way, so the run fails on its first
+Score under `pipeline_score_input_unembeddable` and stops counting. Each
+embedder failure logs `pipeline_score_embedder_failed` with a
+`failure_class` (`input_rejected` or `dependency`) and a static
+`reason_label`, and never the text.
+
 The gate holds when every term holds, in this order. Each `409` label names
 the first term that fails:
 
