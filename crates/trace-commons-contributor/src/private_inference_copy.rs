@@ -2249,7 +2249,32 @@ pub fn balance_limit_line(nanos: Option<i64>, scale: u8) -> String {
     format!("Limit: {amount}")
 }
 
+/// [`format_amount`] rounded UP to the cent, for the one figure that is
+/// subtracted: what has been spent.
+///
+/// The row shows Limit, Spent and what is left, and the left figure is
+/// floored. With the limit in whole cents, `floor(limit - spent)` equals
+/// `limit - ceil(spent)`, so flooring Spent as well made the three
+/// disagree by a cent (limit $130.00, spent $18.185 left $111.81, and
+/// $130.00 - $18.18 is $111.82). Rounding Spent up keeps the three adding
+/// up, and overstates spend by under a cent: the same direction as
+/// understating what is left. A nonzero sub-cent amount is $0.01 here.
+fn format_amount_ceil(nanos: i64, scale: u8) -> String {
+    let Some(divisor) = 10i128.checked_pow(u32::from(scale)) else {
+        return String::new();
+    };
+    let scaled = i128::from(nanos) * 100;
+    // `-(-a).div_euclid(b)` is the ceiling for a positive divisor.
+    let cents = -(-scaled).div_euclid(divisor);
+    let sign = if cents < 0 { "-" } else { "" };
+    let magnitude = cents.unsigned_abs();
+    format!("{sign}${}.{:02}", magnitude / 100, magnitude % 100)
+}
+
 /// What the account has spent, all of it, everywhere.
+///
+/// Rounded up to the cent (see [`format_amount_ceil`]), so that Limit minus
+/// Spent equals the floored amount left.
 ///
 /// `None` is the empty string, drawn as no line at all -- the rule
 /// [`harness_spend_line`] follows for a figure nobody could read. Zero is
@@ -2260,7 +2285,7 @@ pub fn balance_spent_line(nanos: Option<i64>, scale: u8) -> String {
     let Some(nanos) = nanos else {
         return String::new();
     };
-    let amount = format_amount(nanos, scale);
+    let amount = format_amount_ceil(nanos, scale);
     if amount.is_empty() {
         return String::new();
     }
@@ -5220,6 +5245,27 @@ mod tests {
         // And a real zero is still shown, because a real zero is true.
         assert_eq!(balance_remaining_line(Some(0), 9), "$0.00 left");
         assert_ne!(balance_remaining_line(Some(0), 9), none);
+    }
+
+    /// Limit, Spent and what is left add up on the cents shown: limit $130.00
+    /// and spent $18.185 leave $111.815, which is "$111.81 left" and so
+    /// must read "Spent: $18.19", not $18.18.
+    #[test]
+    fn limit_spent_and_left_agree_to_the_cent() {
+        let scale = 9;
+        let (limit, spent) = (130_000_000_000_i64, 18_185_000_000_i64);
+        assert_eq!(balance_remaining_line(Some(limit - spent), scale), "$111.81 left");
+        assert_eq!(balance_limit_line(Some(limit), scale), "Limit: $130.00");
+        assert_eq!(balance_spent_line(Some(spent), scale), "Spent: $18.19");
+        // Whole cents are unchanged, and a sub-cent spend is a cent.
+        assert_eq!(balance_spent_line(Some(18_180_000_000), scale), "Spent: $18.18");
+        assert_eq!(balance_spent_line(Some(1), scale), "Spent: $0.01");
+        for spent in (0..2_000_000_000_i64).step_by(7_654_321) {
+            let left = format_amount(limit - spent, scale);
+            let shown = format_amount_ceil(spent, scale);
+            let cents = |s: &str| s.trim_start_matches('$').replace('.', "").parse::<i64>().unwrap();
+            assert_eq!(cents("$130.00") - cents(&shown), cents(&left), "{spent}");
+        }
     }
 
     /// Nothing left and nothing measured are different sentences on every
