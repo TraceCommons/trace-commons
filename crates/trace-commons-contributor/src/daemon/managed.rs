@@ -3000,6 +3000,7 @@ mod tests {
         report(&mut service, id, &proof, "exited", Some(0)).unwrap();
         assert_eq!(row(&mut service, id, false)["can_start_again"], true);
 
+        let old = row(&mut service, id, false);
         let prepared: PreparedLaunch = serde_json::from_value(
             call(
                 &mut service,
@@ -3013,7 +3014,9 @@ mod tests {
         assert_ne!(prepared.session_id, id);
         assert!(prepared.ticket.is_some());
         let fresh = row(&mut service, prepared.session_id, false);
-        let old = row(&mut service, id, false);
+        // The new row replaces the one it was started from (owner,
+        // 2026-11-04).
+        assert!(!listed(&mut service, id));
         for field in ["tool", "connection", "account_id", "cwd", "purpose"] {
             assert_eq!(fresh[field], old[field], "{field}");
         }

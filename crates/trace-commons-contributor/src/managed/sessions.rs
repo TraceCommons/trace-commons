@@ -497,6 +497,35 @@ impl SessionRegistry {
                 listed.insert(e.root(), index);
             }
         }
+        // Start again replaces the row it was started from (owner,
+        // 2026-11-04): once the new session has started, the ended
+        // conversation it came from is no longer listed beside it. Only a
+        // later row replaces, and only one that started (its ticket
+        // redeemed, or holding its profile), so a Start again that never
+        // ran leaves the old row. Nothing is dismissed: the old rows stay
+        // on file, as resumes' earlier rows do.
+        let mut replaced_at = std::collections::BTreeMap::new();
+        for (index, e) in self.data.entries.iter().enumerate() {
+            let started = e.proof_hash.is_some() || e.view.state.holds_profile();
+            if e.dismissed || !started {
+                continue;
+            }
+            let Some(source) = e.again_of else { continue };
+            if let Some(root) = self
+                .data
+                .entries
+                .iter()
+                .find(|s| s.view.id == source)
+                .map(Entry::root)
+            {
+                // A Resume records its source too, but continues that
+                // conversation: it is already its latest row.
+                if root != e.root() {
+                    replaced_at.insert(root, index);
+                }
+            }
+        }
+        listed.retain(|root, index| replaced_at.get(root).is_none_or(|at| *at < *index));
         let mut listed: Vec<usize> = listed.into_values().collect();
         listed.sort_unstable();
         let held = self.holders(true);
@@ -2481,6 +2510,63 @@ mod tests {
 
         registry.dismiss(second).unwrap();
         assert_eq!(ids(&mut registry), vec![fresh], "no older row comes back");
+    }
+
+    /// Start again replaces the ended row it came from (owner, 2026-11-04):
+    /// once the new session starts, only it is listed. A Start again that
+    /// never ran leaves the old row, and a later row of the old
+    /// conversation (a Resume after the Start again) lists it again.
+    #[test]
+    fn start_again_replaces_the_row_it_came_from_once_it_starts() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let old = ended(&mut registry, coding(&account, home.path()), &account);
+        let other = ended(&mut registry, coding(&account, home.path()), &account);
+        let ids = |registry: &mut SessionRegistry| -> Vec<Uuid> {
+            registry.views().unwrap().iter().map(|v| v.id).collect()
+        };
+
+        // Prepared but never run: the old row stays, beside the new one.
+        let again = registry.start_again_request(old, Uuid::new_v4()).unwrap();
+        registry.prepare_again(again, &account, Some(old)).unwrap();
+        registry.sweep(Utc::now() + Duration::seconds(121)).unwrap();
+        assert!(
+            ids(&mut registry).contains(&old),
+            "a Start again that never ran"
+        );
+
+        // Started: it alone stands for that work.
+        let again = registry.start_again_request(old, Uuid::new_v4()).unwrap();
+        let prepared = registry.prepare_again(again, &account, Some(old)).unwrap();
+        registry
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        let listed = ids(&mut registry);
+        assert!(!listed.contains(&old), "replaced");
+        assert!(listed.contains(&prepared.session_id));
+        assert!(listed.contains(&other), "other work is untouched");
+
+        // A Resume is never taken for a Start again: the resumed row is
+        // its conversation's one row.
+        let base = ended(&mut registry, coding(&account, home.path()), &account);
+        let request = registry.resume_request(base, Uuid::new_v4()).unwrap();
+        let prepared = registry
+            .prepare_again(request, &account, Some(base))
+            .unwrap();
+        registry
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        let listed = ids(&mut registry);
+        assert!(
+            listed.contains(&prepared.session_id),
+            "the resume is listed"
+        );
+        assert!(!listed.contains(&base), "as its conversation's latest row");
     }
 
     /// Start again on a resumed row starts a fresh conversation; only
