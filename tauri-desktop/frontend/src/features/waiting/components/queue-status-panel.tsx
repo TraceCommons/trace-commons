@@ -130,6 +130,7 @@ export function QueueStatusPanel({
             <strong>Inference routing</strong>
             <span>
               {routingLabel(routing.state)}
+              {/* DRAFT, NEEDS APPROVAL (2026-11-04). */}
               {routing.derived ? " · from this app" : ""}
             </span>
             {routing.unreadable_rows > 0 && (

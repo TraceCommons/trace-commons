@@ -33,6 +33,7 @@ export function NativeReviewActions({
       <span className="font-mono text-[10px] font-extrabold tracking-[.16em] text-primary">
         NATIVE REVIEW
       </span>
+      {/* DRAFT, NEEDS APPROVAL (2026-11-04). */}
       <p className="m-0 text-[11px] leading-[1.5] text-muted-foreground">
         Optional checks stay local until you explicitly confirm.
       </p>

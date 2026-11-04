@@ -86,6 +86,7 @@ export function RoutingPanel({
           {stateLabel(status?.daemon.routing?.state ?? "unknown")}
         </strong>
         <span>
+          {/* DRAFT, NEEDS APPROVAL (2026-11-04). */}
           {status?.daemon.routing?.derived
             ? "Derived from the app's routing rows."
             : "No live routing rows available."}
