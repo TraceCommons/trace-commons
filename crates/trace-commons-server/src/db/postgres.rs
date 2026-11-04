@@ -21,6 +21,8 @@ mod legacy_invite_link;
 mod mission_catalog;
 #[path = "postgres_model_training_consent.rs"]
 mod model_training_consent;
+#[path = "postgres_near_ai_rebind.rs"]
+mod near_ai_rebind;
 #[cfg(test)]
 mod pipeline_upgrade_tests;
 #[path = "postgres_public_run.rs"]
@@ -308,6 +310,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_payout_audit",
     "trace_payout_reversal_hold_decisions",
     "trace_account_device_codes",
+    "trace_account_login_changes",
     "trace_device_session_renewals",
     "trace_consent_grants",
     "trace_referral_codes",
@@ -377,14 +380,72 @@ const LEADERBOARD_INPUTS_SQL: &str = "SELECT
                               >= NOW() - ($1 || ' days')::interval
                      ) >= $2";
 
+/// How long a caller waits for a free pooled connection before the pool
+/// refuses it. Without a bound, an exhausted pool queues every caller
+/// indefinitely: requests pile up holding their bodies and any permits taken
+/// earlier, and nothing tells a client to back off. A refusal surfaces as
+/// `DatabaseError::PoolRuntime`, which callers already treat as transient.
+pub const POOL_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long opening a new connection may take, so an unreachable database
+/// fails a caller instead of holding it for the TCP timeout. When the URL
+/// sets `connect_timeout`, it is added on top of the per-host budget
+/// ([`pool_create_timeout`]).
+pub const POOL_CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long the health check on a reused connection may take.
+pub const POOL_RECYCLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The create timeout for a pool on `config`. Without a URL
+/// `connect_timeout` it is [`POOL_CREATE_TIMEOUT`]. With one, it is that
+/// timeout once per configured host, plus [`POOL_CREATE_TIMEOUT`].
+/// `tokio_postgres` applies `connect_timeout` to the TCP connect of each
+/// resolved address in turn, so a bound below that would cut off failover
+/// to a second host. The budget counts configured hosts, not addresses: a
+/// host that resolves to several addresses (`localhost`, a dual-stack name)
+/// gets one `connect_timeout` plus the shared pad, which covers a second
+/// address that fails fast but not one that also hangs. The
+/// TLS handshake, authentication and startup that follow have no timeout of
+/// their own, so the create is always bounded: a server that accepts the
+/// socket and then stalls must not hold a caller until TCP keepalive gives
+/// up.
+fn pool_create_timeout(config: &tokio_postgres::Config) -> std::time::Duration {
+    match config.get_connect_timeout() {
+        Some(per_host) => {
+            let hosts = u32::try_from(config.get_hosts().len().max(1)).unwrap_or(u32::MAX);
+            per_host
+                .saturating_mul(hosts)
+                .saturating_add(POOL_CREATE_TIMEOUT)
+        }
+        None => POOL_CREATE_TIMEOUT,
+    }
+}
+
+/// Builds a pool of at most `max_size` connections on `config` whose waits
+/// are bounded by the timeouts above. Every pool this backend opens goes
+/// through here.
+fn bounded_pool(
+    config: tokio_postgres::Config,
+    max_size: usize,
+) -> Result<Pool, deadpool_postgres::BuildError> {
+    let create_timeout = pool_create_timeout(&config);
+    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    Pool::builder(manager)
+        .max_size(max_size)
+        .runtime(deadpool_postgres::Runtime::Tokio1)
+        .wait_timeout(Some(POOL_WAIT_TIMEOUT))
+        .create_timeout(Some(create_timeout))
+        .recycle_timeout(Some(POOL_RECYCLE_TIMEOUT))
+        .build()
+}
+
 impl PgBackend {
     pub async fn new(config: &DatabaseConfig) -> Result<Self, DatabaseError> {
         let pg_config = config
             .url()
             .parse::<tokio_postgres::Config>()
             .map_err(|e| DatabaseError::Pool(format!("invalid PostgreSQL URL: {e}")))?;
-        let manager = deadpool_postgres::Manager::new(pg_config, tokio_postgres::NoTls);
-        let pool = Pool::builder(manager).max_size(config.pool_size).build()?;
+        let pool = bounded_pool(pg_config, config.pool_size)?;
 
         // Build a SEPARATE, small resolver pool only when a distinct resolver
         // connection string is configured. This pool runs as the narrow
@@ -399,9 +460,7 @@ impl PgBackend {
                                 "invalid login-resolver PostgreSQL URL: {e}"
                             ))
                         })?;
-                let resolver_manager =
-                    deadpool_postgres::Manager::new(resolver_config, tokio_postgres::NoTls);
-                let resolver_pool = Pool::builder(resolver_manager).max_size(2).build()?;
+                let resolver_pool = bounded_pool(resolver_config, 2)?;
                 Some(resolver_pool)
             }
             None => None,
@@ -418,9 +477,7 @@ impl PgBackend {
                     .map_err(|e| {
                         DatabaseError::Pool(format!("invalid gate-driver PostgreSQL URL: {e}"))
                     })?;
-                let gate_driver_manager =
-                    deadpool_postgres::Manager::new(gate_driver_config, tokio_postgres::NoTls);
-                let gate_driver_pool = Pool::builder(gate_driver_manager).max_size(2).build()?;
+                let gate_driver_pool = bounded_pool(gate_driver_config, 2)?;
                 Some(gate_driver_pool)
             }
             None => None,
@@ -440,13 +497,7 @@ impl PgBackend {
                             "invalid pii-backstop-driver PostgreSQL URL: {e}"
                         ))
                     })?;
-                let pii_backstop_driver_manager = deadpool_postgres::Manager::new(
-                    pii_backstop_driver_config,
-                    tokio_postgres::NoTls,
-                );
-                let pii_backstop_driver_pool = Pool::builder(pii_backstop_driver_manager)
-                    .max_size(2)
-                    .build()?;
+                let pii_backstop_driver_pool = bounded_pool(pii_backstop_driver_config, 2)?;
                 Some(pii_backstop_driver_pool)
             }
             None => None,
@@ -463,10 +514,7 @@ impl PgBackend {
                     .map_err(|e| {
                         DatabaseError::Pool(format!("invalid invite-registry PostgreSQL URL: {e}"))
                     })?;
-                let invite_registry_manager =
-                    deadpool_postgres::Manager::new(invite_registry_config, tokio_postgres::NoTls);
-                let invite_registry_pool =
-                    Pool::builder(invite_registry_manager).max_size(2).build()?;
+                let invite_registry_pool = bounded_pool(invite_registry_config, 2)?;
                 Some(invite_registry_pool)
             }
             None => None,
@@ -1036,6 +1084,56 @@ fn recorded_migration_state(
              has never been applied here. Renumber one of them; refusing to skip it"
         ))),
     }
+}
+
+/// Functions a migration created only after it was edited in place, with the
+/// volatility the edit gave them. The runner keeps no checksum, so a database
+/// that applied the earlier text of such a migration is never told it
+/// changed; this list is how it is noticed instead. V146 was edited in place
+/// twice before any deployed database applied it: #1878 added the three hash
+/// helpers, and the review of #1878 made them STABLE and inlinable.
+const IN_PLACE_EDITED_FUNCTIONS: &[(i32, &str, &str)] = &[
+    (146, "public.trace_payout_link_hash(uuid)", "s"),
+    (146, "public.trace_payout_account_hash(uuid)", "s"),
+    (146, "public.trace_legacy_link_hash(uuid)", "s"),
+];
+
+/// Refuses a database that recorded a migration whose in-place edits it never
+/// ran: one of [`IN_PLACE_EDITED_FUNCTIONS`] is missing, or has another
+/// volatility. Run after every migration run, so the service will not start
+/// on such a database. The error names the version and the function, never a
+/// tenant or a row.
+#[doc(hidden)]
+pub async fn verify_in_place_migration_edits<C>(client: &C) -> Result<(), DatabaseError>
+where
+    C: tokio_postgres::GenericClient + Sync,
+{
+    for (version, signature, volatility) in IN_PLACE_EDITED_FUNCTIONS {
+        let row = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM _trace_commons_migrations WHERE version = $1),
+                        (SELECT p.provolatile::TEXT FROM pg_catalog.pg_proc p
+                          WHERE p.oid = pg_catalog.to_regprocedure($2))",
+                &[version, signature],
+            )
+            .await?;
+        let recorded: bool = row.get(0);
+        let found: Option<String> = row.get(1);
+        if recorded && found.as_deref() != Some(*volatility) {
+            return Err(DatabaseError::Migration(format!(
+                "V{version} is recorded here, but `{signature}` is {}: this database \
+                 applied an earlier text of V{version}, which was edited in place before \
+                 release. Recreate the database, or apply V{version}'s current definition of \
+                 that function by hand",
+                if found.is_some() {
+                    "not STABLE"
+                } else {
+                    "missing"
+                }
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The `MIGRATIONS` table below, exposed (hidden) so
@@ -1626,14 +1724,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "near_ai_bind",
         include_str!("../../../../migrations/V100__near_ai_bind.sql"),
     ),
-    // Z2 S5: the unbound passkey-account reaper. Depends only on V30, V32
+    // Z2 S5: the unbound-account reaper. Depends only on V30, V32
     // and V97.
     (
         101,
         "unbound_account_reaper",
         include_str!("../../../../migrations/V101__unbound_account_reaper.sql"),
     ),
-    // #1135 review: closed-but-not-yet-reaped passkey accounts count against
+    // #1135 review: closed-but-not-yet-reaped unbound accounts count against
     // the unbound ceiling. Supersedes V101's note that closed rows fall
     // outside V98's count. Depends only on V97 and V98.
     (
@@ -1926,15 +2024,170 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "referral_earn_promise_in_hours",
         include_str!("../../../../migrations/V143__referral_earn_promise_in_hours.sql"),
     ),
-    // V144: passkeys removed. Unbound and closed passkey-origin accounts are
-    // closed, their sessions revoked, and deleted where nothing refuses it;
+    // V144: WebAuthn sign-in removed. Unbound and closed accounts it created
+    // are closed, their sessions revoked, and deleted where nothing refuses it;
     // then the binding and credential tables and their definer functions go.
     (
         144,
         "remove_passkeys",
         include_str!("../../../../migrations/V144__remove_passkeys.sql"),
     ),
+    // V145 keeps one row per dedup cluster (representative simhash, stamp,
+    // member count) in step with trace_gate_decisions by trigger, so the
+    // inline gate path stops enumerating every decision on each submission
+    // (`list_dedup_cluster_candidates`).
+    (
+        145,
+        "trace_dedup_cluster_representatives",
+        include_str!("../../../../migrations/V145__trace_dedup_cluster_representatives.sql"),
+    ),
+    // V146: the legacy account payout migration. Carried payout links in
+    // legacy tenants, the decision-5 principal claim at tenant-link time,
+    // release of carries when a tenant link is revoked, a waiting link that
+    // never sent closing at zero, and the instance-enrolled tenant link.
+    (
+        146,
+        "legacy_payout_carries",
+        include_str!("../../../../migrations/V146__legacy_payout_carries.sql"),
+    ),
+    // V147 revokes every live payout link on an account with no recorded
+    // NEAR AI login (owner, 2026-11-03, on #1862): a waiting one closes at
+    // zero, an active one gets an unlink request for the pass to close.
+    // Carried links (V146) are kept.
+    (
+        147,
+        "revoke_payout_links_without_near_ai_login",
+        include_str!("../../../../migrations/V147__revoke_payout_links_without_near_ai_login.sql"),
+    ),
+    // V148: legacy payout carries follow their events. A pooled mark, an
+    // account closing and a tenant link deleted each release the carries
+    // they invalidate, in their own transaction (#1872); opening an account
+    // in a linked legacy tenant carries to it (#1873); and every carry
+    // reaches only accounts a signed device proved (owner, 2026-11-03).
+    (
+        148,
+        "legacy_payout_carry_events",
+        include_str!("../../../../migrations/V148__legacy_payout_carry_events.sql"),
+    ),
+    // V149: an ingest login that is also the migrator (staging) gets EXECUTE
+    // on the seven guard-owned functions granted to trace_ingest_runtime
+    // alone; without it every live payout pass ended payout_store_failed.
+    (
+        149,
+        "owner_runtime_function_grants",
+        include_str!("../../../../migrations/V149__owner_runtime_function_grants.sql"),
+    ),
+    // V150: F10, changing the NEAR AI login an account uses. Retired
+    // anchors, one live anchor per account (V82's merge replaced to keep
+    // it), the change table and the admission lease check.
+    (
+        150,
+        "near_ai_login_change",
+        include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
+    ),
+    // V151: a payout link request records the login anchor that proved it,
+    // and the confirm requires that anchor to be live (#1882).
+    (
+        151,
+        "payout_link_request_proving_anchor",
+        include_str!("../../../../migrations/V151__payout_link_request_proving_anchor.sql"),
+    ),
 ];
+
+/// The body of `create_or_reuse_account`, inside a transaction already under
+/// the tenant's context, so a caller can do more in the same transaction
+/// (V148: carrying a payout link to an account opened in a linked legacy
+/// tenant).
+pub(super) async fn create_or_reuse_account_in_tx(
+    tx: &deadpool_postgres::Transaction<'_>,
+    principal_ref: &str,
+) -> Result<Uuid, DatabaseError> {
+    Ok(create_or_reuse_account_in_tx_opened(tx, principal_ref)
+        .await?
+        .0)
+}
+
+/// [`create_or_reuse_account_in_tx`], also saying whether this call opened
+/// the account (`true`) or found the principal's existing one.
+pub(super) async fn create_or_reuse_account_in_tx_opened(
+    tx: &deadpool_postgres::Transaction<'_>,
+    principal_ref: &str,
+) -> Result<(Uuid, bool), DatabaseError> {
+    // Fast path: an active link for this principal already maps to an account.
+    if let Some(row) = tx
+        .query_opt(
+            "SELECT account_id FROM trace_account_principals
+              WHERE tenant_id = trace_current_tenant_id()
+                AND principal_ref = $1
+                AND unlinked_at IS NULL",
+            &[&principal_ref],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?
+    {
+        return Ok((row.get("account_id"), false));
+    }
+
+    // No active link: mint a fresh account and link the principal. The link
+    // insert is ON CONFLICT DO NOTHING against the UNIQUE (tenant_id,
+    // principal_ref) constraint so a concurrent mint that won the race does
+    // not error us out; we re-select the authoritative account below.
+    let new_account_id = Uuid::new_v4();
+    tx.execute(
+        "INSERT INTO trace_accounts (tenant_id, account_id)
+         VALUES (trace_current_tenant_id(), $1)",
+        &[&new_account_id],
+    )
+    .await
+    .map_err(DatabaseError::Postgres)?;
+    tx.execute(
+        "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+         VALUES (trace_current_tenant_id(), $1, $2)
+         ON CONFLICT (tenant_id, principal_ref) DO NOTHING",
+        &[&new_account_id, &principal_ref],
+    )
+    .await
+    .map_err(|error| {
+        if error.as_db_error().is_some_and(|db_error| {
+            db_error.code() == &tokio_postgres::error::SqlState::CHECK_VIOLATION
+                && db_error.message() == "device_upload_principal_namespace_conflict"
+        }) {
+            DatabaseError::UploadPrincipalAuthenticationDenied
+        } else {
+            DatabaseError::Postgres(error)
+        }
+    })?;
+
+    // Re-select the authoritative account for this principal. If a
+    // concurrent mint inserted the link first, this returns ITS account_id,
+    // and the row this call inserted is closed: an open account with no
+    // principal would otherwise be one more open account in the tenant
+    // (review of #1879). Closed, not deleted: the runtime's documented writes
+    // to trace_accounts are INSERT and UPDATE (closed_at) (V90), never
+    // DELETE. If we won, it returns new_account_id.
+    let row = tx
+        .query_one(
+            "SELECT account_id FROM trace_account_principals
+              WHERE tenant_id = trace_current_tenant_id()
+                AND principal_ref = $1
+                AND unlinked_at IS NULL",
+            &[&principal_ref],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+    let account_id: Uuid = row.get("account_id");
+    if account_id != new_account_id {
+        tx.execute(
+            "UPDATE trace_accounts SET closed_at = now()
+              WHERE tenant_id = trace_current_tenant_id() AND account_id = $1",
+            &[&new_account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        return Ok((account_id, false));
+    }
+    Ok((account_id, true))
+}
 
 /// Shared by verified claim issuance and the explicit historical repair.
 async fn bind_device_upload_principal_tx(
@@ -2026,7 +2279,8 @@ pub(super) async fn active_strong_authenticator_count(
                         SELECT 1 FROM trace_near_account_anchors
                          WHERE tenant_id = trace_current_tenant_id()
                            AND account_id = $1
-                           AND identity_source = 'near_ai_login')
+                           AND identity_source = 'near_ai_login'
+                           AND retired_at IS NULL)
                      THEN 1 ELSE 0 END)
                     AS strong_count",
             &[account_id],
@@ -2557,6 +2811,7 @@ impl Database for PgBackend {
                     apply_and_record_migration(&mut client, *version, name, sql).await?;
                 }
             }
+            verify_in_place_migration_edits(&**client).await?;
             Ok::<(), DatabaseError>(())
         }
         .await;
@@ -3835,69 +4090,7 @@ impl Database for PgBackend {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-
-        // Fast path: an active link for this principal already maps to an account.
-        if let Some(row) = tx
-            .query_opt(
-                "SELECT account_id FROM trace_account_principals
-                  WHERE tenant_id = trace_current_tenant_id()
-                    AND principal_ref = $1
-                    AND unlinked_at IS NULL",
-                &[&principal_ref],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?
-        {
-            let account_id: Uuid = row.get("account_id");
-            tx.commit().await.map_err(DatabaseError::Postgres)?;
-            return Ok(account_id);
-        }
-
-        // No active link: mint a fresh account and link the principal. The link
-        // insert is ON CONFLICT DO NOTHING against the UNIQUE (tenant_id,
-        // principal_ref) constraint so a concurrent mint that won the race does
-        // not error us out; we re-select the authoritative account below.
-        let new_account_id = Uuid::new_v4();
-        tx.execute(
-            "INSERT INTO trace_accounts (tenant_id, account_id)
-             VALUES (trace_current_tenant_id(), $1)",
-            &[&new_account_id],
-        )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.execute(
-            "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
-             VALUES (trace_current_tenant_id(), $1, $2)
-             ON CONFLICT (tenant_id, principal_ref) DO NOTHING",
-            &[&new_account_id, &principal_ref],
-        )
-        .await
-        .map_err(|error| {
-            if error.as_db_error().is_some_and(|db_error| {
-                db_error.code() == &tokio_postgres::error::SqlState::CHECK_VIOLATION
-                    && db_error.message() == "device_upload_principal_namespace_conflict"
-            }) {
-                DatabaseError::UploadPrincipalAuthenticationDenied
-            } else {
-                DatabaseError::Postgres(error)
-            }
-        })?;
-
-        // Re-select the authoritative account for this principal. If a
-        // concurrent mint inserted the link first, this returns ITS account_id
-        // and our freshly-inserted (now orphaned) trace_accounts row is harmless
-        // (no principal links to it). If we won, it returns new_account_id.
-        let row = tx
-            .query_one(
-                "SELECT account_id FROM trace_account_principals
-                  WHERE tenant_id = trace_current_tenant_id()
-                    AND principal_ref = $1
-                    AND unlinked_at IS NULL",
-                &[&principal_ref],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        let account_id: Uuid = row.get("account_id");
+        let account_id = create_or_reuse_account_in_tx(&tx, principal_ref).await?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(account_id)
     }
@@ -4078,6 +4271,41 @@ impl Database for PgBackend {
         grant_template: Option<&crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
     ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
         self.near_ai_login_provision(login, device_public_key, session, identity, grant_template)
+            .await
+    }
+
+    async fn store_near_ai_rebind_ceremony(
+        &self,
+        ceremony_hash: &str,
+        pending: &crate::account_login_change::NearAiRebindPending,
+        expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        self.near_ai_rebind_store_ceremony(ceremony_hash, pending, expires_at)
+            .await
+    }
+
+    async fn take_near_ai_rebind_ceremony(
+        &self,
+        ceremony_hash: &str,
+    ) -> Result<Option<crate::account_login_change::NearAiRebindPending>, DatabaseError> {
+        self.near_ai_rebind_take_ceremony(ceremony_hash).await
+    }
+
+    async fn near_ai_rebind_precheck(
+        &self,
+        session: &crate::account_login_change::RebindSession,
+    ) -> Result<crate::account_login_change::RebindPrecheck, DatabaseError> {
+        self.near_ai_rebind_check(session).await
+    }
+
+    async fn near_ai_rebind(
+        &self,
+        session: &crate::account_login_change::RebindSession,
+        current: &crate::account_login_change::RebindCurrent,
+        new_login: &crate::near_ai_login::VerifiedNearAiLogin,
+        identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_login_change::RebindOutcome, DatabaseError> {
+        self.near_ai_rebind_commit(session, current, new_login, identity)
             .await
     }
 
@@ -4316,6 +4544,11 @@ impl Database for PgBackend {
             // NATIVE_SESSION_MAX_LIFETIME_DAYS` and never earlier than it already
             // was. A browser session keeps its fixed expiry.
             //
+            // The cap is bound in HOURS (days x 24). A timestamptz plus a days
+            // interval counts calendar days in the database session's TimeZone,
+            // so across a daylight-saving change in a non-UTC zone the cap moved
+            // by an hour; hours are absolute in every zone (as in V143).
+            //
             // Concurrency. The SELECT above took no row lock, so another request
             // may rotate, revoke or sign out this row before this UPDATE runs.
             // Under READ COMMITTED the UPDATE waits for that writer and then
@@ -4339,7 +4572,7 @@ impl Database for PgBackend {
                                     expires_at,
                                     LEAST(
                                         now() + make_interval(hours => $5),
-                                        created_at + make_interval(days => $6)
+                                        created_at + make_interval(hours => $6)
                                     )
                                 )
                                 ELSE expires_at
@@ -4355,7 +4588,8 @@ impl Database for PgBackend {
                         &new_hash,
                         &crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND,
                         &(crate::account_native_auth::NATIVE_SESSION_TTL_HOURS as i32),
-                        &(crate::account_native_auth::NATIVE_SESSION_MAX_LIFETIME_DAYS as i32),
+                        &((crate::account_native_auth::NATIVE_SESSION_MAX_LIFETIME_DAYS * 24)
+                            as i32),
                     ],
                 )
                 .await
@@ -5192,6 +5426,20 @@ impl Database for PgBackend {
         )
         .await
         .map_err(DatabaseError::Postgres)?;
+        // A legacy tenant's tenant-link lock (V81, V148), also before any
+        // account row lock: a link or attestation holds it while its claim
+        // writes principals referencing an account, and closing the absorbed
+        // account below takes it in the release trigger. Taken here first,
+        // the order is always tenant link, then account row (review of
+        // #1879).
+        if !trace_commons_protocol::admission::is_anchored_tenant(tenant_id) {
+            tx.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || $1, 0))",
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        }
 
         // Load + consume the proposal atomically. The conditional UPDATE
         // re-validates OWNERSHIP (surviving_account_id = A, the auth-derived
@@ -5228,6 +5476,35 @@ impl Database for PgBackend {
             return Ok(None);
         };
         let absorbed_account_id: Uuid = consumed.get("absorbed_account_id");
+
+        // A NEAR AI tenant's absorbed account B may hold V81 tenant links.
+        // Closing B below fires the close trigger, which takes each linked
+        // legacy tenant's tenant-link lock, while this transaction holds B's
+        // row; an attestation under such a link holds that lock and needs a
+        // key-share on B. So take those locks here, sorted, before any row
+        // lock: tenant links first, then rows, on every path (review of
+        // #1879).
+        if trace_commons_protocol::admission::is_anchored_tenant(tenant_id) {
+            let legacy_tenants = tx
+                .query(
+                    "SELECT DISTINCT legacy_tenant_id FROM trace_legacy_invite_links
+                      WHERE tenant_id = trace_current_tenant_id() AND account_id = $1
+                        AND revoked_at IS NULL
+                      ORDER BY legacy_tenant_id",
+                    &[&absorbed_account_id],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            for row in legacy_tenants {
+                let legacy: String = row.get(0);
+                tx.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || $1, 0))",
+                    &[&legacy],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            }
+        }
 
         // B's NEAR anchors and provisioned devices follow the identity, so a
         // device provisioned to B is a live device of A and a returning NEAR
@@ -5758,6 +6035,44 @@ impl Database for PgBackend {
                 dedup_simhash: row.get("dedup_simhash"),
                 dedup_signal_version: row.get("dedup_signal_version"),
             })
+            .collect())
+    }
+
+    async fn list_dedup_cluster_candidates(
+        &self,
+        simhash: i64,
+        max_hamming: u32,
+    ) -> Result<Vec<crate::trace_corpus_storage::DedupClusterCandidateRow>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        let max_hamming = i64::from(max_hamming);
+        // One row per cluster (V145), filtered to the Hamming radius in the
+        // database, so only the clusters a new decision could join cross the
+        // wire. No tenant GUC: the trace_gate_driver role's permissive SELECT
+        // policy on the table authorizes it, as on trace_gate_decisions.
+        let rows = client
+            .query(
+                "SELECT dedup_cluster_id, representative_simhash,
+                        representative_signal_version, member_count
+                 FROM trace_dedup_cluster_representatives
+                 WHERE bit_count((representative_simhash # $1)::bit(64)) <= $2",
+                &[&simhash, &max_hamming],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |row| crate::trace_corpus_storage::DedupClusterCandidateRow {
+                    dedup_cluster_id: row.get("dedup_cluster_id"),
+                    representative_simhash: row.get("representative_simhash"),
+                    representative_signal_version: row.get("representative_signal_version"),
+                    member_count: row.get("member_count"),
+                },
+            )
             .collect())
     }
 
@@ -8239,6 +8554,7 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
+            include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
             include_str!("../../../../migrations/V142__referral_rewards.sql"),
             include_str!("../../../../migrations/V141__trace_model_training_consent_grants.sql"),
             include_str!("../../../../migrations/V140__account_device_codes.sql"),
@@ -8289,6 +8605,7 @@ mod tests {
             include_str!("../../../../migrations/V131__starter_plausibility_features.sql"),
         ];
         let force_rls_migrations = [
+            include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
             include_str!("../../../../migrations/V142__referral_rewards.sql"),
             include_str!("../../../../migrations/V141__trace_model_training_consent_grants.sql"),
             include_str!("../../../../migrations/V140__account_device_codes.sql"),
@@ -8970,6 +9287,36 @@ mod tests {
             "PgBackend must not expose its raw pool as a normal public API; use the \
              tenant-context helpers for application paths and an explicit test hook for \
              raw RLS probes"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pool_timeout_tests {
+    use super::*;
+
+    fn config(url: &str) -> tokio_postgres::Config {
+        url.parse().expect("valid PostgreSQL URL")
+    }
+
+    #[test]
+    fn create_timeout_leaves_room_for_failover_and_stays_bounded() {
+        use std::time::Duration;
+        assert_eq!(
+            pool_create_timeout(&config("postgres://u@127.0.0.1/db")),
+            POOL_CREATE_TIMEOUT
+        );
+        // `connect_timeout` bounds each host's TCP connect, so the pool
+        // budget covers every host and then the handshake on top.
+        assert_eq!(
+            pool_create_timeout(&config(
+                "postgres://u@primary,standby/db?connect_timeout=10"
+            )),
+            Duration::from_secs(20) + POOL_CREATE_TIMEOUT
+        );
+        assert_eq!(
+            pool_create_timeout(&config("postgres://u@127.0.0.1/db?connect_timeout=3")),
+            Duration::from_secs(3) + POOL_CREATE_TIMEOUT
         );
     }
 }

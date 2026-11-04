@@ -321,8 +321,9 @@ async fn a_key_already_gone_is_not_a_failure() {
 
 #[tokio::test]
 async fn a_refused_revoke_is_an_error_and_a_401_names_the_session() {
+    // A 403 is not an error: the key is another account's
+    // (`a_403_revoke_is_another_accounts_key`).
     for (status, label) in [
-        (StatusCode::FORBIDDEN, "near_ai_credential_refused"),
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "near_ai_credential_refused",
@@ -343,6 +344,21 @@ async fn a_refused_revoke_is_an_error_and_a_401_names_the_session() {
             "{status}"
         );
     }
+}
+
+/// A 403 says this session may not act on that workspace: the key is in
+/// another NEAR AI account, recorded before a sign-in to a different one.
+#[tokio::test]
+async fn a_403_revoke_is_another_accounts_key() {
+    let api =
+        CloudApi::for_test(&spawn(revoke_service(StatusCode::FORBIDDEN, Default::default())).await)
+            .unwrap();
+    assert_eq!(
+        api.revoke_inference_key(&session(), "ws-1", "key-1")
+            .await
+            .unwrap(),
+        RevokeOutcome::NotThisAccount
+    );
 }
 
 /// Both ids become path segments. Neither leaves this process unless it is
@@ -366,4 +382,26 @@ async fn a_revoke_with_an_id_that_is_not_a_path_segment_never_leaves() {
         );
     }
     assert!(seen.lock().unwrap().is_empty());
+}
+
+/// The sign-in's mint asks for a full page of organizations, as the
+/// listing does, so "the remembered organization is absent" is read from a
+/// page that can carry it.
+#[tokio::test]
+async fn the_sign_in_mint_asks_for_a_full_page_of_organizations() {
+    let seen: Seen = Default::default();
+    let api = CloudApi::for_test(&spawn(two_org_service(seen.clone())).await).unwrap();
+    let (minted, listed) = api
+        .mint_inference_key_listing(&session(), "d", OrganizationChoice::Prefer("org-b"))
+        .await
+        .unwrap();
+    assert_eq!(minted.organization_id, "org-b");
+    assert!(listed);
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        seen.iter()
+            .any(|line| line
+                .starts_with(&format!("GET /v1/organizations?limit={ORGANIZATION_PAGE} "))),
+        "{seen:?}"
+    );
 }

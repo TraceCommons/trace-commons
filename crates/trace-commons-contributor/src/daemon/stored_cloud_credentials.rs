@@ -91,6 +91,20 @@ impl StoredCloudCredentials {
         &self.binding_digest
     }
 
+    /// Whether this record holds an inference key.
+    pub(crate) fn has_inference(&self) -> bool {
+        self.inference.is_some()
+    }
+
+    /// The stored key's `(workspace_id, key_id)`. Not secret: they name the
+    /// key in the contributor's own NEAR AI account, and a revoke needs them
+    /// even when the key itself cannot be read.
+    pub(crate) fn inference_ids(&self) -> Option<(String, String)> {
+        self.inference
+            .as_ref()
+            .map(|key| (key.workspace_id.clone(), key.key_id.clone()))
+    }
+
     pub(crate) fn resolve(
         &self,
         bundle: SecretBundle,

@@ -3873,7 +3873,7 @@ fn normalize_onboarding_ingest_url(value: Option<String>) -> anyhow::Result<Opti
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, StatusCode, header};
     use chrono::{Duration, Utc};
@@ -8263,7 +8263,7 @@ mod tests {
     /// Captures the log lines a test emits on its own thread. One module
     /// for every capture test in this file, because it installs the one
     /// process-global subscriber the lib tests may have.
-    mod log_capture {
+    pub(crate) mod log_capture {
         use std::io::Write;
         use std::sync::{Arc, Mutex};
 
@@ -8302,7 +8302,10 @@ mod tests {
         /// be dynamic: a plain `filter_fn` caches its first answer per
         /// callsite, so whichever thread registered the handler's `info!`
         /// would decide for all of them again.
-        pub(super) fn capture_logs(f: impl FnOnce()) -> String {
+        ///
+        /// The lib's only global subscriber, so other modules' tests that
+        /// need a log capture call this one (`payout_pass`).
+        pub(crate) fn capture_logs(f: impl FnOnce()) -> String {
             use tracing_subscriber::Layer;
             use tracing_subscriber::layer::SubscriberExt;
             static INSTALL: std::sync::Once = std::sync::Once::new();

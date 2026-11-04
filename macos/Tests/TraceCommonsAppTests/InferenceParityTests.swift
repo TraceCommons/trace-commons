@@ -192,11 +192,17 @@ final class InferenceParityTests: XCTestCase {
         let source = try Self.text("Views/CredentialSection.swift")
         for needle in ["CredentialSurface.tone(", "CredentialSurface.action(", "CredentialSurface.stateLine(",
                        "CredentialSurface.actionExplains(", "CredentialSurface.actionLabel(", "BalanceSurface.actionToDraw(",
-                       "Self.providerOptions(copy)", "copy.credentialWalletNotice", "model.startNearAiCredential(provider:",
+                       "model.startNearAiCredential()",
                        "model.cancelNearAiCredential()", "model.forgetNearAiCredential()", "model.migrateNearAiCredential()",
                        "model.credentialBusy",
                        "actionButton(balanceAction)"] {
             XCTAssertTrue(source.contains(needle), "CredentialSection.swift lacks \(needle)")
+        }
+        // No provider chooser and no wallet notice: the login is chosen on
+        // the daemon's browser page (owner, 2026-11-02).
+        for gone in ["providerOptions", "credentialWalletNotice", "credentialProviderLabel", "GlassPicker(",
+                     "startNearAiCredential(provider:"] {
+            XCTAssertFalse(source.contains(gone), "CredentialSection.swift still has \(gone)")
         }
         // The balance and funding are their own panels (#1146), never a
         // second copy inside the credential card.
@@ -215,20 +221,14 @@ final class InferenceParityTests: XCTestCase {
         }
     }
 
-    /// The card's state is the core's tone on a worded glass label, the
-    /// provider chooser writes the caller's binding and is named on screen,
-    /// and no control is drawn without words.
-    func test_signInDrawsTheToneWithWordsAndNamesTheChooser() throws {
+    /// The card's state is the core's tone on a worded glass label, it
+    /// draws no provider chooser (the daemon's browser page offers the
+    /// logins), and no control is drawn without words.
+    func test_signInDrawsTheToneWithWordsAndNoChooser() throws {
         let source = try Self.text("Views/CredentialSection.swift")
+        XCTAssertFalse(source.contains("GlassPicker("), "the card draws a provider chooser again")
+        XCTAssertFalse(source.contains("selection.wrappedValue"), "the card holds a provider choice again")
         for needle in ["GlassStatusLabel(\n                CredentialSurface.stateLine(status, copy: copy, calls: model.credentialCalls),\n                status: PrivateInferenceIndicator.status(tone))",
-                       "set: { if let value = $0 { selection.wrappedValue = value } }",
-                       "Text(copy.credentialProviderLabel)",
-                       "GlassPicker(\n                        copy.credentialProviderLabel,",
-                       "placeholder: copy.credentialProviderLabel)",
-                       "Text(copy.credentialProviderLabel)\n"
-                           + "                        .glassType(GlassTokens.TypeScale.label)\n"
-                           + "                        .foregroundStyle(GlassColor.textSecondary)\n"
-                           + "                        .accessibilityHidden(true)",
                        ".buttonStyle(GlassButtonStyle(prominent && action == .obtain ? .primary : .glass))\n"
                            + "                .disabled(model.credentialBusy)",
                        ] {
@@ -263,9 +263,9 @@ final class InferenceParityTests: XCTestCase {
         let funding = try Self.text("Views/FundingRow.swift")
         for needle in ["?? status?.view.message ?? copy.fundingUnavailable",
                        "NearAiSignInOffer.billingOffers(",
-                       "state: status?.state, failed: model.nearAiSignInFailed)", "model.signInToNearAI()", "info: copy.fundingWhat,",
+                       "state: status?.state, failed: model.nearAiSignInFailed)", "Task { await model.signInToNearAI() }", "info: copy.fundingWhat,",
                        "GlassIconCard(\n            systemImage: \"creditcard\", title: copy.fundingTitle,",
-                       ": status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)",
+                       "Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)",
                        ".disabled(model.credentialBusy || (model.nearAiSigningIn && !model.canRestartNearAiBrowserSignIn)",
                        ".onReceive(model.$credentialBusy.removeDuplicates().dropFirst())",
                        ".onReceive(model.$credentialStatus.map(\\.sessionState).removeDuplicates().dropFirst())"] {
@@ -455,7 +455,7 @@ final class InferenceParityTests: XCTestCase {
             XCTAssertTrue(views.contains(needle), "InferenceViews.swift lacks \(needle)")
         }
         let account = try Self.text("Views/Monitor/InferenceAccount.swift")
-        for needle in ["credential: AnyView(CredentialSection(copy: copy, prominent: true, titled: false)))",
+        for needle in ["credential: AnyView(CredentialSection(\n                        copy: copy, prominent: true, titled: false, placement: .signInShortcut)))",
                        "HarnessListSection(copy: copy, titled: false)",
                        "PrivateAISwitchCard(", "store.setPrivateAI(on:", "copy.writeUnconfirmed", "model.refreshSettings()",
                        "store.privateAI?.on", "model.privateInferenceCopy"] {
@@ -489,7 +489,7 @@ final class InferenceParityTests: XCTestCase {
                      "struct PrivateAISettingsPanels", "ManagedGlobalSettingsHeader()",
                      "eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,",
                      "HarnessListSection(copy: copy, titled: false)", "PrivateAISwitchCard(",
-                     "credential: AnyView(CredentialSection(copy: copy, prominent: true, titled: false)))"]
+                     "credential: AnyView(CredentialSection(\n                        copy: copy, prominent: true, titled: false, placement: .signInShortcut)))"]
         var cursor = account.startIndex
         for needle in order {
             let found = try XCTUnwrap(account.range(of: needle, range: cursor..<account.endIndex),
@@ -587,7 +587,7 @@ final class InferenceParityTests: XCTestCase {
                        "the inspector summary draws the core's subtitle once")
         // One word and the menu bar's dot, the full sentence as help and
         // hint (2026-10-28).
-        XCTAssertTrue(views.contains("GlassStatusLabel(status.word, status: status.dot)"))
+        XCTAssertTrue(views.contains("GlassChip(status.word, status: status.dot)"))
         XCTAssertTrue(views.contains(".help(status.sentence)"))
         XCTAssertTrue(views.contains(".accessibilityHint(status.sentence)"))
         XCTAssertEqual(views.components(separatedBy: "GlassTabHeading(").count - 1, 1,
@@ -759,7 +759,9 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertEqual(PrivateAIInspectorView.subtitle(copy, state: nil), copy.subtitle)
     }
 
-    /// The step-by-step card explains and is not a button: no action.
+    /// The step-by-step card explains and is not a button: no action, and
+    /// no step link. It is the shared getting-started card (owner,
+    /// 2026-11-02), each step a title over its line.
     func testTheGuideCardIsNotAButton() throws {
         let views = try String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -768,12 +770,13 @@ final class InferenceParityTests: XCTestCase {
         let next = try XCTUnwrap(views.range(of: "struct PrivateAIInspectorView: View {"))
         let card = String(views[guide.lowerBound..<next.lowerBound])
         XCTAssertFalse(card.contains("action:"), "the guide card has no action")
-        XCTAssertTrue(card.contains("closeLabel: MonitorWords.close"))
-        let hero = try String(contentsOf: URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/TCDesign/Components/HeroCard.swift"), encoding: .utf8)
-        XCTAssertTrue(hero.contains("if let action {"))
-        XCTAssertTrue(hero.contains("card.accessibilityElement(children: .combine)"))
+        XCTAssertFalse(card.contains("link:"), "no step links anywhere")
+        XCTAssertTrue(card.contains("GetStartedCard("))
+        XCTAssertFalse(card.contains("GlassHeroCard("))
+        XCTAssertTrue(card.contains("close: GetStartedCard.Close(label: MonitorWords.close) { closed = true },"))
+        XCTAssertEqual(PrivateAIGuideCard.steps.map { $0.title },
+                       ["guide_step_earn_title", "guide_step_start_title", "guide_step_use_title"])
+        XCTAssertEqual(PrivateAIGuideCard.steps.map { $0.line }, ["guide_step_earn", "guide_step_start", "guide_step_use"])
     }
 
 }

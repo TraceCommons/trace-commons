@@ -16,6 +16,7 @@ use crate::trace_invite_registry::InviteTenantMode;
 
 pub mod postgres;
 pub mod postgres_inference_connection;
+mod postgres_legacy_payout_carry;
 mod postgres_payout;
 mod postgres_referral;
 #[doc(hidden)]
@@ -1210,6 +1211,46 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Store a change ceremony (F10) in the provisioning ceremony table.
+    /// Fail-closed by default.
+    async fn store_near_ai_rebind_ceremony(
+        &self,
+        _ceremony_hash: &str,
+        _pending: &crate::account_login_change::NearAiRebindPending,
+        _expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_rebind_unconfigured".into()))
+    }
+
+    /// Consume a change ceremony. Single use.
+    async fn take_near_ai_rebind_ceremony(
+        &self,
+        _ceremony_hash: &str,
+    ) -> Result<Option<crate::account_login_change::NearAiRebindPending>, DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_rebind_unconfigured".into()))
+    }
+
+    /// Whether the session's account can change its login now, and what its
+    /// current identity is (F10 start). Read in the session's tenant only.
+    async fn near_ai_rebind_precheck(
+        &self,
+        _session: &crate::account_login_change::RebindSession,
+    ) -> Result<crate::account_login_change::RebindPrecheck, DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_rebind_unconfigured".into()))
+    }
+
+    /// Move the account from its proven current identity to `new_login`, in
+    /// one transaction in the session's tenant (F10 finish, spec 4.3).
+    async fn near_ai_rebind(
+        &self,
+        _session: &crate::account_login_change::RebindSession,
+        _current: &crate::account_login_change::RebindCurrent,
+        _new_login: &crate::near_ai_login::VerifiedNearAiLogin,
+        _identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_login_change::RebindOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_rebind_unconfigured".into()))
+    }
+
     /// Write the NEAR AI sign-up contributor grant for a device NEAR AI
     /// provisioned before sign-up wrote one (owner decision 2026-10-24).
     ///
@@ -1924,6 +1965,30 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The dedup clusters whose representative simhash is within
+    /// `max_hamming` bits of `simhash`, cross-tenant, each with its
+    /// representative's stamp and its member count. What the inline gate path
+    /// assigns a new decision against.
+    ///
+    /// Postgres answers from `trace_dedup_cluster_representatives` (V145), one
+    /// row per cluster kept in step by trigger. Default: the pre-V145 fold over
+    /// a full [`Database::list_dedup_signals`] enumeration, which is also the
+    /// reference the table is tested against.
+    async fn list_dedup_cluster_candidates(
+        &self,
+        simhash: i64,
+        max_hamming: u32,
+    ) -> Result<Vec<crate::trace_corpus_storage::DedupClusterCandidateRow>, DatabaseError> {
+        let signals = self.list_dedup_signals(i64::MAX).await?;
+        Ok(
+            crate::trace_corpus_storage::dedup_cluster_candidates_from_signals(
+                &signals,
+                simhash,
+                max_hamming,
+            ),
+        )
+    }
+
     /// Enumerate every decision row for the dedup re-derivation pass,
     /// cross-tenant, ordered `decided_at ASC, decision_id ASC`, capped at
     /// `limit`. Not filtered by stamp: the pass reuses rows already on its
@@ -2087,7 +2152,7 @@ pub struct RedeemedSession {
 /// Outcome of a successful [`Database::validate_session`] lookup. Carries the
 /// durable account id and the `auth_credential_id` recorded on the session row
 /// (the NEAR access key that authenticated a NEAR session, the WebAuthn
-/// credential id of a session minted before passkeys were removed, or `None`
+/// credential id of a session minted before V144, or `None`
 /// otherwise, which covers device-link and native sessions; a keyed native
 /// session names its device in `device_key_id`). The credential id is a public
 /// identifier, never key material.
@@ -2097,7 +2162,7 @@ pub struct ValidatedSession {
     pub auth_credential_id: Option<String>,
     /// The `client_kind` recorded on the session row (`'web'` for a device-link
     /// session, `'near'` for a NEAR login, `'native'` for the app; `'passkey'`
-    /// on a session minted before passkeys were removed). Used by the
+    /// on a session minted before V144). Used by the
     /// strong-authenticator gate to classify session strength: only a `'near'`
     /// session is STRONG. A public label, never key material.
     pub client_kind: String,
@@ -2358,7 +2423,7 @@ pub struct RevokeAccountDeviceResult {
     pub sessions_revoked: u64,
     pub grants_revoked: u64,
     /// The account's live native sessions that named no device key (issued
-    /// before V139, by the login-link native sign-in, or by a passkey sign-in
+    /// before V139, by the login-link native sign-in, or by a WebAuthn sign-in
     /// before V144, whatever credential id it carries), revoked with the
     /// device because they cannot be told apart from its own. The caller's
     /// session is never among them.
@@ -3209,6 +3274,17 @@ pub struct PayoutLinkRequestWrite {
     pub recipient: Option<(RecipientKind, SealedRecipient)>,
     pub expires_at: chrono::DateTime<chrono::Utc>,
     pub actor_ref_hash: String,
+    /// For a link, which anchor its proof matched
+    /// ([`crate::payout_recipient_proof::ProofKind::label`]). Written as the
+    /// `label` of the request's audit row, so links proved one way can be
+    /// found later. `None` for an unlink.
+    pub proof_label: Option<&'static str>,
+    /// For a link, the `anchor_hash` of the `near_ai_login` anchor its proof
+    /// matched ([`crate::payout_recipient_proof::VerifiedRecipient::anchor_hash`]).
+    /// The confirm lands the link only while that exact anchor is live
+    /// (V151, #1882). `None` for an unlink; the database refuses a link
+    /// without one.
+    pub proving_anchor_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3236,11 +3312,39 @@ pub struct PayoutLinkRequest {
 /// What a confirm writes beside the request it takes: the new link's id and
 /// program (for a `link`) and the confirming account's actor hash. The
 /// recipient comes from the request row, never from the confirm call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PayoutLinkConfirmWrite {
     pub link_id: Uuid,
     pub program: String,
     pub actor_ref_hash: String,
+    /// The rail's program for a carried link's id, so a confirm on a NEAR
+    /// account carries its link to the legacy accounts it has linked, in
+    /// the same transaction (V146; legacy payout migration spec, section
+    /// 3.3). `None` carries nothing.
+    pub carry_programs: Option<CarryPrograms>,
+}
+
+/// `PayoutRail::program_for_link`, for links the store creates itself (a
+/// carried link gets its own id and so its own program).
+#[derive(Clone)]
+pub struct CarryPrograms(pub std::sync::Arc<dyn Fn(Uuid) -> String + Send + Sync>);
+
+impl std::fmt::Debug for CarryPrograms {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CarryPrograms(..)")
+    }
+}
+
+/// What one carry call did across the account's linked legacy tenants
+/// (V146). Counts only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LegacyCarryReport {
+    /// Carried links written.
+    pub carried: u32,
+    /// Carries released (unlinked, closed at zero, or superseded).
+    pub released: u32,
+    /// Legacy accounts skipped because they hold a link of their own.
+    pub skipped: u32,
 }
 
 /// The outcome of [`PayoutStore::confirm_payout_link_request`]. Every
@@ -3263,6 +3367,13 @@ pub enum PayoutLinkConfirm {
     ChangePending,
     /// An unlink with no active link.
     NotLinked,
+    /// A link whose proving NEAR AI login anchor is no longer live on the
+    /// account at confirm (retired by a login change, gone in a merge, or
+    /// never recorded on a request a pre-V151 service wrote): only the
+    /// login that proved the request can land it, so it links nothing, even
+    /// when the account holds another live login (#1882). Unlinks are never
+    /// refused this way.
+    NoLoginAnchor,
 }
 
 /// One account's link state on one rail, for the link routes.
@@ -3401,12 +3512,19 @@ pub struct PayoutAccountStanding {
     /// An open `trace_credit_holds` row names the account's `account:` key
     /// or a principal actively linked to it.
     pub credit_held: bool,
+    /// The account holds a live carried link that must not be paid (V146,
+    /// `trace_legacy_payout_carry_invalid`): its tenant was marked pooled,
+    /// its tenant link is gone or revoked, or its source account or link
+    /// no longer stands.
+    pub carry_invalid: bool,
 }
 
 /// An account whose row is gone or closed.
 pub const PAYOUT_ACCOUNT_CLOSED: &str = "payout_account_closed";
 /// An open credit hold on the account or a principal linked to it.
 pub const PAYOUT_ACCOUNT_CREDIT_HOLD: &str = "payout_account_credit_hold";
+/// A carried link that no longer has a standing source (V146).
+pub const PAYOUT_LEGACY_CARRY_INVALID: &str = "payout_legacy_carry_invalid";
 
 impl PayoutAccountStanding {
     /// The shared hold label, if any. A missing account row holds like a
@@ -3416,12 +3534,15 @@ impl PayoutAccountStanding {
             Some(PAYOUT_ACCOUNT_CLOSED)
         } else if self.credit_held {
             Some(PAYOUT_ACCOUNT_CREDIT_HOLD)
+        } else if self.carry_invalid {
+            Some(PAYOUT_LEGACY_CARRY_INVALID)
         } else {
             None
         }
     }
 }
 
+pub use postgres_legacy_payout_carry::legacy_link_hash as payout_legacy_link_hash;
 pub use postgres_payout::{
     PayoutPassLock, account_id_hash as payout_account_id_hash, link_id_hash as payout_link_id_hash,
 };
@@ -3744,9 +3865,10 @@ pub trait PayoutStore: Send + Sync {
         rail: &RailId,
     ) -> Result<PayoutAccountLinkView, DatabaseError>;
 
-    /// The account's NEAR AI login anchors (`trace_near_account_anchors`
-    /// rows with `identity_source = 'near_ai_login'`), which a `near_ai`
-    /// proof's subject must match. Empty for an account with none.
+    /// The account's recorded NEAR AI login anchors
+    /// (`trace_near_account_anchors` rows with `identity_source =
+    /// 'near_ai_login'`), which a `near_ai` proof's subject must match. Empty
+    /// for an account with none; wallet anchors prove nothing here.
     async fn payout_account_login_anchors(
         &self,
         tenant: &str,
@@ -3758,8 +3880,10 @@ pub trait PayoutStore: Send + Sync {
     /// carrying the request's sealed recipient, or the unlink mark on the
     /// active link, each with its audit rows. Serialized per account and
     /// rail. Refuses (consuming the request) when it expired, a newer
-    /// request superseded it, or the account's link version is no longer
-    /// the request's `expected_current_version`.
+    /// request superseded it, the account's link version is no longer the
+    /// request's `expected_current_version`, or (for a link) the anchor that
+    /// proved the request is no longer one of the account's live
+    /// `near_ai_login` anchors.
     async fn confirm_payout_link_request(
         &self,
         tenant: &str,
@@ -3768,6 +3892,51 @@ pub trait PayoutStore: Send + Sync {
         handle_hash: &str,
         confirm: &PayoutLinkConfirmWrite,
     ) -> Result<PayoutLinkConfirm, DatabaseError>;
+
+    /// Carries the account's live link on `rail` to every open account of
+    /// each legacy tenant it has linked (V81), and releases carries that no
+    /// longer match: an unlinked source, a pooled tenant, a closed account
+    /// (V146; legacy payout migration spec, section 3.3). Idempotent. A
+    /// confirm already does this in its own transaction; this is for the
+    /// tenant-link route, after a new tenant link. Nothing for an account
+    /// outside `near-` / `nearai-` or without a `near_ai_login` anchor.
+    async fn carry_legacy_payout_links(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        programs: &CarryPrograms,
+        actor_ref_hash: &str,
+    ) -> Result<LegacyCarryReport, DatabaseError>;
+
+    /// Create or reuse the account for `principal_ref` in `tenant`, as
+    /// [`Database::create_or_reuse_account`] does, and, in the same
+    /// transaction, carry the linked NEAR AI account's live link on each of
+    /// `rails` to it when `tenant` is a legacy tenant linked through V81
+    /// (#1873; owner, 2026-11-03: carry only at events, and opening an
+    /// account in a linked tenant is one). Nothing is carried for a tenant
+    /// outside a live tenant link, or from a closed source account. A
+    /// failure rolls the whole transaction back, the account included.
+    /// Owner decision, 2026-11-03 (V148:444): release every live carry on
+    /// `rail` in legacy tenant `tenant` whose account is no longer proven, at
+    /// send time, audited with `actor_ref_hash` (the pass's actor). A live
+    /// pass calls this before it reads the tenant's links; a dry run does
+    /// not. It only ends carries. Nothing for a `near-` / `nearai-` tenant.
+    /// Returns how many carries it released.
+    async fn release_unproven_legacy_carries(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+        actor_ref_hash: &str,
+    ) -> Result<u32, DatabaseError>;
+
+    async fn create_or_reuse_account_carrying(
+        &self,
+        tenant: &str,
+        principal_ref: &str,
+        rails: &[(RailId, CarryPrograms)],
+        actor_ref_hash: &str,
+    ) -> Result<Uuid, DatabaseError>;
 
     /// The audit actions on `rail` in this tenant, oldest first.
     async fn payout_audit_actions(
@@ -4676,6 +4845,8 @@ mod payout_debug_tests {
                 recipient: Some((kind.clone(), sealed())),
                 expires_at: expires,
                 actor_ref_hash: ACCOUNT_HASH.into(),
+                proof_label: Some("near_ai_login"),
+                proving_anchor_hash: Some(HANDLE_HASH.into()),
             }
         ));
         assert_redacted(format!(

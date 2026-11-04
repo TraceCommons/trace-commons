@@ -57,6 +57,8 @@ const TAURI_COMMANDS: &[&str] = &[
     "acknowledge_legacy_invite_migration",
     "arming_reworded_notice",
     "gate_held_notice",
+    "account_attention_copy",
+    "set_up_again",
     "acknowledge_arming_rewordings",
     "automatic_grant",
     "grant_automatic",

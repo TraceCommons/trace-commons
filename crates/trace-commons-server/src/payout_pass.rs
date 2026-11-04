@@ -410,8 +410,22 @@ enum Halt {
 
 type Step<T> = Result<T, Halt>;
 
+/// A store error halts the pass as `payout_store_failed`. It is logged
+/// first, by class only (`sqlstate_42501`, `pool_unlabelled`, ...) and the
+/// calling line, never the message, which can quote row values: a pass
+/// that ended this way with nothing in the log once hid a missing grant.
+#[track_caller]
 fn store<T>(result: Result<T, crate::error::DatabaseError>) -> Step<T> {
-    result.map_err(|_| Halt::Store)
+    let site = std::panic::Location::caller();
+    result.map_err(|error| {
+        tracing::warn!(
+            label = PAYOUT_STORE_FAILED,
+            error_class = %crate::account_onboarding::database_error_label(&error),
+            site = %format_args!("{}:{}", site.file(), site.line()),
+            "payout pass store call failed"
+        );
+        Halt::Store
+    })
 }
 
 /// A rail's own label, checked: never a label that is not a safe identifier.
@@ -777,6 +791,28 @@ impl PayoutPass {
         referral: &mut ReferralRun,
         report: &mut PayoutPassReport,
     ) -> Step<()> {
+        // Owner decision, 2026-11-03 (V148:444): a carry on this rail whose
+        // legacy account is no longer proven is released here, at send time,
+        // before this tenant's links are read, so it is never paid this pass
+        // and the account's other streams are not held. Live mode only (a
+        // dry run moves no link) and this rail only (review of #1879). The
+        // pass only ends carries; it never creates one. A failure releases
+        // nothing, and the account standing still holds such a carry.
+        if self.settings.mode == PayoutMode::Live
+            && !trace_commons_protocol::admission::is_anchored_tenant(tenant)
+        {
+            if let Err(error) = self
+                .payouts
+                .release_unproven_legacy_carries(tenant, self.rail_id(), &self.actor)
+                .await
+            {
+                tracing::warn!(
+                    label = "legacy_carry_release_failed",
+                    error_class = crate::account_onboarding::database_error_label(&error),
+                    "releasing unproven legacy carries failed; the standing holds them"
+                );
+            }
+        }
         match accrue_rail(
             self.payouts.as_ref(),
             self.corpus.as_ref(),
@@ -2144,6 +2180,23 @@ fn rail_line<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A store error is logged before the pass halts: its class and the
+    /// calling line, never its text.
+    #[test]
+    fn a_store_failure_logs_its_class_and_site_but_not_its_text() {
+        let logs = crate::trace_upload_claim_issuer::tests::log_capture::capture_logs(|| {
+            let step: Step<()> = store(Err(crate::error::DatabaseError::Pool(
+                "recipient row 7 is sealed".into(),
+            )));
+            assert!(matches!(step, Err(Halt::Store)));
+        });
+        assert!(logs.contains("payout pass store call failed"), "{logs}");
+        assert!(logs.contains("label=\"payout_store_failed\""), "{logs}");
+        assert!(logs.contains("error_class=pool_unlabelled"), "{logs}");
+        assert!(logs.contains("payout_pass.rs:"), "{logs}");
+        assert!(!logs.contains("recipient row"), "{logs}");
+    }
 
     #[test]
     fn line_refs_are_stable_hashes_of_the_line_id() {

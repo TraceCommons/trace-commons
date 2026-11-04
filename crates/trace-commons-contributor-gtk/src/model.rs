@@ -74,6 +74,33 @@ pub struct Status {
     /// which chooses the words. Absent on a daemon older than the field.
     #[serde(default)]
     pub legacy_invite_migration: serde_json::Value,
+    /// `ok`, or `needs_attention` while this app's account must be set up
+    /// again (#1836 F1). Absent on a daemon older than the field, which
+    /// reads as nothing to show. Kept as sent: the words come from
+    /// `consent_copy::account_attention_for_wire`, never chosen here.
+    #[serde(default)]
+    pub account_state: Option<String>,
+    /// The daemon's reason label beside `account_state`, as sent.
+    #[serde(default)]
+    pub account_state_reason: Option<String>,
+    /// True while `account_state` is `needs_attention` and a NEAR AI login
+    /// is stored. Absent reads as false.
+    #[serde(default)]
+    pub near_ai_login_unconfirmed: bool,
+    /// F10 (spec 2.4): this device may offer "Use a different account".
+    /// Absent on an older daemon, which offers nothing.
+    #[serde(default)]
+    pub login_change_available: bool,
+    /// F10: a wallet-origin account, whose payouts need a NEAR AI login.
+    #[serde(default)]
+    pub payouts_need_login: bool,
+    /// F10: a login the commons refused as another account is held aside
+    /// for the change.
+    #[serde(default)]
+    pub login_change_held: bool,
+    /// F10: the last NEAR AI sign-in was refused as another account.
+    #[serde(default)]
+    pub login_mismatch: bool,
 }
 
 /// One rewording notice as the window draws it (K5).
@@ -90,6 +117,19 @@ pub struct ArmingRewordingCard {
 }
 
 impl Status {
+    /// The account section's status while this app's account needs
+    /// attention, in the core's words, or `None` while there is nothing to
+    /// show (healthy, or a daemon too old to say).
+    pub fn account_attention(
+        &self,
+    ) -> Option<trace_commons_contributor::consent_copy::AccountAttentionCopy> {
+        trace_commons_contributor::consent_copy::account_attention_for_wire(&serde_json::json!({
+            "account_state": self.account_state,
+            "account_state_reason": self.account_state_reason,
+            "near_ai_login_unconfirmed": self.near_ai_login_unconfirmed,
+        }))
+    }
+
     /// Shared completion is proof only for a live, identified enrollment.
     pub fn shared_setup_complete(&self) -> bool {
         self.logged_in
@@ -1173,6 +1213,73 @@ pub fn human_when(then: Option<chrono::DateTime<chrono::Utc>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1836 F1: the account status is the core's, for both reasons, with
+    /// the Private AI line only while a NEAR AI login is stored.
+    #[test]
+    fn an_account_needing_attention_is_worded_by_the_core() {
+        let status: Status = serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "account_state": "needs_attention",
+            "account_state_reason": "account_record_unreadable",
+            "near_ai_login_unconfirmed": true,
+        }))
+        .expect("status decodes");
+        let copy = status.account_attention().expect("shown");
+        assert_eq!(copy.title, "This app's account needs attention");
+        assert_eq!(
+            copy.body,
+            Some(
+                "This app can't read its account details on this computer. Set it up again to keep sending traces."
+            )
+        );
+        assert_eq!(
+            copy.private_ai,
+            Some("Private AI still works with your NEAR AI account.")
+        );
+        assert_eq!(copy.action, "Set up again");
+        assert_eq!(copy.confirm_title, "Set up this app again?");
+        assert_eq!(
+            copy.confirm_body,
+            "This signs out of NEAR AI on this computer. You'll sign in again to keep sending traces."
+        );
+        assert_eq!(copy.confirm_action, "Set up again");
+        assert_eq!(copy.confirm_cancel, "Cancel");
+        assert_eq!(copy.failed, "Nothing changed. Try again.");
+
+        let status: Status = serde_json::from_value(serde_json::json!({
+            "account_state": "needs_attention",
+            "account_state_reason": "account_address_refused",
+            "near_ai_login_unconfirmed": false,
+        }))
+        .expect("status decodes");
+        let copy = status.account_attention().expect("shown");
+        assert_eq!(
+            copy.body,
+            Some(
+                "This app can no longer reach the service it was set up with. Update the app, or set it up again."
+            )
+        );
+        assert_eq!(copy.private_ai, None);
+    }
+
+    /// A healthy account and a daemon too old to send the fields show
+    /// nothing.
+    #[test]
+    fn a_healthy_account_or_an_old_daemon_shows_no_account_status() {
+        let healthy: Status = serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "account_state": "ok",
+            "account_state_reason": null,
+            "near_ai_login_unconfirmed": false,
+        }))
+        .expect("status decodes");
+        assert_eq!(healthy.account_attention(), None);
+        let old: Status =
+            serde_json::from_value(serde_json::json!({"logged_in": true})).expect("old decodes");
+        assert_eq!(old.account_attention(), None);
+        assert!(!old.near_ai_login_unconfirmed);
+    }
 
     fn status_with_voids(voids: serde_json::Value) -> Status {
         serde_json::from_value(serde_json::json!({

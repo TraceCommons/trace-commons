@@ -62,6 +62,26 @@
   </provides>
 
   <releases>
+    <release version="0.23.0" date="2026-11-04">
+      <description>
+        <p>Lets you move your account to a different NEAR AI login, and says which login an account uses when a sign-in is refused as another account.</p>
+      </description>
+    </release>
+    <release version="0.22.0" date="2026-11-03">
+      <description>
+        <p>Lets the browser offer the NEAR AI login choices, shows when your account needs setting up again, opens Private AI sessions in Rex and groups them in herdr, and stops managed Claude Code sessions asking for server classifier review.</p>
+      </description>
+    </release>
+    <release version="0.21.2" date="2026-11-02">
+      <description>
+        <p>Lets you sign in to NEAR AI with GitHub, Google or a NEAR wallet from every Private AI sign-in button.</p>
+      </description>
+    </release>
+    <release version="0.21.1" date="2026-11-01">
+      <description>
+        <p>Keeps a NEAR AI session's models inside its privacy tier when a project's Claude Code settings choose a model, keeps uploads retrying for at least six hours during an outage, and reports final credit as earned in the daily digest.</p>
+      </description>
+    </release>
     <release version="0.21.0" date="2026-11-01">
       <description>
         <p>Removes the daily upload limit, reads sessions up to 512 MiB, offers Codex's compressed sessions, and spreads out retries when the commons is busy.</p>

@@ -65,9 +65,11 @@ pub enum LeverFeedbackAction {
 pub struct GoalState {
     pub lever_dismissals: Vec<LeverDismissal>,
     pub lever_reenables: Vec<LeverReenable>,
-    /// The lever's card was switched off in Settings
-    /// (`analytics_setting_lever`). Absent from a file written before the
-    /// switch, which reads as on.
+    /// The lever's card was switched off in Settings. The switch is gone
+    /// (product owner, 2026-10-29: it controlled nothing once the lever
+    /// card left Overview), and nothing writes this any more; it is still
+    /// read, so a file written while the switch existed keeps decoding and
+    /// an earlier "off" is kept. Absent from older files, which read as on.
     #[serde(default)]
     pub lever_card_off: bool,
     /// The latest week whose summary card was opened.
@@ -212,26 +214,6 @@ impl LocalInsightStore {
         })
     }
 
-    /// The Settings switch for the lever's card (`analytics_setting_lever`).
-    /// Off, no card is drawn, and the weekly summary card leaves out its
-    /// pattern line, the same observation. On, the card is back, and so is
-    /// every kind that three "Not useful" turned off
-    /// ([`super::analytics_constants::LEVER_DISMISSALS_TO_DISABLE`]): that
-    /// kind's "Not useful" are forgotten, so one given later, even in the
-    /// same week, counts again from there.
-    /// Other kinds' feedback is kept.
-    pub fn lever_card(&self, enabled: bool) -> Result<GoalState> {
-        self.update_goals(|file| {
-            file.lever_card_off = !enabled;
-            if enabled {
-                let off = super::lever::kinds_off(&file.lever_dismissals, &file.lever_reenables);
-                file.lever_dismissals
-                    .retain(|entry| !off.contains(&entry.kind));
-            }
-            Ok(())
-        })
-    }
-
     /// The summary card for `week_start` was opened: no card for it, or for
     /// any earlier week, appears again.
     pub fn recap_opened(&self, week_start: NaiveDate) -> Result<GoalState> {
@@ -342,70 +324,6 @@ mod tests {
             value["lever_dismissals"][0],
             serde_json::json!({"kind": "repeated_reads", "week_start": "2026-10-05"})
         );
-    }
-
-    /// The Settings switch for the lever's card (`analytics_setting_lever`):
-    /// off, it stays off; on, every kind that three "Not useful" turned off
-    /// is back, and a later "Not useful" counts again from there.
-    #[test]
-    fn the_lever_card_switch_turns_it_off_and_back_on() {
-        let (_dir, store) = store();
-        let state = store.goal_state().unwrap();
-        assert!(!state.lever_card_off, "on by default");
-        for weeks_ago in [3, 2, 1] {
-            store
-                .lever_feedback(
-                    PatternKind::RepeatedReads,
-                    monday_at(0) - chrono::Duration::weeks(weeks_ago),
-                    LeverFeedbackAction::NotUseful,
-                )
-                .unwrap();
-        }
-        store
-            .lever_feedback(
-                PatternKind::LongContext,
-                monday_at(0),
-                LeverFeedbackAction::NotUseful,
-            )
-            .unwrap();
-        let state = store.goal_state().unwrap();
-        assert_eq!(
-            super::super::lever::kinds_off(&state.lever_dismissals, &state.lever_reenables),
-            vec![PatternKind::RepeatedReads]
-        );
-
-        let off = store.lever_card(false).unwrap();
-        assert!(off.lever_card_off);
-        assert_eq!(
-            off.lever_dismissals.len(),
-            4,
-            "switching off forgets nothing"
-        );
-
-        let on = store.lever_card(true).unwrap();
-        assert!(!on.lever_card_off);
-        assert!(
-            super::super::lever::kinds_off(&on.lever_dismissals, &on.lever_reenables).is_empty()
-        );
-        assert_eq!(
-            on.lever_dismissals,
-            vec![LeverDismissal {
-                kind: PatternKind::LongContext,
-                week_start: monday_at(0)
-            }],
-            "only the kinds that were off are forgotten"
-        );
-        // Persisted, and read back.
-        assert_eq!(store.goal_state().unwrap(), on);
-        // A "Not useful" in the week it was turned back on counts.
-        let again = store
-            .lever_feedback(
-                PatternKind::RepeatedReads,
-                monday_at(0),
-                LeverFeedbackAction::NotUseful,
-            )
-            .unwrap();
-        assert_eq!(again.lever_dismissals.len(), 2);
     }
 
     #[test]

@@ -1477,6 +1477,7 @@ mod tests {
             public_bio: None,
             public_since: None,
             witness_origin: None,
+            account_identity: None,
             witness: None,
             inference_receipt_endpoint: None,
             consent_scopes_chosen: Some(false),

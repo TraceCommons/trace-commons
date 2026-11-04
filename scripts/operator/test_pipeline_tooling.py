@@ -2191,6 +2191,8 @@ class PackageCommandTests(_CorpusRunCase):
                     "TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=500000",
                     "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=0",
                     "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=2.5",
+                    "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_RULE=graded_perplexity_v1",
+                    "TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM=2026-11-04T00:00:00Z",
                     "DATABASE_URL=postgres://ingest@db/trace",
                     "",
                 ]
@@ -2226,6 +2228,10 @@ class PackageCommandTests(_CorpusRunCase):
                 "TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS": "500000",
                 "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS": "0",
                 "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA": "2.5",
+                # Owner decision D1 (2026-11-03): the package pins the credit
+                # rule, so the writer gets it; SETTLE_FROM is not a package
+                # value and stays behind.
+                "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_RULE": "graded_perplexity_v1",
             },
         )
         self.assertNotIn("secret-near-ai-key", self.stdout.getvalue() + self.stderr.getvalue())

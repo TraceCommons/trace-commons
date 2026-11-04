@@ -114,12 +114,20 @@ pub fn token_review_summary(
 /// probabilities".
 pub const WITNESS_TOKEN_HEADING: &str = "Token distribution contribution";
 pub const WITNESS_TOKEN_DISCLOSURE: &str = "Include token probabilities and alternative tokens in traces you review with your witness. Alternatives can contain personal information even when the chosen text does not. The witness filters them before contribution; they remain restricted research data.";
-pub const WITNESS_TOKEN_CAPTURE_NOTE: &str = "Capture is configured separately in Ironwire for supported models. This permission does not turn on capture.";
+/// "IronWire", as everywhere else (it said "Ironwire"). DRAFT, NEEDS
+/// APPROVAL (2026-11-04).
+pub const WITNESS_TOKEN_CAPTURE_NOTE: &str = "Capture is configured separately in IronWire for supported models. This permission does not turn on capture.";
 pub const WITNESS_TOKEN_SCOPE_NOTE: &str = "After the server confirms durable storage, this app removes its local bundle and releases its capture lease. Your agent trace files stay on this device. Withdrawing a contribution is a separate action.";
 /// Approved 2026-10-07: they were "Include
 /// token probabilities" and "Stop including token probabilities".
 pub const WITNESS_TOKEN_ENABLE: &str = "Enable";
 pub const WITNESS_TOKEN_DISABLE: &str = "Disable";
+/// The token card's Enable and Disable, named apart from the model-call
+/// card's, with the same visible words (copy-guide rule 5). DRAFT, NEEDS
+/// APPROVAL (2026-11-04).
+pub const WITNESS_TOKEN_ENABLE_ACCESSIBILITY_NAME: &str = "Enable token distribution contribution";
+pub const WITNESS_TOKEN_DISABLE_ACCESSIBILITY_NAME: &str =
+    "Disable token distribution contribution";
 /// "Enable". Approved 2026-10-07 (owner ruling): it was "Allow token
 /// review".
 pub const WITNESS_TOKEN_CONFIRM: &str = "Enable";
@@ -155,6 +163,10 @@ pub const WITNESS_INFERENCE_SCOPE_NOTE: &str = concat!(
 /// permission" and "Stop including inference bodies".
 pub const WITNESS_INFERENCE_ENABLE: &str = "Enable";
 pub const WITNESS_INFERENCE_DISABLE: &str = "Disable";
+/// The model-call card's Enable and Disable, named apart from the token
+/// card's (copy-guide rule 5). DRAFT, NEEDS APPROVAL (2026-11-04).
+pub const WITNESS_INFERENCE_ENABLE_ACCESSIBILITY_NAME: &str = "Enable model-call evidence";
+pub const WITNESS_INFERENCE_DISABLE_ACCESSIBILITY_NAME: &str = "Disable model-call evidence";
 /// "Enable". Approved 2026-10-07 (owner ruling): it was "Allow sending
 /// captured bodies".
 pub const WITNESS_INFERENCE_CONFIRM: &str = "Enable";
@@ -564,6 +576,8 @@ pub struct WitnessCopy {
     pub token_scope_note: &'static str,
     pub token_enable: &'static str,
     pub token_disable: &'static str,
+    pub token_enable_accessibility_name: &'static str,
+    pub token_disable_accessibility_name: &'static str,
     pub token_confirm: &'static str,
     pub token_cancel: &'static str,
     pub token_enabled: &'static str,
@@ -575,6 +589,8 @@ pub struct WitnessCopy {
     pub inference_scope_note: &'static str,
     pub inference_enable: &'static str,
     pub inference_disable: &'static str,
+    pub inference_enable_accessibility_name: &'static str,
+    pub inference_disable_accessibility_name: &'static str,
     pub inference_confirm: &'static str,
     pub inference_cancel: &'static str,
     pub inference_enabled: &'static str,
@@ -737,6 +753,8 @@ pub fn witness_copy() -> WitnessCopy {
         token_scope_note: WITNESS_TOKEN_SCOPE_NOTE,
         token_enable: WITNESS_TOKEN_ENABLE,
         token_disable: WITNESS_TOKEN_DISABLE,
+        token_enable_accessibility_name: WITNESS_TOKEN_ENABLE_ACCESSIBILITY_NAME,
+        token_disable_accessibility_name: WITNESS_TOKEN_DISABLE_ACCESSIBILITY_NAME,
         token_confirm: WITNESS_TOKEN_CONFIRM,
         token_cancel: WITNESS_TOKEN_CANCEL,
         token_enabled: WITNESS_TOKEN_ENABLED,
@@ -748,6 +766,8 @@ pub fn witness_copy() -> WitnessCopy {
         inference_scope_note: WITNESS_INFERENCE_SCOPE_NOTE,
         inference_enable: WITNESS_INFERENCE_ENABLE,
         inference_disable: WITNESS_INFERENCE_DISABLE,
+        inference_enable_accessibility_name: WITNESS_INFERENCE_ENABLE_ACCESSIBILITY_NAME,
+        inference_disable_accessibility_name: WITNESS_INFERENCE_DISABLE_ACCESSIBILITY_NAME,
         inference_confirm: WITNESS_INFERENCE_CONFIRM,
         inference_cancel: WITNESS_INFERENCE_CANCEL,
         inference_enabled: WITNESS_INFERENCE_ENABLED,
@@ -783,7 +803,13 @@ pub fn witness_copy() -> WitnessCopy {
         },
         wallet: WalletCopy {
             heading: "Join with a NEAR account",
-            disclosure: "Check whether your commons accepts new accounts. Connecting proves control of your account and this device; it does not fund inference or enable capture.",
+            // Approved 2026-11-03 (owner, relayed on #1868): the payouts
+            // sentence appended. It was "Check whether your commons accepts
+            // new accounts. Connecting proves control of your account and
+            // this device; it does not fund inference or enable capture."
+            // Shown by GTK, Windows and Tauri; macOS builds this step's view
+            // only in tests.
+            disclosure: "Check whether your commons accepts new accounts. Connecting proves control of your account and this device; it does not fund inference or enable capture. Payouts need a NEAR AI login, which joining with a NEAR account doesn't set up.",
             commons: "Commons HTTPS address",
             account: "Your NEAR account",
             check: "Check availability",
@@ -1327,7 +1353,7 @@ pub(crate) mod tests {
         let object = json.as_object().unwrap();
         assert_eq!(
             object.len(),
-            45,
+            49,
             "a field added to WitnessCopy must be counted here, or a shell can be handed \
              a word this test has never seen"
         );

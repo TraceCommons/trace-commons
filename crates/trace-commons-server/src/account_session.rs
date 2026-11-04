@@ -140,7 +140,7 @@ impl AccountCtx {
     /// strong session may freely change authenticators; any other session is
     /// gated unless the account has zero strong authenticators (the
     /// bootstrapping carve-out, enforced by the caller). A `'passkey'` session
-    /// minted before passkeys were removed is weak.
+    /// minted before V144 is weak.
     pub fn is_strong_session(&self) -> bool {
         self.client_kind == "near"
     }
@@ -191,7 +191,7 @@ mod tests {
         );
     }
     /// Only a NEAR wallet session is strong. A `'passkey'` session minted
-    /// before passkeys were removed is as weak as a native or device-link one.
+    /// before V144 is as weak as a native or device-link one.
     #[test]
     fn only_a_near_session_is_strong() {
         let ctx = |client_kind: &str| AccountCtx {

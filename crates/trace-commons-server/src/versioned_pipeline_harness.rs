@@ -440,6 +440,7 @@ mod tests {
                 chunk_cap: 16,
                 chunk_min_tokens: 64,
                 novelty_utility_microcredits: 2_500_000,
+                credit_rule: crate::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
             },
         }
     }

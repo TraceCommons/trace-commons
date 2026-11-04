@@ -25,6 +25,11 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     /// while the title and line still stop short of it (owner, 2026-10-29:
     /// Home's Traces hero draws its three steps across the whole card).
     private let contentSpansGraphic: Bool
+    /// With `contentSpansGraphic`, the title and line run the card's width
+    /// as well, stopping only short of the close button (owner, 2026-11-02:
+    /// Home's Traces hero, condensed, has no graphic worth keeping the
+    /// title off).
+    private let titleSpansGraphic: Bool
     /// The action is the pill alone, a button of its own, and the card is
     /// a plain panel, so the caller's content can hold buttons of its own
     /// (owner, 2026-10-29: Home's Traces hero's steps each open a tab).
@@ -38,7 +43,7 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
         gradient: GlassGradient, title: String, subtitle: String? = nil,
         actionTitle: String? = nil, action: (() -> Void)? = nil,
         closeLabel: String? = nil, onClose: (() -> Void)? = nil,
-        contentSpansGraphic: Bool = false, actionOnPill: Bool = false,
+        contentSpansGraphic: Bool = false, titleSpansGraphic: Bool = false, actionOnPill: Bool = false,
         @ViewBuilder graphic: () -> Graphic, @ViewBuilder content: () -> Content
     ) {
         self.gradient = gradient
@@ -49,6 +54,7 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
         self.closeLabel = closeLabel
         self.onClose = onClose
         self.contentSpansGraphic = contentSpansGraphic
+        self.titleSpansGraphic = titleSpansGraphic
         self.actionOnPill = actionOnPill
         self.graphic = graphic()
         self.content = content()
@@ -62,6 +68,23 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     /// How much of the large graphic shows through (owner, 2026-10-19: at
     /// full strength it competed with the words).
     static var graphicOpacity: Double { 0.5 }
+
+    /// How far a title that runs the card's width stops short of its
+    /// trailing edge for the close button: the X's whole target, less the
+    /// card's own padding, so a click on the title never closes the card.
+    static var closeReserve: CGFloat {
+        max(0, GlassHeroClose.inset * 2 + GlassHeroClose.glyph - GlassTokens.Space.cardPaddingHorizontal)
+    }
+
+    /// The title and line's trailing room inside the words: none when the
+    /// whole of the words stops short of the graphic, the graphic's when
+    /// only the caller's content runs under it, and the close button's
+    /// when the title runs the card's width too.
+    static func titleTrailing(contentSpansGraphic: Bool, titleSpansGraphic: Bool, closes: Bool) -> CGFloat {
+        guard contentSpansGraphic else { return 0 }
+        guard titleSpansGraphic else { return graphicReserve }
+        return closes ? closeReserve : 0
+    }
 
     /// The title's face: larger and heavier than a card title, as a hero's
     /// is (the references' display type, on the system face).
@@ -135,7 +158,8 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .padding(.trailing, contentSpansGraphic ? Self.graphicReserve : 0)
+            .padding(.trailing, Self.titleTrailing(
+                contentSpansGraphic: contentSpansGraphic, titleSpansGraphic: titleSpansGraphic, closes: onClose != nil))
             content
             if let actionTitle {
                 if actionOnPill, let action {

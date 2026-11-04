@@ -484,7 +484,7 @@ pub struct DaemonSettings {
     /// different questions: `near_ai` is the privacy-filter credential,
     /// `near_ai_inference` is the key inference calls carry, and this is the
     /// session that management reads need. Forgetting the credential clears
-    /// this too -- see `nearai_credential::ceremony::forget` -- because a
+    /// this too -- see `nearai_credential::disconnect` -- because a
     /// contributor who believes they revoked the daemon's access and left a
     /// session behind has been told something false.
     ///
@@ -757,6 +757,13 @@ pub struct DaemonSettings {
     /// and more than one is installed. Not writable on its own.
     #[serde(default)]
     pub managed_terminal_chosen: bool,
+
+    /// "Group sessions in herdr" (owner decision D4, 2026-11-03): managed
+    /// sessions open as tabs of herdr's "Near.ai" workspace, with
+    /// `managed_terminal` hosting herdr when no herdr client is running.
+    /// Off by default and in a file written before the key existed.
+    #[serde(default)]
+    pub managed_herdr: bool,
 
     /// NEAR AI model ids the person starred, which the Launch sheet's model
     /// picker lists first (`managed_model_catalogue`'s `favorites`). Order
@@ -1419,6 +1426,7 @@ impl Default for DaemonSettings {
             menu_bar_mark_enabled: DEFAULT_MENU_BAR_MARK_ENABLED,
             managed_terminal: Default::default(),
             managed_terminal_chosen: false,
+            managed_herdr: false,
             managed_favorite_models: Vec::new(),
             managed_cli_options: Default::default(),
             managed_folder_settings: Default::default(),
@@ -2135,6 +2143,11 @@ pub fn apply_settings_object(
                     .ok_or(ERR_SETTINGS_INVALID_VALUE)?
                     .into();
                 settings.managed_terminal_chosen = true;
+            }
+            // "Group sessions in herdr". Also reachable as
+            // `set_managed_herdr`, which writes through here.
+            "managed_herdr" => {
+                settings.managed_herdr = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
             // Favorite models merge like `notify`: `{"<id>": true}` stars an
             // id, `false` unstars it, omitted ids stay. One bad entry, or a

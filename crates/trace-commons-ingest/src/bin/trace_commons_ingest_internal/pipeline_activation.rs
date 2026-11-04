@@ -898,6 +898,25 @@ impl ActivateBody {
             expected_record_id: ExpectedRecord::NoRow,
         }
     }
+
+    /// The body the default-routing loop moves a tenant it routed to the
+    /// armed bundle with (owner decision D6, 2026-11-03): the armed bundle
+    /// and results, its own reason code, and the expectation of the routing
+    /// row it read (`ExpectedRecord::Record`), so the store refuses it when
+    /// an operator, or another process, changed the tenant's routing since.
+    pub(crate) fn for_routed_tenant(
+        bundle_id: String,
+        reason_code: &str,
+        attestations: Vec<PipelineCheckAttestation>,
+        activation_record_id: Uuid,
+    ) -> Self {
+        Self {
+            bundle_id,
+            reason_code: reason_code.to_string(),
+            attestations,
+            expected_record_id: ExpectedRecord::Record(activation_record_id),
+        }
+    }
 }
 
 /// An optional expectation field that is present in a body: a value of `T`.
@@ -1095,7 +1114,7 @@ async fn gate_inputs<'a>(
         return Err(refusal(PACKAGE_SIGNER_UNTRUSTED_LABEL));
     }
     service
-        .check_runnable_package(&package, &state.pipeline_main_gate, true)
+        .check_tenant_package(&package, &state.pipeline_main_gate, true)
         .map_err(refusal)?;
     let dependencies = ProductionDependencyProfile::for_bundle(
         service,

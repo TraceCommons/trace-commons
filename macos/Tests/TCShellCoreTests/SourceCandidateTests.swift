@@ -3,6 +3,16 @@ import XCTest
 @testable import TCShellCore
 
 final class SourceCandidateTests: XCTestCase {
+    /// The core's evidence words (`source_copy::SourceEvidenceCopy`), as
+    /// `SourceCheckExportTests` reads them from the dylib; this target
+    /// cannot load it.
+    static let words = SourceEvidenceWords(
+        missing: "Not found on this machine", empty: "Found, but holding no traces yet",
+        countOne: "1 trace", count: "{count} traces", mostRecent: "{traces}, most recent {age}",
+        relocated: "{evidence} (moved here by an environment variable)", ageJustNow: "just now",
+        ageMinutes: "{n} minutes ago", ageHour: "1 hour ago", ageHours: "{n} hours ago",
+        ageYesterday: "yesterday", ageDays: "{n} days ago")
+
     /// Exactly what `tc_discover_sources` returned on the machine this was
     /// written on, pasted rather than paraphrased. The nine-digit fractional
     /// second is the detail worth pinning: it is what the Rust side actually
@@ -65,7 +75,7 @@ final class SourceCandidateTests: XCTestCase {
         // "0 traces" and "that folder is not here" are materially
         // different answers to "may I watch this", and a contributor
         // deciding between them deserves the difference.
-        XCTAssertEqual(missing.evidence(now: Date()), "Not found on this machine")
+        XCTAssertEqual(missing.evidence(now: Date(), words: Self.words), "Not found on this machine")
     }
 
     func testAnEmptyStoreIsDistinctFromAMissingOne() {
@@ -77,7 +87,7 @@ final class SourceCandidateTests: XCTestCase {
             mostRecent: nil,
             relocatedByEnv: false
         )
-        XCTAssertEqual(empty.evidence(now: Date()), "Found, but holding no traces yet")
+        XCTAssertEqual(empty.evidence(now: Date(), words: Self.words), "Found, but holding no traces yet")
     }
 
     func testEvidenceCountsSessionsAndSaysHowRecent() {
@@ -90,7 +100,7 @@ final class SourceCandidateTests: XCTestCase {
             mostRecent: now.addingTimeInterval(-2 * 60 * 60),
             relocatedByEnv: false
         )
-        XCTAssertEqual(candidate.evidence(now: now), "953 traces, most recent 2 hours ago")
+        XCTAssertEqual(candidate.evidence(now: now, words: Self.words), "953 traces, most recent 2 hours ago")
     }
 
     func testASingleSessionIsNotPluralised() {
@@ -103,7 +113,7 @@ final class SourceCandidateTests: XCTestCase {
             mostRecent: now.addingTimeInterval(-90),
             relocatedByEnv: false
         )
-        XCTAssertEqual(candidate.evidence(now: now), "1 trace, most recent just now")
+        XCTAssertEqual(candidate.evidence(now: now, words: Self.words), "1 trace, most recent just now")
     }
 
     func testRelocationIsSurfacedSoAnUnusualPathHasAnExplanation() {
@@ -117,7 +127,7 @@ final class SourceCandidateTests: XCTestCase {
         )
         // Without this the screen shows a path the contributor did not
         // expect and offers no reason for it.
-        XCTAssertTrue(candidate.evidence(now: Date()).contains("moved here by an environment variable"))
+        XCTAssertTrue(candidate.evidence(now: Date(), words: Self.words).contains("moved here by an environment variable"))
     }
 
     func testDisplayNamesAreTheProductNamesNotTheAdapterSlugs() {
