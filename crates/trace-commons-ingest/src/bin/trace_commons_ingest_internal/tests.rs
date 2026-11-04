@@ -6669,6 +6669,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         referral_network_mark_key: None,
         first_run_estimate: Default::default(),
         first_run_copy: Default::default(),
+        first_run_stats: None,
         root,
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -31406,6 +31407,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         referral_network_mark_key: None,
         first_run_estimate: Default::default(),
         first_run_copy: Default::default(),
+        first_run_stats: None,
         root: temp.path().to_path_buf(),
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -103757,12 +103759,13 @@ mod first_run_copy_tests {
     fn the_dollar_line_is_off_by_default() {
         let config = first_run_copy::config_from_values(None, None, None, None).unwrap();
         assert_eq!(config, first_run_copy::FirstRunCopyConfig::default());
-        let request = FirstRunCopyRequest {
-            trace_count: 4100,
-            total_bytes: 940 * MIB,
-        };
+        let request = FirstRunCopyRequest::coarsened(4100, 940 * MIB);
         let (lines, served) = first_run_copy::lines_for(&config, &request);
-        assert_eq!(served, "default");
+        assert_eq!(served.variant, "default");
+        assert_eq!(
+            served.lines_key,
+            trace_commons_protocol::first_run_copy::DEFAULT_LINES_KEY
+        );
         assert_eq!(
             lines,
             trace_commons_protocol::first_run_copy::default_lines()
@@ -103781,23 +103784,21 @@ mod first_run_copy_tests {
         )
         .unwrap();
         let at = |trace_count| {
-            first_run_copy::lines_for(
-                &config,
-                &FirstRunCopyRequest {
-                    trace_count,
-                    total_bytes: 0,
-                },
-            )
+            first_run_copy::lines_for(&config, &FirstRunCopyRequest::coarsened(trace_count, 0))
         };
         let (few, served) = at(30);
-        assert_eq!(served, "usd");
+        assert_eq!(served.variant, "usd");
+        // The key names the wording without holding it.
+        assert!(served.lines_key.starts_with("usd."), "{}", served.lines_key);
+        assert_eq!(served.lines_key.len(), "usd.".len() + 16);
+        assert!(!served.lines_key.contains("SAMPLE"));
         assert_eq!(few.found_credit, "SAMPLE headline $7.50.");
         assert_eq!(few.found_could_credit, "SAMPLE could headline $7.50.");
         assert_eq!(few.credit_depends.as_deref(), Some(DEFAULT_CREDIT_DEPENDS));
         let (many, _) = at(4100);
         assert_eq!(many.found_credit, "SAMPLE headline $20.");
         // Nothing found is the default lines, never "$0".
-        assert_eq!(at(0).1, "default");
+        assert_eq!(at(0).1.variant, "default");
     }
 
     /// Fail closed at boot: half set, not plain whole cents, a per-trace
@@ -103875,10 +103876,7 @@ mod first_run_copy_tests {
             (99_000, 56_000),
             (100_000_000, 1_000_000_000),
         ] {
-            let request = FirstRunCopyRequest {
-                trace_count: count,
-                total_bytes: mib * MIB,
-            };
+            let request = FirstRunCopyRequest::coarsened(count, mib * MIB);
             assert!(request.is_valid());
             let (traces, size) = first_run_copy::log_buckets(&request);
             assert!(known.contains(&traces), "{traces}");
@@ -103893,12 +103891,53 @@ mod first_run_copy_tests {
             }
         }
         assert_eq!(
-            first_run_copy::log_buckets(&FirstRunCopyRequest {
-                trace_count: 4100,
-                total_bytes: 940 * MIB
-            }),
+            first_run_copy::log_buckets(&FirstRunCopyRequest::coarsened(4100, 940 * MIB)),
             ("traces_1k_9k", "mib_100_999")
         );
+    }
+
+    /// The stored row holds the coarsened figures as received, the answer
+    /// and its lines' key, and the client's version and platform; nothing
+    /// else exists to store.
+    #[test]
+    fn a_served_request_is_recorded_as_received() {
+        use trace_commons_server::db::first_run_stats::{
+            FirstRunEstimateOutcome, FirstRunEstimateRecord,
+        };
+        let request = FirstRunCopyRequest::coarsened(4123, 987_654_321).with_client("0.14.2");
+        let config = first_run_copy::config_from_values(None, None, None, None).unwrap();
+        let (_, served) = first_run_copy::lines_for(&config, &request);
+        assert_eq!(
+            first_run_copy::served_record(&request, served),
+            FirstRunEstimateRecord {
+                outcome: FirstRunEstimateOutcome::Served {
+                    variant: "default",
+                    lines_key: "default.2026-11-04".into(),
+                    trace_count: 4100,
+                    total_bytes: 940 * MIB,
+                },
+                app_version: Some("0.14.2".into()),
+                platform: Some(trace_commons_protocol::first_run_copy::current_platform().into()),
+            }
+        );
+    }
+
+    /// The statistics route is admin-only: no credential is refused before
+    /// any store is read.
+    #[tokio::test]
+    async fn the_stats_route_needs_an_admin() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let response = app(test_state(temp.path().to_path_buf()))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/admin/first-run-estimate-stats")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

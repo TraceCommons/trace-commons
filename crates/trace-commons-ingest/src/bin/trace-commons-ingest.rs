@@ -1790,6 +1790,9 @@ struct AppState {
     /// What `POST /v1/public/first-run-copy` answers: the default lines, or
     /// the operator's dollar line, validated at boot.
     first_run_copy: Arc<first_run_copy::FirstRunCopyConfig>,
+    /// Where each first-run estimate request is recorded and the operator's
+    /// statistics are read (V153). `None` without a database.
+    first_run_stats: Option<Arc<dyn trace_commons_server::db::first_run_stats::FirstRunStatsStore>>,
     inference_connection_catalog:
         Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
@@ -5265,6 +5268,10 @@ impl AppState {
             referral_network_mark_key,
             first_run_estimate: credit_estimate::first_run_estimate_from_env()?,
             first_run_copy: first_run_copy::config_from_env()?,
+            first_run_stats: db_connections.as_ref().map(|connections| {
+                connections.postgres.clone()
+                    as Arc<dyn trace_commons_server::db::first_run_stats::FirstRunStatsStore>
+            }),
             attestation_signing,
             legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -9328,6 +9335,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/credit-estimate-eval",
             post(credit_estimate::eval_handler),
+        )
+        .route(
+            "/v1/admin/first-run-estimate-stats",
+            get(first_run_copy::stats_handler),
         )
         .route(
             "/v1/admin/pii-backstop-requeue-quarantined",

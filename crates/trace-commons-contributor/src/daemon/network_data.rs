@@ -252,7 +252,9 @@ async fn first_run_estimate(
 /// traces found, asked of the commons (`POST /v1/public/first-run-copy`)
 /// once the first run has started the daemon. `trace_count` and
 /// `total_bytes` are the shell's own figures; they are coarsened here
-/// (`FirstRunCopyRequest::coarsened`) before anything leaves the machine.
+/// (`FirstRunCopyRequest::coarsened`) before anything leaves the machine,
+/// and sent with the app's version and platform. The commons records each
+/// request for its statistics (V153), with no address or identifier.
 ///
 /// It always answers, with `source` saying whose lines they are:
 /// `commons` for lines the commons sent that pass validation, `fallback`
@@ -267,7 +269,10 @@ pub(crate) async fn handle_first_run_copy(shared: &DaemonShared, req: &Request) 
     else {
         return Response::err(req.id, ERR_BAD_PARAMS, "first-run-copy-params-invalid");
     };
-    let request = FirstRunCopyRequest::coarsened(trace_count, total_bytes);
+    // The app's version and this build's platform go beside the figures,
+    // for the commons' statistics; nothing that names the person or device.
+    let request = FirstRunCopyRequest::coarsened(trace_count, total_bytes)
+        .with_client(env!("CARGO_PKG_VERSION"));
     let (lines, source) = match first_run_copy(shared, &request).await {
         Some(lines) => (lines, "commons"),
         None => (fallback_lines(), "fallback"),
@@ -1225,7 +1230,12 @@ mod tests {
         );
         assert_eq!(
             seen,
-            vec![serde_json::json!({"trace_count": 4100, "total_bytes": 985_661_440_u64})]
+            vec![serde_json::json!({
+                "trace_count": 4100,
+                "total_bytes": 985_661_440_u64,
+                "app_version": env!("CARGO_PKG_VERSION"),
+                "platform": trace_commons_protocol::first_run_copy::current_platform(),
+            })]
         );
     }
 

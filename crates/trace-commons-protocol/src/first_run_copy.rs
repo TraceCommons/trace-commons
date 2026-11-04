@@ -58,8 +58,32 @@ pub const MIB: u64 = 1 << 20;
 /// the product's copy keeps out of the first run.
 pub const FORBIDDEN_WORDS: &[&str] = &["trace commons", "tracecommons", "daemon", "passkey"];
 
+/// The platforms a request may name.
+pub const FIRST_RUN_PLATFORMS: &[&str] = &["macos", "linux", "windows", "other"];
+
+/// The platform this build runs on, as a request names it.
+#[must_use]
+pub fn current_platform() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "macos",
+        "linux" => "linux",
+        "windows" => "windows",
+        _ => "other",
+    }
+}
+
+/// Whether an app version is one a request may carry: 1 to 32 of
+/// `[0-9A-Za-z.+-]`.
+#[must_use]
+pub fn valid_app_version(version: &str) -> bool {
+    (1..=32).contains(&version.len())
+        && version
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'))
+}
+
 /// `POST /v1/public/first-run-copy` body. Both figures already coarse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FirstRunCopyRequest {
     /// The traces found, to two significant figures ([`coarsen_count`]).
@@ -67,6 +91,12 @@ pub struct FirstRunCopyRequest {
     /// Their total size in bytes, as a whole number of MiB to two
     /// significant figures ([`coarsen_bytes`]).
     pub total_bytes: u64,
+    /// The app's version, for the commons' statistics. Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
+    /// One of [`FIRST_RUN_PLATFORMS`], for the same. Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 
 impl FirstRunCopyRequest {
@@ -76,7 +106,17 @@ impl FirstRunCopyRequest {
         Self {
             trace_count: coarsen_count(trace_count).min(FIRST_RUN_MAX_TRACE_COUNT),
             total_bytes: coarsen_bytes(total_bytes),
+            app_version: None,
+            platform: None,
         }
+    }
+
+    /// The same, naming the app's version and this build's platform.
+    #[must_use]
+    pub fn with_client(mut self, app_version: &str) -> Self {
+        self.app_version = valid_app_version(app_version).then(|| app_version.to_owned());
+        self.platform = Some(current_platform().to_owned());
+        self
     }
 
     /// Whether a server may read it: both figures coarse and in bounds.
@@ -86,6 +126,11 @@ impl FirstRunCopyRequest {
             && self.total_bytes <= FIRST_RUN_MAX_TOTAL_BYTES
             && is_coarse_count(self.trace_count)
             && is_coarse_bytes(self.total_bytes)
+            && self.app_version.as_deref().is_none_or(valid_app_version)
+            && self
+                .platform
+                .as_deref()
+                .is_none_or(|p| FIRST_RUN_PLATFORMS.contains(&p))
     }
 }
 
@@ -124,6 +169,10 @@ pub const DEFAULT_FOUND_COULD_CREDIT: &str =
     "We have detected some traces that could earn you credit.";
 /// DRAFT, NEEDS APPROVAL (2026-11-04). #1921's words.
 pub const DEFAULT_CREDIT_DEPENDS: &str = "Final credit depends on how many traces are accepted.";
+
+/// The key the commons records for an answer of [`default_lines`]: a label
+/// naming that line set, never its text. Change it with the lines.
+pub const DEFAULT_LINES_KEY: &str = "default.2026-11-04";
 
 /// [`DEFAULT_FOUND_CREDIT`], [`DEFAULT_FOUND_COULD_CREDIT`] and
 /// [`DEFAULT_CREDIT_DEPENDS`] as one answer.
@@ -251,17 +300,19 @@ mod tests {
             FirstRunCopyRequest::coarsened(4123, 987_654_321),
             FirstRunCopyRequest {
                 trace_count: 4100,
-                total_bytes: 940 * MIB
+                total_bytes: 940 * MIB,
+                app_version: None,
+                platform: None,
             }
         );
         let raw = FirstRunCopyRequest {
             trace_count: 4123,
-            total_bytes: 0,
+            ..FirstRunCopyRequest::coarsened(0, 0)
         };
         assert!(!raw.is_valid());
         let huge = FirstRunCopyRequest {
             trace_count: 1_000_000_000,
-            total_bytes: 0,
+            ..FirstRunCopyRequest::coarsened(0, 0)
         };
         assert!(!huge.is_valid());
         // The largest figures clamp to the bounds and stay valid.
@@ -270,15 +321,35 @@ mod tests {
 
     #[test]
     fn a_request_names_both_figures_and_nothing_else() {
-        let json = serde_json::to_value(FirstRunCopyRequest {
-            trace_count: 4100,
-            total_bytes: 940 * MIB,
-        })
-        .unwrap();
+        let json = serde_json::to_value(FirstRunCopyRequest::coarsened(4123, 987_654_321)).unwrap();
         assert_eq!(
             json,
             serde_json::json!({"trace_count": 4100, "total_bytes": 985_661_440_u64})
         );
+        let named = FirstRunCopyRequest::coarsened(4123, 987_654_321).with_client("0.14.2");
+        assert!(named.is_valid());
+        assert_eq!(
+            serde_json::to_value(&named).unwrap(),
+            serde_json::json!({
+                "trace_count": 4100, "total_bytes": 985_661_440_u64,
+                "app_version": "0.14.2", "platform": current_platform(),
+            })
+        );
+        // A version that is not a plain label is left out, not sent.
+        assert_eq!(
+            FirstRunCopyRequest::coarsened(1, 0)
+                .with_client("0.14 beta")
+                .app_version,
+            None
+        );
+        for (version, platform) in [(Some("a b"), None), (None, Some("beos")), (Some(""), None)] {
+            let request = FirstRunCopyRequest {
+                app_version: version.map(str::to_owned),
+                platform: platform.map(str::to_owned),
+                ..FirstRunCopyRequest::coarsened(1, 0)
+            };
+            assert!(!request.is_valid(), "{version:?} {platform:?}");
+        }
         assert!(
             serde_json::from_value::<FirstRunCopyRequest>(
                 serde_json::json!({"trace_count": 1, "total_bytes": 0, "extra": 1})
