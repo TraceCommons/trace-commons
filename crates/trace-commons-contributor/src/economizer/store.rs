@@ -114,7 +114,7 @@ pub fn repo_key(cwd: &Path, harness: Harness) -> String {
 }
 
 /// Whether `id` can name a file: a session id or a [`repo_key`].
-fn safe_id(id: &str) -> bool {
+pub(super) fn safe_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 80
         && id

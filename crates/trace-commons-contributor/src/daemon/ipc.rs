@@ -470,6 +470,9 @@ pub const METHODS: &[&str] = &[
     "insights_model_answers",
     "insights_benchmarks",
     "insights_submitted",
+    "economizer_status",
+    "economizer_set_enabled",
+    "economizer_restore",
     "subscription_usage",
     "inference_summary",
     "inference_call_proof",
@@ -586,6 +589,10 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "insights_model_answers",
     "insights_benchmarks",
     "insights_submitted",
+    // Each reads or writes only `<config dir>/economizer`.
+    "economizer_status",
+    "economizer_set_enabled",
+    "economizer_restore",
     "subscription_usage",
     "inference_call_proof",
     "private_ai",
@@ -3966,6 +3973,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         "insights_benchmarks" => super::insights_benchmarks::handle_benchmarks(shared, req),
         "insights_submitted" => super::insights_submitted::handle_submitted(shared, req),
+        "economizer_status" => super::economizer::handle_status(shared, req),
+        "economizer_set_enabled" => super::economizer::handle_set_enabled(shared, req),
+        "economizer_restore" => super::economizer::handle_restore(shared, req),
         "inference_call_proof" => super::network_data::handle_proof(shared, req),
         "private_ai" => super::network_data::handle_private_ai(shared, req),
         "list_pending" => handle_list_pending(shared, req),
@@ -19439,7 +19449,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 108, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 111, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 83, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

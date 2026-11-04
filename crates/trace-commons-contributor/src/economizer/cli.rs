@@ -7,13 +7,10 @@ use std::path::PathBuf;
 
 use super::Harness;
 use super::store::{StateBusy, Store, repo_key};
-use super::tools::Thresholds;
+use super::summary::{self, FolderSummary};
 use crate::config::ConfigStore;
 
 const HARNESSES: [Harness; 3] = [Harness::Claude, Harness::Codex, Harness::Opencode];
-/// How long Give back waits for a folder's lock, so a stalled hook never
-/// holds it for good.
-const GIVE_BACK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, Subcommand)]
 pub enum EconomizerCommand {
@@ -71,15 +68,15 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
             let cwd = folder(cwd)?;
             let mut rows = Vec::new();
             for harness in HARNESSES {
-                let state = store.repo(&repo_key(&cwd, harness));
-                let left_out = state.tools.deny_list(harness, &Thresholds::default());
-                let facts: Vec<String> = state
-                    .facts
-                    .told()
+                let key = repo_key(&cwd, harness);
+                let state = store.repo(&key);
+                let row = FolderSummary::of(String::new(), harness, key, &state);
+                let facts: Vec<String> = row
+                    .told
+                    .iter()
                     .map(|fact| format!("{} {}", fact.prefix, fact.program))
                     .collect();
-                let forming = state.facts.facts.iter().filter(|f| !f.told()).count();
-                rows.push((harness, state.sessions, left_out, facts, forming));
+                rows.push((harness, row.sessions, row.left_out, facts, row.forming));
             }
             if as_json {
                 let tools: Vec<_> = rows
@@ -129,18 +126,12 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
                 .into_iter()
                 .filter(|h| harness.is_none_or(|only| only == *h))
             {
-                let key = repo_key(&cwd, harness);
-                if !store.has_repo(&key) {
-                    continue;
-                }
-                // Under the folder's lock, so a session ending at the same
-                // time neither loses its fold nor undoes the Give back.
-                // A busy folder does not stop the others: what was given
-                // back is still reported, then the busy ones as an error.
-                match store.try_update_repo(&key, GIVE_BACK_WAIT, |state| {
-                    let given = state.tools.restore(harness, &Thresholds::default());
-                    (!given.is_empty(), given)
-                }) {
+                // Under the folder's lock (`summary::restore`), so a session
+                // ending at the same time neither loses its fold nor undoes
+                // the Give back. A busy folder does not stop the others:
+                // what was given back is still reported, then the busy ones
+                // as an error.
+                match summary::restore(&store, harness, &repo_key(&cwd, harness)) {
                     Ok(given) if !given.is_empty() => restored.push((harness, given)),
                     Ok(_) => {}
                     Err(error) if error.is::<StateBusy>() => busy.push(harness),

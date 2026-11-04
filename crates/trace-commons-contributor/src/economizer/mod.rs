@@ -35,6 +35,7 @@ pub mod launch;
 pub mod loop_guard;
 pub mod signals;
 pub mod store;
+pub mod summary;
 pub mod tools;
 
 /// The coding tool a session runs in. Each learns on its own: tool
@@ -47,6 +48,16 @@ pub enum Harness {
     Claude,
     Codex,
     Opencode,
+}
+
+impl From<crate::managed::ToolId> for Harness {
+    fn from(tool: crate::managed::ToolId) -> Self {
+        match tool {
+            crate::managed::ToolId::Claude => Self::Claude,
+            crate::managed::ToolId::Codex => Self::Codex,
+            crate::managed::ToolId::Opencode => Self::Opencode,
+        }
+    }
 }
 
 impl Harness {

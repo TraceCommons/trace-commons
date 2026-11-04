@@ -474,6 +474,18 @@ impl SessionRegistry {
         self.data.revision
     }
 
+    /// Every (tool, folder) a coding row names, dismissed rows included,
+    /// as stored: no reconcile, no sweep, nothing written. The economizer's
+    /// status reads it, and keeps a folder whose rows were dismissed.
+    pub fn coding_folders(&self) -> Vec<(ToolId, PathBuf)> {
+        self.data
+            .entries
+            .iter()
+            .filter(|e| e.view.purpose == LaunchPurpose::Coding)
+            .map(|e| (e.view.tool, e.view.cwd.clone()))
+            .collect()
+    }
+
     pub fn views(&mut self) -> Result<Vec<SessionView>, ManagedError> {
         self.reconcile_receipts()?;
         self.sweep(Utc::now())?;
@@ -2735,6 +2747,27 @@ mod tests {
         assert_eq!(views[0].resumed_from, Some(root_started));
         let json = serde_json::to_value(&views[0]).unwrap();
         assert!(json["resumed_from"].is_string(), "{json}");
+    }
+
+    /// The economizer's folder list keeps a dismissed row's folder, and
+    /// reading it writes nothing.
+    #[test]
+    fn coding_folders_keep_dismissed_rows_and_write_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let id = ended(&mut registry, coding(&account, home.path()), &account);
+        registry.dismiss(id).unwrap();
+        assert!(registry.views().unwrap().is_empty());
+        let revision = registry.revision();
+        let folders = registry.coding_folders();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].0, ToolId::Claude);
+        assert_eq!(registry.revision(), revision);
     }
 
     /// Dismiss is the conversation's: dismissing any of its rows dismisses
