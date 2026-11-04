@@ -872,6 +872,12 @@ pub const ENROLL_DEVICE_KEY_REVOKED: &str = "near_ai_enroll_device_key_revoked";
 /// commons on another version: deterministic, so "try later" would loop,
 /// and each pass would write a session this client never holds. That case
 /// keeps the caller's fallback label.
+/// Whether the commons did not answer `error` (no response, a busy status):
+/// a try-later, never a refusal. Shared with the change of login (F10).
+pub(super) fn commons_unanswered(error: &trace_commons_operator_client::Error) -> bool {
+    finish_unanswered(error)
+}
+
 fn finish_unanswered(error: &trace_commons_operator_client::Error) -> bool {
     use trace_commons_operator_client::Error;
     match error {
@@ -1249,7 +1255,9 @@ pub(crate) fn record_account_identity(
     let Some(mut cfg) = store.load_config()? else {
         return Ok(false);
     };
-    if cfg.tenant_id != tenant_id || cfg.account_identity == Some(identity) {
+    // Written only when it changes how the account signs in: a `nearai-`
+    // account answered `near_ai_login` keeps its config byte for byte.
+    if cfg.tenant_id != tenant_id || cfg.signs_in_with() == Some(identity) {
         return Ok(false);
     }
     cfg.account_identity = Some(identity);

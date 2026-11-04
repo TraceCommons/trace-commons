@@ -77,11 +77,11 @@ struct Challenge {
     network: String,
 }
 #[derive(Deserialize)]
-struct WalletResult {
+pub(super) struct WalletResult {
     state: String,
-    account_id: String,
-    wallet_public_key: String,
-    wallet_signature: String,
+    pub(super) account_id: String,
+    pub(super) wallet_public_key: String,
+    pub(super) wallet_signature: String,
 }
 #[derive(Deserialize)]
 struct Completed {
@@ -105,7 +105,7 @@ struct Attempt {
 static ATTEMPTS: OnceLock<Mutex<HashMap<PathBuf, Attempt>>> = OnceLock::new();
 // Embedded FFI creates a short-lived runtime per IPC call. Wallet work and its
 // reactor must outlive that call, including while the app waits in the browser.
-fn signup_runtime() -> Result<&'static tokio::runtime::Runtime> {
+pub(super) fn signup_runtime() -> Result<&'static tokio::runtime::Runtime> {
     static RUNTIME: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
     RUNTIME
         .get_or_init(|| {
@@ -122,7 +122,7 @@ fn signup_runtime() -> Result<&'static tokio::runtime::Runtime> {
 fn attempts() -> &'static Mutex<HashMap<PathBuf, Attempt>> {
     ATTEMPTS.get_or_init(Default::default)
 }
-fn random() -> Result<String> {
+pub(super) fn random() -> Result<String> {
     let mut bytes = [0; 32];
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes)
         .map_err(|_| anyhow!("near_signup_unavailable"))?;
@@ -922,7 +922,12 @@ fn parse_callback(target: &str, state: &str) -> Result<WalletResult> {
     }
     Ok(result)
 }
-async fn receive_wallet(listener: tokio::net::TcpListener, state: &str) -> Result<WalletResult> {
+/// The wallet page's signed callback on `listener`, for `state`. Shared with
+/// the change of login's wallet proof (F10 W1), which signs on the same page.
+pub(super) async fn receive_wallet(
+    listener: tokio::net::TcpListener,
+    state: &str,
+) -> Result<WalletResult> {
     // Ignore unrelated local requests, but bound both each connection and total
     // waiting time so a process cannot monopolize the callback listener.
     loop {
@@ -1121,9 +1126,7 @@ fn persist(
         inference_receipt_check_attestation: true,
         // Joined with a NEAR wallet: signs in with it until a change of
         // login (F10) records otherwise.
-        account_identity: Some(
-            trace_commons_protocol::account_login_change::IdentityKind::Wallet,
-        ),
+        account_identity: Some(trace_commons_protocol::account_login_change::IdentityKind::Wallet),
     };
     let session = crate::account_auth::AccountSession {
         access_token: result.access_token,

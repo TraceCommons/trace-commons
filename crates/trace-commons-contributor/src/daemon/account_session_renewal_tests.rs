@@ -236,6 +236,9 @@ async fn spawn(device_public_key: String) -> Stub {
                             "tenant_id": state.tenant.lock().unwrap().clone(),
                             "device_key_id": device_key_id,
                             "anchor_hash": format!("sha256:{}", "cd".repeat(32)),
+                            // What every F10 commons answers: the account
+                            // signs in with a NEAR AI login.
+                            "identity": "near_ai_login",
                         })),
                     )
                         .into_response()
@@ -2047,7 +2050,23 @@ mod settle_tests {
         assert_eq!(fields[0].1, "commons");
         assert_eq!(fields[1].1, different_account_label());
         assert_eq!((stored(&fx), fx.account_record(), fx.config()), before);
-        assert_eq!(revokes(&fx), 1, "the key minted for it is revoked");
+        // F10: held aside, unstored, for "Use a different account", and
+        // revoked when the hold ends without a change.
+        assert_eq!(revokes(&fx), 0, "held aside for a change of login");
+        assert_hold_ends_in_a_revoke(&fx).await;
+    }
+
+    /// The held login's key is revoked once its hold ends (here, the
+    /// NEAR AI forget every sign-out runs).
+    async fn assert_hold_ends_in_a_revoke(fx: &Fixture) {
+        crate::daemon::account_login_change::forget(fx.shared.store.dir());
+        for _ in 0..50 {
+            if revokes(fx) == 1 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(revokes(fx), 1, "the held key is revoked when the hold ends");
     }
 
     /// The revokes of the minted key the stub saw.
@@ -2213,7 +2232,8 @@ mod settle_tests {
         let error = run(&fx, check).await.unwrap_err();
         assert_eq!(error.root_cause().to_string(), different_account_label());
         assert_eq!((stored(&fx), fx.account_record(), fx.config()), before);
-        assert_eq!(revokes(&fx), 1);
+        assert_eq!(revokes(&fx), 0, "held aside for a change of login");
+        assert_hold_ends_in_a_revoke(&fx).await;
     }
 
     /// Not bound (a first run): stored as it always was.

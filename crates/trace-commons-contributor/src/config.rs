@@ -2237,7 +2237,10 @@ mod tests {
         let near = format!("near-{}", "ab".repeat(32));
         let mut unrecorded = identity_cfg(&near, None);
         let json = serde_json::to_value(&unrecorded).unwrap();
-        assert!(json.get("account_identity").is_none(), "absent stays absent");
+        assert!(
+            json.get("account_identity").is_none(),
+            "absent stays absent"
+        );
         assert!(unrecorded.record_identity_from_namespace());
         assert_eq!(unrecorded.account_identity, Some(Wallet));
         assert!(!unrecorded.record_identity_from_namespace(), "once");

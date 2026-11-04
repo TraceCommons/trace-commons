@@ -24,6 +24,7 @@ pub mod account_admission;
 pub(crate) mod account_attention;
 #[cfg(test)]
 mod account_attention_tests;
+pub(crate) mod account_login_change;
 pub mod account_onboarding;
 pub(crate) mod account_session_renewal;
 pub mod activity_missions;

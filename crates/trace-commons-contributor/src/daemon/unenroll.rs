@@ -141,6 +141,7 @@ fn holds_enrollment(store: &ConfigStore) -> bool {
 /// unenroll: a record that cannot be rewritten is removed, and if even that
 /// fails, the next unenroll call (enrolled or not) tries again.
 fn forget_accounts_login(shared: &DaemonShared) {
+    crate::daemon::account_login_change::forget(shared.store.dir());
     if super::nearai_credential::login_record::forget_commons_login_or_remove(&shared.store)
         .is_err()
     {
