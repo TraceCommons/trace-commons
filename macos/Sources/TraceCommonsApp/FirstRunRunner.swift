@@ -34,9 +34,6 @@ protocol FirstRunDaemon: AnyObject {
     func startDaemon(settingsJSON: String) async -> Bool
     func setSourceSettings(settingsJSON: String) async -> Bool
     func lookupInvite(_ invite: String) async -> FirstRunLookup
-    /// `first_run_estimate`: the commons' dollar estimate per accepted
-    /// trace for Traces. Nil when it could not be asked.
-    func firstRunEstimate() async -> DaemonData.FirstRunEstimate?
     /// `first_run_copy`: the lines Traces shows under the traces found.
     /// Nil when the daemon could not be asked.
     func firstRunCopy(traceCount: UInt64, totalBytes: UInt64) async -> DaemonData.FirstRunCopyLines?
@@ -80,8 +77,6 @@ protocol FirstRunDaemon: AnyObject {
 }
 
 extension FirstRunDaemon {
-    /// A daemon that cannot say: Traces words its estimate in points.
-    func firstRunEstimate() async -> DaemonData.FirstRunEstimate? { nil }
     /// A daemon that cannot say: Traces shows the core's line.
     func firstRunCopy(traceCount: UInt64, totalBytes: UInt64) async -> DaemonData.FirstRunCopyLines? { nil }
 }
@@ -128,10 +123,6 @@ final class FirstRunRunner: ObservableObject {
     @Published var failure: FirstRunFailure?
     /// The last invite the daemon looked up and found valid.
     @Published private(set) var lookup: DaemonData.InviteLookup?
-    /// The commons' dollar estimate for Traces, once the started daemon
-    /// answered `first_run_estimate`; nil before, and Traces words points.
-    @Published private(set) var dollarEstimate: DaemonData.FirstRunEstimate?
-    private var dollarEstimateAsked = false
     /// The lines Traces shows under the count, once the started daemon
     /// answered `first_run_copy`; nil before, and Traces shows the core's
     /// line.
@@ -214,15 +205,6 @@ final class FirstRunRunner: ObservableObject {
         if point == .leaveTools {
             state = FirstRunNavigation.next(state)
         }
-    }
-
-    /// Ask the running daemon for the commons' dollar estimate, once per
-    /// first run: Traces calls this as it opens. Nothing before the daemon
-    /// starts; an unanswered ask is not repeated, and Traces stays on points.
-    func loadDollarEstimate() async {
-        guard state.daemonStarted, !dollarEstimateAsked else { return }
-        dollarEstimateAsked = true
-        dollarEstimate = await daemon.firstRunEstimate()
     }
 
     /// Ask the running daemon what Traces says under the traces found, once
