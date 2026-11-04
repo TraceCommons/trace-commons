@@ -255,7 +255,7 @@ impl FactBook {
             return None;
         }
         Some(format!(
-            "Learned from earlier sessions in this folder (Trace Commons):\n{}",
+            "Learned from earlier sessions in this folder (this app):\n{}",
             lines.join("\n")
         ))
     }
