@@ -20,9 +20,24 @@ public static class ProjectIgnoreCopy
         "Stops this project being offered and clears what it has waiting. "
         + "Anything already submitted is unaffected, and you can undo this in Settings.";
 
-    /// <summary>The core's title (`project_copy::ignore_project_title`): the
-    /// mode is named Never. DRAFT, NEEDS APPROVAL (2026-11-04).</summary>
-    public static string ConfirmationTitle(string project) => $"Set {project} to Never?";
+    /// <summary>
+    /// The core's title (<c>project_copy::ignore_project_title</c>), read
+    /// across the ABI rather than spelled here (copy-guide rule 8). Empty when
+    /// the export answers nothing: never a shell fallback.
+    /// </summary>
+    public static string ConfirmationTitle(string project)
+    {
+        string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_project_ignore_copy_json(project, 0));
+        if (json is null)
+        {
+            return string.Empty;
+        }
+        using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(json);
+        return document.RootElement.TryGetProperty("title", out System.Text.Json.JsonElement title)
+            && title.ValueKind == System.Text.Json.JsonValueKind.String
+            ? title.GetString() ?? string.Empty
+            : string.Empty;
+    }
 
     /// <summary>
     /// The removal clause is dropped when nothing is waiting.
