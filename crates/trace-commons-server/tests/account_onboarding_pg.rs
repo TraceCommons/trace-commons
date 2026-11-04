@@ -2154,15 +2154,15 @@ async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key()
     let legacy_session = unkeyed("native", "revoked-again-legacy").await;
     let caller_session = unkeyed("native", "revoked-again-caller").await;
     let browser_session = unkeyed("web", "revoked-again-browser").await;
-    // A native session that names a credential (only a passkey sign-in, before
-    // V144, minted one) whose credential row is gone, so V144's join missed it.
+    // A native session that names a credential (only a WebAuthn sign-in,
+    // before V144, minted one) whose credential row is gone, so V144's join missed it.
     // Nothing tells it apart from the device's own, so it ends with the device.
-    let passkey_native_session = session_hash("revoked-again-passkey-native");
+    let credential_native_session = session_hash("revoked-again-credential-native");
     admin
         .execute(
             "INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,auth_credential_id,expires_at)
-             VALUES($1,$2,$3,$4,'native','passkey-credential-1',now() + interval '1 hour')",
-            &[&tenant, &uuid::Uuid::new_v4(), &account, &passkey_native_session],
+             VALUES($1,$2,$3,$4,'native','webauthn-credential-1',now() + interval '1 hour')",
+            &[&tenant, &uuid::Uuid::new_v4(), &account, &credential_native_session],
         )
         .await
         .unwrap();
@@ -2216,9 +2216,9 @@ async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key()
             "a browser session is not a device session",
         ),
         (
-            &passkey_native_session,
+            &credential_native_session,
             false,
-            "a native session left over from a passkey sign-in ends too",
+            "a native session left over from a WebAuthn sign-in ends too",
         ),
     ] {
         assert_eq!(

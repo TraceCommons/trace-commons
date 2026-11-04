@@ -31,13 +31,14 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
         record(.startDaemon(settingsJSON: settingsJSON))
     }
 
-    /// What `first_run_estimate` answers, and how often it was asked.
-    var estimate: DaemonData.FirstRunEstimate?
-    private(set) var estimateAsks = 0
-    func firstRunEstimate() async -> DaemonData.FirstRunEstimate? {
-        estimateAsks += 1
-        return estimate
+    /// What `first_run_copy` answers, and the figures each ask sent.
+    var traceLines: DaemonData.FirstRunCopyLines?
+    private(set) var traceLinesAsks: [[UInt64]] = []
+    func firstRunCopy(traceCount: UInt64, totalBytes: UInt64) async -> DaemonData.FirstRunCopyLines? {
+        traceLinesAsks.append([traceCount, totalBytes])
+        return traceLines
     }
+
 
     func setSourceSettings(settingsJSON: String) async -> Bool {
         record(.setSourceSettings(settingsJSON: settingsJSON))
@@ -173,23 +174,48 @@ final class FirstRunRunnerTests: XCTestCase {
         return state
     }
 
-    /// Traces asks the started daemon for the commons' dollar estimate
-    /// once, and keeps the answer; before the daemon runs it asks nothing.
-    func test_theCommonsEstimateIsAskedOnceTheDaemonRuns() async throws {
+    /// A first run sends one request to the commons, `first_run_copy`:
+    /// Traces no longer asks for the dollar estimate the screen stopped
+    /// showing (owner, 2026-11-04).
+    func test_tracesSendsOneRequestToTheCommons() throws {
+        let screen = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/TracesScreen.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(screen.contains("await runner.loadTraceLines("))
+        XCTAssertFalse(screen.contains("loadDollarEstimate"))
+        XCTAssertFalse(screen.contains("dollarEstimate"))
+        let runner = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Sources/TraceCommonsApp/FirstRunRunner.swift"),
+            encoding: .utf8)
+        XCTAssertFalse(runner.contains("firstRunEstimate"))
+    }
+
+    /// Traces asks the started daemon for its lines once, with the count
+    /// and size discovery found, and keeps the answer; it asks nothing
+    /// before the daemon runs or while nothing is counted.
+    func test_theTraceLinesAreAskedOnceTheDaemonRunsAndTracesAreCounted() async {
         let daemon = RecordingFirstRunDaemon()
-        daemon.estimate = try JSONDecoder().decode(
-            DaemonData.FirstRunEstimate.self,
-            from: Data(#"{"usd_micros_per_accepted_trace":{"min":120000,"max":340000}}"#.utf8))
+        daemon.traceLines = DaemonData.FirstRunCopyLines(
+            foundCredit: "SAMPLE line.", foundCouldCredit: "SAMPLE could line.",
+            creditDepends: nil, source: "commons")
         let runner = FirstRunRunner(state: FirstRunState(step: .traces), daemon: daemon)
-        await runner.loadDollarEstimate()
-        XCTAssertEqual(daemon.estimateAsks, 0, "no daemon, no ask")
-        XCTAssertNil(runner.dollarEstimate)
+        await runner.loadTraceLines(traceCount: 4123, totalBytes: 987_654_321)
+        XCTAssertTrue(daemon.traceLinesAsks.isEmpty, "no daemon, no ask")
 
         runner.state.daemonStarted = true
-        await runner.loadDollarEstimate()
-        await runner.loadDollarEstimate()
-        XCTAssertEqual(daemon.estimateAsks, 1, "asked once")
-        XCTAssertEqual(runner.dollarEstimate, daemon.estimate)
+        await runner.loadTraceLines(traceCount: nil, totalBytes: 0)
+        await runner.loadTraceLines(traceCount: 0, totalBytes: 0)
+        XCTAssertTrue(daemon.traceLinesAsks.isEmpty, "nothing counted, no ask")
+        XCTAssertNil(runner.traceLines)
+
+        await runner.loadTraceLines(traceCount: 4123, totalBytes: 987_654_321)
+        await runner.loadTraceLines(traceCount: 4123, totalBytes: 987_654_321)
+        XCTAssertEqual(daemon.traceLinesAsks, [[4123, 987_654_321]], "asked once, the shell's own figures")
+        XCTAssertEqual(runner.traceLines, daemon.traceLines)
     }
 
     func test_aFailedStartKeepsTheInviteAndJoinsNothing() async {

@@ -134,8 +134,9 @@ pub const MONITOR_CORE_UNREACHABLE: &str =
 
 /// What the Traces tab says when a request the
 /// core answered failed (a refused write, or a reply this build could not
-/// read).
-pub const MONITOR_REQUEST_FAILED: &str = "That didn't go through. Try again.";
+/// read). The Retry control sits beside it, so it names no action.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P1).
+pub const MONITOR_REQUEST_FAILED: &str = "That didn't go through.";
 
 /// Every fixed word of the monitor's Traces tab. The row labels are single
 /// words; `keep` and `undo_keep` are Customize's (K5) so the two surfaces
@@ -607,8 +608,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             session_trimmed: "trimmed to fit",
             session_waiting: "waiting",
             folder_mark: "dir",
-            unresolved_bucket_note: "These traces cannot be contributed automatically. \
-                You'll always be asked.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P128).
+            unresolved_bucket_note: "You'll always be asked about these traces.",
         },
         counts: MonitorCountsCopy {
             sessions_waiting_one: "1 trace waiting",
@@ -708,8 +709,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             turn_bytes: "bytes {start}\u{2013}{end}",
             close: "Close",
             native_review: "NATIVE REVIEW",
-            native_review_caption: "Optional daemon-backed checks stay local until you \
-                explicitly confirm.",
+            // DRAFT, NEEDS APPROVAL (2026-11-04).
+            native_review_caption: "Optional checks stay local until you explicitly confirm.",
             prepare_admission: "Prepare admission",
             request_witness_review: "Request review",
             witness_confirm_line: "I understand and want to send this trace for review.",
@@ -914,6 +915,14 @@ pub struct MonitorScreensCopy {
     /// Home's watching row when the core says
     /// the contributor is not signed in: nothing is contributed.
     pub signed_out: &'static str,
+    /// The button beside `signed_out` that opens sign-in. It was first
+    /// run's "Continue", which does not name the click (copy-guide rule 2).
+    pub sign_in: &'static str,
+    /// Settings' line when the core does not answer: Settings shows
+    /// nothing the core last reported, so it stops at the first sentence of
+    /// [`MONITOR_CORE_UNREACHABLE`] (copy-guide rule 7). DRAFT, NEEDS
+    /// APPROVAL (2026-11-04).
+    pub settings_core_unreachable: &'static str,
     /// A mission's credit range: projected credit,
     /// labelled as such (owner ruling, 2026-10-02). Never `pending`, which
     /// is submitted credit still being scored: a contribution mission is
@@ -1163,6 +1172,9 @@ pub struct MonitorFlowMapCopy {
     /// does, in the owner's words (2026-10-19).
     pub style_title: &'static str,
     pub style_toggle: &'static str,
+    ///
+    /// The caption's first sentence was "GUI change only.", which is
+    /// jargon. DRAFT, NEEDS APPROVAL (2026-11-04).
     pub style_caption: &'static str,
     /// The Private AI destination's label: the credential the tools'
     /// calls are answered with.
@@ -1178,7 +1190,16 @@ pub struct MonitorFlowMapCopy {
 /// under that section's name.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct MonitorSettingsNavCopy {
+    /// Ron's #1146 name for the section macOS now calls Account. GTK,
+    /// Windows and Tauri still read it.
     pub connection: &'static str,
+    /// macOS's name for that section since the Settings IA review: who you
+    /// are, the NEAR AI login, devices, and signing out. Owner-approved
+    /// 2026-11-04 (D1).
+    pub account: &'static str,
+    /// macOS's section for NEAR AI credit payouts. Owner-approved 2026-11-04
+    /// (D2).
+    pub payouts: &'static str,
     pub startup: &'static str,
     pub watching: &'static str,
     /// Approved 2026-10-08 (button rule).
@@ -1269,6 +1290,16 @@ pub struct MonitorShellCopy {
     /// an h2, and the re-read link at the right. A shell uppercases the
     /// eyebrows.
     pub settings_refresh: &'static str,
+    /// Each Settings card's re-read button's accessible name and tooltip,
+    /// naming what it re-reads, so the repeated "Refresh" buttons are told
+    /// apart (copy-guide rule 5). DRAFT, NEEDS APPROVAL (2026-11-04).
+    pub settings_refresh_desktop: &'static str,
+    pub settings_refresh_discovery: &'static str,
+    pub settings_refresh_uses: &'static str,
+    /// Startup's updates card's eyebrow. It was spelled in the macOS shell
+    /// (copy-guide rule 8). General's words stay the shell's: General never
+    /// waits on the core (owner decision D20, 2026-11-04).
+    pub updates_eyebrow: &'static str,
     pub consent_eyebrow: &'static str,
     pub desktop_eyebrow: &'static str,
     pub desktop_title: &'static str,
@@ -1277,6 +1308,9 @@ pub struct MonitorShellCopy {
     /// The Watching section's watcher card (#1146 `settings-page.tsx`):
     /// its eyebrow and title, the chip for each state, and what pausing
     /// does. The buttons are `pause_watcher` and `resume_watcher`.
+    ///
+    /// The eyebrow was "Daemon", an internal word. DRAFT, NEEDS APPROVAL
+    /// (2026-11-04).
     pub watcher_eyebrow: &'static str,
     pub watcher_title: &'static str,
     pub watcher_watching: &'static str,
@@ -1359,6 +1393,10 @@ pub struct MonitorHomeHistoryCopy {
     pub traces_hero_step_earn_detail: &'static str,
     pub traces_hero_step_use: &'static str,
     pub traces_hero_step_use_detail: &'static str,
+    /// The third step's link, to the Private AI tab, as "Start earning"
+    /// is the first step's to Traces (owner, 2026-11-04: the card's links
+    /// to the tabs are why it stays on Home). DRAFT, NEEDS APPROVAL.
+    pub traces_hero_use_action: &'static str,
     /// Home's Credit earned tile: the account's whole total under this
     /// Mac's figure, `{amount}` the commons' lifetime points (product
     /// owner, 2026-10-29: show the account-wide total, and leave the change
@@ -1505,6 +1543,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         history_shown_of: "Showing the newest {shown} of {total}",
         history_shown: "Showing the newest {shown}",
         signed_out: "Not signed in",
+        sign_in: "Sign in",
+        settings_core_unreachable: "The watcher isn't answering.",
         projected: "Projected",
         projected_note: "Projected credit is an estimate for a contribution that matches a mission. \
             It is not earned until a contribution is accepted and scored.",
@@ -1516,7 +1556,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             eyebrow: "RUNTIME",
             heading: "Contribution safeguards",
             inference_routing: "Inference routing",
-            daemon_owned: "daemon-owned",
+            // DRAFT, NEEDS APPROVAL (2026-11-04).
+            daemon_owned: "set by the app",
             rows_unavailable_one: "1 row unavailable",
             rows_unavailable: "{count} rows unavailable",
             capacity_unreadable: "Some approved traces may be waiting and have not been sent, \
@@ -1571,13 +1612,16 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             history_empty: "No submissions recorded on this device yet.",
             history_filter_empty: "No submissions match this filter.",
             open: "Open",
-            pause_watcher: "Pause watcher",
-            resume_watcher: "Resume watcher",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P82).
+            pause_watcher: "Pause",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P83).
+            resume_watcher: "Resume",
             pause_hour: "1 hour",
             pause_morning: "Until morning",
             pause_until_resumed: "Until resumed",
             start_at_login: concat!("Start ", crate::app_name!(), " at login"),
-            projects_empty: "No projects seen yet. Traces appear here after discovery.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P124).
+            projects_empty: "No projects yet.",
             changes_heading: "Change log",
             tab_home: "Home",
             tab_inference: "Private AI",
@@ -1585,16 +1629,26 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             tabs_label: "Monitor",
             map_views_label: "Map view",
             settings_refresh: "Refresh",
-            consent_eyebrow: "Consent",
+            // DRAFT, NEEDS APPROVAL (2026-11-04).
+            settings_refresh_desktop: "Refresh system integrations",
+            settings_refresh_discovery: "Refresh trace discovery",
+            settings_refresh_uses: "Refresh data uses",
+            updates_eyebrow: "Updates",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P140).
+            consent_eyebrow: "",
             desktop_eyebrow: "Desktop",
             desktop_title: "System integrations",
-            discovery_eyebrow: "Watcher",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P84).
+            discovery_eyebrow: "",
             discovery_title: "Trace discovery",
-            watcher_eyebrow: "Daemon",
-            watcher_title: "Contribution watcher",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P79).
+            watcher_eyebrow: "",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P85).
+            watcher_title: "Watcher",
             watcher_watching: "Watching",
             watcher_paused: "Paused",
-            watcher_caption: "Pausing stops contribution processing. It does not delete queued traces or change consent.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P78).
+            watcher_caption: "Pausing stops contribution. Queued traces and consent are unchanged.",
             connection_ready: "Ready",
             connection_local_only: "Local only",
             notice_details: "Details",
@@ -1668,7 +1722,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             kept_here: "{count} kept on this Mac",
             style_title: "Traces map",
             style_toggle: "Rocket mode",
-            style_caption: "GUI change only. Contributions fly to the library (space station) by rocket animation.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P231).
+            style_caption: "Changes only how the map looks.",
             credential: "NEAR AI credential",
             none_found: "No configured tools found.",
         },
@@ -1698,6 +1753,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             traces_hero_step_earn_detail: "For each trace",
             traces_hero_step_use: "Use Private AI",
             traces_hero_step_use_detail: "With your credit",
+            traces_hero_use_action: "Open Private AI",
             credit_account_total: "{amount} across your account",
             insights_today: "{total} tokens today",
             insights_teaser: "See where your agents spend their tokens.",
@@ -1708,8 +1764,10 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             missions_action: "Review drafts",
             insights_action: "See insights",
             promotions_title: "Home",
-            promotions_toggle: "Show promotions on Home",
-            promotions_caption: "News from NEAR AI, such as a new model. A promotion you close comes back only when it changes.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P234).
+            promotions_toggle: "Show promotions",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P232).
+            promotions_caption: "News from NEAR AI, such as a new model.",
             submissions: "Submissions",
             contribution_history: "Contribution history",
             reading_history: "Reading local history\u{2026}",
@@ -1736,6 +1794,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         },
         settings_nav: MonitorSettingsNavCopy {
             connection: "Connection",
+            account: "Account",
+            payouts: "Payouts",
             startup: "Startup & notifications",
             watching: "Watching",
             uses: "Data uses",
@@ -1750,7 +1810,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         },
         edge_rail: MonitorEdgeRailCopy {
             setting_toggle: "Show the edge rail",
-            setting_caption: "Rest the pointer on the right edge of the screen to glance at Home, Private AI and your traces.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P233).
+            setting_caption: "Point at the screen's right edge to glance at Home, Private AI and traces.",
             rail_label: "Edge rail",
             handle_label: "Open the edge rail",
             open_app: concat!("Open ", crate::app_name!()),
@@ -1769,7 +1830,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             not_installed: "Not installed",
             installed: "Installed: {path}",
             stale: "Link out of date: {path}",
-            foreign: "{path} already exists and wasn't installed by this app.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P250).
+            foreign: "Another file is already at {path}.",
             install: "Install",
             uninstall: "Uninstall",
             update_link: "Update link",
@@ -1814,10 +1876,41 @@ mod tests {
         out
     }
 
+    /// The Settings card eyebrows the owner cut 2026-11-04 (Settings copy
+    /// pass 2, P140, P84, P79): each is empty, and the only words allowed
+    /// to be.
+    const OWNER_CUT_KEYS: [&str; 3] = [
+        "/shell/consent_eyebrow",
+        "/shell/discovery_eyebrow",
+        "/shell/watcher_eyebrow",
+    ];
+
+    /// Whether `key` (a path from [`words_of`] over the whole screens
+    /// table) is one of [`OWNER_CUT_KEYS`]; asserts that it is empty if so.
+    fn owner_cut(key: &str, word: &str) -> bool {
+        let cut = OWNER_CUT_KEYS.contains(&key);
+        if cut {
+            // Owner dropped this eyebrow 2026-11-04 (Settings copy pass 2).
+            assert!(word.is_empty(), "{key} was cut but says {word:?}");
+        }
+        cut
+    }
+
+    #[test]
+    fn the_owner_cut_eyebrows_are_empty() {
+        let shell = monitor_screens_copy().shell;
+        assert_eq!(shell.consent_eyebrow, "");
+        assert_eq!(shell.discovery_eyebrow, "");
+        assert_eq!(shell.watcher_eyebrow, "");
+    }
+
     #[test]
     fn the_monitor_screens_copy_is_whole_and_shares_the_traces_lines() {
         let copy = monitor_screens_copy();
         for (key, word) in words_of(&copy) {
+            if owner_cut(&key, &word) {
+                continue;
+            }
             assert!(!word.is_empty(), "{key} is empty");
         }
         let traces = monitor_traces_copy();
@@ -1893,7 +1986,10 @@ mod tests {
         let mut words = words_of(&monitor_traces_copy());
         words.extend(words_of(&monitor_screens_copy()));
         for (key, word) in &words {
-            assert!(!word.trim().is_empty(), "{key} is empty");
+            assert!(
+                owner_cut(key, word) || !word.trim().is_empty(),
+                "{key} is empty"
+            );
             assert!(!word.contains("Share automatically"), "{key}: {word}");
         }
         for table in [
@@ -2004,6 +2100,9 @@ mod tests {
         let screens = monitor_screens_copy();
         let shell = &screens.shell;
         for (key, word) in words_of(shell) {
+            if owner_cut(&format!("/shell{key}"), &word) {
+                continue;
+            }
             assert!(!word.is_empty(), "{key} is empty");
         }
         assert_eq!(screens.view, "View options");
@@ -2063,7 +2162,11 @@ mod tests {
         let screens = monitor_screens_copy();
         let nav = &screens.settings_nav;
         let names: Vec<String> = words_of(nav).into_iter().map(|(_, word)| word).collect();
-        assert_eq!(names.len(), 12, "#1146 lists twelve sections: {names:?}");
+        // #1146's twelve, plus macOS's Account and Payouts (2026-11-04).
+        assert_eq!(names.len(), 14, "#1146's twelve and two more: {names:?}");
+        assert_eq!(nav.connection, "Connection");
+        assert_eq!(nav.account, "Account");
+        assert_eq!(nav.payouts, "Payouts");
         assert_eq!(nav.startup, "Startup & notifications");
         assert_eq!(nav.uses, "Data uses");
         assert_eq!(nav.profile, "Public profile");

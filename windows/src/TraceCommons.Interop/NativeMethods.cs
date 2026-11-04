@@ -337,6 +337,17 @@ internal static class NativeMethods
     internal static extern IntPtr tc_account_change_copy_json();
 
     /// <summary>
+    /// The project-ignore confirmation's words for one project and its
+    /// waiting count (<c>project_copy::ignore_project_copy</c>), as an owned
+    /// JSON object with <c>title</c>, <c>body</c>, <c>button</c> and
+    /// <c>tooltip</c>. Free it the way <see cref="TakeOwnedString"/> does.
+    /// NULL for a NULL label or a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_project_ignore_copy_json(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string projectLabel, long pending);
+
+    /// <summary>
     /// The sentence for a refused <c>legacy_invite_migrate</c>, from the IPC
     /// error's label. A label this build does not know gets the core's own
     /// fallback sentence. Free it the way <see cref="TakeOwnedString"/> does.

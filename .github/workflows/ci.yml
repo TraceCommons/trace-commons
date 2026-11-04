@@ -156,6 +156,7 @@ jobs:
         admission_test_inference_connection
         admission_test_inference_connection_route
         admission_test_payout_rails
+        admission_test_first_run_stats
         admission_test_payout_pass
         admission_test_referral_rewards
         admission_test_referral_codes
@@ -411,6 +412,13 @@ jobs:
         run: cargo test -p trace-commons-server --test payout_rails_pg -- --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_payout_rails
+      # The first run's estimate requests (V153): forced RLS with an
+      # insert-only writer and a read-only reader, the row shape, and the
+      # statistics, each exercised as a real LOGIN role the suite provisions.
+      - name: first_run_stats_pg
+        run: cargo test -p trace-commons-server --test first_run_stats_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_first_run_stats
       # The per-rail payout pass (payout spec sections 3, 4 and 7): exactly
       # once across a crash on the cumulative and the keyed rail, one rail's
       # stop or halt never reaching another, a credential refusal changing no
@@ -799,7 +807,7 @@ jobs:
       # base role exactly as V30 creates it (NOLOGIN NOBYPASSRLS -- V30 creates
       # it only if absent, so creating it first changes nothing), plus a
       # separate LOGIN role that is a member of it. Without the resolver URL,
-      # about 74 account, passkey and login tests fail with
+      # about 74 account and login tests fail with
       # `redeem succeeds: left 400 right 303`, because the redeem path fails
       # closed when its resolver pool cannot connect.
       - name: Create the database and the login-resolver roles
@@ -1573,8 +1581,9 @@ jobs:
         run: scripts/ci/msrv-floor.sh audit crates/trace-commons-contributor-gtk/Cargo.toml
       # The flatpak build is network-sandboxed and bundles a pinned rust
       # tarball, so it cannot rustup its way out of a stale pin.
-      # release-apps.yml checks this too -- on a tag push, which is the whole
-      # problem. Its copy is deliberately left in place: that job installs no
+      # release-apps.yml checks this too, in its linux-flatpak job, which
+      # runs only on a workflow_dispatch now that a tag push releases macOS
+      # alone. Its copy is deliberately left in place: that job installs no
       # rust toolchain, so pointing it at this script would make a release
       # depend on the runner image shipping cargo. Two implementations of one
       # rule, but this one runs first and the release one is the backstop.

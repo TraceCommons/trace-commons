@@ -64,6 +64,9 @@ public struct LegacyMigrationOffer: Decodable, Equatable, Sendable {
     /// The invite field's label, shown only after the daemon refused with
     /// `legacy_migration_invite_needed`.
     public let invitePrompt: String
+    /// The invite field's tooltip: what the invite is used for.
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P5).
+    public let inviteLinkTooltip: String
     /// The move could not be started at all: nothing ran.
     public let startFailed: String
     /// The card's dismiss. Puts the card away for good on this Mac.
@@ -99,6 +102,7 @@ public struct LegacyMigrationOffer: Decodable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case title, body, action, working, dismiss, later
         case invitePrompt = "invite_prompt"
+        case inviteLinkTooltip = "invite_link_tooltip"
         case startFailed = "start_failed"
         // The NEAR AI login step's keys keep their old `passkey_` wire names.
         case nearAILoginWaiting = "passkey_waiting"
@@ -111,8 +115,8 @@ public struct LegacyMigrationOffer: Decodable, Equatable, Sendable {
     /// The payload fields this shell decodes, by wire name. Compared against
     /// the live export by `TCBridgeTests`.
     public static let consumedFields = [
-        "title", "body", "action", "working", "invite_prompt", "start_failed", "dismiss", "later",
-        "passkey_waiting", "passkey_failed", "passkey_cancel", "action_name_notice",
+        "title", "body", "action", "working", "invite_prompt", "invite_link_tooltip", "start_failed",
+        "dismiss", "later", "passkey_waiting", "passkey_failed", "passkey_cancel", "action_name_notice",
         "action_name_settings",
     ]
 
@@ -134,7 +138,7 @@ public struct LegacyMigrationOffer: Decodable, Equatable, Sendable {
             return nil
         }
         let words = [
-            offer.title, offer.body, offer.action, offer.working, offer.invitePrompt,
+            offer.title, offer.body, offer.action, offer.working, offer.invitePrompt, offer.inviteLinkTooltip,
             offer.startFailed, offer.dismiss, offer.later, offer.nearAILoginWaiting,
             offer.nearAILoginFailed, offer.nearAILoginCancel, offer.actionNameNotice, offer.actionNameSettings,
         ]

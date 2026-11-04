@@ -7,7 +7,7 @@ namespace TraceCommons.Interop;
 /// </summary>
 public static class ProjectIgnoreCopy
 {
-    public const string ButtonLabel = "Ignore project";
+    public const string ButtonLabel = "Never";
 
     /// <summary>
     /// Word for word what GTK and macOS put on the same button:
@@ -20,7 +20,31 @@ public static class ProjectIgnoreCopy
         "Stops this project being offered and clears what it has waiting. "
         + "Anything already submitted is unaffected, and you can undo this in Settings.";
 
-    public static string ConfirmationTitle(string project) => $"Ignore {project}?";
+    /// <summary>
+    /// The Never button's help text in the ignore confirmation
+    /// (<c>project_copy::IGNORE_PROJECT_BODY_TOOLTIP</c>, P121).
+    /// </summary>
+    public const string NeverButtonTooltip =
+        "Setting it back to Ask can offer the removed traces again.";
+
+    /// <summary>
+    /// The core's title (<c>project_copy::ignore_project_title</c>), read
+    /// across the ABI rather than spelled here (copy-guide rule 8). Empty when
+    /// the export answers nothing: never a shell fallback.
+    /// </summary>
+    public static string ConfirmationTitle(string project)
+    {
+        string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_project_ignore_copy_json(project, 0));
+        if (json is null)
+        {
+            return string.Empty;
+        }
+        using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(json);
+        return document.RootElement.TryGetProperty("title", out System.Text.Json.JsonElement title)
+            && title.ValueKind == System.Text.Json.JsonValueKind.String
+            ? title.GetString() ?? string.Empty
+            : string.Empty;
+    }
 
     /// <summary>
     /// The removal clause is dropped when nothing is waiting.
@@ -40,9 +64,10 @@ public static class ProjectIgnoreCopy
         {
             return $"Stops this project being offered. {tail}";
         }
+        // Owner changed this 2026-11-04 (Settings copy pass 2, P121): the way
+        // back moved to the Never button's tooltip (NeverButtonTooltip).
         var noun = pendingCount == 1 ? "trace" : "traces";
-        return $"This removes {pendingCount} waiting {noun} and stops this project "
-             + $"being offered. {tail}";
+        return $"This removes {pendingCount} waiting {noun}. Traces already sent aren't affected.";
     }
 
     /// <summary>

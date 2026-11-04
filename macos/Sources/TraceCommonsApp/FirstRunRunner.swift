@@ -34,9 +34,9 @@ protocol FirstRunDaemon: AnyObject {
     func startDaemon(settingsJSON: String) async -> Bool
     func setSourceSettings(settingsJSON: String) async -> Bool
     func lookupInvite(_ invite: String) async -> FirstRunLookup
-    /// `first_run_estimate`: the commons' dollar estimate per accepted
-    /// trace for Traces. Nil when it could not be asked.
-    func firstRunEstimate() async -> DaemonData.FirstRunEstimate?
+    /// `first_run_copy`: the lines Traces shows under the traces found.
+    /// Nil when the daemon could not be asked.
+    func firstRunCopy(traceCount: UInt64, totalBytes: UInt64) async -> DaemonData.FirstRunCopyLines?
     func enrollInvite(_ invite: String) async -> Bool
     func signInNearAI() async -> Bool
     /// The near.ai login: signed in once the daemon keeps a near.ai
@@ -77,8 +77,8 @@ protocol FirstRunDaemon: AnyObject {
 }
 
 extension FirstRunDaemon {
-    /// A daemon that cannot say: Traces words its estimate in points.
-    func firstRunEstimate() async -> DaemonData.FirstRunEstimate? { nil }
+    /// A daemon that cannot say: Traces shows the core's line.
+    func firstRunCopy(traceCount: UInt64, totalBytes: UInt64) async -> DaemonData.FirstRunCopyLines? { nil }
 }
 
 /// Why a commit stopped. The screens map each case to a core sentence; the
@@ -123,11 +123,15 @@ final class FirstRunRunner: ObservableObject {
     @Published var failure: FirstRunFailure?
     /// The last invite the daemon looked up and found valid.
     @Published private(set) var lookup: DaemonData.InviteLookup?
-    /// The commons' dollar estimate for Traces, once the started daemon
-    /// answered `first_run_estimate`; nil before, and Traces words points.
-    @Published private(set) var dollarEstimate: DaemonData.FirstRunEstimate?
-    private var dollarEstimateAsked = false
+    /// The lines Traces shows under the count, once the started daemon
+    /// answered `first_run_copy`; nil before, and Traces shows the core's
+    /// line.
+    @Published private(set) var traceLines: DaemonData.FirstRunCopyLines?
+    private var traceLinesAsked = false
     @Published private(set) var isCommitting = false
+    /// The commit running now, nil between commits: Join keeps Back on
+    /// screen during its sign-in (`JoinScreenLayout.backWhileCommitting`).
+    @Published private(set) var committing: CommitPoint?
     /// The near.ai login without an invite is running, which can wait on
     /// the browser for up to `NearAILoginPoll.limit`: Join offers Cancel
     /// beside the spinning Sign in only while this holds.
@@ -179,7 +183,11 @@ final class FirstRunRunner: ObservableObject {
     func commit(_ point: CommitPoint, carrying refusal: FirstRunFailure? = nil) async {
         guard !isCommitting else { return }
         isCommitting = true
-        defer { isCommitting = false }
+        committing = point
+        defer {
+            isCommitting = false
+            committing = nil
+        }
         failure = nil
         refusedGrant = nil
         carriedRefusal = refusal
@@ -199,13 +207,14 @@ final class FirstRunRunner: ObservableObject {
         }
     }
 
-    /// Ask the running daemon for the commons' dollar estimate, once per
-    /// first run: Traces calls this as it opens. Nothing before the daemon
-    /// starts; an unanswered ask is not repeated, and Traces stays on points.
-    func loadDollarEstimate() async {
-        guard state.daemonStarted, !dollarEstimateAsked else { return }
-        dollarEstimateAsked = true
-        dollarEstimate = await daemon.firstRunEstimate()
+    /// Ask the running daemon what Traces says under the traces found, once
+    /// per first run, after discovery has counted them: nothing before the
+    /// daemon starts or while nothing is counted. An unanswered ask is not
+    /// repeated, and Traces keeps the core's line.
+    func loadTraceLines(traceCount: UInt64?, totalBytes: UInt64) async {
+        guard state.daemonStarted, !traceLinesAsked, let traceCount, traceCount > 0 else { return }
+        traceLinesAsked = true
+        traceLines = await daemon.firstRunCopy(traceCount: traceCount, totalBytes: totalBytes)
     }
 
     /// The commits that send the session roots, and so need a declaration.
@@ -334,6 +343,19 @@ final class FirstRunRunner: ObservableObject {
         loginCancel = cancel
         login.cancel()
         _ = await cancel.value
+    }
+
+    /// Back on Join while the near.ai browser sign-in waits: the wait is
+    /// ended as Cancel ends it (`cancelSignIn`: nothing enrolled, nothing
+    /// said), and once the commit is over the person goes back a step,
+    /// every answer kept. Not waiting, nothing done: the short daemon calls
+    /// around the wait are not left mid-way, so a late failure never
+    /// returns the person to Join from a step they moved to.
+    func backFromSignIn() async {
+        guard signInWaiting, committing == .signIn else { return }
+        await cancelSignIn()
+        while isCommitting { await Task.yield() }
+        state = FirstRunNavigation.back(state)
     }
 
     /// The marker is written. No suspension point separates this from the

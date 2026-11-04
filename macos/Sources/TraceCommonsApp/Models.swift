@@ -292,6 +292,15 @@ struct DaemonStatus: Decodable, Equatable {
     /// AI login, and whether a refused login is held aside for it. A daemon
     /// that predates the keys offers nothing.
     let loginChange: AccountLoginChangeStatus
+    /// The login the account last accepted, by tag (`near`, `github`,
+    /// `google`), for "Connected with {provider}" (Settings IA D6). Nil when
+    /// the daemon does not know it, or predates the key.
+    let accountLogin: String?
+    /// Whether this enrolled account's own session is held
+    /// (`account_signed_in`): false after Sign out, which keeps the
+    /// enrollment. Nil when the daemon does not say (an account that never
+    /// signs in, or an older daemon), never a guess.
+    let accountSignedIn: Bool?
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -318,6 +327,8 @@ struct DaemonStatus: Decodable, Equatable {
         case payoutsNeedLogin = "payouts_need_login"
         case loginChangeHeld = "login_change_held"
         case loginMismatch = "login_mismatch"
+        case accountLogin = "account_login"
+        case accountSignedIn = "account_signed_in"
     }
 
     init(
@@ -339,7 +350,9 @@ struct DaemonStatus: Decodable, Equatable {
         gateHeld: GateHeld = .none,
         legacyInviteMigration: LegacyMigrationWire = .none,
         accountAttention: AccountAttentionWire = .none,
-        loginChange: AccountLoginChangeStatus = .none
+        loginChange: AccountLoginChangeStatus = .none,
+        accountLogin: String? = nil,
+        accountSignedIn: Bool? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
@@ -360,6 +373,8 @@ struct DaemonStatus: Decodable, Equatable {
         self.legacyInviteMigration = legacyInviteMigration
         self.accountAttention = accountAttention
         self.loginChange = loginChange
+        self.accountLogin = accountLogin
+        self.accountSignedIn = accountSignedIn
     }
 
     init(from decoder: Decoder) throws {
@@ -402,6 +417,8 @@ struct DaemonStatus: Decodable, Equatable {
         loginChange = AccountLoginChangeStatus(
             available: flag(.loginChangeAvailable), payoutsNeedLogin: flag(.payoutsNeedLogin),
             held: flag(.loginChangeHeld), mismatch: flag(.loginMismatch))
+        accountLogin = (try? c.decodeIfPresent(String.self, forKey: .accountLogin)).flatMap { $0 }
+        accountSignedIn = (try? c.decodeIfPresent(Bool.self, forKey: .accountSignedIn)).flatMap { $0 }
     }
 
     /// This status as the daemon reports it straight after `unenroll`: not
@@ -1115,10 +1132,17 @@ struct TokenStorageView: Decodable, Equatable {
     let captureEnabled: Bool?
     let captureLabel: String?
     let captureConfirmation: String?
+    /// Turning capture on asks first: the question's title and its confirm
+    /// button, apart from the switch's own button (rule 4).
+    let captureConfirmTitle: String?
+    let captureConfirmLabel: String?
     let captureNotice: String?
     let stateLine: String
     let scopeNote: String
     let cleanupLabel: String
+    /// Clean up's hover tip. Optional so an older daemon still decodes.
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P279).
+    let cleanupTooltip: String?
     let discardLabel: String
     /// The discard confirmation's title: the full name the short button drops.
     let discardTitle: String?
@@ -1128,7 +1152,9 @@ struct TokenStorageView: Decodable, Equatable {
     let failureLine: String
     enum CodingKeys: String, CodingKey {
         case captureEnabled = "capture_enabled", captureLabel = "capture_label", captureConfirmation = "capture_confirmation", captureNotice = "capture_notice"
+        case captureConfirmTitle = "capture_confirm_title", captureConfirmLabel = "capture_confirm_label"
         case stateLine = "state_line", scopeNote = "scope_note", cleanupLabel = "cleanup_label"
+        case cleanupTooltip = "cleanup_tooltip"
         case discardLabel = "discard_label", discardTitle = "discard_title", discardConfirmation = "discard_confirmation"
         case cancelLabel = "cancel_label", confirmLabel = "confirm_label", failureLine = "failure_line"
     }

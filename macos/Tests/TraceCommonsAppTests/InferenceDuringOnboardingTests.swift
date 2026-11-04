@@ -37,7 +37,11 @@ final class InferenceDuringOnboardingTests: XCTestCase {
             PrivateAISettingsPanels(store: InferenceStore(client: nil))
                 .environmentObject(model)
                 .environment(\.colorScheme, .light)))
-        XCTAssertTrue(settings.contains(copy.credentialWhat),
+        // credentialWhat is cut (owner 2026-11-04, Settings copy pass 2,
+        // P10): the sign-in card's state line is the one it always draws.
+        let stateLine = CredentialSurface.stateLine(model.credentialStatus, copy: copy, calls: model.credentialCalls)
+        XCTAssertFalse(stateLine.isEmpty)
+        XCTAssertTrue(settings.contains(stateLine),
                       "Private AI must show sign-in before Commons enrollment")
 
         // Drawing it finished nothing.

@@ -14,9 +14,10 @@ import TCShellCore
 struct MonitorWindowView: View {
     /// Opens the Settings window from the gear.
     @Environment(\.openWindow) private var openWindow
-    /// The gate's button, which opens first run: the core's first-run
-    /// Continue. With no table the word is empty, never a Swift fallback.
-    static let openFirstRun = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.frame.continueButton ?? ""
+    /// The signed-out gate's button, which opens first run to sign in: the
+    /// core's "Sign in" (it was first run's Continue, which does not name
+    /// the click). With no table the word is empty, never a Swift fallback.
+    static var openFirstRun: String { MonitorWords.table?.signIn ?? "" }
     /// The window's tabs, in their default order. Home is always first;
     /// the person drags the other three into any order (owner, 2026-10-30,
     /// `ordered(_:)`), holding a tab to lift it (owner, 2026-11-02).
@@ -1128,7 +1129,7 @@ private struct MonitorMapPane: View {
                     // Settings' Devices section, which starts linking a
                     // server on the request (owner, 2026-10-27).
                     AccountDeviceLinkRequest.shared.ask()
-                    OpenMonitor.request(.settings(.connection))
+                    OpenMonitor.request(.settings(.account))
                 },
                 addDeviceLabel: devices.surface?.copy.linkAccessibilityName ?? "")
         case .privateAI:

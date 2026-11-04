@@ -104,7 +104,8 @@ public sealed class AccountLoginChangeSurfaceTests
         AccountLoginChangePage page = AccountLoginChangeSurface.Page(State(AccountLoginChangeStep.Current), _copy)!;
         Assert.Equal(AccountLoginChangeAction.ProveCurrent, page.Action);
         Assert.Equal("T:step_current", page.Heading);
-        Assert.Equal("T:step_current", page.Primary);
+        // The button has its own key, apart from the heading (rule 4).
+        Assert.Equal("T:step_current_button", page.Primary);
         Assert.Equal("T:a11y_current GitHub", page.PrimaryAccessibilityName);
         Assert.False(page.AsksWalletAccount);
         Assert.Empty(page.Lines);
@@ -128,7 +129,8 @@ public sealed class AccountLoginChangeSurfaceTests
         AccountLoginChangePage page = AccountLoginChangeSurface.Page(
             State(AccountLoginChangeStep.New, @new: null), _copy)!;
         Assert.Equal(AccountLoginChangeAction.SignInNew, page.Action);
-        Assert.Equal("T:step_new", page.Primary);
+        Assert.Equal("T:step_new", page.Heading);
+        Assert.Equal("T:step_new_button", page.Primary);
         Assert.Equal("T:step_new_accessibility_name", page.PrimaryAccessibilityName);
     }
 
@@ -293,7 +295,8 @@ public sealed class AccountLoginChangeSurfaceTests
         Assert.Equal(AccountChangeCopy.ConsumedFields.OrderBy(k => k, StringComparer.Ordinal), keys);
 
         AccountChangeCopy copy = Assert.IsType<AccountChangeCopy>(AccountChangeCopy.Copy());
-        Assert.Equal("Use a different account", copy.Change);
+        // Owner changed this 2026-11-04 (Settings copy pass 2, P53).
+        Assert.Equal("Switch account", copy.Change);
         Assert.Equal("Switch", copy.Confirm);
         Assert.Equal("Switch to Google", copy.Render(copy.ConfirmAccessibilityName, @new: "google"));
     }

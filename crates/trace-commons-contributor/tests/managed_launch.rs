@@ -215,7 +215,12 @@ fn launch_without_daemon_refuses_instead_of_starting_an_untracked_tool() {
         .unwrap();
     assert!(!output.status.success());
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(value["error"].as_str().unwrap().contains("daemon"));
+    assert!(
+        value["error"]
+            .as_str()
+            .unwrap()
+            .contains("open the Near.ai app before launching")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -387,7 +392,7 @@ fn redeem_launch_takes_its_ticket_from_the_environment() {
         String::from_utf8_lossy(&output.stderr).into_owned()
     };
     let with = run(Some("0123abcd9876fedc"));
-    assert!(with.contains("start the Near.ai daemon"), "{with}");
+    assert!(with.contains("open the Near.ai app"), "{with}");
     assert!(
         !with.contains("0123abcd9876fedc"),
         "the ticket is never printed: {with}"

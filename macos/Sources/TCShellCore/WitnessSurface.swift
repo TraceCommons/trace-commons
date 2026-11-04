@@ -167,6 +167,9 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
     public let tokenScopeNote: String?
     public let tokenEnable: String?
     public let tokenDisable: String?
+    /// The token card's Enable and Disable accessible names (rule 5).
+    public let tokenEnableAccessibilityName: String?
+    public let tokenDisableAccessibilityName: String?
     public let tokenConfirm: String?
     public let tokenCancel: String?
     public let tokenEnabled: String?
@@ -178,6 +181,9 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
     public let inferenceScopeNote: String
     public let inferenceEnable: String
     public let inferenceDisable: String
+    /// The model-call card's Enable and Disable accessible names (rule 5).
+    public let inferenceEnableAccessibilityName: String?
+    public let inferenceDisableAccessibilityName: String?
     public let inferenceConfirm: String
     public let inferenceCancel: String
     public let inferenceEnabled: String
@@ -194,6 +200,17 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
     public let privacyConfirmDescription: String?
     public let localCapture: String?
     public let localStorage: String?
+    /// Hover tips on the token card's Enable button and on the model-call
+    /// card's Enable, Disable and scope line. Optional so an older core
+    /// still draws the card.
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P270).
+    public let tokenEnableTooltip: String?
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P262).
+    public let inferenceEnableTooltip: String?
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P264).
+    public let inferenceDisableTooltip: String?
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P265).
+    public let inferenceScopeTooltip: String?
     public let review: WitnessReviewCopy?
     public let onboarding: FirstContributionCopy?
     public let wallet: WalletCopy?
@@ -219,6 +236,8 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
         case tokenScopeNote = "token_scope_note"
         case tokenEnable = "token_enable"
         case tokenDisable = "token_disable"
+        case tokenEnableAccessibilityName = "token_enable_accessibility_name"
+        case tokenDisableAccessibilityName = "token_disable_accessibility_name"
         case tokenConfirm = "token_confirm"
         case tokenCancel = "token_cancel"
         case tokenEnabled = "token_enabled"
@@ -230,6 +249,8 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
         case inferenceScopeNote = "inference_scope_note"
         case inferenceEnable = "inference_enable"
         case inferenceDisable = "inference_disable"
+        case inferenceEnableAccessibilityName = "inference_enable_accessibility_name"
+        case inferenceDisableAccessibilityName = "inference_disable_accessibility_name"
         case inferenceConfirm = "inference_confirm"
         case inferenceCancel = "inference_cancel"
         case inferenceEnabled = "inference_enabled"
@@ -243,6 +264,10 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
         case privacyConfirmDescription = "privacy_confirm_description"
         case localCapture = "local_capture"
         case localStorage = "local_storage"
+        case tokenEnableTooltip = "token_enable_tooltip"
+        case inferenceEnableTooltip = "inference_enable_tooltip"
+        case inferenceDisableTooltip = "inference_disable_tooltip"
+        case inferenceScopeTooltip = "inference_scope_tooltip"
 
     }
 

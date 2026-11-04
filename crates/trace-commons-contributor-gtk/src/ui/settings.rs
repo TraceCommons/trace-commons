@@ -329,7 +329,11 @@ impl SettingsView {
         // the front door -- the conventional port is already in the field
         // and the folder box is empty, so the common case is one switch
         // and nothing to fill in.
-        content.append(&style::section(copy::TOOLS_HEADING));
+        // Owner dropped the Tools heading 2026-11-04 (Settings copy pass 2, P117):
+        // the core sends "", and nothing empty is drawn.
+        if !copy::TOOLS_HEADING.is_empty() {
+            content.append(&style::section(copy::TOOLS_HEADING));
+        }
         let routing_card = style::card(gtk::Orientation::Vertical, space::M);
         let routing_tools = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
         routing_card.append(&routing_tools);
@@ -554,6 +558,10 @@ impl SettingsView {
             copy::WITNESS_TOKEN_CAPTURE_NOTE,
             copy::WITNESS_TOKEN_SCOPE_NOTE,
         ] {
+            // Owner cut the scope note 2026-11-04 (Settings copy pass 2, P263): "" draws nothing.
+            if text.is_empty() {
+                continue;
+            }
             let label = gtk::Label::builder()
                 .label(text)
                 .wrap(true)
@@ -3570,6 +3578,11 @@ fn wire_inference_consent(app: &Rc<App>) {
             copy::WITNESS_INFERENCE_CAPTURE_NOTE,
             copy::WITNESS_INFERENCE_SCOPE_NOTE,
         ]
+        // Owner cut the confirm description and token scope note 2026-11-04
+        // (Settings copy pass 2, P285, P263): an empty one leaves no blank paragraph.
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
         .join("\n\n");
         let dialog = adw::MessageDialog::new(
             Some(&a.window),
@@ -3691,6 +3704,11 @@ fn wire_token_consent(app: &Rc<App>) {
             copy::WITNESS_TOKEN_CAPTURE_NOTE,
             copy::WITNESS_TOKEN_SCOPE_NOTE,
         ]
+        // Owner cut the confirm description and token scope note 2026-11-04
+        // (Settings copy pass 2, P285, P263): an empty one leaves no blank paragraph.
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
         .join("\n\n");
         let dialog = adw::MessageDialog::new(
             Some(&a.window),
@@ -4527,11 +4545,11 @@ mod tests {
         assert_eq!(unset[0].0, "Claude Code traces read from the usual place");
         assert_eq!(
             off[0].0,
-            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed"
+            "Claude Code marked not used, so nothing is opened for it"
         );
         assert_eq!(
             off[1].0,
-            "Codex marked not used, so nothing is opened for it. Previously queued traces are not removed"
+            "Codex marked not used, so nothing is opened for it"
         );
 
         for (a, b) in [(&watch, &unset), (&watch, &off), (&unset, &off)] {
@@ -4559,7 +4577,7 @@ mod tests {
         let rows = source_check_rows(&settings_with_modes("off", "unset"));
         assert_eq!(
             rows[0].0,
-            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed"
+            "Claude Code marked not used, so nothing is opened for it"
         );
         assert_eq!(rows[1].0, "Codex traces read from the usual place");
         assert_eq!((rows[0].1, rows[1].1), (false, false));
@@ -5510,6 +5528,9 @@ fn render_token_storage(app: &Rc<App>, storage: Option<crate::model::TokenStorag
         ));
         view.token_capture.set_label(&value.capture_label);
         view.token_cleanup.set_label(&value.cleanup_label);
+        view.token_cleanup.set_tooltip_text(
+            (!value.cleanup_tooltip.is_empty()).then_some(value.cleanup_tooltip.as_str()),
+        );
         view.token_discard.set_label(&value.discard_label);
     } else {
         view.token_storage_status.set_text("");

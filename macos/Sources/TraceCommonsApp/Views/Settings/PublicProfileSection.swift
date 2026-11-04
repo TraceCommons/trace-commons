@@ -70,10 +70,14 @@ struct PublicProfileSection: View {
                     GlassNotice(tone: outcomeTone) { Text(sentence) }
                 }
             }
-            Text(PublicProfileCopy.footnote)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+            // Cut by the owner 2026-11-04 (Settings copy pass 2, P142): an
+            // empty footnote draws nothing.
+            if !PublicProfileCopy.footnote.isEmpty {
+                Text(PublicProfileCopy.footnote)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             profileCopyDefects
         }
         .glassModal(isPresented: $showingGoPublic) {
@@ -94,7 +98,7 @@ struct PublicProfileSection: View {
                     .glassType(GlassTokens.TypeScale.body)
                     .foregroundStyle(GlassColor.textPrimary)
                 Spacer(minLength: 0)
-                Button(PublicProfileCopy.goPublicConfirm) { showingGoPublic = true }
+                Button(PublicProfileCopy.goPublicOpen) { showingGoPublic = true }
                     .buttonStyle(GlassButtonStyle(.glass))
                     .disabled(!model.status.loggedIn)
             }
@@ -136,6 +140,7 @@ struct PublicProfileSection: View {
                     // (Ron, 2026-10-09).
                     Button(PublicProfileCopy.leaveRoster) { model.leaveRoster() }
                         .buttonStyle(GlassButtonStyle(.link))
+                        .accessibilityLabel(PublicProfileCopy.leaveRosterAccessibilityName)
                         .disabled(model.profileBusy)
                 }
                 // A refused save or leave, under the buttons it is about.
@@ -257,10 +262,14 @@ struct GoPublicSheet: View {
         if case .refused(let label) = model.profileOutcome {
             GlassNotice(tone: .outside) { Text(PublicProfileCopy.failureSentence(label)) }
         }
-        Text(PublicProfileCopy.goPublicFootnote)
-            .glassType(GlassTokens.TypeScale.caption)
-            .foregroundStyle(GlassColor.textSecondary)
-            .fixedSize(horizontal: false, vertical: true)
+        // Cut by the owner 2026-11-04 (Settings copy pass 2, P144): an
+        // empty footnote draws nothing.
+        if !PublicProfileCopy.goPublicFootnote.isEmpty {
+            Text(PublicProfileCopy.goPublicFootnote)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var outcomeIsSettled: Bool {

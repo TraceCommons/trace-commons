@@ -175,8 +175,8 @@ submission so it can auto-accept.
 
 The association file at `https://tracecommons.ai/.well-known/apple-app-site-association`
 (`{"webcredentials":{"apps":[...]}}`) existed only so the macOS app could use
-passkeys for the relying party `tracecommons.ai`. Passkeys were removed
-(migration V144), the macOS app no longer carries the
+web credentials for the relying party `tracecommons.ai`. That sign-in was
+removed (migration V144), the macOS app no longer carries the
 `com.apple.developer.associated-domains` entitlement, and this repository no
 longer has a smoke test for the file. Nothing depends on it; it can be
 dropped from `TraceCommons/trace-commons-community` (its worker and the

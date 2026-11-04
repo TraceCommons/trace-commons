@@ -13,7 +13,7 @@ namespace TraceCommons.Interop.Tests;
 /// <summary>
 /// The move of a legacy invite identity to a NEAR AI account: the core's
 /// words across the ABI, the offered flag, the dismissed-card marker, and the
-/// passkey-first Move.
+/// sign-in-first Move.
 /// </summary>
 public sealed class LegacyMigrationMoveTests
 {
@@ -31,8 +31,8 @@ public sealed class LegacyMigrationMoveTests
         LegacyMigrationOfferCopy copy = Assert.IsType<LegacyMigrationOfferCopy>(LegacyMigrationOffers.Copy());
         Assert.Equal("Move", copy.Action);
         Assert.False(string.IsNullOrEmpty(copy.Title));
-        Assert.False(string.IsNullOrEmpty(copy.PasskeyWaiting));
-        Assert.False(string.IsNullOrEmpty(copy.PasskeyCancel));
+        Assert.False(string.IsNullOrEmpty(copy.LoginWaiting));
+        Assert.False(string.IsNullOrEmpty(copy.LoginCancel));
         Assert.False(string.IsNullOrEmpty(copy.Dismiss));
         Assert.False(string.IsNullOrEmpty(copy.Later));
     }
@@ -59,7 +59,8 @@ public sealed class LegacyMigrationMoveTests
     public void TheRefusalLineIsTheCoresForTheLabel()
     {
         string line = Assert.IsType<string>(LegacyMigrationOffers.RefusalLine("legacy_migration_tenant_pooled"));
-        Assert.Contains("shared by many people", line);
+        // Owner dropped "by many people" 2026-11-04 (Settings copy pass 2, P9).
+        Assert.Contains("is shared", line);
         // An unknown label still gets a sentence from the core.
         Assert.False(string.IsNullOrEmpty(LegacyMigrationOffers.RefusalLine("no_such_label")));
     }
@@ -159,7 +160,7 @@ public sealed class LegacyMigrationMoveTests
     {
         var daemon = new Daemon();
         var opened = new List<Uri>();
-        var step = new NearAiPasskeyStep(
+        var step = new NearAiLoginStep(
             daemon.Call,
             open ?? (uri => { opened.Add(uri); return Task.FromResult(true); }),
             delay ?? ((_, _) => Task.CompletedTask),
@@ -170,7 +171,7 @@ public sealed class LegacyMigrationMoveTests
     }
 
     [Fact]
-    public async Task AMoveThatSucceedsRunsNoPasskeyStep()
+    public async Task AMoveThatSucceedsRunsNoLoginStep()
     {
         var (move, daemon, _) = Build();
         daemon.Migrations.Enqueue(Ok("{}"));
@@ -186,13 +187,13 @@ public sealed class LegacyMigrationMoveTests
     }
 
     [Fact]
-    public async Task NoSessionRunsThePasskeyStepThenRetriesOnce()
+    public async Task NoSessionRunsTheLoginStepThenRetriesOnce()
     {
         var (move, daemon, opened) = Build();
         daemon.Status = read => read == 0
             ? Ok("{\"state\":\"x\",\"session_state\":\"absent\",\"attempt_status\":null}")
             : Ok("{\"state\":\"x\",\"session_state\":\"present\",\"attempt_status\":null}");
-        daemon.Migrations.Enqueue(Refused(LegacyMigrationOffers.PasskeyNeededLabel));
+        daemon.Migrations.Enqueue(Refused(LegacyMigrationOffers.LoginNeededLabel));
         daemon.Migrations.Enqueue(Ok("{}"));
         int moved = 0;
         move.Moved += () => moved++;
@@ -211,58 +212,58 @@ public sealed class LegacyMigrationMoveTests
             daemon.Methods);
         Assert.Single(opened);
         Assert.Equal(1, moved);
-        Assert.False(move.PasskeyFailed);
-        Assert.False(move.AwaitingPasskey);
+        Assert.False(move.LoginFailed);
+        Assert.False(move.AwaitingLogin);
     }
 
     [Fact]
-    public async Task ASecondNoSessionAfterThePasskeyIsARefusalNotALoop()
+    public async Task ASecondNoSessionAfterTheLoginIsARefusalNotALoop()
     {
         var (move, daemon, _) = Build();
         daemon.Status = read => read == 0
             ? Ok("{\"state\":\"x\",\"session_state\":\"absent\",\"attempt_status\":null}")
             : Ok("{\"state\":\"x\",\"session_state\":\"present\",\"attempt_status\":null}");
-        daemon.Migrations.Enqueue(Refused(LegacyMigrationOffers.PasskeyNeededLabel));
-        daemon.Migrations.Enqueue(Refused(LegacyMigrationOffers.PasskeyNeededLabel));
+        daemon.Migrations.Enqueue(Refused(LegacyMigrationOffers.LoginNeededLabel));
+        daemon.Migrations.Enqueue(Refused(LegacyMigrationOffers.LoginNeededLabel));
 
         await move.MoveAsync(null);
 
         Assert.Equal(2, daemon.Methods.Count(m => m == DaemonProtocol.Methods.LegacyInviteMigrate));
-        Assert.Equal("LINE:" + LegacyMigrationOffers.PasskeyNeededLabel, move.Refusal);
+        Assert.Equal("LINE:" + LegacyMigrationOffers.LoginNeededLabel, move.Refusal);
     }
 
     [Fact]
-    public async Task APasskeyStepThatEndsWithoutASessionMovesNothing()
+    public async Task ALoginStepThatEndsWithoutASessionMovesNothing()
     {
         var (move, daemon, _) = Build();
         daemon.Status = read => read == 0
             ? Ok("{\"state\":\"x\",\"session_state\":\"absent\",\"attempt_status\":null}")
             : Ok("{\"state\":\"x\",\"session_state\":\"absent\",\"attempt_status\":\"failed\"}");
-        daemon.Migrations.Enqueue(Refused(LegacyMigrationOffers.PasskeyNeededLabel));
+        daemon.Migrations.Enqueue(Refused(LegacyMigrationOffers.LoginNeededLabel));
         int moved = 0;
         move.Moved += () => moved++;
 
         await move.MoveAsync(null);
 
         Assert.Equal(1, daemon.Methods.Count(m => m == DaemonProtocol.Methods.LegacyInviteMigrate));
-        Assert.True(move.PasskeyFailed);
+        Assert.True(move.LoginFailed);
         Assert.Null(move.Refusal);
         Assert.Equal(0, moved);
         Assert.False(move.Busy);
     }
 
     [Fact]
-    public async Task APasskeyStepThatNeverStartsMovesNothing()
+    public async Task ALoginStepThatNeverStartsMovesNothing()
     {
         var (move, daemon, opened) = Build();
         daemon.Status = _ => Ok("{\"state\":\"x\",\"session_state\":\"absent\",\"attempt_status\":null}");
         daemon.Start = Refused("nearai_credential_unavailable");
-        daemon.Migrations.Enqueue(Refused(LegacyMigrationOffers.PasskeyNeededLabel));
+        daemon.Migrations.Enqueue(Refused(LegacyMigrationOffers.LoginNeededLabel));
 
         await move.MoveAsync(null);
 
         Assert.Empty(opened);
-        Assert.True(move.PasskeyFailed);
+        Assert.True(move.LoginFailed);
         Assert.Equal(1, daemon.Methods.Count(m => m == DaemonProtocol.Methods.LegacyInviteMigrate));
     }
 
@@ -271,14 +272,14 @@ public sealed class LegacyMigrationMoveTests
     {
         var (move, daemon, _) = Build(open: _ => Task.FromResult(false));
         daemon.Status = _ => Ok("{\"state\":\"x\",\"session_state\":\"absent\",\"attempt_status\":\"waiting_for_browser\"}");
-        daemon.Migrations.Enqueue(Refused(LegacyMigrationOffers.PasskeyNeededLabel));
+        daemon.Migrations.Enqueue(Refused(LegacyMigrationOffers.LoginNeededLabel));
 
         await move.MoveAsync(null);
 
         Assert.Contains(DaemonProtocol.Methods.NearAiCredentialCancel, daemon.Methods);
         var cancel = daemon.Calls.First(c => c.Method == DaemonProtocol.Methods.NearAiCredentialCancel);
         Assert.Contains("a1", cancel.Params);
-        Assert.True(move.PasskeyFailed);
+        Assert.True(move.LoginFailed);
     }
 
     [Fact]
@@ -291,20 +292,20 @@ public sealed class LegacyMigrationMoveTests
         };
         var (move, daemon, _) = Build(delay: delay);
         daemon.Status = _ => Ok("{\"state\":\"x\",\"session_state\":\"absent\",\"attempt_status\":\"waiting_for_browser\"}");
-        daemon.Migrations.Enqueue(Refused(LegacyMigrationOffers.PasskeyNeededLabel));
+        daemon.Migrations.Enqueue(Refused(LegacyMigrationOffers.LoginNeededLabel));
 
         Task running = move.MoveAsync(null);
-        for (int spin = 0; spin < 200 && !move.AwaitingPasskey; spin++)
+        for (int spin = 0; spin < 200 && !move.AwaitingLogin; spin++)
         {
             await Task.Delay(5);
         }
 
-        Assert.True(move.AwaitingPasskey);
-        await move.CancelPasskeyAsync();
+        Assert.True(move.AwaitingLogin);
+        await move.CancelLoginAsync();
         await running;
 
-        Assert.False(move.AwaitingPasskey);
-        Assert.False(move.PasskeyFailed);
+        Assert.False(move.AwaitingLogin);
+        Assert.False(move.LoginFailed);
         Assert.Null(move.Refusal);
         Assert.False(move.Busy);
         Assert.Equal(1, daemon.Methods.Count(m => m == DaemonProtocol.Methods.LegacyInviteMigrate));
@@ -346,7 +347,7 @@ public sealed class LegacyMigrationMoveTests
     {
         var gate = new TaskCompletionSource<DaemonResponse>();
         int asked = 0;
-        var step = new NearAiPasskeyStep((_, _) => Task.FromResult(Ok("{}")), _ => Task.FromResult(true));
+        var step = new NearAiLoginStep((_, _) => Task.FromResult(Ok("{}")), _ => Task.FromResult(true));
         var move = new LegacyMigrationMove(
             (_, _) => { asked++; return gate.Task; }, step, label => label);
 

@@ -1,24 +1,36 @@
 //! Shared project controls shown beside the contribution queue.
 
-pub const IGNORE_PROJECT: &str = "Ignore project";
+/// The mode is named Never, so the button says so (it was "Ignore
+/// project"). Approved by the owner 2026-11-04 (Settings copy pass 2, P133).
+pub const IGNORE_PROJECT: &str = "Never";
 /// The confirmation's way out, which keeps the project as it is (#1146's
-/// `ignore-project-control.tsx`; owner ruling, 2026-10-06).
-pub const KEEP_PROJECT: &str = "Keep project";
+/// `ignore-project-control.tsx`). Approved by the owner 2026-11-04 (Settings copy pass 2, P134).
+pub const KEEP_PROJECT: &str = "Keep";
 pub const IGNORE_PROJECT_TOOLTIP: &str = "Stops this project being offered and clears what it has waiting. \
      Anything already submitted is unaffected, and you can undo this in Settings.";
 
+/// The mode is named Never, so the title says so (it was "Ignore
+/// {project}?"). DRAFT, NEEDS APPROVAL (2026-11-04).
 pub fn ignore_project_title(project: &str) -> String {
-    format!("Ignore {project}?")
+    format!("Set {project} to Never?")
 }
 
+/// The confirmation's body. With traces waiting: Approved by the owner 2026-11-04 (Settings copy pass 2, P121).
+/// With none waiting the sentence is unchanged.
 pub fn ignore_project_body(pending: usize) -> String {
-    let tail = "Nothing already submitted is affected. You can undo this in Settings.";
     if pending == 0 {
-        return format!("Stops this project being offered. {tail}");
+        return "Stops this project being offered. Nothing already submitted is affected. \
+                You can undo this in Settings."
+            .to_string();
     }
     let noun = if pending == 1 { "trace" } else { "traces" };
-    format!("This removes {pending} waiting {noun} and stops this project being offered. {tail}")
+    format!("This removes {pending} waiting {noun}. Traces already sent aren't affected.")
 }
+
+/// The Never button's help text in the ignore confirmation: the way back the
+/// body no longer names. Approved by the owner 2026-11-04 (Settings copy pass 2, P121).
+pub const IGNORE_PROJECT_BODY_TOOLTIP: &str =
+    "Setting it back to Ask can offer the removed traces again.";
 
 pub fn ignore_project_reconciled(project: &str, promised: usize, purged: u64) -> Option<String> {
     if purged == promised as u64 {
@@ -51,17 +63,16 @@ pub fn arming_offer_question(project_label: &str) -> String {
 pub const ARMING_OFFER_CONFIRM: &str = "Enable";
 pub const ARMING_OFFER_DECLINE: &str = "Not now";
 
-/// Settings' confirmation before a project's mode is set to Automatic, in
-/// Ron's #1146 words (`project-mode-field.tsx`); its body is
-/// [`ARMING_BODY`], and the mode names stay [`FOLDER_MODE_LABELS`]'.
-/// Approved 2026-10-07, with the buttons "Ask" / "Enable" (owner ruling).
-/// The heading and both buttons were the offer's ("Contribute from {project} automatically?",
-/// "Not now", "Turn on automatic contributing").
+/// Settings' confirmation before a project's mode is set to Automatic
+/// (#1146, `project-mode-field.tsx`); its body is [`ARMING_BODY`], and the
+/// mode names stay [`FOLDER_MODE_LABELS`]'. It names the mode, Automatic.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P135).
 pub fn settings_arming_question(project_label: &str) -> String {
-    format!("Enable automatic contribution for {project_label}?")
+    format!("Set {project_label} to Automatic?")
 }
-/// Approved 2026-10-07.
-pub const SETTINGS_ARMING_DESCRIPTION: &str = "Confirm project-wide automatic contribution.";
+/// The confirmation's subtitle, cut: the question and the body say it.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P127).
+pub const SETTINGS_ARMING_DESCRIPTION: &str = "";
 /// Approved 2026-10-07.
 pub const SETTINGS_ARMING_DECLINE: &str = "Ask";
 /// Approved 2026-10-07.
@@ -187,6 +198,9 @@ pub struct IgnoreProjectCopy {
     pub tooltip: &'static str,
     /// The confirmation's cancel: [`KEEP_PROJECT`].
     pub keep: &'static str,
+    /// The Never button's help text in the confirmation:
+    /// [`IGNORE_PROJECT_BODY_TOOLTIP`].
+    pub ignore_project_tooltip: &'static str,
 }
 
 /// The ignore-project words for `project` with `pending` sessions waiting.
@@ -198,6 +212,7 @@ pub fn ignore_project_copy(project: &str, pending: usize) -> IgnoreProjectCopy {
         button: IGNORE_PROJECT,
         tooltip: IGNORE_PROJECT_TOOLTIP,
         keep: KEEP_PROJECT,
+        ignore_project_tooltip: IGNORE_PROJECT_BODY_TOOLTIP,
     }
 }
 
@@ -571,14 +586,12 @@ mod settings_arming_copy_tests {
     #[test]
     fn the_settings_arming_confirmation_is_rons_over_the_arming_body() {
         let copy = arming_offer_copy("api", 0);
-        assert_eq!(
-            copy.settings_question,
-            "Enable automatic contribution for api?"
-        );
+        assert_eq!(copy.settings_question, "Set api to Automatic?");
         assert_eq!(copy.body, ARMING_BODY);
+        // Owner dropped the subtitle 2026-11-04 (Settings copy pass 2, P127).
+        assert_eq!(copy.settings_description, "");
         for text in [
             copy.settings_question.as_str(),
-            copy.settings_description,
             copy.settings_decline,
             copy.settings_confirm,
         ] {
@@ -797,7 +810,7 @@ mod copy_table_tests {
     #[test]
     fn the_ignore_table_carries_the_project_and_the_count() {
         let copy = ignore_project_copy("api", 3);
-        assert_eq!(copy.title, "Ignore api?");
+        assert_eq!(copy.title, "Set api to Never?");
         assert_eq!(copy.body, ignore_project_body(3));
         assert!(copy.body.contains("3 waiting traces"));
         assert_eq!(copy.button, IGNORE_PROJECT);
@@ -805,7 +818,7 @@ mod copy_table_tests {
         assert!(
             ignore_project_copy("api", 1)
                 .body
-                .contains("1 waiting trace ")
+                .contains("1 waiting trace.")
         );
         assert!(!ignore_project_copy("api", 0).body.contains("waiting trace"));
     }
@@ -819,8 +832,15 @@ mod copy_table_tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys.len(), 5);
-        for key in ["title", "body", "button", "tooltip", "keep"] {
+        assert_eq!(keys.len(), 6);
+        for key in [
+            "title",
+            "body",
+            "button",
+            "tooltip",
+            "keep",
+            "ignore_project_tooltip",
+        ] {
             assert!(value[key].is_string(), "{key}");
         }
     }
@@ -830,7 +850,8 @@ mod copy_table_tests {
     #[test]
     fn the_ignore_confirmation_keeps_the_project() {
         let copy = ignore_project_copy("api", 2);
-        assert_eq!(copy.keep, "Keep project");
+        // Owner replaced "Keep project" 2026-11-04 (Settings copy pass 2, P134).
+        assert_eq!(copy.keep, "Keep");
         assert_ne!(copy.keep, copy.button);
     }
 

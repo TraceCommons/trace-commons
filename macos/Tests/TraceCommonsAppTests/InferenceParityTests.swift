@@ -455,7 +455,7 @@ final class InferenceParityTests: XCTestCase {
             XCTAssertTrue(views.contains(needle), "InferenceViews.swift lacks \(needle)")
         }
         let account = try Self.text("Views/Monitor/InferenceAccount.swift")
-        for needle in ["credential: AnyView(CredentialSection(copy: copy, prominent: true, titled: false)))",
+        for needle in ["credential: AnyView(CredentialSection(\n                        copy: copy, prominent: true, titled: false, placement: .signInShortcut)))",
                        "HarnessListSection(copy: copy, titled: false)",
                        "PrivateAISwitchCard(", "store.setPrivateAI(on:", "copy.writeUnconfirmed", "model.refreshSettings()",
                        "store.privateAI?.on", "model.privateInferenceCopy"] {
@@ -489,7 +489,7 @@ final class InferenceParityTests: XCTestCase {
                      "struct PrivateAISettingsPanels", "ManagedGlobalSettingsHeader()",
                      "eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,",
                      "HarnessListSection(copy: copy, titled: false)", "PrivateAISwitchCard(",
-                     "credential: AnyView(CredentialSection(copy: copy, prominent: true, titled: false)))"]
+                     "credential: AnyView(CredentialSection(\n                        copy: copy, prominent: true, titled: false, placement: .signInShortcut)))"]
         var cursor = account.startIndex
         for needle in order {
             let found = try XCTUnwrap(account.range(of: needle, range: cursor..<account.endIndex),
@@ -773,7 +773,9 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(card.contains("link:"), "no step links anywhere")
         XCTAssertTrue(card.contains("GetStartedCard("))
         XCTAssertFalse(card.contains("GlassHeroCard("))
-        XCTAssertTrue(card.contains("close: GetStartedCard.Close(label: MonitorWords.close) { closed = true },"))
+        // Every time, with no X (owner, 2026-11-04).
+        XCTAssertFalse(card.contains("close:"))
+        XCTAssertFalse(card.contains("@AppStorage"))
         XCTAssertEqual(PrivateAIGuideCard.steps.map { $0.title },
                        ["guide_step_earn_title", "guide_step_start_title", "guide_step_use_title"])
         XCTAssertEqual(PrivateAIGuideCard.steps.map { $0.line }, ["guide_step_earn", "guide_step_start", "guide_step_use"])

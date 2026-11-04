@@ -70,7 +70,16 @@ final class PrivateInferenceExportTests: XCTestCase {
         let data = try XCTUnwrap(json.data(using: .utf8))
         let exported = try XCTUnwrap(
             JSONSerialization.jsonObject(with: data) as? [String: String])
+        // Lines the owner cut 2026-11-04 (Settings copy pass 2, P8, P10,
+        // P177, P209): each arrives "", which this shell draws as no line.
+        let cut: Set<String> = [
+            "account_contribution_pending_credit", "credential_what", "harnesses_what", "harness_not_connected",
+        ]
         for (field, text) in exported {
+            if cut.contains(field) {
+                XCTAssertEqual(text, "", "\(field) was cut")
+                continue
+            }
             XCTAssertFalse(
                 text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                 "\(field) arrived empty")
@@ -139,7 +148,8 @@ final class PrivateInferenceExportTests: XCTestCase {
         for sentence in [copy.statePortInUse, copy.stateStartFailed, copy.stateCrashed] {
             XCTAssertTrue(sentence.contains("off and on"), sentence)
         }
-        XCTAssertTrue(copy.stateCrashed.contains("won't retry on its own"), copy.stateCrashed)
+        // Owner dropped "won't retry on its own" 2026-11-04 (Settings copy pass 2, P198).
+        XCTAssertEqual(copy.stateCrashed, "May have stopped. Turn it off and on.")
     }
 
     func testTheServingSentenceNamesAPortOrIsEmpty() {

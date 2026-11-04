@@ -52,6 +52,17 @@ final class SpendOrganizationSurfaceTests: XCTestCase {
         XCTAssertEqual(status.words?.promptLine, "PROMPT-LINE")
     }
 
+    /// The owner cut the card's explanation 2026-11-04 (Settings copy pass
+    /// 2, P188): an empty `what` still decodes, and is drawn as no line.
+    func testAnEmptyExplanationStillDecodesTheWords() {
+        var view = Self.view
+        view["what"] = ""
+        let status = SpendOrganizations.parse(
+            fromJSON: Self.payload(organizations: [("org-a", true), ("org-b", false)], view: view))
+        XCTAssertEqual(status.words?.what, "")
+        XCTAssertEqual(status.words?.title, "TITLE")
+    }
+
     func testEndingThePromptKeepsEverythingElse() {
         let status = SpendOrganizations.parse(
             fromJSON: Self.payload(organizations: [("org-a", true), ("org-b", false)]))

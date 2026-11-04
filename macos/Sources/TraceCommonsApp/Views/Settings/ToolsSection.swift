@@ -157,10 +157,14 @@ struct ToolsSection: View {
                     }
                 }
 
-                Text(copy.appliesAtOnce)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                // Cut by the owner 2026-11-04 (Settings copy pass 2, P105):
+                // an empty line draws nothing.
+                if !copy.appliesAtOnce.isEmpty {
+                    Text(copy.appliesAtOnce)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
             }
         }
@@ -208,7 +212,8 @@ struct ToolsSection: View {
                             model.routingDraft = next
                         }
                     }
-                    .accessibilityLabel(copy.folderTitle)
+                    // Named by its action, as its tooltip is (rule 5); the
+                    // eyebrow above names the field.
                     Text(form.tokenDir)
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textSecondary)

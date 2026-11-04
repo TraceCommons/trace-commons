@@ -119,6 +119,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let neither: String
         /// `{tool}`: a tool watched in two rows.
         public let oneFolderPerTool: String
+        /// Beside Continue: finish setup for Private AI alone.
+        public let privateAiOnly: String
     }
 
     public struct Rules: Decodable, Equatable, Sendable {
@@ -194,6 +196,10 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         /// grant, which finishes on Ask.
         public let sharingRefused: String
         public let sharingSaveFailed: String?
+        /// Settings > Projects' own lines for the same failures: setup's
+        /// name setup and its Start sharing button.
+        public let settingsSharingRefused: String
+        public let settingsSharingSaveFailed: String
         public let scopesFailed: String
         public let rulesFailed: String
         public let privateAiFailed: String
@@ -225,20 +231,13 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let titleLight: String
         public let titleBold: String
         public let onThisMac: String
-        /// The one estimate line's words. The core fills them
-        /// (`tc_first_run_estimate_line`); a screen shows its answer.
-        public let estimatePoints: String
-        public let estimatePointsOne: String
-        public let estimateUsd: String
-        public let estimateUsdOne: String
-        /// The owner's estimate before an invite gives a range, in points
-        /// per accepted trace.
-        public let estimate: Estimate
-
-        public struct Estimate: Decodable, Equatable, Sendable {
-            public let min: Int
-            public let max: Int
-        }
+        /// The line under the count, with no amount (owner, 2026-11-04).
+        /// The core picks it (`tc_first_run_estimate_line`); a screen shows
+        /// its answer.
+        public let foundCredit: String
+        public let foundCouldCredit: String
+        /// Under the line while the use that earns credit is on.
+        public let creditDepends: String
     }
 
     public struct PrivateAi: Decodable, Equatable, Sendable {

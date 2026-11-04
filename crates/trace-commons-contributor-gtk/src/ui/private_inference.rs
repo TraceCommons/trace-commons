@@ -1348,11 +1348,10 @@ mod tests {
         use trace_commons_contributor::harness_state::HarnessState;
         use trace_commons_contributor::private_inference_copy::private_inference_copy;
         let shared = private_inference_copy();
-        for state in [
-            HarnessState::NotConnected,
-            HarnessState::ConnectedNoCalls,
-            HarnessState::Answering,
-        ] {
+        // Owner dropped the "Not connected" line 2026-11-04 (Settings copy pass 2, P209):
+        // the state answers "" like the silent ones below.
+        assert_eq!(harness_line(HarnessState::NotConnected.label()), "");
+        for state in [HarnessState::ConnectedNoCalls, HarnessState::Answering] {
             assert!(
                 !harness_line(state.label()).trim().is_empty(),
                 "{} has no sentence",

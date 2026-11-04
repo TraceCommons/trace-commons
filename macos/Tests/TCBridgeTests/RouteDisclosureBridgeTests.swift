@@ -18,7 +18,9 @@ final class RouteDisclosureBridgeTests: XCTestCase {
         XCTAssertTrue(value.sendsToWitness)
         XCTAssertEqual(value.facts.witness?.origin, "published_at_join")
         XCTAssertTrue(value.copy.witness?.origin.contains("without asking you") == true)
-        XCTAssertTrue(value.copy.receipts?.contains("tells the provider") == true)
+        // Shortened by the owner 2026-11-04 (Settings copy pass 2, P173): it
+        // still says asking tells the provider the trace is contributed.
+        XCTAssertTrue(value.copy.receipts?.contains("tells it the trace is being contributed") == true)
         XCTAssertNil(value.copy.localFilter)
     }
 

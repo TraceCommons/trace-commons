@@ -31,6 +31,9 @@ public sealed record LegacyMigrationOfferCopy
     /// <summary>Asked only after <c>legacy_migration_invite_needed</c>.</summary>
     [JsonPropertyName("invite_prompt")] public string InvitePrompt { get; init; } = string.Empty;
 
+    /// <summary>Tooltip on the invite link field (P5): what the link is used for.</summary>
+    [JsonPropertyName("invite_link_tooltip")] public string InviteLinkTooltip { get; init; } = string.Empty;
+
     /// <summary>The move could not be started at all; nothing ran.</summary>
     [JsonPropertyName("start_failed")] public string StartFailed { get; init; } = string.Empty;
 
@@ -40,14 +43,14 @@ public sealed record LegacyMigrationOfferCopy
     /// <summary>Beside the dismiss: the move is still in Settings.</summary>
     [JsonPropertyName("later")] public string Later { get; init; } = string.Empty;
 
-    /// <summary>While the passkey step is open in the browser.</summary>
-    [JsonPropertyName("passkey_waiting")] public string PasskeyWaiting { get; init; } = string.Empty;
+    /// <summary>While the sign-in step is open in the browser.</summary>
+    [JsonPropertyName("passkey_waiting")] public string LoginWaiting { get; init; } = string.Empty;
 
-    /// <summary>The passkey step ended without finishing.</summary>
-    [JsonPropertyName("passkey_failed")] public string PasskeyFailed { get; init; } = string.Empty;
+    /// <summary>The sign-in step ended without finishing.</summary>
+    [JsonPropertyName("passkey_failed")] public string LoginFailed { get; init; } = string.Empty;
 
-    /// <summary>Stops waiting on the passkey step.</summary>
-    [JsonPropertyName("passkey_cancel")] public string PasskeyCancel { get; init; } = string.Empty;
+    /// <summary>Stops waiting on the sign-in step.</summary>
+    [JsonPropertyName("passkey_cancel")] public string LoginCancel { get; init; } = string.Empty;
 
     /// <summary>The accessible name of <see cref="Action"/> on the offer card.</summary>
     [JsonPropertyName("action_name_notice")] public string ActionNameNotice { get; init; } = string.Empty;
@@ -58,7 +61,7 @@ public sealed record LegacyMigrationOfferCopy
     /// <summary>The payload fields this shell decodes, by wire name.</summary>
     public static readonly IReadOnlyList<string> ConsumedFields = new[]
     {
-        "title", "body", "action", "working", "invite_prompt", "start_failed",
+        "title", "body", "action", "working", "invite_prompt", "invite_link_tooltip", "start_failed",
         "dismiss", "later", "passkey_waiting", "passkey_failed", "passkey_cancel",
         "action_name_notice", "action_name_settings",
     };
@@ -71,8 +74,8 @@ public sealed record LegacyMigrationOfferCopy
 /// </summary>
 public static class LegacyMigrationOffers
 {
-    /// <summary>The refusal that means "run the passkey step, then try again".</summary>
-    public const string PasskeyNeededLabel = "legacy_migration_no_near_ai_session";
+    /// <summary>The refusal that means "run the sign-in step, then try again".</summary>
+    public const string LoginNeededLabel = "legacy_migration_no_near_ai_session";
 
     /// <summary>The refusal that means "ask the contributor for their invite".</summary>
     public const string InviteNeededLabel = "legacy_migration_invite_needed";
@@ -102,8 +105,8 @@ public static class LegacyMigrationOffers
 
             foreach (string sentence in new[]
             {
-                copy.Title, copy.Body, copy.Action, copy.Working, copy.InvitePrompt, copy.StartFailed,
-                copy.Dismiss, copy.Later, copy.PasskeyWaiting, copy.PasskeyFailed, copy.PasskeyCancel,
+                copy.Title, copy.Body, copy.Action, copy.Working, copy.InvitePrompt, copy.InviteLinkTooltip, copy.StartFailed,
+                copy.Dismiss, copy.Later, copy.LoginWaiting, copy.LoginFailed, copy.LoginCancel,
                 copy.ActionNameNotice, copy.ActionNameSettings,
             })
             {

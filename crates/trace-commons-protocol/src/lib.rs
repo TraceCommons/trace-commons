@@ -6,6 +6,7 @@ pub mod canonical_json;
 pub mod community_handle;
 pub mod credit_outcome;
 pub mod device_invite_subject;
+pub mod first_run_copy;
 pub mod first_run_estimate;
 pub mod inference_connection;
 pub mod insights;

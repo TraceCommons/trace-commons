@@ -280,6 +280,49 @@ fn release_apps_workflow_is_tag_driven_and_per_platform_runnable() {
     }
 }
 
+/// Native macOS is the lead client and the Windows, Linux and Tauri shells
+/// are frozen, so an `app-v*` tag push builds and publishes macOS alone.
+/// The other build jobs stay reachable from a workflow_dispatch, which never
+/// publishes. Each job's `if:` must therefore require a dispatch, not merely
+/// omit `push`: a later edit that adds `github.event_name == 'push' ||` back
+/// would quietly resume production Windows and Linux releases.
+#[test]
+fn a_tag_push_releases_macos_only() {
+    let apps = executable_text(&read(".github/workflows/release-apps.yml"));
+    for job in ["  windows:", "  windows-app:", "  linux-flatpak:"] {
+        let start = apps
+            .find(&format!("\n{job}\n"))
+            .unwrap_or_else(|| panic!("missing job {job}"));
+        let body = &apps[start + 1..];
+        let if_at = body
+            .find("    if:")
+            .unwrap_or_else(|| panic!("{job} has no if:"));
+        let runs_on = body[if_at..]
+            .find("runs-on:")
+            .unwrap_or_else(|| panic!("{job} has no runs-on:"));
+        let gate = &body[if_at..if_at + runs_on];
+        assert!(
+            gate.contains("github.event_name == 'workflow_dispatch' &&"),
+            "{job} must run only on a workflow_dispatch; its gate is `{gate}`"
+        );
+        assert!(
+            !gate.contains("'push'"),
+            "{job} must not run on a tag push; its gate is `{gate}`"
+        );
+    }
+
+    let start = apps.find("\n  macos:\n").expect("missing job macos");
+    let body = &apps[start + 1..];
+    let if_at = body.find("    if:").expect("macos has no if:");
+    let runs_on = body[if_at..]
+        .find("runs-on:")
+        .expect("macos has no runs-on:");
+    assert!(
+        body[if_at..if_at + runs_on].contains("github.event_name == 'push'"),
+        "the macOS job must still build on a tag push"
+    );
+}
+
 #[test]
 fn release_tags_are_checked_against_the_versions_the_binaries_report() {
     let apps = read(".github/workflows/release-apps.yml");
@@ -356,12 +399,6 @@ fn the_app_release_checks_its_own_credentials_before_it_signs_anything() {
         "MACOS_NOTARY_ASC_KEY_ID",
         "MACOS_NOTARY_ASC_ISSUER_ID",
         "SPARKLE_PUBLIC_ED_KEY",
-        "AZURE_SIGNING_CLIENT_ID",
-        "AZURE_SIGNING_TENANT_ID",
-        "AZURE_SIGNING_SUBSCRIPTION_ID",
-        "AZURE_SIGNING_ENDPOINT",
-        "AZURE_SIGNING_ACCOUNT",
-        "AZURE_SIGNING_PROFILE",
         "GCP_WIF_PROVIDER",
         "GCP_FLATPAK_PUBLISHER_SA",
         "HOMEBREW_TAP_TOKEN",
@@ -385,6 +422,21 @@ fn the_app_release_checks_its_own_credentials_before_it_signs_anything() {
         );
     }
 
+    // A tag push builds macOS only, so the Azure Trusted Signing values the
+    // dispatch-only Windows jobs spend must not be required by the tag-push
+    // pre-flight: demanding them would fail a macOS release over
+    // configuration nothing it runs consumes.
+    let config_start = apps_code
+        .find("  release-config:")
+        .expect("release-apps.yml must have a release-config job");
+    let config_job = &apps_code[config_start..];
+    let config_job = &config_job[..config_job.find("\n  version:").unwrap_or(config_job.len())];
+    assert!(
+        !config_job.contains("AZURE_SIGNING_"),
+        "release-config must not require AZURE_SIGNING_* -- a tag push no \
+         longer builds the Windows jobs that spend them"
+    );
+
     // The AZURE_SIGNING_* values are environment variables on `release`, so a
     // pre-flight job without the environment reads them as empty and refuses
     // every release. This is the single line that keeps the pre-flight from
@@ -393,11 +445,6 @@ fn the_app_release_checks_its_own_credentials_before_it_signs_anything() {
     // Sliced out of apps_code, not apps: the job's own comment quotes
     // `environment: release` while explaining why it is there, so the same
     // assertion over the raw file would hold with the declaration deleted.
-    let config_start = apps_code
-        .find("  release-config:")
-        .expect("release-apps.yml must have a release-config job");
-    let config_job = &apps_code[config_start..];
-    let config_job = &config_job[..config_job.find("\n  version:").unwrap_or(config_job.len())];
     assert!(
         config_job.contains("environment: release"),
         "the release-config job must declare `environment: release` or the \

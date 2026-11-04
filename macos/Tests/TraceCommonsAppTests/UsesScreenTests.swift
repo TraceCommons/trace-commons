@@ -90,7 +90,7 @@ final class UsesScreenTests: XCTestCase {
         let join = try Self.joinSource()
         let start = try XCTUnwrap(join.range(of: "private func start() {"))
         let startBody = String(join[start.upperBound...].prefix(400))
-        let include = try XCTUnwrap(startBody.range(of: "includeRequired()"))
+        let include = try XCTUnwrap(startBody.range(of: "JoinScreenLayout.startState("))
         let route = try XCTUnwrap(startBody.range(of: "UsesScreenLayout.startRoute(runner.state)"))
         XCTAssertLessThan(include.lowerBound, route.lowerBound)
 
@@ -209,7 +209,7 @@ final class UsesScreenTests: XCTestCase {
         // Off the first run's Uses (owner, 2026-10-28); Settings keeps it.
         XCTAssertFalse(source.contains("Text(copy.uses.rewardOpportunities"))
         XCTAssertEqual(try copy().uses.rewardOpportunities,
-                       "To earn credit for your traces, allow Train coding models. Create benchmarks and Train evaluators are extra uses that may earn more. Credit depends on acceptance and scoring.")
+                       "Allow Train coding models to earn credit. The other uses may earn more.")
         let profile = try String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/TraceCommonsApp/Views/Settings/PublicProfileSection.swift"), encoding: .utf8)
@@ -297,7 +297,8 @@ final class UsesScreenTests: XCTestCase {
         let uses = try copy().uses
         let grant = try grant()
         let scrub = try XCTUnwrap(grant.scrub)
-        XCTAssertEqual(grant.pathAskFirstTitle, "Review each trace yourself.")
+        // Owner dropped Ask's first line 2026-11-04 (Settings copy pass 2, P125).
+        XCTAssertEqual(grant.pathAskFirstTitle, "")
         XCTAssertEqual(grant.pathAskFirstDetail, "Nothing is contributed until you approve it.")
         XCTAssertEqual(grant.pathAutomaticTitle, "Contribute automatically from projects that first appear.")
         XCTAssertFalse(try XCTUnwrap(grant.pathAskFirst).contains("later"))
@@ -320,7 +321,8 @@ final class UsesScreenTests: XCTestCase {
         // the first line of the core's words for it.
         XCTAssertEqual(full.map(\.value), [.askMe, .automatic])
         XCTAssertEqual(full.map(\.title), [try XCTUnwrap(uses.askEachTime), modes.label(for: .autoUpload)])
-        XCTAssertEqual(full.map(\.sub), [grant.pathAskFirstTitle, try XCTUnwrap(uses.automaticScope)])
+        // Ask's cut first line leaves its radio with no sub-line (P125).
+        XCTAssertEqual(full.map(\.sub), [nil, try XCTUnwrap(uses.automaticScope)])
         // Before sign-in Automatic is offered too, and says it turns on once
         // the person signs in, the last step.
         let before = UsesScreenLayout.sharingOptions(for: FirstRunState(step: .uses), modes: modes, grant: grant, uses: uses)

@@ -1,17 +1,21 @@
 //! Explicit account contribution operations, independent of automatic folder grants.
-pub const REFRESH_LINE: &str =
-    "Refresh to check contribution readiness. Sign in to your account if required.";
-pub const CHECKING_LINE: &str = "Checking contribution status…";
-pub const UNAVAILABLE_LINE: &str =
-    "Sign in to your account and retry. Contribution status or invite redemption is unavailable.";
-pub const PENDING_CREDIT_LINE: &str =
-    "Accepted contributions may earn pending credit. Credit redemption is not available.";
-pub const READY_LINE: &str = "Ready to contribute. Accepted contributions may earn pending credit.";
-pub const NOT_READY_LINE: &str =
-    "Contributions are currently unavailable. Refresh status or redeem an invite.";
-/// Approved 2026-10-06. What a commons that does not use account
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P11).
+pub const REFRESH_LINE: &str = "Not checked yet.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P54).
+pub const CHECKING_LINE: &str = "Checking…";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P37).
+pub const UNAVAILABLE_LINE: &str = "Couldn't check status or redeem the invite. Sign in first.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P8). The line is cut: empty, and a shell
+/// that draws it should skip empty text. The field stays, because every shell
+/// decodes it.
+pub const PENDING_CREDIT_LINE: &str = "";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P24).
+pub const READY_LINE: &str = "Ready to contribute.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P27).
+pub const NOT_READY_LINE: &str = "Contributions are unavailable for now.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P13). What a commons that does not use account
 /// admission (the server answers `legacy_evidence`) tells a contributor.
-pub const LEGACY_EVIDENCE_LINE: &str = "This commons does not use account admission. Your contributions go through the standard review.";
+pub const LEGACY_EVIDENCE_LINE: &str = "Your contributions go through standard review.";
 /// Approved 2026-10-06. The card's heading and controls, so no shell
 /// types its own.
 pub const HEADING: &str = "Account contributions";

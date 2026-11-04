@@ -134,15 +134,25 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
 public protocol MonitorWordTable: Decodable, Equatable, Sendable {
     /// The payload fields this shell decodes, by wire name.
     static var consumedFields: [String] { get }
+    /// The words the owner cut, by property name: each arrives "" and is
+    /// drawn as nothing, so it does not make the table unwhole.
+    static var ownerCut: Set<String> { get }
 }
 
 extension MonitorWordTable {
+    public static var ownerCut: Set<String> { [] }
+
     /// Every word in the table, so a decode can refuse an empty one.
     var words: [String] { Mirror(reflecting: self).children.compactMap { $0.value as? String } }
 
     /// Whether every word is there: an empty one is a table this shell
-    /// cannot render, never a blank label.
-    var isWhole: Bool { !words.contains(where: \.isEmpty) }
+    /// cannot render, never a blank label. An `ownerCut` word may be empty.
+    var isWhole: Bool {
+        !Mirror(reflecting: self).children.contains { child in
+            guard let text = child.value as? String, text.isEmpty else { return false }
+            return !Self.ownerCut.contains(child.label ?? "")
+        }
+    }
 }
 
 /// The Traces tree's rows and the Dismiss-session confirmation (`traces-tree.tsx`).
@@ -610,6 +620,12 @@ public struct MonitorShellCopy: MonitorWordTable {
     public let tabsLabel: String
     public let mapViewsLabel: String
     public let settingsRefresh: String
+    /// Each Settings card's re-read button's accessible name and tooltip.
+    public let settingsRefreshDesktop: String
+    public let settingsRefreshDiscovery: String
+    public let settingsRefreshUses: String
+    /// Startup's updates card.
+    public let updatesEyebrow: String
     public let consentEyebrow: String
     public let desktopEyebrow: String
     public let desktopTitle: String
@@ -668,6 +684,10 @@ public struct MonitorShellCopy: MonitorWordTable {
         case tabsLabel = "tabs_label"
         case mapViewsLabel = "map_views_label"
         case settingsRefresh = "settings_refresh"
+        case settingsRefreshDesktop = "settings_refresh_desktop"
+        case settingsRefreshDiscovery = "settings_refresh_discovery"
+        case settingsRefreshUses = "settings_refresh_uses"
+        case updatesEyebrow = "updates_eyebrow"
         case consentEyebrow = "consent_eyebrow"
         case desktopEyebrow = "desktop_eyebrow"
         case desktopTitle = "desktop_title"
@@ -684,6 +704,10 @@ public struct MonitorShellCopy: MonitorWordTable {
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
+
+    /// Settings' consent, discovery and watcher eyebrows, cut by the owner
+    /// 2026-11-04 (Settings copy pass 2, P140, P84, P79): each arrives "".
+    public static var ownerCut: Set<String> { ["consentEyebrow", "discoveryEyebrow", "watcherEyebrow"] }
 
     /// Watching N tools: the singular is its own line.
     public func watching(tools: Int) -> String {
@@ -746,6 +770,8 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let tracesHeroStepEarnDetail: String
     public let tracesHeroStepUse: String
     public let tracesHeroStepUseDetail: String
+    /// The third step's link, to the Private AI tab (owner, 2026-11-04).
+    public let tracesHeroUseAction: String
     /// Home's Credit earned tile: the account's whole total, `{amount}`
     /// (product owner, 2026-10-29).
     public let creditAccountTotal: String
@@ -810,6 +836,7 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case tracesHeroStepEarnDetail = "traces_hero_step_earn_detail"
         case tracesHeroStepUse = "traces_hero_step_use"
         case tracesHeroStepUseDetail = "traces_hero_step_use_detail"
+        case tracesHeroUseAction = "traces_hero_use_action"
         case creditAccountTotal = "credit_account_total"
         case insightsToday = "insights_today"
         case insightsTeaser = "insights_teaser"

@@ -479,6 +479,7 @@ pub const METHODS: &[&str] = &[
     "set_private_ai",
     "invite_lookup",
     "first_run_estimate",
+    "first_run_copy",
     "tool_destinations",
     "list_audit",
     "list_history",
@@ -3013,6 +3014,30 @@ impl DaemonShared {
         ) {
             object.extend(fields);
         }
+        // Additive (the account section after Sign out). `account_signed_in`:
+        // whether this enrolled account's own session record is held (files
+        // only, no credential-store read, so an expired session that the
+        // daemon renews still counts). Present only for an enrolled account
+        // that signs in (a NEAR AI or wallet account) and only when the
+        // record could be checked; an account that never signs in has no
+        // session to be signed out of. A boolean, never an id. Sign out
+        // (`account_sign_out`) clears the record but not the enrollment, so
+        // this is how a shell tells the two apart. While it is false the
+        // account's login is not named: no "Connected with {provider}" for a
+        // signed-out account.
+        let account_signed_in = cfg
+            .as_ref()
+            .filter(|cfg| logged_in && cfg.signs_in_with().is_some())
+            .and(account_snapshot.as_ref())
+            .map(super::commons_credentials::Snapshot::holds_record);
+        if let Some(signed_in) = account_signed_in {
+            status["account_signed_in"] = serde_json::Value::Bool(signed_in);
+            if !signed_in {
+                if let Some(object) = status.as_object_mut() {
+                    object.remove("account_login");
+                }
+            }
+        }
         // Additive (nudge U4). `{count, tools, threshold_days}`: how many
         // waiting Ask-me sessions nobody has written to for the idle
         // threshold, the display names of the tools they came from, and the
@@ -3752,6 +3777,7 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("set_private_ai", "private-ai-requires-async"),
     ("invite_lookup", "invite-lookup-requires-async"),
     ("first_run_estimate", "first-run-estimate-requires-async"),
+    ("first_run_copy", "first-run-copy-requires-async"),
     ("account_session_status", "identity-requires-async"),
     ("account_sign_in", "identity-requires-async"),
     ("account_sign_out", "identity-requires-async"),
@@ -4390,16 +4416,21 @@ fn decorate_token_storage(value: &mut serde_json::Value, enabled: Option<bool>) 
     } else {
         "Enable capture"
     });
-    value["capture_confirmation"] = serde_json::json!(
-        "Token capture stores raw request and response data on this device. It requires configured, supported model targets and restarts the hosted proxy. Contribution and witness sharing remain separate choices."
-    );
+    // The confirmation's title and confirm button, apart from the switch's
+    // button (copy-guide rule 4). Only shown when turning capture on.
+    // DRAFT, NEEDS APPROVAL (2026-11-04).
+    value["capture_confirm_title"] = serde_json::json!("Enable token capture?");
+    value["capture_confirm_label"] = serde_json::json!("Enable capture");
+    // Approved by the owner 2026-11-04 (Settings copy pass 2, P267).
+    value["capture_confirmation"] =
+        serde_json::json!("Saves raw model requests and responses, and restarts the proxy.");
     value["capture_notice"] = serde_json::json!(match enabled {
-        Some(true) =>
-            "Local capture requested. The Private AI connection status reports whether the proxy started successfully.",
-        Some(false) =>
-            "Local capture disabled for the hosted proxy. Existing captures retain their expiry and cleanup rules.",
-        None =>
-            "Local capture follows the proxy configuration. External proxies are configured separately.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P286).
+        Some(true) => "Capture requested. Private AI shows whether it started.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P276).
+        Some(false) => "Capture is off.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P287).
+        None => "Capture follows the proxy's settings.",
     });
 }
 
@@ -6985,6 +7016,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "set_private_ai" => super::network_data::handle_set_private_ai(shared, req).await,
         "invite_lookup" => super::network_data::handle_invite_lookup(shared, req).await,
         "first_run_estimate" => super::network_data::handle_first_run_estimate(shared, req).await,
+        "first_run_copy" => super::network_data::handle_first_run_copy(shared, req).await,
         "account_session_status" => super::native_identity::handle(shared, req).await,
         "account_sign_in" => super::native_identity::handle(shared, req).await,
         "account_sign_out" => super::native_identity::handle(shared, req).await,
@@ -10166,14 +10198,14 @@ mod tests {
     use crate::config::tests_support::temp_store;
     use crate::daemon::policy::UNKNOWN_PROJECT_KEY;
 
-    /// Passkeys are gone, and so is the list of them a daemon before their
-    /// removal kept: a daemon starting on that state deletes the file. With
-    /// no such file, starting is unaffected.
+    /// An older daemon kept a list of sign-in credentials that nothing reads
+    /// any more: a daemon starting on that state deletes the file. With no
+    /// such file, starting is unaffected.
     #[test]
-    fn startup_deletes_the_retired_remembered_passkeys_file() {
+    fn startup_deletes_the_retired_remembered_credentials_file() {
         let (_dir, store) = temp_store();
         let retired = store.daemon_path("remembered-passkeys.json");
-        std::fs::write(&retired, b"{\"passkeys\":[]}").unwrap();
+        std::fs::write(&retired, b"{}").unwrap();
 
         DaemonShared::load(store.clone()).unwrap();
         assert!(!retired.exists());
@@ -18982,7 +19014,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 77);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 78);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -19466,7 +19498,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 109, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 83, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 84, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

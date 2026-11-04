@@ -8640,7 +8640,8 @@ error string into `error.message`.
 | `set_private_ai` | `on`: boolean; `confirmed: true` when enabling | same as `private_ai` | Reuses existing async hosting lifecycle; wrapper new |
 | `mission_catalogue` | `limit?`: 1–50, default 20; `before?`: UUID | `kind`, `catalogue`, `disclosure` | Public skill-evaluation catalogue/client exist; IPC new |
 | `invite_lookup` | `code`: full invite URL | protocol `InviteLookupResponse` | Issuer lookup/client exist; IPC new |
-| `first_run_estimate` | none | protocol `FirstRunEstimate`: `usd_micros_per_accepted_trace?` (`{min, max}`), `{}` when the commons publishes none or cannot be reached | Anonymous `GET /v1/public/first-run-estimate` on the configured commons, or the channel's account origin before enrollment; the shell passes the range to `tc_first_run_estimate_line` and shows its answer |
+| `first_run_estimate` | none | protocol `FirstRunEstimate`: `usd_micros_per_accepted_trace?` (`{min, max}`), `{}` when the commons publishes none or cannot be reached | Anonymous `GET /v1/public/first-run-estimate` on the configured commons, or the channel's account origin before enrollment; no shell asks it since 2026-11-04, when Traces moved to the one `first_run_copy` request; kept so a figure can return |
+| `first_run_copy` | `trace_count`, `total_bytes` (whole numbers, the shell's own figures) | `found_credit`, `found_could_credit`, `credit_depends?`, `source` (`commons` or `fallback`); always answers | The daemon coarsens both figures (two significant figures; bytes to whole MiB first) and sends them in an anonymous `POST /v1/public/first-run-copy` to the same commons as `first_run_estimate`, waiting 4 s. Lines that fail validation, any failure status, a timeout or no commons give the protocol's default lines with `source: fallback` |
 | Native account methods | see below | token-free replies below | Server routes exist; daemon and native adapter new |
 | `history_rollup` | none | existing optional `community` | Already implemented; authoritative standing surface |
 
@@ -8844,8 +8845,8 @@ keystroke. Display-name/range bounds must be validated before presentation.
 
 ### Native account identity
 
-Passkeys were removed on 2026-10-31: an account signs in through NEAR AI.
-The former `passkey_*`, `account_bind` and `account_binding` methods are gone
+An account signs in through NEAR AI (since 2026-10-31). The former
+`passkey_*`, `account_bind` and `account_binding` methods are gone
 and get the ordinary unknown-method answer. The app receives no native
 bearer, NEAR AI token, device key, tenant identity or secret-store reference.
 
@@ -8899,8 +8900,8 @@ refuses with `unavailable` / `account-enrollment-required`. Browser URL exposure
 uses the existing URL validation/opening controls. Tokens, rotations and
 atomic device/config persistence stay in Rust/Keychain.
 
-A daemon from before the removal kept a list of the passkeys used on the Mac
-(`remembered-passkeys.json` in the state directory). A daemon after it
+A daemon from before 2026-10-31 kept a list of sign-in credentials used on
+the Mac (`remembered-passkeys.json` in the state directory). A later daemon
 deletes that file when it starts.
 
 ## Events

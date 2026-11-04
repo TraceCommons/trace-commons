@@ -184,6 +184,7 @@ pub fn withdrawal_words() -> WithdrawalWords {
 pub struct PublicProfileWords {
     pub heading: &'static str,
     pub list_handle_publicly: &'static str,
+    /// Cut: empty. Approved by the owner 2026-11-04 (Settings copy pass 2, P142).
     pub footnote: &'static str,
     pub handle: &'static str,
     pub bio: &'static str,
@@ -191,29 +192,37 @@ pub struct PublicProfileWords {
     pub update_profile: &'static str,
     /// Takes the handle off the roster.
     pub withdraw: &'static str,
+    /// Withdraw's accessible name, naming what it withdraws, apart from a
+    /// trace's Withdraw (copy-guide rule 5). DRAFT, NEEDS APPROVAL
+    /// (2026-11-04).
+    pub withdraw_accessibility_name: &'static str,
     /// `{date}`: when the handle went public.
     pub on_roster_since: &'static str,
     pub go_public_headline: &'static str,
-    /// Approved 2026-10-07.
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P150).
     pub go_public_description: &'static str,
+    /// The dialog's confirm button.
     pub go_public: &'static str,
+    /// The card's button that opens the dialog: the same words as the
+    /// confirm button, its own key (copy-guide rule 4).
+    pub go_public_open: &'static str,
     pub going_public: &'static str,
     pub not_now: &'static str,
     pub published_heading: &'static str,
-    /// Approved 2026-10-07: one sentence where there were four lines.
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P159).
     pub published_lines: &'static [&'static str],
     pub never_heading: &'static str,
-    /// Approved 2026-10-07: one sentence where there were three lines.
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P151).
     pub never_lines: &'static [&'static str],
     pub acknowledgement: &'static str,
-    /// Approved 2026-10-07.
+    /// Cut: empty. Approved by the owner 2026-11-04 (Settings copy pass 2, P144).
     pub go_public_footnote: &'static str,
     pub go_public_handle: &'static str,
     pub go_public_bio: &'static str,
     /// A claim the server accepted.
     pub published: &'static str,
     /// A claim the server accepted that this device could not write down:
-    /// public all the same. Approved 2026-10-07.
+    /// public all the same. Approved by the owner 2026-11-04 (Settings copy pass 2, P145).
     pub published_not_cached: &'static str,
     pub left_roster: &'static str,
     pub left_roster_not_cached: &'static str,
@@ -234,92 +243,88 @@ pub struct PublicProfileWords {
 
 #[must_use]
 pub fn public_profile_words() -> PublicProfileWords {
-    let not_connected = "This device isn't connected.";
+    // Approved by the owner 2026-11-04 (Settings copy pass 2, P165). Approved by the owner 2026-11-04 (Settings copy pass 2, P166).
+    let not_connected = "This computer isn't connected.";
     PublicProfileWords {
         heading: "Public profile",
         list_handle_publicly: "List my handle publicly",
-        footnote: concat!(
-            "Attribution only \u{2014} being listed grants no data use at all. Leaving the ",
-            "roster removes you from future snapshots."
-        ),
+        footnote: "",
         handle: "Handle",
         bio: "Bio",
-        update_profile: "Update profile",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P162).
+        update_profile: "Save",
         withdraw: "Withdraw",
+        withdraw_accessibility_name: "Withdraw public profile",
         on_roster_since: "On the roster since {date}",
         go_public_headline: "Put your handle on the public roster?",
-        go_public_description: concat!(
-            "Public attribution changes identity metadata only. It grants no use of ",
-            "trace data."
-        ),
+        go_public_description: "Going public grants no use of your traces.",
         go_public: "Go public",
+        go_public_open: "Go public",
         going_public: "Going public\u{2026}",
         not_now: "Not now",
-        published_heading: "What gets published",
-        published_lines: &["Your handle, aggregate counts, public date, and bio if provided."],
-        never_heading: "What never does",
-        never_lines: &[
-            "Traces, trace contents, per-trace data, or anything about traces you did not send.",
-        ],
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P158).
+        published_heading: "Published",
+        published_lines: &["Your handle, total counts, public date and bio."],
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P163).
+        never_heading: "Never published",
+        never_lines: &["Your traces or anything about a single trace."],
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P160).
         acknowledgement: concat!(
-            "I understand my handle and aggregate counts become public. Leaving the roster ",
-            "removes me from future snapshots."
+            "I understand my handle and counts become public. Leaving removes me from ",
+            "future snapshots only."
         ),
-        go_public_footnote: "Nothing is pre-checked. Go public stays off until acknowledgement is enabled.",
-        go_public_handle: "The handle to publish",
-        go_public_bio: "Bio, if you want one \u{2014} 280 bytes, plaintext, no HTML",
-        published: "You're on the roster. Your handle and aggregate counts are public now.",
-        published_not_cached: concat!(
-            "Profile is public, but this device could not save its local copy. It may ",
-            "disappear here after refresh or restart."
-        ),
-        left_roster: concat!(
-            "You've left the roster. Your handle isn't published any more, and future ",
-            "snapshots won't include you."
-        ),
+        go_public_footnote: "",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P156).
+        go_public_handle: "Handle",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P147).
+        go_public_bio: "Bio (optional)",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P152).
+        published: "Your handle and counts are public now.",
+        published_not_cached: "Profile is public, but may not show here after a restart.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P143).
+        left_roster: "You've left the roster.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P141).
         left_roster_not_cached: concat!(
-            "You've left the roster \u{2014} your handle isn't published any more, and future ",
-            "snapshots won't include you. This device couldn't clear its own copy of the ",
-            "profile, so this window may show the old handle again until it can."
+            "You've left the roster. This computer may still show your old handle for a ",
+            "while."
         ),
         failure: "{reason} Profile was not published.",
-        failure_default: "Profile was not published. Check local enrollment and network access.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P149).
+        failure_default: "Profile was not published.",
         failure_reasons: BTreeMap::from([
             ("handle-required", "Handle is required."),
             ("handle-too-short", "Handle must be at least 3 characters."),
             ("handle-too-long", "Handle must be 32 characters or fewer."),
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P157).
             (
                 "handle-invalid-character",
-                "Use letters, numbers, hyphens, or underscores; no consecutive separators.",
+                "Use letters, numbers, hyphens or underscores.",
             ),
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P153).
             (
                 "handle-invalid-boundary",
-                "A handle has to start and end with a letter or a number.",
+                "Start and end with a letter or number.",
             ),
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P161).
             (
                 "handle-consecutive-separators",
-                "Use letters, numbers, hyphens, or underscores; no consecutive separators.",
+                "Don't put two hyphens or underscores together.",
             ),
             ("handle-reserved", "That handle is reserved."),
             ("bio-too-long", "Bio must be 280 bytes or fewer."),
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P164).
             (
                 "bio-invalid-character",
-                "Bio contains an unsupported control character.",
+                "Bio contains an unsupported character.",
             ),
-            (
-                "bio-required-or-null",
-                "The bio wasn't sent in a form the roster takes.",
-            ),
-            (
-                "bio-invalid",
-                "The bio wasn't sent in a form the roster takes.",
-            ),
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P154).
+            ("bio-required-or-null", "The roster didn't accept the bio."),
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P155).
+            ("bio-invalid", "The roster didn't accept the bio."),
             ("not-logged-in", not_connected),
         ]),
-        leave_failure: concat!(
-            "{reason}Profile was not withdrawn. You're still on the roster and your handle ",
-            "is still published."
-        ),
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P148).
+        leave_failure: "{reason}Couldn't withdraw. You're still on the roster.",
         leave_not_connected: not_connected,
         wording_defect: "Do not trust the public-profile wording on this screen.",
     }
@@ -418,14 +423,16 @@ pub struct SettingsWords {
     pub consent_heading: &'static str,
     pub connected: &'static str,
     pub not_connected: &'static str,
-    /// Approved 2026-10-07: it was "Sessions
-    /// are being queued, but nothing can be sent."
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P26).
     pub queued_nothing_sent: &'static str,
     pub extra_scan_configured: &'static str,
     pub session_finished_after: &'static str,
+    /// Cut: empty. The notification schedule's own help
+    /// (`nudge_copy::SETTING_DIGEST_HELP_INTERVAL`) says it.
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P235).
     pub at_most_one_notification: &'static str,
-    /// [`Self::at_most_one_notification`] at one hour, the shortest interval
-    /// the daemon allows, so it never reads "every 1 hours".
+    /// [`Self::at_most_one_notification`] at one hour. Cut: empty.
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P236).
     pub at_most_one_notification_one: &'static str,
     pub undecided_dropped: &'static str,
     /// A state row's accessible name: `{title}` then the value.
@@ -448,15 +455,19 @@ pub struct SettingsWords {
     pub no_feed: &'static str,
     pub insecure_feed: &'static str,
     pub updates_off: &'static str,
+    /// Cut: empty. Approved by the owner 2026-11-04 (Settings copy pass 2, P244).
     pub notifications_rendered_here: &'static str,
     pub paused_nothing_sent: &'static str,
-    /// Rewritten plainly at the owner's request. Approved 2026-10-07 (owner rewrite).
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P138).
     pub applies_from_now: &'static str,
     pub always_included: &'static str,
     /// The optional scopes' heading. Approved 2026-10-07: it was "Optional \u{2014} each one lets your traces do
     /// more".
     pub optional_data_use: &'static str,
     pub reward_opportunities: &'static str,
+    /// The tooltip on the Train coding models row, beside [`Self::reward_opportunities`].
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P137).
+    pub reward_opportunities_tooltip: &'static str,
     pub credit: &'static str,
     /// The tag on the always-on scope: the core's one spelling
     /// (`consent_copy::SCOPE_TAG_REQUIRED`, "always on"), matching the
@@ -464,6 +475,9 @@ pub struct SettingsWords {
     pub required: &'static str,
     pub nothing_preselected: &'static str,
     pub nothing_changed: &'static str,
+    /// A folder's mode change the daemon refused: the folder's setting did
+    /// not change. Approved by the owner 2026-11-04 (Settings copy pass 2, P136).
+    pub project_mode_failed: &'static str,
     /// The change log: each fixed action label to its sentence, which the
     /// shell follows with the project's name when there is one. An action
     /// this build does not know still gets [`Self::audit_changed`].
@@ -477,71 +491,69 @@ pub fn settings_words() -> SettingsWords {
         consent_heading: "Data uses",
         connected: "Connected",
         not_connected: "Not connected",
-        queued_nothing_sent: concat!(
-            "Traces may stay queued locally, but nothing can be sent until this device is ",
-            "enrolled."
-        ),
+        queued_nothing_sent: "Nothing is sent until you set up this app.",
         extra_scan_configured: "Extra privacy scan configured",
         session_finished_after: "A trace counts as finished after {seconds} seconds of quiet.",
-        at_most_one_notification: "At most one notification every {hours} hours, and none when nothing is waiting.",
-        at_most_one_notification_one: "At most one notification an hour, and none when nothing is waiting.",
-        undecided_dropped: "Undecided traces are dropped after {days} days. Dropped means never sent.",
+        at_most_one_notification: "",
+        at_most_one_notification_one: "",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P86).
+        undecided_dropped: "Undecided traces are dropped after {days} days and never sent.",
         state_yes: "{title}: yes",
         state_no: "{title}: no",
-        waiting_on_approval: "Waiting on approval in System Settings.",
-        turn_on_in_system_settings: concat!(
-            "Turn it on in System Settings -> General -> Login Items to let ",
-            crate::app_name!(),
-            " start automatically."
-        ),
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P256).
+        waiting_on_approval: "Waiting for approval in System Settings.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P243).
+        turn_on_in_system_settings: "Turn it on in System Settings > General > Login Items.",
         could_not_turn_on: "Couldn't turn this on: {message}",
         could_not_turn_off: "Couldn't turn this off: {message}",
         version: "Version",
         check_now: "Check Now",
         copy: "Copy",
         checks_daily: "Checks daily",
-        checks_automatically: concat!(
-            crate::app_name!(),
-            " checks for updates automatically and asks before installing."
-        ),
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P259).
+        checks_automatically: "Asks before installing an update.",
         managed_by_homebrew: "Updates managed by Homebrew",
-        homebrew_replaces: "Homebrew installed this copy, so Homebrew replaces it. Run this in a terminal:",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P258).
+        homebrew_replaces: "To update, run this in a terminal:",
         updates_unavailable: "Updates unavailable",
-        not_checked_yet: "Not checked yet on this machine.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P260).
+        not_checked_yet: "Not checked yet.",
         last_checked: "Last checked {relative}.",
-        no_feed: concat!(
-            "This build has no update feed configured, so it will not look for new versions. ",
-            "Development builds are like this. Install from a release DMG to receive updates."
-        ),
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P257).
+        no_feed: "This build doesn't check for updates. Install a release DMG to get them.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P261).
         insecure_feed: concat!(
-            "This build's update feed is not HTTPS, so it has been refused. Reinstall from a ",
+            "This build's update feed isn't secure, so it's refused. Reinstall from a ",
             "release DMG."
         ),
         updates_off: "Updates are turned off for this build.",
-        notifications_rendered_here: "Notifications rendered by this app",
+        notifications_rendered_here: "",
         paused_nothing_sent: PAUSED_NOTHING_SENT,
-        applies_from_now: concat!(
-            "Applies to traces sent from now on. The always-included use stays on; ",
-            "optional uses change only when you change them."
-        ),
+        applies_from_now: "Changes apply to traces sent from now on.",
         always_included: "Always included",
         optional_data_use: "Optional data use",
         reward_opportunities: crate::consent_copy::DATA_USE_REWARD_OPPORTUNITIES,
+        reward_opportunities_tooltip: crate::consent_copy::DATA_USE_REWARD_OPPORTUNITIES_TOOLTIP,
         credit: "Credit",
         required: crate::consent_copy::SCOPE_TAG_REQUIRED,
         nothing_preselected: "Nothing here is pre-selected on your behalf.",
-        nothing_changed: "Nothing has been changed.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P169).
+        nothing_changed: "No changes yet.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P136).
+        project_mode_failed: "Couldn't change this folder's setting.",
         audit_actions: BTreeMap::from([
-            ("armed-auto-upload", "Automatic contributing turned on for"),
-            (
-                "disarmed-auto-upload",
-                "Automatic contributing turned off for",
-            ),
-            ("queue-bulk-approved", "The whole queue was approved"),
-            ("consent-scopes-changed", "Permissions changed"),
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P170).
+            ("armed-auto-upload", "Automatic turned on for"),
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P171).
+            ("disarmed-auto-upload", "Automatic turned off for"),
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P167).
+            ("queue-bulk-approved", "Whole queue approved"),
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P172).
+            ("consent-scopes-changed", "Data uses changed"),
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P168).
             (
                 "near-ai-notice-acknowledged",
-                "The extra privacy scan was confirmed",
+                "Extra privacy scan confirmed",
             ),
         ]),
         audit_changed: "Changed",
@@ -638,7 +650,21 @@ mod tests {
 
     #[test]
     fn no_string_is_empty_and_every_hole_is_known() {
-        let value = serde_json::to_value(shell_words_copy()).unwrap();
+        let mut value = serde_json::to_value(shell_words_copy()).unwrap();
+        // Owner dropped these lines 2026-11-04 (Settings copy pass 2, P142,
+        // P144, P235, P236, P244): each is empty, and the only words allowed
+        // to be. The fields stay because the shells decode them.
+        for pointer in [
+            "/public_profile/footnote",
+            "/public_profile/go_public_footnote",
+            "/settings/at_most_one_notification",
+            "/settings/at_most_one_notification_one",
+            "/settings/notifications_rendered_here",
+        ] {
+            let slot = value.pointer_mut(pointer).expect(pointer);
+            assert_eq!(slot.as_str(), Some(""), "{pointer} was cut");
+            *slot = serde_json::Value::Null;
+        }
         let mut all = Vec::new();
         strings(&value, &mut all);
         assert!(

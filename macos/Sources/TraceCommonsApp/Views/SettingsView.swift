@@ -60,6 +60,11 @@ enum SettingsLegacyWords {
     /// #1146's two-level card heads and the watcher card, from the core's
     /// monitor shell table.
     static var refresh: String { MonitorWords.table?.shell.settingsRefresh ?? "" }
+    /// Each card's re-read button's accessible name and tooltip, naming
+    /// what it re-reads; the pill still shows `refresh` (rule 5).
+    static var refreshDesktop: String { MonitorWords.table?.shell.settingsRefreshDesktop ?? "" }
+    static var refreshDiscovery: String { MonitorWords.table?.shell.settingsRefreshDiscovery ?? "" }
+    static var refreshUses: String { MonitorWords.table?.shell.settingsRefreshUses ?? "" }
     static var consentEyebrow: String { MonitorWords.table?.shell.consentEyebrow ?? "" }
     static var desktopEyebrow: String { MonitorWords.table?.shell.desktopEyebrow ?? "" }
     static var desktopTitle: String { MonitorWords.table?.shell.desktopTitle ?? "" }
@@ -99,6 +104,7 @@ enum SettingsLegacyWords {
     /// #1146's group name ("Optional data use").
     static var optionalEachOne: String { words?.optionalDataUse ?? "" }
     static var rewardOpportunities: String { words?.rewardOpportunities ?? "" }
+    static var rewardOpportunitiesTooltip: String { words?.rewardOpportunitiesTooltip ?? "" }
     static var credit: String { words?.credit ?? "" }
     /// The always-on scope's tag, the core's one spelling ("always on"),
     /// matching the first run's "Always on" line.

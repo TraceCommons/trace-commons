@@ -163,17 +163,19 @@ pub fn source_check_line(tool: SourceTool, source_mode: &str) -> String {
     if tool == SourceTool::OpenCode {
         return match source_mode {
             "watch" => "OpenCode sessions are watched in the selected folder",
-            "off" => "OpenCode collection turned off. Previously queued traces are not removed",
-            "unset" => "No OpenCode folder selected; only sessions you collect through managed launches can be read",
-            _ => "OpenCode source settings could not be confirmed",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P71).
+            "off" => "OpenCode collection turned off",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P74).
+            "unset" => "No OpenCode folder selected; only managed launches are read",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P87).
+            _ => "OpenCode settings could not be confirmed",
         }
         .into();
     }
     match source_mode {
         "watch" => format!("{name} traces folder set"),
-        "off" => format!(
-            "{name} marked not used, so nothing is opened for it. Previously queued traces are not removed"
-        ),
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P72).
+        "off" => format!("{name} marked not used, so nothing is opened for it"),
         _ if undeclared_scans_conventional(tool.adapter_name()) => {
             format!("{name} traces read from the usual place")
         }
@@ -192,6 +194,8 @@ pub struct SourceSettingsCopy {
     pub heading: &'static str,
     pub explanation: &'static str,
     pub save_failed: &'static str,
+    /// A permission change that could not be confirmed; Uses' Refresh sits
+    /// beside it. Approved by the owner 2026-11-04 (Settings copy pass 2, P139).
     pub consent_save_failed: &'static str,
     pub unavailable: &'static str,
     pub selected_folder: &'static str,
@@ -199,7 +203,14 @@ pub struct SourceSettingsCopy {
     /// Approved 2026-10-08 (button rule).
     pub watch_candidate: &'static str,
     pub choose_folder: &'static str,
+    /// The accessible name of a row's Watch, decline and folder buttons:
+    /// `{action}` is the button's visible words, `{tool}` the row's tool,
+    /// so the same button on every row is told apart (copy-guide rule 5).
+    /// DRAFT, NEEDS APPROVAL (2026-11-04).
+    pub tool_action_accessibility_name: &'static str,
     pub retry: &'static str,
+    /// The line under a found folder, saying what agreeing would mean.
+    pub evidence: SourceEvidenceCopy,
     pub opencode_version_title: &'static str,
     pub opencode_version_detail: &'static str,
     pub tools: std::collections::BTreeMap<&'static str, SourceSettingsToolCopy>,
@@ -207,6 +218,34 @@ pub struct SourceSettingsCopy {
     /// (`trajectory_source`), shown while `get_settings` reports
     /// `trajectory_source_mode` as `watch` or `off`.
     pub trajectory: TrajectorySettingsCopy,
+}
+
+/// The line under a folder discovery found, and how long ago its newest
+/// trace was written. Moved verbatim from the macOS shell
+/// (`SourceCandidate.evidence`, copy-guide rule 8); the shell picks the
+/// line and fills it. "Not found" and "found but empty" stay apart: one
+/// says the agent is not used, the other that it is and has no trace yet.
+#[derive(serde::Serialize)]
+pub struct SourceEvidenceCopy {
+    pub missing: &'static str,
+    pub empty: &'static str,
+    pub count_one: &'static str,
+    /// `{count}` traces.
+    pub count: &'static str,
+    /// `{traces}`: `count_one` or `count`; `{age}`: one of the ages below.
+    pub most_recent: &'static str,
+    /// `{evidence}`: the line so far, when an environment variable moved
+    /// the folder.
+    pub relocated: &'static str,
+    pub age_just_now: &'static str,
+    /// `{n}` minutes.
+    pub age_minutes: &'static str,
+    pub age_hour: &'static str,
+    /// `{n}` hours.
+    pub age_hours: &'static str,
+    pub age_yesterday: &'static str,
+    /// `{n}` days.
+    pub age_days: &'static str,
 }
 
 /// The Watched folders row for a declared folder of exported traces. It is
@@ -267,7 +306,8 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
                 },
                 explanation: (tool == SourceTool::OpenCode)
                     .then_some("Watch local OpenCode sessions or a folder of exports."),
-                choose_folder: (tool == SourceTool::OpenCode).then_some("Choose a folder…"),
+                // Approved by the owner 2026-11-04 (Settings copy pass 2, P88).
+                choose_folder: (tool == SourceTool::OpenCode).then_some("Choose folder…"),
                 unset_scans_conventional: undeclared_scans_conventional(tool.adapter_name()),
             },
         )
@@ -277,19 +317,43 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
         opencode_version_title: OPENCODE_VERSION_TITLE,
         opencode_version_detail: OPENCODE_VERSION_DETAIL,
         heading: "Watched folders",
-        explanation: "Source settings control future discovery. Turning a source off does not remove traces already queued.",
-        save_failed: "Couldn't confirm that folder change. The last available settings are shown; retry to check the current state.",
-        consent_save_failed: "Couldn't confirm that permission change. The last available permissions are shown; retry to check the current state.",
-        unavailable: "Current folder settings aren't available.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P75).
+        explanation: "Turning a tool off does not remove traces already queued.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P76).
+        save_failed: "Couldn't confirm that change; the folders shown may be out of date.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P139).
+        consent_save_failed: "Couldn't confirm that change. The ticks may be out of date.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P89).
+        unavailable: "Folder settings aren't available.",
         selected_folder: "Selected folder",
-        no_candidate: "No standard location found — choose a folder, or decline",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P77).
+        no_candidate: "No standard location found.",
         watch_candidate: "Watch",
-        choose_folder: "Choose a different folder…",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P80).
+        choose_folder: "Choose folder…",
+        tool_action_accessibility_name: "{tool}: {action}",
         retry: "Retry",
+        evidence: SourceEvidenceCopy {
+            missing: "Not found on this machine",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P81).
+            empty: "Found, no traces yet",
+            count_one: "1 trace",
+            count: "{count} traces",
+            most_recent: "{traces}, most recent {age}",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P90).
+            relocated: "{evidence} (set by an environment variable)",
+            age_just_now: "just now",
+            age_minutes: "{n} minutes ago",
+            age_hour: "1 hour ago",
+            age_hours: "{n} hours ago",
+            age_yesterday: "yesterday",
+            age_days: "{n} days ago",
+        },
         tools,
         trajectory: TrajectorySettingsCopy {
             title: "Exported traces",
-            explanation: "Exports in this folder always wait for you. None is sent automatically, whatever a folder's rule.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P73).
+            explanation: "Exports here always wait for you; none is sent automatically.",
             watching: "A folder of exported traces is read.",
             off: "No folder of exported traces is read.",
             decline: "Stop reading",
@@ -343,9 +407,17 @@ mod tests {
                 undeclared_scans_conventional(adapter)
             );
             let source = SourceTool::from_key(tool.key).expect("known source");
+            // Owner dropped "Previously queued traces are not removed" from
+            // each off line 2026-11-04 (Settings copy pass 2, P71, P72); the
+            // section explanation (P75) says it once.
             assert!(
-                source_check_line(source, "off")
-                    .contains("Previously queued traces are not removed")
+                source_check_line(source, "off").ends_with("turned off")
+                    || source_check_line(source, "off")
+                        .ends_with("marked not used, so nothing is opened for it")
+            );
+            assert!(
+                copy.explanation
+                    .contains("does not remove traces already queued")
             );
             if source == SourceTool::OpenCode {
                 assert_eq!(tool.decline, "Don't read");
@@ -376,10 +448,7 @@ mod tests {
             assert!(line.contains("could not be confirmed"));
             assert_ne!(line, source_check_line(SourceTool::OpenCode, "off"));
         }
-        assert!(
-            source_check_line(SourceTool::OpenCode, "unset")
-                .contains("only sessions you collect through managed launches")
-        );
+        assert!(source_check_line(SourceTool::OpenCode, "unset").contains("only managed launches"));
         assert!(source_check_line(SourceTool::OpenCode, "off").contains("turned off"));
         assert!(OPENCODE_VERSION_DETAIL.contains("1.18.29"));
         assert!(OPENCODE_VERSION_DETAIL.contains("1.19.0 databases"));
@@ -400,11 +469,11 @@ mod tests {
         );
         assert_eq!(
             source_check_line(SourceTool::Claude, "off"),
-            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed"
+            "Claude Code marked not used, so nothing is opened for it"
         );
         assert_eq!(
             source_check_line(SourceTool::Codex, "off"),
-            "Codex marked not used, so nothing is opened for it. Previously queued traces are not removed"
+            "Codex marked not used, so nothing is opened for it"
         );
         // Gemini CLI and Cline construct no adapter when undeclared, so the
         // scan sentence would be false for them in the fail-open direction.
@@ -422,7 +491,7 @@ mod tests {
         );
         assert_eq!(
             source_check_line(SourceTool::Cline, "off"),
-            "Cline marked not used, so nothing is opened for it. Previously queued traces are not removed"
+            "Cline marked not used, so nothing is opened for it"
         );
     }
 

@@ -25,7 +25,7 @@ fork (design 3.6). This directory holds only what is staging's own.
   `ingest.` and `issuer.staging.tracecommons.ai`). Serves
   `/.well-known/apple-app-site-association` and
   `/near-ai-pins/current.json`; everything else is 404.
-- `apple-app-site-association` -- the webcredentials association (unused since passkeys were removed) for
+- `apple-app-site-association` -- the webcredentials association (unused since V144) for
   `KXSWJN7WY8.ai.tracecommons.shell.staging`.
 - `render-env.sh` -- reads the `tc-staging-*` secrets from Secret Manager on
   the VM and writes `/etc/tracecommons/ingest.env`, `issuer.env` and the

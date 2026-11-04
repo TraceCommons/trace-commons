@@ -169,6 +169,7 @@ fn pending_submission_is_single_and_failure_allows_retry() {
             exists: false,
             session_count: 0,
             most_recent: None,
+            total_bytes: None,
             relocated_by_env: false,
             answers_at: None,
         })

@@ -464,17 +464,24 @@ public struct GlassEyebrowCard<Accessory: View, Content: View>: View {
         }
     }
 
-    /// The heading, its accessory, and the content under them.
+    /// The heading, its accessory, and the content under them. An empty
+    /// heading (a line the owner cut) draws no text, and with no accessory
+    /// no heading row at all.
     private var stack: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
-                Text(title ?? eyebrow)
-                    .glassType(title == nil ? GlassTokens.TypeScale.eyebrow : GlassTokens.TypeScale.title)
-                    .foregroundStyle(title == nil ? GlassColor.textTertiary : GlassColor.textPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityAddTraits(.isHeader)
-                Spacer(minLength: GlassTokens.Space.s4)
-                accessory
+        let heading = title ?? eyebrow
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            if !heading.isEmpty || Accessory.self != EmptyView.self {
+                HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
+                    if !heading.isEmpty {
+                        Text(heading)
+                            .glassType(title == nil ? GlassTokens.TypeScale.eyebrow : GlassTokens.TypeScale.title)
+                            .foregroundStyle(title == nil ? GlassColor.textTertiary : GlassColor.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityAddTraits(.isHeader)
+                    }
+                    Spacer(minLength: GlassTokens.Space.s4)
+                    accessory
+                }
             }
             content
         }

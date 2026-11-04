@@ -52,7 +52,7 @@ struct ConsentSection: View {
         let optional = model.consentScopes.filter { !$0.alwaysOn && $0.grantsDataUse }
 
         GlassEyebrowCard(SettingsLegacyWords.consentEyebrow, title: SettingsLegacyWords.consentHeading, accessory: {
-            GlassRefreshButton(SettingsLegacyWords.refresh, action: model.refreshStatus)
+            GlassRefreshButton(SettingsLegacyWords.refreshUses, title: SettingsLegacyWords.refresh, action: model.refreshStatus)
         }) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 caption(SettingsLegacyWords.appliesFromNow)
@@ -71,6 +71,7 @@ struct ConsentSection: View {
                     }
                 }
                 caption(SettingsLegacyWords.rewardOpportunities)
+                    .helpIfAny(SettingsLegacyWords.rewardOpportunitiesTooltip)
                 ForEach(optional) { scope in
                     ConsentScopeToggle(scope: scope)
                 }

@@ -131,14 +131,15 @@ final class InsightsSettingsSwitchesTests: XCTestCase {
         // No headed card without a switch in it (an older daemon).
         XCTAssertTrue(card.contains("if model.daemonSettings?.insightsRecapCardEnabled != nil {"))
 
-        // Drawn under Tools, after its card, inside the modal's gate.
+        // Its own section since the Settings IA review (D13), inside the
+        // modal's gate: it waits for first run, as Tools did.
         let content = try SettingsParityTests.text("Views/Settings/GlassSettingsContent.swift")
-        XCTAssertEqual(content.components(separatedBy: "InsightsSettingsCard()").count - 1, 1)
-        XCTAssertTrue(content.contains("case .tools:\n                ToolsSection()\n"))
-        let tools = try XCTUnwrap(content.range(of: "case .tools:"))
-        let next = try XCTUnwrap(content.range(of: "case .privateAI:"))
-        let drawn = try XCTUnwrap(content.range(of: "InsightsSettingsCard()"))
-        XCTAssertTrue(tools.upperBound < drawn.lowerBound && drawn.upperBound < next.lowerBound)
+        XCTAssertEqual(content.components(separatedBy: "InsightsSection()").count - 1, 1)
+        XCTAssertTrue(content.contains("case .insights: InsightsSection()\n"))
+        XCTAssertTrue(content.contains("case .tools: ToolsSection()\n"))
+        XCTAssertFalse(content.contains("InsightsSettingsCard()"), "the card is drawn outside its section")
+        XCTAssertTrue(card.contains("struct InsightsSection: View {\n    var body: some View {\n        InsightsSettingsCard()\n        SubscriptionUsageSettingsSection()"))
+        XCTAssertFalse(SettingsSection.insights.availableBeforeOnboarding)
         XCTAssertFalse(SettingsSection.tools.availableBeforeOnboarding)
     }
 

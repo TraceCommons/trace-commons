@@ -48,9 +48,9 @@ final class NudgeCopyExportTests: XCTestCase {
                 fromJSON: TCCoreCopy.nudgeDigestHelpJSON(settingsJSON: NudgeSettings.digestHelpInput(settings)))
         }
         XCTAssertEqual(try help(#"{"digest_interval_secs":3600,"digest_schedule":{"mode":"interval"}}"#),
-                       "At most one notification an hour, and none when nothing is waiting.")
+                       "At most one an hour, only when traces are waiting.")
         XCTAssertEqual(try help(#"{"digest_interval_secs":21600}"#),
-                       "At most one notification every 6 hours, and none when nothing is waiting.")
+                       "At most one every 6 hours, only when traces are waiting.")
         XCTAssertNil(try help(#"{"digest_interval_secs":5400}"#))
         XCTAssertNotNil(try help(#"{"digest_schedule":{"mode":"evening","hour":18}}"#))
         XCTAssertNil(NudgeSettings.digestHelp(fromJSON: TCCoreCopy.nudgeDigestHelpJSON(settingsJSON: nil)))

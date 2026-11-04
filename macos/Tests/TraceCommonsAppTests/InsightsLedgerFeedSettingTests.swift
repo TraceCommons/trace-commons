@@ -116,7 +116,8 @@ final class InsightsLedgerFeedSettingTests: XCTestCase {
         let section = try SettingsParityTests.text("Views/Settings/PrivateAISection.swift")
         XCTAssertTrue(section.contains("let feed = model.daemonSettings?.insightsLedgerFeed {"))
         XCTAssertTrue(section.contains(#"InsightsOverviewWords.text("analytics_setting_ledger_feed", Self.insightsCopy)"#))
-        XCTAssertTrue(section.contains(#"InsightsOverviewWords.text("analytics_feed_ledger", Self.insightsCopy)"#))
+        // Owner dropped the ledger feed's explanation from Settings 2026-11-04 (Settings copy pass 2, P189).
+        XCTAssertFalse(section.contains(#"InsightsOverviewWords.text("analytics_feed_ledger", Self.insightsCopy)"#))
         XCTAssertTrue(section.contains("Task { await model.setInsightsLedgerFeed(on) }"))
         XCTAssertTrue(section.contains(".disabled(model.insightsLedgerFeedBusy)"))
         XCTAssertTrue(section.contains("if let refusal = model.insightsLedgerFeedRefusal {"))

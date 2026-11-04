@@ -2002,9 +2002,34 @@ extension DaemonData {
 
     /// Mirrors protocol `first_run_estimate::FirstRunEstimate`: the
     /// daemon's `first_run_estimate` answer, the commons' dollar estimate
-    /// per accepted trace for the first run's Traces step. No range when the
-    /// commons publishes none; the first run then words its estimate in
-    /// points. Passed back to the core to word, never formatted here.
+    /// per accepted trace. The first run no longer asks for it (owner,
+    /// 2026-11-04): Traces sends one request, `first_run_copy`. Kept so the
+    /// contract stays decodable if a figure returns.
+    /// The daemon's `first_run_copy` answer: the lines Traces shows under
+    /// the traces found, from the commons (`source` "commons") or the
+    /// protocol's default lines (`source` "fallback"). The daemon has
+    /// already checked every line; a screen shows them as they are.
+    public struct FirstRunCopyLines: Codable, Equatable, Sendable {
+        public let foundCredit: String
+        public let foundCouldCredit: String
+        public let creditDepends: String?
+        public let source: String?
+
+        public init(foundCredit: String, foundCouldCredit: String, creditDepends: String?, source: String?) {
+            self.foundCredit = foundCredit
+            self.foundCouldCredit = foundCouldCredit
+            self.creditDepends = creditDepends
+            self.source = source
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case foundCredit = "found_credit"
+            case foundCouldCredit = "found_could_credit"
+            case creditDepends = "credit_depends"
+            case source
+        }
+    }
+
     public struct FirstRunEstimate: Codable, Equatable, Sendable {
         public let usdMicrosPerAcceptedTrace: UsdMicrosRange?
 

@@ -602,8 +602,10 @@ pub fn void_notice_for_wire_with_regrant(
 /// Describes the deterministic patterns without promising a model pass.
 /// Detailed token-format heuristics belong in redactor documentation, while
 /// the adjacent limit keeps missed secrets and personal information visible.
+///
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P129).
 pub const AUTO_PATTERNS_ONLY_SCOPE: &str =
-    "Recognized secrets and some file paths and email addresses are removed automatically.";
+    "Known secrets and some file paths and emails are removed.";
 
 /// The limit of the patterns, for the same route as
 /// [`AUTO_PATTERNS_ONLY_SCOPE`].
@@ -616,12 +618,21 @@ pub const AUTO_PATTERNS_ONLY_LIMIT: &str =
 /// Shown only where a pinned witness is configured, since only then does a
 /// session leave unredacted.
 ///
-/// Approved 2026-10-06. States the spec's answer rather than its
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P175). States the spec's answer rather than its
 /// question: the witness does not verify NEAR AI's attestation on each
 /// classifier call, which puts the classifier's operator inside the
 /// transcript's trust boundary, and the classifier receives the
-/// deterministic-pass output rather than the unredacted session.
-pub const AUTO_RAW_SEND_BOTH_ENCLAVES: &str = "Each trace is sent unredacted to your witness, which redacts it inside an enclave. The witness can pass the text its fixed patterns leave to NEAR AI's privacy filter, which runs in a second enclave with a second operator, NEAR AI. The witness does not check that second enclave's attestation on each call, so NEAR AI's operator is trusted with that text.";
+/// deterministic-pass output rather than the unredacted session. That
+/// attestation detail is [`DISCLOSURE_WITNESS_ROUTE_TOOLTIP`].
+pub const AUTO_RAW_SEND_BOTH_ENCLAVES: &str = "Traces go unredacted to your witness, which redacts them in an enclave. Leftover text may go to NEAR AI's privacy filter, a second enclave with a second operator you must trust.";
+
+/// The tooltip on [`AUTO_RAW_SEND_BOTH_ENCLAVES`] where it is the witness
+/// route line in Where your traces go
+/// (`RouteDisclosureCopy::disclosure_witness_route_tooltip`).
+///
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P175).
+pub const DISCLOSURE_WITNESS_ROUTE_TOOLTIP: &str =
+    "The witness doesn't check that enclave's attestation on each call.";
 
 // Where the witness came from -- the spec's second "further sentence" -- is
 // no longer one hedged constant here. The config now records the origin
@@ -682,9 +693,11 @@ pub const AUTO_PATH_ASK_FIRST: &str =
     "Review each trace yourself. Nothing is contributed until you approve it.";
 
 /// The ask-first path's first line, shown on its own with
-/// [`AUTO_PATH_ASK_FIRST_DETAIL`] behind an info button. Approved
-/// 2026-10-08 (owner, dictated).
-pub const AUTO_PATH_ASK_FIRST_TITLE: &str = "Review each trace yourself.";
+/// [`AUTO_PATH_ASK_FIRST_DETAIL`] behind an info button.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P125). The line is cut: empty, and a shell
+/// that draws it should skip empty text. The field stays, because shells
+/// decode it.
+pub const AUTO_PATH_ASK_FIRST_TITLE: &str = "";
 
 /// The rest of [`AUTO_PATH_ASK_FIRST`]. Approved 2026-10-08 (owner,
 /// dictated).
@@ -699,10 +712,18 @@ pub const SCOPE_TAG_REQUIRED: &str = "always on";
 
 /// Distinguish trace-scoring eligibility from other optional reward uses.
 /// Scope choice grants permission; acceptance and scoring still decide credit.
-/// Read by the first-run Uses screen and Settings' data uses. Owner,
-/// 2026-10-27; approved in these words in Zaki's review of #1690
-/// (2026-10-28).
-pub const DATA_USE_REWARD_OPPORTUNITIES: &str = "To earn credit for your traces, allow Train coding models. Create benchmarks and Train evaluators are extra uses that may earn more. Credit depends on acceptance and scoring.";
+/// Read by the first-run Uses screen and Settings' data uses.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P137). What credit depends on moved to
+/// [`DATA_USE_REWARD_OPPORTUNITIES_TOOLTIP`].
+pub const DATA_USE_REWARD_OPPORTUNITIES: &str =
+    "Allow Train coding models to earn credit. The other uses may earn more.";
+
+/// The tooltip on the Train coding models toggle row, beside
+/// [`DATA_USE_REWARD_OPPORTUNITIES`] in Settings' data uses.
+///
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P137).
+pub const DATA_USE_REWARD_OPPORTUNITIES_TOOLTIP: &str =
+    "Credit depends on whether your traces are accepted and how they score.";
 
 /// The scope [`DATA_USE_REWARD_OPPORTUNITIES`] names as the one that earns
 /// credit (`model_training`, "Train coding models").
@@ -960,10 +981,9 @@ pub fn witness_capacity_notice_for_wire(value: &serde_json::Value) -> Option<Wit
 /// `status.legacy_invite_migration.offered` is true.
 pub const LEGACY_MIGRATION_OFFER_TITLE: &str = "Move to your NEAR AI account";
 
-/// Reworded 2026-10-11 (owner direction), and its passkey clause deleted
-/// 2026-10-31 when passkeys were removed; not yet approved. The offer. Says it is optional and that
-/// declining changes nothing, because coexistence is the default.
-pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. You can move your contributions to your NEAR AI account instead. Nothing changes unless you choose to, and your invite keeps working if you don't.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P7). The offer. Says it is optional and that
+/// the invite keeps working, because coexistence is the default.
+pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. Move your contributions to your NEAR AI account, or keep using the invite.";
 
 /// Approved 2026-10-06. The button that starts the move. Approved 2026-10-08 (button rule).
 pub const LEGACY_MIGRATION_OFFER_ACTION: &str = "Move";
@@ -979,16 +999,18 @@ pub const LEGACY_MIGRATION_OFFER_LATER: &str = "You can move later from Settings
 
 /// Not yet approved. Shown while the shell waits on the NEAR AI sign-in in
 /// the browser, which it starts itself when the move needs it
-/// (`legacy_migration_no_near_ai_session`), before it retries the move. The
-/// key keeps its old `passkey_` name.
-pub const LEGACY_MIGRATION_PASSKEY_WAITING: &str = "Waiting for your browser...";
+/// (`legacy_migration_no_near_ai_session`), before it retries the move. Its
+/// wire key keeps an older name (`LegacyMigrationOfferCopy`).
+pub const LEGACY_MIGRATION_NEAR_AI_LOGIN_WAITING: &str = "Waiting for your browser...";
 
-/// Not yet approved. The passkey step ended without finishing (it failed,
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P41).
+/// The NEAR AI sign-in in the browser ended without finishing (it failed,
 /// or ran out of time). Nothing ran.
-pub const LEGACY_MIGRATION_PASSKEY_FAILED: &str = "Your passkey step didn't finish, so nothing was moved. Your invite keeps working; try again when you're ready.";
+pub const LEGACY_MIGRATION_NEAR_AI_LOGIN_FAILED: &str =
+    "Sign-in didn't finish, so nothing was moved.";
 
-/// Not yet approved. Stops waiting on the passkey step. Nothing is moved.
-pub const LEGACY_MIGRATION_PASSKEY_CANCEL: &str = "Cancel";
+/// Not yet approved. Stops waiting on the NEAR AI sign-in. Nothing is moved.
+pub const LEGACY_MIGRATION_NEAR_AI_LOGIN_CANCEL: &str = "Cancel";
 
 /// Not yet approved. The accessible name of the offer card's Move button,
 /// so a screen reader can tell it from the one in Settings
@@ -1001,13 +1023,22 @@ pub const LEGACY_MIGRATION_OFFER_ACTION_NAME_NOTICE: &str =
 pub const LEGACY_MIGRATION_OFFER_ACTION_NAME_SETTINGS: &str =
     "Move to your NEAR AI account, from Settings";
 
-/// Approved 2026-10-06. Shown while the move runs.
-pub const LEGACY_MIGRATION_WORKING: &str = "Moving to your NEAR AI account...";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P28). Shown while the move runs.
+pub const LEGACY_MIGRATION_WORKING: &str = "Moving…";
 
-/// Approved 2026-10-06. Asked only when neither the device nor the
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P5). Asked only when neither the device nor the
 /// commons can say which invite it joined with
-/// (`legacy_migration_invite_needed`).
-pub const LEGACY_MIGRATION_INVITE_PROMPT: &str = "Paste the invite link you joined with. It is used only to show which invite is yours, and it is not stored.";
+/// (`legacy_migration_invite_needed`). Drawn as the field's label and
+/// accessible name; what the link is used for is
+/// [`LEGACY_MIGRATION_INVITE_PROMPT_TOOLTIP`].
+pub const LEGACY_MIGRATION_INVITE_PROMPT: &str = "Paste your invite link";
+
+/// The tooltip on the invite link field
+/// (`LegacyMigrationOfferCopy::invite_link_tooltip`).
+///
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P5).
+pub const LEGACY_MIGRATION_INVITE_PROMPT_TOOLTIP: &str =
+    "Used only to show which invite is yours. It isn't stored.";
 
 /// Approved 2026-10-06. The notice's heading: the one sentence the
 /// consent spec requires every shell to show after the move.
@@ -1030,8 +1061,8 @@ pub const LEGACY_MIGRATION_NOTICE_ACKNOWLEDGE: &str = "Got it";
 
 /// Shown when the shell could not reach the core to start the move at all
 /// (a transport failure, not a refusal): nothing ran, so nothing changed.
-pub const LEGACY_MIGRATION_START_FAILED: &str =
-    "The move could not be started. Nothing was changed.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P45).
+pub const LEGACY_MIGRATION_START_FAILED: &str = "Couldn't start the move. Nothing changed.";
 
 /// The notice after a move, as a shell renders it.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
@@ -1076,50 +1107,50 @@ pub fn legacy_migration_notice_for_wire(
 #[must_use]
 pub fn legacy_migration_refusal_line(label: &str) -> &'static str {
     match label {
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P9).
         "legacy_migration_tenant_pooled" => {
-            "This invite was shared by many people, so it can't be moved to one account. It keeps working exactly as it does now."
+            "This invite is shared, so it can't be moved. It keeps working."
         }
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P18).
         "legacy_migration_admission_not_ready" => {
-            "This commons isn't accepting contributions by account yet. Your invite keeps working; try again later."
+            "Moving isn't open yet. Your invite keeps working."
         }
-        // Approved 2026-10-31, when passkeys were removed.
-        "legacy_migration_no_near_ai_session" => {
-            "Sign in to NEAR AI in your browser first, then try again. Your invite keeps working."
-        }
-        "legacy_migration_invite_needed" => {
-            "We couldn't tell which invite you joined with. Paste your invite link to continue."
-        }
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P19).
+        "legacy_migration_no_near_ai_session" => "Sign in to NEAR AI in your browser first.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P25).
+        "legacy_migration_invite_needed" => "We couldn't tell which invite you joined with.",
         "legacy_migration_invite_other_commons" => "That invite is for a different commons.",
         "legacy_migration_invite_invalid" => "That doesn't look like an invite link or code.",
-        "legacy_migration_tenant_claimed" => {
-            "This invite has already been moved to a different account. Nothing changed here."
-        }
-        // Approved 2026-10-06 (V104): another of this person's devices
-        // moved the same invite tenant onto this account under a different
-        // invite code, which was never granted to the account.
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P29).
+        "legacy_migration_tenant_claimed" => "This invite was already moved to another account.",
+        // V104: another of this person's devices moved the same invite
+        // tenant onto this account under a different invite code, which was
+        // never granted to the account.
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P6).
         "legacy_migration_invite_not_linked" => {
-            "This device joined with a different invite than the one already moved to your account, so it can't be moved. It keeps working as it does now."
+            "This device joined with a different invite, so it can't be moved. It keeps working."
         }
-        "legacy_migration_invite_revoked" => {
-            "This invite was revoked, so it can't be moved. Nothing changed here."
-        }
-        "legacy_migration_device_not_eligible" => {
-            "This device can't be moved to an account. It keeps working as it does now."
-        }
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P46).
+        "legacy_migration_invite_revoked" => "This invite was revoked, so it can't be moved.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P20).
+        "legacy_migration_device_not_eligible" => "This device can't be moved. It keeps working.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P21).
         "legacy_migration_link_not_enabled" => {
-            "This commons doesn't offer moving an invite to an account yet. Your invite keeps working."
+            "Moving isn't offered yet. Your invite keeps working."
         }
-        "legacy_migration_verification_failed" => {
-            "The commons's answer didn't check out, so nothing was changed."
-        }
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P47).
+        "legacy_migration_verification_failed" => "The answer didn't check out. Nothing changed.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P30).
         "legacy_migration_identity_changed" => {
-            "You signed out or changed accounts while this was running, so nothing was moved."
+            "Your account changed during the move. Nothing was moved."
         }
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P48).
         "legacy_migration_commons_changed" => {
-            "This commons's settings changed since you joined, so nothing was moved. Try again later."
+            "Settings changed since you joined. Nothing was moved; try again later."
         }
         "legacy_migration_already_migrated" => "You've already moved to your NEAR AI account.",
-        _ => "Nothing was changed. Your invite keeps working; try again later.",
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P31).
+        _ => "Nothing changed. Try again later.",
     }
 }
 
@@ -1131,17 +1162,24 @@ pub struct LegacyMigrationOfferCopy {
     pub action: &'static str,
     pub working: &'static str,
     pub invite_prompt: &'static str,
+    /// The tooltip on the invite link field ([`Self::invite_prompt`]).
+    pub invite_link_tooltip: &'static str,
     pub start_failed: &'static str,
     /// The offer card's dismiss. Only where the offer is a dismissible card.
     pub dismiss: &'static str,
     /// Beside that dismiss: the move is still in Settings.
     pub later: &'static str,
-    /// While the shell waits on the passkey step in the browser.
-    pub passkey_waiting: &'static str,
-    /// The passkey step ended without finishing.
-    pub passkey_failed: &'static str,
-    /// Stops waiting on the passkey step.
-    pub passkey_cancel: &'static str,
+    /// While the shell waits on the NEAR AI sign-in in the browser. The wire
+    /// keys of this field and the next two keep their older names, which
+    /// shipped shells decode.
+    #[serde(rename = "passkey_waiting")]
+    pub near_ai_login_waiting: &'static str,
+    /// The NEAR AI sign-in ended without finishing.
+    #[serde(rename = "passkey_failed")]
+    pub near_ai_login_failed: &'static str,
+    /// Stops waiting on the NEAR AI sign-in.
+    #[serde(rename = "passkey_cancel")]
+    pub near_ai_login_cancel: &'static str,
     /// The accessible name of `action` on the offer card in the notices.
     pub action_name_notice: &'static str,
     /// The accessible name of `action` in Settings.
@@ -1156,12 +1194,13 @@ pub fn legacy_migration_offer() -> LegacyMigrationOfferCopy {
         action: LEGACY_MIGRATION_OFFER_ACTION,
         working: LEGACY_MIGRATION_WORKING,
         invite_prompt: LEGACY_MIGRATION_INVITE_PROMPT,
+        invite_link_tooltip: LEGACY_MIGRATION_INVITE_PROMPT_TOOLTIP,
         start_failed: LEGACY_MIGRATION_START_FAILED,
         dismiss: LEGACY_MIGRATION_OFFER_DISMISS,
         later: LEGACY_MIGRATION_OFFER_LATER,
-        passkey_waiting: LEGACY_MIGRATION_PASSKEY_WAITING,
-        passkey_failed: LEGACY_MIGRATION_PASSKEY_FAILED,
-        passkey_cancel: LEGACY_MIGRATION_PASSKEY_CANCEL,
+        near_ai_login_waiting: LEGACY_MIGRATION_NEAR_AI_LOGIN_WAITING,
+        near_ai_login_failed: LEGACY_MIGRATION_NEAR_AI_LOGIN_FAILED,
+        near_ai_login_cancel: LEGACY_MIGRATION_NEAR_AI_LOGIN_CANCEL,
         action_name_notice: LEGACY_MIGRATION_OFFER_ACTION_NAME_NOTICE,
         action_name_settings: LEGACY_MIGRATION_OFFER_ACTION_NAME_SETTINGS,
     }
@@ -1518,59 +1557,63 @@ pub const DISCLOSURE_TITLE: &str = "Where your traces go";
 
 /// The route line when a witness is configured and refusing.
 ///
-/// Approved 2026-10-06. True of every refusing state
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P185). True of every refusing state
 /// (`WitnessTrustState::is_refusing`): the submission path refuses before any
 /// network call.
 pub const DISCLOSURE_ROUTE_WITNESS_REFUSING: &str =
-    "A witness is set up but this app cannot check it, so no trace is sent until that is fixed.";
+    "Your witness can't be checked, so no traces are sent.";
 
 /// The route line with no witness configured.
 ///
 /// The local redactor runs before upload; the hosted service applies its
 /// own privacy-filter pass at ingest. This does not promise complete PII
 /// removal. What an attached local filter receives is the next sentence's job.
-pub const DISCLOSURE_ROUTE_LOCAL: &str = "Traces are redacted on this computer. The server that receives your traces applies an additional personal information (PII) removal pass.";
+///
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P192).
+pub const DISCLOSURE_ROUTE_LOCAL: &str =
+    "Traces are redacted on this computer, then the server removes more personal information.";
 
 /// The route line for a device that is not enrolled.
 ///
-/// Approved 2026-10-06.
-pub const DISCLOSURE_ROUTE_NOT_ENROLLED: &str =
-    "This computer is not connected to a commons, so nothing is sent.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P215).
+pub const DISCLOSURE_ROUTE_NOT_ENROLLED: &str = "Not connected to a commons, so nothing is sent.";
 
 /// The route line when the configuration cannot be read.
 ///
-/// Approved 2026-10-06. A client that cannot read its settings sends
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P210). A client that cannot read its settings sends
 /// nothing (`WitnessTrustState::SettingsUnreadable` is a refusal).
 pub const DISCLOSURE_ROUTE_SETTINGS_UNREADABLE: &str =
-    "This app could not read its settings, so nothing is sent.";
+    "Couldn't read settings, so nothing is sent.";
 
 /// Local route, no model privacy filter attached.
 pub const DISCLOSURE_LOCAL_FILTER_NONE: &str = "Local redaction uses fixed patterns.";
 
 /// Local route, NEAR AI's hosted privacy filter attached.
 ///
-/// Approved 2026-10-06. The client's NEAR AI adapter
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P183). The client's NEAR AI adapter
 /// (`NearAiPrivacyFilterAdapter`) makes an ordinary HTTPS call and checks no
 /// attestation. The same trust statement `AUTO_RAW_SEND_BOTH_ENCLAVES` makes
 /// for the witness's hop, made here for this computer's own.
-pub const DISCLOSURE_LOCAL_FILTER_NEAR_AI: &str = "The text the fixed patterns leave is then sent from this computer to NEAR AI's privacy filter. This app does not check that service's attestation, so NEAR AI's operator is trusted with that text.";
+pub const DISCLOSURE_LOCAL_FILTER_NEAR_AI: &str = "Remaining text then goes to NEAR AI's privacy filter. Its attestation isn't checked, so you trust NEAR AI with that text.";
 
 /// Local route, a privacy-filter endpoint named in the environment.
 ///
-/// Approved 2026-10-06.
-pub const DISCLOSURE_LOCAL_FILTER_SELF_HOSTED: &str = "The text the fixed patterns leave is then sent from this computer to a privacy filter named in its environment settings. This app does not check who runs it.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P184).
+pub const DISCLOSURE_LOCAL_FILTER_SELF_HOSTED: &str = "Remaining text then goes to the privacy filter in your environment settings. Nothing here checks who runs it.";
 
 /// Local route, a local sidecar program named in the environment.
 ///
-/// Approved 2026-10-06.
-pub const DISCLOSURE_LOCAL_FILTER_SIDECAR: &str = "The text the fixed patterns leave is then passed to a program on this computer named in its environment settings.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P193).
+pub const DISCLOSURE_LOCAL_FILTER_SIDECAR: &str =
+    "Remaining text then goes to a local program set in your environment settings.";
 
 /// Local route, a filter setting the redactor refuses to build.
 ///
-/// Approved 2026-10-06. `build_redactor_with` refuses an unknown
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P205). `build_redactor_with` refuses an unknown
 /// `pii_filter`, and the protocol crate refuses a malformed environment
 /// backend; neither falls back to patterns only.
-pub const DISCLOSURE_LOCAL_FILTER_INVALID: &str = "The privacy filter setting cannot be used, so traces are not redacted or sent until it is fixed.";
+pub const DISCLOSURE_LOCAL_FILTER_INVALID: &str =
+    "The privacy filter setting is invalid, so nothing is sent until it's fixed.";
 
 /// The witness block's heading.
 ///
@@ -1585,74 +1628,89 @@ pub const DISCLOSURE_WITNESS_MEASUREMENTS_LABEL: &str = "Pinned measurements";
 
 /// What this client checks of the witness enclave, every time.
 ///
-/// Approved 2026-10-06. `witness::verify::verify_witness` is the only
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P181). `witness::verify::verify_witness` is the only
 /// constructor of the `VerifiedWitness` the transport requires: a fresh
 /// nonce-bound quote whose measurement must match a pin and whose report
 /// data must name the pinned signing address.
-pub const DISCLOSURE_WITNESS_CHECK: &str = "Before a trace is sent, this app asks the witness for a fresh attestation and sends nothing unless it matches a measurement pinned here and names this signing key.";
+pub const DISCLOSURE_WITNESS_CHECK: &str =
+    "Nothing is sent unless the witness's fresh attestation matches these pins and key.";
 
 /// The second enclave, from what this client can and cannot see.
 ///
-/// Approved 2026-10-06. The classifier backend and endpoint are set
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P180). The classifier backend and endpoint are set
 /// in the witness's measured compose file (`deploy/witness`), so they are
 /// covered by the measurement, but this client holds only the measurement
 /// value.
-pub const DISCLOSURE_WITNESS_CLASSIFIER: &str = "Which privacy filter the witness calls is fixed by the setup its measurement covers. This app checks the measurement, but it does not read that setup and never sees the filter's attestation.";
+pub const DISCLOSURE_WITNESS_CLASSIFIER: &str = "The witness's measurement fixes which privacy filter it uses. You can't see that filter's attestation.";
 
 /// Origin: published by the commons and saved at join (spec, point 2).
 ///
-/// Approved 2026-10-06.
-pub const DISCLOSURE_ORIGIN_PUBLISHED_AT_JOIN: &str = "The commons you joined published this witness, and it was saved when you joined, without asking you.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P190).
+pub const DISCLOSURE_ORIGIN_PUBLISHED_AT_JOIN: &str =
+    "Set by the commons you joined, without asking you.";
 /// Origin: installed from a connected inference selection (#1019).
 ///
-/// Approved 2026-10-06.
-pub const DISCLOSURE_ORIGIN_CONNECTED_INFERENCE: &str = "You chose this witness when you connected inference, and confirmed installing it on this computer.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P194).
+pub const DISCLOSURE_ORIGIN_CONNECTED_INFERENCE: &str =
+    "You chose this witness when you connected inference.";
 /// Origin: typed into Settings.
 ///
-/// Approved 2026-10-06.
-pub const DISCLOSURE_ORIGIN_SETTINGS: &str =
-    "This witness was entered in Settings on this computer.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P216).
+pub const DISCLOSURE_ORIGIN_SETTINGS: &str = "Entered in Settings on this computer.";
 /// Origin: environment variables at enrollment.
 ///
-/// Approved 2026-10-06.
-pub const DISCLOSURE_ORIGIN_ENVIRONMENT: &str =
-    "This witness came from this computer's environment settings when it was connected.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P201).
+pub const DISCLOSURE_ORIGIN_ENVIRONMENT: &str = "Set from this computer's environment settings.";
 /// Origin unknown: no record, or a record for a different witness.
 ///
-/// Approved 2026-10-06. Replaces the grant screens' earlier
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P176). Replaces the grant screens' earlier
 /// `AUTO_WITNESS_ORIGIN`, which had to hedge between two sources because
 /// nothing was recorded. Now only a config written before the record
 /// existed, or a witness changed by something that does not write one,
 /// lands here, and the sentence names no source it cannot know.
-pub const DISCLOSURE_ORIGIN_NOT_RECORDED: &str = "This app has no record of how this witness was set up. It was set up before this app kept one, or changed since by something that does not.";
+pub const DISCLOSURE_ORIGIN_NOT_RECORDED: &str = "No record of how this witness was set up.";
 
 /// Receipts off.
 ///
-/// Approved 2026-10-06.
-pub const DISCLOSURE_RECEIPTS_OFF: &str =
-    "No receipt endpoint is set, so this app asks no inference provider for receipts.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P186).
+pub const DISCLOSURE_RECEIPTS_OFF: &str = "No receipts are requested.";
 
 /// Receipts on, `inference_receipt_check_attestation` on. Both receipt
 /// sentences open with the fetch, because the fetch is itself a disclosure
 /// (the spec's separate sentence: "each receipt fetch tells the provider
 /// that an exchange is being contributed").
 ///
-/// Approved 2026-10-06. Worded to the config field's own limit: it
-/// reads the report's self-description without verifying the quote.
-pub const DISCLOSURE_RECEIPTS_CHECKED: &str = "Before a trace goes to your witness, this app may ask the inference provider for a signed receipt of the trace's last model call. Asking tells the provider that the exchange is being contributed. This app also checks that the receipt was signed by the key NEAR AI's attestation report names, reading the report without verifying its quote.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P174). Worded to the config field's own limit: it
+/// reads the report's self-description without verifying the quote, which
+/// [`DISCLOSURE_RECEIPTS_CHECKED_TOOLTIP`] says.
+pub const DISCLOSURE_RECEIPTS_CHECKED: &str = "Asking the provider for a receipt of a trace's last call tells it the trace is being contributed. The signer is checked against NEAR AI's attestation report.";
+
+/// The tooltip on [`DISCLOSURE_RECEIPTS_CHECKED`]
+/// (`RouteDisclosureCopy::disclosure_receipts_checked_tooltip`).
+///
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P174).
+pub const DISCLOSURE_RECEIPTS_CHECKED_TOOLTIP: &str =
+    "The report is read without verifying its quote.";
 
 /// Receipts on, the attestation check off.
 ///
-/// Approved 2026-10-06. Whether the witness pins receipt signers is
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P173). Whether the witness pins receipt signers is
 /// its configuration, invisible to this client (IPC contract, "The
-/// attested-inference record").
-pub const DISCLOSURE_RECEIPTS_UNCHECKED: &str = "Before a trace goes to your witness, this app may ask the inference provider for a signed receipt of the trace's last model call. Asking tells the provider that the exchange is being contributed. This app does not compare the receipt's signer with NEAR AI's attestation report, and whether your witness does depends on its setup, which this app cannot see.";
+/// attested-inference record"), which
+/// [`DISCLOSURE_RECEIPTS_UNCHECKED_TOOLTIP`] says.
+pub const DISCLOSURE_RECEIPTS_UNCHECKED: &str = "Asking the provider for a receipt of a trace's last call tells it the trace is being contributed. The receipt's signer isn't checked here.";
+
+/// The tooltip on [`DISCLOSURE_RECEIPTS_UNCHECKED`]
+/// (`RouteDisclosureCopy::disclosure_receipts_unchecked_tooltip`).
+///
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P173).
+pub const DISCLOSURE_RECEIPTS_UNCHECKED_TOOLTIP: &str = "The signer isn't compared with NEAR AI's attestation report. Your witness may check it, depending on its setup.";
 
 /// `ironwire_attested_bodies` on, witness route.
 ///
-/// Approved 2026-10-06. The bodies reach only a witness, never an
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P179). The bodies reach only a witness, never an
 /// envelope (`DaemonSettings::ironwire_attested_bodies`).
-pub const DISCLOSURE_ATTESTED_BODIES: &str = "When this app holds a verbatim copy of a trace's last model call, your prompt and the reply, it sends that to your witness too. It is not part of what the commons receives.";
+pub const DISCLOSURE_ATTESTED_BODIES: &str = "Your witness may also get the last prompt and reply verbatim. The commons doesn't receive them.";
 
 /// The per-session block's heading and labels.
 ///
@@ -1708,9 +1766,18 @@ pub struct WitnessDisclosureCopy {
 pub struct RouteDisclosureCopy {
     pub title: &'static str,
     pub route: &'static str,
+    /// The tooltip on [`Self::route`], present only on the witness route
+    /// ([`DISCLOSURE_WITNESS_ROUTE_TOOLTIP`]).
+    pub disclosure_witness_route_tooltip: Option<&'static str>,
     pub witness: Option<WitnessDisclosureCopy>,
     pub local_filter: Option<&'static str>,
     pub receipts: Option<&'static str>,
+    /// The tooltip on [`Self::receipts`], present only while it is
+    /// [`DISCLOSURE_RECEIPTS_CHECKED`].
+    pub disclosure_receipts_checked_tooltip: Option<&'static str>,
+    /// The tooltip on [`Self::receipts`], present only while it is
+    /// [`DISCLOSURE_RECEIPTS_UNCHECKED`].
+    pub disclosure_receipts_unchecked_tooltip: Option<&'static str>,
     pub attested_bodies: Option<&'static str>,
     pub session: SessionSendCopy,
 }
@@ -1781,11 +1848,17 @@ pub fn route_disclosure_copy(facts: &crate::disclosure::RouteDisclosure) -> Rout
     RouteDisclosureCopy {
         title: DISCLOSURE_TITLE,
         route,
+        disclosure_witness_route_tooltip: sends_to_witness
+            .then_some(DISCLOSURE_WITNESS_ROUTE_TOOLTIP),
         witness,
         local_filter: (facts.route == Route::Local)
             .then(|| facts.local_filter.map(local_filter_line))
             .flatten(),
         receipts,
+        disclosure_receipts_checked_tooltip: (receipts == Some(DISCLOSURE_RECEIPTS_CHECKED))
+            .then_some(DISCLOSURE_RECEIPTS_CHECKED_TOOLTIP),
+        disclosure_receipts_unchecked_tooltip: (receipts == Some(DISCLOSURE_RECEIPTS_UNCHECKED))
+            .then_some(DISCLOSURE_RECEIPTS_UNCHECKED_TOOLTIP),
         attested_bodies: (sends_to_witness && facts.attested_bodies)
             .then_some(DISCLOSURE_ATTESTED_BODIES),
         session: SessionSendCopy {
@@ -2444,9 +2517,9 @@ pub fn session_notification_copy() -> SessionNotificationCopy {
 //
 // The words for choosing the NEAR AI organization the commons sends payout
 // credit to. Every sentence here is DRAFT, NEEDS APPROVAL: none is approved
-// until the owner signs it off. The passkey lines of the spec's draft are
-// gone (D5 superseded 2026-10-23: the signed-in session confirms, and
-// nothing asks for a passkey). Templates carry `{org_name}`, which a shell
+// until the owner signs it off, except those marked as approved in Settings
+// copy pass 2 (2026-11-04). The signed-in session confirms (D5
+// superseded 2026-10-23). Templates carry `{org_name}`, which a shell
 // fills with the name the daemon's `payout_link_orgs` returned
 // ([`render_org_name`]); the name never leaves the device.
 
@@ -2455,14 +2528,13 @@ pub const PAYOUT_COPY_PLACEHOLDERS: &[&str] = &["org_name"];
 
 /// DRAFT, NEEDS APPROVAL. The section's title.
 pub const PAYOUT_LINK_TITLE: &str = "Get paid in NEAR AI credit";
-/// DRAFT, NEEDS APPROVAL. The consent, shown for the org chosen before the
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P60). The consent, shown for the org chosen before the
 /// person confirms. Says the credit is extra, stays in the org, can be spent
 /// by its other members (D7), and pays the org's past NEAR AI use first.
-pub const PAYOUT_LINK_BODY: &str = "The commons will send NEAR AI credit to {org_name} for traces you contribute, as soon as their credit settles. This is on top of your Trace Credit, which you keep. Credit sent to {org_name} stays there and can't be moved. Other members of {org_name} can spend it too. If {org_name} owes NEAR AI for past use, new credit pays that first.";
+pub const PAYOUT_LINK_BODY: &str = "{org_name} gets NEAR AI credit for your traces, on top of your Trace Credit. It can't be moved out, other members can spend it, and it pays past NEAR AI use first.";
 /// DRAFT, NEEDS APPROVAL. Beside the confirm button.
 pub const PAYOUT_LINK_SCOPE: &str = "Sends credit to {org_name} only.";
-/// DRAFT, NEEDS APPROVAL. The confirm button: chooses the org shown. The
-/// spec left this to be drafted after the passkey label was dropped.
+/// DRAFT, NEEDS APPROVAL. The confirm button: chooses the org shown.
 pub const PAYOUT_LINK_BUTTON: &str = "Choose";
 /// DRAFT, NEEDS APPROVAL. Leaves without choosing.
 pub const PAYOUT_LINK_SECONDARY: &str = "Not now";
@@ -2479,22 +2551,21 @@ pub const PAYOUT_LINK_CHANGE_BUTTON: &str = "Change";
 /// DRAFT, NEEDS APPROVAL. The change button's accessibility name.
 pub const PAYOUT_LINK_CHANGE_ACCESSIBILITY_NAME: &str =
     "Change the organization that receives NEAR AI credit";
-/// DRAFT, NEEDS APPROVAL. Beside the unlink button.
-pub const PAYOUT_LINK_UNLINK_BODY: &str =
-    "Credit you earn is kept and sent when you choose an organization again.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P62). Beside the unlink button.
+pub const PAYOUT_LINK_UNLINK_BODY: &str = "Credit is kept and sent once you choose again.";
 /// DRAFT, NEEDS APPROVAL. Status: an active link this device made.
 pub const PAYOUT_LINK_STATUS_LINKED: &str = "Credit goes to {org_name}";
 /// DRAFT, NEEDS APPROVAL. Status: no link.
 pub const PAYOUT_LINK_STATUS_NONE: &str = "No organization chosen";
 /// DRAFT, NEEDS APPROVAL. Status: a confirmed link the rail has not made
-/// active yet (it replaces the spec's "Waiting for passkey confirmation").
+/// active yet.
 pub const PAYOUT_LINK_STATUS_WAITING: &str = "Credit goes to {org_name} from the next payout";
-/// DRAFT, NEEDS APPROVAL. Status: NEAR AI answered that the org is gone.
-pub const PAYOUT_LINK_STATUS_UNAVAILABLE: &str = "Organization unavailable. Choose another.";
-/// DRAFT, NEEDS APPROVAL. Status: the commons holds another org than the one
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P65). Status: NEAR AI answered that the org is gone.
+pub const PAYOUT_LINK_STATUS_UNAVAILABLE: &str = "Organization unavailable.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P66). Status: the commons holds another org than the one
 /// chosen on this device (`recipient_ref_check: "mismatch"`).
 pub const PAYOUT_LINK_STATUS_MISMATCH: &str =
-    "Credit may be going to an organization you didn't choose. Choose again.";
+    "Credit may be going to an organization you didn't choose.";
 /// DRAFT, NEEDS APPROVAL. No NEAR AI session on this device.
 pub const PAYOUT_LINK_SIGN_IN: &str = "Sign in with NEAR AI to choose an organization.";
 /// DRAFT, NEEDS APPROVAL. Shown in place of the section when this device
@@ -2505,9 +2576,9 @@ pub const PAYOUT_LINK_SIGN_IN: &str = "Sign in with NEAR AI to choose an organiz
 pub const PAYOUT_LINK_SESSION_ENDED: &str = "Sign in again";
 /// DRAFT, NEEDS APPROVAL. The NEAR AI user owns no active organization.
 pub const PAYOUT_LINK_NO_ORGANIZATION: &str = "You don't own an active NEAR AI organization.";
-/// DRAFT, NEEDS APPROVAL. The org list changed after it was shown
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P67). The org list changed after it was shown
 /// (`payout-link-orgs-changed`, `payout-link-changed`).
-pub const PAYOUT_LINK_CHANGED: &str = "Your organizations changed. Choose again.";
+pub const PAYOUT_LINK_CHANGED: &str = "Your organizations changed.";
 /// DRAFT, NEEDS APPROVAL. Any other refusal of a start or confirm.
 pub const PAYOUT_LINK_FAILED: &str = "Nothing changed. Try again.";
 
@@ -2571,31 +2642,43 @@ pub fn payout_link_copy() -> PayoutLinkCopy {
 /// is a DRAFT, NEEDS APPROVAL. Templates carry one placeholder each:
 /// `{device}`, `{code}` or `{when}` (already formatted by the shell).
 pub const ACCOUNT_DEVICES_TITLE: &str = "Devices";
-pub const ACCOUNT_DEVICES_BODY: &str =
-    "Computers and servers signed in to your account. Each one uploads with its own key.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P22).
+pub const ACCOUNT_DEVICES_BODY: &str = "Computers and servers signed in to your account.";
 pub const ACCOUNT_DEVICES_THIS_DEVICE: &str = "This device";
 pub const ACCOUNT_DEVICES_UNNAMED: &str = "Unnamed device";
 pub const ACCOUNT_DEVICES_LAST_SEEN: &str = "Last seen {when}";
 pub const ACCOUNT_DEVICES_LINK_BUTTON: &str = "Link a server";
 pub const ACCOUNT_DEVICES_LINK_ACCESSIBILITY_NAME: &str =
     "Link a server or another computer to your account with a one-time code";
-pub const ACCOUNT_DEVICES_LINK_BODY: &str = "On the server, run this command. The code works once, within 10 minutes. Anyone who has it can join your account.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P32).
+pub const ACCOUNT_DEVICES_LINK_BODY: &str =
+    "Run this on the server within 10 minutes. Anyone with the code can join your account.";
 pub const ACCOUNT_DEVICES_CODE_COMMAND: &str = "trace-commons-contributor login --code {code}";
 pub const ACCOUNT_DEVICES_COPY_BUTTON: &str = "Copy command";
 pub const ACCOUNT_DEVICES_COPIED: &str = "Copied";
-pub const ACCOUNT_DEVICES_WAITING: &str = "Waiting for the server to use the code";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P38).
+pub const ACCOUNT_DEVICES_WAITING: &str = "Waiting for the server…";
 pub const ACCOUNT_DEVICES_LINKED: &str = "Server linked.";
-pub const ACCOUNT_DEVICES_EXPIRED: &str = "The code expired before it was used.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P39).
+pub const ACCOUNT_DEVICES_EXPIRED: &str = "The code expired.";
 pub const ACCOUNT_DEVICES_DONE_BUTTON: &str = "Done";
 pub const ACCOUNT_DEVICES_UNLINK_BUTTON: &str = "Unlink";
 pub const ACCOUNT_DEVICES_UNLINK_ACCESSIBILITY_NAME: &str = "Unlink {device}";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P33).
 pub const ACCOUNT_DEVICES_UNLINK_CONFIRM: &str =
-    "Unlink {device}? It is signed out and can't upload or renew its sign-in.";
+    "Unlink {device}? It's signed out and can't upload.";
 pub const ACCOUNT_DEVICES_UNLINK_CONFIRM_BUTTON: &str = "Unlink";
+/// The confirmation's Unlink, apart from the row's (`Unlink {device}`):
+/// the same visible word, its own accessible name (copy-guide rule 5).
+/// DRAFT, NEEDS APPROVAL (2026-11-04).
+pub const ACCOUNT_DEVICES_UNLINK_CONFIRM_ACCESSIBILITY_NAME: &str = "Confirm: unlink {device}";
 pub const ACCOUNT_DEVICES_CANCEL_BUTTON: &str = "Cancel";
 pub const ACCOUNT_DEVICES_SESSION_ENDED: &str = PAYOUT_LINK_SESSION_ENDED;
-pub const ACCOUNT_DEVICES_TOO_MANY: &str = "Too many codes at once. Try again in a few minutes.";
-pub const ACCOUNT_DEVICES_FAILED: &str = PAYOUT_LINK_FAILED;
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P56).
+pub const ACCOUNT_DEVICES_TOO_MANY: &str = "Too many codes. Try again in a few minutes.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P55). Its own words now, no longer
+/// [`PAYOUT_LINK_FAILED`]'s: that line was not part of this approval.
+pub const ACCOUNT_DEVICES_FAILED: &str = "Nothing changed.";
 
 /// Every Devices string, in one payload, for the shells
 /// (`tc_account_devices_copy_json`).
@@ -2620,6 +2703,7 @@ pub struct AccountDevicesCopy {
     pub unlink_accessibility_name: &'static str,
     pub unlink_confirm: &'static str,
     pub unlink_confirm_button: &'static str,
+    pub unlink_confirm_accessibility_name: &'static str,
     pub cancel_button: &'static str,
     pub session_ended: &'static str,
     pub too_many: &'static str,
@@ -2649,6 +2733,7 @@ pub fn account_devices_copy() -> AccountDevicesCopy {
         unlink_accessibility_name: ACCOUNT_DEVICES_UNLINK_ACCESSIBILITY_NAME,
         unlink_confirm: ACCOUNT_DEVICES_UNLINK_CONFIRM,
         unlink_confirm_button: ACCOUNT_DEVICES_UNLINK_CONFIRM_BUTTON,
+        unlink_confirm_accessibility_name: ACCOUNT_DEVICES_UNLINK_CONFIRM_ACCESSIBILITY_NAME,
         cancel_button: ACCOUNT_DEVICES_CANCEL_BUTTON,
         session_ended: ACCOUNT_DEVICES_SESSION_ENDED,
         too_many: ACCOUNT_DEVICES_TOO_MANY,
@@ -2676,12 +2761,14 @@ pub const ACCOUNT_ATTENTION_RECORD_UNREADABLE: &str = "account_record_unreadable
 /// account was set up with.
 pub const ACCOUNT_ATTENTION_ADDRESS_REFUSED: &str = "account_address_refused";
 
-/// Approved 2026-11-02. The heading of the status.
-pub const ACCOUNT_ATTENTION_TITLE: &str = "This app's account needs attention";
-/// Approved 2026-11-02. For [`ACCOUNT_ATTENTION_RECORD_UNREADABLE`].
-pub const ACCOUNT_ATTENTION_RECORD_UNREADABLE_BODY: &str = "This app can't read its account details on this computer. Set it up again to keep sending traces.";
-/// Approved 2026-11-02. For [`ACCOUNT_ATTENTION_ADDRESS_REFUSED`].
-pub const ACCOUNT_ATTENTION_ADDRESS_REFUSED_BODY: &str = "This app can no longer reach the service it was set up with. Update the app, or set it up again.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P49). The heading of the status.
+pub const ACCOUNT_ATTENTION_TITLE: &str = "Needs attention";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P14). For [`ACCOUNT_ATTENTION_RECORD_UNREADABLE`].
+pub const ACCOUNT_ATTENTION_RECORD_UNREADABLE_BODY: &str =
+    "Can't read the account details, so traces can't be sent.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P40). For [`ACCOUNT_ATTENTION_ADDRESS_REFUSED`].
+pub const ACCOUNT_ATTENTION_ADDRESS_REFUSED_BODY: &str =
+    "Can no longer reach the service this app was set up with. An update may fix it.";
 /// Approved 2026-11-02. Only while a NEAR AI login is stored
 /// (`near_ai_login_unconfirmed`).
 pub const ACCOUNT_ATTENTION_PRIVATE_AI: &str = "Private AI still works with your NEAR AI account.";
@@ -2697,10 +2784,10 @@ pub const ACCOUNT_ATTENTION_CONFIRM_BODY: &str =
 pub const ACCOUNT_ATTENTION_CONFIRM_ACTION: &str = ACCOUNT_ATTENTION_ACTION;
 /// Approved 2026-11-02. The confirmation's button that changes nothing.
 pub const ACCOUNT_ATTENTION_CONFIRM_CANCEL: &str = ACCOUNT_DEVICES_CANCEL_BUTTON;
-/// Approved 2026-11-02 for this use. Shown under the button when the
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P57). Shown under the button when the
 /// daemon refused to set up again. Its own constant, so a change to another
 /// surface's failure line does not change it.
-pub const ACCOUNT_ATTENTION_FAILED: &str = "Nothing changed. Try again.";
+pub const ACCOUNT_ATTENTION_FAILED: &str = "Nothing changed.";
 
 /// What the account section shows while `status.account_state` is
 /// `needs_attention` (`tc_account_attention_copy_json`). The branch is the
@@ -2820,12 +2907,10 @@ mod account_attention_tests {
             "near_ai_login_unconfirmed": false,
         }))
         .unwrap();
-        assert_eq!(unreadable.title, "This app's account needs attention");
+        assert_eq!(unreadable.title, "Needs attention");
         assert_eq!(
             unreadable.body,
-            Some(
-                "This app can't read its account details on this computer. Set it up again to keep sending traces."
-            )
+            Some("Can't read the account details, so traces can't be sent.")
         );
         assert_eq!(unreadable.private_ai, None);
         assert_eq!(unreadable.action, "Set up again");
@@ -2838,9 +2923,7 @@ mod account_attention_tests {
         .unwrap();
         assert_eq!(
             refused.body,
-            Some(
-                "This app can no longer reach the service it was set up with. Update the app, or set it up again."
-            )
+            Some("Can no longer reach the service this app was set up with. An update may fix it.")
         );
         assert_eq!(
             refused.private_ai,
@@ -2884,7 +2967,7 @@ mod account_attention_tests {
         );
         assert_eq!(copy.confirm_action, "Set up again");
         assert_eq!(copy.confirm_cancel, "Cancel");
-        assert_eq!(copy.failed, "Nothing changed. Try again.");
+        assert_eq!(copy.failed, "Nothing changed.");
         for sentence in [copy.title, copy.body.unwrap(), copy.confirm_body] {
             assert!(!sentence.contains("Mac"), "{sentence}");
         }
@@ -3324,6 +3407,10 @@ mod tests {
         use crate::disclosure::Route;
         let witness = route_disclosure_copy(&facts(Route::Witness));
         assert_eq!(witness.route, AUTO_RAW_SEND_BOTH_ENCLAVES);
+        assert_eq!(
+            witness.disclosure_witness_route_tooltip,
+            Some(DISCLOSURE_WITNESS_ROUTE_TOOLTIP)
+        );
         assert!(witness.local_filter.is_none());
         let w = witness.witness.as_ref().expect("the witness block");
         assert_eq!(w.classifier, Some(DISCLOSURE_WITNESS_CLASSIFIER));
@@ -3335,6 +3422,7 @@ mod tests {
 
         let local = route_disclosure_copy(&facts(Route::Local));
         assert_eq!(local.route, DISCLOSURE_ROUTE_LOCAL);
+        assert!(local.disclosure_witness_route_tooltip.is_none());
         assert!(local.witness.is_none());
         assert!(local.receipts.is_none());
         assert!(local.attested_bodies.is_none());
@@ -3348,6 +3436,7 @@ mod tests {
 
         let refusing = route_disclosure_copy(&facts(Route::WitnessRefusing));
         assert_eq!(refusing.route, DISCLOSURE_ROUTE_WITNESS_REFUSING);
+        assert!(refusing.disclosure_witness_route_tooltip.is_none());
         let w = refusing.witness.as_ref().expect("still shown");
         assert_eq!(w.classifier, None, "nothing reaches a classifier");
         assert!(refusing.receipts.is_none());
@@ -3391,7 +3480,7 @@ mod tests {
         // The join case says the contributor was not asked (spec, point 2).
         assert!(lines[0].contains("without asking you"));
         assert!(lines[1].contains("connected inference"));
-        assert!(lines[4].contains("no record"));
+        assert!(lines[4].contains("No record"));
         for named in ["commons", "Settings", "connected"] {
             assert!(!lines[4].contains(named), "{named}");
         }
@@ -3416,8 +3505,9 @@ mod tests {
             }
         }
         // The NEAR AI filter is a hop this app does not attest.
+        // Settings copy pass 2 (owner, 2026-11-04, P183) words it "isn't checked".
         assert!(lines[1].contains("NEAR AI"));
-        assert!(lines[1].contains("does not check"));
+        assert!(lines[1].contains("attestation isn't checked"));
     }
 
     /// Receipts: the fetch is a disclosure to the provider (spec, the
@@ -3427,19 +3517,39 @@ mod tests {
     fn the_receipt_sentences_follow_the_configuration() {
         use crate::disclosure::{ReceiptFacts, Route};
         let mut f = facts(Route::Witness);
-        let none = route_disclosure_copy(&f).receipts.unwrap();
-        assert_eq!(none, DISCLOSURE_RECEIPTS_OFF);
+        let off = route_disclosure_copy(&f);
+        assert_eq!(off.receipts.unwrap(), DISCLOSURE_RECEIPTS_OFF);
+        assert!(off.disclosure_receipts_checked_tooltip.is_none());
+        assert!(off.disclosure_receipts_unchecked_tooltip.is_none());
         f.receipts = ReceiptFacts {
             endpoint_configured: true,
             check_attestation: false,
         };
-        let unchecked = route_disclosure_copy(&f).receipts.unwrap();
-        assert!(unchecked.contains("tells the provider"));
-        assert!(unchecked.contains("does not compare"));
+        // Settings copy pass 2 (owner, 2026-11-04, P173, P174): the fetch
+        // still says it tells the provider; what the check does not do moved
+        // to each line's tooltip.
+        let unchecked_copy = route_disclosure_copy(&f);
+        let unchecked = unchecked_copy.receipts.unwrap();
+        assert!(unchecked.contains("tells it the trace is being contributed"));
+        assert!(unchecked.contains("signer isn't checked"));
+        assert!(unchecked_copy.disclosure_receipts_checked_tooltip.is_none());
+        assert!(
+            unchecked_copy
+                .disclosure_receipts_unchecked_tooltip
+                .unwrap()
+                .contains("isn't compared with NEAR AI's attestation report")
+        );
         f.receipts.check_attestation = true;
-        let checked = route_disclosure_copy(&f).receipts.unwrap();
-        assert!(checked.contains("tells the provider"));
-        assert!(checked.contains("without verifying its quote"));
+        let checked_copy = route_disclosure_copy(&f);
+        let checked = checked_copy.receipts.unwrap();
+        assert!(checked.contains("tells it the trace is being contributed"));
+        assert!(
+            checked_copy
+                .disclosure_receipts_checked_tooltip
+                .unwrap()
+                .contains("without verifying its quote")
+        );
+        assert!(checked_copy.disclosure_receipts_unchecked_tooltip.is_none());
     }
 
     #[test]
@@ -3607,10 +3717,11 @@ mod tests {
     /// that a project with sessions on disk keeps asking.
     #[test]
     fn the_split_path_answers_keep_their_whole_meaning() {
-        assert_eq!(
-            format!("{AUTO_PATH_ASK_FIRST_TITLE} {AUTO_PATH_ASK_FIRST_DETAIL}"),
-            AUTO_PATH_ASK_FIRST
-        );
+        // Owner dropped "Review each trace yourself." as the ask-first title
+        // 2026-11-04 (Settings copy pass 2, P125): the title is empty and the
+        // detail still carries the rest of the whole sentence.
+        assert_eq!(AUTO_PATH_ASK_FIRST_TITLE, "");
+        assert!(AUTO_PATH_ASK_FIRST.ends_with(AUTO_PATH_ASK_FIRST_DETAIL));
         assert!(!AUTO_PATH_ASK_FIRST.contains("later"));
         assert!(AUTO_PATH_AUTOMATIC.starts_with(AUTO_PATH_AUTOMATIC_TITLE.trim_end_matches('.')));
         assert!(AUTO_PATH_AUTOMATIC_DETAIL.contains("after you turn this on"));
@@ -4242,34 +4353,53 @@ mod tests {
     }
 
     /// The move leads with the browser step (owner, 2026-10-11): with no
-    /// session the shell runs the browser step itself. The offer and the
-    /// wait offer no passkey (removed 2026-10-31), and none of the step's
+    /// session the shell runs the browser step itself. None of the step's
     /// lines speaks of signing in. The step's own words are separate keys,
     /// and its button is short.
     #[test]
     fn the_migration_leads_with_the_browser_step() {
         let offer = legacy_migration_offer();
-        assert_eq!(offer.passkey_waiting, LEGACY_MIGRATION_PASSKEY_WAITING);
-        assert_eq!(offer.passkey_failed, LEGACY_MIGRATION_PASSKEY_FAILED);
-        assert_eq!(offer.passkey_cancel, LEGACY_MIGRATION_PASSKEY_CANCEL);
+        assert_eq!(
+            offer.near_ai_login_waiting,
+            LEGACY_MIGRATION_NEAR_AI_LOGIN_WAITING
+        );
+        assert_eq!(
+            offer.near_ai_login_failed,
+            LEGACY_MIGRATION_NEAR_AI_LOGIN_FAILED
+        );
+        assert_eq!(
+            offer.near_ai_login_cancel,
+            LEGACY_MIGRATION_NEAR_AI_LOGIN_CANCEL
+        );
         let no_session = legacy_migration_refusal_line("legacy_migration_no_near_ai_session");
-        for line in [offer.body, offer.passkey_waiting, no_session] {
+        for line in [
+            offer.body,
+            offer.near_ai_login_waiting,
+            offer.near_ai_login_failed,
+            no_session,
+        ] {
             assert!(!line.to_lowercase().contains("passkey"), "{line}");
         }
-        for line in [offer.body, offer.passkey_waiting, offer.passkey_failed] {
+        for line in [
+            offer.body,
+            offer.near_ai_login_waiting,
+            offer.near_ai_login_failed,
+        ] {
             assert!(!line.to_lowercase().contains("sign in"), "{line}");
         }
         // The refusal names the step it sends the contributor to (owner,
-        // 2026-10-31).
+        // 2026-10-31; shortened in Settings copy pass 2, P19, 2026-11-04).
+        assert_eq!(no_session, "Sign in to NEAR AI in your browser first.");
+        assert!(offer.near_ai_login_failed.contains("nothing was moved"));
+        // Owner dropped "Your invite keeps working." 2026-11-04 (Settings copy pass 2, P41).
+        assert!(!offer.near_ai_login_failed.contains("keeps working"));
         assert_eq!(
-            no_session,
-            "Sign in to NEAR AI in your browser first, then try again. Your invite keeps working."
+            offer.near_ai_login_failed,
+            "Sign-in didn't finish, so nothing was moved."
         );
-        assert!(offer.passkey_failed.contains("nothing was moved"));
-        assert!(offer.passkey_failed.contains("keeps working"));
-        assert!(offer.passkey_cancel.split_whitespace().count() <= 2);
-        assert_ne!(offer.passkey_cancel, offer.dismiss);
-        assert_ne!(offer.passkey_waiting, offer.working);
+        assert!(offer.near_ai_login_cancel.split_whitespace().count() <= 2);
+        assert_ne!(offer.near_ai_login_cancel, offer.dismiss);
+        assert_ne!(offer.near_ai_login_waiting, offer.working);
     }
 
     #[test]
@@ -4495,8 +4625,9 @@ mod payout_link_copy_tests {
         );
         for (name, docs) in &declared {
             assert!(
-                docs.contains("DRAFT, NEEDS APPROVAL"),
-                "{name} is not marked for owner review"
+                docs.contains("DRAFT, NEEDS APPROVAL")
+                    || docs.contains("Approved by the owner 2026-11-04 (Settings copy pass 2"),
+                "{name} is not marked for owner review or approved"
             );
         }
         for text in every_string(&copy) {
@@ -4562,12 +4693,12 @@ mod payout_link_copy_tests {
     #[test]
     fn copy_says_other_members_can_spend_and_overage_is_paid_first() {
         let body = payout_link_copy().body;
-        assert!(body.contains("Other members of {org_name} can spend it too."));
-        assert!(
-            body.contains("If {org_name} owes NEAR AI for past use, new credit pays that first.")
-        );
+        // Settings copy pass 2 (owner, 2026-11-04, P60) shortened the body.
+        assert!(body.contains("other members can spend it"));
+        assert!(body.contains("it pays past NEAR AI use first."));
         assert!(body.contains("can't be moved"));
-        assert!(body.contains("which you keep"));
+        // Owner dropped "which you keep" 2026-11-04 (Settings copy pass 2, P60).
+        assert!(body.contains("on top of your Trace Credit"));
         assert_eq!(
             render_org_name("Credit goes to {org_name}", "Synthetic Org"),
             "Credit goes to Synthetic Org"
@@ -4588,8 +4719,12 @@ mod payout_link_copy_tests {
         assert_eq!(scope["always_on"], false);
         assert_eq!(scope["grants_data_use"], true);
         let title = scope["title"].as_str().expect("title");
-        assert!(DATA_USE_REWARD_OPPORTUNITIES.contains(&format!("allow {title}.")));
-        assert!(DATA_USE_REWARD_OPPORTUNITIES.contains("are extra uses that may earn more."));
+        // Settings copy pass 2 (owner, 2026-11-04, P137).
+        assert!(
+            DATA_USE_REWARD_OPPORTUNITIES.starts_with(&format!("Allow {title} to earn credit."))
+        );
+        assert!(DATA_USE_REWARD_OPPORTUNITIES.contains("The other uses may earn more."));
+        assert!(DATA_USE_REWARD_OPPORTUNITIES_TOOLTIP.contains("accepted"));
         assert!(!DATA_USE_REWARD_OPPORTUNITIES.contains("earn nothing"));
         assert_eq!(DATA_USE_CREDIT_REQUIRED, "Required to earn credit.");
     }

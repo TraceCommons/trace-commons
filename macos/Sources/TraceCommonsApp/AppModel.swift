@@ -388,6 +388,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var settingUpAgain = false
     /// The daemon refused the last "Set up again"; cleared by the next one.
     @Published private(set) var setUpAgainFailed = false
+    /// The account section's "Sign out" is running (Settings IA D3).
+    @Published private(set) var signingOut = false
+    /// The daemon refused the last "Sign out"; cleared by the next one.
+    @Published private(set) var signOutFailed = false
     /// Words `status.legacy_invite_migration.notice`. The ABI in the app;
     /// replaced only by tests.
     var legacyMigrationWording: (String) -> String? = TCConsentCopy.legacyMigrationNoticeJSON(
@@ -4323,7 +4327,12 @@ final class AppModel: ObservableObject {
                     self.recordRead(label, answered: false)
                     // `error.message` is a fixed label by contract, never a
                     // path, a token, or a server response body.
-                    if let failure = error as? DaemonClient.Failure {
+                    if label == "set_project_mode", let line = ShellWords.table?.settings.projectModeFailed {
+                        // A folder's setting did not change; the person is
+                        // told that in the core's words (Settings copy pass 2,
+                        // P136), not the call's name.
+                        self.lastActionError = line
+                    } else if let failure = error as? DaemonClient.Failure {
                         self.lastActionError = "\(label): \(failure.message)"
                     } else {
                         self.lastActionError = "\(label): failed"
@@ -4373,9 +4382,11 @@ extension AppModel: FirstRunDaemon {
         return true
     }
 
-    func firstRunEstimate() async -> DaemonData.FirstRunEstimate? {
-        guard case .success(let estimate) = await firstRunCall({ try $0.firstRunEstimate() }) else { return nil }
-        return estimate
+    func firstRunCopy(traceCount: UInt64, totalBytes: UInt64) async -> DaemonData.FirstRunCopyLines? {
+        guard case .success(let lines) = await firstRunCall({
+            try $0.firstRunCopy(traceCount: traceCount, totalBytes: totalBytes)
+        }) else { return nil }
+        return lines
     }
 
     func lookupInvite(_ invite: String) async -> FirstRunLookup {
@@ -4734,6 +4745,38 @@ extension AppModel: FirstRunDaemon {
         let done = await unenroll()
         setUpAgainFailed = !done
         return done
+    }
+
+    /// "Sign out" (Settings IA D3): the daemon clears this computer's
+    /// account session and its NEAR AI login, and revokes both, best effort
+    /// (`account_sign_out`). The enrollment stays: signing in again picks
+    /// the account back up. It replaces NEAR AI "Forget" on macOS, so the
+    /// NEAR AI result is said as Forget said it: the failed-revoke sentence
+    /// when the key could not be revoked at NEAR AI, `nearAiStillSignedIn`
+    /// when it could not be cleared here. True when the daemon signed out.
+    @discardableResult
+    func signOut() async -> Bool {
+        guard !signingOut else { return false }
+        signingOut = true
+        signOutFailed = false
+        defer { signingOut = false }
+        guard case .success(let nearAi) = await firstRunCall({ try $0.accountSignOut() }) else {
+            signOutFailed = true
+            return false
+        }
+        switch nearAi {
+        case .notRevoked:
+            lastActionError = privateInferenceCopy?.credentialForgetNotRevoked
+        case .notCleared:
+            lastActionError = privateInferenceCopy?.nearAiStillSignedIn
+        case .done:
+            break
+        }
+        refreshStatus()
+        refreshNearAiCredential()
+        refreshAccountSession()
+        refreshSettings()
+        return true
     }
 
     /// One blocking client call off the main actor. Nil without a daemon.

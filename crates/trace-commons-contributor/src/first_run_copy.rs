@@ -37,7 +37,7 @@
 //!   was mocked: `discovery_failed` and `retry` for a discovery that returns
 //!   nothing readable, and `enroll_refused` for an enroll refused after the
 //!   invite was accepted. It also carries `lookup_unavailable` and
-//!   `sign_in_failed` (the core's existing sign-in line), so leaving Folders
+//!   `sign_in_failed` (the core's existing Private AI sign-in line), so leaving Folders
 //!   or Tools never stops in silence, and `settings_failed` for a changed
 //!   folder declaration the running daemon refused.
 //! - Rules adds `unavailable` and `retry` for folders the daemon could not
@@ -48,17 +48,14 @@
 //!   500 the picker lists.
 //! - The animated first run (Ron's 2026-10-21 canvas, owner request
 //!   2026-10-22) adds `welcome`, the splash before Tools; `traces`, what the
-//!   watched tools' traces could earn, with `traces.estimate`, the owner's
-//!   default range before an invite gives one; `frame.step_traces` and
+//!   watched tools' traces could earn; `frame.step_traces` and
 //!   `frame.step_private_ai` for the two new steps; the Uses graphic's three
 //!   labels and `automatic_after_sign_in`; and the Private AI screen's title
 //!   and tool count. Sign-in moves last, so Join's words are unchanged.
-//! - Traces words one estimate for the traces found, never a per-trace rate
-//!   (owner, 2026-10-23): `traces.estimate_points` from points, or, when the
-//!   commons publishes a dollar range per accepted trace
-//!   (`GET /v1/public/first-run-estimate`), `traces.estimate_usd` in
-//!   dollars of NEAR AI credit instead. [`traces_estimate_line`] does the
-//!   arithmetic and the formatting, so a shell only shows the string.
+//! - Traces says the traces found can earn credit and names no amount
+//!   (owner, 2026-11-04, for the MVP): `traces.found_credit`, or
+//!   `traces.found_could_credit` while the use that earns credit is off.
+//!   [`traces_estimate_line`] picks the line, so a shell only shows it.
 //! - near.ai needs no invite (owner, Ron's review of #1235), so there is no
 //!   line asking for one.
 //! - Uses adds Start's failures (`sharing_refused`, `scopes_failed`,
@@ -78,11 +75,6 @@
 //! `{min}`, `{max}`, `{selected}`, `{total}`, `{tools}`, `{title}`, and the
 //! session date and duration's `{weekday}`, `{day}`, `{month}`, `{hours}` and
 //! `{minutes}`; the shell fills them and adds nothing else.
-
-use trace_commons_protocol::first_run_estimate::{USD_MICROS_PER_CENT, UsdMicrosRange};
-use trace_commons_protocol::invite_lookup::{
-    CREDIT_RANGE_UNIT_POINTS, CreditRange, valid_credit_range,
-};
 
 /// Every placeholder name the table uses, each written `{name}` in a string.
 pub const PLACEHOLDERS: &[&str] = &[
@@ -137,7 +129,7 @@ pub struct FrameCopy {
     /// The footer's Back on every step after Join. Approved 2026-10-08.
     pub back: &'static str,
     /// Cancel on the NEAR AI sign-in wait, the Folders footer and the sharing
-    /// confirmations. The words the passkey group carried before it went.
+    /// confirmations.
     pub cancel: &'static str,
     /// Close on the preview sheet's fallback. Unchanged words, as above.
     pub close: &'static str,
@@ -199,51 +191,34 @@ pub struct WelcomeCopy {
     pub title: &'static str,
     /// Ron's words (2026-10-21).
     pub body: &'static str,
-    /// DRAFT, NEEDS APPROVAL.
+    /// DRAFT, NEEDS APPROVAL. Also Join's primary button on the Private AI
+    /// only path, where nothing is shared so "Start sharing" would be
+    /// false: DRAFT, NEEDS APPROVAL (2026-11-04) for that reuse.
     pub start: &'static str,
 }
 
 /// Traces: what the watched tools' traces could earn. The titles and
-/// `on_this_mac` are DRAFT, NEEDS APPROVAL; the estimate lines are approved
-/// (2026-10-23).
+/// `on_this_mac` are DRAFT, NEEDS APPROVAL.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TracesCopy {
     pub title_light: &'static str,
     pub title_bold: &'static str,
     /// Under the count of the watched tools' traces.
     pub on_this_mac: &'static str,
-    /// `{min}`, `{max}`: the traces found times the per-trace range in
-    /// points (the invite's, or `estimate` before one), as one total.
-    /// Approved 2026-10-23 (owner: a total, not a per-trace rate, and no
-    /// "not yet settled"). Filled by [`traces_estimate_line`].
-    pub estimate_points: &'static str,
-    /// `{min}`: the same, when the total is a single figure. Approved
-    /// 2026-10-23.
-    pub estimate_points_one: &'static str,
-    /// `{min}`, `{max}`: the traces found times the server's dollar range
-    /// per accepted trace (`trace_commons_protocol::first_run_estimate`),
-    /// as one total; each figure carries its `$`. Approved 2026-10-23 as
-    /// "an estimated $X–$Y in NEAR AI credit"; capitalized here because the
-    /// line opens the card. Shown in place of `estimate_points`, never
-    /// beside it. Filled by [`traces_estimate_line`].
-    pub estimate_usd: &'static str,
-    /// `{min}`: the same, when the total is a single figure ("an estimated
-    /// $X in NEAR AI credit"). Approved 2026-10-23.
-    pub estimate_usd_one: &'static str,
-    /// The same four lines while the use that earns credit
-    /// (`uses.credit_scope`) is not ticked: what the traces could earn if
-    /// the person allowed it, worded as conditional so the headline never
-    /// promises what the note under it takes away (Zaki's review of #1690,
-    /// 2026-10-28, approved in these words).
-    pub could_estimate_points: &'static str,
-    pub could_estimate_points_one: &'static str,
-    pub could_estimate_usd: &'static str,
-    pub could_estimate_usd_one: &'static str,
-    /// The per-trace range Traces multiplies before an invite's lookup
-    /// gives one, in points per accepted trace (owner, 2026-10-22: 3 to 8,
-    /// marked as an estimate). An invite's own range replaces it; a server
-    /// dollar range replaces both. The owner's figure.
-    pub estimate: EstimateRange,
+    /// The one line under the count once traces are found. No figure: the
+    /// MVP names no amount, in points or dollars (owner, 2026-11-04: "we have
+    /// detected some traces that can earn you credit").
+    /// DRAFT, NEEDS APPROVAL. Shown by [`traces_estimate_line`].
+    pub found_credit: &'static str,
+    /// The same while the use that earns credit (`uses.credit_scope`) is
+    /// not ticked: conditional, so the headline never promises what the
+    /// note under it takes away (Zaki's review of #1690, 2026-10-28).
+    /// DRAFT, NEEDS APPROVAL.
+    pub found_could_credit: &'static str,
+    /// Under `found_credit`, smaller: the credit is not fixed until traces
+    /// are accepted (owner, 2026-11-04). Not shown under
+    /// `found_could_credit`, where `no_credit` sits instead.
+    pub credit_depends: &'static str,
     /// Under the conditional estimate while the use that earns credit
     /// (`uses.credit_scope`) is not ticked, with `back_to_uses`, a link to
     /// the Uses step. A neutral note, not a warning, and it names no going
@@ -252,13 +227,6 @@ pub struct TracesCopy {
     /// Zaki's review of #1690 (2026-10-28).
     pub no_credit: &'static str,
     pub back_to_uses: &'static str,
-}
-
-/// A range of points per accepted trace, the one unit the daemon accepts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub struct EstimateRange {
-    pub min: u32,
-    pub max: u32,
 }
 
 /// Folders, Quick setup's tool list (`tool-screens.tsx`, `tool-row.tsx`).
@@ -291,8 +259,12 @@ pub struct FoldersCopy {
     /// The invite could not be looked up just now (no answer from the
     /// issuer); nothing is said about the invite itself.
     pub lookup_unavailable: &'static str,
-    /// The near.ai sign-in did not finish: the core's existing sign-in line
-    /// (`consent_copy::INFERENCE_SIGN_IN_FAILED`), not a second wording.
+    /// The near.ai sign-in did not finish: the core's existing Private AI
+    /// sign-in line (`private_inference_copy::CREDENTIAL_FAILED`), not a
+    /// second wording. It names only Sign in, which Join shows; the
+    /// inference step's line it read before offered a Skip that Join does
+    /// not have (tester report, 2026-11-04). DRAFT, NEEDS APPROVAL
+    /// (2026-11-04): the reassignment.
     pub sign_in_failed: &'static str,
     /// The daemon is running and refused a changed folder declaration on a
     /// later Continue (`set_settings`). Watching goes on with the folders it
@@ -325,6 +297,10 @@ pub struct ToolsCopy {
     /// one of them to say "I don't use it"; this says so beside the added
     /// folder. Approved 2026-10-06.
     pub one_folder_per_tool: &'static str,
+    /// The secondary action beside Continue: finish setup for Private AI
+    /// alone, watching no tool and sharing nothing (tester report,
+    /// owner-approved path 2026-11-04). DRAFT, NEEDS APPROVAL (2026-11-04).
+    pub private_ai_only: &'static str,
 }
 
 /// Rules and the past-session picker (`rules-screen.tsx`).
@@ -392,7 +368,7 @@ pub struct UsesCopy {
     /// Settings > Projects' sharing choice, the setup choice made
     /// changeable (owner, 2026-10-30; #1753 A2): the line under it, and the
     /// question Automatic asks when folders are set to Ask, with `{count}`
-    /// those folders. DRAFT, NEEDS APPROVAL.
+    /// those folders.
     pub settings_sharing_note: &'static str,
     pub keep_asks_title: &'static str,
     pub keep_asks_body: &'static str,
@@ -414,6 +390,11 @@ pub struct UsesCopy {
     /// Start finished on Ask because the Automatic grant was refused.
     pub sharing_refused: &'static str,
     pub sharing_save_failed: &'static str,
+    /// Settings > Projects' own lines for the same two failures: setup's
+    /// name setup and its Start sharing button, which Settings does not
+    /// show (copy-guide rule 7).
+    pub settings_sharing_refused: &'static str,
+    pub settings_sharing_save_failed: &'static str,
     /// Start stopped before anything it sends was saved: the data uses.
     pub scopes_failed: &'static str,
     /// Start stopped on a folder rule or a past-session include; the data
@@ -457,12 +438,12 @@ pub struct PrivateAiCopy {
     /// While the offer's words cannot be read. The step has had no switch
     /// since #1685, so it says nothing about enabling.
     pub unavailable: &'static str,
-    /// The first two sentences of `private_inference_copy::OFFER_WHAT`,
+    /// The first two sentences of `private_inference_copy::OFFER_WHAT_FIRST_RUN`,
     /// the only words the Uses card shows before "Learn more" (owner,
-    /// 2026-10-08). `offer_lead`, a space and `offer_more` are `OFFER_WHAT`
+    /// 2026-10-08). `offer_lead`, a space and `offer_more` are `OFFER_WHAT_FIRST_RUN`
     /// exactly, so nothing of the disclosure is reworded or lost.
     pub offer_lead: &'static str,
-    /// The rest of `OFFER_WHAT`, shown with the exposure and no-repoint
+    /// The rest of `OFFER_WHAT_FIRST_RUN`, shown with the exposure and no-repoint
     /// sentences once "Learn more" is pressed.
     pub offer_more: &'static str,
     /// Discloses the rest of the Private AI offer in place. Approved
@@ -566,7 +547,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             retry: "Look again",
             enroll_refused: "Your invite was found, but joining with it did not go through. Press Continue to try again.",
             lookup_unavailable: "Your invite couldn't be checked just now. Press Continue to try again.",
-            sign_in_failed: crate::consent_copy::INFERENCE_SIGN_IN_FAILED,
+            sign_in_failed: crate::private_inference_copy::CREDENTIAL_FAILED,
             settings_failed: "Your folder changes couldn't be saved. Watching goes on with the folders you chose before. Press Continue to try again.",
         },
         tools: ToolsCopy {
@@ -581,6 +562,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             trajectory_label: "Exported traces",
             neither: "Neither",
             one_folder_per_tool: "{tool} can watch only one folder. Answer “Not used” on one of its rows.",
+            private_ai_only: "Use Private AI only",
         },
         rules: RulesCopy {
             title_light: "Set your ",
@@ -618,14 +600,18 @@ pub fn first_run_copy() -> FirstRunCopy {
             required: crate::consent_copy::SCOPE_TAG_REQUIRED,
             all_optional: "All optional uses",
             reward_opportunities: crate::consent_copy::DATA_USE_REWARD_OPPORTUNITIES,
-            automatic_scope: "Upload older traces first, then new traces, from all watched folders. Traces must be unchanged for 24 hours. Ignore a folder to exclude it.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P120).
+            automatic_scope: "Sends past and new traces once they've been unchanged for 24 hours.",
             ask_each_time: "Ask each time",
-            // DRAFT, NEEDS APPROVAL (2026-10-30).
-            settings_sharing_note: "A folder set to Ask keeps asking, even when Automatic is on. A folder set to Never is never shared.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P122).
+            settings_sharing_note: "Folders set to Ask or Never keep their own setting.",
             keep_asks_title: "Keep folders set to Ask?",
-            keep_asks_body: "Folders set to Ask: {count}. Keep them asking, or make every folder Automatic.",
-            keep_asks_keep: "Keep them on Ask",
-            keep_asks_all: "Make all Automatic",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P123).
+            keep_asks_body: "Folders set to Ask: {count}.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P130).
+            keep_asks_keep: "Keep Ask",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P132).
+            keep_asks_all: "All Automatic",
             optional_all_on: "{count} optional uses, all on",
             optional_all_off: "{count} optional uses, all off",
             optional_some_on: "{count} optional uses · {selected} on",
@@ -636,6 +622,10 @@ pub fn first_run_copy() -> FirstRunCopy {
             start: "Start sharing",
             sharing_refused: "Setup finished, but Automatic wasn't turned on. Sharing is on Ask.",
             sharing_save_failed: "Sharing couldn't be saved. Setup hasn't finished; try Start sharing again.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P126).
+            settings_sharing_refused: "Automatic wasn't turned on.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P131).
+            settings_sharing_save_failed: "Sharing couldn't be saved.",
             scopes_failed: "How your traces may be used couldn't be saved. Setup hasn't finished; try Start sharing again.",
             rules_failed: "A folder rule or past-trace choice couldn't be saved. Setup hasn't finished; try Start sharing again.",
             private_ai_failed: "The Private AI setting couldn't be saved. Setup hasn't finished; try Start sharing again.",
@@ -654,15 +644,9 @@ pub fn first_run_copy() -> FirstRunCopy {
             title_light: "What your traces ",
             title_bold: "could earn",
             on_this_mac: "traces on this Mac",
-            estimate_points: "An estimated {min}–{max} points",
-            estimate_points_one: "An estimated {min} points",
-            estimate_usd: "An estimated {min}–{max} in NEAR AI credit",
-            estimate_usd_one: "An estimated {min} in NEAR AI credit",
-            could_estimate_points: "You could earn an estimated {min}–{max} points",
-            could_estimate_points_one: "You could earn an estimated {min} points",
-            could_estimate_usd: "You could earn an estimated {min}–{max} in NEAR AI credit",
-            could_estimate_usd_one: "You could earn an estimated {min} in NEAR AI credit",
-            estimate: EstimateRange { min: 3, max: 8 },
+            found_credit: "We have detected some traces that can earn you credit.",
+            found_could_credit: "We have detected some traces that could earn you credit.",
+            credit_depends: "Final credit depends on how many traces are accepted.",
             no_credit: "Allow Train coding models to earn it.",
             back_to_uses: "Go back to Uses",
         },
@@ -680,134 +664,41 @@ pub fn first_run_copy() -> FirstRunCopy {
     }
 }
 
-/// One dollar figure from whole micro-dollars: "$0.40", "$1", "$1.50",
-/// "$1,234.56". Whole dollars drop the cents; anything else shows two places.
-/// A sub-cent remainder is cut, never rounded up, though none reaches here:
-/// the server's range is whole cents (`UsdMicrosRange::is_valid`), and so is
-/// any whole multiple of it.
+/// Traces' one line under the count: that the traces found can earn
+/// credit, with no figure (owner, 2026-11-04: the MVP names no amount).
+/// `None` draws no line: nothing found yet (`traces` unknown or 0).
 #[must_use]
-pub fn usd_figure(usd_micros: u64) -> String {
-    let dollars = group(usd_micros / 1_000_000);
-    let cents = (usd_micros % 1_000_000) / USD_MICROS_PER_CENT;
-    if cents == 0 {
-        format!("${dollars}")
-    } else {
-        format!("${dollars}.{cents:02}")
-    }
-}
-
-/// An integer with a comma between each group of three digits.
-#[must_use]
-pub fn group(value: u64) -> String {
-    let digits = value.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
-fn fill_range(range: &str, one: &str, min: String, max: String) -> String {
-    if min == max {
-        one.replace("{min}", &min)
-    } else {
-        range.replace("{min}", &min).replace("{max}", &max)
-    }
-}
-
-/// Traces' one estimate line: the traces found times a per-trace range, as
-/// a total. `None` draws no line: nothing found yet (`traces` unknown or 0),
-/// or a total past `u64`.
-///
-/// A server dollar range (`usd`, from `GET /v1/public/first-run-estimate`)
-/// that this build would show words the total in dollars of NEAR AI credit,
-/// whatever an invite says. Without one, points as before: the invite's
-/// range when it is in `points_per_accepted_trace` and one the daemon
-/// accepts, else the owner's default ([`TracesCopy::estimate`]). Never both.
-///
-/// The dollar line is the one narrow exception to "the app never shows a
-/// dollar figure it cannot verify" (`crate::commons_credit`): it is
-/// labelled an estimate, shown only on the first run, from the operator's
-/// published configuration, and is never a balance.
-#[must_use]
-pub fn traces_estimate_line(
-    copy: &TracesCopy,
-    traces: Option<u64>,
-    usd: Option<UsdMicrosRange>,
-    points: Option<CreditRange>,
-) -> Option<String> {
-    estimate_line(copy, traces, usd, points, true)
+pub fn traces_estimate_line(copy: &TracesCopy, traces: Option<u64>) -> Option<String> {
+    found_line(copy, traces, true)
 }
 
 /// [`traces_estimate_line`] while the use that earns credit is not ticked:
-/// the same total, worded as what the traces could earn
-/// (`could_estimate_*`).
+/// worded as what the traces could earn (`found_could_credit`).
 #[must_use]
-pub fn traces_could_earn_line(
-    copy: &TracesCopy,
-    traces: Option<u64>,
-    usd: Option<UsdMicrosRange>,
-    points: Option<CreditRange>,
-) -> Option<String> {
-    estimate_line(copy, traces, usd, points, false)
+pub fn traces_could_earn_line(copy: &TracesCopy, traces: Option<u64>) -> Option<String> {
+    found_line(copy, traces, false)
 }
 
-fn estimate_line(
-    copy: &TracesCopy,
-    traces: Option<u64>,
-    usd: Option<UsdMicrosRange>,
-    points: Option<CreditRange>,
-    earns_credit: bool,
-) -> Option<String> {
-    let (usd_range, usd_one, points_range, points_one) = if earns_credit {
-        (
-            copy.estimate_usd,
-            copy.estimate_usd_one,
-            copy.estimate_points,
-            copy.estimate_points_one,
-        )
-    } else {
-        (
-            copy.could_estimate_usd,
-            copy.could_estimate_usd_one,
-            copy.could_estimate_points,
-            copy.could_estimate_points_one,
-        )
-    };
-    let traces = traces.filter(|n| *n > 0)?;
-    if let Some(usd) = usd.filter(UsdMicrosRange::is_valid) {
-        let min = traces.checked_mul(usd.min)?;
-        let max = traces.checked_mul(usd.max)?;
-        return Some(fill_range(
-            usd_range,
-            usd_one,
-            usd_figure(min),
-            usd_figure(max),
-        ));
-    }
-    let (per_min, per_max) = points
-        .filter(|r| r.unit == CREDIT_RANGE_UNIT_POINTS && valid_credit_range(r.min, r.max))
-        .and_then(|r| Some((u64::try_from(r.min).ok()?, u64::try_from(r.max).ok()?)))
-        .unwrap_or((u64::from(copy.estimate.min), u64::from(copy.estimate.max)));
-    let min = traces.checked_mul(per_min)?;
-    let max = traces.checked_mul(per_max)?;
-    Some(fill_range(points_range, points_one, group(min), group(max)))
+fn found_line(copy: &TracesCopy, traces: Option<u64>, earns_credit: bool) -> Option<String> {
+    traces.filter(|n| *n > 0)?;
+    Some(
+        if earns_credit {
+            copy.found_credit
+        } else {
+            copy.found_could_credit
+        }
+        .to_owned(),
+    )
 }
 
-/// What a shell sends to word Traces' estimate: the traces it found, the
-/// daemon's `first_run_estimate` answer's range, and an invite lookup's
-/// `credit_range`. Every field optional; unknown ones ignored.
+/// What a shell sends to word Traces' line: the traces it found and whether
+/// the use that earns credit is ticked. An older shell also sends the
+/// daemon's dollar range and an invite's points range; they are ignored,
+/// since the line names no amount.
 #[derive(Debug, Default, serde::Deserialize)]
 struct EstimateRequest {
     #[serde(default)]
     traces: Option<u64>,
-    #[serde(default)]
-    usd_micros_per_accepted_trace: Option<UsdMicrosRange>,
-    #[serde(default)]
-    credit_range: Option<CreditRange>,
     /// Whether the use that earns credit is ticked; absent means it is, so
     /// an older shell keeps its words.
     #[serde(default)]
@@ -819,11 +710,9 @@ struct EstimateRequest {
 #[must_use]
 pub fn traces_estimate_line_json(request: &str) -> Option<String> {
     let request: EstimateRequest = serde_json::from_str(request).ok()?;
-    estimate_line(
+    found_line(
         &first_run_copy().traces,
         request.traces,
-        request.usd_micros_per_accepted_trace,
-        request.credit_range,
         request.earns_credit.unwrap_or(true),
     )
 }
@@ -986,60 +875,33 @@ mod tests {
         assert!(!copy.traces.no_credit.contains("didn't"));
     }
 
-    /// While the use that earns credit is off, the headline says what the
-    /// traces could earn, in each of its four forms; with it on, the
-    /// headline is unchanged (Zaki's review of #1690).
+    /// While the use that earns credit is off, the line says what the
+    /// traces could earn; with it on, that they can (Zaki's review of
+    /// #1690). Neither names an amount (owner, 2026-11-04).
     #[test]
-    fn the_estimate_is_conditional_while_credit_is_off() {
+    fn the_found_line_is_conditional_while_credit_is_off() {
         let copy = first_run_copy().traces;
-        let usd = |min, max| Some(UsdMicrosRange { min, max });
-        let points = |min, max| {
-            Some(CreditRange {
-                min,
-                max,
-                unit: CREDIT_RANGE_UNIT_POINTS.to_owned(),
-            })
-        };
-        for (earning, could) in [
-            (
-                traces_estimate_line(&copy, Some(10), usd(120_000, 340_000), None),
-                traces_could_earn_line(&copy, Some(10), usd(120_000, 340_000), None),
-            ),
-            (
-                traces_estimate_line(&copy, Some(3), usd(500_000, 500_000), None),
-                traces_could_earn_line(&copy, Some(3), usd(500_000, 500_000), None),
-            ),
-            (
-                traces_estimate_line(&copy, Some(10), None, None),
-                traces_could_earn_line(&copy, Some(10), None, None),
-            ),
-            (
-                traces_estimate_line(&copy, Some(10), None, points(4, 4)),
-                traces_could_earn_line(&copy, Some(10), None, points(4, 4)),
-            ),
-        ] {
-            let earning = earning.expect("a line");
-            let could = could.expect("a line");
-            assert!(earning.starts_with("An estimated "), "{earning}");
-            assert_eq!(could, format!("You could earn an e{}", &earning[4..]));
-        }
         assert_eq!(
-            traces_could_earn_line(&copy, Some(10), usd(120_000, 340_000), None).as_deref(),
-            Some("You could earn an estimated $1.20–$3.40 in NEAR AI credit")
+            traces_estimate_line(&copy, Some(10)).as_deref(),
+            Some("We have detected some traces that can earn you credit.")
         );
-        assert_eq!(traces_could_earn_line(&copy, Some(0), None, None), None);
+        assert_eq!(
+            traces_could_earn_line(&copy, Some(10)).as_deref(),
+            Some("We have detected some traces that could earn you credit.")
+        );
+        assert_eq!(traces_could_earn_line(&copy, Some(0)), None);
         let json = |v: serde_json::Value| traces_estimate_line_json(&v.to_string());
         assert_eq!(
             json(serde_json::json!({"traces": 10, "earns_credit": false})).as_deref(),
-            Some("You could earn an estimated 30–80 points")
+            Some(copy.found_could_credit)
         );
         assert_eq!(
             json(serde_json::json!({"traces": 10, "earns_credit": true})).as_deref(),
-            Some("An estimated 30–80 points")
+            Some(copy.found_credit)
         );
         assert_eq!(
             json(serde_json::json!({"traces": 10})).as_deref(),
-            Some("An estimated 30–80 points")
+            Some(copy.found_credit)
         );
     }
 
@@ -1097,14 +959,15 @@ mod tests {
     }
 
     /// The Private AI card's lead and the rest it discloses are the offer's
-    /// own sentences, split once: together they are `OFFER_WHAT` exactly,
-    /// in the core's NEAR AI spelling (owner, 2026-10-08).
+    /// own sentences, split once: together they are first run's offer
+    /// exactly, in the core's NEAR AI spelling (owner, 2026-10-08). Settings
+    /// reads the shorter `OFFER_WHAT` since the Settings copy pass (P178).
     #[test]
     fn the_private_ai_lead_and_rest_are_the_offer_split_once() {
         let copy = first_run_copy().private_ai;
         assert_eq!(
             format!("{} {}", copy.offer_lead, copy.offer_more),
-            crate::private_inference_copy::OFFER_WHAT
+            crate::private_inference_copy::OFFER_WHAT_FIRST_RUN
         );
         assert!(
             copy.offer_lead
@@ -1209,15 +1072,36 @@ mod tests {
         assert!(!uses.complete_failed.contains("Setup finished"));
     }
 
+    /// Join's sign-in failure names only controls Join shows (copy guide
+    /// rule 7): Join has Sign in and no Skip (owner, 2026-10-12), so the
+    /// line must not offer to skip (tester report, 2026-11-04).
+    #[test]
+    fn the_sign_in_failure_offers_no_skip() {
+        let copy = first_run_copy();
+        let line = copy.folders.sign_in_failed.to_lowercase();
+        assert!(!line.contains("skip"), "{line}");
+        assert!(line.contains("try again"), "{line}");
+    }
+
+    /// Private AI only is an action (copy guide rule 1) naming the
+    /// destination the way the rest of the app does ("Private AI").
+    #[test]
+    fn private_ai_only_is_named_by_its_destination() {
+        let copy = first_run_copy();
+        assert_eq!(copy.tools.private_ai_only, "Use Private AI only");
+        assert_ne!(copy.tools.private_ai_only, copy.frame.continue_button);
+    }
+
     /// Every way leaving Folders or Tools can stop has a sentence, so
     /// Continue never does nothing in silence. A sign-in that did not finish
-    /// reads the core's existing sign-in line rather than a second wording.
+    /// reads the core's existing Private AI sign-in line rather than a
+    /// second wording.
     #[test]
     fn leaving_the_roots_says_why_it_stopped() {
         let copy = first_run_copy();
         assert_eq!(
             copy.folders.sign_in_failed,
-            crate::consent_copy::INFERENCE_SIGN_IN_FAILED
+            crate::private_inference_copy::CREDENTIAL_FAILED
         );
         // Lookup never reached an answer: nothing is said about the invite.
         assert_ne!(copy.folders.lookup_unavailable, copy.join.invite_error);
@@ -1262,35 +1146,17 @@ mod tests {
         ] {
             assert!(!bold.ends_with('.'), "{bold}");
         }
-        // One total for the traces found, never a per-trace rate, and no
-        // "not yet settled" (owner, 2026-10-23).
+        // The MVP names no amount, in points or dollars (owner, 2026-11-04).
         for line in [
-            copy.traces.estimate_points,
-            copy.traces.estimate_points_one,
-            copy.traces.estimate_usd,
-            copy.traces.estimate_usd_one,
+            copy.traces.found_credit,
+            copy.traces.found_could_credit,
+            copy.traces.credit_depends,
         ] {
-            assert!(line.starts_with("An estimated {min}"), "{line}");
-            assert!(!line.contains("per accepted trace"), "{line}");
-            assert!(!line.contains("not yet settled"), "{line}");
-            assert!(!line.contains('$'), "the figure carries the sign: {line}");
+            assert!(!line.contains('$'), "{line}");
+            assert!(!line.contains("point"), "{line}");
+            assert!(!line.contains('{'), "{line}");
+            assert!(line.ends_with('.'), "{line}");
         }
-        assert_eq!(
-            copy.traces.estimate_points,
-            "An estimated {min}–{max} points"
-        );
-        assert_eq!(copy.traces.estimate_points_one, "An estimated {min} points");
-        assert_eq!(
-            copy.traces.estimate_usd,
-            "An estimated {min}–{max} in NEAR AI credit"
-        );
-        assert_eq!(
-            copy.traces.estimate_usd_one,
-            "An estimated {min} in NEAR AI credit"
-        );
-        // The owner's per-trace default before an invite (2026-10-22).
-        assert_eq!(copy.traces.estimate, EstimateRange { min: 3, max: 8 });
-        assert!(copy.traces.estimate.min <= copy.traces.estimate.max);
         for line in [copy.private_ai.can_connect, copy.private_ai.can_connect_one] {
             assert!(line.contains("{total}"), "{line}");
         }
@@ -1362,139 +1228,30 @@ mod tests {
         assert!(empty.is_empty(), "empty first-run strings: {empty:?}");
     }
 
-    fn usd(min: u64, max: u64) -> Option<UsdMicrosRange> {
-        Some(UsdMicrosRange { min, max })
-    }
-
-    fn points(min: i64, max: i64) -> Option<CreditRange> {
-        Some(CreditRange::points(min, max))
-    }
-
-    #[test]
-    fn dollars_are_whole_dollars_or_two_places_with_grouping() {
-        assert_eq!(usd_figure(400_000), "$0.40");
-        assert_eq!(usd_figure(1_000_000), "$1");
-        assert_eq!(usd_figure(1_500_000), "$1.50");
-        assert_eq!(usd_figure(10_000), "$0.01");
-        assert_eq!(usd_figure(1_234_560_000), "$1,234.56");
-        assert_eq!(usd_figure(1_000_000_000_000), "$1,000,000");
-        // Sub-cent remainders never reach here (the range is whole cents);
-        // were one to, it is cut, never rounded up.
-        assert_eq!(usd_figure(19_999), "$0.01");
-        assert_eq!(group(0), "0");
-        assert_eq!(group(999), "999");
-        assert_eq!(group(1_000), "1,000");
-        assert_eq!(group(10_920), "10,920");
-    }
-
-    /// The server's range present: one dollar total for the traces found.
-    #[test]
-    fn a_server_range_is_one_dollar_total() {
-        let copy = first_run_copy().traces;
-        assert_eq!(
-            traces_estimate_line(&copy, Some(10), usd(120_000, 340_000), None).as_deref(),
-            Some("An estimated $1.20–$3.40 in NEAR AI credit")
-        );
-        assert_eq!(
-            traces_estimate_line(&copy, Some(1), usd(400_000, 1_000_000), None).as_deref(),
-            Some("An estimated $0.40–$1 in NEAR AI credit")
-        );
-        assert_eq!(
-            traces_estimate_line(&copy, Some(3), usd(500_000, 500_000), None).as_deref(),
-            Some("An estimated $1.50 in NEAR AI credit")
-        );
-        // An invite's points never override the server's dollars.
-        assert_eq!(
-            traces_estimate_line(&copy, Some(1365), usd(10_000, 20_000), points(2, 6)).as_deref(),
-            Some("An estimated $13.65–$27.30 in NEAR AI credit")
-        );
-    }
-
-    /// No server range: today's points, as one total, from the invite's
-    /// range or the owner's default.
-    #[test]
-    fn without_a_server_range_the_total_is_points() {
-        let copy = first_run_copy().traces;
-        assert_eq!(
-            traces_estimate_line(&copy, Some(1365), None, None).as_deref(),
-            Some("An estimated 4,095–10,920 points")
-        );
-        assert_eq!(
-            traces_estimate_line(&copy, Some(1365), None, points(2, 6)).as_deref(),
-            Some("An estimated 2,730–8,190 points")
-        );
-        assert_eq!(
-            traces_estimate_line(&copy, Some(10), None, points(4, 4)).as_deref(),
-            Some("An estimated 40 points")
-        );
-        // A range in another unit is not points: the default stands.
-        let foreign = CreditRange {
-            min: 1,
-            max: 2,
-            unit: "dollars".into(),
-        };
-        assert_eq!(
-            traces_estimate_line(&copy, Some(1), None, Some(foreign)).as_deref(),
-            Some("An estimated 3–8 points")
-        );
-        // A range the daemon would refuse is not used either.
-        assert_eq!(
-            traces_estimate_line(&copy, Some(1), None, points(-1, 5)).as_deref(),
-            Some("An estimated 3–8 points")
-        );
-        // A server range this build would not show is no range.
-        assert_eq!(
-            traces_estimate_line(&copy, Some(1), usd(10_001, 20_000), None).as_deref(),
-            Some("An estimated 3–8 points")
-        );
-    }
-
-    /// Nothing found, or not counted yet: no line, never "$0" or "0 points".
+    /// Nothing found, or not counted yet: no line.
     #[test]
     fn no_traces_is_no_line() {
         let copy = first_run_copy().traces;
         for found in [None, Some(0)] {
-            assert_eq!(
-                traces_estimate_line(&copy, found, usd(10_000, 20_000), None),
-                None
-            );
-            assert_eq!(traces_estimate_line(&copy, found, None, None), None);
+            assert_eq!(traces_estimate_line(&copy, found), None);
+            assert_eq!(traces_could_earn_line(&copy, found), None);
         }
     }
 
-    /// A total past u64 is no line, not a wrapped figure.
-    #[test]
-    fn an_overflowing_total_is_no_line() {
-        let copy = first_run_copy().traces;
-        assert_eq!(
-            traces_estimate_line(&copy, Some(u64::MAX), usd(10_000, 20_000), None),
-            None
-        );
-        assert_eq!(
-            traces_estimate_line(&copy, Some(u64::MAX), None, points(2, 6)),
-            None
-        );
-    }
-
-    /// The shells' wire: a JSON object in, the line or nothing out.
+    /// The shells' wire: a JSON object in, the line or nothing out. An
+    /// older shell's dollar or points range is read and ignored.
     #[test]
     fn the_estimate_request_reads_its_json() {
+        let copy = first_run_copy().traces;
         let line = |v: serde_json::Value| traces_estimate_line_json(&v.to_string());
         assert_eq!(
             line(serde_json::json!({
                 "traces": 10,
                 "usd_micros_per_accepted_trace": {"min": 120_000, "max": 340_000},
-            }))
-            .as_deref(),
-            Some("An estimated $1.20–$3.40 in NEAR AI credit")
-        );
-        assert_eq!(
-            line(serde_json::json!({
-                "traces": 10,
                 "credit_range": {"min": 4, "max": 4, "unit": "points_per_accepted_trace"},
             }))
             .as_deref(),
-            Some("An estimated 40 points")
+            Some(copy.found_credit)
         );
         assert_eq!(line(serde_json::json!({"traces": null})), None);
         assert_eq!(line(serde_json::json!({})), None);

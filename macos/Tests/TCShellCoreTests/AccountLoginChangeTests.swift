@@ -58,7 +58,8 @@ final class AccountLoginChangeSurfaceTests: XCTestCase {
         let page = AccountLoginChangeSurface.page(state(.current), copy: copy)!
         XCTAssertEqual(page.action, .proveCurrent)
         XCTAssertEqual(page.heading, "T:step_current")
-        XCTAssertEqual(page.primary, "T:step_current")
+        // The button has its own key, apart from the heading (rule 4).
+        XCTAssertEqual(page.primary, "T:step_current_button")
         XCTAssertEqual(page.primaryAccessibilityName, "T:a11y_current GitHub")
         XCTAssertFalse(page.asksWalletAccount)
         XCTAssertEqual(page.lines, [])
@@ -75,7 +76,8 @@ final class AccountLoginChangeSurfaceTests: XCTestCase {
     func testStepTwoSignsInWithTheNewAccount() {
         let page = AccountLoginChangeSurface.page(state(.new, new: nil), copy: copy)!
         XCTAssertEqual(page.action, .signInNew)
-        XCTAssertEqual(page.primary, "T:step_new")
+        XCTAssertEqual(page.heading, "T:step_new")
+        XCTAssertEqual(page.primary, "T:step_new_button")
         XCTAssertEqual(page.primaryAccessibilityName, "T:step_new_accessibility_name")
     }
 

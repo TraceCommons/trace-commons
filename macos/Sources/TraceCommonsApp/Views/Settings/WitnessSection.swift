@@ -65,6 +65,13 @@ struct WitnessSection: View {
                             .accessibilityElement(children: .combine)
                     }
 
+                    // Whether the extra privacy scan is configured, moved
+                    // here from the account section (Settings IA D7).
+                    if let settings = model.daemonSettings {
+                        SettingsStateRow(title: SettingsLegacyWords.extraScanConfigured,
+                                         isOn: settings.nearAIConfigured)
+                    }
+
                     if let state, WitnessSurface.offersConfigure(state) {
                         fields(copy)
                     }
@@ -162,6 +169,7 @@ struct WitnessSection: View {
                 prose(copy.inferenceDisclosure)
                 prose(copy.inferenceCaptureNote)
                 prose(copy.inferenceScopeNote)
+                    .helpIfAny(copy.inferenceScopeTooltip ?? "")
                 // Absent is absent: no sentence and a disabled Enable.
                 if model.daemonSettings == nil {
                     SettingsReadNotice(model.settingsRead, retry: model.refreshSettings)
@@ -174,6 +182,8 @@ struct WitnessSection: View {
                 HStack(spacing: GlassTokens.Space.s3) {
                     Button(copy.inferenceEnable) { showingInferenceDisclosure = true }
                         .buttonStyle(GlassButtonStyle(.glass))
+                        .accessibilityLabel(copy.inferenceEnableAccessibilityName ?? copy.inferenceEnable)
+                        .helpIfAny(copy.inferenceEnableTooltip ?? "")
                         .disabled(model.inferenceEvidenceBusy || model.daemonSettings?.ironwireAttestedBodies == nil)
                     // Disable, the decline, is a link after Enable (Ron,
                     // 2026-10-09).
@@ -181,6 +191,8 @@ struct WitnessSection: View {
                         Task { await model.setInferenceEvidence(false) }
                     }
                     .buttonStyle(GlassButtonStyle(.link))
+                    .accessibilityLabel(copy.inferenceDisableAccessibilityName ?? copy.inferenceDisable)
+                    .helpIfAny(copy.inferenceDisableTooltip ?? "")
                     .disabled(model.inferenceEvidenceBusy || model.daemonSettings?.ironwireAttestedBodies == nil)
                 }
                 // A failed save, directly under the buttons it is about.
@@ -192,9 +204,9 @@ struct WitnessSection: View {
         .glassModal(isPresented: $showingInferenceDisclosure) {
             GlassConfirmation(
                 title: copy.privacyConfirmTitle ?? copy.inferenceHeading,
-                subtitle: copy.privacyConfirmDescription,
-                message: [copy.inferenceDisclosure, copy.inferenceCaptureNote,
-                          copy.inferenceScopeNote].compactMap { $0 }.joined(separator: "\n\n"),
+                subtitle: Self.nonEmpty(copy.privacyConfirmDescription),
+                message: Self.paragraphs([copy.inferenceDisclosure, copy.inferenceCaptureNote,
+                                          copy.inferenceScopeNote]),
                 actions: [
                     .cancel(copy.inferenceCancel) { showingInferenceDisclosure = false },
                     GlassModalAction(copy.inferenceConfirm, isDefault: true) {
@@ -223,6 +235,8 @@ struct WitnessSection: View {
                 HStack(spacing: GlassTokens.Space.s3) {
                     Button(copy.tokenEnable ?? "") { showingTokenDisclosure = true }
                         .buttonStyle(GlassButtonStyle(.glass))
+                        .accessibilityLabel(copy.tokenEnableAccessibilityName ?? copy.tokenEnable ?? "")
+                        .helpIfAny(copy.tokenEnableTooltip ?? "")
                         .disabled(model.tokenContributionBusy || model.daemonSettings?.tokenDistributionsContribution == nil)
                     // Disable, the decline, is a link after Enable (Ron,
                     // 2026-10-09).
@@ -230,6 +244,7 @@ struct WitnessSection: View {
                         Task { await model.setTokenContribution(false) }
                     }
                     .buttonStyle(GlassButtonStyle(.link))
+                    .accessibilityLabel(copy.tokenDisableAccessibilityName ?? copy.tokenDisable ?? "")
                     .disabled(model.tokenContributionBusy || model.daemonSettings?.tokenDistributionsContribution == nil)
                 }
                 // A failed save, directly under the buttons it is about.
@@ -247,9 +262,9 @@ struct WitnessSection: View {
         .glassModal(isPresented: $showingTokenDisclosure) {
             GlassConfirmation(
                 title: copy.privacyConfirmTitle ?? copy.tokenHeading ?? "",
-                subtitle: copy.privacyConfirmDescription,
-                message: [copy.tokenDisclosure, copy.tokenCaptureNote,
-                          copy.tokenScopeNote].compactMap { $0 }.joined(separator: "\n\n"),
+                subtitle: Self.nonEmpty(copy.privacyConfirmDescription),
+                message: Self.paragraphs([copy.tokenDisclosure, copy.tokenCaptureNote,
+                                          copy.tokenScopeNote]),
                 actions: [
                     .cancel(copy.tokenCancel ?? "") { showingTokenDisclosure = false },
                     GlassModalAction(copy.tokenConfirm ?? "", isDefault: true) {
@@ -277,10 +292,10 @@ struct WitnessSection: View {
             .disabled(model.tokenContributionBusy)
             .glassModal(isPresented: $showingTokenCapture) {
                 GlassConfirmation(
-                    title: label, message: storage.captureConfirmation ?? "",
+                    title: storage.captureConfirmTitle ?? label, message: storage.captureConfirmation ?? "",
                     actions: [
                         .cancel(storage.cancelLabel) { showingTokenCapture = false },
-                        GlassModalAction(label, isDefault: true) {
+                        GlassModalAction(storage.captureConfirmLabel ?? label, isDefault: true) {
                             showingTokenCapture = false
                             Task { await model.setLocalTokenCapture(true) }
                         },
@@ -297,6 +312,7 @@ struct WitnessSection: View {
         HStack(spacing: GlassTokens.Space.s3) {
             Button(storage.cleanupLabel) { Task { await model.cleanTokenStorage(discard: false) } }
                 .buttonStyle(GlassButtonStyle(.glass))
+                .helpIfAny(storage.cleanupTooltip ?? "")
             Button(storage.discardLabel, role: .destructive) { showingTokenDiscard = true }
                 .buttonStyle(GlassButtonStyle(.destructive))
         }
@@ -318,11 +334,28 @@ struct WitnessSection: View {
         if !model.tokenStorageNotice.isEmpty { GlassAlert(model.tokenStorageNotice) }
     }
 
+    /// A paragraph, or nothing for an empty one: the owner cut some lines
+    /// to "" (Settings copy pass 2, 2026-11-04, P263).
+    @ViewBuilder
     private func prose(_ text: String) -> some View {
-        Text(text)
-            .glassType(GlassTokens.TypeScale.label.weight(.regular))
-            .foregroundStyle(GlassColor.textPrimary)
-            .fixedSize(horizontal: false, vertical: true)
+        if !text.isEmpty {
+            Text(text)
+                .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                .foregroundStyle(GlassColor.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// A confirmation's body: the present, non-empty paragraphs, so a cut
+    /// line leaves no blank paragraph (P263).
+    static func paragraphs(_ lines: [String?]) -> String {
+        lines.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n")
+    }
+
+    /// Nil for a missing or cut subtitle (P285), so none is drawn.
+    static func nonEmpty(_ text: String?) -> String? {
+        guard let text, !text.isEmpty else { return nil }
+        return text
     }
 
     private func note(_ text: String) -> some View {

@@ -140,7 +140,10 @@ enum UsesScreenLayout {
     /// Automatic, on an account that can choose it, goes through both
     /// disclosures; Private AI turned on otherwise goes through the witness
     /// disclosure (spec rule 10); everything else commits directly.
+    /// Private AI only shares nothing and sends no Private AI switch
+    /// (`FirstRunPlan`), so it has nothing to disclose and always commits.
     static func startRoute(_ state: FirstRunState) -> StartRoute {
+        if state.privateAIOnly { return .commit }
         if SharingDisclosureFlow.isNeeded(for: state) { return .disclose }
         if SharingDisclosureFlow.isWitnessOnlyNeeded(for: state) { return .discloseWitness }
         return .commit
@@ -189,7 +192,10 @@ enum UsesScreenLayout {
     private static func split(path: SharingPath, grant: AutomaticGrantCopy) -> (line: String, detail: String)? {
         switch path {
         case .askMe:
-            guard let line = grant.pathAskFirstTitle, !line.isEmpty, let detail = grant.pathAskFirstDetail,
+            // Ask's first line was cut by the owner 2026-11-04 (Settings
+            // copy pass 2, P125): an empty title is present, not missing;
+            // the radio then has no sub-line and the detail stays.
+            guard let line = grant.pathAskFirstTitle, let detail = grant.pathAskFirstDetail,
                 !detail.isEmpty
             else { return nil }
             return (line, detail)
@@ -217,7 +223,7 @@ enum UsesScreenLayout {
             let mode: ProjectMode = path == .automatic ? .autoUpload : .ask
             guard let modeTitle = modes?.label(for: mode) else { return nil }
             let title = path == .askMe ? (uses.askEachTime ?? modeTitle) : modeTitle
-            var lines = [grant.flatMap { split(path: path, grant: $0)?.line }].compactMap { $0 }
+            var lines = [grant.flatMap { split(path: path, grant: $0)?.line }].compactMap { $0 }.filter { !$0.isEmpty }
             if path == .automatic, let scope = uses.automaticScope { lines = [scope] }
             if path == .automatic, !FirstRunNavigation.canChooseAutomatic(state) {
                 lines.append(uses.automaticAfterSignIn)

@@ -65,10 +65,13 @@ extension DaemonClient {
         try call("automatic_grant", as: AutomaticGrant.self)
     }
 
-    /// `first_run_estimate`: the commons' dollar estimate per accepted
-    /// trace, or no range. Always answers once the daemon runs.
-    func firstRunEstimate() throws -> DaemonData.FirstRunEstimate {
-        try call("first_run_estimate", as: DaemonData.FirstRunEstimate.self)
+    /// `first_run_copy`: the lines Traces shows under the traces found. The
+    /// daemon coarsens both figures before asking the commons, and always
+    /// answers, with its own default lines when the commons cannot.
+    func firstRunCopy(traceCount: UInt64, totalBytes: UInt64) throws -> DaemonData.FirstRunCopyLines {
+        try call(
+            "first_run_copy", params: ["trace_count": traceCount, "total_bytes": totalBytes],
+            as: DaemonData.FirstRunCopyLines.self)
     }
 
     /// `invite_lookup`: the issuer and pay range an invite names. The whole

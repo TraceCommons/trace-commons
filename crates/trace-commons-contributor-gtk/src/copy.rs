@@ -420,13 +420,13 @@ pub const CONTRIBUTE: &str = "Contribute";
 /// Shown where the transcript would be when the shell is attached to a
 /// daemon it does not host. The contract serves the full redacted body
 /// in-process only; saying so plainly beats an empty box.
+/// DRAFT, NEEDS APPROVAL (2026-11-04).
 pub const BODY_NOT_AVAILABLE_HERE: &str = concat!(
     "The full text can only be shown by the copy of ",
     app_name!(),
     " that is doing the watching. \
      A background watcher is running separately on this machine, so this window can show what \
-     would be sent and what was scrubbed, but not the text itself. \
-     `trace-commons-contributor daemon preview` shows the same summary from a terminal."
+     would be sent and what was scrubbed, but not the text itself."
 );
 
 pub const PERMISSIONS_INTRO: &str =
@@ -795,9 +795,13 @@ pub fn withdraw_failure_sentence(label: &str) -> String {
     if WITHDRAW_NOT_FOUND_LABELS.contains(&label) {
         return WITHDRAW_NOT_FOUND.to_string();
     }
+    // A shell-made label such as "daemon-not-running" is shown without its
+    // process prefix; the label itself is unchanged.
+    // DRAFT, NEEDS APPROVAL (2026-11-04).
+    let shown = label.strip_prefix("daemon-").unwrap_or(label);
     format!(
         "Nothing was withdrawn and nothing was deleted. The request did not go through \
-         ({label}). You can try again."
+         ({shown}). You can try again."
     )
 }
 
@@ -2863,6 +2867,18 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_withdrawal_never_names_the_background_process() {
+        let sentence = withdraw_failure_sentence("daemon-not-running");
+        assert!(sentence.contains("(not-running)"), "{sentence}");
+        assert!(!sentence.to_lowercase().contains("daemon"), "{sentence}");
+    }
+
+    #[test]
+    fn the_unhosted_body_line_never_names_the_background_process() {
+        assert!(!BODY_NOT_AVAILABLE_HERE.to_lowercase().contains("daemon"));
+    }
+
+    #[test]
     fn the_not_found_sentence_discloses_neither_existence_nor_ownership() {
         // Rule 4: the server answers identically whether a submission
         // belongs to somebody else or does not exist, so that accounts
@@ -3085,11 +3101,21 @@ mod tests {
     fn the_ignore_confirmation_always_names_the_way_back() {
         for n in [0usize, 1, 7] {
             let body = ignore_project_body(n);
-            assert!(body.contains("undo this in Settings"), "n={n}: {body}");
-            assert!(
-                body.contains("Nothing already submitted is affected."),
-                "n={n}"
-            );
+            // Owner dropped "undo this in Settings" from the body for n > 0
+            // 2026-11-04 (Settings copy pass 2, P121); its way back is now
+            // IGNORE_PROJECT_BODY_TOOLTIP.
+            if n == 0 {
+                assert!(body.contains("undo this in Settings"), "n={n}: {body}");
+                assert!(
+                    body.contains("Nothing already submitted is affected."),
+                    "n={n}"
+                );
+            } else {
+                assert!(
+                    body.contains("Traces already sent aren't affected."),
+                    "n={n}: {body}"
+                );
+            }
         }
     }
 
@@ -3107,7 +3133,7 @@ mod tests {
 
     #[test]
     fn the_ignore_title_names_the_project() {
-        assert_eq!(ignore_project_title("api"), "Ignore api?");
+        assert_eq!(ignore_project_title("api"), "Set api to Never?");
     }
 
     /// This shell prints the shared words and not its own.

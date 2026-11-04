@@ -109,7 +109,12 @@ final class CredentialExportTests: XCTestCase {
         let copy = try XCTUnwrap(copy())
         let cost = copy.credentialCost
         XCTAssertTrue(cost.contains("browser"), cost)
-        XCTAssertTrue(cost.contains("your NEAR AI account"), cost)
+        // Owner dropped "in your NEAR AI account" and the keychain sentence
+        // 2026-11-04 (Settings copy pass 2, P3); it still names the key and
+        // the kept sign-in, and the revoke and key-scope facts moved to the
+        // Sign in tooltip.
+        XCTAssertTrue(cost.contains("NEAR AI key"), cost)
+        XCTAssertTrue(cost.contains("keeps you signed in"), cost)
         XCTAssertEqual(CredentialSurface.actionExplains(.obtain, copy: copy), cost)
     }
 
@@ -124,7 +129,7 @@ final class CredentialExportTests: XCTestCase {
         XCTAssertFalse(copy.credentialForgetExplains.isEmpty)
         XCTAssertFalse(copy.credentialForgetNotRevoked.isEmpty)
         XCTAssertEqual(
-            copy.nearAiStillSignedIn, "NEAR AI is still signed in. Use Forget in Private AI.")
+            copy.nearAiStillSignedIn, "NEAR AI is still signed in.")
     }
 
     /// The tri-state crosses as three values, and only the middle one draws
@@ -146,12 +151,15 @@ final class CredentialExportTests: XCTestCase {
     func testNoCredentialSentenceCanCarryAValue() throws {
         let copy = try XCTUnwrap(copy())
         let sentences = [
-            copy.credentialTitle, copy.credentialWhat, copy.credentialCost,
+            // credentialWhat is cut (owner 2026-11-04, Settings copy pass 2,
+            // P10) and asserted empty below; the Sign in tooltip takes its slot.
+            copy.credentialTitle, copy.signInTooltip, copy.credentialCost,
             copy.credentialObtain, copy.credentialCancel, copy.credentialForget,
             copy.credentialForgetExplains, copy.credentialAbsent, copy.credentialObtaining,
             copy.credentialFailed, copy.credentialCancelled, copy.credentialPresent,
             copy.credentialUnknown, copy.credentialUnreported, copy.harnessNeedsCredential,
         ]
+        XCTAssertEqual(copy.credentialWhat, "")
         for sentence in sentences {
             XCTAssertFalse(sentence.isEmpty)
             for marker in ["{}", "{key}", "{prefix}", "%@", "%s", "%d"] {

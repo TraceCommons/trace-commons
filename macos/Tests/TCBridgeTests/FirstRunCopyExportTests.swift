@@ -13,18 +13,20 @@ final class FirstRunCopyExportTests: XCTestCase {
         // The animated first run's own groups decode from the same table.
         XCTAssertEqual(copy.welcome.title, "Welcome to Near AI")
         XCTAssertEqual(copy.frame.stepTraces, "Traces")
-        XCTAssertEqual([copy.traces.estimate.min, copy.traces.estimate.max], [3, 8])
+        XCTAssertEqual(copy.traces.foundCredit, "We have detected some traces that can earn you credit.")
         XCTAssertTrue(copy.privateAi.canConnect.contains("{total}"))
     }
 
-    /// Folders' sign-in line is the core's existing one, read through the
-    /// first-run table rather than a second bridge call.
-    func testTheSignInLineIsTheInferenceCopys() throws {
+    /// Folders' sign-in line is the core's existing Private AI one, read
+    /// through the first-run table rather than a second bridge call. It is
+    /// no longer the inference step's, which offers a Skip Join does not
+    /// have (tester report, 2026-11-04).
+    func testTheSignInLineIsPrivateAIs() throws {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
-        let inference = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: Data(try XCTUnwrap(TCCoreCopy.inferenceConnectionCopyJSON()).utf8))
-                as? [String: Any])
-        XCTAssertEqual(copy.folders.signInFailed, inference["sign_in_failed"] as? String)
+        let privateAI = try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: try XCTUnwrap(TCPrivateInference.copyJSON())))
+        XCTAssertEqual(copy.folders.signInFailed, privateAI.credentialFailed)
+        XCTAssertFalse(copy.folders.signInFailed.lowercased().contains("skip"))
+        XCTAssertEqual(copy.tools.privateAiOnly, "Use Private AI only")
         XCTAssertNotEqual(copy.folders.lookupUnavailable, copy.join.inviteError)
         XCTAssertNotEqual(copy.uses.completeFailed, copy.uses.sharingRefused)
     }

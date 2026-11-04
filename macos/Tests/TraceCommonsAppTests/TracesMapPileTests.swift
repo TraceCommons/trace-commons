@@ -409,7 +409,7 @@ final class TracesMapPileTests: XCTestCase {
         XCTAssertEqual(words.legendMemory, "Memory stays on this Mac")
         XCTAssertEqual(words.styleTitle, "Traces map")
         XCTAssertEqual(words.styleToggle, "Rocket mode")
-        XCTAssertEqual(words.styleCaption, "GUI change only. Contributions fly to the library (space station) by rocket animation.")
+        XCTAssertEqual(words.styleCaption, "Changes only how the map looks.")
     }
 
     /// The window feeds its player what History gained, kept and

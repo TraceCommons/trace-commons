@@ -77,7 +77,7 @@ public sealed class LegacyMigrationOfferViewModel : INotifyPropertyChanged
 
     public string Later => _copy?.Later ?? string.Empty;
 
-    public string Cancel => _copy?.PasskeyCancel ?? string.Empty;
+    public string Cancel => _copy?.LoginCancel ?? string.Empty;
 
     public string InvitePrompt => _copy?.InvitePrompt ?? string.Empty;
 
@@ -99,26 +99,26 @@ public sealed class LegacyMigrationOfferViewModel : INotifyPropertyChanged
         }
     }
 
-    /// <summary>The move is running, or waiting on the passkey.</summary>
+    /// <summary>The move is running, or waiting on the sign-in.</summary>
     public bool IsWorking => Move.Busy;
 
-    /// <summary>The working line, or the passkey line while the browser step is open.</summary>
-    public string WorkingLine => Move.AwaitingPasskey
-        ? _copy?.PasskeyWaiting ?? string.Empty
+    /// <summary>The working line, or the sign-in line while the browser step is open.</summary>
+    public string WorkingLine => Move.AwaitingLogin
+        ? _copy?.LoginWaiting ?? string.Empty
         : Move.Busy ? _copy?.Working ?? string.Empty : string.Empty;
 
-    /// <summary>The Cancel on the passkey wait. Nothing is moved.</summary>
-    public bool CanCancel => Move.AwaitingPasskey;
+    /// <summary>The Cancel on the sign-in wait. Nothing is moved.</summary>
+    public bool CanCancel => Move.AwaitingLogin;
 
     public bool CanMove => !Move.Busy;
 
     /// <summary>
-    /// The core's refusal line, else the passkey step's failure, else the
+    /// The core's refusal line, else the sign-in step's failure, else the
     /// could-not-start line. Empty when there is none.
     /// </summary>
     public string Problem =>
         Move.Refusal
-        ?? (Move.PasskeyFailed ? _copy?.PasskeyFailed
+        ?? (Move.LoginFailed ? _copy?.LoginFailed
             : Move.StartFailed ? _copy?.StartFailed
             : null)
         ?? string.Empty;
@@ -128,7 +128,7 @@ public sealed class LegacyMigrationOfferViewModel : INotifyPropertyChanged
     /// <summary>Move, sending the pasted invite only once the daemon asked for it.</summary>
     public Task MoveAsync() => Move.MoveAsync(Invite);
 
-    public Task CancelAsync() => Move.CancelPasskeyAsync();
+    public Task CancelAsync() => Move.CancelLoginAsync();
 
     /// <summary>Puts the card away for good on this device. The move stays in Settings.</summary>
     public void DismissCard()

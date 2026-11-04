@@ -56,25 +56,26 @@ final class FirstRunCreditNoteTests: XCTestCase {
         XCTAssertFalse(source.contains("exclamationmark"), "a note, not a warning")
         // The headline says what the traces could earn while the note shows
         // (Zaki's review of #1690), and is unchanged once credit is on.
-        XCTAssertTrue(source.contains("earnsCredit: !TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses)"))
+        XCTAssertTrue(source.contains("let earnsCredit = !TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses)"))
+        XCTAssertTrue(source.contains("earnsCredit: earnsCredit) {"))
+        // The final-credit line shows only while credit is on (owner,
+        // 2026-11-04): the core's note, or the commons' note in its place.
+        XCTAssertTrue(source.contains("coreNote: copy.traces.creditDepends,"))
+        let copyNote = copy.traces.creditDepends
+        XCTAssertEqual(
+            TracesScreenLayout.lines(found: 1, served: nil, coreLine: "line", coreNote: copyNote, earnsCredit: true)?.note,
+            copyNote)
+        XCTAssertNil(
+            TracesScreenLayout.lines(found: 1, served: nil, coreLine: "line", coreNote: copyNote, earnsCredit: false)?.note)
     }
 
-    func testTracesEstimateIsConditionalWhileTrainCodingModelsIsOff() throws {
+    func testTracesLineIsConditionalWhileTrainCodingModelsIsOff() throws {
         XCTAssertEqual(
-            TracesScreenLayout.estimate(found: 1365, lookup: nil, dollars: nil, earnsCredit: false),
-            "You could earn an estimated 4,095–10,920 points")
+            TracesScreenLayout.estimate(found: 1365, lookup: nil, earnsCredit: false),
+            "We have detected some traces that could earn you credit.")
         XCTAssertEqual(
-            TracesScreenLayout.estimate(found: 1365, lookup: nil, dollars: nil, earnsCredit: true),
-            "An estimated 4,095–10,920 points")
-        let commons = try JSONDecoder().decode(
-            DaemonData.FirstRunEstimate.self,
-            from: Data(#"{"usd_micros_per_accepted_trace":{"min":120000,"max":340000}}"#.utf8))
-        XCTAssertEqual(
-            TracesScreenLayout.estimate(found: 1365, lookup: nil, dollars: commons, earnsCredit: false),
-            "You could earn an estimated $163.80–$464.10 in NEAR AI credit")
-        XCTAssertEqual(
-            TracesScreenLayout.estimate(found: 1365, lookup: nil, dollars: commons, earnsCredit: true),
-            "An estimated $163.80–$464.10 in NEAR AI credit")
+            TracesScreenLayout.estimate(found: 1365, lookup: nil, earnsCredit: true),
+            "We have detected some traces that can earn you credit.")
     }
 
     func testTheLinkReturnsToUsesWithEveryChoiceKept() {

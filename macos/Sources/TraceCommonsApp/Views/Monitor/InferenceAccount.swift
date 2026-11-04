@@ -76,6 +76,7 @@ struct PrivateAISettingsPanels: View {
                             eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,
                             refresh: copy.panelToolsRefreshAccessibility, refreshWord: copy.panelRefresh,
                             onRefresh: { refreshTools() })
+                        .helpIfAny(copy.harnessesPrecedenceTooltip)
                         HarnessListSection(copy: copy, titled: false)
                     }
                 }
@@ -95,7 +96,8 @@ struct PrivateAISettingsPanels: View {
                     onDismiss: { store.dismissPrivateAIRefusal() },
                     onRefresh: { refreshConnection() },
                     // #1146: the sign-in is part of the connection panel.
-                    credential: AnyView(CredentialSection(copy: copy, prominent: true, titled: false)))
+                    credential: AnyView(CredentialSection(
+                        copy: copy, prominent: true, titled: false, placement: .signInShortcut)))
             }
         }
     }

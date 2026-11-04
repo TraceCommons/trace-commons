@@ -400,7 +400,7 @@ struct TracesTreeView: View, Equatable {
                 actions: [
                     // #1146's "Keep project", from the core.
                     .cancel(copy.keep, action: cancel),
-                    .destructive(copy.button) { apply(pending.folder, pending.mode) },
+                    .destructive(copy.button, help: copy.ignoreProjectTooltip) { apply(pending.folder, pending.mode) },
                 ],
                 onCancel: cancel)
         case .arm(let copy):

@@ -94,21 +94,28 @@ impl PolicyReason {
     }
     pub fn detail(self) -> &'static str {
         match self {
-            Self::MissingObservation => "Waiting for fresh resource observations.",
-            Self::StaleObservation => "Resource observations expired. Resume after they recover.",
-            Self::InvalidClock => "Resource observation timing is invalid.",
-            Self::Sleeping => "Compute is paused for sleep. Resume after waking.",
-            Self::Power => "Compute requires AC power. Resume after reconnecting.",
-            Self::LowPowerMode => "Turn off Low Power Mode before resuming compute.",
-            Self::UnknownObservation => "Required resource information is unavailable.",
-            Self::Thermal | Self::CriticalThermal => {
-                "Compute is paused until the device cools. Resume when ready."
-            }
-            Self::Memory | Self::CriticalMemory => {
-                "Compute is paused for memory pressure. Resume after recovery."
-            }
-            Self::Paused => "Compute is paused. Resume when ready.",
-            Self::Disabled => "Compute contribution is disabled.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P344).
+            Self::MissingObservation => "Checking this computer's resources.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P326).
+            Self::StaleObservation => "Resource readings expired.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P347).
+            Self::InvalidClock => "Resource readings have bad timing.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P320).
+            Self::Sleeping => "Paused for sleep.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P336).
+            Self::Power => "Needs to be plugged in.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P329).
+            Self::LowPowerMode => "Low Power Mode is on.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P337).
+            Self::UnknownObservation => "Resource readings unavailable.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P321).
+            Self::Thermal | Self::CriticalThermal => "Paused until the computer cools.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P322).
+            Self::Memory | Self::CriticalMemory => "Paused for low memory.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P323).
+            Self::Paused => "Paused.",
+            // Approved by the owner 2026-11-04 (Settings copy pass 2, P343).
+            Self::Disabled => "Compute is disabled.",
             Self::Shutdown => "Compute is shutting down.",
         }
     }
