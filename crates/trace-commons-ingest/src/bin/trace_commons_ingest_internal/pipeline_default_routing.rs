@@ -94,6 +94,12 @@ pub(crate) const DEFAULT_ROUTING_BACKOFF: StdDuration = StdDuration::from_secs(6
 const EXPIRY_WARNING_SECONDS: i64 = 24 * 60 * 60;
 /// The page size of the cache refresh's read of every routed tenant.
 const ROUTED_PAGE: i64 = 1000;
+/// The most passes the loop runs back to back, without the interval between
+/// them, before it sleeps. At the default batch this reaches 5,000 tenants.
+pub(crate) const MAX_BACK_TO_BACK_PASSES: u32 = 100;
+/// Logged when a run of back-to-back passes ended because it hit the cap.
+pub(crate) const PIPELINE_DEFAULT_ROUTING_BACK_TO_BACK_CAPPED_LABEL: &str =
+    "pipeline_default_routing_back_to_back_passes_capped";
 
 /// The reason code of every routing change default routing makes.
 pub(crate) const PIPELINE_DEFAULT_ROUTING_REASON_CODE: &str = "pipeline_default_routing";
@@ -510,6 +516,12 @@ pub(crate) struct DefaultRoutingPassReport {
 }
 
 impl DefaultRoutingPassReport {
+    /// Whether the pass changed a tenant's routing or qualification. A
+    /// refusal or a skip is not progress.
+    fn made_progress(&self) -> bool {
+        self.activated + self.requalified + self.migrated > 0
+    }
+
     fn count(&mut self, outcome: &DefaultRouteOutcome) {
         match outcome {
             DefaultRouteOutcome::Activated => self.activated += 1,
@@ -519,6 +531,19 @@ impl DefaultRoutingPassReport {
             | DefaultRouteOutcome::AlreadyDecided => self.skipped += 1,
         }
     }
+}
+
+/// Whether the loop runs another pass at once: the last pass made progress,
+/// a cursor shows tenants left unvisited, and fewer than `cap` passes have
+/// run back to back. A pass that only refused or skipped never repeats, so
+/// tenants that fail readiness wait for the interval.
+fn run_again_now(
+    report: &DefaultRoutingPassReport,
+    more_pages: bool,
+    passes_run: u32,
+    cap: u32,
+) -> bool {
+    report.made_progress() && more_pages && passes_run < cap
 }
 
 /// The tenants whose routing row is `pipeline` or `contained` and whose
@@ -627,6 +652,13 @@ impl PipelineDefaultRouting {
         }
         let _ = tenant_id;
         true
+    }
+
+    /// Test builds only: the next re-qualify page starts after `after`, so a
+    /// shared database's older tenants do not fill the pages.
+    #[cfg(test)]
+    pub(crate) fn start_requalify_after_for_test(&self, after: String) {
+        *self.requalify_cursor.lock().unwrap_or_else(lock_poisoned) = Some(after);
     }
 
     /// Test builds only: reads `now` in place of the wall clock.
@@ -885,6 +917,58 @@ impl PipelineDefaultRouting {
         report.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         *self.last_pass.lock().unwrap_or_else(lock_poisoned) = Some(report.clone());
         report
+    }
+
+    /// Whether either cursor shows a page that was full, so tenants may be
+    /// left unvisited in this sweep.
+    fn more_pages(&self) -> bool {
+        self.route_cursor
+            .lock()
+            .unwrap_or_else(lock_poisoned)
+            .is_some()
+            || self
+                .requalify_cursor
+                .lock()
+                .unwrap_or_else(lock_poisoned)
+                .is_some()
+    }
+
+    /// Passes back to back, without the interval, while each one made
+    /// progress and tenants remain, at most `MAX_BACK_TO_BACK_PASSES`; then
+    /// returns the number of passes run. After a deploy this requalifies
+    /// every routed tenant without waiting an interval per `BATCH` tenants.
+    pub(crate) async fn run_passes(
+        &self,
+        state: &AppState,
+        stop: Option<&tokio::sync::watch::Receiver<bool>>,
+    ) -> u32 {
+        self.run_passes_capped(state, stop, MAX_BACK_TO_BACK_PASSES)
+            .await
+    }
+
+    pub(crate) async fn run_passes_capped(
+        &self,
+        state: &AppState,
+        stop: Option<&tokio::sync::watch::Receiver<bool>>,
+        cap: u32,
+    ) -> u32 {
+        let mut passes = 0;
+        loop {
+            let report = self.run_pass(state).await;
+            passes += 1;
+            if stop.is_some_and(|stop| *stop.borrow()) {
+                return passes;
+            }
+            if !run_again_now(&report, self.more_pages(), passes, cap) {
+                if passes >= cap && report.made_progress() && self.more_pages() {
+                    tracing::info!(
+                        passes,
+                        "{PIPELINE_DEFAULT_ROUTING_BACK_TO_BACK_CAPPED_LABEL}"
+                    );
+                }
+                return passes;
+            }
+        }
     }
 
     async fn route_batch(&self, state: &AppState, report: &mut DefaultRoutingPassReport) {
@@ -1356,7 +1440,7 @@ pub(crate) async fn admit_routed_tenant(
     admit_if_routed(default_routing, state, service, tenant_id, routing).await;
 }
 
-/// The loop of the mode `all`, beside the worker: one `run_pass` every
+/// The loop of the mode `all`, beside the worker: `run_passes` every
 /// `interval`, until `stop` fires.
 pub(crate) struct DefaultRoutingLoopHandle {
     pub(crate) stop: tokio::sync::watch::Sender<bool>,
@@ -1369,7 +1453,7 @@ pub(crate) fn spawn_default_routing_loop(state: Arc<AppState>) -> Option<Default
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
     let join = tokio::spawn(async move {
         while !*stop_rx.borrow() {
-            routing.run_pass(&state).await;
+            routing.run_passes(&state, Some(&stop_rx)).await;
             tokio::select! {
                 _ = tokio::time::sleep(routing.config().interval) => {},
                 _ = stop_rx.changed() => {},
@@ -1443,6 +1527,56 @@ mod unit_tests {
                 PIPELINE_DEFAULT_ROUTING_REASON_CODE
             )
         );
+    }
+
+    fn report(
+        activated: u64,
+        requalified: u64,
+        migrated: u64,
+        refused: u64,
+    ) -> DefaultRoutingPassReport {
+        DefaultRoutingPassReport {
+            activated,
+            requalified,
+            migrated,
+            refused,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_pass_with_progress_and_tenants_left_runs_again_at_once() {
+        for done in [report(1, 0, 0, 0), report(0, 50, 0, 0), report(0, 0, 3, 0)] {
+            assert!(run_again_now(&done, true, 1, 100), "{done:?}");
+        }
+        // Progress among refusals still runs again.
+        assert!(run_again_now(&report(0, 1, 0, 49), true, 1, 100));
+    }
+
+    #[test]
+    fn a_pass_that_only_refused_or_skipped_waits_for_the_interval() {
+        let mut only_refused = report(0, 0, 0, 50);
+        assert!(!run_again_now(&only_refused, true, 1, 100));
+        only_refused.skipped = 50;
+        assert!(!run_again_now(&only_refused, true, 1, 100));
+        assert!(!run_again_now(
+            &DefaultRoutingPassReport::default(),
+            true,
+            1,
+            100
+        ));
+    }
+
+    #[test]
+    fn a_pass_with_no_tenants_left_waits_for_the_interval() {
+        assert!(!run_again_now(&report(0, 10, 0, 0), false, 1, 100));
+    }
+
+    #[test]
+    fn the_cap_bounds_the_run() {
+        let busy = report(0, 50, 0, 0);
+        assert!(run_again_now(&busy, true, 99, 100));
+        assert!(!run_again_now(&busy, true, 100, 100));
     }
 
     #[test]

@@ -1277,7 +1277,20 @@ Two paths activate:
 - **The loop.** Every interval, a pass routes up to `BATCH` tenants that
   have a `trace_tenants` row and no routing row, so a tenant that signed up
   is routed before its first upload where possible. The cursor wraps at the
-  end of the list.
+  end of the list. The same pass re-qualifies up to `BATCH` tenants it
+  routed whose bundle has no qualification on the running revision, and
+  moves up to `BATCH` off a bundle that awards nothing.
+- **Back-to-back passes.** After a deploy every routed tenant needs
+  re-qualifying, which would take one interval per `BATCH` tenants. So when a
+  pass activated, re-qualified or migrated at least one tenant and a page was
+  full (tenants remain), the loop runs the next pass at once, without the
+  interval, up to 100 passes in a row (5,000 tenants at the default batch),
+  then sleeps the interval. A pass that only refused or skipped tenants (for
+  example every remaining tenant refused `activation_readiness_failed`) does
+  not repeat: those tenants are retried on the next interval, as before. A
+  run that hit the 100-pass cap logs
+  `pipeline_default_routing_back_to_back_passes_capped`. `BATCH` still bounds
+  each pass.
 
 The cross-tenant list comes from two `SECURITY DEFINER` functions (V124,
 `trace_pipeline_unrouted_tenants` and `trace_pipeline_routed_tenants`). They
@@ -1351,11 +1364,13 @@ It is not all at once. Each pass reads one page of
 `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_BATCH` routed tenants (`pipeline`
 or `contained`, whoever routed them) and re-qualifies the ones on that page
 that default routing wrote; the next pass reads the next page. With N routed
-tenants in all, the last of them is re-qualified about `ceil(N / BATCH)`
-intervals after arming: with the defaults (`BATCH` 50, interval 60 s) and
-500 routed tenants, about 10 minutes. Until then, uploads of a tenant not
-yet reached answer `503 pipeline_bundle_not_qualified`; the upload path does
-not re-qualify. To shorten the window, raise the batch for the deploy.
+tenants in all, the loop re-qualifies them in back-to-back passes (see
+"Back-to-back passes" above), one `BATCH` page per pass with no interval
+between, so the window is the time of `ceil(N / BATCH)` passes rather than
+that many intervals, for up to 100 passes. Past the cap, or when a pass only
+refuses tenants, the rest wait one interval per run. Until a tenant is
+reached, its uploads answer `503 pipeline_bundle_not_qualified`; the upload
+path does not re-qualify.
 
 A tenant an operator activated by hand, or whose row an operator changed
 since (for example a `contain`), is not re-qualified by the loop. Qualify it
