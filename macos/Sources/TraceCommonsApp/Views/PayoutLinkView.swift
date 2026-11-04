@@ -14,6 +14,16 @@ import TCShellCore
 struct PayoutLinkView: View {
     @EnvironmentObject private var app: AppModel
     @StateObject private var model = PayoutLinkModel()
+    /// Told whether the section draws anything, each time that changes:
+    /// Settings lists its Payouts row only while it does (D2). First run
+    /// has no row to hide and passes nothing.
+    var onVisibility: (Bool) -> Void = { _ in }
+
+    /// Whether the body below draws a card: a rail to show, or a refusal to
+    /// say. Nothing otherwise, so a commons without the rail draws nothing.
+    private var visible: Bool {
+        model.surface != nil && (model.rail != nil || model.statusRefusal != nil)
+    }
 
     var body: some View {
         // Always present, so `.task` runs even when the section is hidden.
@@ -50,6 +60,7 @@ struct PayoutLinkView: View {
         .onChange(of: app.accountSessionGeneration) {
             Task { await model.refresh() }
         }
+        .onChange(of: visible, initial: true) { _, shown in onVisibility(shown) }
     }
 
     @ViewBuilder

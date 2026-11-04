@@ -65,6 +65,13 @@ struct WitnessSection: View {
                             .accessibilityElement(children: .combine)
                     }
 
+                    // Whether the extra privacy scan is configured, moved
+                    // here from the account section (Settings IA D7).
+                    if let settings = model.daemonSettings {
+                        SettingsStateRow(title: SettingsLegacyWords.extraScanConfigured,
+                                         isOn: settings.nearAIConfigured)
+                    }
+
                     if let state, WitnessSurface.offersConfigure(state) {
                         fields(copy)
                     }

@@ -7,31 +7,33 @@ import TCDesign
 struct GlassSettingsContent: View {
     var navigation: MainWindowNavigation?
     let section: SettingsSection
+    /// Payouts tells the window whether anything in it applies (D2).
+    var onPayoutsPresence: (Bool) -> Void = { _ in }
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             switch section {
+            case .account: AccountSection()
+            case .payouts: PayoutsSection(onPresence: onPayoutsPresence)
+            case .referrals: ReferralsSection()
+            case .watching: WatchingSection()
+            case .watchedFolders: WatchedFoldersSection()
+            case .tools: ToolsSection()
+            // The Insights switches, their own section since the Settings IA
+            // review (D13); it waits for first run (R-43), as Tools did.
+            case .insights:
+                InsightsSettingsCard()
+                SubscriptionUsageSettingsSection()
+            case .projects: ProjectsSection()
+            case .consent: ConsentSection()
+            case .publicProfile: PublicProfileSection()
+            case .changes: ChangesSection()
+            case .privateAI: PrivateAISection()
             case .general: GeneralSection()
-            case .connection: ConnectionSection()
             case .startup: StartupSection()
             case .notifications: NotificationsSection()
             case .updates: UpdatesSection()
-            case .consent: ConsentSection()
-            case .publicProfile: PublicProfileSection()
-            case .watching: WatchingSection()
-            case .watchedFolders: WatchedFoldersSection()
-            case .tools:
-                ToolsSection()
-                // The Insights switches: in Tools because it waits for first
-                // run (R-43); the ledger feed's is in Private AI (Ron's #1287
-                // review).
-                InsightsSettingsCard()
-                SubscriptionUsageSettingsSection()
-            case .privateAI: PrivateAISection()
-            case .referrals: ReferralsSection()
             case .witness: WitnessSection()
-            case .projects: ProjectsSection()
-            case .changes: ChangesSection()
             case .compute: EmptyView()
             }
         }

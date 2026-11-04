@@ -18,14 +18,12 @@ struct WatchingSection: View {
                 if model.daemonSettings == nil {
                     SettingsReadNotice(model.settingsRead, retry: model.refreshSettings)
                 } else if let settings = model.daemonSettings {
-                    line(SettingsLegacyWords.sessionFinishedAfter(settings.quiescenceSecs))
-                    line(SettingsLegacyWords.atMostOneNotification(settings.digestIntervalSecs / 3600))
+                    // What happens to traces nobody decides on: a
+                    // consequence, said nowhere else, so it stays (D16). The
+                    // quiet period and the paused line are gone (the chip
+                    // above says paused); the digest and notification lines
+                    // are Notifications'.
                     line(SettingsLegacyWords.undecidedDropped(settings.queueTtlDays))
-                    SettingsStateRow(title: SettingsLegacyWords.notificationsRenderedHere,
-                                     isOn: !settings.localNotifications)
-                }
-                if model.status.paused {
-                    line(SettingsLegacyWords.pausedNothingSent)
                 }
             }
         }

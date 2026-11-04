@@ -22,6 +22,29 @@ struct CredentialSection: View {
     /// Whether the section draws its own title. Inside #1146's connection
     /// panel it does not: the panel's title is the heading.
     var titled = true
+    /// Where it is drawn (Settings IA, owner 2026-11-04). The account
+    /// section holds the NEAR AI login whole; Private AI keeps only the way
+    /// in (D8), and draws nothing while signed in.
+    var placement: Placement = .account
+
+    enum Placement: Equatable {
+        /// The NEAR AI login in full, but never Forget: Sign out replaces it
+        /// (D3, spec Q1 answered no).
+        case account
+        /// Only Sign in, or Cancel while one runs; nothing otherwise (D8).
+        case signInShortcut
+    }
+
+    /// The buttons a placement may draw: Forget nowhere, and the shortcut
+    /// only the way in.
+    static func draws(_ action: CredentialAction, in placement: Placement) -> Bool {
+        switch (action, placement) {
+        case (.forget, _), (.none, _): false
+        case (.obtain, _), (.cancel, _): true
+        case (.migrate, .account): true
+        case (.migrate, .signInShortcut): false
+        }
+    }
 
     var body: some View {
         let status = model.credentialStatus
@@ -32,6 +55,15 @@ struct CredentialSection: View {
         let balanceAction = requiresSession ? CredentialAction.none : BalanceSurface.actionToDraw(
             balance: BalanceSurface.action(model.balanceStatus, calls: model.balanceCalls),
             credential: action)
+        if placement == .account || Self.draws(action, in: placement) || Self.draws(balanceAction, in: placement) {
+            card(status: status, tone: tone, action: action, balanceAction: balanceAction)
+        }
+    }
+
+    @ViewBuilder
+    private func card(
+        status: CredentialStatus, tone: PrivateInferenceTone, action: CredentialAction, balanceAction: CredentialAction
+    ) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             if !titled {
                 // Drawn inside the connection card, which is its heading.
@@ -58,7 +90,7 @@ struct CredentialSection: View {
             // action, not from a branch here, and it is drawn ABOVE the
             // button: what pressing it costs is not a footnote to having
             // pressed it.
-            if let explains = CredentialSurface.actionExplains(action, copy: copy) {
+            if Self.draws(action, in: placement), let explains = CredentialSurface.actionExplains(action, copy: copy) {
                 Text(explains)
                     .glassType(GlassTokens.TypeScale.body)
                     .foregroundStyle(GlassColor.textPrimary)
@@ -86,7 +118,7 @@ struct CredentialSection: View {
     /// Only a write already in flight greys the button.
     @ViewBuilder
     private func actionButton(_ action: CredentialAction) -> some View {
-        if let label = CredentialSurface.actionLabel(action, copy: copy) {
+        if Self.draws(action, in: placement), let label = CredentialSurface.actionLabel(action, copy: copy) {
             Button(label) { run(action) }
                 .buttonStyle(GlassButtonStyle(prominent && action == .obtain ? .primary : .glass))
                 .disabled(model.credentialBusy)
