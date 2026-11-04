@@ -348,9 +348,11 @@ private struct HomeOverview: View {
                     Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
                         GridRow {
                             HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
-                                         systemImage: HomeStatIcons.waiting, action: openTraces)
+                                         systemImage: HomeStatIcons.waiting, loading: traces.phase == .loading,
+                                         action: openTraces)
                             HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(freshRollup),
-                                         systemImage: HomeStatIcons.contributed, action: openHistory)
+                                         systemImage: HomeStatIcons.contributed,
+                                         loading: store.isLoading("history_rollup"), action: openHistory)
                         }
                         if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) {
                             GridRow {
@@ -1460,10 +1462,14 @@ private struct HistoryStats: View {
                 let creditTile = HomeFormat.creditTile(final: rollup?.creditFinal, pending: rollup?.creditPending,
                                                        accepted: rollup?.allTime?.accepted,
                                                        credit: credit)
+                let loadingRollup = store.isLoading("history_rollup")
                 HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value,
-                             detail: creditTile.detail)
-                HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(rollup))
-                HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined))
+                             detail: creditTile.detail,
+                             loading: store.isLoading("history_rollup", "commons_credit_summary"))
+                HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(rollup),
+                             loading: loadingRollup)
+                HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined),
+                             loading: loadingRollup)
             }
             .fixedSize(horizontal: false, vertical: true)
         }
@@ -1749,8 +1755,10 @@ struct HomeAccountTiles: View {
                 // No sign-in line under it (owner, 2026-11-02): the Account
                 // heading says "No data - Sign in" instead.
                 HomeStatTile(label: HomeFormat.creditReceivedWord, value: tiles.received,
-                             detail: creditDetail, systemImage: HomeStatIcons.credit, action: openPrivateAI)
+                             detail: creditDetail, systemImage: HomeStatIcons.credit,
+                             loading: store.isLoading("history_rollup"), action: openPrivateAI)
                 HomeStatTile(label: HomeFormat.creditPendingTitleWord, value: tiles.pending,
+                             loading: store.isLoading("history_rollup", "commons_credit_summary"),
                              action: openPrivateAI)
                 if let copy = model.privateInferenceCopy {
                     let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
@@ -1785,6 +1793,8 @@ private struct HomeStatTile: View {
     var detailInk: GlassRGBA? = nil
     /// The tile's icon (`HomeStatIcons`); nil draws none.
     var systemImage: String? = nil
+    /// The first answer has not come: a placeholder, not a dash or a zero.
+    var loading = false
     /// Opens where the number lives, and the whole tile is the button;
     /// nil for a tile on the page its number lives on (History's).
     var action: (() -> Void)?
@@ -1796,12 +1806,12 @@ private struct HomeStatTile: View {
         if let action {
             Button(action: action) {
                 GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
-                              interactive: true, iconPlacement: .watermark)
+                              interactive: true, iconPlacement: .watermark, loading: loading)
             }
             .buttonStyle(GlassPressStyle())
         } else {
             GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
-                          iconPlacement: .watermark)
+                          iconPlacement: .watermark, loading: loading)
         }
     }
 }

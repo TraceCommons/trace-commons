@@ -61,6 +61,26 @@ final class HomeTests: XCTestCase {
         return store
     }
 
+    /// A figure is loading until its first reply, then a number, or unknown
+    /// when the read failed: never the same as a zero or a dash.
+    func test_aFigureIsLoadingUntilItsFirstReply() async {
+        let loaded = HomeStore(client: SampleDaemonClient(.normalDay))
+        XCTAssertTrue(loaded.isLoading("history_rollup"))
+        XCTAssertTrue(loaded.isLoading("history_rollup", "commons_credit_summary"))
+        await loaded.load()
+        XCTAssertFalse(loaded.isLoading("history_rollup"))
+        XCTAssertFalse(loaded.isLoading("history_rollup", "commons_credit_summary"))
+
+        // A failed read has answered: unknown, not loading.
+        let down = await store(.coreDown)
+        XCTAssertFalse(down.isLoading("history_rollup"))
+        XCTAssertNotNil(down.failures["history_rollup"])
+
+        // A new client starts the wait again.
+        loaded.attach(SampleDaemonClient(.normalDay))
+        XCTAssertTrue(loaded.isLoading("history_rollup"))
+    }
+
     /// Every sample set loads; the core-down set records failures instead of
     /// drawing zeros.
     func test_theStoreLoadsEverySampleSet() async {
