@@ -25,15 +25,22 @@ struct AccountSection: View {
             connection
             // The NEAR AI login, moved from Private AI (D8): its state and
             // Sign in, Cancel or move-from-the-keychain. Never Forget: Sign
-            // out below replaces it (D3).
-            if let copy = model.privateInferenceCopy {
+            // out below replaces it (D3). While the account is signed out
+            // the card's own Sign in is the way back, and it restores the
+            // NEAR AI login too, so this card waits.
+            if head != .signedOut, let copy = model.privateInferenceCopy {
                 GlassEyebrowCard(copy.credentialTitle) {
                     CredentialSection(copy: copy, titled: false, placement: .account)
                 }
             }
             ContributionAccountCard()
-            // The devices linked to this account, and Link a server.
-            AccountDevicesView()
+            // The devices linked to this account, and Link a server. They
+            // need the account's session, and their own "Sign in again"
+            // would be a second Sign in beside the card's, so they wait for
+            // the account to be signed in.
+            if head != .signedOut {
+                AccountDevicesView()
+            }
             LegacyMigrationSettingsCard()
             AccountLeaveCard()
         }
@@ -41,7 +48,7 @@ struct AccountSection: View {
 
     private var connection: some View {
         GlassEyebrowCard(Self.eyebrow, title: connectionTitle, accessory: {
-            if model.statusRead == .answered {
+            if model.statusRead == .answered, head.showsChip {
                 GlassChip(glass: model.status.loggedIn ? SettingsLegacyWords.connectionReady
                                                        : SettingsLegacyWords.connectionLocalOnly,
                           muted: !model.status.loggedIn)
@@ -55,12 +62,44 @@ struct AccountSection: View {
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
+                } else if head == .signedOut {
+                    // Signed out, still enrolled: the core's "Sign in", the
+                    // signed-out notice's own key (#1918), signs the account
+                    // back in the way the account signs in (NEAR AI or
+                    // native), as the payout card's Sign in again does.
+                    if let signIn = MonitorWords.table?.signIn, !signIn.isEmpty {
+                        Button(signIn) { Task { await model.signInToAccount() } }
+                            .buttonStyle(GlassButtonStyle(.primary, small: true))
+                            .disabled(model.accountSigningIn)
+                            .fixedSize()
+                    }
                 }
                 // Change the NEAR AI login this account uses (F10), beside
                 // the connected line.
                 AccountLoginChangeButton()
             }
         }
+    }
+
+    /// The account's head state, from the daemon's status: not enrolled,
+    /// enrolled but signed out (Sign out keeps the enrollment), or connected.
+    /// Only `account_signed_in == false` is signed out; an account that never
+    /// signs in, or an older daemon that does not say, reads as before.
+    enum Head: Equatable {
+        case notEnrolled, signedOut, connected
+
+        /// Whether the card wears its Ready or Local only chip: never while
+        /// signed out, which is neither (owner, 2026-11-04).
+        var showsChip: Bool { self != .signedOut }
+    }
+
+    static func head(loggedIn: Bool, accountSignedIn: Bool?) -> Head {
+        guard loggedIn else { return .notEnrolled }
+        return accountSignedIn == false ? .signedOut : .connected
+    }
+
+    private var head: Head {
+        Self.head(loggedIn: model.status.loggedIn, accountSignedIn: model.status.accountSignedIn)
     }
 
     /// The card's eyebrow: the section's own name, from the core.
@@ -71,18 +110,26 @@ struct AccountSection: View {
     private var connectionTitle: String? {
         guard model.statusRead == .answered else { return nil }
         return Self.connectedTitle(
-            loggedIn: model.status.loggedIn, accountLogin: model.status.accountLogin,
-            needsAttention: model.accountAttention != nil, copy: change.copy)
+            loggedIn: model.status.loggedIn, accountSignedIn: model.status.accountSignedIn,
+            accountLogin: model.status.accountLogin, needsAttention: model.accountAttention != nil,
+            copy: change.copy)
     }
 
     /// "Connected with {provider}" (D6) while the account's login is known
     /// and the account needs no attention (F1: a login stored without the
     /// check is never presented as the account's); otherwise "Connected", or
-    /// "Not connected" for an app that is not enrolled.
+    /// "Not connected" for an app that is not enrolled. A signed-out account
+    /// (Sign out keeps the enrollment) is the core's "Not signed in", never
+    /// "Connected with {provider}".
     static func connectedTitle(
-        loggedIn: Bool, accountLogin: String?, needsAttention: Bool, copy: AccountChangeCopy?
+        loggedIn: Bool, accountSignedIn: Bool?, accountLogin: String?, needsAttention: Bool,
+        copy: AccountChangeCopy?
     ) -> String {
-        guard loggedIn else { return SettingsLegacyWords.notConnected }
+        switch head(loggedIn: loggedIn, accountSignedIn: accountSignedIn) {
+        case .notEnrolled: return SettingsLegacyWords.notConnected
+        case .signedOut: return MonitorWords.signedOut
+        case .connected: break
+        }
         if !needsAttention, let copy, let line = copy.render(copy.connected, provider: accountLogin) {
             return line
         }

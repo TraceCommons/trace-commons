@@ -545,6 +545,51 @@ async fn a_signed_out_account_is_not_signed_back_in() {
     assert!(fx.stub.state.status_bearers.lock().unwrap().is_empty());
 }
 
+/// `status.account_signed_in` (the account section after Sign out): present
+/// only for an enrolled account that signs in, true while its own session
+/// record is held (expired or not: renewal is the daemon's business), false
+/// once it is gone. While false, `account_login` is not reported, so no
+/// shell says "Connected with {provider}" for a signed-out account.
+#[tokio::test]
+async fn status_says_an_enrolled_account_is_signed_out_only_once_its_session_is_gone() {
+    let held = Fixture::new(Session::Expired).await;
+    crate::daemon::nearai_credential::login_record::accepted_by_commons(
+        &held.shared.store,
+        Some("github"),
+    );
+    let status = held.shared.status_value();
+    assert_eq!(status["account_signed_in"], true, "{status}");
+    assert_eq!(status["account_login"], "github");
+
+    // Signing out clears the record: signed out, and no login named.
+    let _ = held.call("account_sign_out", json!({})).await;
+    let status = held.shared.status_value();
+    assert_eq!(status["account_signed_in"], false, "{status}");
+    assert!(status.get("account_login").is_none(), "{status}");
+    assert_eq!(status["logged_in"], true, "sign-out does not unenroll");
+
+    let absent = Fixture::new(Session::Absent).await;
+    crate::daemon::nearai_credential::login_record::accepted_by_commons(
+        &absent.shared.store,
+        Some("github"),
+    );
+    let status = absent.shared.status_value();
+    assert_eq!(status["account_signed_in"], false, "{status}");
+    assert!(status.get("account_login").is_none(), "{status}");
+
+    // An account that does not sign in (an invite tenant) has no session to
+    // be signed out of: the field is absent, never false.
+    let other = Fixture::with_tenant(Session::Expired, "tenant-other").await;
+    assert!(
+        other
+            .shared
+            .status_value()
+            .get("account_signed_in")
+            .is_none(),
+        "an account that never signs in is not signed out"
+    );
+}
+
 #[tokio::test]
 async fn an_account_in_another_tenant_is_not_renewed_this_way() {
     let fx = Fixture::with_tenant(Session::Expired, "tenant-other").await;

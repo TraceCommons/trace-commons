@@ -138,16 +138,56 @@ final class SettingsSectionsTests: XCTestCase {
     /// words.
     func test_theConnectedLineNamesTheLoginOnlyWhenItIsTheAccountsKnownLogin() throws {
         let copy = try XCTUnwrap(AccountLoginChangeModel.shared.copy)
-        XCTAssertEqual(AccountSection.connectedTitle(
-            loggedIn: true, accountLogin: "github", needsAttention: false, copy: copy), "Connected with GitHub")
-        XCTAssertEqual(AccountSection.connectedTitle(
-            loggedIn: true, accountLogin: "github", needsAttention: true, copy: copy), SettingsLegacyWords.connected)
-        XCTAssertEqual(AccountSection.connectedTitle(
-            loggedIn: true, accountLogin: nil, needsAttention: false, copy: copy), SettingsLegacyWords.connected)
-        XCTAssertEqual(AccountSection.connectedTitle(
-            loggedIn: true, accountLogin: "myspace", needsAttention: false, copy: copy), SettingsLegacyWords.connected)
-        XCTAssertEqual(AccountSection.connectedTitle(
-            loggedIn: false, accountLogin: "github", needsAttention: false, copy: copy), SettingsLegacyWords.notConnected)
+        func title(_ loggedIn: Bool, _ login: String?, attention: Bool = false, signedIn: Bool? = true) -> String {
+            AccountSection.connectedTitle(
+                loggedIn: loggedIn, accountSignedIn: signedIn, accountLogin: login, needsAttention: attention,
+                copy: copy)
+        }
+        XCTAssertEqual(title(true, "github"), "Connected with GitHub")
+        XCTAssertEqual(title(true, "github", attention: true), SettingsLegacyWords.connected)
+        XCTAssertEqual(title(true, nil), SettingsLegacyWords.connected)
+        XCTAssertEqual(title(true, "myspace"), SettingsLegacyWords.connected)
+        XCTAssertEqual(title(false, "github"), SettingsLegacyWords.notConnected)
+        // An account that never signs in, or an older daemon: as before.
+        XCTAssertEqual(title(true, "github", signedIn: nil), "Connected with GitHub")
+    }
+
+    /// After Sign out the account stays enrolled, but its session is gone:
+    /// the card says so in the core's "Not signed in", never "Connected
+    /// with {provider}", draws no Ready chip, and offers the core's "Sign
+    /// in", which signs the account back in (owner, 2026-11-04).
+    func test_aSignedOutAccountSaysNotSignedInAndOffersSignIn() throws {
+        let copy = try XCTUnwrap(AccountLoginChangeModel.shared.copy)
+        XCTAssertEqual(AccountSection.head(loggedIn: true, accountSignedIn: false), .signedOut)
+        XCTAssertEqual(AccountSection.head(loggedIn: true, accountSignedIn: true), .connected)
+        XCTAssertEqual(AccountSection.head(loggedIn: true, accountSignedIn: nil), .connected)
+        XCTAssertEqual(AccountSection.head(loggedIn: false, accountSignedIn: false), .notEnrolled)
+        let signedOut = AccountSection.connectedTitle(
+            loggedIn: true, accountSignedIn: false, accountLogin: "github", needsAttention: false, copy: copy)
+        XCTAssertEqual(signedOut, MonitorWords.signedOut)
+        XCTAssertFalse(signedOut.isEmpty)
+        XCTAssertEqual(MonitorWords.table?.signIn, "Sign in", "the notice's approved word")
+        XCTAssertEqual(MonitorWindowView.openFirstRun, MonitorWords.table?.signIn, "one key for both")
+        XCTAssertFalse(AccountSection.Head.signedOut.showsChip, "a signed-out account wears no Ready chip")
+        XCTAssertTrue(AccountSection.Head.connected.showsChip)
+        XCTAssertTrue(AccountSection.Head.notEnrolled.showsChip)
+
+        let account = try SettingsParityTests.text("Views/Settings/AccountSection.swift")
+        for needle in [
+            // The core's "Sign in", the signed-out notice's own key (#1918),
+            // and the account's own way back in (NEAR AI or native, the
+            // daemon's choice), as the payout card's Sign in again runs it.
+            "if let signIn = MonitorWords.table?.signIn, !signIn.isEmpty {",
+            "Button(signIn) { Task { await model.signInToAccount() } }",
+            ".disabled(model.accountSigningIn)",
+            // One Sign in in the section: the NEAR AI login card and the
+            // devices card, whose own Sign in again would be a second, wait
+            // for the account to be signed in.
+            "if head != .signedOut, let copy = model.privateInferenceCopy {",
+            "if head != .signedOut {\n                AccountDevicesView()",
+        ] {
+            XCTAssertTrue(account.contains(needle), "AccountSection.swift lacks \(needle)")
+        }
     }
 
     /// Forget is drawn nowhere (D3); Private AI's card offers only the way
