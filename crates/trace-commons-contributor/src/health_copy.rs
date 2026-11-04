@@ -112,7 +112,8 @@ impl HealthLineCopy {
 /// restarts a stopped service, so this does not clear on its own.
 pub fn core_down_copy() -> HealthLineCopy {
     HealthLineCopy::actionable(
-        concat!("Can't reach ", crate::app_name!(), "'s background service."),
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P2).
+        "Can't reach the background service.",
         "Nothing is being watched or sent while it's down. Your queue and the traces \
          already sent are safe, and traces from while it was down will be picked up when \
          it's running again.",
@@ -325,10 +326,7 @@ mod tests {
     #[test]
     fn core_down_says_the_queue_is_safe_and_new_sessions_are_picked_up() {
         let copy = core_down_copy();
-        assert_eq!(
-            copy.title,
-            concat!("Can't reach ", crate::app_name!(), "'s background service.")
-        );
+        assert_eq!(copy.title, "Can't reach the background service.");
         assert!(copy.detail.contains("Your queue"), "{}", copy.detail);
         assert!(
             copy.detail.contains("already sent are safe"),

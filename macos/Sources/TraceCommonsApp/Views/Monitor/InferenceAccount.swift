@@ -76,6 +76,7 @@ struct PrivateAISettingsPanels: View {
                             eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,
                             refresh: copy.panelToolsRefreshAccessibility, refreshWord: copy.panelRefresh,
                             onRefresh: { refreshTools() })
+                        .helpIfAny(copy.harnessesPrecedenceTooltip)
                         HarnessListSection(copy: copy, titled: false)
                     }
                 }

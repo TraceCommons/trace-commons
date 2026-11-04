@@ -20,7 +20,9 @@ public sealed record RouteDisclosure
     /// <summary>The <c>copy</c> fields this shell decodes, compared against the export.</summary>
     public static IReadOnlyList<string> ConsumedCopyFields { get; } = new[]
     {
-        "title", "route", "witness", "local_filter", "receipts", "attested_bodies", "session",
+        "title", "route", "disclosure_witness_route_tooltip", "witness", "local_filter", "receipts",
+        "disclosure_receipts_checked_tooltip", "disclosure_receipts_unchecked_tooltip",
+        "attested_bodies", "session",
     };
 
     /// <summary>Whether a session leaves this machine unredacted.</summary>
@@ -47,9 +49,15 @@ public sealed record RouteDisclosureCopy
 {
     [JsonPropertyName("title")] public string Title { get; init; } = string.Empty;
     [JsonPropertyName("route")] public string Route { get; init; } = string.Empty;
+    /// <summary>Tooltip on <see cref="Route"/>; non-null only on the witness route (P175).</summary>
+    [JsonPropertyName("disclosure_witness_route_tooltip")] public string? WitnessRouteTooltip { get; init; }
     [JsonPropertyName("witness")] public WitnessDisclosureCopy? Witness { get; init; }
     [JsonPropertyName("local_filter")] public string? LocalFilter { get; init; }
     [JsonPropertyName("receipts")] public string? Receipts { get; init; }
+    /// <summary>Tooltip on <see cref="Receipts"/> while it is the checked sentence (P174).</summary>
+    [JsonPropertyName("disclosure_receipts_checked_tooltip")] public string? ReceiptsCheckedTooltip { get; init; }
+    /// <summary>Tooltip on <see cref="Receipts"/> while it is the unchecked sentence (P173).</summary>
+    [JsonPropertyName("disclosure_receipts_unchecked_tooltip")] public string? ReceiptsUncheckedTooltip { get; init; }
     [JsonPropertyName("attested_bodies")] public string? AttestedBodies { get; init; }
     [JsonPropertyName("session")] public SessionSendCopy Session { get; init; } = new();
 }

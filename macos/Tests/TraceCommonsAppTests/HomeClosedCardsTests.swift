@@ -65,7 +65,7 @@ final class HomeClosedCardsTests: XCTestCase {
     /// The switch's words are the core's, and say what it does.
     func testThePromotionsSwitchSpeaksTheCoresWords() throws {
         let words = try XCTUnwrap(MonitorWords.table?.homeHistory)
-        XCTAssertEqual(words.promotionsToggle, "Show promotions on Home")
+        XCTAssertEqual(words.promotionsToggle, "Show promotions")
         XCTAssertFalse(words.promotionsTitle.isEmpty)
         XCTAssertFalse(words.promotionsCaption.isEmpty)
     }

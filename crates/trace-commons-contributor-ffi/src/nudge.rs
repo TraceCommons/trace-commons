@@ -133,11 +133,11 @@ mod tests {
             digest_help(Some(
                 r#"{"digest_interval_secs":3600,"digest_schedule":{"mode":"interval"}}"#
             ))["digest_help"],
-            "At most one notification an hour, and none when nothing is waiting."
+            "At most one an hour, only when traces are waiting."
         );
         assert_eq!(
             digest_help(Some(r#"{"digest_interval_secs":21600}"#))["digest_help"],
-            "At most one notification every 6 hours, and none when nothing is waiting."
+            "At most one every 6 hours, only when traces are waiting."
         );
         assert_eq!(
             digest_help(Some(

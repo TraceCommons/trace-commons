@@ -218,8 +218,14 @@ pub(crate) mod tests {
         wait_for(&controller, 3, |s| s.reason == "worker-already-running");
         let snapshot = controller.snapshot();
         assert!(snapshot.worker_stopped); // No child owned by this controller.
-        assert!(snapshot.detail.contains("restart the machine"));
-        assert!(snapshot.detail.contains("will not adopt or kill"));
+        assert!(snapshot.detail.contains("restart the computer"));
+        // Owner dropped "will not adopt or kill an unknown process" 2026-11-04
+        // (Settings copy pass 2, P302); the line still names the way out.
+        assert!(
+            snapshot
+                .detail
+                .contains("Stop it from the app that started it")
+        );
         assert!(controller.shutdown(Duration::from_secs(1)).worker_stopped);
     }
 }

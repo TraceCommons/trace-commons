@@ -73,7 +73,7 @@ final class LegacyMigrationNoticeTests: XCTestCase {
 
     private let offer = """
     {"title":"Move to your NEAR AI account","body":"b","action":"Move","working":"w",
-     "invite_prompt":"p","start_failed":"s","dismiss":"Dismiss","later":"l",
+     "invite_prompt":"p","invite_link_tooltip":"t","start_failed":"s","dismiss":"Dismiss","later":"l",
      "passkey_waiting":"pw","passkey_failed":"pf","passkey_cancel":"Cancel",
      "action_name_notice":"Move, card","action_name_settings":"Move, Settings"}
     """
@@ -83,6 +83,7 @@ final class LegacyMigrationNoticeTests: XCTestCase {
         XCTAssertEqual(decoded.title, "Move to your NEAR AI account")
         XCTAssertEqual(decoded.action, "Move")
         XCTAssertEqual(decoded.invitePrompt, "p")
+        XCTAssertEqual(decoded.inviteLinkTooltip, "t")
         XCTAssertEqual(decoded.startFailed, "s")
         XCTAssertEqual(decoded.dismiss, "Dismiss")
         XCTAssertEqual(decoded.later, "l")

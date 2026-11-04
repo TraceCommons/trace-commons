@@ -53,8 +53,13 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let trayOpenToTurnOn: String
     /// The heading over the list of tools found on this computer.
     public let harnessesTitle: String
-    /// The line under that heading, qualifying what the list is.
+    /// The line under that heading, qualifying what the list is. Cut by the
+    /// owner 2026-11-04 (Settings copy pass 2, P177): arrives "", drawn as
+    /// no line.
     public let harnessesWhat: String
+    /// The tooltip on the tools heading.
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P177).
+    public let harnessesPrecedenceTooltip: String
     /// What the amount `HarnessSurface.spendSentence` names does and does
     /// not cover. Drawn beside that sentence and only when it is drawn.
     public let harnessesSpendScope: String
@@ -133,6 +138,9 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     /// having read only its label was not told what they agreed to.
     public let credentialCost: String
     public let credentialObtain: String
+    /// The tooltip on the Sign in button.
+    /// Approved by the owner 2026-11-04 (Settings copy pass 2, P3).
+    public let signInTooltip: String
     public let credentialCancel: String
     public let credentialForget: String
     /// What forgetting does: the key leaves this computer and is revoked at
@@ -347,6 +355,7 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case trayOpenToTurnOn = "tray_open_to_turn_on"
         case harnessesTitle = "harnesses_title"
         case harnessesWhat = "harnesses_what"
+        case harnessesPrecedenceTooltip = "harnesses_precedence_tooltip"
         case harnessesSpendScope = "harnesses_spend_scope"
         case harnessNotConnected = "harness_not_connected"
         case harnessConnectedNothingSeen = "harness_connected_nothing_seen"
@@ -397,6 +406,7 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case credentialWalletNotice = "credential_wallet_notice"
         case credentialCost = "credential_cost"
         case credentialObtain = "credential_obtain"
+        case signInTooltip = "sign_in_tooltip"
         case credentialCancel = "credential_cancel"
         case credentialForget = "credential_forget"
         case credentialForgetExplains = "credential_forget_explains"

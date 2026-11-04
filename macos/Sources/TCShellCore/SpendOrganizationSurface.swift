@@ -142,7 +142,9 @@ public struct SpendOrganizations: Equatable, Sendable {
             guard let value = view[key] as? String, !value.isEmpty else { return nil }
             return value
         }
-        guard let title = text("title"), let what = text("what"), let picker = text("picker"),
+        // `what` was cut by the owner 2026-11-04 (Settings copy pass 2,
+        // P188): it may arrive "", and the card then draws no line for it.
+        guard let title = text("title"), let what = view["what"] as? String, let picker = text("picker"),
             let switching = text("switching"), let failed = text("failed"),
             let sessionExpired = text("session_expired"), let refused = text("refused"),
             let revokePending = text("revoke_pending"), let promptTitle = text("prompt_title"),

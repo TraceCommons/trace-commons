@@ -110,6 +110,9 @@ public static class PrivateInferenceSurface
                 }
             }
 
+            // The owner-cut fields (copy.CutByOwner) are not in Sentences: they
+            // arrive as the empty string and a shell draws no line for them.
+
             return copy;
         }
         catch (JsonException)

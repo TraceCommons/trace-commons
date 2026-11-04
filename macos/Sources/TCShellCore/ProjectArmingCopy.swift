@@ -34,6 +34,9 @@ public struct ProjectArmingCopy: Decodable, Equatable, Sendable {
     /// Settings' confirmation before a mode is set to Automatic, in Ron's
     /// #1146 words: its heading, the line under it, and its two buttons.
     public let settingsQuestion: String
+    /// Cut by the owner 2026-11-04 (Settings copy pass 2, P127): arrives
+    /// "", and is the one field allowed to; the confirmation then has no
+    /// subtitle.
     public let settingsDescription: String
     public let settingsDecline: String
     public let settingsConfirm: String
@@ -47,7 +50,8 @@ public struct ProjectArmingCopy: Decodable, Equatable, Sendable {
         case settingsConfirm = "settings_confirm"
     }
 
-    /// Decode the payload, or nil if it will not parse or a field is empty.
+    /// Decode the payload, or nil if it will not parse or a field other than
+    /// `settingsDescription` is empty.
     public static func decode(fromJSON json: String?) -> ProjectArmingCopy? {
         guard let data = json?.data(using: .utf8),
             let copy = try? JSONDecoder().decode(ProjectArmingCopy.self, from: data)
@@ -56,8 +60,7 @@ public struct ProjectArmingCopy: Decodable, Equatable, Sendable {
         }
         let sentences = [
             copy.evidence, copy.question, copy.confirm, copy.decline, copy.body,
-            copy.bodyWithBacklog, copy.settingsQuestion, copy.settingsDescription,
-            copy.settingsDecline, copy.settingsConfirm,
+            copy.bodyWithBacklog, copy.settingsQuestion, copy.settingsDecline, copy.settingsConfirm,
         ]
         return sentences.contains(where: \.isEmpty) ? nil : copy
     }

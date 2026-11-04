@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Globalization;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -205,6 +206,13 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
     public string RoutingToolsHeading => _routingCopy?.ToolsHeading ?? string.Empty;
 
+    /// <summary>
+    /// The heading is drawn only when the words arrived and it is not empty:
+    /// the owner cut it 2026-11-04 (Settings copy pass 2, P117) and the core
+    /// now sends the empty string.
+    /// </summary>
+    public bool ShowRoutingToolsHeading => RoutingAvailable && RoutingToolsHeading.Length > 0;
+
     public string RoutingIntro => _routingCopy?.Intro ?? string.Empty;
 
     public string RoutingToggleText => _routingCopy?.Toggle ?? string.Empty;
@@ -214,6 +222,9 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     /// Nothing on this surface waits on the app being started again.
     /// </summary>
     public string RoutingAppliesAtOnceText => _routingCopy?.AppliesAtOnce ?? string.Empty;
+
+    /// <summary>The owner cut this line (P105); an empty one draws nothing.</summary>
+    public bool HasRoutingAppliesAtOnceText => RoutingAppliesAtOnceText.Length > 0;
 
     public string RoutingPortTitle => _routingCopy?.PortTitle ?? string.Empty;
 
@@ -688,9 +699,25 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     public string PrivacyConfirmTitle => _witnessCopy?.PrivacyConfirmTitle ?? string.Empty;
 
     public string PrivacyConfirmDescription => _witnessCopy?.PrivacyConfirmDescription ?? string.Empty;
+
+    /// <summary>
+    /// The privacy confirmation's body paragraphs, in order, without the
+    /// empty ones. The owner cut the description and the token scope note
+    /// (Settings copy pass 2, P285, P263), and joining an empty string with a
+    /// blank-line separator would leave a blank paragraph at the start or end.
+    /// </summary>
+    public static string JoinParagraphs(params string[] paragraphs) =>
+        string.Join("\n\n", paragraphs.Where(p => !string.IsNullOrEmpty(p)));
     public string InferenceEvidenceDisclosure => _witnessCopy?.InferenceDisclosure ?? string.Empty;
     public string InferenceEvidenceCaptureNote => _witnessCopy?.InferenceCaptureNote ?? string.Empty;
     public string InferenceEvidenceScopeNote => _witnessCopy?.InferenceScopeNote ?? string.Empty;
+
+    /// <summary>Tooltip on the model-call evidence row (P265).</summary>
+    public string InferenceEvidenceScopeTooltip => _witnessCopy?.InferenceScopeTooltip ?? string.Empty;
+
+    /// <summary>Tooltips on the model-call evidence Enable and Disable buttons (P262, P264).</summary>
+    public string InferenceEvidenceEnableTooltip => _witnessCopy?.InferenceEnableTooltip ?? string.Empty;
+    public string InferenceEvidenceDisableTooltip => _witnessCopy?.InferenceDisableTooltip ?? string.Empty;
     public string InferenceEvidenceConfirm => _witnessCopy?.InferenceConfirm ?? string.Empty;
     public string InferenceEvidenceCancel => _witnessCopy?.InferenceCancel ?? string.Empty;
     public string InferenceEvidenceEnable => _witnessCopy?.InferenceEnable ?? string.Empty;
@@ -765,6 +792,12 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     public string TokenContributionDisclosure => _witnessCopy?.TokenDisclosure ?? string.Empty;
     public string TokenContributionCaptureNote => _witnessCopy?.TokenCaptureNote ?? string.Empty;
     public string TokenContributionScopeNote => _witnessCopy?.TokenScopeNote ?? string.Empty;
+
+    /// <summary>The owner cut this note (P263); an empty one draws nothing.</summary>
+    public bool HasTokenContributionScopeNote => TokenContributionScopeNote.Length > 0;
+
+    /// <summary>Tooltip on the Token distribution Enable button (P270).</summary>
+    public string TokenContributionEnableTooltip => _witnessCopy?.TokenEnableTooltip ?? string.Empty;
     public string TokenContributionConfirm => _witnessCopy?.TokenConfirm ?? string.Empty;
     public string TokenContributionCancel => _witnessCopy?.TokenCancel ?? string.Empty;
     public string TokenContributionEnable => _witnessCopy?.TokenEnable ?? string.Empty;

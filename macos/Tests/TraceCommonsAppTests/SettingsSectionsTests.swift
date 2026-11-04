@@ -307,10 +307,15 @@ final class SettingsSectionsTests: XCTestCase {
         XCTAssertFalse(WatchingSection.controlsArmed(read: .answered, lastReadFailed: false, startup: .refused("x")))
         XCTAssertFalse(WatchingSection.controlsArmed(read: .failed, lastReadFailed: true, startup: .running))
         let shell = try XCTUnwrap(MonitorWords.table?.shell)
-        for word in [shell.watcherEyebrow, shell.watcherTitle, shell.watcherWatching, shell.watcherPaused,
-                     shell.watcherCaption, shell.settingsRefresh, shell.consentEyebrow, shell.desktopEyebrow,
-                     shell.desktopTitle, shell.discoveryEyebrow, shell.discoveryTitle] {
+        for word in [shell.watcherTitle, shell.watcherWatching, shell.watcherPaused,
+                     shell.watcherCaption, shell.settingsRefresh, shell.desktopEyebrow,
+                     shell.desktopTitle, shell.discoveryTitle] {
             XCTAssertFalse(word.isEmpty)
+        }
+        // Owner dropped the watcher, consent and discovery eyebrows 2026-11-04
+        // (Settings copy pass 2, P79, P140, P84): each arrives "".
+        for word in [shell.watcherEyebrow, shell.consentEyebrow, shell.discoveryEyebrow] {
+            XCTAssertEqual(word, "")
         }
         XCTAssertNotEqual(shell.watcherWatching, shell.watcherPaused)
         // Every card that re-reads has the refresh icon button, named in
@@ -326,12 +331,17 @@ final class SettingsSectionsTests: XCTestCase {
     /// (poldsam's #1298 review, finding 2). Other intervals keep the plural.
     func test_theDigestIntervalLineAtOneHourIsTheCoresSingular() throws {
         let words = try XCTUnwrap(ShellWords.table?.settings)
-        XCTAssertFalse(words.atMostOneNotificationOne.isEmpty)
+        // Owner dropped both interval lines 2026-11-04 (Settings copy pass 2,
+        // P235, P236): the digest switch's help says the interval, so each
+        // arrives "" and Settings draws no line, never "every 1 hours".
+        XCTAssertEqual(words.atMostOneNotificationOne, "")
+        XCTAssertEqual(words.atMostOneNotification, "")
         XCTAssertEqual(SettingsLegacyWords.atMostOneNotification(1), words.atMostOneNotificationOne)
         XCTAssertFalse(SettingsLegacyWords.atMostOneNotification(1).contains("1 hours"))
         XCTAssertEqual(SettingsLegacyWords.atMostOneNotification(4),
                        ShellWords.fill(words.atMostOneNotification, ["hours": "4"]))
-        XCTAssertTrue(SettingsLegacyWords.atMostOneNotification(4).contains("4 hours"))
+        let startup = try SettingsParityTests.text("Views/Settings/StartupSection.swift")
+        XCTAssertTrue(startup.contains("if !interval.isEmpty {"), "an empty interval line is still drawn")
     }
 
     /// The view a section's `case` arm draws in `GlassSettingsContent`.

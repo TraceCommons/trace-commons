@@ -298,50 +298,51 @@ pub const OFFER_NO_THANKS: &str = "No thanks";
 // Settings.
 // ---------------------------------------------------------------------
 
-/// DRAFT, NEEDS APPROVAL.
-pub const SETTING_SUGGESTIONS: &str = "Show suggestions in Traces, History and the menu bar";
-/// DRAFT, NEEDS APPROVAL.
-pub const SETTING_SUGGESTIONS_HELP: &str = "These suggestions are worked out on this computer. The counts behind them are not sent anywhere.";
-/// DRAFT, NEEDS APPROVAL.
-pub const SETTING_MARK: &str =
-    "Show a small ring on the menu bar icon when there is something new to look at";
-/// DRAFT, NEEDS APPROVAL.
-pub const SETTING_MARK_HELP: &str =
-    "It never appears while traces are waiting for your decision; the number does.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P241).
+pub const SETTING_SUGGESTIONS: &str = "Show suggestions";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P239).
+pub const SETTING_SUGGESTIONS_HELP: &str = "The counts behind them aren't sent.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P240).
+pub const SETTING_MARK: &str = "Mark the menu bar icon when something is new";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P245).
+pub const SETTING_MARK_HELP: &str = "The number shows instead while traces wait for you.";
 /// DRAFT, NEEDS APPROVAL.
 pub const SETTING_NOTIFY_MASTER: &str = concat!("Notifications from ", crate::app_name!());
+/// [`SETTING_NOTIFY_MASTER`]'s help text: the minimum gap of owner
+/// decision 4, which [`SETTING_NOTIFY_BUDGET_HELP`] no longer states.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P237).
+pub const SETTING_NOTIFY_MASTER_TOOLTIP: &str = "They never arrive close together.";
 /// DRAFT, NEEDS APPROVAL.
 pub const SETTING_DIGEST: &str = "Waiting and contributed traces";
-/// Under the Interval schedule. The same words, and the same `{hours}`
-/// placeholder, as the Settings line it replaces
-/// (`SettingsWords.at_most_one_notification`). DRAFT, NEEDS APPROVAL.
+/// Under the Interval schedule, with the `{hours}` placeholder. It
+/// replaced the Settings line `SettingsWords.at_most_one_notification`,
+/// which the owner cut. Approved by the owner 2026-11-04 (Settings copy pass 2, P251).
 pub const SETTING_DIGEST_HELP_INTERVAL: &str =
-    "At most one notification every {hours} hours, and none when nothing is waiting.";
+    "At most one every {hours} hours, only when traces are waiting.";
 /// [`SETTING_DIGEST_HELP_INTERVAL`] at one hour, the shortest interval the
-/// daemon allows. DRAFT, NEEDS APPROVAL.
+/// daemon allows. Approved by the owner 2026-11-04 (Settings copy pass 2, P252).
 pub const SETTING_DIGEST_HELP_INTERVAL_ONE: &str =
-    "At most one notification an hour, and none when nothing is waiting.";
-/// Under the Evening schedule. DRAFT, NEEDS APPROVAL.
+    "At most one an hour, only when traces are waiting.";
+/// Under the Evening schedule. Approved by the owner 2026-11-04 (Settings copy pass 2, P253).
 pub const SETTING_DIGEST_HELP_EVENING: &str =
-    "At most one notification each evening, and none when nothing is waiting.";
+    "At most one each evening, only when traces are waiting.";
 /// DRAFT, NEEDS APPROVAL.
 pub const SETTING_NOTIFY_VERDICTS: &str = "When traces you sent are judged";
-/// DRAFT, NEEDS APPROVAL.
-pub const SETTING_NOTIFY_IDLE: &str = "When traces have been idle for a few days";
-/// DRAFT, NEEDS APPROVAL.
-pub const SETTING_NOTIFY_IDLE_HELP: &str = "When the regular notification is on, this is one extra sentence in it, \
-     not a separate notification.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P247), with "a
+/// few days" kept: idle strings state the threshold (owner rule, tested by
+/// `owner_picks_select_a_candidate_and_idle_strings_name_the_threshold`).
+pub const SETTING_NOTIFY_IDLE: &str = "When traces sit idle for a few days";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P242).
+pub const SETTING_NOTIFY_IDLE_HELP: &str =
+    "Added to the regular notification, not sent on its own.";
 /// Held with the weekly recap (owner decision 1). DRAFT, NEEDS APPROVAL.
 pub const SETTING_NOTIFY_RECAP: &str = "A summary of last week";
-/// Restates the global caps of owner decision 4 (one a day, three a week,
-/// a minimum gap) and the quiet hours of owner decision 5 (21:00-09:00),
-/// and changes with them. DRAFT, NEEDS APPROVAL.
-pub const SETTING_NOTIFY_BUDGET_HELP: &str = concat!(
-    "Apart from the regular notification above, ",
-    crate::app_name!(),
-    " sends at most one a day and three a week, none between 9 pm and 9 am, \
-     and never two close together."
-);
+/// Restates the global caps of owner decision 4 (one a day, three a week)
+/// and the quiet hours of owner decision 5 (21:00-09:00), and changes with
+/// them; the minimum gap is [`SETTING_NOTIFY_MASTER_TOOLTIP`]'s.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P237).
+pub const SETTING_NOTIFY_BUDGET_HELP: &str =
+    "Other notifications: at most one a day and three a week, none from 9 pm to 9 am.";
 /// DRAFT, NEEDS APPROVAL.
 pub const ABOUT_SUGGESTIONS: &str =
     "These counts are kept on this computer only, and are removed when you sign out.";
@@ -475,10 +476,10 @@ pub const NOTIFY_NEAR_AI_CREDIT_ACTION_NOT_NOW: &str = "Not now";
 /// The Settings switch for it. DRAFT.
 pub const SETTING_NOTIFY_NEAR_AI_CREDIT: &str = "When NEAR AI credit arrives";
 
-/// The Settings switch.
-pub const SETTING_SETTLEMENT_ESTIMATE: &str = "Estimate what traces on this Mac are worth";
-/// The Settings switch's help.
-pub const SETTING_SETTLEMENT_ESTIMATE_HELP: &str = "Worked out on this Mac from your traces' size and makeup. Nothing is sent to make the estimate.";
+/// The Settings switch. Approved by the owner 2026-11-04 (Settings copy pass 2, P248).
+pub const SETTING_SETTLEMENT_ESTIMATE: &str = "Estimate what traces are worth";
+/// The Settings switch's help. Approved by the owner 2026-11-04 (Settings copy pass 2, P238).
+pub const SETTING_SETTLEMENT_ESTIMATE_HELP: &str = "Nothing is sent to make the estimate.";
 
 /// Each counted string's key and its `_ONE` sibling's. The count the pair
 /// turns on is the string's first count placeholder (`{n}`, `{a}`, `{m}`,
@@ -666,6 +667,10 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("SETTING_MARK", SETTING_MARK),
     ("SETTING_MARK_HELP", SETTING_MARK_HELP),
     ("SETTING_NOTIFY_MASTER", SETTING_NOTIFY_MASTER),
+    (
+        "SETTING_NOTIFY_MASTER_TOOLTIP",
+        SETTING_NOTIFY_MASTER_TOOLTIP,
+    ),
     ("SETTING_DIGEST", SETTING_DIGEST),
     ("SETTING_DIGEST_HELP_INTERVAL", SETTING_DIGEST_HELP_INTERVAL),
     (
@@ -1131,13 +1136,18 @@ mod tests {
                 "{text} must match {NUDGE_VERDICTS_FINAL_CLAUSE}"
             );
         }
+        // Owner dropped the Settings line these replaced 2026-11-04
+        // (Settings copy pass 2, P235, P236): the interval help is said once,
+        // here, and the old Settings words are empty.
+        assert!(SETTING_DIGEST_HELP_INTERVAL.contains("{hours}"));
+        assert!(!SETTING_DIGEST_HELP_INTERVAL_ONE.contains('{'));
         assert_eq!(
-            SETTING_DIGEST_HELP_INTERVAL,
-            crate::shell_words_copy::settings_words().at_most_one_notification
+            crate::shell_words_copy::settings_words().at_most_one_notification,
+            ""
         );
         assert_eq!(
-            SETTING_DIGEST_HELP_INTERVAL_ONE,
-            crate::shell_words_copy::settings_words().at_most_one_notification_one
+            crate::shell_words_copy::settings_words().at_most_one_notification_one,
+            ""
         );
         for review in [
             NUDGE_BACKLOG_REVIEW,
@@ -1280,6 +1290,17 @@ mod tests {
             }
             for counted in ["{n}", "{a}", "{m}"] {
                 assert!(!one_text.contains(counted), "{one}: {one_text}");
+            }
+            // The interval line's "traces are waiting" is not about the
+            // count, which is the hour: its singular is the plural line
+            // with "every {hours} hours" read as "an hour" (Settings copy
+            // pass 2, P251 and P252).
+            if *one == "SETTING_DIGEST_HELP_INTERVAL_ONE" {
+                assert_eq!(
+                    one_text,
+                    many_text.replace("every {hours} hours", "an hour")
+                );
+                continue;
             }
             for plural in ["sessions", "traces", "They ", " have been", " are "] {
                 assert!(

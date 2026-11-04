@@ -4327,7 +4327,12 @@ final class AppModel: ObservableObject {
                     self.recordRead(label, answered: false)
                     // `error.message` is a fixed label by contract, never a
                     // path, a token, or a server response body.
-                    if let failure = error as? DaemonClient.Failure {
+                    if label == "set_project_mode", let line = ShellWords.table?.settings.projectModeFailed {
+                        // A folder's setting did not change; the person is
+                        // told that in the core's words (Settings copy pass 2,
+                        // P136), not the call's name.
+                        self.lastActionError = line
+                    } else if let failure = error as? DaemonClient.Failure {
                         self.lastActionError = "\(label): \(failure.message)"
                     } else {
                         self.lastActionError = "\(label): failed"

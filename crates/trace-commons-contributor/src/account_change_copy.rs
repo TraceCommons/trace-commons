@@ -6,9 +6,10 @@
 //! ("go with your recs on F10 and build it"), except the mismatch body,
 //! approved 2026-11-02 with #1836, and each is marked with its date. Both
 //! notices the change adds were approved with them (spec 2.6): the mismatch
-//! block's "Use a different account" button and the payouts line for a
+//! block's "Switch account" button and the payouts line for a
 //! wallet-origin account. Nothing here says "Trace Commons" (owner,
-//! 2026-11-02).
+//! 2026-11-02). Settings copy pass 2 (owner, 2026-11-04) reworded some of
+//! them; those carry that approval line instead.
 //!
 //! Templates carry `{provider}`, `{old_provider}` or `{new_provider}`: a
 //! login's title ([`crate::private_inference_copy::credential_provider_title`]:
@@ -20,20 +21,20 @@ use serde::Serialize;
 
 // ---- The mismatch block (spec 2.1, entry point 1) ----
 
-/// Owner-approved 2026-11-02 (#1836). The account section after a NEAR AI
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P36). The account section after a NEAR AI
 /// sign-in the account refused as another account.
 pub const ACCOUNT_LOGIN_MISMATCH_BODY: &str =
-    "This app is connected to a different NEAR AI account. Sign in with that account again.";
+    "Connected to a different NEAR AI account. Sign in with that one.";
 /// Owner-approved 2026-11-03. The mismatch block's sign-in button.
 pub const ACCOUNT_LOGIN_MISMATCH_SIGN_IN: &str = "Sign in";
-/// Owner-approved 2026-11-03 (a notice, spec 2.6 item 1). The mismatch
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P52). (a notice, spec 2.6 item 1). The mismatch
 /// block's button that starts a change with the refused login held aside.
-pub const ACCOUNT_LOGIN_MISMATCH_CHANGE: &str = "Use a different account";
+pub const ACCOUNT_LOGIN_MISMATCH_CHANGE: &str = "Switch account";
 
 // ---- The account section (spec 2.1, entry point 2) ----
 
-/// Owner-approved 2026-11-03. Beside the connected line: starts a change.
-pub const ACCOUNT_LOGIN_CHANGE: &str = "Use a different account";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P53). Beside the connected line: starts a change.
+pub const ACCOUNT_LOGIN_CHANGE: &str = "Switch account";
 
 /// Owner-approved 2026-11-04 (Settings IA D6; change spec section 5.1,
 /// `account.login.connected`). The account section's connected line, naming
@@ -56,25 +57,25 @@ pub const ACCOUNT_SIGN_OUT_BODY: &str =
 
 // ---- Payouts, for a wallet-origin account (spec 2.1) ----
 
-/// Owner-approved 2026-11-03 (a notice, spec 2.6 item 2). Where the payout
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P61). (a notice, spec 2.6 item 2). Where the payout
 /// link status would be, on an account that joined with a NEAR wallet.
-pub const PAYOUTS_NEEDS_LOGIN_BODY: &str =
-    "Payouts need a NEAR AI login. Add one to this account to set up payouts.";
-/// Owner-approved 2026-11-03. Beside it: starts a change.
-pub const PAYOUTS_NEEDS_LOGIN_ADD: &str = "Add a NEAR AI login";
+pub const PAYOUTS_NEEDS_LOGIN_BODY: &str = "Payouts need a NEAR AI login.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P63). Beside it: starts a change.
+pub const PAYOUTS_NEEDS_LOGIN_ADD: &str = "Add login";
 
 // ---- The change sheet (spec 2.2) ----
 
 /// Owner-approved 2026-11-03. The sheet's title.
 pub const ACCOUNT_CHANGE_TITLE: &str = "Use a different NEAR AI account";
-/// Owner-approved 2026-11-03. Step 3, for a NEAR AI account.
-pub const ACCOUNT_CHANGE_BODY: &str = "Your traces, credit and payout settings stay. From now on, sign in with {new_provider}. Your {old_provider} login will no longer connect to this app.";
-/// Owner-approved 2026-11-03. Step 3, for a NEAR AI account whose old login
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P12). Step 3, for a NEAR AI account.
+pub const ACCOUNT_CHANGE_BODY: &str = "Your traces, credit and payout settings stay. From now on, sign in with {new_provider}, not {old_provider}.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P23). Step 3, for a NEAR AI account whose old login
 /// is not known (spec 2.2).
-pub const ACCOUNT_CHANGE_BODY_OLD_UNKNOWN: &str = "Your traces, credit and payout settings stay. From now on, sign in with {new_provider}. Your old login will no longer connect to this app.";
-/// Owner-approved 2026-11-03. Step 3, for an account that joined with a
+pub const ACCOUNT_CHANGE_BODY_OLD_UNKNOWN: &str = "Your traces, credit and payout settings stay. From now on, sign in with {new_provider}, not your old login.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P17). Step 3, for an account that joined with a
 /// NEAR wallet.
-pub const ACCOUNT_CHANGE_BODY_WALLET: &str = "Your traces and credit stay. From now on, sign in with {new_provider}. Your NEAR wallet will no longer sign in to this app.";
+pub const ACCOUNT_CHANGE_BODY_WALLET: &str =
+    "Your traces and credit stay. From now on, sign in with {new_provider}, not your NEAR wallet.";
 /// Owner-approved 2026-11-03. Step 3, beside the body.
 pub const ACCOUNT_CHANGE_PRIVATE_AI: &str =
     "Private AI will use your {new_provider} account. Keys made in the old account are removed.";
@@ -102,24 +103,23 @@ pub const ACCOUNT_CHANGE_STEP_NEW_BUTTON: &str = "Sign in";
 /// Owner-approved 2026-11-03. Step 1's sign-in was another login.
 pub const ACCOUNT_CHANGE_ERROR_CURRENT_LOGIN: &str =
     "Sign in with {old_provider} first to confirm it's you.";
-/// Owner-approved 2026-11-03. The wallet did not confirm.
-pub const ACCOUNT_CHANGE_ERROR_WALLET: &str = "Your NEAR wallet didn't confirm. Try again.";
-/// Owner-approved 2026-11-03. The new login already holds an account.
-pub const ACCOUNT_CHANGE_ERROR_IN_USE: &str =
-    "That NEAR AI account is already in use. Choose a different account.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P50). The wallet did not confirm.
+pub const ACCOUNT_CHANGE_ERROR_WALLET: &str = "Your NEAR wallet didn't confirm.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P35). The new login already holds an account.
+pub const ACCOUNT_CHANGE_ERROR_IN_USE: &str = "That NEAR AI account is already in use.";
 /// Owner-approved 2026-11-03. Within the seven-day cooldown (decision 9).
 pub const ACCOUNT_CHANGE_ERROR_TOO_SOON: &str =
     "This account changed its login recently. Try again later.";
-/// Owner-approved 2026-11-03. Anything else.
-pub const ACCOUNT_CHANGE_ERROR_UNAVAILABLE: &str = "Couldn't switch accounts. Try again.";
-/// Under "Add a NEAR AI login" when it could not start: it adds a login,
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P51). Anything else.
+pub const ACCOUNT_CHANGE_ERROR_UNAVAILABLE: &str = "Couldn't switch accounts.";
+/// Under "Add login" when it could not start: it adds a login,
 /// so it does not say "switch accounts" (copy-guide rule 7).
-/// DRAFT, NEEDS APPROVAL (2026-11-04).
-pub const PAYOUTS_NEEDS_LOGIN_ADD_FAILED: &str = "Couldn't add a NEAR AI login. Try again.";
-/// Owner-approved 2026-11-03. An ordinary sign-in with a login a change
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P64).
+pub const PAYOUTS_NEEDS_LOGIN_ADD_FAILED: &str = "Couldn't add a NEAR AI login.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P59). An ordinary sign-in with a login a change
 /// retired, not in the sheet.
 pub const ACCOUNT_CHANGE_ERROR_RETIRED: &str =
-    "This app no longer uses that NEAR AI account. Sign in with {provider}.";
+    "That NEAR AI account is no longer used here. Sign in with {provider}.";
 
 // Accessibility names: each step's primary button names its step (spec
 // 2.2, copy-guide rule 5).
@@ -432,6 +432,7 @@ mod tests {
                 .take_while(|line| line.starts_with("///"))
                 .any(|line| {
                     line.contains("Owner-approved 2026-11-04")
+                        || line.contains("Approved by the owner 2026-11-04")
                         || line.contains("Owner-approved 2026-11-03")
                         || line.contains("Owner-approved 2026-11-02")
                         // The Settings copy audit's fixes, awaiting the
@@ -448,15 +449,16 @@ mod tests {
     /// The spec's exact words (section 2), so a later edit is a decision.
     #[test]
     fn the_words_are_the_approved_ones() {
+        // Settings copy pass 2 (owner, 2026-11-04): P36, P52, P53, P63.
         assert_eq!(
             ACCOUNT_LOGIN_MISMATCH_BODY,
-            "This app is connected to a different NEAR AI account. Sign in with that account again."
+            "Connected to a different NEAR AI account. Sign in with that one."
         );
-        assert_eq!(ACCOUNT_LOGIN_MISMATCH_CHANGE, "Use a different account");
-        assert_eq!(ACCOUNT_LOGIN_CHANGE, "Use a different account");
+        assert_eq!(ACCOUNT_LOGIN_MISMATCH_CHANGE, "Switch account");
+        assert_eq!(ACCOUNT_LOGIN_CHANGE, "Switch account");
         assert_eq!(ACCOUNT_CHANGE_TITLE, "Use a different NEAR AI account");
         assert_eq!(ACCOUNT_CHANGE_CONFIRM, "Switch");
-        assert_eq!(PAYOUTS_NEEDS_LOGIN_ADD, "Add a NEAR AI login");
+        assert_eq!(PAYOUTS_NEEDS_LOGIN_ADD, "Add login");
         // Settings IA, 2026-11-04 (D3, D6): the specs' own words.
         assert_eq!(ACCOUNT_LOGIN_CONNECTED, "Connected with {provider}");
         assert_eq!(ACCOUNT_SIGN_OUT, "Sign out");
@@ -476,7 +478,7 @@ mod tests {
         assert_eq!(
             render(ACCOUNT_CHANGE_BODY, None, Some("near"), Some("github")).as_deref(),
             Some(
-                "Your traces, credit and payout settings stay. From now on, sign in with GitHub. Your NEAR wallet login will no longer connect to this app."
+                "Your traces, credit and payout settings stay. From now on, sign in with GitHub, not NEAR wallet."
             )
         );
         assert_eq!(
@@ -565,16 +567,16 @@ mod tests {
         assert_eq!(
             confirm.lines,
             vec![
-                "Your traces, credit and payout settings stay. From now on, sign in with Google. Your NEAR wallet login will no longer connect to this app.".to_owned(),
+                "Your traces, credit and payout settings stay. From now on, sign in with Google, not NEAR wallet.".to_owned(),
                 "Private AI will use your Google account. Keys made in the old account are removed.".to_owned(),
             ]
         );
         let unknown_old =
             change_page(&state("confirm", "near_ai_login", None, Some("google"))).unwrap();
-        assert!(unknown_old.lines[0].contains("Your old login"));
+        assert!(unknown_old.lines[0].contains("not your old login"));
         let wallet_confirm =
             change_page(&state("confirm", "wallet", None, Some("github"))).unwrap();
-        assert!(wallet_confirm.lines[0].contains("Your NEAR wallet will no longer sign in"));
+        assert!(wallet_confirm.lines[0].contains("not your NEAR wallet"));
         assert!(change_page(&state("confirm", "near_ai_login", None, None)).is_none());
 
         let done = change_page(&state("done", "near_ai_login", None, None)).unwrap();

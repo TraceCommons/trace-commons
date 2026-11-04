@@ -58,9 +58,9 @@ mod tests {
             serde_json::to_value(copy::account_attention_for_wire(&status).unwrap()).unwrap()
         );
         let shown = account_attention_copy(status);
-        assert_eq!(shown["title"], "This app's account needs attention");
+        assert_eq!(shown["title"], "Needs attention");
         assert_eq!(shown["action"], "Set up again");
-        assert_eq!(shown["failed"], "Nothing changed. Try again.");
+        assert_eq!(shown["failed"], "Nothing changed.");
     }
 
     #[test]

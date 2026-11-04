@@ -89,6 +89,7 @@ struct NearAiSignInHeadButton: View {
         }
         .disabled(model.credentialBusy || (model.nearAiSigningIn && !model.canRestartNearAiBrowserSignIn))
         .fixedSize()
+        .helpIfAny(copy.signInTooltip)
         .task { if model.accountSession == .unread { model.refreshAccountSession() } }
     }
 }

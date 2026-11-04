@@ -31,15 +31,34 @@ public class ProjectIgnoreCopyTests
         Assert.Contains("Stops this project being offered.", body);
     }
 
-    [Theory]
-    [InlineData(0)]
-    [InlineData(1)]
-    [InlineData(7)]
-    public void AlwaysNamesTheWayBack(int n)
+    [Fact]
+    public void NothingWaitingNamesTheWayBack()
     {
-        var body = ProjectIgnoreCopy.ConfirmationBody("api", n);
+        var body = ProjectIgnoreCopy.ConfirmationBody("api", 0);
         Assert.Contains("undo this in Settings", body);
         Assert.Contains("Nothing already submitted is affected.", body);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(7)]
+    public void WaitingTracesSayWhatAlreadySentIsAndTheTooltipNamesTheWayBack(int n)
+    {
+        var body = ProjectIgnoreCopy.ConfirmationBody("api", n);
+        Assert.Contains("Traces already sent aren't affected.", body);
+        // Owner dropped "You can undo this in Settings." and "Nothing already
+        // submitted is affected." from this body 2026-11-04 (Settings copy
+        // pass 2, P121); the way back is the Never button's tooltip.
+        Assert.DoesNotContain("undo this in Settings", body);
+        Assert.Equal(
+            "Setting it back to Ask can offer the removed traces again.",
+            ProjectIgnoreCopy.NeverButtonTooltip);
+    }
+
+    [Fact]
+    public void TheButtonIsTheModeName()
+    {
+        Assert.Equal("Never", ProjectIgnoreCopy.ButtonLabel);
     }
 
     [Theory]

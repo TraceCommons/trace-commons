@@ -36,10 +36,14 @@ struct SpendOrganizationCard: View {
                             options: Self.options(status))
                         .disabled(model.spendOrganizationSwitching || model.credentialBusy)
                     }
-                    Text(words.what)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    // Cut by the owner 2026-11-04 (Settings copy pass 2,
+                    // P188): an empty line draws nothing.
+                    if !words.what.isEmpty {
+                        Text(words.what)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if let line = Self.stateLine(
                         status, switching: model.spendOrganizationSwitching,
                         failure: model.spendOrganizationFailure)

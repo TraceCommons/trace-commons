@@ -58,7 +58,8 @@
 // configured to send through it -- and it had no third state, so a dead
 // proxy and an unlisted tool both rendered as a confident verdict.
 
-pub const TOOLS_HEADING: &str = "Tools";
+/// Cut by the owner: the shells skip an empty heading. Approved by the owner 2026-11-04 (Settings copy pass 2, P117).
+pub const TOOLS_HEADING: &str = "";
 
 /// IronWire answered, and reports this tool as pointed at a local address.
 ///
@@ -127,18 +128,18 @@ pub const TOOL_CLINE: &str = "Cline";
 /// The cost is real and worth stating: the failure sentences no longer say
 /// what to go start. What they have left is the port and the folder, which
 /// are the two things a contributor can actually act on from this window.
-pub const IRONWIRE_INTRO: &str = concat!(
-    crate::app_name!(),
-    " can read a record kept on this machine of where your tools send their requests first, \
-     and says so below, one tool at a time. That is a fact about this machine alone: it says \
-     where a request goes first, not what happens to it afterwards."
-);
+///
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P91).
+pub const IRONWIRE_INTRO: &str =
+    "Reads a local record of where each tool sends requests first. Can't see what happens after.";
 
-pub const IRONWIRE_TOGGLE: &str = "Read the local record on this machine";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P109).
+pub const IRONWIRE_TOGGLE: &str = "Read the local record";
 
-/// Said out loud because the obvious worry is that it is not true.
-/// Nothing here waits on the app being started again.
-pub const IRONWIRE_APPLIES_AT_ONCE: &str = "Changes here apply straight away.";
+/// Nothing here waits on the app being started again. Cut by the owner:
+/// the line is empty, and a shell skips empty text.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P105).
+pub const IRONWIRE_APPLIES_AT_ONCE: &str = "";
 
 /// The one action offered when the machine already answered the question.
 ///
@@ -154,7 +155,8 @@ pub const IRONWIRE_CONNECT: &str = "Connect";
 ///
 /// They are the override, not the front door. A contributor who has to
 /// change either is on an unusual install; everybody else never opens this.
-pub const IRONWIRE_OVERRIDE_TITLE: &str = "Set the port and folder yourself";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P113).
+pub const IRONWIRE_OVERRIDE_TITLE: &str = "Set port and folder";
 
 /// Ask again, for the contributor who started IronWire after this window
 /// was open.
@@ -167,8 +169,8 @@ pub const IRONWIRE_OVERRIDE_TITLE: &str = "Set the port and folder yourself";
 pub const IRONWIRE_LOOK_AGAIN: &str = "Check now";
 
 pub const IRONWIRE_PORT_TITLE: &str = "Port";
-pub const IRONWIRE_PORT_NOTE: &str =
-    "Already set to the usual number. Change it only if the record is kept on a different one.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P99).
+pub const IRONWIRE_PORT_NOTE: &str = "Change it only if the record uses a different port.";
 
 pub const IRONWIRE_FOLDER_TITLE: &str = "Folder";
 
@@ -180,24 +182,25 @@ pub const IRONWIRE_FOLDER_TITLE: &str = "Folder";
 /// system's own chooser, which is the only thing that survives the app
 /// being sandboxed later. The other two shells keep a text box and do not
 /// render this word.
-pub const IRONWIRE_CHOOSE_FOLDER: &str = "Choose the folder";
+///
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P116).
+pub const IRONWIRE_CHOOSE_FOLDER: &str = "Choose folder";
 
 /// The note when nothing on this machine can say where the usual place is.
 ///
 /// Kept as a constant because the payload's shape requires one, and used as
 /// the fallback [`ironwire_folder_note`] returns when no folder resolved. A
 /// build with no home directory to read has no better sentence available.
-pub const IRONWIRE_FOLDER_NOTE: &str =
-    "Leave this empty unless the record is kept somewhere other than the usual place.";
+///
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P104).
+pub const IRONWIRE_FOLDER_NOTE: &str = "Leave empty unless the record is somewhere unusual.";
 
 /// The folder note, naming the folder it is talking about.
 ///
-/// Every failure sentence on this surface ends by sending a contributor to
-/// this one field -- "Name the folder below", "Point the folder below at
-/// where the record is kept" -- and the field then declined to say which
-/// folder it meant or what it would read if left empty. "Somewhere other
-/// than the usual place" resolved to nothing anywhere on the screen, so the
-/// instruction had no answer for the person following it.
+/// A note that does not say which folder it means, or what is read if the
+/// field is left empty, gives the person at the field nothing to check.
+///
+/// The `Some` sentence: Approved by the owner 2026-11-04 (Settings copy pass 2, P108).
 ///
 /// The path arrives as an argument rather than as wording, for the same
 /// reason [`ironwire_token_line`]'s does: it is the one place a vendor name
@@ -206,9 +209,7 @@ pub const IRONWIRE_FOLDER_NOTE: &str =
 #[must_use]
 pub fn ironwire_folder_note(default_dir: Option<&str>) -> String {
     match default_dir {
-        Some(dir) => {
-            format!("Leave this empty unless the record is kept somewhere other than {dir}.")
-        }
+        Some(dir) => format!("Leave empty unless the record isn't in {dir}."),
         None => IRONWIRE_FOLDER_NOTE.to_string(),
     }
 }
@@ -235,47 +236,44 @@ pub const IRONWIRE_CHECKING: &str = "Checking\u{2026}";
 
 /// The check itself could not be run -- not a fact about IronWire, so it
 /// must not send anybody to look at a port or a file that is fine.
-pub const IRONWIRE_CHECK_UNAVAILABLE: &str =
-    "That check couldn't be run just now. Nothing changed.";
+///
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P106).
+pub const IRONWIRE_CHECK_UNAVAILABLE: &str = "Couldn't check. Nothing changed.";
 
 /// The clause both token-file failures end with, as a literal.
 ///
 /// A macro and not a `const` because `concat!` takes literals: the state
 /// sentence below and [`ironwire_token_line`] have to end with the same
-/// instruction, and a second copy of it is a second thing to edit. It is
-/// also the reason a contributor can act on either sentence -- both send
-/// them to the one field on this card that takes an answer.
+/// words, and a second copy of them is a second thing to edit. The owner
+/// cut the instruction that used to follow (the folder field is already on
+/// the card), so what is shared is the fact: missing or no longer valid.
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P92). Approved by the owner 2026-11-04 (Settings copy pass 2, P94).
 macro_rules! ironwire_point_at_the_folder {
     () => {
-        "Either it is not there, or it is no longer valid. Point the folder below at where the \
-         record is kept."
+        "it's missing or no longer valid."
     };
 }
 
-pub const IRONWIRE_PROBE_REACHABLE: &str =
-    concat!(crate::app_name!(), " can read the local record.");
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P110).
+pub const IRONWIRE_PROBE_REACHABLE: &str = "Local record available.";
 
 /// The reported origin is independent of whether the reader is succeeding.
-pub const IRONWIRE_DERIVED_ORIGIN: &str = "The local record is selected from this app's model-call service. This does not enable reading trace bodies.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P107).
+pub const IRONWIRE_DERIVED_ORIGIN: &str =
+    "Chosen from this app's model-call service. It doesn't enable reading trace bodies.";
 /// Unknown internal state is not evidence of an Off declaration or a bad token.
-pub const IRONWIRE_STATE_UNKNOWN: &str =
-    "The local-record state is unavailable. Check again before relying on it.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P98).
+pub const IRONWIRE_STATE_UNKNOWN: &str = "Status unavailable.";
 
-pub const IRONWIRE_STATE_OFF: &str = concat!(
-    "Off. ",
-    crate::app_name!(),
-    " is not reading the local record."
-);
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P101).
+pub const IRONWIRE_STATE_OFF: &str = "Off.";
 /// Not a fault, and the copy has to say so. A record read from a
 /// freshly-built reader starts empty by construction, so a contributor who
 /// just turned this on -- or just changed the port -- sees this state.
-pub const IRONWIRE_STATE_WAITING: &str = "On. Nothing recorded yet, which is normal just after you turn this on or change something \
-     here.";
-pub const IRONWIRE_STATE_READING: &str = concat!(
-    "On, and ",
-    crate::app_name!(),
-    " is reading the local record."
-);
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P97).
+pub const IRONWIRE_STATE_WAITING: &str = "On. Nothing recorded yet, which is normal.";
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P111).
+pub const IRONWIRE_STATE_READING: &str = "On, reading the local record.";
 
 /// Declared, switched on, and the reader could not be built at all.
 ///
@@ -287,14 +285,14 @@ pub const IRONWIRE_STATE_READING: &str = concat!(
 /// off nor fine: it is the one state on this card that is asking for
 /// something.
 ///
-/// The instruction is [`ironwire_token_line`]'s, from the one literal, so
-/// the sentence a card shows without a probe and the sentence a probe
-/// returns send a contributor to the same field. It names no file, because
-/// the status block carries no path -- a path is what the probe adds.
+/// The ending is [`ironwire_token_line`]'s, from the one literal, so the
+/// sentence a card shows without a probe and the sentence a probe returns
+/// state the same fact. It names no file, because the status block carries
+/// no path -- a path is what the probe adds.
+///
+/// Approved by the owner 2026-11-04 (Settings copy pass 2, P92).
 pub const IRONWIRE_STATE_TOKEN_UNREADABLE: &str = concat!(
-    "On, but ",
-    crate::app_name!(),
-    " could not use the file it needs in order to read the local record. ",
+    "On, but can't use the record's file: ",
     ironwire_point_at_the_folder!()
 );
 
@@ -387,19 +385,13 @@ pub fn tool_tone(source_mode: &str, wiring: ToolWiring) -> ToolTone {
 #[must_use]
 pub fn ironwire_token_line(token_path: Option<&str>) -> String {
     match token_path {
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P94).
         Some(path) => format!(
-            concat!(
-                crate::app_name!(),
-                " could not use the file at {path}. ",
-                ironwire_point_at_the_folder!()
-            ),
+            concat!("Can't use {path}: ", ironwire_point_at_the_folder!()),
             path = path
         ),
-        None => concat!(
-            crate::app_name!(),
-            " could not work out where the record is kept. Name the folder below."
-        )
-        .to_string(),
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P102).
+        None => "Can't find where the record is kept.".to_string(),
     }
 }
 
@@ -407,10 +399,8 @@ pub fn ironwire_token_line(token_path: Option<&str>) -> String {
 #[must_use]
 pub fn ironwire_unreachable_line(port: Option<u16>) -> String {
     match port {
-        Some(port) => format!(
-            "Nothing answered on port {port}. Check that this is the right number, or name the \
-             folder below."
-        ),
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P96).
+        Some(port) => format!("Nothing answered on port {port}."),
         None => "Nothing answered on this machine.".to_string(),
     }
 }
@@ -426,9 +416,9 @@ pub fn ironwire_unreachable_line(port: Option<u16>) -> String {
 /// # Neither sentence is a failure
 ///
 /// A machine keeping no such record is the ordinary machine, so the `None`
-/// sentence says what that looks like before it says what to do. It is the
-/// state most readers of this screen are in, and a screen that greets them
-/// with a fault is describing their machine wrongly.
+/// sentence says that is normal. It is the state most readers of this
+/// screen are in, and a screen that greets them with a fault is describing
+/// their machine wrongly.
 ///
 /// # The found sentence promises that nothing has happened yet
 ///
@@ -438,13 +428,12 @@ pub fn ironwire_unreachable_line(port: Option<u16>) -> String {
 #[must_use]
 pub fn ironwire_discovery_line(port: Option<u16>) -> String {
     match port {
-        Some(port) => format!(
-            "A local record is being kept on this machine, on port {port}. Nothing is read from \
-             it until you turn this on."
-        ),
-        None => "Nothing on this machine has left details of a local record, which is what an \
-                 ordinary machine looks like. If one is being kept, say which port below."
-            .to_string(),
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P103).
+        Some(port) => {
+            format!("Found a local record on port {port}. Nothing is read until you turn this on.")
+        }
+        // Approved by the owner 2026-11-04 (Settings copy pass 2, P93).
+        None => "No local record found, which is normal.".to_string(),
     }
 }
 
@@ -1125,28 +1114,47 @@ mod tests {
         }
     }
 
-    /// The sentences that name us take the name from the one definition.
+    /// The sentences that used to name us, held to the owner's words.
     ///
-    /// The forbidden-word sweep is a rule about what must not be said; this
-    /// is the other half, and without it the surface could satisfy that
-    /// rule by naming nobody at all. Asserted against
-    /// [`crate::brand::APP_NAME`] rather than against the literal, so
-    /// renaming the app in `brand.rs` moves these sentences with it and a
-    /// hand-typed name here would fail.
+    /// These sentences took the app's name from [`crate::brand::APP_NAME`]
+    /// so that a rename moved them with it. The owner cut the name from all
+    /// of them, so what is left of the rule is that none of them carries a
+    /// copy of it, hand-typed or otherwise, and that each says exactly what
+    /// was approved.
     #[test]
     fn the_sentences_that_name_this_app_take_the_name_from_one_place() {
+        // Owner dropped the app name 2026-11-04 (Settings copy pass 2, P91, P92, P94, P101, P102, P110, P111).
         let name = crate::brand::APP_NAME;
         for text in [
-            IRONWIRE_INTRO,
-            IRONWIRE_PROBE_REACHABLE,
-            IRONWIRE_STATE_OFF,
-            IRONWIRE_STATE_READING,
-            IRONWIRE_STATE_TOKEN_UNREADABLE,
+            IRONWIRE_INTRO.to_string(),
+            IRONWIRE_PROBE_REACHABLE.to_string(),
+            IRONWIRE_STATE_OFF.to_string(),
+            IRONWIRE_STATE_READING.to_string(),
+            IRONWIRE_STATE_TOKEN_UNREADABLE.to_string(),
+            ironwire_token_line(Some("/home/x/.config/t")),
+            ironwire_token_line(None),
         ] {
-            assert!(text.contains(name), "{name:?} is not in: {text}");
+            assert!(!text.contains(name), "{name:?} is in: {text}");
         }
-        assert!(ironwire_token_line(Some("/home/x/.config/t")).contains(name));
-        assert!(ironwire_token_line(None).contains(name));
+        assert_eq!(
+            IRONWIRE_INTRO,
+            "Reads a local record of where each tool sends requests first. Can't see what happens after."
+        );
+        assert_eq!(IRONWIRE_PROBE_REACHABLE, "Local record available.");
+        assert_eq!(IRONWIRE_STATE_OFF, "Off.");
+        assert_eq!(IRONWIRE_STATE_READING, "On, reading the local record.");
+        assert_eq!(
+            IRONWIRE_STATE_TOKEN_UNREADABLE,
+            "On, but can't use the record's file: it's missing or no longer valid."
+        );
+        assert_eq!(
+            ironwire_token_line(Some("/home/x/.config/t")),
+            "Can't use /home/x/.config/t: it's missing or no longer valid."
+        );
+        assert_eq!(
+            ironwire_token_line(None),
+            "Can't find where the record is kept."
+        );
     }
 
     /// The field every failure sentence sends a contributor to says which
@@ -1237,13 +1245,19 @@ mod tests {
         assert_eq!(copy.state_token_unreadable, IRONWIRE_STATE_TOKEN_UNREADABLE);
 
         // And the JSON a shell actually reads carries those same values --
-        // every field a string, none of them empty. An empty word would
-        // render as a blank beside a tool name rather than as a failure.
+        // every field a string, none of them empty except the two lines the
+        // owner cut, which a shell skips. An empty word would render as a
+        // blank beside a tool name rather than as a failure.
         let json = serde_json::to_value(&copy).expect("serialises");
         for (field, value) in json.as_object().expect("a JSON object") {
             let text = value
                 .as_str()
                 .unwrap_or_else(|| panic!("{field} is not a string"));
+            if field == "tools_heading" || field == "applies_at_once" {
+                // Owner dropped the "Tools" heading and "Changes here apply straight away." 2026-11-04 (Settings copy pass 2, P117, P105).
+                assert!(text.is_empty(), "{field} was cut by the owner: {text}");
+                continue;
+            }
             assert!(!text.is_empty(), "{field} is empty");
         }
         assert_eq!(json["word_private"], serde_json::json!(TOOL_PRIVATE));
