@@ -1186,7 +1186,7 @@ mod tests {
         }
     }
 
-    /// A ceremony row left by the removed passkey bind routes (it carries a
+    /// A ceremony row left by the bind routes V144 removed (it carries a
     /// `purpose`, a tenant and an account) never parses as a NEAR AI login or
     /// provisioning ceremony, so a leftover row finishes nothing.
     #[test]

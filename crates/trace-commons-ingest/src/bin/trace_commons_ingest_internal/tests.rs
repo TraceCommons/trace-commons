@@ -20,8 +20,6 @@ mod model_training_consent_tests;
 mod native_session_sliding_expiry_tests;
 #[path = "tests/near_ai_provisioning_tests.rs"]
 mod near_ai_provisioning_tests;
-#[path = "tests/passkey_removal_tests.rs"]
-mod passkey_removal_tests;
 #[path = "tests/payout_link_tests.rs"]
 mod payout_link_tests;
 #[path = "tests/payout_rails_tests.rs"]
@@ -34,6 +32,8 @@ mod public_run_tests;
 mod referral_admin_tests;
 #[path = "tests/referral_tests.rs"]
 mod referral_tests;
+#[path = "tests/removed_account_routes_tests.rs"]
+mod removed_account_routes_tests;
 #[path = "tests/reward_participant_tests.rs"]
 mod reward_participant_tests;
 
@@ -85344,7 +85344,7 @@ async fn near_login_rejects_malformed_public_key_shape() {
 // is applied at the top of NEAR enroll start/finish, NEAR identity remove and
 // payout designation. A STRONG session (`client_kind='near'`) may always change
 // authenticators; a WEAK session (a device-link `'web'` cookie, a native token,
-// or a pre-removal `'passkey'` session) may add/remove only while the account
+// or a pre-V144 `'passkey'` session) may add/remove only while the account
 // holds ZERO strong authenticators (the bootstrapping carve-out). Rename/list are
 // NOT gated (label-only) and are not exercised here.
 // ============================================================================

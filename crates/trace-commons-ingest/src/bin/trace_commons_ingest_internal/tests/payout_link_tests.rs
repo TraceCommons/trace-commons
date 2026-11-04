@@ -4,9 +4,8 @@
 //! The payout link routes (payout spec section 5): start, confirm and
 //! status, on the contributor's signed-in account session.
 //!
-//! The owner superseded the passkey confirmation (D5) on 2026-10-23: a
-//! signed-in session links, changes and unlinks, with no passkey and no
-//! step-up page. What still stands behind a link is the server's own check
+//! Since the owner superseded D5 on 2026-10-23, a signed-in session links,
+//! changes and unlinks, with no step-up page. What still stands behind a link is the server's own check
 //! with NEAR AI (`/users/me` with the person's token, then a zero-target
 //! probe), the "changed since shown" version check, and an audit row for
 //! every request and confirmation.
@@ -179,7 +178,7 @@ struct Harness {
 }
 
 /// A signed-in account: a tenant of its own, an open account row with no
-/// passkey and no binding row, and a weak native session for it. Unless made
+/// binding row, and a weak native session for it. Unless made
 /// with [`Harness::unanchored_account_in`], it carries a NEAR AI login
 /// anchor on the stub's subject, as an account that signed in with NEAR AI
 /// does.
@@ -854,7 +853,7 @@ async fn probe_404_and_409_and_403_map_to_their_outcomes() {
 }
 
 #[tokio::test]
-async fn confirm_needs_the_same_account_session_and_no_passkey() {
+async fn confirm_needs_the_same_account_session_and_no_step_up() {
     let Some(h) = harness().await else { return };
     let account = h.account().await;
     let other = h.unanchored_account_in(&account.tenant).await;
