@@ -7,12 +7,12 @@
 //! over one state, so a refusal reads the same on either.
 //!
 //! **Nothing here authors a sentence.** The offer, the working line, the
-//! passkey lines and every refusal come from
+//! sign-in lines and every refusal come from
 //! `trace_commons_contributor::consent_copy`, which macOS reaches across the
 //! C ABI. The `legacy_migration_*` strings below are the daemon's wire
 //! labels, which are not words anybody reads.
 //!
-//! **The passkey step comes first.** The move provisions the account with the
+//! **The NEAR AI sign-in comes first.** The move provisions the account with the
 //! NEAR AI session the daemon keeps. With none, the daemon refuses with
 //! `legacy_migration_no_near_ai_session`; this shell then runs the same
 //! browser sign-in the model-calls screen runs (`near_ai_credential_*`), waits
@@ -39,7 +39,7 @@ const LABEL_PREFIX: &str = "legacy_migration_";
 const ATTEMPT_WAITING: &str = "waiting_for_browser";
 /// How long the move waits on the browser before it says the step did not
 /// finish. The same ten minutes macOS waits.
-const PASSKEY_LIMIT_SECONDS: u32 = 600;
+const LOGIN_LIMIT_SECONDS: u32 = 600;
 
 /// What the shell does with a move that came back refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,17 +109,17 @@ struct Shown {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Alert {
     Refusal(&'static str),
-    PasskeyFailed,
+    LoginFailed,
     StartFailed,
 }
 
 #[derive(Debug, Default, Clone)]
 struct Inner {
     busy: bool,
-    awaiting_passkey: bool,
+    awaiting_login: bool,
     invite_needed: bool,
     start_failed: bool,
-    passkey_failed: bool,
+    login_failed: bool,
     refusal: Option<&'static str>,
     invite: String,
 }
@@ -135,8 +135,8 @@ impl Inner {
     fn shown(&self) -> Shown {
         let alert = if let Some(line) = self.refusal {
             Some(Alert::Refusal(line))
-        } else if self.passkey_failed {
-            Some(Alert::PasskeyFailed)
+        } else if self.login_failed {
+            Some(Alert::LoginFailed)
         } else if self.start_failed {
             Some(Alert::StartFailed)
         } else {
@@ -144,9 +144,9 @@ impl Inner {
         };
         Shown {
             invite_field: self.invite_needed,
-            waiting_line: self.awaiting_passkey,
-            cancel: self.awaiting_passkey,
-            working_line: self.busy && !self.awaiting_passkey,
+            waiting_line: self.awaiting_login,
+            cancel: self.awaiting_login,
+            working_line: self.busy && !self.awaiting_login,
             move_button: !self.busy && self.can_move(),
             alert,
         }
@@ -177,7 +177,7 @@ impl MoveState {
         inner.busy = true;
         inner.refusal = None;
         inner.start_failed = false;
-        inner.passkey_failed = false;
+        inner.login_failed = false;
         let generation = self.generation.get() + 1;
         self.generation.set(generation);
         Some((generation, sent))
@@ -301,7 +301,7 @@ impl Controls {
         root.append(&invite_prompt);
         root.append(&invite);
 
-        let waiting = style::body(offer.passkey_waiting);
+        let waiting = style::body(offer.near_ai_login_waiting);
         let working = style::body(offer.working);
         waiting.set_visible(false);
         working.set_visible(false);
@@ -313,7 +313,7 @@ impl Controls {
         let move_button = gtk::Button::with_label(offer.action);
         move_button.add_css_class("suggested-action");
         move_button.add_css_class("pill");
-        let cancel = gtk::Button::with_label(offer.passkey_cancel);
+        let cancel = gtk::Button::with_label(offer.near_ai_login_cancel);
         cancel.add_css_class("flat");
         cancel.set_visible(false);
         buttons.append(&move_button);
@@ -364,7 +364,7 @@ impl Controls {
             Some(alert) => {
                 self.alert.set_label(match alert {
                     Alert::Refusal(line) => line,
-                    Alert::PasskeyFailed => offer.passkey_failed,
+                    Alert::LoginFailed => offer.near_ai_login_failed,
                     Alert::StartFailed => offer.start_failed,
                 });
                 self.alert.set_visible(true);
@@ -436,7 +436,7 @@ pub fn wire(app: &Rc<App>) {
             let weak = weak.clone();
             move |_| {
                 if let Some(app) = weak.upgrade() {
-                    cancel_passkey(&app);
+                    cancel_login(&app);
                 }
             }
         });
@@ -474,7 +474,7 @@ fn migrate(app: &Rc<App>) {
     ask(app, sent, generation, true);
 }
 
-fn ask(app: &Rc<App>, sent: Option<String>, generation: u64, passkey_allowed: bool) {
+fn ask(app: &Rc<App>, sent: Option<String>, generation: u64, login_allowed: bool) {
     let params = serde_json::json!({ "invite": sent });
     let retry = sent;
     app.call_with_failure("legacy_invite_migrate", params, move |app, result| {
@@ -490,8 +490,8 @@ fn ask(app: &Rc<App>, sent: Option<String>, generation: u64, passkey_allowed: bo
                 });
                 finish(app);
             }
-            Err(failure) if passkey_allowed && failure.label == LABEL_NO_SESSION => {
-                passkey_step(app, retry, generation);
+            Err(failure) if login_allowed && failure.label == LABEL_NO_SESSION => {
+                login_step(app, retry, generation);
             }
             Err(failure) => {
                 let class = classify(&failure.label);
@@ -523,9 +523,9 @@ fn finish(app: &Rc<App>) {
     app.refresh();
 }
 
-/// The passkey step: the first run's browser sign-in, then the move again.
-fn passkey_step(app: &Rc<App>, sent: Option<String>, generation: u64) {
-    app.legacy_move.edit(|inner| inner.awaiting_passkey = true);
+/// The NEAR AI sign-in: the first run's browser sign-in, then the move again.
+fn login_step(app: &Rc<App>, sent: Option<String>, generation: u64) {
+    app.legacy_move.edit(|inner| inner.awaiting_login = true);
     repaint(app);
     app.call(
         "near_ai_credential_status",
@@ -535,7 +535,7 @@ fn passkey_step(app: &Rc<App>, sent: Option<String>, generation: u64) {
                 return;
             }
             if poll_verdict(result.ok().as_ref()) == Poll::SignedIn {
-                passkey_done(app, sent, generation);
+                login_done(app, sent, generation);
             } else {
                 start_sign_in(app, sent, generation);
             }
@@ -544,20 +544,20 @@ fn passkey_step(app: &Rc<App>, sent: Option<String>, generation: u64) {
 }
 
 /// The sign-in finished: the move again, once.
-fn passkey_done(app: &Rc<App>, sent: Option<String>, generation: u64) {
-    app.legacy_move.edit(|inner| inner.awaiting_passkey = false);
+fn login_done(app: &Rc<App>, sent: Option<String>, generation: u64) {
+    app.legacy_move.edit(|inner| inner.awaiting_login = false);
     credential::refresh(app);
     repaint(app);
     ask(app, sent, generation, false);
 }
 
 /// The sign-in did not finish. Nothing was moved and the offer stays.
-fn passkey_failed(app: &Rc<App>) {
+fn login_failed(app: &Rc<App>) {
     app.legacy_move.attempt.replace(None);
     app.legacy_move.edit(|inner| {
-        inner.awaiting_passkey = false;
+        inner.awaiting_login = false;
         inner.busy = false;
-        inner.passkey_failed = true;
+        inner.login_failed = true;
     });
     credential::refresh(app);
     finish(app);
@@ -595,7 +595,7 @@ fn start_sign_in(app: &Rc<App>, sent: Option<String>, generation: u64) {
             });
             let Some((id, url)) = started else {
                 if !app.legacy_move.stale(generation) {
-                    passkey_failed(app);
+                    login_failed(app);
                 }
                 return;
             };
@@ -607,7 +607,7 @@ fn start_sign_in(app: &Rc<App>, sent: Option<String>, generation: u64) {
             }
             if !credential::open_browser(&url) {
                 cancel_attempt(app, Some(id));
-                passkey_failed(app);
+                login_failed(app);
                 return;
             }
             app.legacy_move.attempt.replace(Some(id.clone()));
@@ -626,10 +626,10 @@ fn poll_sign_in(app: &Rc<App>, sent: Option<String>, generation: u64, attempt: S
             return glib::ControlFlow::Break;
         }
         elapsed.set(elapsed.get() + 1);
-        if elapsed.get() >= PASSKEY_LIMIT_SECONDS {
+        if elapsed.get() >= LOGIN_LIMIT_SECONDS {
             over.set(true);
             cancel_attempt(&app, Some(attempt.clone()));
-            passkey_failed(&app);
+            login_failed(&app);
             return glib::ControlFlow::Break;
         }
         if in_flight.replace(true) {
@@ -649,11 +649,11 @@ fn poll_sign_in(app: &Rc<App>, sent: Option<String>, generation: u64, attempt: S
                     Poll::SignedIn => {
                         over.set(true);
                         app.legacy_move.attempt.replace(None);
-                        passkey_done(app, sent, generation);
+                        login_done(app, sent, generation);
                     }
                     Poll::Ended => {
                         over.set(true);
-                        passkey_failed(app);
+                        login_failed(app);
                     }
                 }
             },
@@ -662,19 +662,19 @@ fn poll_sign_in(app: &Rc<App>, sent: Option<String>, generation: u64, attempt: S
     });
 }
 
-/// Cancel while waiting on the passkey: stop waiting and end the browser
+/// Cancel while waiting on the sign-in: stop waiting and end the browser
 /// step. Nothing is moved, and the offer stays.
-fn cancel_passkey(app: &Rc<App>) {
+fn cancel_login(app: &Rc<App>) {
     let state = &app.legacy_move;
-    if !state.snapshot().awaiting_passkey {
+    if !state.snapshot().awaiting_login {
         return;
     }
     state.generation.set(state.generation.get() + 1);
     let attempt = state.attempt.replace(None);
     state.edit(|inner| {
-        inner.awaiting_passkey = false;
+        inner.awaiting_login = false;
         inner.busy = false;
-        inner.passkey_failed = false;
+        inner.login_failed = false;
     });
     cancel_attempt(app, attempt);
     finish(app);
@@ -719,10 +719,10 @@ mod tests {
     }
 
     #[test]
-    fn the_passkey_wait_shows_cancel_and_its_own_line_not_the_working_line() {
+    fn the_login_wait_shows_cancel_and_its_own_line_not_the_working_line() {
         let shown = Inner {
             busy: true,
-            awaiting_passkey: true,
+            awaiting_login: true,
             ..Inner::default()
         }
         .shown();
@@ -742,20 +742,20 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_outranks_the_passkey_and_start_lines() {
+    fn a_refusal_outranks_the_login_and_start_lines() {
         let inner = Inner {
             refusal: Some("line"),
-            passkey_failed: true,
+            login_failed: true,
             start_failed: true,
             ..Inner::default()
         };
         assert_eq!(inner.shown().alert, Some(Alert::Refusal("line")));
         let inner = Inner {
-            passkey_failed: true,
+            login_failed: true,
             start_failed: true,
             ..Inner::default()
         };
-        assert_eq!(inner.shown().alert, Some(Alert::PasskeyFailed));
+        assert_eq!(inner.shown().alert, Some(Alert::LoginFailed));
     }
 
     #[test]
@@ -783,11 +783,11 @@ mod tests {
         state.edit(|inner| {
             inner.refusal = Some("line");
             inner.start_failed = true;
-            inner.passkey_failed = true;
+            inner.login_failed = true;
         });
         state.begin().expect("starts");
         let inner = state.snapshot();
-        assert!(inner.refusal.is_none() && !inner.start_failed && !inner.passkey_failed);
+        assert!(inner.refusal.is_none() && !inner.start_failed && !inner.login_failed);
     }
 
     #[test]
@@ -884,7 +884,7 @@ mod tests {
             if trimmed.starts_with("//") {
                 continue;
             }
-            for sentence in ["Your invite", "Nothing was", "passkey", "Move to"] {
+            for sentence in ["Your invite", "Nothing was", "Waiting for", "Move to"] {
                 assert!(
                     !trimmed.contains(&format!("\"{sentence}")),
                     "a sentence authored here: {trimmed}"

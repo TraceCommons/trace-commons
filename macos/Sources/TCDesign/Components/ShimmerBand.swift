@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// Where a slanted band of light is as it crosses a field: the map's
-/// shimmer (`GlassMapShimmer`) and the card's (`GlassCardShine`) both draw
-/// one, from the same geometry.
+/// shimmer (`GlassMapShimmer`) draws one. (The Not contributed card's,
+/// which shared it, was removed on 2026-11-02.)
 enum GlassShimmerBand {
     /// The band at `progress` (0 wholly before the field, 1 wholly past
     /// it): the gradient's start and end. The band leans `slant` degrees

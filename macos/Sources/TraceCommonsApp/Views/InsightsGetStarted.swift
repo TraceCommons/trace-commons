@@ -43,90 +43,41 @@ struct InsightsGetStartedHeader: View {
     }
 }
 
-/// "Your Insights grow with your traces": why it is worth it, then
-/// three numbered steps, and one action: a text link under step 2 to the
-/// folder list (product owner, 2026-10-29: one clear action, small step
-/// numbers, room between the steps, not a setup wizard).
+/// "Your Insights will appear here": why it is worth it, then three
+/// numbered steps, and one action: a text link under step 2 to the folder
+/// list (product owner, 2026-10-29: one clear action, small step numbers,
+/// room between the steps, not a setup wizard). No icon beside the title,
+/// each step one short line, and a step's longer explanation behind the
+/// "i" after that line (product owner, 2026-11-02).
 struct InsightsGetStartedCard: View {
     let start: InsightsGetStarted
 
     private func text(_ key: String) -> String { start.copy[key] ?? "" }
 
+    /// The shared getting-started card (`GetStartedCard`), which the
+    /// Private AI tab's guide and Home's Traces walkthrough draw too.
     var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s9) {
-            HStack(alignment: .top, spacing: GlassTokens.Space.s5) {
-                Image(systemName: "chart.bar.xaxis")
-                    .glassGlyph(18, weight: .semibold)
-                    .foregroundStyle(GlassTokens.Color.chartSeries1.color)
-                    .frame(width: 40, height: 40)
-                    .background(Circle().fill(GlassTokens.Color.chartSeries1.color.opacity(0.14)))
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    Text(text("analytics_start_title")).insightsTitle()
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityAddTraits(.isHeader)
-                    Text(text("analytics_start_why")).insightsNote()
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s9) {
-                step(1, title: text("analytics_start_step_use"),
-                     detail: text("analytics_start_step_use_detail")) { EmptyView() }
-                step(2, title: text("analytics_start_step_share"),
-                     detail: text("analytics_start_step_share_detail")) {
-                    if let openTraces = start.openTraces {
-                        Button(action: openTraces) {
-                            HStack(spacing: GlassTokens.Space.s2) {
-                                Text(text("analytics_start_choose"))
-                                Image(systemName: "arrow.right").accessibilityHidden(true)
-                            }
-                        }
-                        .buttonStyle(GlassButtonStyle(.link))
-                        .padding(.top, GlassTokens.Space.s3)
-                    }
-                }
-                step(3, title: text("analytics_start_step_fill"),
-                     detail: text("analytics_start_step_fill_detail")) { EmptyView() }
-            }
-            .insightsCardBody()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
-    }
-
-    /// One numbered step: its number in a disc, its title and its detail,
-    /// and what the step can open under them.
-    private func step<Action: View>(_ number: Int, title: String, detail: String,
-                                    @ViewBuilder action: () -> Action) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s5) {
-            Text(String(number))
-                .glassType(GlassTokens.TypeScale.micro)
-                .monospacedDigit()
-                .foregroundStyle(GlassTokens.Color.chartSeries1.color)
-                .frame(width: 18, height: 18)
-                .background(Circle().fill(GlassTokens.Color.chartSeries1.color.opacity(0.14)))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                Text(title).glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(detail).insightsNote()
-                    .fixedSize(horizontal: false, vertical: true)
-                action()
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .accessibilityElement(children: .contain)
+        GetStartedCard(
+            title: text("analytics_start_title"), lead: text("analytics_start_why"),
+            steps: [
+                .init(title: text("analytics_start_step_use"), detail: text("analytics_start_step_use_detail")),
+                .init(title: text("analytics_start_step_share"), detail: text("analytics_start_step_share_detail"),
+                      info: text("analytics_start_step_share_info"),
+                      link: start.openTraces.map { GetStartedCard.Link(title: text("analytics_start_choose"), action: $0) }),
+                .init(title: text("analytics_start_step_fill"), detail: text("analytics_start_step_fill_detail"),
+                      info: text("analytics_start_step_fill_info")),
+            ])
     }
 }
 
-/// "Sample data — not yours", full width above the sample.
+/// "Sample data shown below", full width above the sample: a tinted card with
+/// a test tube for "sample", and no border (product owner, 2026-11-02).
 struct InsightsSampleBanner: View {
     let copy: [String: String]
 
     var body: some View {
         HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
-            Image(systemName: "eye")
+            Image(systemName: "testtube.2")
                 .glassGlyph(14, weight: .semibold)
                 .foregroundStyle(GlassStatus.ask.textColor)
                 .accessibilityHidden(true)
@@ -144,8 +95,6 @@ struct InsightsSampleBanner: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
             .fill(GlassStatus.ask.color.opacity(0.12)))
-        .overlay(RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
-            .strokeBorder(GlassStatus.ask.color.opacity(0.55), style: StrokeStyle(lineWidth: 1, dash: [5, 4])))
         .accessibilityElement(children: .combine)
     }
 }

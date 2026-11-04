@@ -166,7 +166,7 @@ export function useOnboarding(alreadyEnrolled: boolean) {
     : enrollMutation.isError
       ? "Enrollment failed. Check invite link and allowed issuer configuration."
       : consentMutation.isError
-        ? "Consent choices were not saved. Nothing proceeds until the daemon confirms them."
+        ? "Consent choices were not saved. Nothing proceeds until the app confirms them."
         : privacyMutation.isError
           ? "Privacy-scan choice was not saved."
           : grantMutation.isError

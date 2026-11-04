@@ -101,6 +101,16 @@
                                    Foreground="{ThemeResource TcCoralTextBrush}"
                                    TextWrapping="Wrap" />
                         <!--
+                            F10: the last NEAR AI sign-in was refused as
+                            another account, in the approved mismatch words.
+                            The account section in Settings offers what to do.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.LoginMismatchLine, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasLoginMismatchLine, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcCoralTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <!--
                             What pressing the button below costs, or what
                             forgetting does not do. Bound to the same action
                             the button is, so neither can be drawn without
@@ -109,16 +119,6 @@
                         <TextBlock Text="{x:Bind ViewModel.CredentialActionPreamble, Mode=OneWay}"
                                    Visibility="{x:Bind ViewModel.HasCredentialActionPreamble, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <ComboBox Header="{x:Bind ViewModel.CredentialProviderLabel}"
-                                  ItemsSource="{x:Bind ViewModel.CredentialProviders}"
-                                  DisplayMemberPath="Label" SelectedValuePath="Id"
-                                  SelectedValue="{x:Bind ViewModel.CredentialProvider, Mode=TwoWay}"
-                                  Visibility="{x:Bind ViewModel.HasCredentialProvider, Mode=OneWay}"
-                                  IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
-                                  MinHeight="44" HorizontalAlignment="Stretch" />
-                        <TextBlock Text="{x:Bind ViewModel.CredentialWalletNotice}"
-                                   Visibility="{x:Bind ViewModel.HasCredentialWalletNotice, Mode=OneWay}"
                                    TextWrapping="Wrap" />
                         <Button Content="{x:Bind ViewModel.CredentialActionText, Mode=OneWay}"
                                 Visibility="{x:Bind ViewModel.ShowCredentialSignIn, Mode=OneWay}"

@@ -127,7 +127,10 @@ final class HoverStateTests: XCTestCase {
         let sources = Dictionary(uniqueKeysWithValues: try DesignSources.components())
         let navigation = try XCTUnwrap(sources["Navigation.swift"])
         for name in ["struct GlassSegmentedTabs", "struct GlassRuleTabs", "struct GlassBreadcrumb"] {
-            let body = try XCTUnwrap(navigation.range(of: name).map { String(navigation[$0.lowerBound...].prefix(5000)) })
+            let start = try XCTUnwrap(navigation.range(of: name))
+            let end = navigation.range(of: "\npublic struct ", range: start.upperBound..<navigation.endIndex)?.lowerBound
+                ?? navigation.endIndex
+            let body = String(navigation[start.lowerBound..<end])
             XCTAssertTrue(body.contains(".onHover"), "\(name) has no hover")
         }
         let controls = try XCTUnwrap(sources["Controls.swift"])

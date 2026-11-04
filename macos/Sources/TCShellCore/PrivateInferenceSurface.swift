@@ -19,6 +19,12 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     /// `offerExposure` in one line, shown on the offer card with its first
     /// paragraph while the rest waits behind `offerLearnMore`.
     public let offerExposureShort: String
+    /// The offer notice's own lines (owner, 2026-11-02): its opening line,
+    /// the shared-machine fact the short exposure line leaves out, and the
+    /// local log, the last two behind its Details.
+    public let offerWhatShort: String
+    public let offerExposureShared: String
+    public let offerLogged: String
     /// The offer card's link to the rest of its paragraphs.
     public let offerLearnMore: String
     public let offerNoRepoint: String
@@ -129,11 +135,17 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let credentialObtain: String
     public let credentialCancel: String
     public let credentialForget: String
-    /// That forgetting is local: the key stays valid at the service until
-    /// the contributor removes it in their own account. Drawn WHEREVER
-    /// Forget is offered -- `handle_forget`'s `revoked: false` in words, and
-    /// a button labelled only "Forget" reads as a revocation it is not.
+    /// What forgetting does: the key leaves this computer and is revoked at
+    /// NEAR AI. Drawn WHEREVER Forget is offered.
     public let credentialForgetExplains: String
+    /// Drawn only after a forget that answered `removed: true, revoked:
+    /// false`: the revoke at NEAR AI did not happen, and the contributor can
+    /// delete the key there. See `CredentialSurface.forgetLeftKeyAtService`.
+    public let credentialForgetNotRevoked: String
+    /// After an unenroll that could not clear the NEAR AI sign-in
+    /// (`near_ai_cleared: false`): it is still on this Mac, and Forget in
+    /// Private AI removes it.
+    public let nearAiStillSignedIn: String
     /// The button behind `migration_available`, and the sentence drawn beside
     /// it: moving copies the sign-in out of the login keychain, and macOS may
     /// ask for the login password once to allow that.
@@ -305,6 +317,9 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case offerWhat = "offer_what"
         case offerExposure = "offer_exposure"
         case offerExposureShort = "offer_exposure_short"
+        case offerWhatShort = "offer_what_short"
+        case offerExposureShared = "offer_exposure_shared"
+        case offerLogged = "offer_logged"
         case offerLearnMore = "offer_learn_more"
         case offerNoRepoint = "offer_no_repoint"
         case offerAccept = "offer_accept"
@@ -385,6 +400,8 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case credentialCancel = "credential_cancel"
         case credentialForget = "credential_forget"
         case credentialForgetExplains = "credential_forget_explains"
+        case credentialForgetNotRevoked = "credential_forget_not_revoked"
+        case nearAiStillSignedIn = "near_ai_still_signed_in"
         case credentialMigrate = "credential_migrate"
         case credentialMigrateExplains = "credential_migrate_explains"
         case credentialAbsent = "credential_absent"

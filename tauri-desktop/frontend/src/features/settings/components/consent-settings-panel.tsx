@@ -93,7 +93,7 @@ export function ConsentSettingsPanel({
       </div>
       <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
         Applies to traces sent from now on. Always-included scope cannot be
-        removed; every optional scope is changed from the daemon's current
+        removed; every optional scope is changed from the app's current
         answer.
       </p>
       {error && (

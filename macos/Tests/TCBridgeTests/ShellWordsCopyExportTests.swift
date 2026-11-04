@@ -25,6 +25,7 @@ final class ShellWordsCopyExportTests: XCTestCase {
         let tables: [(String, Any)] = [
             ("withdrawal", copy.withdrawal), ("public_profile", copy.publicProfile), ("queue", copy.queue),
             ("history", copy.history), ("scrubbing", copy.scrubbing), ("settings", copy.settings),
+            ("paused_notice", copy.pausedNotice),
         ]
         for (name, decoded) in tables {
             let nested = try XCTUnwrap(object[name] as? [String: Any], name)
@@ -40,6 +41,14 @@ final class ShellWordsCopyExportTests: XCTestCase {
         XCTAssertEqual(copy.withdrawal.confirmTitle, "Confirm withdrawal")
         XCTAssertNotNil(copy.publicProfile.failureReasons["handle-too-short"])
         XCTAssertNotNil(copy.settings.auditActions["armed-auto-upload"])
+    }
+
+    /// The Traces tab's resume notice says Settings' own paused sentence.
+    func testThePausedNoticeReusesTheSettingsSentence() throws {
+        let copy = try XCTUnwrap(ShellWordsCopy.decode(fromJSON: TCCoreCopy.shellWordsCopyJSON()))
+        XCTAssertEqual(copy.pausedNotice.body, copy.settings.pausedNothingSent)
+        XCTAssertEqual(copy.pausedNotice.resume, "Resume")
+        XCTAssertEqual(copy.pausedNotice.notNow, "Not now")
     }
 
     /// A table with an empty string is refused whole.

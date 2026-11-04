@@ -74,7 +74,7 @@ export function WaitingPage({ status }: { status: CoreStatus | null }) {
           tone="blue"
         />
         <StatCard
-          label="Daemon"
+          label="Watcher"
           value={waiting.state === "error" ? "Offline" : "Watching"}
           detail="Existing Rust contributor core"
           tone={waiting.state === "error" ? "gold" : "green"}

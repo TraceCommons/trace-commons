@@ -22,6 +22,7 @@ const UNIT_FILE_NAME: &str = crate::channel::SYSTEMD_UNIT_NAME;
 /// The systemd user unit text.
 pub fn systemd_unit_text(exe: &str, config_dir: &str) -> String {
     let env = crate::channel::STATE_DIR_ENV;
+    let app = crate::brand::APP_NAME;
     let channel = if crate::channel::near_ai_staging() {
         " (staging)"
     } else {
@@ -29,7 +30,7 @@ pub fn systemd_unit_text(exe: &str, config_dir: &str) -> String {
     };
     format!(
         "[Unit]\n\
-         Description=Trace Commons contributor background uploader{channel}\n\
+         Description={app} background uploader{channel}\n\
          Documentation=https://github.com/zmanian/trace-commons-server\n\
          After=network-online.target\n\
          \n\
@@ -122,6 +123,7 @@ mod tests {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: Some(true),
             witness_origin: None,
+            account_identity: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "https://issuer.example.ai".into(),
@@ -163,14 +165,10 @@ mod tests {
         let unit = systemd_unit_text("/x", "/y");
         if crate::channel::near_ai_staging() {
             assert_eq!(UNIT_FILE_NAME, "trace-commons-contributor-staging.service");
-            assert!(
-                unit.contains(
-                    "Description=Trace Commons contributor background uploader (staging)\n"
-                )
-            );
+            assert!(unit.contains("Description=Near.ai background uploader (staging)\n"));
         } else {
             assert_eq!(UNIT_FILE_NAME, "trace-commons-contributor.service");
-            assert!(unit.contains("Description=Trace Commons contributor background uploader\n"));
+            assert!(unit.contains("Description=Near.ai background uploader\n"));
         }
     }
 

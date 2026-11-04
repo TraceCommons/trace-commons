@@ -169,6 +169,10 @@ struct SettingsWindowView: View {
             // The sheet for sent traces without Train coding models, when
             // turning it on here raised it.
             .modifier(SentTracesTrainingPresenter(site: .settings))
+            // The change of login's sheet (F10), raised from the Connection
+            // and Private AI sections. Once per window: the Monitor's
+            // Settings draws every section at once.
+            .modifier(AccountLoginChangePresenter())
             // Confirmations raised by a section cover this window, with
             // #1146's close button in the core's words.
             .glassModalHost()

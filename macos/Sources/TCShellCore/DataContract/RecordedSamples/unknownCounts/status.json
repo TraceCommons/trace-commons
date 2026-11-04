@@ -3,6 +3,9 @@
   "logged_in": true,
   "setup_complete": false,
   "account_scope": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "account_state": "ok",
+  "account_state_reason": null,
+  "near_ai_login_unconfirmed": false,
   "tenant_id": "tenant-sample",
   "consent_scopes": [
     "debugging_evaluation"
@@ -13,8 +16,8 @@
   "queue_capacity_used": 3,
   "queue_at_capacity": false,
   "dev_dry_run": false,
-  "contribution_mode": "notify_only",
-  "contribution_mode_partial": false,
+  "login_change_held": false,
+  "login_mismatch": false,
   "next_digest_at": null,
   "health": {
     "last_error_label": null,
@@ -46,5 +49,9 @@
     "projects": []
   },
   "contribution_override": null,
+  "contribution_mode": "notify_only",
+  "contribution_mode_partial": false,
+  "login_change_available": false,
+  "payouts_need_login": false,
   "_sample": "absent on purpose: older daemon"
 }

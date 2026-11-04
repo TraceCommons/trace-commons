@@ -19,7 +19,14 @@
 //!   paths and upstream error strings (which can hold URLs) in fields, and
 //!   a message is `fmt::Arguments` that a subscriber sees only through
 //!   `Debug`, so a literal cannot be told from an interpolation. The
-//!   callsite plus the pinned revision identifies the event exactly.
+//!   callsite plus the pinned revision identifies the event exactly;
+//! * a label line ([`record_labels`]) is a level, a fixed event name and
+//!   `key=value` pairs, for a failure a callsite cannot place (which step
+//!   of a NEAR AI sign-in failed, say). The name and keys are
+//!   `&'static str`, and every value is checked to be label-shaped --
+//!   lowercase letters, digits and `_`, at most 64 bytes -- and written as
+//!   `invalid` otherwise ([`label_value`]), so no id, token, URL or prose
+//!   can be written through one.
 //!
 //! Source paths are shortened to `<crate>/src/...`: a dependency's
 //! `file!()` is absolute and runs through the build machine's home
@@ -28,7 +35,7 @@
 //!
 //! Two files in the state directory, both mode 0600, append-only and each
 //! capped at [`DIAGNOSTICS_LOG_CAP_BYTES`]: `daemon-panics.log` for panics
-//! and `daemon-errors.log` for warn/error events, so a storm of repeated
+//! and `daemon-errors.log` for warn/error events and label lines, so a storm of repeated
 //! warnings cannot rotate a panic record away. At the cap a file is renamed
 //! to `<name>.1` (replacing the previous one) and a fresh file starts; if
 //! that rename fails, the file starts over in place rather than stop
@@ -42,7 +49,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::config::ConfigStore;
 
-/// File name of the warn/error event log inside the daemon's state directory.
+/// File name of the warn/error log inside the daemon's state directory:
+/// tracing events' metadata and label lines ([`record_labels`]).
 pub const DIAGNOSTICS_LOG_FILE: &str = "daemon-errors.log";
 
 /// File name of the panic log inside the daemon's state directory. Panics
@@ -303,6 +311,64 @@ fn current_global_log(pick: fn(&Sinks) -> &Arc<DiagnosticsLog>) -> Option<Arc<Di
         Ok(sink) => read(&sink),
         Err(std::sync::TryLockError::Poisoned(poisoned)) => read(&poisoned.into_inner()),
         Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
+/// The longest value a label line keeps.
+const LABEL_MAX: usize = 64;
+
+/// A label line's value as written: itself when it is label-shaped
+/// (lowercase ASCII letters, digits and `_`, at most [`LABEL_MAX`]), else
+/// `invalid`. Ids, tokens, URLs and prose are never label-shaped, so none
+/// can reach the file through a value.
+pub fn label_value(value: &str) -> &str {
+    let shaped = !value.is_empty()
+        && value.len() <= LABEL_MAX
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if shaped { value } else { "invalid" }
+}
+
+/// One label line: the level, an event name and `key=value` pairs. Names
+/// and keys are `&'static str`, and each value passes [`label_value`].
+/// Without the timestamp, which the writer adds.
+pub fn labels_line(
+    level: tracing::Level,
+    event: &'static str,
+    fields: &[(&'static str, &str)],
+) -> String {
+    let mut line = format!("{level} {event}");
+    for (key, value) in fields {
+        line.push(' ');
+        line.push_str(key);
+        line.push('=');
+        line.push_str(label_value(value));
+    }
+    line
+}
+
+/// Append [`labels_line`] to `log`, timestamped as every other line.
+pub fn record_labels_to(
+    log: &DiagnosticsLog,
+    level: tracing::Level,
+    event: &'static str,
+    fields: &[(&'static str, &str)],
+) {
+    let _ = log.append_line(&format!(
+        "{} {}",
+        timestamp(),
+        labels_line(level, event, fields)
+    ));
+}
+
+/// Append [`labels_line`] to the daemon's warn/error log
+/// ([`DIAGNOSTICS_LOG_FILE`]), for a failure whose cause the metadata-only
+/// tracing line cannot name (a tracing event's fields are never written).
+/// Best effort: nothing when no log is installed.
+pub fn record_labels(level: tracing::Level, event: &'static str, fields: &[(&'static str, &str)]) {
+    if let Some(log) = current_global_log(|sinks| &sinks.events) {
+        record_labels_to(&log, level, event, fields);
     }
 }
 

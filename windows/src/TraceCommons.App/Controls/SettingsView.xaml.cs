@@ -72,6 +72,98 @@ public sealed partial class SettingsView : UserControl
         OpenPrivateInferenceRequested?.Invoke(this, EventArgs.Empty);
     }
 
+    /// <summary>
+    /// Asks the window to start the first run once "Set up again" unenrolled
+    /// this device. Raised as an event for the reason
+    /// <see cref="OpenPrivateInferenceRequested"/> is: this control knows
+    /// nothing about the onboarding window.
+    /// </summary>
+    public event EventHandler? SetUpAgainRequested;
+
+    private bool _setUpAgainDialogOpen;
+
+    /// <summary>
+    /// "Set up again" asks first, in the Rust's words. Only the primary
+    /// button unenrolls; Cancel, Escape, Enter and a dialog that never
+    /// appeared change nothing.
+    /// </summary>
+    private async void OnSetUpAgain(object sender, RoutedEventArgs e)
+    {
+        // Not while another settings write runs: the confirmation would ask
+        // for something that could not start.
+        if (_setUpAgainDialogOpen || !Settings.HasAccountAttention || Settings.IsBusy)
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = Settings.AccountAttentionConfirmTitle,
+            Content = new TextBlock
+            {
+                Text = Settings.AccountAttentionConfirmBody,
+                TextWrapping = TextWrapping.Wrap,
+            },
+            PrimaryButtonText = Settings.AccountAttentionConfirmAction,
+            CloseButtonText = Settings.AccountAttentionConfirmCancel,
+
+            // Keeping the enrollment is what Enter and Escape both do: the
+            // primary button drops it.
+            DefaultButton = ContentDialogButton.Close,
+        };
+
+        _setUpAgainDialogOpen = true;
+        try
+        {
+            if (await DialogGuard.ShowOnceAsync(dialog) != ContentDialogResult.Primary)
+            {
+                return;
+            }
+        }
+        finally
+        {
+            _setUpAgainDialogOpen = false;
+        }
+
+        if (await Settings.SetUpAgainAsync())
+        {
+            SetUpAgainRequested?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    private bool _loginChangeDialogOpen;
+
+    /// <summary>
+    /// "Use a different account" and "Add a NEAR AI login" (F10): starts or
+    /// resumes the ceremony, then shows its three-step dialog. A refused
+    /// start shows the generic line under the entry point instead.
+    /// </summary>
+    private async void OnUseDifferentAccount(object sender, RoutedEventArgs e)
+    {
+        if (_loginChangeDialogOpen || Settings.LoginChange.Calling)
+        {
+            return;
+        }
+
+        _loginChangeDialogOpen = true;
+        try
+        {
+            await Settings.LoginChange.BeginAsync();
+            await AccountLoginChangeDialog.ShowAsync(XamlRoot, Settings.LoginChange, Settings.WalletAccountLabel);
+        }
+        finally
+        {
+            _loginChangeDialogOpen = false;
+        }
+    }
+
+    /// <summary>The mismatch block's Sign in: a NEAR AI sign-in with the account's own login.</summary>
+    private async void OnLoginMismatchSignIn(object sender, RoutedEventArgs e)
+    {
+        await Settings.MismatchSignInAsync();
+    }
+
     private async void OnDisableInferenceEvidence(object sender, RoutedEventArgs e)
     {
         await Settings.SetInferenceEvidenceAsync(false);

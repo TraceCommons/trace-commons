@@ -40,6 +40,10 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
     /// The ended session can be resumed: its conversation continues. False
     /// from an older daemon.
     public let canResume: Bool
+    /// The row can be dismissed even though it holds its account: it is
+    /// stuck unknown, its launcher gone before its first report (owner,
+    /// 2026-11-02). False from an older daemon.
+    public let canDismiss: Bool
     /// For a resumed row, when its conversation's root row started; nil for
     /// a fresh row, from an older daemon, or when unreadable.
     public let resumedFrom: Date?
@@ -49,7 +53,7 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
     enum CodingKeys: String, CodingKey {
         case id, tool, connection, cwd, state, purpose, model, collection
         case accountID = "account_id", accountLabel = "account_label", projectLabel = "project_label", exitCode = "exit_code"
-        case canFocus = "can_focus", canStop = "can_stop", canStartAgain = "can_start_again", canResume = "can_resume", resumedFrom = "resumed_from", startedAt = "started_at"
+        case canFocus = "can_focus", canStop = "can_stop", canStartAgain = "can_start_again", canResume = "can_resume", canDismiss = "can_dismiss", resumedFrom = "resumed_from", startedAt = "started_at"
     }
 
     /// Decodes its own timestamp, as `PastSession` does: chrono writes
@@ -72,6 +76,7 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
         canStop = try c.decodeIfPresent(Bool.self, forKey: .canStop) ?? false
         canStartAgain = try c.decodeIfPresent(Bool.self, forKey: .canStartAgain) ?? false
         canResume = try c.decodeIfPresent(Bool.self, forKey: .canResume) ?? false
+        canDismiss = try c.decodeIfPresent(Bool.self, forKey: .canDismiss) ?? false
         resumedFrom = try c.decodeIfPresent(String.self, forKey: .resumedFrom).flatMap(SourceCandidate.Wire.parseTimestamp)
         startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt).flatMap(SourceCandidate.Wire.parseTimestamp)
     }
@@ -87,6 +92,8 @@ public enum ManagedSessionAction: Equatable, Sendable {
     case resume
     /// Launch the ended session again, same tool, account and folder.
     case startAgain
+    /// Copy the command line that resumes the session from a terminal.
+    case copyResumeCommand
     /// Take the ended row off the list.
     case dismiss
 }
@@ -131,7 +138,13 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         public let resume: Bool?
         /// Terminal installer support; absent from older daemons.
         public let toolSetup: Bool?
+        /// The chosen terminal's name: where tool setup opens, and what the
+        /// install and update hints and the picker name.
         public let terminalDestination: String?
+        /// Where a session opens: herdr while sessions are grouped there,
+        /// else the chosen terminal. Absent from an older daemon, which
+        /// reads as `terminalDestination` ([`ManagedSurface.sessionDestination`]).
+        public let launchDestination: String?
         /// Whether the daemon holds a NEAR AI sign-in. A bool, never the
         /// credential; absent from an older daemon, which reads as no.
         public let nearAiSignin: Bool?
@@ -144,8 +157,15 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         /// The terminal apps installed on this Mac; absent from an older
         /// daemon.
         public let terminalChoices: [ManagedTerminalChoice]?
+        /// Whether herdr was found here, so "Group sessions in herdr" can
+        /// be offered; absent from an older daemon, which reads as no.
+        public let herdrAvailable: Bool?
+        /// Whether sessions open as tabs of herdr's "Near.ai" workspace;
+        /// absent from an older daemon.
+        public let herdrGrouping: Bool?
         enum CodingKeys: String, CodingKey {
             case managedLaunch = "managed_launch", terminalLaunch = "terminal_launch", terminalDestination = "terminal_destination"
+            case launchDestination = "launch_destination"
             case toolSetup = "tool_setup"
             case folderSettings = "folder_settings"
             case keepSavedModel = "keep_saved_model"
@@ -153,6 +173,7 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
             case nearAiSignin = "near_ai_signin"
             case terminalCurrent = "terminal_current", terminalChoices = "terminal_choices"
             case terminalChosen = "terminal_chosen"
+            case herdrAvailable = "herdr_available", herdrGrouping = "herdr_grouping"
             case resume
         }
     }
@@ -271,6 +292,14 @@ public enum ManagedSurface {
         // and points at Settings.
         let notFound = "managed-terminal-not-found"
         if code == notFound || message == notFound { return "terminal_not_found" }
+        // Something at herdr's socket path this account cannot trust, and a
+        // Rex app that did not open in time: lines of their own (owner,
+        // 2026-11-03). A Rex call that failed
+        // (`managed-terminal-call-failed`) is the general failure below.
+        let herdrUntrusted = "managed-herdr-socket-untrusted"
+        if code == herdrUntrusted || message == herdrUntrusted { return "herdr_socket_untrusted" }
+        let rexNotReady = "managed-rex-not-ready"
+        if code == rexNotReady || message == rexNotReady { return "rex_not_ready" }
         // A named model NEAR AI does not offer: the line that says so.
         let modelUnavailable = "managed-model-unavailable"
         if code == modelUnavailable || message == modelUnavailable { return "model_unavailable" }
@@ -281,7 +310,30 @@ public enum ManagedSurface {
         // A NEAR AI project that chooses a model: the line that says why.
         let projectChoosesModel = "managed-project-chooses-model"
         if code == projectChoosesModel || message == projectChoosesModel { return "project_chooses_model" }
+        // A NEAR AI project that sets the auto mode server variable: the
+        // line that says what to remove.
+        let projectSetsAutoModeServer = "managed-project-sets-auto-mode-server"
+        if code == projectSetsAutoModeServer || message == projectSetsAutoModeServer { return "project_sets_auto_mode_server" }
         return "action_failed"
+    }
+
+    /// Where a session opens, for `{destination}` and a launch's
+    /// `{terminal}`: herdr while sessions are grouped there (owner,
+    /// 2026-11-03), else the chosen terminal.
+    public static func sessionDestination(_ capabilities: ManagedSnapshot.Capabilities) -> String? {
+        capabilities.launchDestination ?? capabilities.terminalDestination
+    }
+
+    /// The chosen terminal, where tool setup opens: for the install and
+    /// update hints and the picker, never herdr.
+    public static func setupDestination(_ capabilities: ManagedSnapshot.Capabilities) -> String? {
+        capabilities.terminalDestination
+    }
+
+    /// The app a failed request's `{terminal}` names: the chosen terminal
+    /// for tool setup, where a session opens for anything else.
+    public static func failureDestination(method: String?, _ capabilities: ManagedSnapshot.Capabilities) -> String? {
+        method == "managed_tool_setup" ? setupDestination(capabilities) : sessionDestination(capabilities)
     }
 
     /// A line with `{terminal}` filled from the terminal the daemon
@@ -299,21 +351,37 @@ public extension ManagedSurface {
         !session.holdsAccount && session.canResume && terminalLaunch && resumeCapable
     }
 
-    /// The buttons drawn on the row: an ended row's Resume, or Start again
-    /// when it has no Resume, then Dismiss. Start again moves into the menu
-    /// when Resume is offered (`rowMenuItems`). A running row draws none.
+    /// The one visible action on the row (owner, 2026-11-01: fewer things on
+    /// a crowded row): an ended row's Resume, or Start again when it has no
+    /// Resume, or Dismiss when nothing else is offered. Everything else is in
+    /// the menu (`rowMenuItems`). A row that holds its account draws none,
+    /// except Dismiss on one the daemon says is stuck (`canDismiss`).
     static func rowButtons(_ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool = false) -> [ManagedSessionAction] {
-        guard !session.holdsAccount else { return [] }
-        if offersResume(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable) { return [.resume, .dismiss] }
-        return (session.canStartAgain && terminalLaunch ? [.startAgain] : []) + [.dismiss]
+        guard !session.holdsAccount else { return session.canDismiss ? [.dismiss] : [] }
+        if offersResume(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable) { return [.resume] }
+        return [session.canStartAgain && terminalLaunch ? .startAgain : .dismiss]
+    }
+
+    /// Whether an ended row offers "Copy resume command": the row can resume
+    /// and holds no account, and the app knows its config directory.
+    static func offersCopyResumeCommand(_ session: ManagedSession, configDirectoryKnown: Bool) -> Bool {
+        session.canResume && !session.holdsAccount && configDirectoryKnown
     }
 
     /// The items in the row's menu: Show and Stop for a running row; for an
-    /// ended row that offers Resume, Start again.
-    static func rowMenuItems(_ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool = false) -> [ManagedSessionAction] {
+    /// ended row, Start again (when Resume is the button), Copy resume
+    /// command, then Dismiss (unless Dismiss is the button).
+    static func rowMenuItems(
+        _ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool = false, configDirectoryKnown: Bool = false
+    ) -> [ManagedSessionAction] {
         if session.state == "running" { return menuActions(session) }
-        guard offersResume(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable) else { return [] }
-        return session.canStartAgain ? [.startAgain] : []
+        guard !session.holdsAccount else { return [] }
+        let buttons = rowButtons(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable)
+        var items: [ManagedSessionAction] = []
+        if buttons == [.resume], session.canStartAgain, terminalLaunch { items.append(.startAgain) }
+        if offersCopyResumeCommand(session, configDirectoryKnown: configDirectoryKnown) { items.append(.copyResumeCommand) }
+        if buttons != [.dismiss] { items.append(.dismiss) }
+        return items
     }
 
     /// The row's continuation marker, "Resumed · Continues 2:14 PM": the
@@ -385,6 +453,12 @@ public struct ManagedModel: Decodable, Equatable, Identifiable, Sendable {
     /// NEAR AI's privacy tier (`incognito`, `near_ai`, `external`) that the
     /// picker groups by; absent from an older daemon or an unlabelled entry.
     public let tier: String?
+
+    /// What a picker or a row calls the model: NEAR AI's display name, or
+    /// the id when it gives none. The id stays the value and the tooltip.
+    public var label: String {
+        name.map { $0.trimmingCharacters(in: .whitespaces) }.flatMap { $0.isEmpty ? nil : $0 } ?? id
+    }
 }
 
 /// `managed_model_catalogue`'s answer: NEAR AI's chat models in its order,
@@ -561,6 +635,9 @@ public struct ManagedModelOption: Equatable, Sendable {
     /// model wherever no heading above it says the tier; none when `tier`
     /// is none or the copy has no heading for it.
     public var tierHeading: String? = nil
+    /// The model's id when `title` is its display name, for a tooltip;
+    /// none when the title already is the id.
+    public var help: String? = nil
 
     /// What `tier` means, for a shell to draw: none for an unknown tier.
     public var privacy: ManagedModelPrivacy? { ManagedSurface.modelPrivacy(tier) }
@@ -575,6 +652,26 @@ public enum ManagedModelPrivacy: Equatable, Sendable {
     case externalPrivate
     /// A vendor's servers, through NEAR AI's gateway (`incognito`).
     case incognito
+}
+
+/// A session row's model name, from the daemon's catalogue cache.
+public extension ManagedSurface {
+    /// `managed_model_catalogue`'s params. A row passes `cacheOnly`, so the
+    /// daemon answers from its cache and never reads NEAR AI for a row.
+    static func catalogueParams(tool: String, cacheOnly: Bool) -> [String: Any] {
+        cacheOnly ? ["tool": tool, "cache_only": true] : ["tool": tool]
+    }
+
+    /// Display names by model id, for the models that have one.
+    static func modelNames(_ catalogue: ManagedModelCatalogue?) -> [String: String] {
+        var names: [String: String] = [:]
+        for model in catalogue?.models ?? [] where model.label != model.id { names[model.id] = model.label }
+        return names
+    }
+
+    /// The model as a row says it: its display name when the cache has one,
+    /// else the id the session recorded.
+    static func rowModel(_ id: String, names: [String: String]) -> String { names[id] ?? id }
 }
 
 /// Choosing the model of a NEAR AI session in the Launch sheet.
@@ -614,9 +711,10 @@ public extension ManagedSurface {
     /// NEAR AI does not list is not shown. With no catalogue, only the
     /// default.
     static func modelOptions(_ catalogue: ManagedModelCatalogue?, copy: (String) -> String) -> [ManagedModelOption] {
-        let first = catalogue?.default.map { copy("model_default").replacingOccurrences(of: "{model}", with: $0) }
-            ?? copy("model_default_unknown")
         let models = catalogue?.models ?? []
+        let first = catalogue?.default.map { id in
+            copy("model_default").replacingOccurrences(of: "{model}", with: models.first { $0.id == id }?.label ?? id)
+        } ?? copy("model_default_unknown")
         let order = catalogue?.tierOrder ?? []
         let favorites = Set(catalogue?.favorites ?? [])
         // A tier's place in the order and its heading; a heading the copy
@@ -639,13 +737,15 @@ public extension ManagedSurface {
             let index = place(model)
             let tier = index.map { order[$0] }
             let tierHeading = index.flatMap(heading)
+            let title = model.label
+            let help = title == model.id ? nil : model.id
             if favorites.contains(model.id) {
-                favored.append(ManagedModelOption(title: model.id, value: model.id, tier: tier, tierHeading: tierHeading))
+                favored.append(ManagedModelOption(title: title, value: model.id, tier: tier, tierHeading: tierHeading, help: help))
             } else if let index {
                 byTier[index].append(ManagedModelOption(
-                    title: model.id, value: model.id, section: tierHeading, tier: tier, tierHeading: tierHeading))
+                    title: title, value: model.id, section: tierHeading, tier: tier, tierHeading: tierHeading, help: help))
             } else {
-                rest.append(ManagedModelOption(title: model.id, value: model.id))
+                rest.append(ManagedModelOption(title: title, value: model.id, help: help))
             }
         }
         return [head] + favored + byTier.flatMap { $0 } + rest
@@ -831,11 +931,24 @@ public extension ManagedSnapshot {
     /// older daemon.
     var terminalChoices: [ManagedTerminalChoice] { capabilities.terminalChoices ?? [] }
 
-    /// Whether a launch dialog asks which terminal to open in: until the
-    /// person has chosen one, and only when more than one is installed.
-    /// An older daemon that does not say never asks.
+    /// Whether Settings offers "Group sessions in herdr": only where the
+    /// daemon found herdr, or while the switch is on, so it can be turned
+    /// off after herdr is removed.
+    var offersHerdrGrouping: Bool {
+        capabilities.herdrAvailable == true || capabilities.herdrGrouping == true
+    }
+
+    /// Whether a launch dialog asks which terminal to open in: on every
+    /// launch, whether or not one was chosen before, and only when more than
+    /// one is installed. An older daemon that does not say never asks.
     var asksForTerminal: Bool {
-        capabilities.terminalChosen == false && terminalChoices.count > 1
+        capabilities.terminalChosen != nil && terminalChoices.count > 1
+    }
+
+    /// The terminal a launch saves as the default before it starts: the
+    /// one picked in a dialog that asked, else none.
+    func terminalToSave(picked: String?) -> String? {
+        asksForTerminal ? picked : nil
     }
 
     /// The terminal a launch dialog that asks starts on: the current one

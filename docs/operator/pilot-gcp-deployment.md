@@ -70,9 +70,9 @@ manual prerequisites must be in place or the feature fail-closes:
   Then set `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL` (in `ingest.env.template`)
   to that role. If unset, every device-link / NEAR login redeem returns
   400 and no browser session resolves.
-- **No passkey configuration.** Passkeys were removed in V144; the
+- **No WebAuthn configuration.** WebAuthn sign-in was removed in V144; the
   `TRACE_COMMONS_WEBAUTHN_RP_*` settings are ignored and the template no
-  longer renders them. See [`deployment.md`](deployment.md#v144-passkey-removal).
+  longer renders them. See [`deployment.md`](deployment.md#v144-webauthn-sign-in-removal).
 
 Optional / posture:
 - **NEAR login** (`TRACE_COMMONS_NEAR_RPC_URL` / `_NEAR_NETWORK` /

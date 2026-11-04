@@ -68,6 +68,12 @@ public struct SourceSettingsCopy: Decodable, Sendable {
     public let opencodeVersionTitle, opencodeVersionDetail: String?
     public let heading, explanation, saveFailed, consentSaveFailed, unavailable: String
     public let selectedFolder, noCandidate, watchCandidate, chooseFolder, retry: String
+    /// `{tool}`, `{action}`: a row button's accessible name, so the same
+    /// button on every row is told apart. Nil from an older core.
+    public let toolActionAccessibilityName: String?
+    /// The line under a found folder. Nil from an older core, and then no
+    /// line is drawn.
+    public let evidence: Evidence?
     public let tools: [String: Tool]
     /// The row for a declared folder of exported traces; nil from a core
     /// that does not carry one, and then no row is drawn.
@@ -76,6 +82,18 @@ public struct SourceSettingsCopy: Decodable, Sendable {
         public let key, decline: String
         public let explanation, chooseFolder: String?
         public let unsetScansConventional: Bool
+    }
+    /// See `source_copy::SourceEvidenceCopy`.
+    public struct Evidence: Decodable, Sendable {
+        public let missing, empty, countOne, count, mostRecent, relocated: String
+        public let ageJustNow, ageMinutes, ageHour, ageHours, ageYesterday, ageDays: String
+    }
+    /// A row button's accessible name: its visible words and the row's
+    /// tool, or the visible words alone from an older core.
+    public func toolActionName(_ action: String, tool: String) -> String {
+        guard let template = toolActionAccessibilityName else { return action }
+        return template.replacingOccurrences(of: "{tool}", with: tool)
+            .replacingOccurrences(of: "{action}", with: action)
     }
     public struct Trajectory: Decodable, Sendable {
         public let title, explanation, watching, off, decline: String

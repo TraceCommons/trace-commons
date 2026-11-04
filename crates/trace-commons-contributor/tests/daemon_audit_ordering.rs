@@ -45,6 +45,7 @@ fn cfg(device_key_id: String) -> ContributorConfig {
         inference_receipt_endpoint: None,
         consent_scopes_chosen: Some(true),
         witness_origin: None,
+        account_identity: None,
         inference_receipt_check_attestation: false,
         schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
         issuer_url: "http://issuer.invalid".into(),

@@ -124,18 +124,61 @@ fn clear(root: &gtk::Box) {
     }
 }
 
+/// Where a session opens, for the launch lines and a launch's refusal:
+/// herdr while sessions are grouped there, else the chosen terminal; an
+/// older daemon sends only `terminal_destination` (owner, 2026-11-03). This
+/// shell runs no tool setup, so it never needs the chosen terminal alone.
+fn session_destination(snapshot: &Value) -> Option<&str> {
+    let capabilities = &snapshot["capabilities"];
+    capabilities["launch_destination"]
+        .as_str()
+        .or_else(|| capabilities["terminal_destination"].as_str())
+}
+
 /// The line for a refused terminal launch. A chosen terminal that was not
-/// found has its own, naming it and pointing at Settings; anything else is
-/// the generic launch line.
+/// found has its own, naming it and pointing at Settings, as does an
+/// untrusted herdr socket (owner, 2026-11-03); anything else is the generic
+/// launch line.
 fn launch_refusal(label: &str, destination: Option<&str>) -> String {
-    if label == "managed-terminal-not-found" {
-        let terminal = destination
-            .map(str::to_owned)
-            .unwrap_or_else(|| text("terminal"));
-        text("terminal_not_found").replace("{terminal}", &terminal)
-    } else {
-        text("launch_unknown")
+    match label {
+        "managed-terminal-not-found" => {
+            let terminal = destination
+                .map(str::to_owned)
+                .unwrap_or_else(|| text("terminal"));
+            text("terminal_not_found").replace("{terminal}", &terminal)
+        }
+        "managed-herdr-socket-untrusted" => text("herdr_socket_untrusted"),
+        _ => text("launch_unknown"),
     }
+}
+
+/// The "Open sessions in" row a launch dialog shows (#1891, as the macOS
+/// app's `asksForTerminal` and `proposedTerminal`): the installed terminals
+/// as (id, name) and the position it starts on. Shown on every launch,
+/// whether or not a terminal was chosen before, but only when the daemon
+/// reports `terminal_chosen` (an older daemon that omits it never asks) and
+/// more than one terminal is installed. It starts on the current terminal
+/// when that is installed, else the first.
+fn terminal_ask(snapshot: &Value) -> Option<(Vec<(String, String)>, u32)> {
+    let capabilities = &snapshot["capabilities"];
+    if !capabilities["terminal_chosen"].is_boolean() {
+        return None;
+    }
+    let (choices, _) = super::terminal_choice::model(snapshot)?;
+    if choices.len() < 2 {
+        return None;
+    }
+    let current = capabilities["terminal_current"].as_str();
+    let start = current
+        .and_then(|id| choices.iter().position(|(choice, _)| choice == id))
+        .unwrap_or(0) as u32;
+    Some((choices, start))
+}
+
+/// The terminal a launch saves as the default before it starts: the one
+/// picked in a dialog that asked, else none.
+fn terminal_to_save(ask: Option<&[(String, String)]>, picked: u32) -> Option<String> {
+    ask?.get(picked as usize).map(|(id, _)| id.clone())
 }
 
 fn action(app: &Rc<App>, method: &str, params: Value, terminal: bool) {
@@ -196,6 +239,7 @@ fn refusal_key(label: &str) -> &'static str {
         "managed-model-unavailable" => "model_unavailable",
         "managed-near-ai-balance-too-low" => "balance_too_low",
         "managed-project-chooses-model" => "project_chooses_model",
+        "managed-project-sets-auto-mode-server" => "project_sets_auto_mode_server",
         _ => "action_failed",
     }
 }
@@ -236,7 +280,7 @@ pub fn refresh(app: &Rc<App>) {
                 if let Some(install) = install_button(tool) { root.append(&install); }
             }
         }
-        let destination = snapshot["capabilities"]["terminal_destination"].as_str();
+        let destination = session_destination(&snapshot);
         *app.private_inference.managed_destination.borrow_mut() = destination.map(str::to_owned);
         style::append_meta(root, destination.map(|d| text("terminal_scope").replace("{destination}", d)).unwrap_or_else(|| text("terminal_unavailable")));
         for account in snapshot["accounts"].as_array().into_iter().flatten() {
@@ -467,6 +511,28 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
     content.append(&model);
     content.append(&collect);
     content.append(&scope);
+    // "Open sessions in", on every launch while more than one terminal is
+    // installed (#1891). The label is the core's.
+    let terminals = terminal_ask(snapshot);
+    let terminal_picker = terminals.as_ref().map(|(choices, start)| {
+        let label_text = text("terminal_choice");
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let label = gtk::Label::builder()
+            .label(&label_text)
+            .xalign(0.0)
+            .hexpand(true)
+            .wrap(true)
+            .build();
+        row.append(&label);
+        let names: Vec<&str> = choices.iter().map(|(_, name)| name.as_str()).collect();
+        let dropdown = gtk::DropDown::from_strings(&names);
+        dropdown.update_property(&[gtk::accessible::Property::Label(&label_text)]);
+        dropdown.set_selected(*start);
+        row.append(&dropdown);
+        content.append(&row);
+        dropdown
+    });
+    let terminal_choices: Option<Vec<(String, String)>> = terminals.map(|(choices, _)| choices);
     let w = window.clone();
     let f = folder.clone();
     content.append(&button("choose_folder", move || {
@@ -492,9 +558,7 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
         &content,
         text("launch_scope").replace(
             "{destination}",
-            snapshot["capabilities"]["terminal_destination"]
-                .as_str()
-                .unwrap_or_default(),
+            session_destination(snapshot).unwrap_or_default(),
         ),
     );
     let a = Rc::clone(app);
@@ -504,7 +568,24 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
         let Some(account) = accounts.get(picker.selected() as usize) else { return; };
         let opencode = account["tool"] == "opencode";
         if opencode && model.text().trim().is_empty() { a.toast(&text("model_required")); return; }
-        action(&a, "managed_launch_prepare", json!({"request_id":uuid::Uuid::new_v4(),"purpose":"coding","tool":account["tool"],"connection":account["connection"],"account_id":account["id"],"cwd":folder.text().as_str(),"expected_generation":generations[account["tool"].as_str().unwrap_or_default()],"save_default":false,"model":if opencode { Some(model.text().trim().to_owned()) } else { None },"collect_traces":opencode && collect.is_active()}), true);
+        let request = json!({"request_id":uuid::Uuid::new_v4(),"purpose":"coding","tool":account["tool"],"connection":account["connection"],"account_id":account["id"],"cwd":folder.text().as_str(),"expected_generation":generations[account["tool"].as_str().unwrap_or_default()],"save_default":false,"model":if opencode { Some(model.text().trim().to_owned()) } else { None },"collect_traces":opencode && collect.is_active()});
+        // The picked terminal is saved before the launch; a refused save
+        // stops the launch.
+        let picked = terminal_picker.as_ref().map_or(0, |d| d.selected());
+        match terminal_to_save(terminal_choices.as_deref(), picked) {
+            Some(terminal) => a.call(
+                "set_managed_terminal",
+                json!({ "terminal": terminal }),
+                move |app, result| {
+                    if result.is_err() {
+                        app.toast(&text("action_failed"));
+                        return;
+                    }
+                    action(app, "managed_launch_prepare", request, true);
+                },
+            ),
+            None => action(&a, "managed_launch_prepare", request, true),
+        }
         w.close();
     }));
     window.present();
@@ -512,7 +593,92 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
 
 #[cfg(test)]
 mod tests {
+    /// Owner, 2026-11-03: a session grouped in herdr opens there, so the
+    /// launch lines and a launch's refusal name herdr; an older daemon sends
+    /// only `terminal_destination`, which then names where sessions open.
+    #[test]
+    fn a_launch_names_where_the_session_opens() {
+        let grouped = serde_json::json!({"capabilities":{
+            "terminal_destination":"Konsole","launch_destination":"herdr"}});
+        assert_eq!(session_destination(&grouped), Some("herdr"));
+        let older = serde_json::json!({"capabilities":{"terminal_destination":"Konsole"}});
+        assert_eq!(session_destination(&older), Some("Konsole"));
+        assert_eq!(
+            session_destination(&serde_json::json!({"capabilities":{}})),
+            None
+        );
+    }
+
     use super::*;
+
+    fn two_terminals(chosen: serde_json::Value, current: serde_json::Value) -> Value {
+        json!({"capabilities":{
+            "terminal_chosen": chosen,
+            "terminal_current": current,
+            "terminal_choices":[
+                {"id":"gnome_terminal","name":"GNOME Terminal"},
+                {"id":"konsole","name":"Konsole"}
+            ]
+        }})
+    }
+
+    /// #1891: asked on every launch once the daemon reports `terminal_chosen`
+    /// (true or false) and more than one terminal is installed, starting on
+    /// the current one, else the first.
+    #[test]
+    fn a_launch_asks_for_the_terminal_on_every_launch_with_two_installed() {
+        for chosen in [json!(true), json!(false)] {
+            let (choices, start) = terminal_ask(&two_terminals(chosen, json!("konsole"))).unwrap();
+            assert_eq!(choices.len(), 2);
+            assert_eq!(start, 1);
+        }
+        assert_eq!(
+            terminal_ask(&two_terminals(json!(false), json!(null)))
+                .unwrap()
+                .1,
+            0
+        );
+        assert_eq!(
+            terminal_ask(&two_terminals(json!(true), json!("ghostty")))
+                .unwrap()
+                .1,
+            0
+        );
+    }
+
+    #[test]
+    fn a_launch_does_not_ask_with_one_terminal_or_an_older_daemon() {
+        let one = json!({"capabilities":{"terminal_chosen":false,
+            "terminal_choices":[{"id":"konsole","name":"Konsole"}]}});
+        assert_eq!(terminal_ask(&one), None);
+        // An older daemon sends no terminal_chosen.
+        let mut older = two_terminals(json!(true), json!("konsole"));
+        older["capabilities"]
+            .as_object_mut()
+            .unwrap()
+            .remove("terminal_chosen");
+        assert_eq!(terminal_ask(&older), None);
+        assert_eq!(
+            terminal_ask(&json!({"capabilities":{"terminal_chosen":true}})),
+            None
+        );
+        assert_eq!(terminal_ask(&json!({})), None);
+    }
+
+    #[test]
+    fn only_an_asked_launch_saves_the_picked_terminal() {
+        let (choices, _) = terminal_ask(&two_terminals(json!(true), json!("konsole"))).unwrap();
+        assert_eq!(
+            terminal_to_save(Some(&choices), 0).as_deref(),
+            Some("gnome_terminal")
+        );
+        assert_eq!(
+            terminal_to_save(Some(&choices), 1).as_deref(),
+            Some("konsole")
+        );
+        assert_eq!(terminal_to_save(Some(&choices), 5), None);
+        assert_eq!(terminal_to_save(None, 1), None);
+    }
 
     #[test]
     fn a_terminal_not_found_names_it_and_points_at_settings() {
@@ -527,6 +693,16 @@ mod tests {
         assert_eq!(
             launch_refusal("managed-launch-unknown", Some("Konsole")),
             super::text("launch_unknown")
+        );
+    }
+
+    /// Owner, 2026-11-03: something at herdr's socket path this account
+    /// cannot trust has its own line, as on macOS.
+    #[test]
+    fn an_untrusted_herdr_socket_has_its_own_line() {
+        assert_eq!(
+            launch_refusal("managed-herdr-socket-untrusted", Some("herdr")),
+            "herdr's connection file can't be trusted. Remove it or check its permissions."
         );
     }
 
@@ -548,11 +724,16 @@ mod tests {
             refusal_key("managed-project-chooses-model"),
             "project_chooses_model"
         );
+        assert_eq!(
+            refusal_key("managed-project-sets-auto-mode-server"),
+            "project_sets_auto_mode_server"
+        );
         for key in [
             "balance_too_low",
             "sign_in_needed",
             "model_unavailable",
             "project_chooses_model",
+            "project_sets_auto_mode_server",
         ] {
             assert!(!super::text(key).is_empty(), "{key}");
         }

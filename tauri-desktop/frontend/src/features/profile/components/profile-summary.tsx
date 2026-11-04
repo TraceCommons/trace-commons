@@ -64,7 +64,7 @@ export function ProfileSummary({
         <span>
           {coreStatusState === "error"
             ? "Rust core status unavailable"
-            : "Status read from existing contributor daemon"}
+            : "Status read from this app"}
         </span>
         <Button
           className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"

@@ -252,6 +252,14 @@ public sealed class WithdrawCopyTests
     }
 
     [Fact]
+    public void AFailedWithdrawalNeverNamesTheBackgroundProcess()
+    {
+        string sentence = WithdrawCopy.FailureSentence("daemon-not-started");
+        Assert.Contains("(not-started)", sentence, StringComparison.Ordinal);
+        Assert.DoesNotContain("daemon", sentence, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void TheFailureContributorsActuallyHitIsExplainedInFull()
     {
         // `daemon/withdraw.rs` answers `account-session-required` before any

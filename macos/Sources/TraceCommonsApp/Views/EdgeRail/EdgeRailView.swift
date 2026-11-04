@@ -320,28 +320,6 @@ private struct EdgeRailTracesGraph: View {
     }
 }
 
-/// The Private AI calls in a peek: the calls on the ledger's page, by day,
-/// over the same days the Traces graph shows.
-private struct EdgeRailCallsGraph: View {
-    let page: DaemonData.InferenceCallPage
-    @State private var hovered: String?
-
-    var body: some View {
-        let buckets = TracesGraphModel.buckets(
-            shared: page.calls.map(\.at), kept: [], offset: 0, now: .now, range: .days)
-        GlassBarGraph(
-            buckets.map { bucket in
-                let day = TracesGraphModel.day(bucket.start)
-                return GlassBarBucket(
-                    id: bucket.start.formatted(.iso8601), label: bucket.label,
-                    up: Double(bucket.shared), down: 0,
-                    description: "\(day), \(FlowMapScene.pair(MonitorWords.calls, bucket.shared))")
-            },
-            scaleFloor: 5, hovered: $hovered)
-            .frame(height: EdgeRailGraph.height)
-    }
-}
-
 enum EdgeRailGraph {
     /// A peek's graph height: the bars and their day labels, which draw
     /// below the bars, so the frame holds both.

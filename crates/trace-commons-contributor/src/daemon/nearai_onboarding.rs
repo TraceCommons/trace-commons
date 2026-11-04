@@ -105,6 +105,11 @@ struct Finished {
     /// the enrollment failed.
     #[serde(default)]
     referral: Option<trace_commons_protocol::referral::ReferralOutcome>,
+    /// What the account signs in with, as the commons answers it (F10
+    /// decision 4). Absent from a commons older than F10 and from a
+    /// device-code sign-in, where the namespace decides as before.
+    #[serde(default)]
+    identity: Option<trace_commons_protocol::account_login_change::IdentityKind>,
 }
 
 /// Shape check for a NEAR AI tenant id: the `nearai-` namespace plus 64
@@ -362,6 +367,8 @@ async fn enroll_prepared(
     prepared: Prepared,
     expected: super::commons_credentials::Snapshot,
 ) -> Result<Enrolled> {
+    // The sign-in whose session this spends, read with it by `prepare`.
+    let signed_in = prepared.login.clone();
     let identity = DeviceIdentity::load_or_generate_async(&shared.store).await?;
     let provisioned = provision(shared, api, prepared, &identity).await?;
     let referral = provisioned.finished.referral;
@@ -369,7 +376,7 @@ async fn enroll_prepared(
     let store = shared.store.clone();
     let ingest_url = ingest_url.to_string();
     tokio::task::spawn_blocking(move || {
-        persist(
+        let value = persist(
             &store,
             Commons {
                 ingest_url: &ingest_url,
@@ -381,7 +388,10 @@ async fn enroll_prepared(
             &identity,
             provisioned.finished,
             Some(&expected),
-        )
+        )?;
+        // The account accepted this NEAR AI login: it is the account's login.
+        Login::enrolled(signed_in.as_ref(), &store);
+        Ok(value)
     })
     .await
     .map_err(|_| anyhow!("commons_credential_worker_unavailable"))?
@@ -552,28 +562,7 @@ async fn ceremony(
     identity: &DeviceIdentity,
     referral_code: Option<&str>,
 ) -> Result<Finished> {
-    let verifier = random()?;
-    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(Sha256::digest(verifier.as_bytes()));
-
-    let started: Started = commons
-        .call_json(
-            reqwest::Method::POST,
-            PROVISION_START_PATH,
-            &[],
-            Some(&start_payload(&code_challenge, &identity.public_key_b64)),
-        )
-        .await
-        .map_err(|_| anyhow!("near_ai_enroll_start_failed"))?;
-
-    let device_signature = device_proof_for_ceremony(
-        identity,
-        &started.ceremony_id,
-        &started.nonce,
-        &code_challenge,
-        started.expires_at,
-        Utc::now().timestamp(),
-    )?;
+    let started = start_ceremony(commons, identity, CeremonyFor::Enrolment).await?;
 
     // Spend the refresh token as late as possible, for the reason above. The
     // rotation is persisted inside `exchange` before the JWT is used.
@@ -591,31 +580,246 @@ async fn ceremony(
             }
             _ => anyhow!("near_ai_enroll_token_unavailable"),
         })?;
+    finish_ceremony(
+        commons,
+        identity,
+        started,
+        &access_token.access_token,
+        referral_code,
+        CeremonyFor::Enrolment,
+    )
+    .await
+}
 
+/// A started ceremony and the proof its finish carries.
+struct StartedCeremony {
+    ceremony_id: String,
+    verifier: String,
+    device_signature: String,
+}
+
+/// Which caller's labels a ceremony's commons failures take.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CeremonyFor {
+    /// Enrolment and renewal: the labels their shells word.
+    Enrolment,
+    /// A fresh sign-in's check ([`check_fresh_login`]). No start answer
+    /// refuses a login, and at the finish only the commons's uniform `400`
+    /// deny and the revoked-key `409` do. Every other failure is a
+    /// [`FreshCheckFailure`]: no verdict, of a named kind.
+    FreshLogin,
+}
+
+/// Why a fresh sign-in's check got no verdict from the commons, carried in
+/// the error so the caller maps each kind exhaustively, never through a
+/// label string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FreshCheckFailure {
+    /// No answer came from the commons: no response (a connect or TLS
+    /// failure, a timeout), or a status that says it is busy or did not
+    /// get there -- a server error other than `511`, or `408`, `421`, `425`,
+    /// `429`, the set #1850 treats as transient. A TLS interception that
+    /// breaks the handshake lands here too: it is not told apart from a
+    /// failed connection.
+    Unanswered,
+    /// An answer came, but not one the commons sends: any other status (a
+    /// redirect, a proxy's or portal's `403` or `404`, the `511` a captive
+    /// portal is meant to send, a `4xx` that is not the commons's own deny),
+    /// or a body that does not parse or is too large. Often a misrouted or
+    /// intercepted address. Classified by the status when one arrived, so a
+    /// busy `503` with an oversized page is still [`Self::Unanswered`].
+    Unusable,
+    /// The commons answered the start with its own uniform `400` deny: it
+    /// was reached, and gave no verdict (not ready, a refused draw, a
+    /// database error). No start answer refuses a login.
+    NoVerdict,
+    /// Nothing was sent: a local failure building the request.
+    Local,
+}
+
+impl std::fmt::Display for FreshCheckFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unanswered => "near_ai_fresh_check_unanswered",
+            Self::Unusable => "near_ai_fresh_check_unusable",
+            Self::NoVerdict => "near_ai_fresh_check_no_verdict",
+            Self::Local => "near_ai_fresh_check_local",
+        })
+    }
+}
+
+impl std::error::Error for FreshCheckFailure {}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CeremonyStage {
+    Start,
+    Finish,
+}
+
+/// A status that says the commons is busy or the request did not get
+/// through: a server error other than `511`, and the retry-later client
+/// statuses #1850 treats as transient.
+fn commons_busy(status: reqwest::StatusCode) -> bool {
+    (status.is_server_error() && status != reqwest::StatusCode::NETWORK_AUTHENTICATION_REQUIRED)
+        || matches!(status.as_u16(), 408 | 421 | 425 | 429)
+}
+
+/// The kind of a fresh check's failure, from the operator client's error
+/// and the status that came with it (`None` when no response arrived).
+fn fresh_failure(
+    error: &trace_commons_operator_client::Error,
+    status: Option<reqwest::StatusCode>,
+    stage: CeremonyStage,
+) -> FreshCheckFailure {
+    use trace_commons_operator_client::Error;
+    match error {
+        Error::BearerMissing { .. }
+        | Error::InvalidEndpoint { .. }
+        | Error::HostNotAllowed { .. }
+        | Error::HeaderMalformed { .. } => FreshCheckFailure::Local,
+        Error::Transport { .. }
+        | Error::ResponseTooLarge { .. }
+        | Error::HttpFailure { .. }
+        | Error::ServerLabel { .. }
+        | Error::MalformedResponse { .. } => match status {
+            None => FreshCheckFailure::Unanswered,
+            Some(status) if commons_busy(status) => FreshCheckFailure::Unanswered,
+            Some(_) if stage == CeremonyStage::Start && is_uniform_finish_deny(error) => {
+                FreshCheckFailure::NoVerdict
+            }
+            Some(_) => FreshCheckFailure::Unusable,
+        },
+    }
+}
+
+/// A call's typed result, with the status the commons answered with.
+async fn call_with_status<Resp: serde::de::DeserializeOwned>(
+    commons: &trace_commons_operator_client::Client,
+    path: &str,
+    body: &serde_json::Value,
+) -> (
+    std::result::Result<Resp, trace_commons_operator_client::Error>,
+    Option<reqwest::StatusCode>,
+) {
+    let call = commons
+        .call_json_with_response_header::<serde_json::Value, Resp>(
+            reqwest::Method::POST,
+            path,
+            &[],
+            Some(body),
+            "retry-after",
+        )
+        .await;
+    (call.result, call.status)
+}
+
+/// The ceremony's start and the device proof over its answer.
+async fn start_ceremony(
+    commons: &trace_commons_operator_client::Client,
+    identity: &DeviceIdentity,
+    caller: CeremonyFor,
+) -> Result<StartedCeremony> {
+    let verifier = random()?;
+    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(verifier.as_bytes()));
+
+    let (started, status) = call_with_status::<Started>(
+        commons,
+        PROVISION_START_PATH,
+        &start_payload(&code_challenge, &identity.public_key_b64),
+    )
+    .await;
+    let started = started.map_err(|error| match caller {
+        CeremonyFor::Enrolment => anyhow!("near_ai_enroll_start_failed"),
+        CeremonyFor::FreshLogin => {
+            anyhow::Error::new(fresh_failure(&error, status, CeremonyStage::Start))
+        }
+    })?;
+
+    let device_signature = device_proof_for_ceremony(
+        identity,
+        &started.ceremony_id,
+        &started.nonce,
+        &code_challenge,
+        started.expires_at,
+        Utc::now().timestamp(),
+    )?;
+    Ok(StartedCeremony {
+        ceremony_id: started.ceremony_id,
+        verifier,
+        device_signature,
+    })
+}
+
+/// The ceremony for a NEAR AI access token the caller already holds -- a
+/// sign-in's fresh one, not yet stored -- so nothing stored is exchanged or
+/// rotated. Not validated: the caller checks the answer.
+async fn ceremony_with_access_token(
+    commons: &trace_commons_operator_client::Client,
+    identity: &DeviceIdentity,
+    access_token: &str,
+) -> Result<Finished> {
+    let started = start_ceremony(commons, identity, CeremonyFor::FreshLogin).await?;
+    finish_ceremony(
+        commons,
+        identity,
+        started,
+        access_token,
+        None,
+        CeremonyFor::FreshLogin,
+    )
+    .await
+}
+
+async fn finish_ceremony(
+    commons: &trace_commons_operator_client::Client,
+    identity: &DeviceIdentity,
+    started: StartedCeremony,
+    access_token: &str,
+    referral_code: Option<&str>,
+    caller: CeremonyFor,
+) -> Result<Finished> {
+    // The commons refuses a finish in three ways: its uniform `400` deny,
+    // the revoked-key `409`, and (F10) the `409` for a login a change of
+    // login retired. For a fresh sign-in's check, only those are a refusal;
+    // any other answer says nothing about the login. A retired login is
+    // another account's to this device (spec 2.5): the mismatch block.
+    let refusal = |(error, status): (
+        trace_commons_operator_client::Error,
+        Option<reqwest::StatusCode>,
+    )| {
+        let refused = is_uniform_finish_deny(&error)
+            || error.server_label() == Some(DEVICE_KEY_REVOKED_WIRE)
+            || error.server_label()
+                == Some(trace_commons_protocol::account_login_change::NEAR_AI_LOGIN_RETIRED);
+        if caller == CeremonyFor::FreshLogin && !refused {
+            anyhow::Error::new(fresh_failure(&error, status, CeremonyStage::Finish))
+        } else {
+            finish_refusal(
+                &error,
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
+        }
+    };
     // The JWT rides in the body, never a header: we are not
     // authenticating to the commons with it, we are handing it over to
     // be introspected.
     let body = serde_json::json!({
         "ceremony_id": started.ceremony_id,
-        "code_verifier": verifier,
+        "code_verifier": started.verifier,
         "device_public_key": identity.public_key_b64,
-        "device_signature": device_signature,
-        "access_token": access_token.access_token,
+        "device_signature": started.device_signature,
+        "access_token": access_token,
     });
     let finish = |body: serde_json::Value| async move {
-        commons
-            .call_json::<serde_json::Value, Finished>(
-                reqwest::Method::POST,
-                PROVISION_FINISH_PATH,
-                &[],
-                Some(&body),
-            )
-            .await
+        match call_with_status::<Finished>(commons, PROVISION_FINISH_PATH, &body).await {
+            (Ok(finished), _) => Ok(finished),
+            (Err(error), status) => Err((error, status)),
+        }
     };
     let Some(code) = referral_code else {
-        return finish(body)
-            .await
-            .map_err(|error| finish_refusal(&error, "near_ai_enroll_verification_failed"));
+        return finish(body).await.map_err(refusal);
     };
     // Only when there is one: a finish without a code is the body every
     // shipped commons parses.
@@ -629,15 +833,15 @@ async fn ceremony(
         // it, on the same ceremony and token; the answer then carries no
         // `referral` and the code reads as not applied. A real refusal took
         // the ceremony, so the retry is refused the same way.
-        Err(error) if is_uniform_finish_deny(&error) => finish(body).await,
+        Err((error, _)) if is_uniform_finish_deny(&error) => finish(body).await,
         other => other,
     }
-    .map_err(|error| finish_refusal(&error, "near_ai_enroll_verification_failed"))
+    .map_err(refusal)
 }
 
 /// The label of the 400 an ingest answers for any refused native finish,
 /// one whose body it could not parse included (`native_generic_deny`).
-const UNIFORM_FINISH_DENY: &str = "native sign-in could not be completed";
+pub(super) const UNIFORM_FINISH_DENY: &str = "native sign-in could not be completed";
 
 /// That uniform deny, and nothing else: not a revoked key, not a 5xx, not
 /// a transport failure.
@@ -658,14 +862,56 @@ pub(super) const DEVICE_KEY_REVOKED_WIRE: &str = "device_key_revoked";
 /// key, then signing in, which makes a new one.
 pub const ENROLL_DEVICE_KEY_REVOKED: &str = "near_ai_enroll_device_key_revoked";
 
-/// A finish refusal as this module's label: the revoked-key refusal by
-/// name, anything else as `fallback`. Never the remote body.
+/// Whether a finish was not answered: no response, a status
+/// [`commons_busy`] counts as busy (the commons' own `503
+/// near_ai_sign_in_unavailable` and `429 near_ai_sign_in_rate_limited`
+/// among them), a body past the client's cap, or a success whose body was
+/// cut short. The commons' refusals are small JSON bodies, so an oversized
+/// one is an error page in front of it (a proxy's `502`/`503`/`504`), which
+/// carries no status this error keeps.
+///
+/// A `MalformedResponse` follows only a `2xx`. When the body ended early
+/// (empty, or truncated: `is_eof`), the answer was lost in transit and
+/// starting again works. When it is complete JSON of another shape, that is a
+/// commons on another version: deterministic, so "try later" would loop,
+/// and each pass would write a session this client never holds. That case
+/// keeps the caller's fallback label.
+/// Whether the commons did not answer `error` (no response, a busy status):
+/// a try-later, never a refusal. Shared with the change of login (F10).
+pub(super) fn commons_unanswered(error: &trace_commons_operator_client::Error) -> bool {
+    finish_unanswered(error)
+}
+
+fn finish_unanswered(error: &trace_commons_operator_client::Error) -> bool {
+    use trace_commons_operator_client::Error;
+    match error {
+        Error::Transport { .. } | Error::ResponseTooLarge { .. } => true,
+        Error::MalformedResponse { source, .. } => source.is_eof(),
+        Error::HttpFailure { status, .. } | Error::ServerLabel { status, .. } => {
+            commons_busy(*status)
+        }
+        _ => false,
+    }
+}
+
+/// A finish failure as this module's label: the revoked-key refusal by
+/// name; a commons that did not answer (no response, a server error such as
+/// its `503 near_ai_sign_in_unavailable`, or its `429
+/// near_ai_sign_in_rate_limited`) as `unavailable`, the caller's existing
+/// try-later label; anything else as `fallback`. Never the remote body.
+///
+/// The try-later label leads to a new start, never a resend of this finish:
+/// the commons' wire contract is that after a `503` or `429` at finish the
+/// ceremony may or may not still exist, so a client always starts again.
 pub(super) fn finish_refusal(
     error: &trace_commons_operator_client::Error,
     fallback: &'static str,
+    unavailable: &'static str,
 ) -> anyhow::Error {
     if error.server_label() == Some(DEVICE_KEY_REVOKED_WIRE) {
         anyhow!(ENROLL_DEVICE_KEY_REVOKED)
+    } else if finish_unanswered(error) {
+        anyhow!(unavailable)
     } else {
         anyhow!(fallback)
     }
@@ -681,6 +927,27 @@ pub(super) struct Login {
 }
 
 impl Login {
+    /// The account accepted this sign-in's NEAR AI login: remember which
+    /// login it was, when the record names this sign-in. File I/O: call it
+    /// off the async runtime.
+    fn accepted(login: Option<&Self>, store: &ConfigStore) {
+        use super::nearai_credential::login_record;
+        login_record::accepted_by_commons(store, Self::provider(login, store));
+    }
+
+    /// [`Login::accepted`] for a first enrollment: this is a new account, so
+    /// its login replaces whatever the record held, and an unknown one
+    /// clears it rather than leave an earlier account's login in place.
+    fn enrolled(login: Option<&Self>, store: &ConfigStore) {
+        use super::nearai_credential::login_record;
+        login_record::enrolled_with(store, Self::provider(login, store));
+    }
+
+    fn provider(login: Option<&Self>, store: &ConfigStore) -> Option<&'static str> {
+        use super::nearai_credential::login_record;
+        login.and_then(|login| login_record::stored_login(store, &login.key_id))
+    }
+
     fn of(settings: &super::settings::DaemonSettings) -> Option<Self> {
         settings.near_ai_inference.as_ref().map(|key| Self {
             key_id: key.key_id.clone(),
@@ -768,7 +1035,15 @@ fn validate_finished(result: &Finished, identity: &DeviceIdentity) -> Result<()>
         || !result.anchor_hash[7..]
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        || !is_near_ai_tenant_id(&result.tenant_id)
+        // A `nearai-` tenant, or a `near-` one the commons says signs in
+        // with a NEAR AI login: a wallet-origin account that changed its
+        // login keeps its tenant (F10 decision 4). Which tenant is right is
+        // the caller's check (`check_renewal` pins the enrolled one); this
+        // is shape only.
+        || !(is_near_ai_tenant_id(&result.tenant_id)
+            || (crate::config::is_near_tenant_id(&result.tenant_id)
+                && result.identity
+                    == Some(trace_commons_protocol::account_login_change::IdentityKind::NearAiLogin)))
         || result.account_id.is_empty()
         || result.account_id.len() > 256
     {
@@ -829,7 +1104,9 @@ pub(super) async fn renew_account_session(
     // NEAR AI login to its account, and an answer for another tenant is
     // refused below.
     let account_id = previous_account_id(previous.as_ref())?;
-    if !is_near_ai_tenant_id(&cfg.tenant_id) || identity.device_key_id != cfg.device_key_id {
+    // The recorded identity kind, not the tenant prefix (F10 decision 4): a
+    // `near-` account that changed to a NEAR AI login renews by it.
+    if !cfg.signs_in_with_near_ai() || identity.device_key_id != cfg.device_key_id {
         bail!("near_ai_enroll_invalid")
     }
     let (session, login) = {
@@ -858,7 +1135,13 @@ pub(super) async fn renew_account_session(
     store_renewed_session(
         shared, cfg, identity, previous, account_id, finished, expected,
     )
-    .await
+    .await?;
+    // The account accepted the login this spent: remember it, checked
+    // against that sign-in (`login`, read with the session), off this
+    // runtime.
+    let store = shared.store.clone();
+    let _ = tokio::task::spawn_blocking(move || Login::accepted(login.as_ref(), &store)).await;
+    Ok(())
 }
 
 /// The stored record's account id, which a renewal's answer must name.
@@ -889,6 +1172,32 @@ async fn store_renewed_session(
     finished: Finished,
     expected: super::commons_credentials::Snapshot,
 ) -> Result<()> {
+    let checked = check_renewal(cfg, identity, previous, account_id, finished, expected)?;
+    write_renewed_session(&shared.store, checked).await
+}
+
+/// A renewal's answer that passed [`check_renewal`], not yet stored.
+pub(super) struct CheckedRenewal {
+    payload: serde_json::Value,
+    expected: super::commons_credentials::Snapshot,
+    /// The enrolled tenant, and what the commons said the account signs in
+    /// with, recorded once the session is stored (F10 section 2.5).
+    tenant_id: String,
+    identity: Option<trace_commons_protocol::account_login_change::IdentityKind>,
+}
+
+/// The checks [`store_renewed_session`] makes before it writes: the answer
+/// is well formed, for this device and the enrolled tenant, and names the
+/// stored record's account. A different account is
+/// `account-enrollment-mismatch`.
+fn check_renewal(
+    cfg: &ContributorConfig,
+    identity: &DeviceIdentity,
+    previous: Option<serde_json::Value>,
+    account_id: Option<String>,
+    finished: Finished,
+    expected: super::commons_credentials::Snapshot,
+) -> Result<CheckedRenewal> {
     validate_finished(&finished, identity)?;
     if finished.tenant_id != cfg.tenant_id
         || account_id
@@ -907,13 +1216,79 @@ async fn store_renewed_session(
     payload["expires_at"] =
         serde_json::to_value(Utc::now() + chrono::Duration::seconds(finished.expires_in_secs))?;
     payload["account_id"] = serde_json::Value::String(account_id);
-    let body = serde_json::to_vec(&payload)?;
-    let store = shared.store.clone();
+    Ok(CheckedRenewal {
+        payload,
+        expected,
+        tenant_id: cfg.tenant_id.clone(),
+        identity: finished.identity,
+    })
+}
+
+/// Store a checked renewal in place of the snapshot it was checked against.
+/// A record that changed since (a sign-out, another renewal) wins.
+pub(super) async fn write_renewed_session(
+    store: &crate::config::ConfigStore,
+    checked: CheckedRenewal,
+) -> Result<()> {
+    let body = serde_json::to_vec(&checked.payload)?;
+    let store = store.clone();
+    let expected = checked.expected;
+    let (tenant_id, identity) = (checked.tenant_id, checked.identity);
     tokio::task::spawn_blocking(move || {
-        super::commons_credentials::replace(&store, &expected, &body, None)
+        super::commons_credentials::replace(&store, &expected, &body, None)?;
+        // The session is stored: the account signs in the way the commons
+        // just answered. Best effort, and only for the tenant checked.
+        if let Some(identity) = identity {
+            let _ = record_account_identity(&store, &tenant_id, identity);
+        }
+        Ok(())
     })
     .await
     .map_err(|_| anyhow!("commons_credential_worker_unavailable"))?
+}
+
+/// Record what the enrolled account signs in with (F10 decision 4), when the
+/// config is still `tenant_id`'s and says otherwise. `true` when it wrote.
+/// The commons' answer at a sign-in or a change is the authority; nothing
+/// else writes it after enrollment. Blocking: file I/O.
+pub(crate) fn record_account_identity(
+    store: &ConfigStore,
+    tenant_id: &str,
+    identity: trace_commons_protocol::account_login_change::IdentityKind,
+) -> Result<bool> {
+    let Some(mut cfg) = store.load_config()? else {
+        return Ok(false);
+    };
+    // Written only when it changes how the account signs in: a `nearai-`
+    // account answered `near_ai_login` keeps its config byte for byte.
+    if cfg.tenant_id != tenant_id || cfg.signs_in_with() == Some(identity) {
+        return Ok(false);
+    }
+    cfg.account_identity = Some(identity);
+    store.save_config(&cfg)?;
+    Ok(true)
+}
+
+/// Run the NEAR AI ceremony with a sign-in's fresh access token, before
+/// that login is stored, and check the answer as a renewal is checked
+/// (owner, 2026-11-02: the account tied to Trace Commons is kept). A login
+/// the commons refuses, or one it resolves to another account, is an
+/// error; nothing is written either way.
+pub(super) async fn check_fresh_login(
+    commons: &trace_commons_operator_client::Client,
+    cfg: &ContributorConfig,
+    identity: &DeviceIdentity,
+    previous: Option<serde_json::Value>,
+    expected: super::commons_credentials::Snapshot,
+    access_token: &str,
+) -> Result<CheckedRenewal> {
+    // The tenant is the caller's check (`account_session_renewal::check_fresh_login`).
+    let account_id = previous_account_id(previous.as_ref())?;
+    if identity.device_key_id != cfg.device_key_id {
+        bail!("near_ai_enroll_invalid")
+    }
+    let finished = ceremony_with_access_token(commons, identity, access_token).await?;
+    check_renewal(cfg, identity, previous, account_id, finished, expected)
 }
 
 impl From<trace_commons_protocol::account_device_code::DeviceSignInResponse> for Finished {
@@ -927,6 +1302,7 @@ impl From<trace_commons_protocol::account_device_code::DeviceSignInResponse> for
             device_key_id: response.device_key_id,
             anchor_hash: response.anchor_hash,
             referral: None,
+            identity: None,
         }
     }
 }
@@ -1012,7 +1388,9 @@ pub(super) async fn renew_account_session_by_device_key(
         device_session_renew_bytes,
     };
     let account_id = previous_account_id(previous.as_ref())?;
-    if !is_near_ai_tenant_id(&cfg.tenant_id) || identity.device_key_id != cfg.device_key_id {
+    // Any account namespace: a device that joined by code renews by its own
+    // key whatever the account signs in with (F10 decision 4).
+    if cfg.signs_in_with().is_none() || identity.device_key_id != cfg.device_key_id {
         bail!("near_ai_enroll_invalid")
     }
     let device: [u8; 32] = base64::engine::general_purpose::STANDARD
@@ -1117,7 +1495,12 @@ fn persist(
         inference_receipt_endpoint: commons.receipt_endpoint,
         consent_scopes_chosen: Some(false),
         inference_receipt_check_attestation: true,
+        account_identity: result.identity,
     };
+    // A commons older than F10, or a device-code sign-in, answers no kind:
+    // the namespace decides, recorded once.
+    let mut config = config;
+    config.record_identity_from_namespace();
 
     let session = crate::account_auth::AccountSession {
         access_token: result.access_token,
@@ -1148,6 +1531,10 @@ fn persist(
         &serde_json::to_vec(&session)?,
         Some(&config),
     )?;
+    // A new account: no earlier account's login stands as this one's. A NEAR
+    // AI enrollment then records its own (`Login::enrolled`); a device-code
+    // join has none.
+    super::nearai_credential::login_record::enrolled_with(&store, None);
 
     // Deliberately not the account id or anything token-shaped beyond what a
     // shell needs to render "you are enrolled".
@@ -1387,6 +1774,7 @@ mod tests {
             device_key_id: String::new(),
             anchor_hash: format!("sha256:{}", "ab".repeat(32)),
             referral: None,
+            identity: None,
         }
     }
 
@@ -1504,6 +1892,28 @@ mod tests {
         assert!(persist(&shared.store, commons(), &identity, good(), None).is_ok());
     }
 
+    /// F10 decision 4: a `near-` tenant is a NEAR AI sign-in's answer only
+    /// when the commons says the account signs in with a NEAR AI login (a
+    /// wallet-origin account that changed its login), and the kind is
+    /// recorded with the enrollment.
+    #[test]
+    fn a_near_tenant_answer_is_accepted_only_when_it_signs_in_with_a_near_ai_login() {
+        use trace_commons_protocol::account_login_change::IdentityKind;
+        let near = format!("near-{}", "ab".repeat(32));
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let identity = DeviceIdentity::load_or_generate(&store).unwrap();
+        let with = |kind: Option<IdentityKind>| {
+            let mut result = finished();
+            result.device_key_id = identity.device_key_id.clone();
+            result.tenant_id = near.clone();
+            result.identity = kind;
+            result
+        };
+        assert!(validate_finished(&with(None), &identity).is_err());
+        assert!(validate_finished(&with(Some(IdentityKind::Wallet)), &identity).is_err());
+        assert!(validate_finished(&with(Some(IdentityKind::NearAiLogin)), &identity).is_ok());
+    }
+
     #[test]
     fn tenant_ids_are_accepted_on_shape_and_never_derived() {
         assert!(is_near_ai_tenant_id(&format!("nearai-{}", "3c".repeat(32))));
@@ -1562,7 +1972,7 @@ mod tests {
             body: format!("{{\"error\":\"{label}\"}}"),
             retry_after: None,
         };
-        let revoked = finish_refusal(&refused(DEVICE_KEY_REVOKED_WIRE), "fallback");
+        let revoked = finish_refusal(&refused(DEVICE_KEY_REVOKED_WIRE), "fallback", "unavailable");
         assert_eq!(revoked.to_string(), ENROLL_DEVICE_KEY_REVOKED);
         assert_eq!(label(&revoked), ENROLL_DEVICE_KEY_REVOKED);
         assert_eq!(
@@ -1570,8 +1980,112 @@ mod tests {
             super::super::account_session_renewal::FAILURE_DEVICE_KEY_REVOKED
         );
         assert_eq!(
-            finish_refusal(&refused("anything_else"), "fallback").to_string(),
+            finish_refusal(&refused("anything_else"), "fallback", "unavailable").to_string(),
             "fallback"
+        );
+    }
+
+    /// A finish the commons did not answer -- its `503
+    /// near_ai_sign_in_unavailable`, its `429 near_ai_sign_in_rate_limited`,
+    /// any other server error, or no response -- is the caller's try-later
+    /// label, never the verification failure. Its uniform `400` deny still is.
+    #[test]
+    fn a_busy_finish_is_unavailable_not_a_verification_failure() {
+        let answer = |status: reqwest::StatusCode, label: &str| {
+            trace_commons_operator_client::Error::ServerLabel {
+                url: "https://commons.example/v1/account/near-ai/provision/finish".into(),
+                status,
+                label: label.into(),
+                body: format!("{{\"error\":\"{label}\"}}"),
+                retry_after: None,
+            }
+        };
+        for (status, label) in [
+            (
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "near_ai_sign_in_unavailable",
+            ),
+            (
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                "near_ai_sign_in_rate_limited",
+            ),
+            (reqwest::StatusCode::BAD_GATEWAY, "anything"),
+        ] {
+            for (fallback, unavailable) in [
+                (
+                    "near_ai_enroll_verification_failed",
+                    "near_ai_enroll_unavailable",
+                ),
+                ("near_signup_verification_failed", "near_signup_unavailable"),
+            ] {
+                assert_eq!(
+                    finish_refusal(&answer(status, label), fallback, unavailable).to_string(),
+                    unavailable,
+                    "{status} {label}"
+                );
+            }
+        }
+        // A success whose body was cut short (here, empty): the answer was
+        // lost in transit.
+        assert_eq!(
+            finish_refusal(
+                &trace_commons_operator_client::Error::MalformedResponse {
+                    url: "https://commons.example/v1/account/near-ai/provision/finish".into(),
+                    body: String::new(),
+                    source: serde_json::from_str::<serde_json::Value>("")
+                        .expect_err("empty input is not JSON"),
+                },
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
+            .to_string(),
+            "near_ai_enroll_unavailable"
+        );
+        // A complete success body of another shape: a commons on another
+        // version, deterministic, so not "try later".
+        assert_eq!(
+            finish_refusal(
+                &trace_commons_operator_client::Error::MalformedResponse {
+                    url: "https://commons.example/v1/account/near-ai/provision/finish".into(),
+                    body: "{\"renamed\":true}".into(),
+                    source: serde_json::from_str::<Finished>("{\"renamed\":true}")
+                        .err()
+                        .expect("a body of another shape does not parse"),
+                },
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
+            .to_string(),
+            "near_ai_enroll_verification_failed"
+        );
+        // An error page too large to be the commons' own refusal.
+        assert_eq!(
+            finish_refusal(
+                &trace_commons_operator_client::Error::ResponseTooLarge { limit: 256 * 1024 },
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
+            .to_string(),
+            "near_ai_enroll_unavailable"
+        );
+        assert_eq!(
+            finish_refusal(
+                &answer(
+                    reqwest::StatusCode::BAD_REQUEST,
+                    "native sign-in could not be completed"
+                ),
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
+            .to_string(),
+            "near_ai_enroll_verification_failed",
+            "the uniform deny is still the refusal"
+        );
+        // The enroll label passes through to the shell as the existing
+        // try-later line, not a new one.
+        assert_eq!(
+            label(&anyhow!("near_ai_enroll_unavailable")),
+            "near_ai_enroll_unavailable"
         );
     }
 }
@@ -1906,7 +2420,47 @@ mod route_tests {
         commons: Commons,
         referral: SignupReferral,
     ) -> (Stub, DaemonShared, Result<Value>, tempfile::TempDir) {
+        enroll_against_signed_in_with(commons, referral, None).await
+    }
+
+    /// [`enroll_against_with`], with the NEAR AI session recorded as coming
+    /// from `login`.
+    async fn enroll_against_signed_in_with(
+        commons: Commons,
+        referral: SignupReferral,
+        login: Option<(&str, &str)>,
+    ) -> (Stub, DaemonShared, Result<Value>, tempfile::TempDir) {
+        enroll_against_after(commons, referral, login, |_| {}).await
+    }
+
+    /// [`enroll_against_signed_in_with`], with `before` run on the store
+    /// first.
+    async fn enroll_against_after(
+        commons: Commons,
+        referral: SignupReferral,
+        login: Option<(&str, &str)>,
+        before: impl FnOnce(&DaemonShared),
+    ) -> (Stub, DaemonShared, Result<Value>, tempfile::TempDir) {
         let (dir, shared) = shared_with_session();
+        before(&shared);
+        // The retained session's sign-in minted "key-enroll"; the record
+        // names the login of the sign-in whose key it was given.
+        if let Some((login, key_id)) = login {
+            shared.settings.lock().unwrap().near_ai_inference =
+                Some(crate::daemon::settings::NearAiInferenceCredential {
+                    key: "sk-synthetic-enroll".into(),
+                    key_id: "key-enroll".into(),
+                    key_prefix: "sk-syn".into(),
+                    organization_id: "org-enroll".into(),
+                    workspace_id: "ws-enroll".into(),
+                    minted_at: Utc::now(),
+                });
+            crate::daemon::nearai_credential::login_record::record_stored_login(
+                &shared.store,
+                login,
+                key_id,
+            );
+        }
         let identity = DeviceIdentity::load_or_generate(&shared.store).unwrap();
         let stub = stub(commons, identity).await;
         let expected = super::super::commons_credentials::snapshot(
@@ -1972,6 +2526,63 @@ mod route_tests {
                 crate::config::WitnessOrigin::PublishedAtJoin
             ))
         );
+    }
+
+    /// An enrollment the Commons accepted remembers the login it came from
+    /// as the account's; one it refused remembers nothing.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[tokio::test]
+    async fn an_accepted_enrollment_remembers_the_accounts_login_and_a_refused_one_does_not() {
+        use crate::daemon::nearai_credential::login_record;
+        let (_stub, shared, result, _dir) = enroll_against_signed_in_with(
+            Commons::Production,
+            SignupReferral::None,
+            Some(("github", "key-enroll")),
+        )
+        .await;
+        result.expect("enrolled");
+        assert_eq!(login_record::commons_login(&shared.store), Some("github"));
+
+        let (_stub, shared, result, _dir) = enroll_against_signed_in_with(
+            Commons::ProductionFinishDenied,
+            SignupReferral::None,
+            Some(("github", "key-enroll")),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(login_record::commons_login(&shared.store), None);
+
+        // A tag written for another sign-in is not this session's login.
+        let (_stub, shared, result, _dir) = enroll_against_signed_in_with(
+            Commons::Production,
+            SignupReferral::None,
+            Some(("github", "key-of-another-sign-in")),
+        )
+        .await;
+        result.expect("enrolled");
+        assert_eq!(login_record::commons_login(&shared.store), None);
+
+        // A session whose login is not known leaves the record as it was.
+        let (_stub, shared, result, _dir) = enroll_against(Commons::Production).await;
+        result.expect("enrolled");
+        assert_eq!(login_record::commons_login(&shared.store), None);
+
+        // A new account never inherits an earlier account's login: a
+        // leftover from an unenroll that could not clear it is replaced, and
+        // cleared when this login is not known.
+        let leftover = |shared: &DaemonShared| {
+            shared
+                .store
+                .write_daemon_file(
+                    crate::config::DAEMON_NEAR_AI_LOGIN_FILE,
+                    br#"{"commons_login":"github"}"#,
+                )
+                .unwrap();
+        };
+        let (_stub, shared, result, _dir) =
+            enroll_against_after(Commons::Production, SignupReferral::None, None, leftover).await;
+        result.expect("enrolled");
+        assert_eq!(login_record::commons_login(&shared.store), None);
     }
 
     /// A referral code typed at sign-up rides in the finish, canonical, and

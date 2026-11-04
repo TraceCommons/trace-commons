@@ -284,6 +284,18 @@ struct DaemonStatus: Decodable, Equatable {
     /// The notice after a legacy invite identity moved to a NEAR AI account.
     /// A daemon that predates the field has nothing to show.
     let legacyInviteMigration: LegacyMigrationWire
+    /// Whether this app's account needs attention (#1836 F1). A daemon that
+    /// predates the keys has nothing to show.
+    let accountAttention: AccountAttentionWire
+    /// Changing the NEAR AI login the account uses (F10, spec 2.4): whether
+    /// it is offered, whether a wallet-origin account's payouts need a NEAR
+    /// AI login, and whether a refused login is held aside for it. A daemon
+    /// that predates the keys offers nothing.
+    let loginChange: AccountLoginChangeStatus
+    /// The login the account last accepted, by tag (`near`, `github`,
+    /// `google`), for "Connected with {provider}" (Settings IA D6). Nil when
+    /// the daemon does not know it, or predates the key.
+    let accountLogin: String?
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -303,6 +315,14 @@ struct DaemonStatus: Decodable, Equatable {
         case armingRewordings = "arming_rewordings"
         case gateHeld = "automatic_contribution_held"
         case legacyInviteMigration = "legacy_invite_migration"
+        case accountState = "account_state"
+        case accountStateReason = "account_state_reason"
+        case nearAILoginUnconfirmed = "near_ai_login_unconfirmed"
+        case loginChangeAvailable = "login_change_available"
+        case payoutsNeedLogin = "payouts_need_login"
+        case loginChangeHeld = "login_change_held"
+        case loginMismatch = "login_mismatch"
+        case accountLogin = "account_login"
     }
 
     init(
@@ -322,7 +342,10 @@ struct DaemonStatus: Decodable, Equatable {
         witnessCapacity: WitnessCapacity = .none,
         armingRewordings: [ArmingRewordingWire] = [],
         gateHeld: GateHeld = .none,
-        legacyInviteMigration: LegacyMigrationWire = .none
+        legacyInviteMigration: LegacyMigrationWire = .none,
+        accountAttention: AccountAttentionWire = .none,
+        loginChange: AccountLoginChangeStatus = .none,
+        accountLogin: String? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
@@ -341,6 +364,9 @@ struct DaemonStatus: Decodable, Equatable {
         self.armingRewordings = armingRewordings
         self.gateHeld = gateHeld
         self.legacyInviteMigration = legacyInviteMigration
+        self.accountAttention = accountAttention
+        self.loginChange = loginChange
+        self.accountLogin = accountLogin
     }
 
     init(from decoder: Decoder) throws {
@@ -369,6 +395,38 @@ struct DaemonStatus: Decodable, Equatable {
         legacyInviteMigration =
             (try? c.decodeIfPresent(LegacyMigrationWire.self, forKey: .legacyInviteMigration))
             .flatMap { $0 } ?? .none
+        // Each key alone, and a wrong type reads as absent: an older daemon,
+        // or one this build cannot read, has nothing to show.
+        accountAttention = AccountAttentionWire(
+            state: (try? c.decodeIfPresent(String.self, forKey: .accountState)).flatMap { $0 },
+            reason: (try? c.decodeIfPresent(String.self, forKey: .accountStateReason)).flatMap { $0 },
+            nearAILoginUnconfirmed:
+                (try? c.decodeIfPresent(Bool.self, forKey: .nearAILoginUnconfirmed)).flatMap { $0 } ?? false)
+        // Each key alone; a wrong type reads as false.
+        func flag(_ key: CodingKeys) -> Bool {
+            (try? c.decodeIfPresent(Bool.self, forKey: key)).flatMap { $0 } ?? false
+        }
+        loginChange = AccountLoginChangeStatus(
+            available: flag(.loginChangeAvailable), payoutsNeedLogin: flag(.payoutsNeedLogin),
+            held: flag(.loginChangeHeld), mismatch: flag(.loginMismatch))
+        accountLogin = (try? c.decodeIfPresent(String.self, forKey: .accountLogin)).flatMap { $0 }
+    }
+
+    /// This status as the daemon reports it straight after `unenroll`: not
+    /// logged in, no tenant, no setup completion, no account scope (the
+    /// config and record are gone, so the account-scoped state resets as it
+    /// does for a real logged-out status), no legacy migration and nothing
+    /// about the account. Everything else is kept. For a model whose status read after
+    /// a confirmed unenroll failed, so `requiresOnboarding` still follows
+    /// the unenroll.
+    func unenrolled() -> DaemonStatus {
+        DaemonStatus(
+            schemaVersion: schemaVersion, loggedIn: false, tenantID: nil, setupComplete: nil,
+            accountScope: nil, consentScopes: consentScopes, paused: paused,
+            queueDepth: queueDepth, decisionsOwed: decisionsOwed, nextDigestAt: nextDigestAt,
+            health: health, routing: routing, grantVoids: grantVoids,
+            witnessCapacity: witnessCapacity, armingRewordings: armingRewordings, gateHeld: gateHeld,
+            legacyInviteMigration: .none, accountAttention: .none)
     }
 
     static let unknown = DaemonStatus(
@@ -1065,6 +1123,10 @@ struct TokenStorageView: Decodable, Equatable {
     let captureEnabled: Bool?
     let captureLabel: String?
     let captureConfirmation: String?
+    /// Turning capture on asks first: the question's title and its confirm
+    /// button, apart from the switch's own button (rule 4).
+    let captureConfirmTitle: String?
+    let captureConfirmLabel: String?
     let captureNotice: String?
     let stateLine: String
     let scopeNote: String
@@ -1078,6 +1140,7 @@ struct TokenStorageView: Decodable, Equatable {
     let failureLine: String
     enum CodingKeys: String, CodingKey {
         case captureEnabled = "capture_enabled", captureLabel = "capture_label", captureConfirmation = "capture_confirmation", captureNotice = "capture_notice"
+        case captureConfirmTitle = "capture_confirm_title", captureConfirmLabel = "capture_confirm_label"
         case stateLine = "state_line", scopeNote = "scope_note", cleanupLabel = "cleanup_label"
         case discardLabel = "discard_label", discardTitle = "discard_title", discardConfirmation = "discard_confirmation"
         case cancelLabel = "cancel_label", confirmLabel = "confirm_label", failureLine = "failure_line"

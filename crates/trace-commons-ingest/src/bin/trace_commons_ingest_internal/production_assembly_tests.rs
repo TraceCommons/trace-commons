@@ -786,6 +786,7 @@ pub(crate) const MAIN_GATE: trace_commons_server::versioned_pipeline_compat::Mai
         chunk_cap: 16,
         chunk_min_tokens: 64,
         novelty_utility_microcredits: 0,
+        credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
     };
 
 fn issuer_checks() -> PipelineNoveltyUtilityChecks {

@@ -12,11 +12,12 @@ final class WriteSurfacesBeforeOnboardingTests: XCTestCase {
     /// that ask nothing first run asks. Everything else, every write
     /// section included, is unavailable until onboarding is done.
     func test_onlyTheNonConsentSectionsAreAvailableBeforeOnboarding() {
-        let available: Set<SettingsSection> = [.general, .connection, .startup, .notifications, .updates, .privateAI, .compute]
+        let available: Set<SettingsSection> = [.general, .account, .startup, .notifications, .updates, .privateAI, .compute]
         for section in SettingsSection.allCases {
             XCTAssertEqual(section.availableBeforeOnboarding, available.contains(section), section.rawValue)
         }
-        for write: SettingsSection in [.consent, .publicProfile, .watchedFolders, .tools, .referrals, .witness, .projects] {
+        for write: SettingsSection in [.consent, .publicProfile, .watchedFolders, .tools, .insights, .payouts, .referrals,
+                                       .witness, .projects] {
             XCTAssertFalse(write.availableBeforeOnboarding, "\(write.rawValue) writes what first run asks")
         }
     }
@@ -29,11 +30,12 @@ final class WriteSurfacesBeforeOnboardingTests: XCTestCase {
         // section of its body is gated.
         let window = try MonitorNavigationTests.text("Views/Monitor/SettingsModal.swift")
         XCTAssertTrue(window.contains("""
-                switch MonitorGate.of(
+                MonitorGate.of(
                     startup: model.startup, onboardingKnown: model.onboardingKnown,
                     requiresOnboarding: model.requiresOnboarding
-                ).forSettings(availableBeforeOnboarding: item.availableBeforeOnboarding) {
+                ).forSettings(availableBeforeOnboarding: item.availableBeforeOnboarding)
         """), "a write section must be gated before onboarding")
+        XCTAssertTrue(window.contains("switch gate(for: item) {"), "the gated body does not switch on the gate")
         XCTAssertTrue(window.contains("""
                 case .signedOut:
                     GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
@@ -41,10 +43,14 @@ final class WriteSurfacesBeforeOnboardingTests: XCTestCase {
                     }
         """), "a write section must not draw before onboarding")
         // The section itself is drawn only when the gate is open.
-        let gate = try XCTUnwrap(window.range(of: ".forSettings(availableBeforeOnboarding: item.availableBeforeOnboarding) {"))
+        let gate = try XCTUnwrap(window.range(of: "switch gate(for: item) {"))
         let open = try XCTUnwrap(window.range(of: "case .open:", range: gate.upperBound ..< window.endIndex))
         let compute = try XCTUnwrap(window.range(of: "ComputeView(model: compute)", range: gate.upperBound ..< window.endIndex))
         XCTAssertLessThan(open.lowerBound, compute.lowerBound)
+        // Payouts is drawn only through an open gate too, and says nothing
+        // at all before it opens (D2).
+        XCTAssertTrue(window.contains("} else if item == .payouts {"))
+        XCTAssertTrue(window.contains("if gate(for: item) == .open {"))
     }
 
     /// The popover draws no override rows any more (owner, 2026-10-19), so

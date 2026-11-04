@@ -55,7 +55,7 @@ export function PrivateAiPage() {
         <StatCard
           label="Runtime"
           value={text(runtime, "state", "Unknown")}
-          detail={text(runtime, "reason", "Daemon status unavailable")}
+          detail={text(runtime, "reason", "Status unavailable")}
           tone="blue"
         />
         <StatCard

@@ -30,7 +30,8 @@ enum SourceRowState {
             if let candidate {
                 return SourceRowAnswer(
                     line: line, secondaryLine: nil, candidatePath: candidate.path,
-                    evidence: candidate.evidence(now: now), selectedPath: nil)
+                    evidence: copy.evidenceWords.map { candidate.evidence(now: now, words: $0) },
+                    selectedPath: nil)
             }
             let none = tool.explanation == nil ? copy.noCandidate : nil
             return SourceRowAnswer(
@@ -166,18 +167,36 @@ struct GlassSourceRow: View {
                             Button(copy.watchCandidate) { onWatchCandidate(candidate) }
                                 .buttonStyle(GlassButtonStyle(.glass))
                                 .disabled(choice == .watch(path: candidate.path))
+                                .accessibilityLabel(copy.toolActionName(copy.watchCandidate, tool: kind.displayName))
                         }
                         GlassFolderButton(tool.chooseFolder ?? copy.chooseFolder) {
                             if let path = FolderPanel.choose() { onChoose(path) }
                         }
+                        .accessibilityLabel(
+                            copy.toolActionName(tool.chooseFolder ?? copy.chooseFolder, tool: kind.displayName))
                         Button(tool.decline) { onDecline() }
                             .buttonStyle(GlassButtonStyle(.link))
                             .disabled(choice == .off)
+                            .accessibilityLabel(copy.toolActionName(tool.decline, tool: kind.displayName))
                         Spacer(minLength: 0)
                     }
                 }
             }
             .accessibilityElement(children: .contain)
+        }
+    }
+}
+
+extension SourceSettingsCopy {
+    /// The core's evidence words, as `SourceCandidate.evidence` takes them;
+    /// nil from an older core, and then no evidence line is drawn.
+    var evidenceWords: SourceEvidenceWords? {
+        evidence.map {
+            SourceEvidenceWords(
+                missing: $0.missing, empty: $0.empty, countOne: $0.countOne, count: $0.count,
+                mostRecent: $0.mostRecent, relocated: $0.relocated, ageJustNow: $0.ageJustNow,
+                ageMinutes: $0.ageMinutes, ageHour: $0.ageHour, ageHours: $0.ageHours,
+                ageYesterday: $0.ageYesterday, ageDays: $0.ageDays)
         }
     }
 }

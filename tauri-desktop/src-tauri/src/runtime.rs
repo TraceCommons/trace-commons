@@ -106,7 +106,8 @@ pub(crate) async fn ensure_daemon_started(state: &State<'_, AppState>) -> Result
             state.inner().attach_external_daemon(Arc::new(attached))?;
             return Ok(());
         }
-        Err(_) => return Err("starting embedded contributor daemon failed".to_owned()),
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        Err(_) => return Err("starting the app failed".to_owned()),
     };
     let shared = Arc::clone(&embedded.shared);
     start_supervisor(Arc::clone(&shared));

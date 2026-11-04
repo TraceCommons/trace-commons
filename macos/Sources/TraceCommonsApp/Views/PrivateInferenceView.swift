@@ -96,7 +96,8 @@ struct PrivateAISwitchCard: View {
                     if let onRefresh {
                         PrivateAIPanelHeader(
                             eyebrow: copy.panelConnectionEyebrow, title: copy.settingsTitle,
-                            refresh: copy.panelConnectionRefreshAccessibility, disabled: busy, onRefresh: onRefresh)
+                            refresh: copy.panelConnectionRefreshAccessibility, refreshWord: copy.panelRefresh,
+                            disabled: busy, onRefresh: onRefresh)
                     } else {
                         Text(copy.settingsTitle)
                             .glassType(GlassTokens.TypeScale.title)

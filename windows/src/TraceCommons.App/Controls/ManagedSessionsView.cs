@@ -110,10 +110,12 @@ public sealed class ManagedSessionsView : UserControl
         try { await action(); }
         catch (Refused refused)
         {
-            // `{terminal}` is the chosen terminal the daemon names.
+            // `{terminal}` is where the session opens: herdr while grouped
+            // there. This shell runs no tool setup, so every refusal here is
+            // a launch's.
             _error.Text = ManagedSignIn.FillTerminal(
                 T(_unsupportedVersion ? "unsupported_version" : ManagedSignIn.ErrorKey(refused.Code)),
-                _snapshot?.Capabilities.TerminalDestination,
+                _snapshot?.Capabilities.SessionDestination,
                 T("terminal"));
         }
         catch { _error.Text = T("action_failed"); }
@@ -161,7 +163,7 @@ public sealed class ManagedSessionsView : UserControl
                 _root.Children.Add(recovery);
             }
         }
-        _root.Children.Add(new TextBlock { Text = _snapshot.Capabilities.TerminalDestination is string destination
+        _root.Children.Add(new TextBlock { Text = _snapshot.Capabilities.SessionDestination is string destination
             ? T("terminal_scope").Replace("{destination}", destination) : T("terminal_unavailable"), TextWrapping = TextWrapping.Wrap });
         _root.Children.Add(_rows);
         _rows.Children.Clear();
@@ -223,7 +225,7 @@ public sealed class ManagedSessionsView : UserControl
         section.Children.Add(new TextBlock { Text = T("near_ai"), FontSize = 20 });
         bool signedIn = _snapshot.NearAiSignedIn;
         string line = signedIn
-            ? ManagedSignIn.Scope(T("sign_in_scope"), _snapshot.Capabilities.TerminalDestination, T("terminal"))
+            ? ManagedSignIn.Scope(T("sign_in_scope"), _snapshot.Capabilities.SessionDestination, T("terminal"))
             : T("sign_in_needed");
         section.Children.Add(new TextBlock { Text = line, TextWrapping = TextWrapping.Wrap });
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
@@ -255,7 +257,33 @@ public sealed class ManagedSessionsView : UserControl
     {
         if (await PickFolderAsync() is not string path) return;
         if (_snapshot?.SignInLaunchParams(tool, path, Guid.NewGuid().ToString()) is not { } request) return;
+        // Asked on every launch while more than one terminal is installed (#1891).
+        if (_snapshot.AsksForTerminal)
+        {
+            var terminal = TerminalPicker();
+            var ask = Dialog("launch_title", terminal, "launch_short");
+            if (await ask.ShowAsync() != ContentDialogResult.Primary) return;
+            await SaveTerminalAsync(terminal.SelectedIndex);
+        }
         await OpenAsync(await CallAsync("managed_launch_prepare", request));
+    }
+
+    /// <summary>The "Open sessions in" row of a launch that asks: the core's
+    /// label over the installed terminals, starting on the current one.</summary>
+    private ComboBox TerminalPicker()
+    {
+        var picker = new ComboBox { Header = T("terminal_choice"), MinWidth = 220 };
+        AutomationProperties.SetName(picker, T("terminal_choice"));
+        foreach (var choice in _snapshot!.TerminalChoices) picker.Items.Add(choice.Name);
+        picker.SelectedIndex = _snapshot.ProposedTerminalIndex;
+        return picker;
+    }
+
+    /// <summary>Writes the picked terminal as the default before the launch.</summary>
+    private async Task SaveTerminalAsync(int pickedIndex)
+    {
+        if (_snapshot?.TerminalToSave(pickedIndex) is string id)
+            await CallAsync("set_managed_terminal", new { terminal = id });
     }
 
     private async Task<string?> PickFolderAsync()
@@ -349,13 +377,16 @@ public sealed class ManagedSessionsView : UserControl
             if (await PickFolderAsync() is string path) project.Text = path;
         };
         form.Children.Add(choose);
-        form.Children.Add(new TextBlock { Text = T("launch_scope").Replace("{destination}", _snapshot.Capabilities.TerminalDestination ?? T("terminal")), TextWrapping = TextWrapping.Wrap });
+        var terminalPicker = _snapshot.AsksForTerminal ? TerminalPicker() : null;
+        if (terminalPicker is not null) form.Children.Add(terminalPicker);
+        form.Children.Add(new TextBlock { Text = T("launch_scope").Replace("{destination}", _snapshot.Capabilities.SessionDestination ?? T("terminal")), TextWrapping = TextWrapping.Wrap });
         var launchDialog = Dialog("launch_title", form, "launch_short");
         void ValidateLaunch() => launchDialog.IsPrimaryButtonEnabled = account.SelectedIndex >= 0 && !string.IsNullOrWhiteSpace(project.Text) && (accounts[account.SelectedIndex].Tool != "opencode" || !string.IsNullOrWhiteSpace(model.Text));
         account.SelectionChanged += (_, _) => ValidateLaunch();
         model.TextChanged += (_, _) => ValidateLaunch(); project.TextChanged += (_, _) => ValidateLaunch(); ValidateLaunch();
         if (await launchDialog.ShowAsync() != ContentDialogResult.Primary || string.IsNullOrWhiteSpace(project.Text)) return;
         var selected = accounts[account.SelectedIndex];
+        if (terminalPicker is not null) await SaveTerminalAsync(terminalPicker.SelectedIndex);
         await OpenAsync(await CallAsync("managed_launch_prepare", new { request_id = Guid.NewGuid(), purpose = "coding", tool = selected.Tool, connection = selected.Connection, account_id = selected.Id, cwd = project.Text, expected_generation = _snapshot.Generations.GetValueOrDefault(selected.Tool), save_default = false, model = selected.Tool == "opencode" ? model.Text.Trim() : null, collect_traces = selected.Tool == "opencode" && collect.IsChecked == true }));
     }
 }

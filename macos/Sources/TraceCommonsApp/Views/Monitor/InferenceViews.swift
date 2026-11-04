@@ -380,37 +380,32 @@ struct InferenceTabView: View {
 /// there). No title of its own: the tab names it (owner, 2026-10-10).
 /// How Private AI works, step by step (product owner, 2026-10-28): first on
 /// the tab, in the managed copy's words, until it is closed with its X.
-/// Closed, it stays closed on this Mac.
+/// Closed, it stays closed on this Mac. Drawn as the Insights empty state's
+/// card is (product owner, 2026-11-02, `GetStartedCard`): a plain card, no
+/// gradient or graphic, each step a title over one line.
 struct PrivateAIGuideCard: View {
     static let closedKey = "privateAI.guideClosed"
     @AppStorage(Self.closedKey) private var closed = false
     @EnvironmentObject private var model: AppModel
 
-    static let stepKeys = ["guide_step_earn", "guide_step_start", "guide_step_use"]
+    /// Each step's title, then its line.
+    static let steps = [
+        (title: "guide_step_earn_title", line: "guide_step_earn"),
+        (title: "guide_step_start_title", line: "guide_step_start"),
+        (title: "guide_step_use_title", line: "guide_step_use"),
+    ]
 
     var body: some View {
         if !closed {
-            // The card explains; it has no action, so it is not a button.
-            GlassHeroCard(
-                gradient: GlassTokens.Gradient.heroCampaign,
-                title: model.managedText("guide_title"), subtitle: model.managedText("guide_body"),
-                closeLabel: MonitorWords.close, onClose: { closed = true }
-            ) {
-                GlassHeroSymbol("lock.shield")
-            } content: {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    ForEach(Array(Self.stepKeys.enumerated()), id: \.offset) { index, key in
-                        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s2) {
-                            Text(verbatim: "\(index + 1).")
-                                .glassType(GlassTokens.TypeScale.bodyStrong)
-                            Text(model.managedText(key))
-                                .glassType(GlassTokens.TypeScale.body)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .foregroundStyle(GlassTokens.Color.heroInk.color)
-                    }
-                }
-            }
+            // The card explains; no step has a link.
+            GetStartedCard(
+                title: model.managedText("guide_title"), lead: model.managedText("guide_body"),
+                steps: Self.steps.map { keys in
+                    GetStartedCard.Step(title: model.managedText(keys.title), detail: model.managedText(keys.line))
+                },
+                close: GetStartedCard.Close(label: MonitorWords.close) { closed = true },
+                // Tried here first (owner, 2026-11-02).
+                pixelField: true)
         }
     }
 }
@@ -453,21 +448,23 @@ struct PrivateAIInspectorView: View {
         // the right: the menu bar's one word and dot, the core's full
         // sentence as the row's help and accessibility hint.
         // The state right after the title (owner, 2026-10-20), not at the
-        // row's far end.
+        // row's far end, in a pill, as Settings draws Watching (owner,
+        // 2026-11-02).
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             GlassTabHeading(copy.inspectorStatus) {
-                GlassStatusLabel(status.word, status: status.dot)
-                    .multilineTextAlignment(.leading)
+                GlassChip(status.word, status: status.dot)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .accessibilityElement(children: .combine)
             .help(status.sentence)
             .accessibilityHint(status.sentence)
-            // What the destination is for, in the core's words, at the
-            // title size (product owner, 2026-10-28: make it bigger).
+            // What the destination is for, in the core's words, under the
+            // heading and below it in weight (owner, 2026-11-02: not bold,
+            // lower than the section title; it was the title size from
+            // 2026-10-28).
             Text(Self.subtitle(copy, state: store.privateAI?.state))
-                .glassType(GlassTokens.TypeScale.title)
-                .foregroundStyle(GlassColor.textPrimary)
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }

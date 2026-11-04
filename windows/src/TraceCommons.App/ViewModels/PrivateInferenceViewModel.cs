@@ -427,28 +427,6 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
 
     public string CredentialWhat => _copy?.CredentialWhat ?? string.Empty;
 
-    public NearAiCredentialSurface.ProviderChoice[] CredentialProviders =>
-        _copy is null ? [] : NearAiCredentialSurface.Providers(_copy);
-
-    private string _credentialProvider = NearAiCredentialSurface.ProviderNear;
-    public string CredentialProvider
-    {
-        get => _credentialProvider;
-        set
-        {
-            if (_credentialBusy || !NearAiCredentialSurface.IsProvider(value)) return;
-            _credentialProvider = value;
-            Raise(nameof(CredentialProvider));
-            Raise(nameof(CredentialWalletNotice));
-            Raise(nameof(HasCredentialWalletNotice));
-        }
-    }
-
-    public string CredentialProviderLabel => _copy?.CredentialProviderLabel ?? string.Empty;
-    public bool HasCredentialProvider => _copy is not null && OfferedAction == CredentialAction.Obtain;
-    public bool HasCredentialWalletNotice => HasCredentialProvider && CredentialProvider == NearAiCredentialSurface.ProviderNear;
-    public string CredentialWalletNotice => _copy?.CredentialWalletNotice ?? string.Empty;
-
     /// <summary>The sentence for whatever the daemon last reported.</summary>
     public string CredentialStateText => _copy is null
         ? string.Empty
@@ -613,8 +591,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// which is a second browser tab in front of somebody already looking at
     /// one.
     /// </remarks>
-    /// <param name="provider">The sign-in provider; the page's choice when null.</param>
-    public async Task<NearAiCredentialAttempt?> StartCredentialAsync(string? provider = null)
+    public async Task<NearAiCredentialAttempt?> StartCredentialAsync()
     {
         if (_copy is null || _credentialBusy)
         {
@@ -628,7 +605,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         {
             DaemonResponse response = await _host
                 .CallAsync(DaemonProtocol.Methods.NearAiCredentialStart,
-                    NearAiCredentialSurface.SerializeStart(provider ?? CredentialProvider))
+                    NearAiCredentialSurface.StartRequest)
                 .ConfigureAwait(true);
             if (response.IsError || response.Result is null)
             {
@@ -684,10 +661,8 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// Removes the stored key from this machine.
     /// </summary>
     /// <remarks>
-    /// Local, and the page says so beside the button:
-    /// <see cref="CredentialActionPreamble"/> is the sentence saying the key
-    /// stays valid at the service until the contributor removes it in their
-    /// own account. This shell cannot do that for them and does not claim to.
+    /// The daemon also revokes the key at NEAR AI. When that did not happen,
+    /// the status text says so (<see cref="NearAiCredentialSurface.ForgetNotice"/>).
     /// </remarks>
     public async Task ForgetCredentialAsync()
     {
@@ -696,7 +671,9 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
             return;
         }
 
-        await CallThenRefreshAsync(DaemonProtocol.Methods.NearAiCredentialForget)
+        await CallThenRefreshAsync(
+                DaemonProtocol.Methods.NearAiCredentialForget,
+                notice: NearAiCredentialSurface.ForgetNotice)
             .ConfigureAwait(true);
     }
 
@@ -730,7 +707,10 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// the reply: what this machine holds afterwards is a question only the
     /// next status answers.
     /// </summary>
-    private async Task CallThenRefreshAsync(string method, string? parameters = null)
+    private async Task CallThenRefreshAsync(
+        string method,
+        string? parameters = null,
+        Func<DaemonResponse, PrivateInferenceCopy?, string>? notice = null)
     {
         _credentialBusy = true;
         Funding.CredentialChanged(_credential.SessionState, true);
@@ -741,7 +721,9 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
                     ? _host.CallAsync(method)
                     : _host.CallAsync(method, parameters))
                 .ConfigureAwait(true);
-            Notice = response.IsError && _copy is not null ? _copy.WriteUnconfirmed : string.Empty;
+            Notice = response.IsError && _copy is not null
+                ? _copy.WriteUnconfirmed
+                : notice?.Invoke(response, _copy) ?? string.Empty;
         }
         catch
         {
@@ -761,10 +743,33 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         await LoadCredentialAsync().ConfigureAwait(true);
     }
 
+    // F10: a NEAR AI sign-in the account refused as another account says so
+    // in #1836's approved words (status.login_mismatch), where this card
+    // shows the sign-in's result. Fed by the view from status, so the
+    // credential reads here keep their own call sequence.
+    private string _loginMismatchLine = string.Empty;
+
+    /// <summary>
+    /// The approved mismatch body, or the empty string. Not while a sign-in
+    /// is waiting on the browser: that one has not been refused yet.
+    /// </summary>
+    public string LoginMismatchLine =>
+        NearAiCredentialSurface.AwaitingBrowser(_credential) ? string.Empty : _loginMismatchLine;
+
+    public bool HasLoginMismatchLine => LoginMismatchLine.Length > 0;
+
+    /// <summary>Sets the mismatch line from the latest status (null clears it).</summary>
+    public void ShowLoginMismatch(string? line)
+    {
+        _loginMismatchLine = line ?? string.Empty;
+        Raise(nameof(LoginMismatchLine));
+        Raise(nameof(HasLoginMismatchLine));
+    }
+
     private void RaiseCredential()
     {
-        Raise(nameof(HasCredentialProvider));
-        Raise(nameof(HasCredentialWalletNotice));
+        Raise(nameof(LoginMismatchLine));
+        Raise(nameof(HasLoginMismatchLine));
         Raise(nameof(HasCloudSession));
         Raise(nameof(CredentialStateText));
         Raise(nameof(CredentialIsNeutral));

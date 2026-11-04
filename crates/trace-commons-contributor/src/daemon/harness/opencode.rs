@@ -322,7 +322,7 @@ impl OpenCodeEdit {
                     crate::channel::OTHER_STATE_DIR_NAME
                 ));
                 if !absent(&other_receipt) {
-                    edit.occupied.push(("OpenCode connection".into(), "Another Trace Commons channel already has a saved connection; disconnect it first".into()));
+                    edit.occupied.push(("OpenCode connection".into(), "Another channel of this app already has a saved connection; disconnect it first".into()));
                     edit.contents = edit.existing.clone().unwrap_or_default();
                     return Ok(edit);
                 }
@@ -438,7 +438,7 @@ impl OpenCodeEdit {
                     &mut value,
                     &mut saved,
                     path(&[table, PROVIDER, "name"]),
-                    json!("Trace Commons"),
+                    json!(crate::brand::APP_NAME),
                 )?;
                 add(
                     &mut value,
@@ -514,9 +514,9 @@ impl OpenCodeEdit {
                             put(&mut value, container, None)?;
                         }
                     }
-                    edit.changes.push("Remove Trace Commons routing settings and restore previous model selections; keep other-provider selections and unrelated edits".into());
+                    edit.changes.push("Remove this app's routing settings and restore previous model selections; keep other-provider selections and unrelated edits".into());
                     if !additional.is_empty() {
-                        edit.changes.push(format!("Remove {} additional agent model overrides using Trace Commons; inherit the restored default", additional.len()));
+                        edit.changes.push(format!("Remove {} additional agent model overrides using this app; inherit the restored default", additional.len()));
                     }
                 } else if routed(&value, None) {
                     edit.occupied.push((
