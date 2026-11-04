@@ -40,9 +40,17 @@ final class SettingsSectionsTests: XCTestCase {
         XCTAssertEqual(SettingsSection.ListRow.row(title: nil), .init(text: "—", enabled: false))
         XCTAssertEqual(SettingsSection.ListRow.row(title: ""), .init(text: "—", enabled: false))
         XCTAssertEqual(SettingsSection.ListRow.row(title: "Private AI"), .init(text: "Private AI", enabled: true))
-        for section in SettingsSection.listed {
+        for section in SettingsSection.listed where section != .general {
             XCTAssertEqual(section.listRow(nil), .init(text: "—", enabled: false), "\(section)")
         }
+    }
+
+    /// General's name is this app's own word and its content never waits on
+    /// the core, so its row is never the placeholder: with the core's table
+    /// missing it still reads General and still opens the section.
+    func test_generalsRowNeverWaitsOnTheCoresTable() {
+        XCTAssertEqual(SettingsSection.general.navName(nil), SettingsWords.general)
+        XCTAssertEqual(SettingsSection.general.listRow(nil), .init(text: SettingsWords.general, enabled: true))
     }
 
     /// Every section but Compute (its own view) draws its own glass view
