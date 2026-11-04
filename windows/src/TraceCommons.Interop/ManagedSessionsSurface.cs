@@ -33,6 +33,8 @@ public sealed record ManagedTool(string Tool, bool Installed,
 /// daemon, or for a stored choice the daemon does not know.</param>
 /// <param name="TerminalChoices">The terminals the daemon found on this
 /// computer; absent from an older daemon.</param>
+/// <param name="TerminalChosen">Whether the person has chosen the terminal; null
+/// from an older daemon, which reads as never asking.</param>
 /// <param name="TerminalDestination">The chosen terminal's name.</param>
 /// <param name="LaunchDestination">Where a session opens: herdr while sessions
 /// are grouped there, else the chosen terminal. Absent from an older
@@ -44,7 +46,8 @@ public sealed record ManagedCapabilities(
     [property: JsonPropertyName("near_ai_signin")] bool NearAiSignin = false,
     [property: JsonPropertyName("terminal_current")] string? TerminalCurrent = null,
     [property: JsonPropertyName("terminal_choices")] ManagedTerminalChoice[]? TerminalChoices = null,
-    [property: JsonPropertyName("launch_destination")] string? LaunchDestination = null)
+    [property: JsonPropertyName("launch_destination")] string? LaunchDestination = null,
+    [property: JsonPropertyName("terminal_chosen")] bool? TerminalChosen = null)
 {
     /// <summary>Where a session opens, for the launch lines and a launch's
     /// refusal: <see cref="LaunchDestination"/>, or the chosen terminal from
@@ -105,6 +108,24 @@ public sealed record ManagedSnapshot(
     /// choice no longer found selects nothing rather than the first.</summary>
     [JsonIgnore] public int TerminalSelectedIndex =>
         System.Array.FindIndex(TerminalChoices, c => c.Id == Capabilities.TerminalCurrent);
+
+    /// <summary>Whether a launch dialog asks which terminal to open in: on
+    /// every launch, whether or not one was chosen before, and only when more
+    /// than one is installed. An older daemon that does not say never asks
+    /// (#1891, as macOS <c>asksForTerminal</c>).</summary>
+    [JsonIgnore] public bool AsksForTerminal =>
+        Capabilities.TerminalChosen is not null && TerminalChoices.Length > 1;
+
+    /// <summary>The position a launch dialog that asks starts on: the current
+    /// terminal when it is installed, else the first installed; -1 with none.</summary>
+    [JsonIgnore] public int ProposedTerminalIndex =>
+        TerminalSelectedIndex >= 0 ? TerminalSelectedIndex : (TerminalChoices.Length > 0 ? 0 : -1);
+
+    /// <summary>The terminal a launch saves as the default before it starts:
+    /// the one picked in a dialog that asked, else null.</summary>
+    public string? TerminalToSave(int pickedIndex) =>
+        AsksForTerminal && pickedIndex >= 0 && pickedIndex < TerminalChoices.Length
+            ? TerminalChoices[pickedIndex].Id : null;
 
     /// <summary>The tool's NEAR AI sign-in entry, only while signed in.</summary>
     public ManagedAccount? SignInEntry(string tool) => NearAiSignedIn && CanLaunch(tool)
