@@ -4,11 +4,10 @@ import TCDesign
 import TCShellCore
 
 /// What Traces shows, apart from the view so it can be tested: the watched
-/// tools' traces counted, and what they could earn, one estimated total in
-/// the core's words (owner, 2026-10-23). The core multiplies and formats it
-/// (`tc_first_run_estimate_line`): dollars of NEAR AI credit when the
-/// commons publishes a range per accepted trace, else points from an
-/// invite's range or the core's default (3 to 8, owner, 2026-10-22).
+/// tools' traces counted, and one line in the core's words that they can
+/// earn credit (`tc_first_run_estimate_line`). The line names no amount
+/// (owner, 2026-11-04); the request still carries the commons' and an
+/// invite's ranges, which the core ignores.
 enum TracesScreenLayout {
     /// A watched tool and its traces on this Mac.
     struct Row: Equatable {
@@ -34,10 +33,10 @@ enum TracesScreenLayout {
         return total(rows(state, discovered: discovered))
     }
 
-    /// The one estimate line, as the core words it, or nil for none
-    /// (nothing found or counted yet). The core picks dollars or points,
-    /// and, while the use that earns credit is off (`earnsCredit` false),
-    /// words it as what the traces could earn (Zaki's review of #1690).
+    /// The one line, as the core words it, or nil for none (nothing found
+    /// or counted yet). While the use that earns credit is off
+    /// (`earnsCredit` false) it says what the traces could earn (Zaki's
+    /// review of #1690).
     static func estimate(
         found: UInt64?, lookup: DaemonData.InviteLookup?, dollars: DaemonData.FirstRunEstimate?,
         earnsCredit: Bool = true
@@ -250,22 +249,32 @@ struct TracesScreen: View {
         .frame(maxWidth: 460)
     }
 
-    /// The one estimated total, or nothing at all when there is none.
+    /// The one line under the count, or nothing at all when there is none,
+    /// and, while the use that earns credit is on, that the final credit
+    /// depends on which traces are accepted (owner, 2026-11-04).
     @ViewBuilder
     private func estimate(found: UInt64?) -> some View {
         let done = memory.tracesCounted || reduceMotion
+        let earnsCredit = !TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses)
         if let line = TracesScreenLayout.estimate(
             found: found, lookup: runner.lookup, dollars: runner.dollarEstimate,
-            earnsCredit: !TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses)) {
-            Text(line)
-                .glassType(GlassTokens.TypeScale.heading)
-                .foregroundStyle(GlassColor.textPrimary)
-                .multilineTextAlignment(.center)
-                .firstRunCard(padding: EdgeInsets(top: 12, leading: 24, bottom: 12, trailing: 24))
-                .fixedSize()
-                .opacity(done ? 1 : 0)
-                .offset(y: done ? 0 : 8)
-                .animation(GlassMotion.spatial(reduceMotion, duration: 0.64), value: done)
+            earnsCredit: earnsCredit) {
+            VStack(spacing: GlassTokens.Space.s1) {
+                Text(line)
+                    .glassType(GlassTokens.TypeScale.heading)
+                    .foregroundStyle(GlassColor.textPrimary)
+                if earnsCredit {
+                    Text(copy.traces.creditDepends)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                }
+            }
+            .multilineTextAlignment(.center)
+            .firstRunCard(padding: EdgeInsets(top: 12, leading: 24, bottom: 12, trailing: 24))
+            .fixedSize()
+            .opacity(done ? 1 : 0)
+            .offset(y: done ? 0 : 8)
+            .animation(GlassMotion.spatial(reduceMotion, duration: 0.64), value: done)
         }
     }
 }

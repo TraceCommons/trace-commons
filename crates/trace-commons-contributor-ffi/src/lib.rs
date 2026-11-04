@@ -5790,15 +5790,15 @@ pub extern "C" fn tc_first_run_copy_json() -> *mut c_char {
     })
 }
 
-/// The first run's Traces estimate, one line
+/// The first run's Traces line under the count
 /// (`first_run_copy::traces_estimate_line`): `request` is a JSON object with
-/// `traces` (the traces found), the daemon's `first_run_estimate` range
-/// `usd_micros_per_accepted_trace`, and an invite lookup's `credit_range`,
-/// each optional. The core does the arithmetic and the formatting, so the
-/// shell shows the string as it is.
+/// `traces` (the traces found) and `earns_credit`, each optional; an older
+/// shell's `usd_micros_per_accepted_trace` and `credit_range` are ignored.
+/// The line names no amount (owner, 2026-11-04), and the shell shows it as
+/// it is.
 ///
 /// Returns an owned string; free it with [`tc_string_free`]. NULL draws no
-/// line: nothing found or counted yet, a total past range, a NULL or
+/// line: nothing found or counted yet, a NULL or
 /// unreadable request, or a caught panic.
 ///
 /// # Safety
