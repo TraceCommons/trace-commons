@@ -87,6 +87,20 @@ pub struct Status {
     /// is stored. Absent reads as false.
     #[serde(default)]
     pub near_ai_login_unconfirmed: bool,
+    /// F10 (spec 2.4): this device may offer "Use a different account".
+    /// Absent on an older daemon, which offers nothing.
+    #[serde(default)]
+    pub login_change_available: bool,
+    /// F10: a wallet-origin account, whose payouts need a NEAR AI login.
+    #[serde(default)]
+    pub payouts_need_login: bool,
+    /// F10: a login the commons refused as another account is held aside
+    /// for the change.
+    #[serde(default)]
+    pub login_change_held: bool,
+    /// F10: the last NEAR AI sign-in was refused as another account.
+    #[serde(default)]
+    pub login_mismatch: bool,
 }
 
 /// One rewording notice as the window draws it (K5).

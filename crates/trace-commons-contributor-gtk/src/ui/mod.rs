@@ -5,6 +5,7 @@
 //! has a real one -- would only ever be a shortcut into it. Nothing in this
 //! application tells a contributor to install a shell extension.
 
+pub(crate) mod account_change;
 pub mod balance;
 pub mod community_brand;
 pub mod credential;
@@ -210,6 +211,8 @@ pub struct App {
     /// five sections down a settings list.
     pub private_inference: private_inference::PrivateInferenceView,
     pub settings: settings::SettingsView,
+    /// Changing the NEAR AI login the account uses (F10).
+    pub account_change: account_change::ChangeView,
     /// The update banner. Above the health banner is deliberate: an update
     /// is a standing fact about this machine, while health is about the
     /// current run.
@@ -500,6 +503,7 @@ impl App {
             entries: RefCell::new(Vec::new()),
             projects: RefCell::new(Vec::new()),
             status: RefCell::new(None),
+            account_change: account_change::ChangeView::default(),
             rollup: RefCell::new(HistoryRollup::default()),
             undo: RefCell::new(None),
             undo_tick: RefCell::new(None),

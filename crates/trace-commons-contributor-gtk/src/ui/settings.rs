@@ -74,6 +74,9 @@ pub struct SettingsView {
     /// status block and its "Set up again" button, empty otherwise. A
     /// status in this section, never a banner or notification.
     account_attention: gtk::Box,
+    /// The change of login's entry points (F10): the mismatch block, Use a
+    /// different account, and a wallet-origin account's payouts line.
+    login_change: gtk::Box,
     /// What "Set up again" is doing. Kept here, not on the button: the block
     /// is rebuilt on every daemon event, and a fresh button must not start a
     /// second unenroll while one is running.
@@ -278,6 +281,9 @@ impl SettingsView {
         let account_attention = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         account_attention.set_visible(false);
         state_card.append(&account_attention);
+        let login_change = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+        login_change.set_visible(false);
+        state_card.append(&login_change);
         let connection = gtk::Label::builder().xalign(0.0).wrap(true).build();
         connection.add_css_class("tc-body");
         state_card.append(&connection);
@@ -699,6 +705,7 @@ impl SettingsView {
             connection,
             connection_chip,
             account_attention,
+            login_change,
             set_up_again: std::cell::Cell::new(SetUpAgain::Idle),
             attention_shown: std::cell::RefCell::new(None),
             connection_checks,
@@ -1052,6 +1059,7 @@ pub fn render_status(app: &Rc<App>, status: &Status) {
     });
 
     render_account_attention(app, status);
+    super::account_change::render_block(app, &app.settings.login_change, status);
     render_routing_status(app, status);
 }
 

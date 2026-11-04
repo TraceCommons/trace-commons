@@ -195,6 +195,177 @@ pub fn render(
     Some(text)
 }
 
+/// One answer of `account_login_change`, as a shell reads it: the
+/// ceremony's step, whose login is being proved and which the account moves
+/// to, and the step's error. Unknown fields are ignored.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct ChangeState {
+    pub change_id: String,
+    /// `current`, `new`, `confirm` or `done`.
+    pub step: String,
+    /// `wallet` or `near_ai_login`.
+    pub current_kind: String,
+    #[serde(default)]
+    pub old_provider: Option<String>,
+    #[serde(default)]
+    pub new_provider: Option<String>,
+    #[serde(default)]
+    pub busy: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub browser_url: Option<String>,
+}
+
+impl ChangeState {
+    pub fn is_wallet(&self) -> bool {
+        self.current_kind == "wallet"
+    }
+}
+
+/// What a step's primary button does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageAction {
+    /// Step 1: prove the current identity (a browser leg).
+    ProveCurrent,
+    /// Step 2: sign in with the new login (a browser leg).
+    SignInNew,
+    /// Step 3: the person confirms. Never the default button: it moves the
+    /// account.
+    Confirm,
+    /// Done: close the sheet. There is no confirmation of its own (spec 2.2).
+    Close,
+}
+
+/// What the change sheet shows for one state, every sentence the core's.
+/// The macOS shell maps the same states in TCShellCore
+/// (`AccountLoginChangeSurface`); this is the same mapping for the shells
+/// that link this crate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ChangePage {
+    pub title: &'static str,
+    pub heading: Option<&'static str>,
+    pub lines: Vec<String>,
+    pub primary: &'static str,
+    pub primary_accessibility_name: String,
+    pub action: PageAction,
+    /// Step 1 of a wallet-origin account: the NEAR account name field.
+    pub asks_wallet_account: bool,
+    pub error: Option<String>,
+    pub busy: bool,
+    pub cancel: &'static str,
+}
+
+/// The sheet's page for `state`. `None` only when step 3's words cannot be
+/// drawn (a new login nobody can name): the shell closes rather than show a
+/// placeholder.
+#[must_use]
+pub fn change_page(state: &ChangeState) -> Option<ChangePage> {
+    let old = state.old_provider.as_deref();
+    let new = state.new_provider.as_deref();
+    let error = change_error_line(state);
+    let page = |heading, lines, primary, name: String, action, asks| ChangePage {
+        title: ACCOUNT_CHANGE_TITLE,
+        heading,
+        lines,
+        primary,
+        primary_accessibility_name: name,
+        action,
+        asks_wallet_account: asks,
+        error: error.clone(),
+        busy: state.busy,
+        cancel: ACCOUNT_CHANGE_CANCEL,
+    };
+    match state.step.as_str() {
+        "current" => {
+            let lines = if state.is_wallet() {
+                vec![ACCOUNT_CHANGE_STEP_CURRENT_WALLET.to_owned()]
+            } else {
+                Vec::new()
+            };
+            let name = if state.is_wallet() {
+                ACCOUNT_CHANGE_STEP_CURRENT.to_owned()
+            } else {
+                render(
+                    ACCOUNT_CHANGE_STEP_CURRENT_ACCESSIBILITY_NAME,
+                    None,
+                    old,
+                    None,
+                )
+                .unwrap_or_else(|| ACCOUNT_CHANGE_STEP_CURRENT.to_owned())
+            };
+            Some(page(
+                Some(ACCOUNT_CHANGE_STEP_CURRENT),
+                lines,
+                ACCOUNT_CHANGE_STEP_CURRENT,
+                name,
+                PageAction::ProveCurrent,
+                state.is_wallet(),
+            ))
+        }
+        "new" => Some(page(
+            Some(ACCOUNT_CHANGE_STEP_NEW),
+            Vec::new(),
+            ACCOUNT_CHANGE_STEP_NEW,
+            ACCOUNT_CHANGE_STEP_NEW_ACCESSIBILITY_NAME.to_owned(),
+            PageAction::SignInNew,
+            false,
+        )),
+        "confirm" => {
+            let body = if state.is_wallet() {
+                render(ACCOUNT_CHANGE_BODY_WALLET, None, None, new)?
+            } else {
+                render(ACCOUNT_CHANGE_BODY, None, old, new)
+                    .or_else(|| render(ACCOUNT_CHANGE_BODY_OLD_UNKNOWN, None, None, new))?
+            };
+            let private_ai = render(ACCOUNT_CHANGE_PRIVATE_AI, None, None, new)?;
+            let name = render(ACCOUNT_CHANGE_CONFIRM_ACCESSIBILITY_NAME, None, None, new)?;
+            Some(page(
+                None,
+                vec![body, private_ai],
+                ACCOUNT_CHANGE_CONFIRM,
+                name,
+                PageAction::Confirm,
+                false,
+            ))
+        }
+        // Done, and a step this build does not know: close.
+        _ => Some(ChangePage {
+            title: ACCOUNT_CHANGE_TITLE,
+            heading: None,
+            lines: Vec::new(),
+            primary: ACCOUNT_CHANGE_CANCEL,
+            primary_accessibility_name: ACCOUNT_CHANGE_CANCEL.to_owned(),
+            action: PageAction::Close,
+            asks_wallet_account: false,
+            error: None,
+            busy: false,
+            cancel: ACCOUNT_CHANGE_CANCEL,
+        }),
+    }
+}
+
+/// The daemon's step error as the approved sentence. `current_login` with an
+/// old login nobody can name has no approved words naming it and says the
+/// generic line.
+fn change_error_line(state: &ChangeState) -> Option<String> {
+    let error = state.error.as_deref()?;
+    Some(match error {
+        "current_login" => render(
+            ACCOUNT_CHANGE_ERROR_CURRENT_LOGIN,
+            None,
+            state.old_provider.as_deref(),
+            None,
+        )
+        .unwrap_or_else(|| ACCOUNT_CHANGE_ERROR_UNAVAILABLE.to_owned()),
+        "wallet" => ACCOUNT_CHANGE_ERROR_WALLET.to_owned(),
+        "in_use" => ACCOUNT_CHANGE_ERROR_IN_USE.to_owned(),
+        "too_soon" => ACCOUNT_CHANGE_ERROR_TOO_SOON.to_owned(),
+        _ => ACCOUNT_CHANGE_ERROR_UNAVAILABLE.to_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +452,105 @@ mod tests {
         assert_ne!(copy.title, copy.change);
         assert_eq!(copy.change, copy.mismatch_change);
         assert_ne!(copy.confirm, copy.title);
+    }
+
+    fn state(step: &str, kind: &str, old: Option<&str>, new: Option<&str>) -> ChangeState {
+        ChangeState {
+            change_id: "c1".into(),
+            step: step.into(),
+            current_kind: kind.into(),
+            old_provider: old.map(str::to_owned),
+            new_provider: new.map(str::to_owned),
+            busy: false,
+            error: None,
+            browser_url: None,
+        }
+    }
+
+    #[test]
+    fn each_step_is_its_page_in_the_approved_words() {
+        let current =
+            change_page(&state("current", "near_ai_login", Some("github"), None)).unwrap();
+        assert_eq!(current.action, PageAction::ProveCurrent);
+        assert_eq!(current.heading, Some(ACCOUNT_CHANGE_STEP_CURRENT));
+        assert_eq!(
+            current.primary_accessibility_name,
+            "Confirm it's you with GitHub"
+        );
+        assert!(!current.asks_wallet_account);
+
+        let wallet = change_page(&state("current", "wallet", None, None)).unwrap();
+        assert!(wallet.asks_wallet_account);
+        assert_eq!(
+            wallet.lines,
+            vec![ACCOUNT_CHANGE_STEP_CURRENT_WALLET.to_owned()]
+        );
+
+        let new = change_page(&state("new", "near_ai_login", Some("github"), None)).unwrap();
+        assert_eq!(new.action, PageAction::SignInNew);
+        assert_eq!(new.primary, ACCOUNT_CHANGE_STEP_NEW);
+
+        let confirm = change_page(&state(
+            "confirm",
+            "near_ai_login",
+            Some("near"),
+            Some("google"),
+        ))
+        .unwrap();
+        assert_eq!(confirm.action, PageAction::Confirm);
+        assert_eq!(confirm.primary_accessibility_name, "Switch to Google");
+        assert_eq!(
+            confirm.lines,
+            vec![
+                "Your traces, credit and payout settings stay. From now on, sign in with Google. Your NEAR wallet login will no longer connect to this app.".to_owned(),
+                "Private AI will use your Google account. Keys made in the old account are removed.".to_owned(),
+            ]
+        );
+        let unknown_old =
+            change_page(&state("confirm", "near_ai_login", None, Some("google"))).unwrap();
+        assert!(unknown_old.lines[0].contains("Your old login"));
+        let wallet_confirm =
+            change_page(&state("confirm", "wallet", None, Some("github"))).unwrap();
+        assert!(wallet_confirm.lines[0].contains("Your NEAR wallet will no longer sign in"));
+        assert!(change_page(&state("confirm", "near_ai_login", None, None)).is_none());
+
+        let done = change_page(&state("done", "near_ai_login", None, None)).unwrap();
+        assert_eq!(done.action, PageAction::Close);
+    }
+
+    #[test]
+    fn each_error_is_its_approved_sentence() {
+        let line = |error: &str, old: Option<&str>| {
+            let mut s = state("current", "near_ai_login", old, None);
+            s.error = Some(error.into());
+            change_page(&s).unwrap().error.unwrap()
+        };
+        assert_eq!(
+            line("current_login", Some("github")),
+            "Sign in with GitHub first to confirm it's you."
+        );
+        assert_eq!(
+            line("current_login", None),
+            ACCOUNT_CHANGE_ERROR_UNAVAILABLE
+        );
+        assert_eq!(line("wallet", None), ACCOUNT_CHANGE_ERROR_WALLET);
+        assert_eq!(line("in_use", None), ACCOUNT_CHANGE_ERROR_IN_USE);
+        assert_eq!(line("too_soon", None), ACCOUNT_CHANGE_ERROR_TOO_SOON);
+        assert_eq!(
+            line("something_new", None),
+            ACCOUNT_CHANGE_ERROR_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn a_daemon_answer_decodes_as_a_state() {
+        let state: ChangeState = serde_json::from_value(serde_json::json!({
+            "change_id": "c9", "step": "confirm", "current_kind": "wallet",
+            "old_provider": null, "new_provider": "github", "busy": false,
+            "error": null, "browser_url": "http://127.0.0.1:1/x", "future": 1
+        }))
+        .unwrap();
+        assert!(state.is_wallet());
+        assert_eq!(state.browser_url.as_deref(), Some("http://127.0.0.1:1/x"));
     }
 }
