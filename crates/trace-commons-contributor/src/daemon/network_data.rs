@@ -1276,6 +1276,29 @@ mod tests {
         assert_eq!(got, fallback_answer());
     }
 
+    /// A configuration that cannot be read leaves no commons to ask: the
+    /// default lines, and nothing is sent. (With no configuration at all
+    /// the first run asks the channel's commons, as `first_run_estimate`.)
+    #[tokio::test]
+    async fn first_run_copy_falls_back_without_a_commons_to_ask() {
+        let (_dir, s) = shared();
+        std::fs::write(
+            s.store.dir().join("contributor.json"),
+            b"not a configuration",
+        )
+        .unwrap();
+        assert_eq!(first_run_estimate_target(&s.store), None);
+        let response = handle_first_run_copy(
+            &s,
+            &request(
+                "first_run_copy",
+                serde_json::json!({"trace_count": 10, "total_bytes": 0}),
+            ),
+        )
+        .await;
+        assert_eq!(response.result.expect("answers"), fallback_answer());
+    }
+
     /// Both figures are required, as whole numbers.
     #[tokio::test]
     async fn first_run_copy_needs_both_figures() {
