@@ -91,6 +91,13 @@ pub struct SourceCandidate {
     pub session_count: u64,
     /// The most recent session-file mtime, if any.
     pub most_recent: Option<DateTime<Utc>>,
+    /// The session files' total size in bytes, from the same metadata the
+    /// count reads. `None` when not measured: an OpenCode database, whose
+    /// sessions are rows rather than files, or a store that is not there.
+    /// The first run sends it, coarsened, to ask what to say about the
+    /// traces found (`trace_commons_protocol::first_run_copy`).
+    #[serde(default)]
+    pub total_bytes: Option<u64>,
     /// Whether an environment variable relocated this store, so a screen can
     /// say why the path is not the usual one.
     pub relocated_by_env: bool,
@@ -206,6 +213,7 @@ pub fn describe_opencode(path: &Path) -> SourceCandidate {
             exists: std::fs::symlink_metadata(path).is_ok(),
             session_count: refs.len() as u64,
             most_recent: refs.iter().filter_map(|r| r.group_modified_at).max(),
+            total_bytes: None,
             relocated_by_env: false,
             answers_at: None,
         };
@@ -280,6 +288,7 @@ pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
         exists: true,
         session_count: tally.count,
         most_recent: tally.most_recent,
+        total_bytes: Some(tally.bytes),
         relocated_by_env: false,
         answers_at: source_answers_at(source).map(str::to_string),
     };
@@ -359,6 +368,7 @@ fn is_claude_code_session_name(name: &str) -> bool {
 /// One layout walk's running count, and what is left of its entry budget.
 struct Tally {
     count: u64,
+    bytes: u64,
     most_recent: Option<DateTime<Utc>>,
     budget: usize,
 }
@@ -367,6 +377,7 @@ impl Tally {
     fn new() -> Self {
         Tally {
             count: 0,
+            bytes: 0,
             most_recent: None,
             budget: FOLDER_ENTRY_BUDGET,
         }
@@ -412,6 +423,9 @@ impl Tally {
     /// Count one session file, from metadata only.
     fn note(&mut self, meta: Option<std::fs::Metadata>) {
         self.count += 1;
+        self.bytes = self
+            .bytes
+            .saturating_add(meta.as_ref().map_or(0, std::fs::Metadata::len));
         if let Some(modified) = meta.and_then(|m| m.modified().ok()) {
             let stamp: DateTime<Utc> = modified.into();
             self.most_recent = Some(match self.most_recent {
@@ -531,11 +545,11 @@ fn describe(
     suffix: &str,
     walk: Walk,
 ) -> SourceCandidate {
-    let (exists, session_count, most_recent) = if path.is_dir() {
-        let (count, recent) = count_sessions(&path, suffix, walk);
-        (true, count, recent)
+    let (exists, session_count, most_recent, total_bytes) = if path.is_dir() {
+        let (count, recent, bytes) = count_sessions(&path, suffix, walk);
+        (true, count, recent, Some(bytes))
     } else {
-        (false, 0, None)
+        (false, 0, None, None)
     };
     SourceCandidate {
         source: source.to_string(),
@@ -543,6 +557,7 @@ fn describe(
         exists,
         session_count,
         most_recent,
+        total_bytes,
         relocated_by_env,
         answers_at: source_answers_at(source).map(str::to_string),
     }
@@ -557,8 +572,9 @@ fn describe(
 /// symlinks: a symlinked directory could point anywhere, and this is a
 /// counting pass whose whole justification is that it stays inside the store
 /// it is describing.
-fn count_sessions(root: &Path, suffix: &str, walk: Walk) -> (u64, Option<DateTime<Utc>>) {
+fn count_sessions(root: &Path, suffix: &str, walk: Walk) -> (u64, Option<DateTime<Utc>>, u64) {
     let mut count = 0_u64;
+    let mut bytes = 0_u64;
     let mut most_recent: Option<DateTime<Utc>> = None;
     let mut stack = vec![root.to_path_buf()];
 
@@ -596,7 +612,9 @@ fn count_sessions(root: &Path, suffix: &str, walk: Walk) -> (u64, Option<DateTim
                 continue;
             }
             count += 1;
-            if let Ok(meta) = entry.metadata()
+            let meta = entry.metadata().ok();
+            bytes = bytes.saturating_add(meta.as_ref().map_or(0, std::fs::Metadata::len));
+            if let Some(meta) = meta
                 && let Ok(modified) = meta.modified()
             {
                 let stamp: DateTime<Utc> = modified.into();
@@ -608,7 +626,7 @@ fn count_sessions(root: &Path, suffix: &str, walk: Walk) -> (u64, Option<DateTim
         }
     }
 
-    (count, most_recent)
+    (count, most_recent, bytes)
 }
 
 #[cfg(test)]
@@ -645,6 +663,27 @@ mod tests {
     fn write_session(dir: &Path, name: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join(name), b"{}\n").unwrap();
+    }
+
+    /// The session files' total size is summed beside the count, from the
+    /// files counted only; a store that is not there measures nothing.
+    #[test]
+    fn the_probe_sums_the_counted_session_files_sizes() {
+        let home = Scratch::new("bytes");
+        let chats = home.path().join(".gemini/tmp/proj/chats");
+        write_session(&chats, "session-a.json");
+        write_session(&chats, "session-b.json");
+        std::fs::write(chats.join("notes.txt"), b"not a session, not counted").unwrap();
+        let found = probe(home.path(), no_env);
+        let gemini = found
+            .iter()
+            .find(|c| c.source == SOURCE_GEMINI_CLI)
+            .unwrap();
+        assert_eq!(gemini.session_count, 2);
+        assert_eq!(gemini.total_bytes, Some(6));
+        let codex = found.iter().find(|c| c.source == SOURCE_CODEX).unwrap();
+        assert!(!codex.exists);
+        assert_eq!(codex.total_bytes, None);
     }
 
     #[test]
@@ -948,6 +987,8 @@ mod tests {
         assert!(row.exists);
         assert_eq!(row.session_count, 2);
         assert!(row.most_recent.is_some());
+        // Two three-byte session files, measured from the same metadata.
+        assert_eq!(row.total_bytes, Some(6));
         assert!(!row.relocated_by_env);
         assert_eq!(row.answers_at, Some("Anthropic".to_string()));
     }

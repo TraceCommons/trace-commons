@@ -487,6 +487,9 @@ tc_handle*  tc_daemon_attach(const char* config_dir, char** err);
  *   exists            whether that store is there right now
  *   session_count     how many sessions were discovered
  *   most_recent       RFC 3339 timestamp, or null
+ *   total_bytes       the counted session files' total size, or null
+ *                     when not measured (an OpenCode database, or a
+ *                     store that is not there)
  *   relocated_by_env  whether an environment override moved it
  *   answers_at        the vendor this tool's own calls answer at by
  *                     default (e.g. "Anthropic"), or null for a tool with

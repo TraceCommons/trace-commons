@@ -3,6 +3,9 @@
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
+use trace_commons_protocol::first_run_copy::{
+    FirstRunCopyLines, FirstRunCopyRequest, default_lines,
+};
 use trace_commons_protocol::invite_lookup::{
     CREDIT_RANGE_UNIT_POINTS, InviteLookupResponse, valid_credit_range, valid_issuer_display_name,
 };
@@ -245,6 +248,47 @@ async fn first_run_estimate(
         crate::credit_estimate_table::EstimateTableClient::new(origin.as_str(), allowed.as_deref())
             .ok()?;
     client.fetch_first_run_estimate().await.ok().flatten()
+}
+
+/// `first_run_copy`: the lines the first run's Traces step shows under the
+/// traces found, asked of the commons (`POST /v1/public/first-run-copy`)
+/// once the first run has started the daemon. `trace_count` and
+/// `total_bytes` are the shell's own figures; they are coarsened here
+/// (`FirstRunCopyRequest::coarsened`) before anything leaves the machine.
+///
+/// It always answers, with `source` saying whose lines they are:
+/// `commons` for lines the commons sent that pass validation, `fallback`
+/// for the protocol's default lines when the commons cannot be reached,
+/// times out, refuses the request, answers with anything but a document
+/// whose every line passes validation, or there is no commons to ask. The
+/// request is anonymous, to the same commons [`handle_first_run_estimate`]
+/// asks.
+pub(crate) async fn handle_first_run_copy(shared: &DaemonShared, req: &Request) -> Response {
+    let figure = |name: &str| req.params.get(name).and_then(serde_json::Value::as_u64);
+    let (Some(trace_count), Some(total_bytes)) = (figure("trace_count"), figure("total_bytes"))
+    else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "first-run-copy-params-invalid");
+    };
+    let request = FirstRunCopyRequest::coarsened(trace_count, total_bytes);
+    let (lines, source) = match first_run_copy(shared, &request).await {
+        Some(lines) => (lines, "commons"),
+        None => (default_lines(), "fallback"),
+    };
+    let mut answer = serde_json::to_value(lines).expect("lines serialize");
+    answer["source"] = serde_json::Value::from(source);
+    Response::ok(req.id, answer)
+}
+
+async fn first_run_copy(
+    shared: &DaemonShared,
+    request: &FirstRunCopyRequest,
+) -> Option<FirstRunCopyLines> {
+    let (ingest, allowed) = first_run_estimate_target(&shared.store)?;
+    let origin = crate::config::ingest_origin_url(&ingest, "/").ok()?;
+    let client =
+        crate::credit_estimate_table::EstimateTableClient::new(origin.as_str(), allowed.as_deref())
+            .ok()?;
+    client.fetch_first_run_copy(request).await.ok()
 }
 
 /// The configured commons and its host policy, as the estimate table's
@@ -1085,6 +1129,174 @@ mod tests {
                 "https://commons.example/v1/traces".to_string(),
                 Some("127.0.0.1".to_string())
             ))
+        );
+    }
+
+    /// Serve `answer` (status, body) on the first-run copy route, ask
+    /// through the daemon with the owner's 4,123 traces, and return the
+    /// daemon's answer and the request bodies the route saw.
+    async fn first_run_copy_against(
+        answer: Option<(axum::http::StatusCode, String)>,
+        delay: std::time::Duration,
+    ) -> (serde_json::Value, Vec<serde_json::Value>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = seen.clone();
+        let router = match answer {
+            Some((status, body)) => Router::new().route(
+                trace_commons_protocol::first_run_copy::FIRST_RUN_COPY_PATH,
+                post(
+                    move |headers: axum::http::HeaderMap, Json(request): Json<serde_json::Value>| {
+                        let body = body.clone();
+                        let observed = observed.clone();
+                        async move {
+                            for header in ["authorization", "cookie", "x-tenant-id"] {
+                                assert!(!headers.contains_key(header), "{header} was sent");
+                            }
+                            observed.lock().unwrap().push(request);
+                            tokio::time::sleep(delay).await;
+                            (status, body)
+                        }
+                    },
+                ),
+            ),
+            None => Router::new(),
+        };
+        let (port, task) = serve(router).await;
+        let (_dir, s) = shared();
+        configure_origin(&s, &format!("http://127.0.0.1:{port}/v1/traces"));
+        let response = super::super::ipc::handle_request_async(
+            &s,
+            &request(
+                "first_run_copy",
+                serde_json::json!({"trace_count": 4123, "total_bytes": 987_654_321_u64}),
+            ),
+        )
+        .await;
+        task.abort();
+        let seen = seen.lock().unwrap().clone();
+        (
+            response.result.expect("first_run_copy always answers"),
+            seen,
+        )
+    }
+
+    fn fallback_answer() -> serde_json::Value {
+        serde_json::json!({
+            "found_credit": trace_commons_protocol::first_run_copy::DEFAULT_FOUND_CREDIT,
+            "found_could_credit": trace_commons_protocol::first_run_copy::DEFAULT_FOUND_COULD_CREDIT,
+            "credit_depends": trace_commons_protocol::first_run_copy::DEFAULT_CREDIT_DEPENDS,
+            "source": "fallback",
+        })
+    }
+
+    /// The commons' lines come back marked `commons`, and what left the
+    /// machine was coarsened: 4,123 traces is 4,100, 942 MiB is 940 MiB.
+    /// Synthetic lines.
+    #[tokio::test]
+    async fn first_run_copy_relays_the_commons_lines_and_sends_coarse_figures() {
+        let lines = serde_json::json!({
+            "found_credit": "SAMPLE line.",
+            "found_could_credit": "SAMPLE could line.",
+        });
+        let (answer, seen) = first_run_copy_against(
+            Some((axum::http::StatusCode::OK, lines.to_string())),
+            std::time::Duration::ZERO,
+        )
+        .await;
+        assert_eq!(
+            answer,
+            serde_json::json!({
+                "found_credit": "SAMPLE line.",
+                "found_could_credit": "SAMPLE could line.",
+                "source": "commons",
+            })
+        );
+        assert_eq!(
+            seen,
+            vec![serde_json::json!({"trace_count": 4100, "total_bytes": 985_661_440_u64})]
+        );
+    }
+
+    /// Every way the commons can fail to give usable lines is the default
+    /// lines, marked `fallback`.
+    #[tokio::test]
+    async fn first_run_copy_falls_back_on_every_failure() {
+        use axum::http::StatusCode;
+        let valid = serde_json::json!({
+            "found_credit": "SAMPLE line.", "found_could_credit": "SAMPLE could line."
+        });
+        let mut bad_line = valid.clone();
+        bad_line["found_credit"] = "The daemon says <b>hi</b>.".into();
+        let cases: Vec<(&str, Option<(StatusCode, String)>)> = vec![
+            ("no route", None),
+            ("400", Some((StatusCode::BAD_REQUEST, valid.to_string()))),
+            ("429", Some((StatusCode::TOO_MANY_REQUESTS, valid.to_string()))),
+            ("500", Some((StatusCode::INTERNAL_SERVER_ERROR, valid.to_string()))),
+            ("not json", Some((StatusCode::OK, "not json".into()))),
+            ("not an object", Some((StatusCode::OK, "[]".into()))),
+            ("no headline", Some((StatusCode::OK, "{}".into()))),
+            ("a bad line", Some((StatusCode::OK, bad_line.to_string()))),
+            (
+                "too large",
+                Some((
+                    StatusCode::OK,
+                    serde_json::json!({
+                        "found_credit": "a.", "found_could_credit": "b.",
+                        "padding": "x".repeat(16 * 1024),
+                    })
+                    .to_string(),
+                )),
+            ),
+        ];
+        for (case, answer) in cases {
+            let (got, _) = first_run_copy_against(answer, std::time::Duration::ZERO).await;
+            assert_eq!(got, fallback_answer(), "{case}");
+        }
+    }
+
+    /// A commons slower than the first run will wait is the default lines.
+    #[tokio::test]
+    async fn first_run_copy_falls_back_on_a_timeout() {
+        let lines = serde_json::json!({
+            "found_credit": "SAMPLE line.", "found_could_credit": "SAMPLE could line."
+        });
+        let (got, _) = first_run_copy_against(
+            Some((axum::http::StatusCode::OK, lines.to_string())),
+            crate::credit_estimate_table::FIRST_RUN_COPY_TIMEOUT + std::time::Duration::from_secs(2),
+        )
+        .await;
+        assert_eq!(got, fallback_answer());
+    }
+
+    /// Both figures are required, as whole numbers.
+    #[tokio::test]
+    async fn first_run_copy_needs_both_figures() {
+        let (_dir, s) = shared();
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({"trace_count": 10}),
+            serde_json::json!({"trace_count": -1, "total_bytes": 0}),
+            serde_json::json!({"trace_count": "10", "total_bytes": 0}),
+        ] {
+            let response = handle_first_run_copy(&s, &request("first_run_copy", params)).await;
+            assert_eq!(
+                response.error.expect("refused").message,
+                "first-run-copy-params-invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn first_run_copy_is_advertised_and_async_only() {
+        assert!(super::super::ipc::METHODS.contains(&"first_run_copy"));
+        let (_dir, s) = shared();
+        let response = super::super::ipc::handle_request(
+            &s,
+            &request("first_run_copy", serde_json::json!({})),
+        );
+        assert_eq!(
+            response.error.expect("refused synchronously").message,
+            "first-run-copy-requires-async"
         );
     }
 
