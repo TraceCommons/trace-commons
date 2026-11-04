@@ -191,12 +191,20 @@ pub struct PublicProfileWords {
     pub update_profile: &'static str,
     /// Takes the handle off the roster.
     pub withdraw: &'static str,
+    /// Withdraw's accessible name, naming what it withdraws, apart from a
+    /// trace's Withdraw (copy-guide rule 5). DRAFT, NEEDS APPROVAL
+    /// (2026-11-04).
+    pub withdraw_accessibility_name: &'static str,
     /// `{date}`: when the handle went public.
     pub on_roster_since: &'static str,
     pub go_public_headline: &'static str,
     /// Approved 2026-10-07.
     pub go_public_description: &'static str,
+    /// The dialog's confirm button.
     pub go_public: &'static str,
+    /// The card's button that opens the dialog: the same words as the
+    /// confirm button, its own key (copy-guide rule 4).
+    pub go_public_open: &'static str,
     pub going_public: &'static str,
     pub not_now: &'static str,
     pub published_heading: &'static str,
@@ -234,7 +242,7 @@ pub struct PublicProfileWords {
 
 #[must_use]
 pub fn public_profile_words() -> PublicProfileWords {
-    let not_connected = "This device isn't connected to Trace Commons.";
+    let not_connected = "This device isn't connected.";
     PublicProfileWords {
         heading: "Public profile",
         list_handle_publicly: "List my handle publicly",
@@ -246,6 +254,7 @@ pub fn public_profile_words() -> PublicProfileWords {
         bio: "Bio",
         update_profile: "Update profile",
         withdraw: "Withdraw",
+        withdraw_accessibility_name: "Withdraw public profile",
         on_roster_since: "On the roster since {date}",
         go_public_headline: "Put your handle on the public roster?",
         go_public_description: concat!(
@@ -253,6 +262,7 @@ pub fn public_profile_words() -> PublicProfileWords {
             "trace data."
         ),
         go_public: "Go public",
+        go_public_open: "Go public",
         going_public: "Going public\u{2026}",
         not_now: "Not now",
         published_heading: "What gets published",
@@ -519,7 +529,7 @@ pub fn settings_words() -> SettingsWords {
         ),
         updates_off: "Updates are turned off for this build.",
         notifications_rendered_here: "Notifications rendered by this app",
-        paused_nothing_sent: "Paused. Nothing is being queued or sent.",
+        paused_nothing_sent: PAUSED_NOTHING_SENT,
         applies_from_now: concat!(
             "Applies to traces sent from now on. The always-included use stays on; ",
             "optional uses change only when you change them."
@@ -548,6 +558,39 @@ pub fn settings_words() -> SettingsWords {
     }
 }
 
+/// Uploads are paused by the person. One sentence, read by Settings
+/// (`SettingsWords::paused_nothing_sent`) and by the Traces tab's resume
+/// notice (`PausedNoticeWords::body`).
+pub const PAUSED_NOTHING_SENT: &str = "Paused. Nothing is being queued or sent.";
+
+// ---------------------------------------------------------------------------
+// The Traces tab's resume notice
+
+/// The notice the Traces tab shows each time it is opened while the person
+/// has paused uploads, and only then: never while uploads run, nor while
+/// they are held for another reason (the account needs attention, automatic
+/// contribution is held, or this device is not enrolled). The notice and
+/// its words were approved by the owner 2026-11-04.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct PausedNoticeWords {
+    /// [`PAUSED_NOTHING_SENT`], the same sentence Settings says.
+    pub body: &'static str,
+    /// Approved 2026-11-04. Resumes uploads (the daemon's `resume`).
+    pub resume: &'static str,
+    /// Approved 2026-11-04. Hides the notice until the Traces tab is next
+    /// opened.
+    pub not_now: &'static str,
+}
+
+#[must_use]
+pub fn paused_notice_words() -> PausedNoticeWords {
+    PausedNoticeWords {
+        body: PAUSED_NOTHING_SENT,
+        resume: "Resume",
+        not_now: "Not now",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The table
 
@@ -560,6 +603,7 @@ pub struct ShellWordsCopy {
     pub history: HistoryWords,
     pub scrubbing: ScrubbingWords,
     pub settings: SettingsWords,
+    pub paused_notice: PausedNoticeWords,
 }
 
 #[must_use]
@@ -571,12 +615,27 @@ pub fn shell_words_copy() -> ShellWordsCopy {
         history: history_words(),
         scrubbing: scrubbing_words(),
         settings: settings_words(),
+        paused_notice: paused_notice_words(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The resume notice says Settings' own paused sentence, not a copy of
+    /// it, with the two labels approved 2026-11-04.
+    #[test]
+    fn the_paused_notice_reuses_the_settings_sentence() {
+        let copy = shell_words_copy();
+        assert_eq!(copy.paused_notice.body, copy.settings.paused_nothing_sent);
+        assert_eq!(
+            copy.paused_notice.body,
+            "Paused. Nothing is being queued or sent."
+        );
+        assert_eq!(copy.paused_notice.resume, "Resume");
+        assert_eq!(copy.paused_notice.not_now, "Not now");
+    }
 
     fn strings(value: &serde_json::Value, out: &mut Vec<String>) {
         match value {

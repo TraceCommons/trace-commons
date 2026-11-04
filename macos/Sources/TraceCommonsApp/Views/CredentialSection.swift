@@ -22,46 +22,27 @@ struct CredentialSection: View {
     /// Whether the section draws its own title. Inside #1146's connection
     /// panel it does not: the panel's title is the heading.
     var titled = true
-    /// The first provider this build offers (the daemon's default): the
-    /// NEAR wallet in production, NEAR AI's Google login in staging.
-    @State private var ownProvider = CredentialSection.offeredProviders.first ?? ""
-    /// Where the provider choice lives when the caller holds it. `nil` -- every
-    /// production caller -- keeps it in this view's own state.
-    ///
-    /// A test seam, and the only one: on macOS 27 SwiftUI draws the picker
-    /// itself, with no `NSPopUpButton` beneath it and no accessibility node in
-    /// an offscreen host, so a test cannot reach the control to change it.
-    /// Holding the same binding the picker writes lets it make the same change.
-    var providerSelection: Binding<String>? = nil
+    /// Where it is drawn (Settings IA, owner 2026-11-04). The account
+    /// section holds the NEAR AI login whole; Private AI keeps only the way
+    /// in (D8), and draws nothing while signed in.
+    var placement: Placement = .account
 
-    private var selection: Binding<String> { providerSelection ?? $ownProvider }
-    private var provider: String { selection.wrappedValue }
-
-    /// The sign-in providers the picker offers, in the order it offers them.
-    /// The titles are `PrivateInferenceCopy`'s; the tags are the daemon's
-    /// `provider` values.
-    struct ProviderOption: Hashable {
-        let tag: String
-        let title: String
+    enum Placement: Equatable {
+        /// The NEAR AI login in full, but never Forget: Sign out replaces it
+        /// (D3, spec Q1 answered no).
+        case account
+        /// Only Sign in, or Cancel while one runs; nothing otherwise (D8).
+        case signInShortcut
     }
 
-    /// The providers this build offers, as the core reports them
-    /// (`tc_build_channel_json`): a staging build offers NEAR AI's Google
-    /// login only.
-    static var offeredProviders: [String] { BuildChannelGate.dylibChannel?.nearAiSignInProviders ?? [] }
-
-    /// `offered`, in its order, with the core's title for each. A provider
-    /// this build has no title for is not drawn.
-    static func providerOptions(
-        _ copy: PrivateInferenceCopy, offered: [String] = CredentialSection.offeredProviders
-    ) -> [ProviderOption] {
-        offered.compactMap { tag in
-            switch tag {
-            case "near": return ProviderOption(tag: tag, title: copy.credentialProviderNear)
-            case "github": return ProviderOption(tag: tag, title: copy.credentialProviderGithub)
-            case "google": return ProviderOption(tag: tag, title: copy.credentialProviderGoogle)
-            default: return nil
-            }
+    /// The buttons a placement may draw: Forget nowhere, and the shortcut
+    /// only the way in.
+    static func draws(_ action: CredentialAction, in placement: Placement) -> Bool {
+        switch (action, placement) {
+        case (.forget, _), (.none, _): false
+        case (.obtain, _), (.cancel, _): true
+        case (.migrate, .account): true
+        case (.migrate, .signInShortcut): false
         }
     }
 
@@ -74,6 +55,28 @@ struct CredentialSection: View {
         let balanceAction = requiresSession ? CredentialAction.none : BalanceSurface.actionToDraw(
             balance: BalanceSurface.action(model.balanceStatus, calls: model.balanceCalls),
             credential: action)
+        if Self.shows(action: action, balanceAction: balanceAction, in: placement) {
+            card(status: status, tone: tone, action: action, balanceAction: balanceAction)
+        }
+    }
+
+    /// Whether the card is drawn. The account section always draws it.
+    /// Private AI's shortcut steps aside only while a NEAR AI login is held
+    /// (Forget or the keychain move would be the card's button), unless the
+    /// balance still asks for a sign-in: before a login, and while the state
+    /// is unread, it says what signing in is for (D8).
+    static func shows(action: CredentialAction, balanceAction: CredentialAction, in placement: Placement) -> Bool {
+        switch placement {
+        case .account: true
+        case .signInShortcut:
+            draws(balanceAction, in: placement) || (action != .forget && action != .migrate)
+        }
+    }
+
+    @ViewBuilder
+    private func card(
+        status: CredentialStatus, tone: PrivateInferenceTone, action: CredentialAction, balanceAction: CredentialAction
+    ) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             if !titled {
                 // Drawn inside the connection card, which is its heading.
@@ -100,45 +103,18 @@ struct CredentialSection: View {
             // action, not from a branch here, and it is drawn ABOVE the
             // button: what pressing it costs is not a footnote to having
             // pressed it.
-            if let explains = CredentialSurface.actionExplains(action, copy: copy) {
+            if Self.draws(action, in: placement), let explains = CredentialSurface.actionExplains(action, copy: copy) {
                 Text(explains)
                     .glassType(GlassTokens.TypeScale.body)
                     .foregroundStyle(GlassColor.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if action == .obtain || balanceAction == .obtain {
-                // The glass pill shows only the chosen provider, so the
-                // chooser's own word is drawn beside it, as the native
-                // picker drew its label. VoiceOver hears it once, from the
-                // pill, which carries both the label and the value.
-                HStack(spacing: GlassTokens.Space.s4) {
-                    Text(copy.credentialProviderLabel)
-                        .glassType(GlassTokens.TypeScale.label)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .accessibilityHidden(true)
-                    GlassPicker(
-                        copy.credentialProviderLabel,
-                        selection: Binding(
-                            get: { provider },
-                            set: { if let value = $0 { selection.wrappedValue = value } }),
-                        options: Self.providerOptions(copy).map { GlassPickerOption($0.title, value: $0.tag) },
-                        placeholder: copy.credentialProviderLabel)
-                }
-                .frame(minHeight: 44)
-                .disabled(model.credentialBusy)
-                if provider == "near" {
-                    Text(copy.credentialWalletNotice)
-                        .glassType(GlassTokens.TypeScale.body)
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
             actionButton(action)
             // The balance and funding are their own panels after this card,
             // as #1146 draws them (`PrivateAIBalanceCard`, `FundingRow`). The
-            // sign-in the balance needs stays here, beside the provider
-            // chooser it uses, and never doubles this card's own button: the
-            // decision is `BalanceSurface.actionToDraw`'s, not this view's.
+            // sign-in the balance needs stays here, and never doubles this
+            // card's own button: the decision is `BalanceSurface.actionToDraw`'s,
+            // not this view's.
             actionButton(balanceAction)
         }
     }
@@ -155,7 +131,7 @@ struct CredentialSection: View {
     /// Only a write already in flight greys the button.
     @ViewBuilder
     private func actionButton(_ action: CredentialAction) -> some View {
-        if let label = CredentialSurface.actionLabel(action, copy: copy) {
+        if Self.draws(action, in: placement), let label = CredentialSurface.actionLabel(action, copy: copy) {
             Button(label) { run(action) }
                 .buttonStyle(GlassButtonStyle(prominent && action == .obtain ? .primary : .glass))
                 .disabled(model.credentialBusy)
@@ -168,7 +144,9 @@ struct CredentialSection: View {
             Task {
                 // The URL is served once, by start. Opening it is this
                 // view's environment; the model has no window.
-                guard let url = await model.startNearAiCredential(provider: provider) else { return }
+                // No provider; the daemon's browser page lists the build's
+                // logins, and the wallet's notice with them (owner, 2026-11-02).
+                guard let url = await model.startNearAiCredential() else { return }
                 let accepted = await openURL.opened(url)
                 // A browser that never opened leaves a ceremony nobody can
                 // finish, so it is stopped rather than left to time out.

@@ -126,6 +126,9 @@ fn refusal(code: &str) -> anyhow::Error {
     if code == super::PROJECT_CHOOSES_MODEL_LABEL {
         return ManagedError::ProjectChoosesModel.into();
     }
+    if code == super::PROJECT_SETS_AUTO_MODE_SERVER_LABEL {
+        return ManagedError::ProjectSetsAutoModeServer.into();
+    }
     anyhow::anyhow!("{code}")
 }
 
@@ -503,6 +506,14 @@ mod tests {
     /// A refusal the person can act on reads as its sentence in the
     /// terminal, not as its label (owner, 2026-11-01); any other refusal
     /// keeps its label.
+    #[test]
+    fn a_project_auto_mode_server_refusal_prints_why() {
+        assert_eq!(
+            refusal(crate::managed::PROJECT_SETS_AUTO_MODE_SERVER_LABEL).to_string(),
+            "Remove CLAUDE_CODE_AUTO_MODE_SERVER from this project's settings."
+        );
+    }
+
     #[test]
     fn a_project_model_refusal_prints_why() {
         assert_eq!(

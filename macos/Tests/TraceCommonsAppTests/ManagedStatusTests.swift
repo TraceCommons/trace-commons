@@ -94,22 +94,23 @@ final class ManagedStatusTests: XCTestCase {
     }
 
     /// (d) The list not read yet: the sessions card says it is connecting,
-    /// with Retry as the card's own re-read icon, the size the balance
-    /// card's is (owner, 2026-10-22), in the core's words even before the
-    /// daemon has sent its table.
-    func test_anUnreadListSaysConnectingWithRetry() throws {
+    /// with the card's own re-read control, the size the balance card's is
+    /// (owner, 2026-10-22), in the core's words even before the daemon has
+    /// sent its table. It says "Refresh", as every refresh pill does (owner,
+    /// 2026-11-02; it was named "Retry" while it was a bare icon).
+    func test_anUnreadListSaysConnectingWithRefresh() throws {
         let source = try Self.source()
         for needle in [
             "} else {\n                connectingCard\n            }",
             "subtitle: [model.managedText(\"connecting\")]",
-            "refresh: .init(model.managedText(\"retry\"), isDisabled: model.managedBusy) {",
+            "refresh: .init(model.managedText(\"refresh\"), isDisabled: model.managedBusy) {",
         ] {
             XCTAssertTrue(source.contains(needle), "ManagedSessionsView.swift lacks \(needle)")
         }
         XCTAssertFalse(source.contains("Label(model.managedText(\"retry\")"), "Retry is a capsule again")
         let model = AppModel()
         XCTAssertNil(model.managedSnapshot)
-        for key in ["title", "connecting", "retry"] {
+        for key in ["title", "connecting", "refresh"] {
             XCTAssertFalse(model.managedText(key).isEmpty, "\(key) has no words before the first read")
         }
     }

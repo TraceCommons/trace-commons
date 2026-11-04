@@ -24,6 +24,7 @@ enum PublicProfileCopy {
     static var saveProfile: String { words?.updateProfile ?? "" }
     /// Takes the handle off the roster (#1146's "Withdraw").
     static var leaveRoster: String { words?.withdraw ?? "" }
+    static var leaveRosterAccessibilityName: String { words?.withdrawAccessibilityName ?? "" }
 
     static func onRosterSince(_ date: String) -> String {
         ShellWords.fill(words?.onRosterSince ?? "", ["date": date])
@@ -34,6 +35,8 @@ enum PublicProfileCopy {
     static var goPublicHeadline: String { words?.goPublicHeadline ?? "" }
     static var goPublicDescription: String { words?.goPublicDescription ?? "" }
     static var goPublicConfirm: String { words?.goPublic ?? "" }
+    /// The card's button that opens the dialog: its own key (rule 4).
+    static var goPublicOpen: String { words?.goPublicOpen ?? "" }
     static var goingPublic: String { words?.goingPublic ?? "" }
     static var notNow: String { words?.notNow ?? "" }
     static var publishedHeading: String { words?.publishedHeading ?? "" }

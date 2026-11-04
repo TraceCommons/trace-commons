@@ -41,30 +41,56 @@ struct FolderInspector: View {
             // (`MonitorWindowView`), and a scroll nested in it was sized
             // short of its content and cut off the Decisions card's Submit
             // (owner, 2026-10-19).
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                InspectorHeader(tile: .folder, title: folder.label, sub: Self.headerSub(folder, words: words))
-                // The legend says its words or is not drawn, as the Summary's.
-                if let table = MonitorWords.table {
-                    HStack(spacing: GlassTokens.Space.s3) {
-                        GlassLegendCell(table.shared, value: Self.shared(folder, history: history), status: .shared)
-                        GlassLegendCell(table.kept, value: String(folder.sessions.count), status: .kept)
+            ScrollViewReader { proxy in
+                VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                    InspectorHeader(tile: .folder, title: folder.label, sub: Self.headerSub(folder, words: words))
+                    // The legend says its words or is not drawn, as the Summary's.
+                    if let table = MonitorWords.table {
+                        HStack(spacing: GlassTokens.Space.s3) {
+                            GlassLegendCell(table.shared, value: Self.shared(folder, history: history), status: .shared)
+                            GlassLegendCell(table.kept, value: String(folder.sessions.count), status: .kept)
+                        }
+                    }
+                    // The rule first, under the legend (owner, 2026-10-19), then
+                    // the folder's details, then what waits on a decision.
+                    InspectorSection(words.inspector.contributionRule) {
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) { rule(words) }
+                    }
+                    InspectorSection(words.inspector.projectDetails) {
+                        GlassKeyValueList(Self.rows(folder, words: words))
+                    }
+                    if !folder.sessions.isEmpty && folder.mode != .ignore {
+                        InspectorSection(words.inspector.decisions) {
+                            decisions(words)
+                        }
+                    }
+                    // Room for the Submit menu under the Decisions card, the
+                    // last thing in the column: without it the column's
+                    // scroll ends at the card and cuts the menu off.
+                    if submitMenuOpen {
+                        Color.clear
+                            .frame(height: Self.submitMenuRoom)
+                            .id(Self.submitMenuRoomID)
+                            .accessibilityHidden(true)
                     }
                 }
-                // The rule first, under the legend (owner, 2026-10-19), then
-                // the folder's details, then what waits on a decision.
-                InspectorSection(words.inspector.contributionRule) {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) { rule(words) }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                // The Submit menu floats over the column, not inside the
+                // Decisions card: a card clips what it holds, and hid the
+                // menu under its bottom edge (bug bash, 2026-10-29).
+                .overlayPreferenceValue(TracesMenuAnchors.self, alignment: .topLeading) { anchors in
+                    GeometryReader { space in submitMenu(anchors[Self.submitMenuAnchor], in: space) }
                 }
-                InspectorSection(words.inspector.projectDetails) {
-                    GlassKeyValueList(Self.rows(folder, words: words))
-                }
-                if !folder.sessions.isEmpty && folder.mode != .ignore {
-                    InspectorSection(words.inspector.decisions) {
-                        decisions(words)
+                .onChange(of: submitMenuOpen) { _, open in
+                    guard open else { return }
+                    // Once the room is laid out.
+                    Task { @MainActor in
+                        withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) {
+                            proxy.scrollTo(Self.submitMenuRoomID)
+                        }
                     }
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
             // Whole-window confirmations, as the tree's: the destructive
             // action right-most and never on Return; Escape cancels.
             .glassModal(isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } })) {
@@ -160,19 +186,10 @@ struct FolderInspector: View {
                         Task { await store.contributeFolder(folder, verdict: nil) }
                     }
                     .actionHelp(TracesTreeView.submitHelp(offer.withheldLine, words: words))
-                    .overlay(alignment: .topTrailing) {
-                        if submitMenuOpen {
-                            TracesSubmitMenu(
-                                label: outcome.submitAllAs, tip: outcome.submitAllAsTooltip,
-                                onPick: {
-                                    submitMenuOpen = false
-                                    choosingVerdict = true
-                                },
-                                onDismiss: { submitMenuOpen = false })
-                                .offset(y: GlassTokens.Size.controlLarge + GlassTokens.Space.s2)
-                        }
+                    // Its menu is drawn over the column (`submitMenu`).
+                    .anchorPreference(key: TracesMenuAnchors.self, value: .bounds) {
+                        submitMenuOpen ? [Self.submitMenuAnchor: $0] : [:]
                     }
-                    .zIndex(submitMenuOpen ? 1 : 0)
                 } else if submits {
                     Button(title) { Task { await store.contributeFolder(folder, verdict: nil) } }
                         .buttonStyle(GlassButtonStyle(.glass))
@@ -186,8 +203,6 @@ struct FolderInspector: View {
             }
             .lineLimit(1)
             .disabled(busy)
-            // Its menu floats over what follows the buttons.
-            .zIndex(submitMenuOpen ? 1 : 0)
             // A refused write, under the buttons it is about.
             if let refused = store.writeErrors[folder.id] {
                 GlassAlert(words.line(for: refused))
@@ -195,6 +210,40 @@ struct FolderInspector: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    /// The Submit split button's menu (owner, 2026-10-19), under the
+    /// button with their trailing edges together; a menu wider than what
+    /// lies left of that edge starts at the column's edge, not past it.
+    @ViewBuilder
+    private func submitMenu(_ anchor: Anchor<CGRect>?, in space: GeometryProxy) -> some View {
+        if submitMenuOpen, let anchor, let outcome = store.disclosure?.outcome {
+            let button = space[anchor]
+            TracesSubmitMenu(
+                label: outcome.submitAllAs, tip: outcome.submitAllAsTooltip,
+                onPick: {
+                    submitMenuOpen = false
+                    choosingVerdict = true
+                },
+                onDismiss: { submitMenuOpen = false })
+                .disabled(store.writing.contains(folder.id))
+                .frame(minWidth: button.maxX, alignment: .trailing)
+                .offset(y: button.minY + Self.submitMenuDrop)
+        }
+    }
+
+    /// The split button's key in `TracesMenuAnchors`.
+    static let submitMenuAnchor = "folder-inspector-submit"
+    /// The room under the Decisions card's `id`, scrolled to as the menu
+    /// opens.
+    static let submitMenuRoomID = "folder-inspector-submit-menu-room"
+    /// How far under the split button's top its menu sits.
+    static let submitMenuDrop = GlassTokens.Size.controlLarge + GlassTokens.Space.s2
+    /// The room the menu needs under the Decisions card: how far it
+    /// reaches below the split button (its drop, and one row in the
+    /// panel's inset, less the button's height), less the quiet card's
+    /// 10pt bottom inset and the column's gap before the room.
+    static let submitMenuRoom = submitMenuDrop + GlassTokens.Space.s5 * 2 + GlassTokens.Size.control
+        - GlassTokens.Size.controlLarge - 10 - GlassTokens.Space.cardGap
 
     /// Ron's `SubmitAllAsControl` (`SubmitAllAsModal`), shared with the
     /// folder row's Submit split button.

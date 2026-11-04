@@ -1,11 +1,13 @@
 //! Local saved accounts and explicitly managed native-tool sessions.
 
 pub mod accounts;
+pub mod catalogue_cache;
 pub mod cli;
 pub mod codex;
 pub mod codex_hooks;
 pub mod collection_plan;
 pub mod folder;
+pub mod herdr;
 pub mod models;
 pub mod native_collection;
 pub mod opencode;
@@ -131,7 +133,8 @@ pub enum ManagedError {
     SignInRequired,
     #[error("sign in to NEAR AI before launching")]
     NearAiSignInRequired,
-    #[error("start the {} daemon before launching", crate::brand::APP_NAME)]
+    /// DRAFT, NEEDS APPROVAL (2026-11-04).
+    #[error("open the {} app before launching", crate::brand::APP_NAME)]
     DaemonUnavailable,
     #[error("launch status unknown; reconcile before retrying")]
     LaunchUnknown,
@@ -151,6 +154,22 @@ pub enum ManagedError {
         "This project's Claude Code settings, agents, commands or skills choose a model. NEAR AI sessions use the session's models."
     )]
     ProjectChoosesModel,
+    /// A NEAR AI Claude Code launch whose project's settings set
+    /// `CLAUDE_CODE_AUTO_MODE_SERVER` (owner-approved wording, 2026-11-02).
+    #[error("Remove CLAUDE_CODE_AUTO_MODE_SERVER from this project's settings.")]
+    ProjectSetsAutoModeServer,
+    /// Something at herdr's socket path that this account cannot trust
+    /// (owner-approved wording, 2026-11-03). Refused before the ticket.
+    #[error("herdr's connection file can't be trusted. Remove it or check its permissions.")]
+    HerdrSocketUntrusted,
+    /// Rex is installed but its app did not connect in time
+    /// (owner-approved wording, 2026-11-03). Refused before the ticket.
+    #[error("Rex didn't open in time. Try again.")]
+    RexNotReady,
+    /// A terminal app's own command failed or gave nothing before the
+    /// ticket was sent. Shells show the general failure line.
+    #[error("the terminal app's command failed")]
+    TerminalCallFailed,
 }
 
 /// The daemon's label for [`ManagedError::ProjectChoosesModel`], which the
@@ -158,6 +177,12 @@ pub enum ManagedError {
 /// `project_chooses_model` line.
 pub const PROJECT_CHOOSES_MODEL_LABEL: &str = "managed-project-chooses-model";
 
+/// The daemon's label for [`ManagedError::ProjectSetsAutoModeServer`], which
+/// the CLI turns back into its sentence and the shells map to the shared
+/// `project_sets_auto_mode_server` line.
+pub const PROJECT_SETS_AUTO_MODE_SERVER_LABEL: &str = "managed-project-sets-auto-mode-server";
+
 pub mod copy;
+pub mod rex;
 pub mod route;
 pub mod terminal;

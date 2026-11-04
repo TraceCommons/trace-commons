@@ -2924,7 +2924,7 @@ async fn an_incomplete_withdrawal_is_counted_until_the_legacy_worker_completes_i
 /// The gate configuration the route tests start ingest with, and the one their
 /// production-compatible packages hold: the floors of the runtime suite's
 /// `production_compatible_config`.
-const ROUTE_MAIN_GATE: MainGateConfig = MainGateConfig {
+pub(super) const ROUTE_MAIN_GATE: MainGateConfig = MainGateConfig {
     perplexity_floor_micros: Some(1_000),
     tail_fraction_floor_micros: Some(1_000),
     novelty_floor_micros: Some(1_000),
@@ -2935,6 +2935,7 @@ const ROUTE_MAIN_GATE: MainGateConfig = MainGateConfig {
     chunk_cap: 16,
     chunk_min_tokens: 64,
     novelty_utility_microcredits: 0,
+    credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
 };
 
 /// The index ids of A (the assembly's default package) and B. The index id is
@@ -2947,11 +2948,16 @@ const ROUTE_CHECK_KEY_ID: &str = "route-check-attestation-key";
 
 /// The configuration of a production-compatible package with `index_id`.
 fn route_config(index_id: &str) -> CompatibilityBundleConfig {
+    route_config_with(index_id, &ROUTE_MAIN_GATE)
+}
+
+/// `route_config`, holding `gate` instead of `ROUTE_MAIN_GATE`.
+fn route_config_with(index_id: &str, gate: &MainGateConfig) -> CompatibilityBundleConfig {
     CompatibilityBundleConfig::production_compatible(
         "qualified_production_perplexity.v1".to_string(),
         "qualified_production_projection.v1".to_string(),
         index_id.to_string(),
-        &ROUTE_MAIN_GATE,
+        gate,
     )
     .expect("a production-compatible configuration")
 }
@@ -2971,7 +2977,7 @@ fn route_package(index_id: &str) -> trace_commons_gate_api::pipeline::BundlePack
 /// boot uses: a compatibility service whose every dependency reports itself
 /// production-qualified (`qualified_compatibility_pipeline_service`), with
 /// A as its default package.
-struct QualifiedRouteAssembler;
+struct QualifiedRouteAssembler(MainGateConfig);
 
 impl IngestPipelineRuntimeAssembler for QualifiedRouteAssembler {
     fn assemble(
@@ -2981,7 +2987,7 @@ impl IngestPipelineRuntimeAssembler for QualifiedRouteAssembler {
         qualified_compatibility_pipeline_service(
             context.backend,
             context.artifact_store,
-            &route_config(ROUTE_INDEX_A),
+            &route_config_with(ROUTE_INDEX_A, &self.0),
             Some(context.object_store_name),
             context.novelty_utility_checks,
             context.unqualified_routing_allowed,
@@ -2998,12 +3004,23 @@ fn assemble_route_service(
     configured_store: &ConfiguredTraceArtifactStore,
     issuer: Option<&str>,
 ) -> Arc<PipelineService> {
+    assemble_route_service_with_gate(backend, configured_store, issuer, ROUTE_MAIN_GATE)
+}
+
+/// `assemble_route_service`, booted with `gate` as `main`'s gate
+/// configuration: its default package is A's index under `gate`.
+pub(super) fn assemble_route_service_with_gate(
+    backend: Arc<PgBackend>,
+    configured_store: &ConfiguredTraceArtifactStore,
+    issuer: Option<&str>,
+    gate: MainGateConfig,
+) -> Arc<PipelineService> {
     let connections = TraceCorpusDbConnections {
         database: backend.clone() as Arc<dyn Database>,
         postgres: backend,
     };
     assemble_ingest_pipeline_runtime(
-        Some(&QualifiedRouteAssembler),
+        Some(&QualifiedRouteAssembler(gate)),
         Some(&connections),
         Some(configured_store),
         false,
@@ -3018,7 +3035,7 @@ fn assemble_route_service(
             issuer_principal_ref: issuer.map(str::to_string),
             ..PipelineNoveltyUtilityChecks::default()
         },
-        ROUTE_MAIN_GATE,
+        gate,
     )
     .expect("assemble the qualified runtime")
     .expect("an assembler was given, so a service is returned")

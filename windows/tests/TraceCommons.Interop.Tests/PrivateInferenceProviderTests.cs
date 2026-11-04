@@ -23,7 +23,7 @@ namespace TraceCommons.Interop.Tests
         [Theory]
         [InlineData(false)]
         [InlineData(true)]
-        public async Task SelectedProviderSurvivesPendingStartAndRefusalAllowsRetry(bool requiresSession)
+        public async Task SignInStartsWithNoProviderSurvivesPendingStartAndRefusalAllowsRetry(bool requiresSession)
         {
             var recording = new RecordingCalls(requiresSession);
             var host = new DaemonHost(recording.CallAsync);
@@ -35,10 +35,8 @@ namespace TraceCommons.Interop.Tests
 
             // Onboarding receives an existing inference key with no session.
             // The requiresSession constructor must still offer sign-in.
-            Assert.True(model.HasCredentialProvider);
+            Assert.True(model.HasCredentialAction);
             Assert.False(model.HasCloudSession);
-            model.CredentialProvider = NearAiCredentialSurface.ProviderNear;
-            Assert.True(model.HasCredentialWalletNotice);
             Assert.True(model.CredentialControlsEnabled);
 
             var enabledChanges = new List<bool>();
@@ -53,10 +51,8 @@ namespace TraceCommons.Interop.Tests
             Task<NearAiCredentialAttempt?> first = model.StartCredentialAsync();
             Assert.False(first.IsCompleted);
             Assert.False(model.CredentialControlsEnabled);
-            AssertProvider(Assert.Single(recording.Starts), NearAiCredentialSurface.ProviderNear);
+            AssertNamesNoProvider(Assert.Single(recording.Starts));
 
-            model.CredentialProvider = NearAiCredentialSurface.ProviderGoogle;
-            Assert.Equal(NearAiCredentialSurface.ProviderNear, model.CredentialProvider);
             Assert.Null(await model.StartCredentialAsync().WaitAsync(Deadline));
             Assert.Single(recording.Starts);
             Assert.False(first.IsCompleted);
@@ -67,14 +63,11 @@ namespace TraceCommons.Interop.Tests
             Assert.True(model.HasNotice);
             Assert.Equal(new[] { false, true }, enabledChanges);
 
-            model.CredentialProvider = NearAiCredentialSurface.ProviderGoogle;
-            Assert.Equal(NearAiCredentialSurface.ProviderGoogle, model.CredentialProvider);
-            Assert.False(model.HasCredentialWalletNotice);
             Task<NearAiCredentialAttempt?> retry = model.StartCredentialAsync();
             Assert.False(retry.IsCompleted);
             Assert.False(model.CredentialControlsEnabled);
             Assert.Equal(2, recording.Starts.Length);
-            AssertProvider(recording.Starts[1], NearAiCredentialSurface.ProviderGoogle);
+            AssertNamesNoProvider(recording.Starts[1]);
 
             recording.SecondStart.SetResult(DaemonResponse.Parse(
                 "{\"result\":{\"attempt_id\":\"synthetic-retry\",\"status\":\"waiting_for_browser\","
@@ -97,41 +90,11 @@ namespace TraceCommons.Interop.Tests
             Assert.Equal(expected, recording.Calls.Select(call => call.Method));
         }
 
-        [Theory]
-        [InlineData(false, "")]
-        [InlineData(false, "NEAR")]
-        [InlineData(false, "near\"}")]
-        [InlineData(true, "")]
-        [InlineData(true, "NEAR")]
-        [InlineData(true, "near\"}")]
-        public async Task InvalidSelectionCannotReplaceTheProviderSentToTheDaemon(bool requiresSession, string invalid)
-        {
-            var recording = new RecordingCalls(requiresSession);
-            var host = new DaemonHost(recording.CallAsync);
-            var model = requiresSession
-                ? new PrivateInferenceViewModel(host, requiresSession: true)
-                : new PrivateInferenceViewModel(host);
-            Assert.True(model.Available, "The current contributor FFI copy must be loaded.");
-            model.CredentialProvider = NearAiCredentialSurface.ProviderNear;
-            model.CredentialProvider = invalid;
-
-            Assert.Equal(NearAiCredentialSurface.ProviderNear, model.CredentialProvider);
-            Assert.Empty(recording.Calls);
-            Task<NearAiCredentialAttempt?> start = model.StartCredentialAsync();
-            Assert.False(start.IsCompleted);
-            AssertProvider(Assert.Single(recording.Starts), NearAiCredentialSurface.ProviderNear);
-            recording.FirstStart.SetResult(Refusal());
-            Assert.Null(await start.WaitAsync(Deadline));
-            Assert.Single(recording.Calls);
-            Assert.True(model.CredentialControlsEnabled);
-        }
-
-        private static void AssertProvider(RecordedCall call, string provider)
+        private static void AssertNamesNoProvider(RecordedCall call)
         {
             Assert.Equal(DaemonProtocol.Methods.NearAiCredentialStart, call.Method);
             using JsonDocument parameters = JsonDocument.Parse(call.Parameters);
-            Assert.Single(parameters.RootElement.EnumerateObject());
-            Assert.Equal(provider, parameters.RootElement.GetProperty("provider").GetString());
+            Assert.Empty(parameters.RootElement.EnumerateObject());
         }
 
         private static DaemonResponse Refusal() => DaemonResponse.Parse(

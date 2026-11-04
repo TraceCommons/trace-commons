@@ -13,6 +13,48 @@ public enum FirstRunNavigation {
     /// The steps the step thread names: every one after Welcome.
     public static var threadSteps: [FirstRunStep] { Array(steps.dropFirst()) }
 
+    /// The steps this first run walks. Private AI only shares nothing, so
+    /// it has no Uses (how traces may be used) and no Traces (what they
+    /// could earn); Private AI and the sign-in stay.
+    public static func steps(for state: FirstRunState) -> [FirstRunStep] {
+        state.privateAIOnly ? steps.filter { $0 != .uses && $0 != .traces } : steps
+    }
+
+    /// The steps the thread names on this first run's path.
+    public static func threadSteps(for state: FirstRunState) -> [FirstRunStep] {
+        Array(steps(for: state).dropFirst())
+    }
+
+    /// Private AI only, on Tools (tester report, owner-approved
+    /// 2026-11-04): a person who installed the app for Private AI finishes
+    /// setup signed in to NEAR AI without sharing. Every tool and added
+    /// folder is answered Not used, so the daemon watches nothing and
+    /// queues nothing; nothing set under Customize is kept, and no data use
+    /// is chosen. The step does not move: Tools' commit starts the daemon
+    /// first (`CommitPoint.leaveTools`).
+    public static func choosePrivateAIOnly(_ state: FirstRunState) -> FirstRunState {
+        var chosen = state
+        for kind in chosen.toolAnswers.keys { chosen.toolAnswers[kind] = .off }
+        for kind in [SourceKind.claudeCode, .codex] { chosen.toolAnswers[kind] = .off }
+        chosen.withdrawTrajectory()
+        for folder in chosen.addedFolders { chosen.answerAdded(path: folder.path, watched: false) }
+        chosen.rules = [:]
+        chosen.pastSelections = [:]
+        chosen.scopes = []
+        chosen.privateAIOnly = true
+        return chosen
+    }
+
+    /// Continue on Tools: a person who chose Private AI only and came back
+    /// to Tools is sharing after all, so the path runs through Uses again,
+    /// where the Sharing choice is theirs. Any other state is unchanged.
+    public static func continueSharing(_ state: FirstRunState) -> FirstRunState {
+        guard state.privateAIOnly else { return state }
+        var sharing = state
+        sharing.privateAIOnly = false
+        return sharing
+    }
+
     /// The following step, or the same state on the last one.
     public static func next(_ state: FirstRunState) -> FirstRunState {
         move(state, by: 1)
@@ -32,6 +74,7 @@ public enum FirstRunNavigation {
     /// every answer kept and the grant's ready answer cleared. A step not
     /// yet reached is not a way forward; the state is returned unchanged.
     public static func back(to step: FirstRunStep, from state: FirstRunState) -> FirstRunState {
+        let steps = steps(for: state)
         guard let target = steps.firstIndex(of: step), let current = steps.firstIndex(of: state.step), target < current
         else { return state }
         var moved = state
@@ -95,6 +138,10 @@ public enum FirstRunNavigation {
             // A Sharing choice is the person's to pick; none is preselected.
             return requiredScope != nil && state.sharingChosen
         case .join:
+            // Private AI only consents to no data use, so it waits for no
+            // required use: only an enrollment to mark complete, and
+            // nothing watched.
+            if state.privateAIOnly { return state.holdsEnrolment && !state.watchesAnything }
             guard requiredScope != nil else { return false }
             let watchesOnly = state.account == .watchOnly && !state.daemonHoldsEnrolment
             // Watching only shares nothing, so it needs no Sharing choice.
@@ -122,6 +169,7 @@ public enum FirstRunNavigation {
     }
 
     private static func move(_ state: FirstRunState, by offset: Int) -> FirstRunState {
+        let steps = steps(for: state)
         guard let index = steps.firstIndex(of: state.step) else { return state }
         let target = index + offset
         guard steps.indices.contains(target) else { return state }

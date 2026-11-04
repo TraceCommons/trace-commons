@@ -9,9 +9,10 @@ import XCTest
 /// owner): "Count tokens in watched folders" (`insights_counter_pass`, on
 /// by default and always on since 2026-10-29, so Settings no longer draws
 /// it) and "Weekly summary" (`insights_recap_card_enabled`) are daemon
-/// settings; the "Higher-than-usual card" is the core's `lever_card`
-/// switch. Each reads its confirmed value, moves only on a confirmed echo,
-/// and says the core's request-failed words when a write is refused.
+/// settings; the "Higher-than-usual card" switch is gone (product owner,
+/// 2026-10-29, #1753). Each reads its confirmed value, moves only on a
+/// confirmed echo, and says the core's request-failed words when a write
+/// is refused.
 @MainActor
 final class InsightsSettingsSwitchesTests: XCTestCase {
     static func frame(_ values: [String: Bool]) -> String {
@@ -99,119 +100,6 @@ final class InsightsSettingsSwitchesTests: XCTestCase {
         XCTAssertNil(model.insightsLedgerFeedRefusal)
     }
 
-    // MARK: The lever card switch (the core's `lever_card`)
-
-    static func comparisons(cardEnabled: Bool?) -> InsightsResponse {
-        let field = cardEnabled.map { ",\"card_enabled\":\($0)" } ?? ""
-        return decode("""
-        {"type":"comparisons","comparisons":{"feed":"saved","week_start":"2026-10-05","goals":[],
-        "lever":{"pick":null,"disabled":[],"unavailable":"needs_counter_pass"\(field)},"recap":null}}
-        """)
-    }
-
-    static func leverCard(off: Bool) -> InsightsResponse {
-        decode("""
-        {"type":"lever_card","state":{"goals":[],"lever_dismissals":[],"lever_reenables":[],
-        "lever_card_off":\(off),"recap_opened_week":null}}
-        """)
-    }
-
-    static func decode(_ json: String) -> InsightsResponse {
-        // swiftlint:disable:next force_try
-        try! JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
-    }
-
-    func test_theLeverSwitchReadsTheCoresValueWithoutCounterWeeks() async throws {
-        let core = LeverCore([Self.comparisons(cardEnabled: false)])
-        let lever = InsightsLeverCardSwitch(service: core.call)
-        await lever.load()
-        XCTAssertEqual(lever.enabled, false)
-        let sent = try XCTUnwrap(core.requests.first)
-        XCTAssertEqual(sent.operation.type, "comparisons")
-        XCTAssertNil(sent.operation.counter_weeks, "Settings sends no weeks")
-    }
-
-    /// A core that does not report the switch draws none, never an "off".
-    func test_anUnreportedLeverValueDrawsNoSwitch() async {
-        let lever = InsightsLeverCardSwitch(service: LeverCore([Self.comparisons(cardEnabled: nil)]).call)
-        await lever.load()
-        XCTAssertNil(lever.enabled)
-    }
-
-    func test_aConfirmedLeverWriteMovesTheSwitch() async throws {
-        let core = LeverCore([Self.comparisons(cardEnabled: false), Self.leverCard(off: false)])
-        let lever = InsightsLeverCardSwitch(service: core.call)
-        await lever.load()
-        await lever.set(true)
-        XCTAssertEqual(lever.enabled, true)
-        XCTAssertNil(lever.refusal)
-        XCTAssertFalse(lever.busy)
-        let write = try XCTUnwrap(core.requests.last)
-        XCTAssertEqual(write.operation.type, "lever_card")
-        XCTAssertEqual(write.operation.enabled, true)
-    }
-
-    /// The core answered with the switch still off: that is where it
-    /// stands, and the request-failed words say so.
-    func test_aLeverEchoOfTheOtherValueIsARefusal() async {
-        let core = LeverCore([Self.comparisons(cardEnabled: false), Self.leverCard(off: true),
-                              Self.comparisons(cardEnabled: false)])
-        let lever = InsightsLeverCardSwitch(service: core.call)
-        await lever.load()
-        await lever.set(true)
-        XCTAssertEqual(lever.enabled, false)
-        XCTAssertEqual(lever.refusal, MonitorWords.table?.requestFailed)
-        XCTAssertNotNil(lever.refusal)
-    }
-
-    /// A failed write reads the core back and never draws what was asked.
-    func test_aFailedLeverWriteReadsBackAndSaysSo() async {
-        let core = LeverCore([Self.comparisons(cardEnabled: false), nil, Self.comparisons(cardEnabled: false)])
-        let lever = InsightsLeverCardSwitch(service: core.call)
-        await lever.load()
-        await lever.set(true)
-        XCTAssertEqual(lever.enabled, false)
-        XCTAssertNotNil(lever.refusal)
-        XCTAssertFalse(lever.busy)
-    }
-
-    func test_aConfirmedLeverWriteClearsAnEarlierRefusal() async {
-        let core = LeverCore([Self.comparisons(cardEnabled: false), nil, Self.comparisons(cardEnabled: false),
-                              Self.leverCard(off: false)])
-        let lever = InsightsLeverCardSwitch(service: core.call)
-        await lever.load()
-        await lever.set(true)
-        XCTAssertNotNil(lever.refusal)
-        await lever.set(true)
-        XCTAssertNil(lever.refusal)
-        XCTAssertEqual(lever.enabled, true)
-    }
-
-    /// The real core, through the router the card uses, against a scratch
-    /// store: `comparisons` with no weeks answers the switch, and a
-    /// `lever_card` reply carries `lever_card_off`, both in shapes the
-    /// bridge decodes. A decode slip here would leave the switch undrawn.
-    func test_theRealCoreAnswersTheLeverSwitchRoundTrip() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
-                                                attributes: [.posixPermissions: 0o700])
-        defer { try? FileManager.default.removeItem(at: root) }
-        let router = InsightsServiceRouter(selection: .custom(root.path))
-        let lever = InsightsLeverCardSwitch(service: { try await router.call($0) })
-
-        await lever.load()
-        XCTAssertEqual(lever.enabled, true, "a fresh store reads the card as on")
-        let off = try await router.call(.init(operation: .init("lever_card", enabled: false)))
-        XCTAssertEqual(off.state?.lever_card_off, true)
-        await lever.load()
-        XCTAssertEqual(lever.enabled, false)
-        await lever.set(true)
-        XCTAssertEqual(lever.enabled, true)
-        XCTAssertNil(lever.refusal)
-        await lever.load()
-        XCTAssertEqual(lever.enabled, true, "the write reached the store")
-    }
-
     // MARK: Source rules
 
     static func card() throws -> String {
@@ -227,34 +115,31 @@ final class InsightsSettingsSwitchesTests: XCTestCase {
         XCTAssertFalse(card.contains("insightsCounterPass"))
         XCTAssertFalse(card.contains("analytics_setting_counter_pass"))
         XCTAssertTrue(card.contains("if let on = settings.insightsRecapCardEnabled {"))
-        XCTAssertTrue(card.contains("if let on = lever.enabled {"))
-        for key in ["analytics_setting_recap_card", "analytics_setting_lever"] {
-            XCTAssertTrue(card.contains("text(\"\(key)\")"), "\(key) is not the label")
-        }
+        XCTAssertTrue(card.contains("text(\"analytics_setting_recap_card\")"), "not the label")
+        // The higher-than-usual card's switch is gone (product owner,
+        // 2026-10-29, #1753), with the core's operation behind it.
+        XCTAssertFalse(card.contains("lever"))
+        XCTAssertFalse(card.contains("analytics_setting_lever"))
+        XCTAssertNil(TCInsights.copy()?["analytics_setting_lever"])
         XCTAssertTrue(card.contains("Task { await model.setInsightsSwitch(.recapCard, on) }"))
-        XCTAssertTrue(card.contains("Task { await lever.set(on) }"))
         XCTAssertTrue(card.contains(".disabled(model.insightsSwitchBusy.contains(.recapCard))"))
-        XCTAssertTrue(card.contains(".disabled(lever.busy)"))
         XCTAssertTrue(card.contains("model.insightsSwitchRefusal[.recapCard]"))
-        XCTAssertTrue(card.contains("lever.refusal"))
         // "Hide" on the summary card writes the daemon directly, so the
-        // card re-reads both owners whenever it appears.
+        // card re-reads the setting whenever it appears.
         XCTAssertTrue(card.contains("model.refreshSettings()"))
-        XCTAssertTrue(card.contains("await lever.load()"))
-        XCTAssertEqual(card.components(separatedBy: "GlassToggleStyle(.settings)").count - 1, 2)
-        // No headed card without a switch in it (an older daemon and core).
-        XCTAssertTrue(card.contains(
-            "if model.daemonSettings?.insightsRecapCardEnabled != nil\n"
-                + "                || lever.enabled != nil {"))
+        XCTAssertEqual(card.components(separatedBy: "GlassToggleStyle(.settings)").count - 1, 1)
+        // No headed card without a switch in it (an older daemon).
+        XCTAssertTrue(card.contains("if model.daemonSettings?.insightsRecapCardEnabled != nil {"))
 
-        // Drawn under Tools, after its card, inside the modal's gate.
+        // Its own section since the Settings IA review (D13), inside the
+        // modal's gate: it waits for first run, as Tools did.
         let content = try SettingsParityTests.text("Views/Settings/GlassSettingsContent.swift")
-        XCTAssertEqual(content.components(separatedBy: "InsightsSettingsCard()").count - 1, 1)
-        XCTAssertTrue(content.contains("case .tools:\n                ToolsSection()\n"))
-        let tools = try XCTUnwrap(content.range(of: "case .tools:"))
-        let next = try XCTUnwrap(content.range(of: "case .privateAI:"))
-        let drawn = try XCTUnwrap(content.range(of: "InsightsSettingsCard()"))
-        XCTAssertTrue(tools.upperBound < drawn.lowerBound && drawn.upperBound < next.lowerBound)
+        XCTAssertEqual(content.components(separatedBy: "InsightsSection()").count - 1, 1)
+        XCTAssertTrue(content.contains("case .insights: InsightsSection()\n"))
+        XCTAssertTrue(content.contains("case .tools: ToolsSection()\n"))
+        XCTAssertFalse(content.contains("InsightsSettingsCard()"), "the card is drawn outside its section")
+        XCTAssertTrue(card.contains("struct InsightsSection: View {\n    var body: some View {\n        InsightsSettingsCard()\n        SubscriptionUsageSettingsSection()"))
+        XCTAssertFalse(SettingsSection.insights.availableBeforeOnboarding)
         XCTAssertFalse(SettingsSection.tools.availableBeforeOnboarding)
     }
 
@@ -299,28 +184,4 @@ private final class SwitchDaemon: DaemonCalling, @unchecked Sendable {
 
     func searchOriginal(entryID: String, needle: String) -> Int? { nil }
     func openPreview(entryID: String) throws -> TCPreview { throw TCDaemon.TCError.daemonGone }
-}
-
-/// The core's analytics service, answering in order; `nil` throws.
-private final class LeverCore: @unchecked Sendable {
-    private let lock = NSLock()
-    private var answers: [InsightsResponse?]
-    private var sent: [InsightsRequest] = []
-
-    init(_ answers: [InsightsResponse?]) { self.answers = answers }
-
-    var requests: [InsightsRequest] {
-        lock.lock()
-        defer { lock.unlock() }
-        return sent
-    }
-
-    func call(_ request: InsightsRequest) async throws -> InsightsResponse {
-        let answer: InsightsResponse? = lock.withLock {
-            sent.append(request)
-            return answers.isEmpty ? nil : answers.removeFirst()
-        }
-        guard let answer else { throw InsightsError.invalidResponse }
-        return answer
-    }
 }

@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+# The integration tests are listed as [[test]] targets at the end of this file.
+autotests = false
 
 [dependencies]
 async-trait = "0.1"
@@ -37,3 +39,10 @@ near-ai-privacy-filter = ["dep:reqwest", "dep:futures", "dep:tracing", "dep:tikt
 # Loopback classifier backend. No tokenizer and no concurrent streams: the
 # local model has a real 128k context, so a field goes up in one request.
 self-hosted-privacy-filter = ["dep:reqwest", "dep:tracing", "dep:tiktoken-rs", "dep:futures"]
+
+# Integration tests. `it` holds every tests/*.rs file not listed below as a
+# module, so the dependency graph links once rather than once per file; see
+# tests/it.rs.
+[[test]]
+name = "it"
+path = "tests/it.rs"

@@ -51,6 +51,10 @@ async fn discovers_bounded_pending_tenants_without_content_authority() {
     let d = format!("{prefix}d");
     let now = Utc::now();
     let cutoff = now - Duration::hours(1);
+    let pipeline_key = trace_commons_server::versioned_pipeline_credit::pipeline_ledger_source_key(
+        &c,
+        "graded-idempotency-key",
+    );
     event(
         &db,
         &a,
@@ -102,6 +106,19 @@ async fn discovers_bounded_pending_tenants_without_content_authority() {
             false,
         ),
         ("training_utility", "1", "accepted", None, now, true),
+        // A compatibility pipeline run's `NoveltyUtility` leg, flat or
+        // graded: its `external_ref` is the pipeline's ledger source key,
+        // and the pipeline settles (graded) or never settles (flat) it
+        // itself, so `main`'s scheduler never discovers it (owner decision
+        // D2, 2026-11-03).
+        (
+            "novelty_utility",
+            "1",
+            "accepted",
+            Some(pipeline_key.as_str()),
+            now,
+            false,
+        ),
     ] {
         event(&db, &c, (kind, points, status, external, at, settled)).await;
     }

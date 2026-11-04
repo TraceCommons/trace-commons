@@ -17,17 +17,19 @@ use super::*;
 
 use std::sync::Arc;
 
-use super::pipeline_activation_pg_tests::{RouteFixture, clean_envelope};
+use super::pipeline_activation_pg_tests::{
+    ROUTE_MAIN_GATE, RouteFixture, assemble_route_service_with_gate, clean_envelope,
+};
 use super::pipeline_http_pg_tests::{
-    account_owner_backend, route_request, route_trace, runtime_backend, tenant_tx,
-    wait_for_run_state, write_routing_as_operator,
+    TEST_PIPELINE_CREDIT_ISSUER, account_owner_backend, route_request, route_trace,
+    runtime_backend, tenant_tx, wait_for_run_state, write_routing_as_operator,
 };
 use crate::ingest::app::pipeline_default_routing::{
     DEFAULT_ROUTING_ACTOR_REF, DEFAULT_ROUTING_ATTESTATION_SUFFIX, DEFAULT_ROUTING_PACKAGE_FILE,
-    DefaultRouteOutcome, DefaultRoutingPassReport, PIPELINE_DEFAULT_ROUTING_REASON_CODE,
-    PIPELINE_DEFAULT_ROUTING_RESULTS_MISSING_LABEL, PIPELINE_DEFAULT_ROUTING_RESULTS_STALE_LABEL,
-    PIPELINE_DEFAULT_ROUTING_REVISION_MISMATCH_LABEL, PipelineDefaultRouting,
-    PipelineDefaultRoutingConfig,
+    DefaultRouteOutcome, DefaultRoutingPassReport, MAX_BACK_TO_BACK_PASSES,
+    PIPELINE_DEFAULT_ROUTING_REASON_CODE, PIPELINE_DEFAULT_ROUTING_RESULTS_MISSING_LABEL,
+    PIPELINE_DEFAULT_ROUTING_RESULTS_STALE_LABEL, PIPELINE_DEFAULT_ROUTING_REVISION_MISMATCH_LABEL,
+    PipelineDefaultRouting, PipelineDefaultRoutingConfig,
 };
 use trace_commons_server::versioned_pipeline_activation::{PipelineActivationStore, RoutingState};
 
@@ -295,12 +297,21 @@ impl DefaultRoutingFixture {
         &self,
         attestations: &[trace_commons_server::versioned_pipeline_qualification::PipelineCheckAttestation],
     ) {
+        self.write_results_for(&self.route.a, attestations);
+    }
+
+    /// `write_results`, for the signed `package` instead of A.
+    fn write_results_for(
+        &self,
+        package: &trace_commons_gate_api::pipeline::BundlePackage,
+        attestations: &[trace_commons_server::versioned_pipeline_qualification::PipelineCheckAttestation],
+    ) {
         for entry in std::fs::read_dir(self.results.path()).unwrap() {
             std::fs::remove_file(entry.unwrap().path()).unwrap();
         }
         std::fs::write(
             self.results.path().join(DEFAULT_ROUTING_PACKAGE_FILE),
-            serde_json::to_vec(&self.route.signed(&self.route.a)).unwrap(),
+            serde_json::to_vec(&self.route.signed(package)).unwrap(),
         )
         .unwrap();
         for attestation in attestations {
@@ -863,6 +874,249 @@ async fn the_loop_requalifies_its_tenants_after_a_deploy() {
             &fixture.newcomer_contributor,
             "deployed_requalified",
         )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert!(is_pipeline_receipt(&receipt), "{receipt}");
+}
+
+/// Issue #1906: tenants this mode routed, more than one `BATCH` of them,
+/// are all re-qualified by one run of back-to-back passes after a deploy,
+/// without the interval between passes.
+struct ManyRouted {
+    tenants: Vec<String>,
+    new_build: Arc<AppState>,
+    deployed: String,
+}
+
+impl ManyRouted {
+    const COUNT: usize = 5;
+
+    /// `COUNT` tenants routed by the fixture's process, then a new build on
+    /// another revision with `batch` 2 and the operator's set for it.
+    async fn new(fixture: &DefaultRoutingFixture) -> Self {
+        fixture.rearm().await;
+        // A time-ordered prefix: tenants other runs left in the shared
+        // database sort before these, and the new build starts after them.
+        let stamp = format!(
+            "tenant-0-first-pass-{:020}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let mut tenants = Vec::new();
+        for index in 0..Self::COUNT {
+            // Sorts before every other suite's tenants, so the pages the
+            // new build reads start with these.
+            let tenant = format!("{stamp}-{index}");
+            seed_tenant(&fixture.route.owner, &tenant).await;
+            fixture
+                .routing()
+                .restrict_loop_for_test(BTreeSet::from([tenant.clone()]));
+            let outcome = fixture
+                .routing()
+                .default_route_tenant(&fixture.state, &tenant)
+                .await;
+            assert!(
+                matches!(outcome, DefaultRouteOutcome::Activated),
+                "{outcome:?}"
+            );
+            tenants.push(tenant);
+        }
+        let deployed = sha256_prefixed("first-pass-deployed-revision");
+        let scope: BTreeSet<String> = tenants.iter().cloned().collect();
+        let results_dir = fixture.results.path().to_path_buf();
+        let new_build = fixture.process(|state| {
+            state.pipeline_code_revision_hash = Some(deployed.clone());
+            let routing = PipelineDefaultRouting::new(PipelineDefaultRoutingConfig {
+                results_dir,
+                interval: StdDuration::from_secs(3600),
+                batch: 2,
+            });
+            routing.restrict_loop_for_test(scope);
+            routing.start_requalify_after_for_test(stamp.clone());
+            state.pipeline_default_routing = Some(Arc::new(routing));
+        });
+        fixture.write_results(&fixture.route.attestations_on(&fixture.route.a, &deployed));
+        DefaultRoutingFixture::routing_of(&new_build)
+            .rearm(&new_build)
+            .await;
+        Self {
+            tenants,
+            new_build,
+            deployed,
+        }
+    }
+
+    async fn qualified(&self, fixture: &DefaultRoutingFixture) -> usize {
+        let store = PipelineQualificationStore::new(fixture.route.runtime.clone());
+        let mut count = 0;
+        for tenant in &self.tenants {
+            if store
+                .qualification(tenant, &fixture.route.a.bundle_id, &self.deployed)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_run_of_passes_requalifies_more_tenants_than_a_batch() {
+    let Some(fixture) = DefaultRoutingFixture::new().await else {
+        return;
+    };
+    let many = ManyRouted::new(&fixture).await;
+    assert_eq!(many.qualified(&fixture).await, 0);
+    let passes = DefaultRoutingFixture::routing_of(&many.new_build)
+        .run_passes(&many.new_build, None)
+        .await;
+    assert_eq!(many.qualified(&fixture).await, ManyRouted::COUNT);
+    assert!(
+        (3..=MAX_BACK_TO_BACK_PASSES).contains(&passes),
+        "five tenants at batch two need three passes: {passes}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_cap_bounds_a_run_of_passes() {
+    let Some(fixture) = DefaultRoutingFixture::new().await else {
+        return;
+    };
+    let many = ManyRouted::new(&fixture).await;
+    let passes = DefaultRoutingFixture::routing_of(&many.new_build)
+        .run_passes_capped(&many.new_build, None, 2)
+        .await;
+    assert_eq!(passes, 2);
+    assert_eq!(many.qualified(&fixture).await, 4, "two passes of two");
+}
+
+/// A process that is not armed makes no progress, so a run is one pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pass_with_no_progress_does_not_repeat() {
+    let Some(fixture) = DefaultRoutingFixture::new().await else {
+        return;
+    };
+    // Never armed: the results directory is not read.
+    let passes = fixture.routing().run_passes(&fixture.state, None).await;
+    assert_eq!(passes, 1);
+}
+
+/// Owner decision D6 (2026-11-03): once `main`'s award is raised (here to
+/// the graded rule at one point), a new boot accepts the tenants still on
+/// the old bundle that awards nothing, and its loop moves each tenant this
+/// mode routed to the armed bundle, keeping the routing row this mode's. A
+/// tenant activated by hand is left to the operator, and a second pass
+/// moves nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_loop_moves_its_tenants_off_a_bundle_that_awards_nothing() {
+    let Some(fixture) = DefaultRoutingFixture::new().await else {
+        return;
+    };
+    fixture.rearm().await;
+    let (_, receipt) = fixture.newcomer_upload("before_raise").await;
+    assert!(is_pipeline_receipt(&receipt), "{receipt}");
+    fixture.route.qualify(&fixture.route.a).await;
+    let (status, body) = fixture
+        .route
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/activate",
+            Some(
+                fixture
+                    .route
+                    .activate_body(&fixture.route.a, "operator_activates")
+                    .await,
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before = fixture.view(&fixture.newcomer).await;
+    assert_eq!(
+        before.active_bundle_id.as_deref(),
+        Some(fixture.route.a.bundle_id.as_str())
+    );
+
+    // The owner raises the award; the new boot's default package holds it.
+    let raised_gate = MainGateConfig {
+        novelty_utility_microcredits: 1_000_000,
+        credit_rule:
+            trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::GradedPerplexityV1,
+        ..ROUTE_MAIN_GATE
+    };
+    let service = assemble_route_service_with_gate(
+        fixture.route.runtime.clone(),
+        &fixture.route.configured_store,
+        Some(TEST_PIPELINE_CREDIT_ISSUER),
+        raised_gate,
+    );
+    let raised = service.default_package().clone();
+    assert_ne!(raised.bundle_id, fixture.route.a.bundle_id);
+    let new_boot = fixture.process(|state| {
+        state.pipeline_service = Some(service.clone());
+        state.pipeline_main_gate = raised_gate;
+    });
+    fixture.write_results_for(&raised, &fixture.route.attestations(&raised));
+
+    let report = DefaultRoutingFixture::routing_of(&new_boot)
+        .run_pass(&new_boot)
+        .await;
+    assert_eq!(report.migrated, 1, "only the newcomer: {report:?}");
+    let after = fixture.view(&fixture.newcomer).await;
+    assert_eq!(
+        after.active_bundle_id.as_deref(),
+        Some(raised.bundle_id.as_str())
+    );
+    let routing = after.routing.as_ref().expect("the routing row");
+    assert_eq!(routing.routing_state, RoutingState::Pipeline);
+    assert_eq!(routing.actor_principal_ref, DEFAULT_ROUTING_ACTOR_REF);
+    assert_eq!(routing.reason_code, PIPELINE_DEFAULT_ROUTING_REASON_CODE);
+    assert_ne!(
+        Some(routing.activation_record_id),
+        before
+            .routing
+            .as_ref()
+            .map(|routing| routing.activation_record_id)
+    );
+    assert_eq!(
+        fixture
+            .view(&fixture.route.tenant)
+            .await
+            .active_bundle_id
+            .as_deref(),
+        Some(fixture.route.a.bundle_id.as_str()),
+        "a hand-activated tenant is the operator's to move"
+    );
+
+    // config-status shows the operator the rule this boot runs and what
+    // its last pass moved.
+    let status = fixture
+        .config_status(&new_boot, &fixture.newcomer_admin)
+        .await;
+    assert_eq!(
+        status["novelty_utility"]["credit_rule"],
+        "graded_perplexity_v1"
+    );
+    assert_eq!(status["pipeline_default_routing_last_pass"]["migrated"], 1);
+    assert_eq!(
+        fixture
+            .config_status(&fixture.state, &fixture.newcomer_admin)
+            .await["novelty_utility"]["credit_rule"],
+        "flat"
+    );
+
+    let again = DefaultRoutingFixture::routing_of(&new_boot)
+        .run_pass(&new_boot)
+        .await;
+    assert_eq!(again.migrated, 0, "{again:?}");
+    // The moved tenant's run on the old bundle is still in flight; the new
+    // boot serves the tenant, and its next upload binds the raised bundle.
+    let (status, receipt) = fixture
+        .upload_as(&new_boot, &fixture.newcomer_contributor, "after_raise")
         .await;
     assert_eq!(status, StatusCode::OK, "{receipt}");
     assert!(is_pipeline_receipt(&receipt), "{receipt}");

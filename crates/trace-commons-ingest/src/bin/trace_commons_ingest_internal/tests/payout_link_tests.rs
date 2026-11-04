@@ -4,9 +4,8 @@
 //! The payout link routes (payout spec section 5): start, confirm and
 //! status, on the contributor's signed-in account session.
 //!
-//! The owner superseded the passkey confirmation (D5) on 2026-10-23: a
-//! signed-in session links, changes and unlinks, with no passkey and no
-//! step-up page. What still stands behind a link is the server's own check
+//! Since the owner superseded D5 on 2026-10-23, a signed-in session links,
+//! changes and unlinks, with no step-up page. What still stands behind a link is the server's own check
 //! with NEAR AI (`/users/me` with the person's token, then a zero-target
 //! probe), the "changed since shown" version check, and an audit row for
 //! every request and confirmation.
@@ -78,6 +77,10 @@ struct NearAiStub {
     orgs: Vec<(Uuid, &'static str, bool)>,
     /// The probe's reply: `None` is a 200 `no_op`.
     probe_error: Option<(u16, &'static str)>,
+    /// `auth_provider` and login address on `/users/me`: `github` and a
+    /// mailbox by default; `near` and `{account}@near` for a wallet sign-in.
+    auth_provider: &'static str,
+    email: String,
     users_me_calls: usize,
     probe_calls: usize,
 }
@@ -104,8 +107,8 @@ async fn stub_near_ai(stub: Stub) -> String {
                     })
                     .collect();
                 axum::Json(serde_json::json!({
-                    "id": stub.subject, "email": "synthetic@example.invalid",
-                    "username": NAME_SENTINEL, "auth_provider": "github",
+                    "id": stub.subject, "email": stub.email,
+                    "username": NAME_SENTINEL, "auth_provider": stub.auth_provider,
                     "organizations": orgs, "workspaces": [],
                 }))
             }
@@ -175,7 +178,10 @@ struct Harness {
 }
 
 /// A signed-in account: a tenant of its own, an open account row with no
-/// passkey and no binding row, and a weak native session for it.
+/// binding row, and a weak native session for it. Unless made
+/// with [`Harness::unanchored_account_in`], it carries a NEAR AI login
+/// anchor on the stub's subject, as an account that signed in with NEAR AI
+/// does.
 struct Account {
     tenant: String,
     id: Uuid,
@@ -188,6 +194,8 @@ async fn harness_with(mode: PayoutMode) -> Option<Harness> {
         subject: format!("synthetic-subject-{}", Uuid::new_v4().simple()),
         orgs: vec![(org(1), "owner", true), (org(2), "owner", true)],
         probe_error: None,
+        auth_provider: "github",
+        email: "synthetic@example.invalid".to_owned(),
         users_me_calls: 0,
         probe_calls: 0,
     }));
@@ -218,7 +226,18 @@ impl Harness {
             .await
     }
 
+    /// An account anchored on the stub's current subject. Anchors are
+    /// globally unique, so one harness anchors one account per subject.
     async fn account_in(&self, tenant: &str) -> Account {
+        let account = self.unanchored_account_in(tenant).await;
+        let subject = self.stub().subject.clone();
+        self.insert_anchor(&account, &subject, "near_ai_login")
+            .await;
+        account
+    }
+
+    /// An account with no NEAR AI login anchor, like a wallet-origin one.
+    async fn unanchored_account_in(&self, tenant: &str) -> Account {
         let id = Uuid::new_v4();
         {
             let mut client = self.backend.trace_pool_for_test().get().await.unwrap();
@@ -266,6 +285,76 @@ impl Harness {
             id,
             token: native_token_value(tenant, &secret),
         }
+    }
+
+    /// Records an anchor of `identity_source` for `subject` on `account`.
+    /// A `wallet` anchor stands for a wallet-origin account.
+    async fn insert_anchor(&self, account: &Account, subject: &str, identity_source: &str) {
+        let auth_provider = (identity_source == "near_ai_login").then_some("github");
+        self.backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap()
+            .execute(
+                "INSERT INTO trace_near_account_anchors
+                    (tenant_id, account_id, anchor_hash, sealed_account_name, index_pepper_ref,
+                     account_name_key_ref, identity_source, auth_provider)
+                 VALUES ($1, $2, $3, $4, 'fixture-pepper', 'fixture-key', $5, $6)",
+                &[
+                    &account.tenant,
+                    &account.id,
+                    &identity().login_index_label(subject),
+                    &serde_json::json!({"fixture": true}),
+                    &identity_source,
+                    &auth_provider,
+                ],
+            )
+            .await
+            .unwrap();
+    }
+
+    /// Records a wallet anchor for NEAR account `near_account` on `network`,
+    /// as wallet provisioning does.
+    async fn insert_wallet_anchor(&self, account: &Account, network: &str, near_account: &str) {
+        self.backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap()
+            .execute(
+                "INSERT INTO trace_near_account_anchors
+                    (tenant_id, account_id, anchor_hash, sealed_account_name, index_pepper_ref,
+                     account_name_key_ref, identity_source)
+                 VALUES ($1, $2, $3, $4, 'fixture-pepper', 'fixture-key', 'wallet')",
+                &[
+                    &account.tenant,
+                    &account.id,
+                    &identity().index_label(network, near_account),
+                    &serde_json::json!({"fixture": true}),
+                ],
+            )
+            .await
+            .unwrap();
+    }
+
+    /// Removes every NEAR AI login anchor of `account`. Test-only: no
+    /// production path removes an anchor. It stands for an unanchored
+    /// account whose link was made before the start checked anchors.
+    async fn drop_login_anchors(&self, account: &Account) {
+        self.backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap()
+            .execute(
+                "DELETE FROM trace_near_account_anchors
+                  WHERE tenant_id = $1 AND account_id = $2
+                    AND identity_source = 'near_ai_login'",
+                &[&account.tenant, &account.id],
+            )
+            .await
+            .unwrap();
     }
 
     async fn call(
@@ -366,6 +455,26 @@ impl Harness {
             .await
             .unwrap()
             .get(0)
+    }
+
+    /// The `label` of each `link_requested` audit row in the tenant: which
+    /// anchor the link's proof matched.
+    async fn request_proof_labels(&self, account: &Account) -> Vec<Option<String>> {
+        self.backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap()
+            .query(
+                "SELECT label FROM trace_payout_audit
+                  WHERE tenant_id = $1 AND action = 'link_requested'",
+                &[&account.tenant],
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get(0))
+            .collect()
     }
 
     async fn audit(&self, account: &Account) -> Vec<PayoutAuditAction> {
@@ -490,6 +599,12 @@ async fn an_account_links_from_its_weak_signed_in_session() {
     let key = h.link(&account, org(1)).await;
     let waiting = h.links(&account, &[PayoutLinkState::Waiting]).await;
     assert_eq!(waiting.len(), 1);
+    // Proved by the account's NEAR AI login anchor, and the request's audit
+    // row says so.
+    assert_eq!(
+        h.request_proof_labels(&account).await,
+        vec![Some("near_ai_login".to_owned())]
+    );
     assert_eq!(
         waiting[0].recipient.recipient_ref.as_deref(),
         Some(near_ai_recipient_ref(key, org(1)).as_str())
@@ -534,28 +649,9 @@ async fn a_non_owner_or_inactive_org_is_refused() {
 async fn a_nearai_tenant_with_a_different_subject_is_refused() {
     let Some(h) = harness().await else { return };
     let tenant = trace_commons_server::near_account_identity::random_near_ai_tenant_id();
-    let account = h.account_in(&tenant).await;
+    let account = h.unanchored_account_in(&tenant).await;
     let anchored = format!("synthetic-anchored-{}", Uuid::new_v4().simple());
-    h.backend
-        .raw_pool_for_tests_and_diagnostics()
-        .get()
-        .await
-        .unwrap()
-        .execute(
-            "INSERT INTO trace_near_account_anchors
-                (tenant_id, account_id, anchor_hash, sealed_account_name, index_pepper_ref,
-                 account_name_key_ref, identity_source, auth_provider)
-             VALUES ($1, $2, $3, $4, 'fixture-pepper', 'fixture-key', 'near_ai_login',
-                     'github')",
-            &[
-                &tenant,
-                &account.id,
-                &identity().login_index_label(&anchored),
-                &serde_json::json!({"fixture": true}),
-            ],
-        )
-        .await
-        .unwrap();
+    h.insert_anchor(&account, &anchored, "near_ai_login").await;
     let (status, body) = h
         .start(&account, link_body(Uuid::new_v4(), org(1), 0))
         .await;
@@ -570,6 +666,133 @@ async fn a_nearai_tenant_with_a_different_subject_is_refused() {
         .start(&account, link_body(Uuid::new_v4(), org(1), 0))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// B9 (one-connected-account spec): an account with no anchor of either
+/// kind, as a principal-linked legacy or pilot account has, links no
+/// organization (owner decision 2026-11-02; migrating those accounts is F11,
+/// before production payouts). Refused before the token is spent, under the
+/// generic `subject_mismatch` every shipped app already knows.
+#[tokio::test]
+async fn an_account_with_no_anchor_of_either_kind_links_nothing() {
+    let Some(h) = harness().await else { return };
+    let account = h
+        .unanchored_account_in(&format!("payout-link-{}", Uuid::new_v4().simple()))
+        .await;
+    let (status, body) = h
+        .start(&account, link_body(Uuid::new_v4(), org(1), 0))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "subject_mismatch", "{body}");
+    assert_eq!(h.stub().users_me_calls, 0, "the token is never spent");
+    assert_eq!(h.stub().probe_calls, 0);
+    assert_eq!(h.request_rows(&account).await, 0);
+    assert!(h.dump(&account.tenant).await.is_empty());
+}
+
+/// Only a recorded NEAR AI login proves a link (owner, 2026-11-02: "It
+/// should just be NEAR AI login on both staging and production"). A
+/// wallet-origin account with no recorded NEAR AI login links nothing, even
+/// through NEAR AI's own wallet sign-in, and the token is never spent. The
+/// deployment's NEAR network plays no part. Its path to payouts is the change-account flow, which records a
+/// NEAR AI login.
+#[tokio::test]
+async fn a_wallet_account_with_no_recorded_login_links_nothing_through_a_wallet_sign_in() {
+    let Some(h) = harness().await else { return };
+    let account = h
+        .unanchored_account_in(
+            &trace_commons_server::near_account_identity::random_near_tenant_id(),
+        )
+        .await;
+    let wallet = format!("w{}.near", Uuid::new_v4().simple());
+    h.insert_wallet_anchor(&account, "mainnet", &wallet).await;
+    h.stub().auth_provider = "near";
+    h.stub().email = format!("{wallet}@near");
+    let (status, body) = h
+        .start(&account, link_body(Uuid::new_v4(), org(1), 0))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "subject_mismatch", "{body}");
+    assert_eq!(h.stub().users_me_calls, 0, "the token is never spent");
+    assert_eq!(h.request_rows(&account).await, 0);
+}
+
+/// A link request started while the account had a NEAR AI login, confirmed
+/// after the login is gone, writes no link. This is what closes the deploy
+/// window V147 relies on: a request the old code started for an account
+/// with no login (or one whose login was later removed) cannot confirm
+/// under the new code, whatever the deploy topology. The request is
+/// consumed, as every other confirm refusal does.
+#[tokio::test]
+async fn a_link_confirmed_after_the_login_is_gone_is_refused() {
+    let Some(h) = harness().await else { return };
+    let account = h.account().await;
+    let (status, body) = h
+        .start(&account, link_body(Uuid::new_v4(), org(1), 0))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let handle = body["handle"].as_str().unwrap().to_owned();
+    h.drop_login_anchors(&account).await;
+    let (status, body) = h.confirm(&account, &handle).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "subject_mismatch", "{body}");
+    assert!(
+        h.links(
+            &account,
+            &[PayoutLinkState::Waiting, PayoutLinkState::Active]
+        )
+        .await
+        .is_empty()
+    );
+    assert_eq!(h.request_rows(&account).await, 0);
+    assert_eq!(h.version(&account).await, 0);
+}
+
+/// Runtime behaviour for a link that already exists on an account with no
+/// NEAR AI login: the pass does not re-check logins, so such a link keeps
+/// its state until something revokes it. V147 revokes the ones that exist
+/// at deploy, once; a link whose account loses its login later is not
+/// revoked by the runtime (no production path removes a login anchor
+/// today). Status reports it, a change to another org is refused, and
+/// stopping payouts is not.
+#[tokio::test]
+async fn an_existing_link_without_a_login_is_kept_and_can_only_be_unlinked() {
+    let Some(h) = harness().await else { return };
+    let account = h.account().await;
+    h.link(&account, org(1)).await;
+    h.backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap()
+        .execute(
+            "UPDATE trace_payout_links SET state = 'active' WHERE tenant_id = $1",
+            &[&account.tenant],
+        )
+        .await
+        .unwrap();
+    h.drop_login_anchors(&account).await;
+    let calls = h.stub().users_me_calls;
+
+    let (_, status) = h.status(&account).await;
+    assert_eq!(status["rails"][0]["linked"], true, "{status}");
+    assert_eq!(status["rails"][0]["state"], "active", "{status}");
+    assert_eq!(h.links(&account, &[PayoutLinkState::Active]).await.len(), 1);
+
+    let (status, body) = h
+        .start(&account, link_body(Uuid::new_v4(), org(2), 1))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "subject_mismatch", "{body}");
+    assert_eq!(h.stub().users_me_calls, calls, "the token is never spent");
+
+    let (status, unlink) = h.start(&account, unlink_body(Uuid::new_v4(), 1)).await;
+    assert_eq!(status, StatusCode::OK, "{unlink}");
+    let (status, body) = h
+        .confirm(&account, unlink["handle"].as_str().unwrap())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["action"], "unlink", "{body}");
 }
 
 #[tokio::test]
@@ -630,10 +853,10 @@ async fn probe_404_and_409_and_403_map_to_their_outcomes() {
 }
 
 #[tokio::test]
-async fn confirm_needs_the_same_account_session_and_no_passkey() {
+async fn confirm_needs_the_same_account_session_and_no_step_up() {
     let Some(h) = harness().await else { return };
     let account = h.account().await;
-    let other = h.account_in(&account.tenant).await;
+    let other = h.unanchored_account_in(&account.tenant).await;
     let (_, body) = h
         .start(&account, link_body(Uuid::new_v4(), org(1), 0))
         .await;
@@ -945,7 +1168,9 @@ async fn change_and_unlink_on_one_rail_leave_another_rails_link_alone() {
         keyed_before
     );
     // An unlink with nothing linked on a fresh account.
-    let fresh = h.account().await;
+    let fresh = h
+        .unanchored_account_in(&format!("payout-link-{}", Uuid::new_v4().simple()))
+        .await;
     let (status, body) = h.start(&fresh, unlink_body(Uuid::new_v4(), 0)).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["error"], "payout_not_linked");
@@ -1187,4 +1412,116 @@ async fn an_enabled_rail_without_the_recipient_key_refuses_the_start() {
     );
     Arc::get_mut(&mut state).unwrap().near_account_identity = Some(identity());
     super::super::payout_rails::require_payout_recipient_key(&state).unwrap();
+}
+
+/// V146 (legacy payout migration spec, section 3.3): a link confirmed on a
+/// NEAR AI account that has linked a legacy tenant reaches every open
+/// account there, in the confirm's transaction, as a waiting link that
+/// opens to the same org; a legacy account's own start is still refused;
+/// and an unlink releases the carry.
+#[tokio::test]
+async fn a_confirmed_link_reaches_a_linked_legacy_account_and_opens_to_the_same_org() {
+    let Some(h) = harness().await else { return };
+    let near = h
+        .account_in(&format!(
+            "nearai-{}",
+            Uuid::new_v4().simple().to_string().repeat(2)
+        ))
+        .await;
+    let legacy = h
+        .unanchored_account_in(&format!("tenant-carry-{}", Uuid::new_v4().simple()))
+        .await;
+    let admin = h
+        .backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let hex = |label: &str| sha256_prefixed(label);
+    let tenant_link = Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_legacy_invite_links
+                (link_id, tenant_id, account_id, legacy_tenant_id, device_key_id,
+                 invite_subject_hash, nonce, issued_at, device_signature, linked_at,
+                 server_kid, server_signature)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 1, 'sig', 2, 'kid', 'sig')",
+            &[
+                &tenant_link,
+                &near.tenant,
+                &near.id,
+                &legacy.tenant,
+                &hex(&format!("device:{}", legacy.tenant)),
+                &hex("invite"),
+                &hex("nonce")[7..].to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+    // The legacy account holds the app-form upload principal of the linking
+    // device, so the carry treats it as proven (owner, 2026-11-03).
+    // The linking device, live in the legacy tenant: only a live device
+    // proves accounts (V148).
+    let device = hex(&format!("device:{}", legacy.tenant));
+    admin
+        .execute(
+            "INSERT INTO device_keys (device_key_id, tenant_id, public_key, invite_subject_hash)
+             VALUES ($1, $2, 'test', $1)",
+            &[&device, &legacy.tenant],
+        )
+        .await
+        .unwrap();
+    let principal = trace_commons_server::account_trust::device_upload_principal_refs(
+        &legacy.tenant,
+        &device,
+        &trace_commons_server::account_trust::device_claim_actor(
+            &legacy.tenant,
+            &device,
+            Some(&trace_commons_protocol::onboarding::user_subject_hash(
+                &device,
+            )),
+        ),
+    )
+    .unwrap()[0]
+        .clone();
+    admin
+        .execute(
+            "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+             VALUES ($1, $2, $3)",
+            &[&legacy.tenant, &legacy.id, &principal],
+        )
+        .await
+        .unwrap();
+    // What the tenant link's claim would have recorded for the device
+    // (V148 proves only by those records); the link row is inserted
+    // directly here, so no claim ran.
+    admin
+        .execute(
+            "INSERT INTO trace_legacy_link_claimed_principals
+                 (tenant_id, legacy_link_hash, device_key_id, principal_ref)
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &legacy.tenant,
+                &trace_commons_server::db::payout_legacy_link_hash(tenant_link),
+                &device,
+                &principal,
+            ],
+        )
+        .await
+        .unwrap();
+
+    // The legacy account cannot link for itself: it has no login anchor.
+    let (status, body) = h.start(&legacy, link_body(Uuid::new_v4(), org(1), 0)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "subject_mismatch", "{body}");
+
+    h.link(&near, org(1)).await;
+    let carried = h.links(&legacy, &[PayoutLinkState::Waiting]).await;
+    assert_eq!(carried.len(), 1);
+    assert_eq!(carried[0].account_id, legacy.id);
+    let opener = SealedRecipientOpener::new(identity());
+    assert_eq!(
+        opener.open(&carried[0]).unwrap().expose(),
+        org(1).to_string()
+    );
 }

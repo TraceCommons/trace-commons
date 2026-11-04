@@ -94,7 +94,7 @@ struct PublicProfileSection: View {
                     .glassType(GlassTokens.TypeScale.body)
                     .foregroundStyle(GlassColor.textPrimary)
                 Spacer(minLength: 0)
-                Button(PublicProfileCopy.goPublicConfirm) { showingGoPublic = true }
+                Button(PublicProfileCopy.goPublicOpen) { showingGoPublic = true }
                     .buttonStyle(GlassButtonStyle(.glass))
                     .disabled(!model.status.loggedIn)
             }
@@ -136,6 +136,7 @@ struct PublicProfileSection: View {
                     // (Ron, 2026-10-09).
                     Button(PublicProfileCopy.leaveRoster) { model.leaveRoster() }
                         .buttonStyle(GlassButtonStyle(.link))
+                        .accessibilityLabel(PublicProfileCopy.leaveRosterAccessibilityName)
                         .disabled(model.profileBusy)
                 }
                 // A refused save or leave, under the buttons it is about.

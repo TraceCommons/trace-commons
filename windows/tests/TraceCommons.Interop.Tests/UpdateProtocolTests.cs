@@ -122,6 +122,7 @@ public class UpdateProtocolTests
             string text = UpdateProtocol.DescribeRefusal(value);
             Assert.False(string.IsNullOrWhiteSpace(text));
             Assert.EndsWith(".", text);
+            Assert.DoesNotContain("daemon", text, System.StringComparison.OrdinalIgnoreCase);
         }
     }
 

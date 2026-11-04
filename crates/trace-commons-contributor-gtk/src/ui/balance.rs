@@ -399,6 +399,11 @@ mod tests {
             body.contains("super::credential::act(&app, action)"),
             "the press no longer goes to the one ceremony mechanism"
         );
+        assert!(
+            !body.contains("shared_provider_selector") && !body.contains("DropDown"),
+            "the balance row's Sign in offers a choice of login in the app; \
+             the login is chosen on the browser page"
+        );
     }
 
     /// Nothing on this section is authored here, and no state is branched

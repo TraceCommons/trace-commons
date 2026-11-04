@@ -61,8 +61,11 @@ final class FirstRunFrameTests: XCTestCase {
         let frame = try Self.source()
         XCTAssertEqual(frame.components(separatedBy: "Button(copy.frame.back)").count - 1, 1)
         let back = try XCTUnwrap(frame.range(of: "Button(copy.frame.back)"))
-        let after = String(frame[back.upperBound...].prefix(200))
+        let after = String(frame[back.upperBound...].prefix(320))
         XCTAssertTrue(after.contains("FirstRunNavigation.back(state)"))
+        // While a commit runs, Back is the screen's own (Join's sign-in),
+        // never a plain step back the runner could undo.
+        XCTAssertTrue(after.contains("footer.backWhileCommitting?.action()"))
         XCTAssertTrue(after.contains("GlassButtonStyle(.glass, size: .stage)"))
     }
 

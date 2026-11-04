@@ -17,8 +17,9 @@ import TCShellCore
 /// - Traces (the tree and History): the traces moving now, the undos, the
 ///   core's health, the consent notices about folders (grant voids,
 ///   arming rewordings, a gate hold), the arming offer, the backlog and
-///   idle suggestions and the idle notifications offer, and the
-///   first-contribution note; on History also its verdict news and the
+///   idle suggestions and the idle notifications offer, the
+///   first-contribution note, and Resume while the person has paused
+///   uploads; on History also its verdict news and the
 ///   verdict notifications offer.
 /// - Private AI: the offer to route AI requests through NEAR AI, and the
 ///   NEAR AI sign-in while there is none (owner, 2026-10-19: the sign-in
@@ -201,7 +202,7 @@ struct MonitorNotices: View {
                     GlassNoticeMark(.ask)
                 } summary: { EmptyView() } details: { EmptyView() } actions: {
                     Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
-                        .buttonStyle(GlassButtonStyle(.glass))
+                        .buttonStyle(GlassButtonStyle(.primary))
                 }
             })
         case .awaiting, .open:
@@ -281,6 +282,32 @@ struct MonitorNotices: View {
     /// What waits on an answer about the traces: the first-contribution
     /// note, the idle notifications offer, the backlog or idle suggestion,
     /// and the arming offer.
+    /// The resume notice (owner, 2026-11-04, notice and words approved):
+    /// while the person has paused uploads and nothing else holds them,
+    /// each time the Traces tab is opened. Not now closes it until the tab
+    /// is next opened (`PausedResumeNotice.closed`, from the window).
+    private var pausedItems: [GlassPopoverItem] {
+        guard let words = ShellWords.table?.pausedNotice,
+            PausedResumeNotice.shows(
+                paused: model.status.paused, loggedIn: model.status.loggedIn,
+                needsAttention: model.accountAttention != nil,
+                contributionHeld: model.status.gateHeld.held,
+                dismissedThisVisit: closed.contains(PausedResumeNotice.id))
+        else { return [] }
+        return [GlassPopoverItem(id: PausedResumeNotice.id) {
+            GlassPopoverNotice(title: words.body) {
+                GlassNoticeMark(.off)
+            } summary: { EmptyView() } details: { EmptyView() } actions: {
+                Button(words.resume) { model.resume() }
+                    .buttonStyle(GlassButtonStyle(.primary))
+                    .lineLimit(1)
+                Button(words.notNow) { closed.insert(PausedResumeNotice.id) }
+                    .buttonStyle(GlassButtonStyle(.link))
+                    .lineLimit(1)
+            }
+        }]
+    }
+
     private var tracesOffers: [GlassPopoverItem] {
         var items: [GlassPopoverItem] = []
         // Only on an answered, empty history; whether anything is under
@@ -308,6 +335,9 @@ struct MonitorNotices: View {
             })
         }
         items += offerItems(.traces)
+        // Resume while the person has paused uploads: on both of the
+        // Traces tab's pages.
+        items += pausedItems
         if let card = traces.nudgeCard {
             items.append(nudgeItem(
                 card, busy: traces.nudgeBusy,
@@ -441,7 +471,7 @@ struct MonitorNotices: View {
                     // doing so agrees to the new settings.
                     if let rearm, let action = notice.rearmAction {
                         Button(action) { model.rearmGrantVoid(id: void.id, projectID: rearm) }
-                            .buttonStyle(GlassButtonStyle(.glass))
+                            .buttonStyle(GlassButtonStyle(.primary))
                             .lineLimit(1)
                     }
                     dismissAll
@@ -468,7 +498,7 @@ struct MonitorNotices: View {
                 } actions: {
                     if let target, let action = notice.askFirstAction {
                         Button(action) { model.askFirst(projectID: target) }
-                            .buttonStyle(GlassButtonStyle(.glass))
+                            .buttonStyle(GlassButtonStyle(.primary))
                             .lineLimit(1)
                     }
                     dismissAll
@@ -492,7 +522,7 @@ struct MonitorNotices: View {
                                 Text(project.line).foregroundStyle(GlassColor.textPrimary)
                                 if let projectID = project.projectId, let action = project.askFirstAction {
                                     Button(action) { model.askFirst(projectID: projectID) }
-                                        .buttonStyle(GlassButtonStyle(.glass))
+                                        .buttonStyle(GlassButtonStyle(.primary))
                                         .lineLimit(1)
                                 }
                                 if let projectID = project.projectId, model.askFirstRefused.contains(projectID),
@@ -532,7 +562,7 @@ struct MonitorNotices: View {
                     Button(busy ? words.undo.undoing : words.undoKeep) {
                         Task { await traces.perform(.undoKeep, on: kept) }
                     }
-                    .buttonStyle(GlassButtonStyle(.glass))
+                    .buttonStyle(GlassButtonStyle(.primary))
                     .disabled(busy)
                 }
             })
@@ -553,7 +583,7 @@ struct MonitorNotices: View {
                         Button(busy ? words.undo.undoing : words.undoContribute) {
                             Task { await traces.undoFolder(folder.projectId) }
                         }
-                        .buttonStyle(GlassButtonStyle(.glass))
+                        .buttonStyle(GlassButtonStyle(.primary))
                         .disabled(busy)
                     }
                 }
@@ -576,7 +606,7 @@ struct MonitorNotices: View {
                         Button(busy ? words.undo.undoing : words.undoContribute) {
                             Task { await traces.perform(.undoContribute, on: contributed.entryId) }
                         }
-                        .buttonStyle(GlassButtonStyle(.glass))
+                        .buttonStyle(GlassButtonStyle(.primary))
                         .disabled(busy)
                     }
                 }
@@ -610,7 +640,7 @@ struct MonitorNotices: View {
                     // The app's one Return binding, on the safe action: a
                     // keystroke pulls a transcript back.
                     Button(words?.undoContribute ?? QueueLegacyWords.undo) { model.undoApproval() }
-                        .buttonStyle(GlassButtonStyle(.glass))
+                        .buttonStyle(GlassButtonStyle(.primary))
                         .keyboardShortcut(.defaultAction)
                 }
             }
@@ -646,7 +676,7 @@ struct MonitorNotices: View {
                             await offers.accept(offer) { _ = await Notifier.shared.requestAuthorizationIfNeverAsked() }
                         }
                     }
-                    .buttonStyle(GlassButtonStyle(.glass))
+                    .buttonStyle(GlassButtonStyle(.primary))
                     .disabled(offers.writing)
                     Button(offer.decline) { Task { await offers.answer(offer, accept: false) } }
                         .buttonStyle(GlassButtonStyle(.link))
@@ -688,7 +718,8 @@ struct MonitorNotices: View {
                 // The X answers as Not now does: the offer is asked once, so
                 // closing it is an answer, not a deferral (owner,
                 // 2026-10-08). What it does and, in one line, what it
-                // exposes; the rest behind Details.
+                // exposes; the rest behind Details, each thing said once
+                // (owner, 2026-11-02).
                 GlassPopoverNotice(
                     title: copy.offerTitle, tag: copy.destination, tagTone: .accent,
                     detailsLabel: details, closeLabel: copy.offerDecline,
@@ -696,15 +727,16 @@ struct MonitorNotices: View {
                 ) {
                     GlassNoticeMark(systemImage: "shield.lefthalf.filled", tint: GlassColor.accentText)
                 } summary: {
-                    Text(copy.offerWhat)
+                    Text(copy.offerWhatShort)
                     Text(copy.offerExposureShort)
                 } details: {
-                    Text(copy.offerExposure)
+                    Text(copy.offerExposureShared)
                     Text(copy.offerNoRepoint)
+                    Text(copy.offerLogged)
                     Text(copy.offerAskedOnce)
                 } actions: {
                     Button(copy.offerAccept) { model.answerPrivateInferenceOffer(accepted: true) }
-                        .buttonStyle(GlassButtonStyle(.glass))
+                        .buttonStyle(GlassButtonStyle(.primary))
                     Button(copy.offerDecline) { model.answerPrivateInferenceOffer(accepted: false) }
                         .buttonStyle(GlassButtonStyle(.link))
                 }
@@ -720,11 +752,15 @@ struct MonitorNotices: View {
                 } summary: {
                     Text(model.managedText("sign_in_needed"))
                 } details: { EmptyView() } actions: {
-                    Button(model.managedText("sign_in_near_ai")) { NearAiSignIn.begin(model, openURL: openURL) }
-                        .buttonStyle(GlassButtonStyle(.glass))
-                        .lineLimit(1)
-                        .accessibilityLabel(model.managedText("sign_in_near_ai_accessibility"))
-                        .disabled(model.credentialBusy)
+                    NearAiSignInButton(
+                        title: model.managedText("sign_in_near_ai"),
+                        accessibilityName: model.managedText("sign_in_near_ai_accessibility"),
+                        style: GlassButtonStyle(.primary)
+                    ) {
+                        NearAiSignIn.begin(model, openURL: openURL)
+                    }
+                    .lineLimit(1)
+                    .disabled(model.credentialBusy)
                 }
             })
         }
@@ -735,18 +771,23 @@ struct MonitorNotices: View {
 /// The NEAR AI sign-in, begun as Settings > Private AI begins it: the
 /// daemon starts the ceremony and the browser finishes it. A browser that
 /// never opened leaves a ceremony nobody can finish, so it is stopped
-/// rather than left to time out. It names no provider, so the daemon starts
-/// this build's default (`channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER`): the
-/// NEAR wallet in production, NEAR AI's Google login in staging.
+/// rather than left to time out. It names no provider; the daemon's
+/// browser page lists the build's logins and the person picks one there
+/// (owner, 2026-11-02).
 @MainActor
 enum NearAiSignIn {
     static func begin(_ model: AppModel, openURL: OpenURLAction, then: (() -> Void)? = nil) {
         Task {
-            guard let url = await model.startNearAiCredential() else { return }
-            let accepted = await openURL.opened(url)
-            if !accepted { model.cancelNearAiCredential() }
+            await run(model, open: { url in await openURL.opened(url) })
             then?()
         }
+    }
+
+    /// `begin`'s work, with the browser as a seam for tests.
+    static func run(_ model: AppModel, open: (URL) async -> Bool) async {
+        guard let url = await model.startNearAiCredential() else { return }
+        let accepted = await open(url)
+        if !accepted { model.cancelNearAiCredential() }
     }
 }
 
@@ -807,7 +848,7 @@ private struct ArmingOfferPopover: View {
                 Text(copy.body)
             } actions: {
                 Button(copy.confirm) { confirming = true }
-                    .buttonStyle(GlassButtonStyle(.glass))
+                    .buttonStyle(GlassButtonStyle(.primary))
                 Button(copy.decline, action: onDecline)
                     .buttonStyle(GlassButtonStyle(.link))
             }

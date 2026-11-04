@@ -771,25 +771,41 @@ async fn legacy_invite_link_and_coexistence_readiness() {
     );
 
     // An instance enrollment is `invite`-origin in device_keys but redeemed no
-    // invite; it is not an invite identity.
+    // invite; it is not an invite identity. Since V146 (owner decision 3,
+    // 2026-11-03) it links all the same, but carries no invite: no invite
+    // grant is written for its subject hash. The link is revoked again so
+    // the fleet below is what it was before V146.
     let instance_tenant = format!("tenant-{}", "e".repeat(64));
     let instance_hash = hash("instance-subject");
     let instance_device = new_device();
     seed_tenant(&admin, &instance_tenant).await;
     seed_device(&admin, &instance_tenant, &instance_hash, &instance_device).await;
+    linker
+        .link(
+            &near_b,
+            account_b,
+            &instance_tenant,
+            &instance_hash,
+            &instance_device,
+        )
+        .await
+        .expect("an instance enrollment links without an invite (V146)");
     assert_eq!(
-        linker
-            .link(
-                &near_b,
-                account_b,
-                &instance_tenant,
-                &instance_hash,
-                &instance_device
-            )
-            .await
-            .expect_err("instance enrollments are not invite identities"),
-        LinkRefusal::DeviceNotEligible
+        count(
+            &admin,
+            "SELECT count(*) FROM trace_account_invite_grants WHERE invite_subject_hash = $1",
+            &[&instance_hash],
+        )
+        .await,
+        0,
+        "an instance link grants no invite"
     );
+    exec(
+        &admin,
+        "UPDATE trace_legacy_invite_links SET revoked_at = now() WHERE legacy_tenant_id = $1",
+        &[&instance_tenant],
+    )
+    .await;
 
     // --- Account eligibility and the challenge.
     let fresh_tenant = format!("tenant-fresh-{}", Uuid::new_v4().simple());

@@ -28,12 +28,26 @@ near-ai launch codex --account Work --cwd /path/to/another-project
 near-ai sessions list
 ```
 
-CLI launches use the current terminal or multiplexer pane. All managed launches,
-including those initiated from the CLI, appear in the app's managed-session list.
+CLI launches use the current terminal or multiplexer pane. Managed launches,
+including those initiated from the CLI, appear in the app's managed-session list,
+one row per conversation: a resumed session continues its conversation's row
+rather than adding one beside it. The row shown is the conversation's latest
+session that is still starting or running, or whose launcher took up its launch;
+a resume whose launch expired unused does not replace the row that ran. Dismissing a row dismisses the
+whole conversation, so no earlier row comes back in its place.
 A session the app opened in Terminal can be shown (its tab brought to the
 front) and stopped from its row; a CLI launch cannot, because the app neither
 opened its window nor started its launcher. An ended session can be started
 again in the same folder with the same account while both still exist.
+Start again replaces the ended row it came from (owner, 2026-11-04): once the
+new session is starting or running, only it is listed; a Start again that
+never ran leaves the old row.
+Every launch, Start again and Resume included, opens a window of its own; none
+types into an existing tab. Opening a session in a window already open needed
+macOS's System Events Automation and Accessibility prompts, which the owner
+does not want (2026-11-03), so the app does not offer it and the daemon has no such path: an
+older app's `beside` is accepted and ignored, and its two window-list methods
+are refused as unknown. See `docs/contributor-daemon-ipc-v1_1.md`.
 Stop signals only the tool process the launcher supervises: SIGTERM, then
 SIGKILL after a bounded wait. Processes the tool itself started (a shell
 command, a dev server) are not signalled and can outlive it.
@@ -228,16 +242,15 @@ Decided in #1406 (design owner, 2026-10-14): the choice lives in Settings >
 Private AI on every shell, the Start buttons are unchanged, and Windows and
 Linux get the same choice as macOS, as an exception to the #1173 D13 freeze.
 
-**The first launch asks.** Until the person has chosen a terminal
-(`managed_terminal_chosen`, set by any write of `managed_terminal` and
-never cleared), the snapshot's `capabilities.terminal_chosen` is false, and
-the macOS launch dialogs (the sign-in card's and Launch managed session)
-draw the same "Open sessions in" picker as Settings, over the installed
-apps, starting on the current choice. Open saves the choice, then
-launches, so the session opens there and later dialogs do not ask. With
-one terminal installed nothing is asked. A settings file written before
-the key existed counts as not chosen, so a person who has launched before
-is asked once too.
+**Every launch asks.** On macOS the launch dialogs (the sign-in card's and
+Launch managed session) draw the same "Open sessions in" picker as
+Settings, over the installed apps, starting on the current choice
+(`managed_terminal`), on every launch once the daemon reports
+`capabilities.terminal_chosen` (true or false; an older daemon that omits it
+never asks). Open saves the pick as the default (`set_managed_terminal`),
+then launches, so the session opens there and the next dialog starts on it.
+With one terminal installed nothing is asked. Windows, Linux and Tauri pick
+only in Settings today.
 
 **The test.** A terminal is offered only if it accepts both a command and a
 working directory from its scripting interface or command line, documented
@@ -261,6 +274,8 @@ another in Settings." until another is chosen.
 | macOS | iTerm2 | `iterm2` | AppleScript `create window with default profile command` | iTerm2 AppleScript dictionary |
 | macOS | kitty | `kitty` | `open -n -b net.kovidgoyal.kitty --args --directory <folder> --hold <helper> <args>` | as Linux kitty below; `--detach`: "On macOS use open -a kitty.app -n instead", kitty(1); bundle id from kitty's `setup.py` (`net.kovidgoyal.{appname}`) |
 | macOS | WezTerm | `wezterm` | `open -n -b com.github.wez.wezterm --args --config exit_behavior="Hold" start --always-new-process --cwd <folder> -- <helper> <args>` | as Linux WezTerm below; the bundle's executable is `wezterm-gui`, which takes `--config` and `start` itself (`wezterm-gui/src/main.rs`); bundle id from `assets/macos/WezTerm.app/Contents/Info.plist` |
+| macOS | Warp | `warp` | a Tab Config, `~/.warp/tab_configs/near-ai-<uuid>.toml` (owner-only, removed as soon as the launch redeems its ticket or its session ends, and by the lease tick once the ticket's two minutes have passed; a daemon restart removes or adopts the ones it left), with the folder as the pane's `directory` and the command as its one `commands` entry, opened with `open warp://tab_config/near-ai-<uuid>`: a new tab in Warp's active window, or a new window when it has none. A URL, not an Apple Event, so macOS asks for no permission (owner, 2026-11-03: sessions as tabs in one window, with no prompts). No tab is recorded, so the row cannot bring it forward | "Tab Configs", <https://docs.warp.dev/terminal/windows/tab-configs/>: `warp://tab_config/<name>` "opens as a new tab in the active window"; "URI scheme", <https://docs.warp.dev/features/uri-scheme>; bundle id `dev.warp.Warp-Stable` from `Warp.app/Contents/Info.plist` |
+| macOS | Rex | `rex` | Rex's own CLI, found inside the bundle LaunchServices names for `com.superlogical.rex` (`Contents/Helpers/Rex Server.rex/Contents/MacOS/rex`) or in the copy the app keeps under Application Support; never on `PATH`. `open -b com.superlogical.rex` starts or raises the app, `rex ls --json` finds the Rex session labelled "Near.ai" (`rex new Near.ai --json -c <folder>` makes it when it is missing), and `rex api call -s <session> session.new_window -` opens the tab, with the request on stdin: a terminal block with `shell: "none"`, the helper's argv as `command`, the folder as `cwd`, and `exit.on_completion: false`. Every session is a tab of that one Rex session. Show runs `rex focus -s <session> <block>` and `open -b` again. No Apple Event, so macOS asks for no permission. Rex has no option to set an environment variable, so the ticket is in argv, as for kitty (owner decision D2) | the installed beta (`Rex Beta 0.1.0 (1758)`, API revision 10), `docs/superpowers/specs/2026-11-03-rex-herdr-terminal-integration.md`. A private beta with no published CLI contract (D8): its `rex ls --json` is read by value, not by field name |
 | macOS | Alacritty | `alacritty` | `open -n -b org.alacritty --args --working-directory <folder> --hold -e <helper> <args>` | as Linux Alacritty below; bundle id from `extra/osx/Alacritty.app/Contents/Info.plist` |
 | Windows | Windows Terminal | `windows_terminal` | `wt.exe new-tab --title "NEAR AI" -d <folder> <helper> <args>` | `new-tab --startingDirectory, -d` and `commandline` ("Executable with optional arguments"), <https://learn.microsoft.com/en-us/windows/terminal/command-line-arguments> |
 | Linux | GNOME Terminal | `gnome_terminal` | `gnome-terminal --working-directory=<folder> -- <helper> <args>` | `--working-directory=DIRNAME` "Set the terminal's working directory"; `--` is what the deprecated `-x, --execute` entry ("interpret all subsequent options as a program and arguments") says to use instead (`-e` is deprecated too), gnome-terminal(1), <https://manpages.debian.org/testing/gnome-terminal/gnome-terminal.1.en.html> |
@@ -269,6 +284,32 @@ another in Settings." until another is chosen.
 | Linux | WezTerm | `wezterm` | `wezterm --config exit_behavior="Hold" start --always-new-process --cwd <folder> -- <helper> <args>` | `start`: `--cwd` "Specify the current working directory for the initially spawned program", `--always-new-process` "don't try to ask an existing wezterm GUI instance to start the command", and the program after `--`, <https://wezterm.org/cli/start.html>; `--config 'exit_behavior="Hold"'`, <https://wezterm.org/config/files.html>, "keep the pane open after the program exits", <https://wezterm.org/config/lua/config/exit_behavior.html> |
 | Linux | Alacritty | `alacritty` | `alacritty --working-directory <folder> --hold -e <helper> <args>` | `--working-directory` "Start the shell in the specified working directory"; `--hold` "Remain open after child process exits"; `-e, --command` "Command and args to execute (must be last argument)", alacritty(1), <https://manpages.debian.org/trixie/alacritty/alacritty.1.en.html> |
 | Linux | Ghostty | `ghostty` | `ghostty --working-directory=<folder> --wait-after-command=true -e <helper> <args>` | "Every configuration key is a valid CLI flag", <https://ghostty.org/docs/config>; `working-directory`, `wait-after-command`, and `-e` sets `initial-command` and "Disables shell expansion since the input is expected to already be shell-expanded", <https://ghostty.org/docs/config/reference> |
+
+**Group sessions in herdr.** A switch under the picker (settings key
+`managed_herdr`, off by default; owner decisions D3-D6, 2026-11-03) opens
+every session as a tab of the herdr workspace labelled "Near.ai", on macOS
+and Linux, whichever terminal is chosen. herdr (<https://herdr.dev>,
+Apache-2.0) is a terminal multiplexer that runs inside the chosen terminal;
+it is offered only when the `herdr` program is found on the daemon's `PATH`,
+`/opt/homebrew/bin`, `/usr/local/bin` or `~/.local/bin`. The daemon speaks
+herdr's newline-delimited JSON API on its socket,
+`$XDG_CONFIG_HOME/herdr/herdr.sock` or `~/.config/herdr/herdr.sock`, after
+checking that it is a socket this account owns with no group or other
+access. One `layout.apply` request opens the tab, with the helper's argv as
+the pane's `command` (no shell), the folder as its `cwd`, and the ticket only
+in its `env` as `NEAR_AI_LAUNCH_TICKET`: herdr saves each pane's argv to its
+session file and runs it again after a restart, so argv must hold no ticket,
+and it does not save `env`. `redeem-launch` reads the variable when
+`--ticket` is absent, and the tool never inherits it. When the "Near.ai"
+workspace is missing it is made with `workspace.create`, and the session's
+tab replaces the shell tab it starts with. When no herdr answers, the chosen
+terminal opens `herdr` alone (nothing secret) and the launch waits up to 10
+seconds for its socket. Show switches herdr to the session's tab
+(`tab.focus`, found again by terminal id in `session.snapshot`); it does not
+raise the terminal herdr runs in, which would need Apple Events (D6). A
+launch with the switch on and no herdr found is refused with
+`managed-terminal-not-found`; nothing falls back to opening the terminal
+directly. herdr's Windows named pipe is not spoken yet.
 
 Windows Terminal reads `;` anywhere in its command line as the start of a new
 command (same page: "Commands provide the action, or list of actions separated

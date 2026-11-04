@@ -43,10 +43,19 @@ rust-version = "1.96"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/TraceCommons/trace-commons"
 
-# Third-party crates only: no debug info. The workspace's own crates keep the
-# default dev profile, so their backtraces and debugger symbols are
-# unchanged; a third-party frame still names its function but loses its
-# file and line. Measured on 2026-10-15, a clean
+# Debug info, in two tiers. The `test` profile inherits both.
+#
+# The workspace's own crates get line tables only: a backtrace still names
+# each frame's file and line, and a panic message carries its file:line
+# either way, but there is no variable or type information for a debugger.
+# Add `debug = true` here locally when you need to step through one.
+# Measured on 2026-11-02, the target/ of
+# `cargo test --workspace --no-run` went from 15 GB to 13 GB.
+[profile.dev]
+debug = "line-tables-only"
+
+# Third-party crates: no debug info at all. A third-party frame still names
+# its function but loses its file and line. Measured on 2026-10-15, a clean
 # `cargo test -p trace-commons-contributor --lib --no-run` target/ went from
 # 6.7-6.8 GB to 5.9 GB, which every worktree and CI cache carries.
 [profile.dev.package."*"]

@@ -39,6 +39,10 @@ pub enum NearWalletError {
     AlreadyUsed,
     #[error("near_ai_wallet_unavailable")]
     Unavailable,
+    /// Another choice from the login page arrived after this wallet sign-in
+    /// was picked: the attempt ends so the app can start a new one.
+    #[error("near_ai_credential_choice_stale")]
+    StaleChoice,
 }
 
 /// One in-memory signing attempt. Deliberately neither Clone nor Debug nor

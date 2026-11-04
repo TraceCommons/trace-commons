@@ -20,10 +20,55 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(snapshot.terminalChoices, [ManagedTerminalChoice(id: "terminal", name: "Terminal"), ManagedTerminalChoice(id: "ghostty", name: "Ghostty")])
     }
 
-    /// The launch dialog asks for a terminal until one is chosen, only with
-    /// more than one installed, and never for an older daemon that does not
-    /// say; it starts on the current app when installed, else the first.
-    func testTheLaunchDialogAsksForATerminalUntilOneIsChosen() throws {
+    /// Owner, 2026-11-03: while sessions are grouped in herdr, a launch
+    /// refusal names herdr, but tool setup, its install and update hints and
+    /// the picker still name the chosen terminal, where setup opens.
+    func testGroupedLaunchesNameHerdrAndSetupNamesTheTerminal() throws {
+        func capabilities(_ fields: String) throws -> ManagedSnapshot.Capabilities {
+            let json = #"{"revision":2,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,\#(fields)"terminal_choices":[]}}"#
+            return try JSONDecoder().decode(ManagedSnapshot.self, from: Data(json.utf8)).capabilities
+        }
+        let grouped = try capabilities(#""terminal_destination":"Ghostty","launch_destination":"herdr","herdr_grouping":true,"#)
+        let install = "Open {terminal} and run the official installer for {tool}."
+        let notFound = "{terminal} wasn't found on this computer. Choose another in Settings."
+        XCTAssertEqual(
+            ManagedSurface.fillTerminal(install, terminal: ManagedSurface.setupDestination(grouped), fallback: "your terminal"),
+            "Open Ghostty and run the official installer for {tool}.")
+        XCTAssertEqual(
+            ManagedSurface.fillTerminal(notFound, terminal: ManagedSurface.failureDestination(method: "managed_launch_prepare", grouped), fallback: "your terminal"),
+            "herdr wasn't found on this computer. Choose another in Settings.")
+        XCTAssertEqual(ManagedSurface.failureDestination(method: "managed_tool_setup", grouped), "Ghostty")
+        XCTAssertEqual(ManagedSurface.sessionDestination(grouped), "herdr")
+
+        // An older daemon sends only `terminal_destination`, which then
+        // names where everything opens.
+        let older = try capabilities(#""terminal_destination":"Ghostty","#)
+        XCTAssertEqual(ManagedSurface.sessionDestination(older), "Ghostty")
+        XCTAssertEqual(ManagedSurface.failureDestination(method: "managed_launch_prepare", older), "Ghostty")
+        XCTAssertEqual(ManagedSurface.setupDestination(older), "Ghostty")
+    }
+
+    /// "Group sessions in herdr" is offered where the daemon found herdr,
+    /// or while it is on, so it can be turned off after herdr is removed;
+    /// an older daemon that sends neither offers nothing.
+    func testHerdrGroupingIsOfferedWhereHerdrIsFoundOrWhileOn() throws {
+        func snapshot(_ fields: String) throws -> ManagedSnapshot {
+            let json = #"{"revision":2,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,\#(fields)"terminal_choices":[]}}"#
+            return try JSONDecoder().decode(ManagedSnapshot.self, from: Data(json.utf8))
+        }
+        let found = try snapshot(#""herdr_available":true,"herdr_grouping":false,"#)
+        XCTAssertTrue(found.offersHerdrGrouping)
+        XCTAssertEqual(found.capabilities.herdrGrouping, false)
+        XCTAssertTrue(try snapshot(#""herdr_available":false,"herdr_grouping":true,"#).offersHerdrGrouping)
+        XCTAssertFalse(try snapshot(#""herdr_available":false,"herdr_grouping":false,"#).offersHerdrGrouping)
+        XCTAssertFalse(try snapshot("").offersHerdrGrouping)
+    }
+
+    /// The launch dialog asks for a terminal on every launch, chosen or not,
+    /// only with more than one installed, and never for an older daemon that
+    /// does not say; it starts on the current app when installed, else the
+    /// first. What it picks is saved as the default.
+    func testTheLaunchDialogAsksForATerminalOnEveryLaunch() throws {
         func snapshot(chosen: String, current: String, choices: [String]) throws -> ManagedSnapshot {
             let list = choices.map { #"{"id":"\#($0)","name":"\#($0)"}"# }.joined(separator: ",")
             let json = #"{"revision":2,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_current":\#(current),\#(chosen)"terminal_choices":[\#(list)]}}"#
@@ -32,7 +77,14 @@ final class ManagedSessionsTests: XCTestCase {
         let asking = try snapshot(chosen: #""terminal_chosen":false,"#, current: #""ghostty""#, choices: ["terminal", "ghostty"])
         XCTAssertTrue(asking.asksForTerminal)
         XCTAssertEqual(asking.proposedTerminal, "ghostty")
-        XCTAssertFalse(try snapshot(chosen: #""terminal_chosen":true,"#, current: #""ghostty""#, choices: ["terminal", "ghostty"]).asksForTerminal)
+        let chosen = try snapshot(chosen: #""terminal_chosen":true,"#, current: #""ghostty""#, choices: ["terminal", "ghostty"])
+        XCTAssertTrue(chosen.asksForTerminal)
+        XCTAssertEqual(chosen.proposedTerminal, "ghostty")
+        XCTAssertFalse(try snapshot(chosen: #""terminal_chosen":true,"#, current: #""terminal""#, choices: ["terminal"]).asksForTerminal)
+        XCTAssertEqual(chosen.terminalToSave(picked: "terminal"), "terminal")
+        XCTAssertEqual(asking.terminalToSave(picked: "ghostty"), "ghostty")
+        XCTAssertNil(chosen.terminalToSave(picked: nil))
+        XCTAssertNil(try snapshot(chosen: #""terminal_chosen":true,"#, current: #""terminal""#, choices: ["terminal"]).terminalToSave(picked: "terminal"))
         XCTAssertFalse(try snapshot(chosen: "", current: #""ghostty""#, choices: ["terminal", "ghostty"]).asksForTerminal)
         XCTAssertFalse(try snapshot(chosen: #""terminal_chosen":false,"#, current: #""terminal""#, choices: ["terminal"]).asksForTerminal)
         let missing = try snapshot(chosen: #""terminal_chosen":false,"#, current: "null", choices: ["kitty", "wezterm"])
@@ -231,9 +283,10 @@ final class ManagedSessionsTests: XCTestCase {
 
     // MARK: #1407 row actions
 
-    private func session(_ state: String, focus: Bool = false, stop: Bool = false, again: Bool = false, resume: Bool? = nil, startedAt: String? = nil, resumedFrom: String? = nil) throws -> ManagedSession {
+    private func session(_ state: String, focus: Bool = false, stop: Bool = false, again: Bool = false, resume: Bool? = nil, dismiss: Bool? = nil, startedAt: String? = nil, resumedFrom: String? = nil) throws -> ManagedSession {
         var json = #"{"id":"s","tool":"claude","connection":"subscription","account_id":"a","account_label":"Work","project_label":"Project","cwd":"/tmp","state":"\#(state)","purpose":"coding","can_focus":\#(focus),"can_stop":\#(stop),"can_start_again":\#(again)"#
         if let resume { json += #","can_resume":\#(resume)"# }
+        if let dismiss { json += #","can_dismiss":\#(dismiss)"# }
         if let resumedFrom { json += #","resumed_from":"\#(resumedFrom)""# }
         if let startedAt { json += #","started_at":"\#(startedAt)""# }
         return try JSONDecoder().decode(ManagedSession.self, from: Data((json + "}").utf8))
@@ -267,8 +320,8 @@ final class ManagedSessionsTests: XCTestCase {
     }
 
     /// Ron, #1407: Show and Stop only where the daemon can do them, hidden
-    /// (not disabled) otherwise; an ended row offers Start again, then
-    /// Dismiss.
+    /// (not disabled) otherwise; an ended row offers Start again, with
+    /// Dismiss in its menu.
     func testRowActionsFollowWhatTheDaemonCanDo() throws {
         XCTAssertEqual(drawn(try session("running", focus: true, stop: true), terminalLaunch: true), [[], [.show, .stop]])
         XCTAssertEqual(drawn(try session("running", stop: true), terminalLaunch: true), [[], [.stop]])
@@ -277,12 +330,26 @@ final class ManagedSessionsTests: XCTestCase {
         // A flag on a row that is not running offers nothing.
         XCTAssertEqual(drawn(try session("starting", focus: true, stop: true), terminalLaunch: true), [[], []])
         XCTAssertEqual(drawn(try session("unknown", focus: true, stop: true), terminalLaunch: true), [[], []])
-        XCTAssertEqual(drawn(try session("exited", again: true), terminalLaunch: true), [[.startAgain, .dismiss], []])
-        XCTAssertEqual(drawn(try session("failed", again: true), terminalLaunch: true), [[.startAgain, .dismiss], []])
+        XCTAssertEqual(drawn(try session("exited", again: true), terminalLaunch: true), [[.startAgain], [.dismiss]])
+        XCTAssertEqual(drawn(try session("failed", again: true), terminalLaunch: true), [[.startAgain], [.dismiss]])
         XCTAssertEqual(drawn(try session("exited", again: true), terminalLaunch: false), [[.dismiss], []])
         XCTAssertEqual(drawn(try session("exited"), terminalLaunch: true), [[.dismiss], []])
         XCTAssertEqual(ManagedSurface.menuActions(try session("running", focus: true, stop: true)), [.show, .stop])
         XCTAssertEqual(ManagedSurface.menuActions(try session("exited", again: true)), [])
+    }
+
+    /// Owner, 2026-11-02: a row stuck unknown (its launcher died before its
+    /// first report) draws Dismiss, alone, when the daemon says
+    /// `can_dismiss`; without it, or from an older daemon, a row holding its
+    /// account draws nothing. An ended row's actions do not depend on it.
+    func testAStuckRowDrawsDismissOnlyWhenTheDaemonOffersIt() throws {
+        XCTAssertEqual(drawn(try session("unknown", dismiss: true), terminalLaunch: true), [[.dismiss], []])
+        XCTAssertEqual(drawn(try session("unknown", again: true, resume: true, dismiss: true), terminalLaunch: true, resumeCapable: true), [[.dismiss], []])
+        XCTAssertEqual(drawn(try session("unknown", dismiss: false), terminalLaunch: true), [[], []])
+        XCTAssertEqual(drawn(try session("unknown"), terminalLaunch: true), [[], []])
+        XCTAssertFalse(try session("unknown").canDismiss)
+        XCTAssertEqual(drawn(try session("exited", again: true), terminalLaunch: true), [[.startAgain], [.dismiss]])
+        XCTAssertEqual(drawn(try session("exited"), terminalLaunch: true), [[.dismiss], []])
     }
 
     func testOnlyAShowableRunningRowShowsOnClick() throws {
@@ -316,24 +383,53 @@ final class ManagedSessionsTests: XCTestCase {
 
     func testRowButtonsAndMenuSplitWhenResumeIsOffered() throws {
         let both = try session("exited", again: true, resume: true)
-        XCTAssertEqual(ManagedSurface.rowButtons(both, terminalLaunch: true, resumeCapable: true), [.resume, .dismiss])
-        XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: true, resumeCapable: true), [.startAgain])
-        // Without Resume, Start again stays the glass button and the menu is empty.
+        // One visible action; Start again and Dismiss are in the menu.
+        XCTAssertEqual(ManagedSurface.rowButtons(both, terminalLaunch: true, resumeCapable: true), [.resume])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: true, resumeCapable: true), [.startAgain, .dismiss])
+        // Without Resume, Start again is the button and Dismiss the menu.
         let again = try session("exited", again: true)
-        XCTAssertEqual(ManagedSurface.rowButtons(again, terminalLaunch: true, resumeCapable: true), [.startAgain, .dismiss])
-        XCTAssertEqual(ManagedSurface.rowMenuItems(again, terminalLaunch: true, resumeCapable: true), [])
-        XCTAssertEqual(ManagedSurface.rowButtons(both, terminalLaunch: true, resumeCapable: false), [.startAgain, .dismiss])
-        XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: true), [])
+        XCTAssertEqual(ManagedSurface.rowButtons(again, terminalLaunch: true, resumeCapable: true), [.startAgain])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(again, terminalLaunch: true, resumeCapable: true), [.dismiss])
+        XCTAssertEqual(ManagedSurface.rowButtons(both, terminalLaunch: true, resumeCapable: false), [.startAgain])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: true), [.dismiss])
+        // Nothing to launch: Dismiss alone, visible, no menu.
         XCTAssertEqual(ManagedSurface.rowButtons(both, terminalLaunch: false, resumeCapable: true), [.dismiss])
         XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: false, resumeCapable: true), [])
-        // Resume without Start again: Resume and Dismiss, an empty menu.
         let resumeOnly = try session("exited", resume: true)
-        XCTAssertEqual(ManagedSurface.rowButtons(resumeOnly, terminalLaunch: true, resumeCapable: true), [.resume, .dismiss])
-        XCTAssertEqual(ManagedSurface.rowMenuItems(resumeOnly, terminalLaunch: true, resumeCapable: true), [])
+        XCTAssertEqual(ManagedSurface.rowButtons(resumeOnly, terminalLaunch: true, resumeCapable: true), [.resume])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(resumeOnly, terminalLaunch: true, resumeCapable: true), [.dismiss])
         // A running row keeps Show and Stop in the menu and draws no buttons.
         let running = try session("running", focus: true, stop: true)
         XCTAssertEqual(ManagedSurface.rowButtons(running, terminalLaunch: true, resumeCapable: true), [])
         XCTAssertEqual(ManagedSurface.rowMenuItems(running, terminalLaunch: true, resumeCapable: true), [.show, .stop])
+        // A row still holding its account draws neither.
+        let starting = try session("starting")
+        XCTAssertEqual(ManagedSurface.rowButtons(starting, terminalLaunch: true, resumeCapable: true), [])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(starting, terminalLaunch: true, resumeCapable: true), [])
+    }
+
+    func testCopyResumeCommandIsAMenuItemNotARowButton() throws {
+        let both = try session("exited", again: true, resume: true)
+        // Never a visible row button.
+        XCTAssertFalse(ManagedSurface.rowButtons(both, terminalLaunch: true, resumeCapable: true).contains(.copyResumeCommand))
+        // In the menu once the config directory is known, after Start again.
+        XCTAssertEqual(
+            ManagedSurface.rowMenuItems(both, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: true),
+            [.startAgain, .copyResumeCommand, .dismiss])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: true, resumeCapable: true), [.startAgain, .dismiss])
+        // Resume only: the menu holds just the copy item.
+        let resumeOnly = try session("exited", resume: true)
+        XCTAssertEqual(
+            ManagedSurface.rowMenuItems(resumeOnly, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: true),
+            [.copyResumeCommand, .dismiss])
+        // A row that cannot resume, or is running, never offers it.
+        let again = try session("exited", again: true)
+        XCTAssertEqual(
+            ManagedSurface.rowMenuItems(again, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: true), [.dismiss])
+        let running = try session("running", focus: true, stop: true)
+        XCTAssertEqual(
+            ManagedSurface.rowMenuItems(running, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: true),
+            [.show, .stop])
     }
 
     func testResumedFromDecodesAndFormatsTheMarker() throws {
@@ -349,13 +445,13 @@ final class ManagedSessionsTests: XCTestCase {
 
     func testEndedRowOffersResumeFirstOnlyWhenEverythingAllowsIt() throws {
         let row = try session("exited", again: true, resume: true)
-        XCTAssertEqual(drawn(row, terminalLaunch: true, resumeCapable: true), [[.resume, .dismiss], [.startAgain]])
+        XCTAssertEqual(drawn(row, terminalLaunch: true, resumeCapable: true), [[.resume], [.startAgain, .dismiss]])
         // An older daemon without the capability, or no terminal, or no flag.
-        XCTAssertEqual(drawn(row, terminalLaunch: true, resumeCapable: false), [[.startAgain, .dismiss], []])
-        XCTAssertEqual(drawn(row, terminalLaunch: true), [[.startAgain, .dismiss], []])
+        XCTAssertEqual(drawn(row, terminalLaunch: true, resumeCapable: false), [[.startAgain], [.dismiss]])
+        XCTAssertEqual(drawn(row, terminalLaunch: true), [[.startAgain], [.dismiss]])
         XCTAssertEqual(drawn(row, terminalLaunch: false, resumeCapable: true), [[.dismiss], []])
-        XCTAssertEqual(drawn(try session("failed", again: true), terminalLaunch: true, resumeCapable: true), [[.startAgain, .dismiss], []])
-        XCTAssertEqual(drawn(try session("exited", resume: true), terminalLaunch: true, resumeCapable: true), [[.resume, .dismiss], []])
+        XCTAssertEqual(drawn(try session("failed", again: true), terminalLaunch: true, resumeCapable: true), [[.startAgain], [.dismiss]])
+        XCTAssertEqual(drawn(try session("exited", resume: true), terminalLaunch: true, resumeCapable: true), [[.resume], [.dismiss]])
         XCTAssertEqual(drawn(try session("running", focus: true, resume: true), terminalLaunch: true, resumeCapable: true), [[], [.show]])
     }
 
@@ -396,6 +492,55 @@ final class ManagedSessionsTests: XCTestCase {
     /// tier, NEAR AI's own TEEs first, then a third party's, then
     /// Incognito, each in NEAR AI's order. The default heads no group; a model with
     /// no tier (an older daemon) comes last, under no heading.
+    func testRowsNameModelsFromTheCacheAndFallBackToTheId() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"z-ai/glm-5.3","name":"GLM 5.3 Flash"},{"id":"x/no-name"},{"id":"x/blank","name":" "}]}"#.utf8))
+        let names = ManagedSurface.modelNames(catalogue)
+        XCTAssertEqual(names, ["z-ai/glm-5.3": "GLM 5.3 Flash"])
+        // The picker and the row call a model the same thing.
+        let option = ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }.first { $0.value == "z-ai/glm-5.3" }
+        XCTAssertEqual(ManagedSurface.rowModel("z-ai/glm-5.3", names: names), option?.title)
+        // No name, or an empty or failed cache: the recorded id.
+        XCTAssertEqual(ManagedSurface.rowModel("x/no-name", names: names), "x/no-name")
+        XCTAssertEqual(ManagedSurface.rowModel("z-ai/glm-5.3", names: ManagedSurface.modelNames(nil)), "z-ai/glm-5.3")
+    }
+
+    /// A row's read never asks NEAR AI: it always sends `cache_only`.
+    func testARowsCatalogueReadIsCacheOnly() {
+        let row = ManagedSurface.catalogueParams(tool: "claude", cacheOnly: true)
+        XCTAssertEqual(row["cache_only"] as? Bool, true)
+        XCTAssertEqual(row["tool"] as? String, "claude")
+        XCTAssertEqual(row.count, 2)
+        // The picker's read is unchanged.
+        let picker = ManagedSurface.catalogueParams(tool: "claude", cacheOnly: false)
+        XCTAssertNil(picker["cache_only"])
+        XCTAssertEqual(picker.count, 1)
+    }
+
+    func testThePickersTitleModelsByDisplayNameAndKeepTheIdAsValueAndTooltip() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"""
+        {"models":[
+          {"id":"z-ai/glm-5.3","name":"GLM 5.3 Flash","tier":"external"},
+          {"id":"x/no-name","tier":"external"},
+          {"id":"x/blank","name":"  ","tier":"external"},
+          {"id":"a/fav","name":"Fav Model","tier":"external"}
+        ],"tier_order":["external"],"default":"z-ai/glm-5.3","favorites":["a/fav"]}
+        """#.utf8))
+        let options = ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }
+        // The default row names the model by its display name too.
+        XCTAssertTrue(options[0].title.contains("GLM 5.3 Flash"), options[0].title)
+        XCTAssertFalse(options[0].title.contains("z-ai/glm-5.3"))
+        let byValue = Dictionary(uniqueKeysWithValues: options.map { ($0.value, $0) })
+        XCTAssertEqual(byValue["z-ai/glm-5.3"]?.title, "GLM 5.3 Flash")
+        XCTAssertEqual(byValue["z-ai/glm-5.3"]?.help, "z-ai/glm-5.3")
+        XCTAssertEqual(byValue["a/fav"]?.title, "Fav Model")
+        XCTAssertEqual(byValue["a/fav"]?.help, "a/fav")
+        // No name, or a blank one: the id is the title and there is no tooltip.
+        XCTAssertEqual(byValue["x/no-name"]?.title, "x/no-name")
+        XCTAssertNil(byValue["x/no-name"]?.help)
+        XCTAssertEqual(byValue["x/blank"]?.title, "x/blank")
+        XCTAssertNil(byValue["x/blank"]?.help)
+    }
+
     func testTheModelPickerGroupsModelsByPrivacyTier() throws {
         let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"""
         {"models":[
@@ -593,13 +738,14 @@ final class ManagedSessionsTests: XCTestCase {
     }
 
     /// The picker's first option names no model and says which one the
-    /// session will get; every NEAR AI chat model follows, in its order.
+    /// session will get; every NEAR AI chat model follows, in its order,
+    /// each by its display name when NEAR AI gives one, else its id.
     func testTheModelPickerOffersTheDefaultThenTheCatalogue() throws {
         let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"anthropic/claude-sonnet-5-5","name":"Claude Sonnet 5.5"},{"id":"openai/gpt-6.1-sol"}],"default":"anthropic/claude-sonnet-5-5"}"#.utf8))
         XCTAssertEqual(catalogue.models.map(\.id), ["anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol"])
         XCTAssertEqual(catalogue.models.first?.name, "Claude Sonnet 5.5")
         let options = ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }
-        XCTAssertEqual(options.map(\.title), ["Default: anthropic/claude-sonnet-5-5", "anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol"])
+        XCTAssertEqual(options.map(\.title), ["Default: Claude Sonnet 5.5", "Claude Sonnet 5.5", "openai/gpt-6.1-sol"])
         XCTAssertEqual(options.map(\.value), [ManagedSurface.defaultModel, "anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol"])
 
         // Before the catalogue arrives, or when NEAR AI could not be read:
@@ -864,5 +1010,15 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.errorKey(code: "managed-model-unavailable", message: "managed-model-unavailable"), "model_unavailable")
         XCTAssertEqual(ManagedSurface.errorKey(code: "managed-near-ai-balance-too-low", message: "managed-near-ai-balance-too-low"), "balance_too_low")
         XCTAssertEqual(ManagedSurface.errorKey(code: "managed-project-chooses-model", message: "managed-project-chooses-model"), "project_chooses_model")
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-project-sets-auto-mode-server", message: "managed-project-sets-auto-mode-server"), "project_sets_auto_mode_server")
+    }
+
+    /// Owner, 2026-11-03: an untrusted herdr socket and a Rex app that did
+    /// not open in time have lines of their own; a Rex call that failed is
+    /// the general failure, never the unsupported-version line.
+    func testHerdrAndRexRefusalsHaveTheirLines() {
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-herdr-socket-untrusted", message: "managed-herdr-socket-untrusted"), "herdr_socket_untrusted")
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-rex-not-ready", message: "managed-rex-not-ready"), "rex_not_ready")
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-terminal-call-failed", message: "managed-terminal-call-failed"), "action_failed")
     }
 }

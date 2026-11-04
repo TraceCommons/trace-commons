@@ -262,9 +262,9 @@ mod fastembed_impl {
             // Decode lossily. The trace is already redacted upstream and
             // the embedder tokenizer handles odd whitespace fine.
             let text = String::from_utf8_lossy(plaintext).into_owned();
-            if text.trim().is_empty() {
-                anyhow::bail!("EmbedderEmptyInput: empty plaintext rejected");
-            }
+            // Typed, so the caller can tell this input's fault from an
+            // outage (`classify_embedder_error`).
+            crate::embedder::reject_unembeddable_input(&text)?;
 
             let mut model = self
                 .model

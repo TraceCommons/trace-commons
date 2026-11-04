@@ -27,9 +27,10 @@ enum SharingChoice {
         projects.filter { $0.configured && !$0.isUnresolvedBucket && ($0.folderMode ?? $0.mode) == .ask }.count
     }
 
-    /// The Traces tab's line under its switch: how many of the folders it
-    /// lists send on their own, of every folder it lists with a mode (Never
-    /// counted, as in the owner's mockup: "4 of 6 folders automatic").
+    /// The Traces toolbar eye's tooltip line: how many of the folders the
+    /// tab lists send on their own, of every folder it lists with a mode
+    /// (Never counted, as in the owner's mockup: "4 of 6 folders
+    /// automatic").
     static func automaticCount(_ folders: [TracesTree.FolderNode], words: String) -> String {
         let listed = folders.filter { $0.mode != nil }
         let automatic = listed.filter { $0.mode == .autoUpload }.count
@@ -49,6 +50,21 @@ enum SharingChoice {
         asking > 0 ? .keepAsks(count: asking) : .disclose(keepFolderAsks: true)
     }
 
+    /// The Traces toolbar button's icon (owner, 2026-11-02).
+    static let toolbarIcon = "eye"
+
+    /// The toolbar button's tooltip: its name, then the count line.
+    static func toolbarHelp(name: String, line: String) -> String {
+        line.isEmpty ? name : name + "\n" + line
+    }
+
+    /// Whether the toolbar button is drawn: only once the grant and its
+    /// words are known, so it never shows a guess and is never drawn dimmed
+    /// for a state it cannot act on (owner, 2026-10-10: hide, don't dim).
+    static func drawsToolbarButton(grantKnown: Bool, wordsKnown: Bool) -> Bool {
+        grantKnown && wordsKnown
+    }
+
     /// The radios: setup's own titles and lines (`UsesScreenLayout`), for
     /// an account that holds an enrollment, so Settings and setup say the
     /// same thing.
@@ -60,12 +76,14 @@ enum SharingChoice {
     }
 }
 
-/// The card at the top of Settings > Projects, and the switch at the top
-/// of the Traces tab (owner, 2026-10-30): one choice, the same steps from
-/// either. Every word is the core's.
+/// The card at the top of Settings > Projects (owner, 2026-10-30), and the
+/// eye in the Traces tab's toolbar, left of History (owner, 2026-11-02:
+/// it was a switch on a card over the tree): one choice, the same steps
+/// from either. Every word is the core's.
 struct SharingChoiceCard: View {
-    /// The Traces tab's switch: its words, and the folders it lists.
-    struct Switch {
+    /// The Traces toolbar's eye: its name, its tooltip's count line, and
+    /// the tab to re-read.
+    struct ToolbarToggle {
         let accessibleName: String
         let line: String
         /// Re-reads the tab once the choice is saved.
@@ -73,7 +91,7 @@ struct SharingChoiceCard: View {
     }
 
     /// Nil for Settings' radios.
-    var asSwitch: Switch?
+    var toolbar: ToolbarToggle?
 
     @EnvironmentObject private var model: AppModel
     @State private var grantCopy: AutomaticGrantCopy?
@@ -115,35 +133,29 @@ struct SharingChoiceCard: View {
 
     @ViewBuilder
     private func content(_ copy: FirstRunCopy) -> some View {
-        if let asSwitch { switchRow(copy, asSwitch) } else { card(copy) }
+        if let toolbar { toolbarButton(toolbar) } else { card(copy) }
     }
 
-    /// The Traces tab's row: Automatic, the count under it, and the switch.
-    private func switchRow(_ copy: FirstRunCopy, _ words: Switch) -> some View {
-        let title = ProjectModeWords.table?.label(for: .autoUpload) ?? ""
-        return GlassCard {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                        Text(title)
-                            .glassType(GlassTokens.TypeScale.bodyStrong)
-                            .foregroundStyle(GlassColor.textPrimary)
-                        Text(words.line)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 0)
-                    if working { GlassSpinner() }
-                    Toggle(words.accessibleName, isOn: Binding(
-                        get: { SharingChoice.current(model.automaticGrant) == .automatic },
-                        set: { choose($0 ? .automatic : .askMe) }))
-                        .toggleStyle(GlassToggleStyle(.settings, showsLabel: false))
-                        .help(words.accessibleName)
-                        .disabled(working || model.automaticGrant == nil || grantCopy == nil)
-                }
+    /// The Traces toolbar's eye: on while Automatic is, and pressing it
+    /// takes the same steps as Settings' radios (turning it on asks about
+    /// folders set to Ask, then shows setup's disclosures; off is Ask each
+    /// time). Its tooltip carries the count. A refusal opens under it.
+    @ViewBuilder
+    private func toolbarButton(_ words: ToolbarToggle) -> some View {
+        if SharingChoice.drawsToolbarButton(grantKnown: model.automaticGrant != nil, wordsKnown: grantCopy != nil) {
+            let on = SharingChoice.current(model.automaticGrant) == .automatic
+            GlassRoundButton(words.accessibleName, systemImage: SharingChoice.toolbarIcon, isOn: on,
+                             help: SharingChoice.toolbarHelp(name: words.accessibleName, line: words.line)) {
+                choose(on ? .askMe : .automatic)
+            }
+            .disabled(working)
+            .accessibilityHint(words.line)
+            .popover(isPresented: Binding(get: { refusal != nil }, set: { if !$0 { refusal = nil } }),
+                     arrowEdge: .bottom) {
                 if let refusal {
                     GlassAlert(refusal)
+                        .frame(width: GlassInfoButton.popoverWidth, alignment: .leading)
+                        .padding(GlassTokens.Space.s5)
                 }
             }
         }
@@ -191,8 +203,8 @@ struct SharingChoiceCard: View {
         case .askMe:
             working = true
             Task {
-                if !(await model.setAskEachTime()) { refusal = Self.copy?.uses.sharingSaveFailed }
-                await asSwitch?.saved()
+                if !(await model.setAskEachTime()) { refusal = Self.copy?.uses.settingsSharingSaveFailed }
+                await toolbar?.saved()
                 working = false
             }
         case .automatic:
@@ -215,16 +227,16 @@ struct SharingChoiceCard: View {
         let request = SharingDisclosureFlow.grantRequest(
             flow.progress(connected: model.status.loggedIn, scopes: Set(model.status.consentScopes)))
         guard let request, request.ready else {
-            refusal = Self.copy?.uses.sharingRefused
+            refusal = Self.copy?.uses.settingsSharingRefused
             return
         }
         working = true
         let keep = keepFolderAsks
         Task {
             if case .refused = await model.grantAutomatic(witness: request.witnessSigningAddress, keepFolderAsks: keep) {
-                refusal = Self.copy?.uses.sharingRefused
+                refusal = Self.copy?.uses.settingsSharingRefused
             }
-            await asSwitch?.saved()
+            await toolbar?.saved()
             working = false
         }
     }

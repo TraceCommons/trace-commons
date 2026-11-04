@@ -6,11 +6,7 @@
 //! reachable through the library crate, so we pull them in here via
 //! `#[path]` to keep the production binary the single source of truth.
 
-#[path = "../src/bin/pilot_bootstrap/hf_dataset.rs"]
-mod hf_dataset;
-
-#[path = "../src/bin/pilot_bootstrap/translators.rs"]
-mod translators;
+use crate::pilot_bootstrap::translators;
 
 use serde_json::{Value, json};
 use translators::{DeepSeekAgentTranslator, PiMonoTranslator, Translator};
