@@ -50,11 +50,21 @@ enum JoinScreenLayout {
         state.step == .join && canForward(state) && !isCommitting && !completed
     }
 
-    /// Always "Start sharing": Join is the last step and has no Skip
-    /// (owner, 2026-10-12: sign-in required). It stays off until a NEAR AI
-    /// account is signed in (`canStart`).
+    /// "Start sharing": Join is the last step and has no Skip (owner,
+    /// 2026-10-12: sign-in required). It stays off until a NEAR AI account
+    /// is signed in (`canStart`). Private AI only shares nothing, so its
+    /// Start reads Welcome's "Get started" instead.
     static func footerTitle(_ state: FirstRunState, copy: FirstRunCopy) -> String {
-        copy.uses.start
+        state.privateAIOnly ? copy.welcome.start : copy.uses.start
+    }
+
+    /// Back while a commit runs on Join: nil (withdrawn) except during the
+    /// sign-in, so nobody is trapped behind its spinner. Enabled while the
+    /// browser wait can be ended (`FirstRunRunner.backFromSignIn`), shown
+    /// but off for the short daemon calls around it.
+    static func backWhileCommitting(committing: CommitPoint?, signInWaiting: Bool) -> Bool? {
+        guard committing == .signIn else { return nil }
+        return signInWaiting
     }
 
     /// Whether Join shows an account as signed into: near.ai answered on
@@ -92,9 +102,24 @@ enum JoinScreenLayout {
         _ state: FirstRunState, uses: FirstRunCopy.Uses, requiredScope: ConsentScope?, grant: AutomaticGrantCopy?,
         isCommitting: Bool
     ) -> Bool {
-        canForward(state)
+        // Private AI only consents to nothing: no required use and no
+        // sharing words to wait on, only the account and nothing watched.
+        if state.privateAIOnly {
+            return canForward(state) && !isCommitting
+                && FirstRunNavigation.canContinue(readyToStart(state), candidates: [], requiredScope: nil)
+        }
+        return canForward(state)
             && UsesScreenLayout.canStart(
                 readyToStart(state), uses: uses, requiredScope: requiredScope, grant: grant, isCommitting: isCommitting)
+    }
+
+    /// The state Start commits (`readyToStart`), with the required use
+    /// among its scopes when sharing, as Uses' locked box showed. Private AI
+    /// only consents to nothing, so it gets none.
+    static func startState(_ state: FirstRunState, required: ConsentScope?) -> FirstRunState {
+        let ready = readyToStart(state)
+        guard !ready.privateAIOnly else { return ready }
+        return UsesScreenLayout.includingRequired(ready, required: required)
     }
 
     static func canAutomaticallyStart(
@@ -457,6 +482,13 @@ struct JoinScreen: View {
                 // About taking the action, so directly above the action bar.
                 note: copy.join.noSharing,
                 busy: starting && runner.isCommitting,
+                backWhileCommitting: JoinScreenLayout.backWhileCommitting(
+                    committing: runner.committing, signInWaiting: runner.signInWaiting
+                ).map { enabled in
+                    FirstRunFooter.BackWhileCommitting(isEnabled: enabled) {
+                        Task { await runner.backFromSignIn() }
+                    }
+                },
                 action: start)
         ) {
             orbit
@@ -696,18 +728,12 @@ struct JoinScreen: View {
 
     // MARK: - Start sharing
 
-    /// Put the required use in the state, once it is known.
-    private func includeRequired() {
-        let included = UsesScreenLayout.includingRequired(
-            runner.state, required: UsesScreenLayout.requiredScope(model.consentScopes))
-        if included != runner.state { runner.state = included }
-    }
-
     private func start() {
-        runner.state = JoinScreenLayout.readyToStart(runner.state)
         // What Start sends matches what Uses showed: the required use
-        // included.
-        includeRequired()
+        // included when sharing; nothing for Private AI only.
+        let ready = JoinScreenLayout.startState(
+            runner.state, required: UsesScreenLayout.requiredScope(model.consentScopes))
+        if ready != runner.state { runner.state = ready }
         switch UsesScreenLayout.startRoute(runner.state) {
         case .disclose:
             disclosure = SharingDisclosureFlow()

@@ -19,6 +19,11 @@ enum FirstRunStageLayout {
         FirstRunNavigation.threadSteps.firstIndex(of: step)
     }
 
+    /// The step's position on this first run's path.
+    static func threadIndex(of step: FirstRunStep, in state: FirstRunState) -> Int? {
+        FirstRunNavigation.threadSteps(for: state).firstIndex(of: step)
+    }
+
     /// How a stretch of the thread reads: the one before step `index` is
     /// travelled once that step is reached, and the newest one leads.
     enum Segment: Equatable {

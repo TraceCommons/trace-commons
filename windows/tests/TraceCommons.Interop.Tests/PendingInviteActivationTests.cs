@@ -27,7 +27,8 @@ public sealed class PendingInviteActivationTests
         pending.Receive("invite");
         var refused = pending.Take(true, false, false, false);
         Assert.Null(refused.Invite);
-        Assert.Contains("cannot reach the daemon", refused.Notice);
+        Assert.Contains("cannot reach the running app", refused.Notice);
+        Assert.DoesNotContain("daemon", refused.Notice, System.StringComparison.OrdinalIgnoreCase);
         Assert.Null(pending.Take(true, false, true, false).Invite);
     }
 

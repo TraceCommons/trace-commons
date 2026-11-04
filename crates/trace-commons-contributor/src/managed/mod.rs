@@ -113,7 +113,8 @@ pub enum ManagedError {
     SignInRequired,
     #[error("sign in to NEAR AI before launching")]
     NearAiSignInRequired,
-    #[error("start the {} daemon before launching", crate::brand::APP_NAME)]
+    /// DRAFT, NEEDS APPROVAL (2026-11-04).
+    #[error("open the {} app before launching", crate::brand::APP_NAME)]
     DaemonUnavailable,
     #[error("launch status unknown; reconcile before retrying")]
     LaunchUnknown,

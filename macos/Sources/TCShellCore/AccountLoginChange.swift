@@ -25,6 +25,8 @@ public struct AccountChangeCopy: Decodable, Equatable, Sendable {
     public let signOutBody: String
     public let payoutsNeedsLoginBody: String
     public let payoutsNeedsLoginAdd: String
+    /// Under "Add a NEAR AI login" when it could not start.
+    public let payoutsNeedsLoginAddFailed: String
     public let title: String
     public let body: String
     public let bodyOldUnknown: String
@@ -35,6 +37,9 @@ public struct AccountChangeCopy: Decodable, Equatable, Sendable {
     public let stepCurrent: String
     public let stepCurrentWallet: String
     public let stepNew: String
+    /// Steps 1 and 2's buttons, apart from their headings.
+    public let stepCurrentButton: String
+    public let stepNewButton: String
     public let errorCurrentLogin: String
     public let errorWallet: String
     public let errorInUse: String
@@ -57,12 +62,15 @@ public struct AccountChangeCopy: Decodable, Equatable, Sendable {
         case mismatchChange = "mismatch_change"
         case payoutsNeedsLoginBody = "payouts_needs_login_body"
         case payoutsNeedsLoginAdd = "payouts_needs_login_add"
+        case payoutsNeedsLoginAddFailed = "payouts_needs_login_add_failed"
         case bodyOldUnknown = "body_old_unknown"
         case bodyWallet = "body_wallet"
         case privateAI = "private_ai"
         case stepCurrent = "step_current"
         case stepCurrentWallet = "step_current_wallet"
         case stepNew = "step_new"
+        case stepCurrentButton = "step_current_button"
+        case stepNewButton = "step_new_button"
         case errorCurrentLogin = "error_current_login"
         case errorWallet = "error_wallet"
         case errorInUse = "error_in_use"
@@ -81,9 +89,10 @@ public struct AccountChangeCopy: Decodable, Equatable, Sendable {
     /// live export by `TCBridgeTests`.
     public static let consumedFields = [
         "mismatch_body", "mismatch_sign_in", "mismatch_change", "change", "connected", "sign_out",
-        "sign_out_body", "payouts_needs_login_body", "payouts_needs_login_add", "title", "body",
-        "body_old_unknown", "body_wallet", "private_ai", "confirm", "cancel", "step_current",
-        "step_current_wallet", "step_new", "error_current_login", "error_wallet", "error_in_use",
+        "sign_out_body", "payouts_needs_login_body", "payouts_needs_login_add",
+        "payouts_needs_login_add_failed", "title", "body", "body_old_unknown", "body_wallet",
+        "private_ai", "confirm", "cancel", "step_current", "step_current_wallet", "step_new",
+        "step_current_button", "step_new_button", "error_current_login", "error_wallet", "error_in_use",
         "error_too_soon", "error_unavailable", "error_retired", "step_current_accessibility_name",
         "step_new_accessibility_name", "confirm_accessibility_name", "provider_near",
         "provider_github", "provider_google",
@@ -92,9 +101,9 @@ public struct AccountChangeCopy: Decodable, Equatable, Sendable {
     public var sentences: [String] {
         [
             mismatchBody, mismatchSignIn, mismatchChange, change, connected, signOut, signOutBody,
-            payoutsNeedsLoginBody,
-            payoutsNeedsLoginAdd, title, body, bodyOldUnknown, bodyWallet, privateAI, confirm,
-            cancel, stepCurrent, stepCurrentWallet, stepNew, errorCurrentLogin, errorWallet,
+            payoutsNeedsLoginBody, payoutsNeedsLoginAdd, payoutsNeedsLoginAddFailed, title, body,
+            bodyOldUnknown, bodyWallet, privateAI, confirm, cancel, stepCurrent, stepCurrentWallet,
+            stepNew, stepCurrentButton, stepNewButton, errorCurrentLogin, errorWallet,
             errorInUse, errorTooSoon, errorUnavailable, errorRetired, stepCurrentAccessibilityName,
             stepNewAccessibilityName, confirmAccessibilityName, providerNear, providerGithub,
             providerGoogle,
@@ -298,12 +307,12 @@ public enum AccountLoginChangeSurface {
                     ?? copy.stepCurrent)
             return AccountLoginChangePage(
                 title: copy.title, heading: copy.stepCurrent, lines: lines,
-                primary: copy.stepCurrent, primaryAccessibilityName: name, action: .proveCurrent,
+                primary: copy.stepCurrentButton, primaryAccessibilityName: name, action: .proveCurrent,
                 asksWalletAccount: state.isWallet, error: error, busy: state.busy,
                 cancel: copy.cancel)
         case .new:
             return AccountLoginChangePage(
-                title: copy.title, heading: copy.stepNew, lines: [], primary: copy.stepNew,
+                title: copy.title, heading: copy.stepNew, lines: [], primary: copy.stepNewButton,
                 primaryAccessibilityName: copy.stepNewAccessibilityName, action: .signInNew,
                 asksWalletAccount: false, error: error, busy: state.busy, cancel: copy.cancel)
         case .confirm:

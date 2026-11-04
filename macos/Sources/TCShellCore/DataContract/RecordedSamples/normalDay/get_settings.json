@@ -85,6 +85,8 @@
     "failure_line": "Cleanup could not complete. Undo approval before discarding an approved review, then try again.",
     "capture_enabled": false,
     "capture_label": "Enable capture",
+    "capture_confirm_title": "Enable token capture?",
+    "capture_confirm_label": "Enable capture",
     "capture_confirmation": "Token capture stores raw request and response data on this device. It requires configured, supported model targets and restarts the hosted proxy. Contribution and witness sharing remain separate choices.",
     "capture_notice": "Local capture follows the proxy configuration. External proxies are configured separately."
   },

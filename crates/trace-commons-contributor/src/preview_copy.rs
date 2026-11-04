@@ -708,8 +708,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             turn_bytes: "bytes {start}\u{2013}{end}",
             close: "Close",
             native_review: "NATIVE REVIEW",
-            native_review_caption: "Optional daemon-backed checks stay local until you \
-                explicitly confirm.",
+            // DRAFT, NEEDS APPROVAL (2026-11-04).
+            native_review_caption: "Optional checks stay local until you explicitly confirm.",
             prepare_admission: "Prepare admission",
             request_witness_review: "Request review",
             witness_confirm_line: "I understand and want to send this trace for review.",
@@ -914,6 +914,14 @@ pub struct MonitorScreensCopy {
     /// Home's watching row when the core says
     /// the contributor is not signed in: nothing is contributed.
     pub signed_out: &'static str,
+    /// The button beside `signed_out` that opens sign-in. It was first
+    /// run's "Continue", which does not name the click (copy-guide rule 2).
+    pub sign_in: &'static str,
+    /// Settings' line when the core does not answer: Settings shows
+    /// nothing the core last reported, so it stops at the first sentence of
+    /// [`MONITOR_CORE_UNREACHABLE`] (copy-guide rule 7). DRAFT, NEEDS
+    /// APPROVAL (2026-11-04).
+    pub settings_core_unreachable: &'static str,
     /// A mission's credit range: projected credit,
     /// labelled as such (owner ruling, 2026-10-02). Never `pending`, which
     /// is submitted credit still being scored: a contribution mission is
@@ -1163,6 +1171,9 @@ pub struct MonitorFlowMapCopy {
     /// does, in the owner's words (2026-10-19).
     pub style_title: &'static str,
     pub style_toggle: &'static str,
+    ///
+    /// The caption's first sentence was "GUI change only.", which is
+    /// jargon. DRAFT, NEEDS APPROVAL (2026-11-04).
     pub style_caption: &'static str,
     /// The Private AI destination's label: the credential the tools'
     /// calls are answered with.
@@ -1278,6 +1289,16 @@ pub struct MonitorShellCopy {
     /// an h2, and the re-read link at the right. A shell uppercases the
     /// eyebrows.
     pub settings_refresh: &'static str,
+    /// Each Settings card's re-read button's accessible name and tooltip,
+    /// naming what it re-reads, so the repeated "Refresh" buttons are told
+    /// apart (copy-guide rule 5). DRAFT, NEEDS APPROVAL (2026-11-04).
+    pub settings_refresh_desktop: &'static str,
+    pub settings_refresh_discovery: &'static str,
+    pub settings_refresh_uses: &'static str,
+    /// Startup's updates card's eyebrow. It was spelled in the macOS shell
+    /// (copy-guide rule 8). General's words stay the shell's: General never
+    /// waits on the core (owner decision D20, 2026-11-04).
+    pub updates_eyebrow: &'static str,
     pub consent_eyebrow: &'static str,
     pub desktop_eyebrow: &'static str,
     pub desktop_title: &'static str,
@@ -1286,6 +1307,9 @@ pub struct MonitorShellCopy {
     /// The Watching section's watcher card (#1146 `settings-page.tsx`):
     /// its eyebrow and title, the chip for each state, and what pausing
     /// does. The buttons are `pause_watcher` and `resume_watcher`.
+    ///
+    /// The eyebrow was "Daemon", an internal word. DRAFT, NEEDS APPROVAL
+    /// (2026-11-04).
     pub watcher_eyebrow: &'static str,
     pub watcher_title: &'static str,
     pub watcher_watching: &'static str,
@@ -1514,6 +1538,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         history_shown_of: "Showing the newest {shown} of {total}",
         history_shown: "Showing the newest {shown}",
         signed_out: "Not signed in",
+        sign_in: "Sign in",
+        settings_core_unreachable: "The watcher isn't answering.",
         projected: "Projected",
         projected_note: "Projected credit is an estimate for a contribution that matches a mission. \
             It is not earned until a contribution is accepted and scored.",
@@ -1525,7 +1551,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             eyebrow: "RUNTIME",
             heading: "Contribution safeguards",
             inference_routing: "Inference routing",
-            daemon_owned: "daemon-owned",
+            // DRAFT, NEEDS APPROVAL (2026-11-04).
+            daemon_owned: "set by the app",
             rows_unavailable_one: "1 row unavailable",
             rows_unavailable: "{count} rows unavailable",
             capacity_unreadable: "Some approved traces may be waiting and have not been sent, \
@@ -1594,12 +1621,17 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             tabs_label: "Monitor",
             map_views_label: "Map view",
             settings_refresh: "Refresh",
+            // DRAFT, NEEDS APPROVAL (2026-11-04).
+            settings_refresh_desktop: "Refresh system integrations",
+            settings_refresh_discovery: "Refresh trace discovery",
+            settings_refresh_uses: "Refresh data uses",
+            updates_eyebrow: "Updates",
             consent_eyebrow: "Consent",
             desktop_eyebrow: "Desktop",
             desktop_title: "System integrations",
             discovery_eyebrow: "Watcher",
             discovery_title: "Trace discovery",
-            watcher_eyebrow: "Daemon",
+            watcher_eyebrow: "Background service",
             watcher_title: "Contribution watcher",
             watcher_watching: "Watching",
             watcher_paused: "Paused",
@@ -1677,7 +1709,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             kept_here: "{count} kept on this Mac",
             style_title: "Traces map",
             style_toggle: "Rocket mode",
-            style_caption: "GUI change only. Contributions fly to the library (space station) by rocket animation.",
+            style_caption: "Only changes how the map looks. Contributions fly to the library (space station) by rocket animation.",
             credential: "NEAR AI credential",
             none_found: "No configured tools found.",
         },

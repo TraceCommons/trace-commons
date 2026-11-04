@@ -104,4 +104,27 @@ extension SourceCheckExportTests {
         XCTAssertTrue(copy.explanation.contains("does not remove traces already queued"))
         XCTAssertTrue(copy.consentSaveFailed.contains("Couldn't confirm"))
     }
+
+    /// The folder rows' evidence words and per-tool button names come from
+    /// the core (they were spelled in `SourceCandidate`); the fixture in
+    /// `SourceCandidateTests` must match this export.
+    func testEvidenceWordsAndRowButtonNamesComeFromTheCore() throws {
+        let copy = try XCTUnwrap(TCSourceChecks.settingsCopy())
+        let evidence = try XCTUnwrap(copy.evidence)
+        XCTAssertEqual(evidence.missing, "Not found on this machine")
+        XCTAssertEqual(evidence.empty, "Found, but holding no traces yet")
+        XCTAssertEqual(evidence.countOne, "1 trace")
+        XCTAssertEqual(evidence.count, "{count} traces")
+        XCTAssertEqual(evidence.mostRecent, "{traces}, most recent {age}")
+        XCTAssertEqual(evidence.relocated, "{evidence} (moved here by an environment variable)")
+        XCTAssertEqual(
+            [evidence.ageJustNow, evidence.ageMinutes, evidence.ageHour, evidence.ageHours,
+             evidence.ageYesterday, evidence.ageDays],
+            ["just now", "{n} minutes ago", "1 hour ago", "{n} hours ago", "yesterday", "{n} days ago"])
+        // The same visible Watch on two rows has two accessible names.
+        XCTAssertNotEqual(
+            copy.toolActionName(copy.watchCandidate, tool: "Codex"),
+            copy.toolActionName(copy.watchCandidate, tool: "Claude Code"))
+        XCTAssertTrue(copy.toolActionName(copy.watchCandidate, tool: "Codex").contains(copy.watchCandidate))
+    }
 }

@@ -221,8 +221,10 @@ pub const STATE_OFF: &str = "Off.";
 /// A settings response without this status may come from an older daemon.
 pub const STATE_UNREPORTED: &str = "This version can't report its status.";
 
-/// An unrecognized daemon state is not evidence of shutdown.
-pub const STATE_UNKNOWN: &str = "Status unknown. Check again before relying on it.";
+/// An unrecognized daemon state is not evidence of shutdown. The owner's
+/// word for an unknown status (ruling 2026-10-02); it was "Status unknown.
+/// Check again before relying on it." DRAFT, NEEDS APPROVAL (2026-11-04).
+pub const STATE_UNKNOWN: &str = "Status unavailable.";
 
 /// The switch records a request; retained ownership reports actual cleanup.
 pub const STATE_STOPPING: &str = "Stopping. Finishing calls in progress.";

@@ -98,7 +98,7 @@ struct AccountDevicesView: View {
                 HStack {
                     Button(surface.copy.unlinkConfirmButton) { Task { await model.unlink(device) } }
                         .buttonStyle(GlassButtonStyle(.glass))
-                        .accessibilityLabel(surface.unlinkAccessibilityName(for: device))
+                        .accessibilityLabel(surface.unlinkConfirmAccessibilityName(for: device))
                         .disabled(model.busy)
                     Button(surface.copy.cancelButton) { model.confirming = nil }
                         .buttonStyle(GlassButtonStyle(.link))

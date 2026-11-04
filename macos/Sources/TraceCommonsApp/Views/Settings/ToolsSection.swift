@@ -208,7 +208,8 @@ struct ToolsSection: View {
                             model.routingDraft = next
                         }
                     }
-                    .accessibilityLabel(copy.folderTitle)
+                    // Named by its action, as its tooltip is (rule 5); the
+                    // eyebrow above names the field.
                     Text(form.tokenDir)
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textSecondary)

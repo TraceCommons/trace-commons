@@ -2596,6 +2596,10 @@ pub const ACCOUNT_DEVICES_UNLINK_ACCESSIBILITY_NAME: &str = "Unlink {device}";
 pub const ACCOUNT_DEVICES_UNLINK_CONFIRM: &str =
     "Unlink {device}? It is signed out and can't upload or renew its sign-in.";
 pub const ACCOUNT_DEVICES_UNLINK_CONFIRM_BUTTON: &str = "Unlink";
+/// The confirmation's Unlink, apart from the row's (`Unlink {device}`):
+/// the same visible word, its own accessible name (copy-guide rule 5).
+/// DRAFT, NEEDS APPROVAL (2026-11-04).
+pub const ACCOUNT_DEVICES_UNLINK_CONFIRM_ACCESSIBILITY_NAME: &str = "Confirm: unlink {device}";
 pub const ACCOUNT_DEVICES_CANCEL_BUTTON: &str = "Cancel";
 pub const ACCOUNT_DEVICES_SESSION_ENDED: &str = PAYOUT_LINK_SESSION_ENDED;
 pub const ACCOUNT_DEVICES_TOO_MANY: &str = "Too many codes at once. Try again in a few minutes.";
@@ -2624,6 +2628,7 @@ pub struct AccountDevicesCopy {
     pub unlink_accessibility_name: &'static str,
     pub unlink_confirm: &'static str,
     pub unlink_confirm_button: &'static str,
+    pub unlink_confirm_accessibility_name: &'static str,
     pub cancel_button: &'static str,
     pub session_ended: &'static str,
     pub too_many: &'static str,
@@ -2653,6 +2658,7 @@ pub fn account_devices_copy() -> AccountDevicesCopy {
         unlink_accessibility_name: ACCOUNT_DEVICES_UNLINK_ACCESSIBILITY_NAME,
         unlink_confirm: ACCOUNT_DEVICES_UNLINK_CONFIRM,
         unlink_confirm_button: ACCOUNT_DEVICES_UNLINK_CONFIRM_BUTTON,
+        unlink_confirm_accessibility_name: ACCOUNT_DEVICES_UNLINK_CONFIRM_ACCESSIBILITY_NAME,
         cancel_button: ACCOUNT_DEVICES_CANCEL_BUTTON,
         session_ended: ACCOUNT_DEVICES_SESSION_ENDED,
         too_many: ACCOUNT_DEVICES_TOO_MANY,
