@@ -20,6 +20,9 @@
 use chrono::{DateTime, Duration, Utc};
 use reqwest::{StatusCode, Url};
 use trace_commons_operator_client::host_allowlist::HostAllowlist;
+use trace_commons_protocol::first_run_copy::{
+    FIRST_RUN_COPY_MAX_RESPONSE_BYTES, FIRST_RUN_COPY_PATH, FirstRunCopyLines, FirstRunCopyRequest,
+};
 use trace_commons_protocol::first_run_estimate::{
     FIRST_RUN_ESTIMATE_MAX_BYTES, FIRST_RUN_ESTIMATE_PATH, FirstRunEstimate, UsdMicrosRange,
 };
@@ -32,6 +35,10 @@ use crate::config::allowlist_for;
 
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long the first run waits for the commons' Traces lines before it
+/// shows its own: the screen is open and waiting on them.
+pub const FIRST_RUN_COPY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// The public route the table is served on (`trace-commons-ingest`).
 pub const ESTIMATE_TABLE_PATH: &str = "/v1/credit-estimate/table";
@@ -302,13 +309,44 @@ impl EstimateTableClient {
         }
     }
 
-    /// One unauthenticated GET of `path` on the configured origin, read up
-    /// to `max_bytes` and refused past it.
-    async fn get_bounded(
+    /// Ask the commons what the first run says under the traces found
+    /// (`POST /v1/public/first-run-copy`), within [`FIRST_RUN_COPY_TIMEOUT`].
+    /// `request` must already be coarse, or nothing is sent. An answer
+    /// whose lines fail `FirstRunCopyLines::is_valid`, or a body that is
+    /// not the document, is refused; the caller shows its own lines then.
+    pub async fn fetch_first_run_copy(
         &self,
-        path: &str,
-        max_bytes: usize,
-    ) -> Result<Vec<u8>, EstimateTableClientError> {
+        request: &FirstRunCopyRequest,
+    ) -> Result<FirstRunCopyLines, EstimateTableClientError> {
+        if !request.is_valid() {
+            return Err(EstimateTableClientError::Refused);
+        }
+        let url = self.url_for(FIRST_RUN_COPY_PATH)?;
+        let response = self
+            .http
+            .post(url)
+            .timeout(FIRST_RUN_COPY_TIMEOUT)
+            .json(request)
+            .send()
+            .await
+            .map_err(|_| EstimateTableClientError::Unavailable)?;
+        let body = read_bounded(response, FIRST_RUN_COPY_MAX_RESPONSE_BYTES).await?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).map_err(|_| EstimateTableClientError::Refused)?;
+        if !value.is_object() {
+            return Err(EstimateTableClientError::Refused);
+        }
+        let lines: FirstRunCopyLines =
+            serde_json::from_value(value).map_err(|_| EstimateTableClientError::Refused)?;
+        if !lines.is_valid() {
+            return Err(EstimateTableClientError::Refused);
+        }
+        Ok(lines)
+    }
+
+    /// `path` on the configured origin, with no query or fragment, checked
+    /// against the host policy.
+    fn url_for(&self, path: &str) -> Result<Url, EstimateTableClientError> {
         let mut url = self.origin.clone();
         url.set_path(path);
         url.set_query(None);
@@ -316,36 +354,57 @@ impl EstimateTableClient {
         self.allowlist
             .check(&url)
             .map_err(|_| EstimateTableClientError::HostNotAllowed)?;
-        let mut response = self
+        Ok(url)
+    }
+
+    /// One unauthenticated GET of `path` on the configured origin, read up
+    /// to `max_bytes` and refused past it.
+    async fn get_bounded(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, EstimateTableClientError> {
+        let url = self.url_for(path)?;
+        let response = self
             .http
             .get(url)
             .send()
             .await
             .map_err(|_| EstimateTableClientError::Unavailable)?;
-        match response.status() {
-            StatusCode::NOT_FOUND => return Err(EstimateTableClientError::NotFound),
-            status if !status.is_success() => return Err(EstimateTableClientError::Unavailable),
-            _ => {}
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > max_bytes as u64)
-        {
+        read_bounded(response, max_bytes).await
+    }
+}
+
+/// A response's body, read up to `max_bytes` and refused past it: a 404 is
+/// [`EstimateTableClientError::NotFound`], any other failure status
+/// [`EstimateTableClientError::Unavailable`].
+async fn read_bounded(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, EstimateTableClientError> {
+    match response.status() {
+        StatusCode::NOT_FOUND => return Err(EstimateTableClientError::NotFound),
+        status if !status.is_success() => return Err(EstimateTableClientError::Unavailable),
+        _ => {}
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(EstimateTableClientError::ResponseTooLarge);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| EstimateTableClientError::Unavailable)?
+    {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
             return Err(EstimateTableClientError::ResponseTooLarge);
         }
-        let mut body = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| EstimateTableClientError::Unavailable)?
-        {
-            if body.len().saturating_add(chunk.len()) > max_bytes {
-                return Err(EstimateTableClientError::ResponseTooLarge);
-            }
-            body.extend_from_slice(&chunk);
-        }
-        Ok(body)
+        body.extend_from_slice(&chunk);
     }
+    Ok(body)
 }
 
 #[cfg(test)]

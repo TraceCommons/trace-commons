@@ -129,7 +129,7 @@ pub struct FrameCopy {
     /// The footer's Back on every step after Join. Approved 2026-10-08.
     pub back: &'static str,
     /// Cancel on the NEAR AI sign-in wait, the Folders footer and the sharing
-    /// confirmations. The words the passkey group carried before it went.
+    /// confirmations.
     pub cancel: &'static str,
     /// Close on the preview sheet's fallback. Unchanged words, as above.
     pub close: &'static str,

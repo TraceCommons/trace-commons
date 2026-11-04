@@ -5,7 +5,13 @@ import Foundation
 /// list, and the rule that opens each section in its body. Plain labels,
 /// in his order.
 public struct MonitorSettingsNavCopy: MonitorWordTable {
+    /// Ron's name for the section macOS calls Account; decoded so the
+    /// export's every field is consumed, but no longer drawn here.
     public let connection: String
+    /// The Account section (owner, 2026-11-04, D1).
+    public let account: String
+    /// The Payouts section (owner, 2026-11-04, D2).
+    public let payouts: String
     public let startup: String
     public let watching: String
     public let uses: String
@@ -20,6 +26,8 @@ public struct MonitorSettingsNavCopy: MonitorWordTable {
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case connection
+        case account
+        case payouts
         case startup
         case watching
         case uses

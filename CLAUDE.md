@@ -190,7 +190,7 @@ TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL=postgres://tc_login_resolver_login@127
 cargo test -p trace-commons-ingest --lib -- --test-threads=1
 ```
 
-Without the resolver URL, about 74 account, passkey and login tests fail with
+Without the resolver URL, about 74 account and login tests fail with
 `redeem succeeds: left 400 right 303`. CI runs the same thing in the
 `ingest-bin-postgres` job (`trace-commons-ingest tests, whole bin, against
 PostgreSQL`), which is a required status check, in the merge queue too.

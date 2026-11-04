@@ -27,6 +27,8 @@ mod admission;
 mod credit_estimate;
 #[path = "trace_commons_ingest_internal/file_witness.rs"]
 mod file_witness;
+#[path = "trace_commons_ingest_internal/first_run_copy.rs"]
+mod first_run_copy;
 #[path = "trace_commons_ingest_internal/inference_connection.rs"]
 mod inference_connection_routes;
 #[path = "trace_commons_ingest_internal/legacy_invite_link.rs"]
@@ -1785,6 +1787,9 @@ struct AppState {
     /// serves: from the operator's two settings, validated at boot, or
     /// empty when neither is set.
     first_run_estimate: Arc<trace_commons_protocol::first_run_estimate::FirstRunEstimate>,
+    /// What `POST /v1/public/first-run-copy` answers: the default lines, or
+    /// the operator's dollar line, validated at boot.
+    first_run_copy: Arc<first_run_copy::FirstRunCopyConfig>,
     inference_connection_catalog:
         Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
@@ -5259,6 +5264,7 @@ impl AppState {
             referral_config,
             referral_network_mark_key,
             first_run_estimate: credit_estimate::first_run_estimate_from_env()?,
+            first_run_copy: first_run_copy::config_from_env()?,
             attestation_signing,
             legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -8617,8 +8623,7 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
         .merge(legacy_invite_link_routes::routes())
         .merge(inference_connection_routes::routes())
         // Payout recipient links (payout spec section 5): start, confirm and
-        // status on the signed-in account session; no passkey (owner,
-        // 2026-10-23).
+        // status on the signed-in account session (owner, 2026-10-23).
         .merge(payout_link_routes::routes())
         // Referral codes and applying one (referral spec section 6), on the
         // signed-in account session as the payout links are.
@@ -8829,6 +8834,16 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/public/first-run-estimate",
             get(credit_estimate::first_run_estimate_handler),
+        )
+        // Same reason: the first run asks what to say under the traces it
+        // found before an account or any consent exists. A POST, so the
+        // coarsened figures never sit in a URL a proxy logs; a small body
+        // bound.
+        .route(
+            "/v1/public/first-run-copy",
+            post(first_run_copy::first_run_copy_handler).layer(DefaultBodyLimit::max(
+                trace_commons_protocol::first_run_copy::FIRST_RUN_COPY_MAX_REQUEST_BYTES,
+            )),
         )
         // Same reason: the settlement table is public, non-personal data.
         // 404 when the operator installed none.
@@ -23467,7 +23482,7 @@ const ACCOUNT_CEREMONY_COOKIE_MAX_AGE_SECS: i64 = 3 * 60;
 /// Adding or removing an authenticator (a NEAR key) is only freely allowed
 /// from a STRONG session — one minted by a NEAR wallet assertion. From a WEAK
 /// session (a device-link `'web'` cookie, a native token, or a `'passkey'`
-/// session minted before passkeys were removed) the change is REFUSED *once the
+/// session minted before V144) the change is REFUSED *once the
 /// account already holds at least one strong authenticator*, so a leaked
 /// session or a phished device-link link cannot silently swap the account's
 /// real second factor.
@@ -23858,7 +23873,7 @@ async fn account_near_identities_list_handler(
         .map(|i| {
             // True only when THIS NEAR identity authenticated the current session.
             // NEAR login set `auth_credential_id` to the public key; a session
-            // minted by a pre-removal passkey login carries a credential id;
+            // minted by a sign-in before V144 may carry a credential id;
             // device-link is None — none of which can false-positive against a
             // NEAR public key.
             let this_session = ctx

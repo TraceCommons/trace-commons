@@ -88,7 +88,7 @@ final class ShellNoticesPlacementTests: XCTestCase {
         XCTAssertEqual(
             notices.components(separatedBy: ".accessibilityLabel(offer.actionName(for: placement))").count - 1, 1)
         XCTAssertTrue(notices.contains("LegacyMigrationMoveControls(offer: offer, placement: .notice, onDismiss: onDismiss)"))
-        let settings = try MonitorNavigationTests.text("Views/Settings/ConnectionSection.swift")
+        let settings = try MonitorNavigationTests.text("Views/Settings/AccountSection.swift")
         XCTAssertTrue(settings.contains("LegacyMigrationMoveControls(offer: offer, placement: .settings)"))
         XCTAssertTrue(settings.contains("model.isLegacyMigrationOfferDrawn"))
         // Move only while the daemon offers it; a held refusal draws without it.

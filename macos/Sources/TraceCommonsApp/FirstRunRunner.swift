@@ -37,6 +37,9 @@ protocol FirstRunDaemon: AnyObject {
     /// `first_run_estimate`: the commons' dollar estimate per accepted
     /// trace for Traces. Nil when it could not be asked.
     func firstRunEstimate() async -> DaemonData.FirstRunEstimate?
+    /// `first_run_copy`: the lines Traces shows under the traces found.
+    /// Nil when the daemon could not be asked.
+    func firstRunCopy(traceCount: UInt64, totalBytes: UInt64) async -> DaemonData.FirstRunCopyLines?
     func enrollInvite(_ invite: String) async -> Bool
     func signInNearAI() async -> Bool
     /// The near.ai login: signed in once the daemon keeps a near.ai
@@ -79,6 +82,8 @@ protocol FirstRunDaemon: AnyObject {
 extension FirstRunDaemon {
     /// A daemon that cannot say: Traces words its estimate in points.
     func firstRunEstimate() async -> DaemonData.FirstRunEstimate? { nil }
+    /// A daemon that cannot say: Traces shows the core's line.
+    func firstRunCopy(traceCount: UInt64, totalBytes: UInt64) async -> DaemonData.FirstRunCopyLines? { nil }
 }
 
 /// Why a commit stopped. The screens map each case to a core sentence; the
@@ -127,6 +132,11 @@ final class FirstRunRunner: ObservableObject {
     /// answered `first_run_estimate`; nil before, and Traces words points.
     @Published private(set) var dollarEstimate: DaemonData.FirstRunEstimate?
     private var dollarEstimateAsked = false
+    /// The lines Traces shows under the count, once the started daemon
+    /// answered `first_run_copy`; nil before, and Traces shows the core's
+    /// line.
+    @Published private(set) var traceLines: DaemonData.FirstRunCopyLines?
+    private var traceLinesAsked = false
     @Published private(set) var isCommitting = false
     /// The near.ai login without an invite is running, which can wait on
     /// the browser for up to `NearAILoginPoll.limit`: Join offers Cancel
@@ -206,6 +216,16 @@ final class FirstRunRunner: ObservableObject {
         guard state.daemonStarted, !dollarEstimateAsked else { return }
         dollarEstimateAsked = true
         dollarEstimate = await daemon.firstRunEstimate()
+    }
+
+    /// Ask the running daemon what Traces says under the traces found, once
+    /// per first run, after discovery has counted them: nothing before the
+    /// daemon starts or while nothing is counted. An unanswered ask is not
+    /// repeated, and Traces keeps the core's line.
+    func loadTraceLines(traceCount: UInt64?, totalBytes: UInt64) async {
+        guard state.daemonStarted, !traceLinesAsked, let traceCount, traceCount > 0 else { return }
+        traceLinesAsked = true
+        traceLines = await daemon.firstRunCopy(traceCount: traceCount, totalBytes: totalBytes)
     }
 
     /// The commits that send the session roots, and so need a declaration.

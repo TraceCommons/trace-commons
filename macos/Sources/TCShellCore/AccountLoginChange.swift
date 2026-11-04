@@ -18,6 +18,11 @@ public struct AccountChangeCopy: Decodable, Equatable, Sendable {
     public let mismatchSignIn: String
     public let mismatchChange: String
     public let change: String
+    /// "Connected with {provider}" (owner, 2026-11-04, D6).
+    public let connected: String
+    /// "Sign out" and the line drawn above it (owner, 2026-11-04, D3).
+    public let signOut: String
+    public let signOutBody: String
     public let payoutsNeedsLoginBody: String
     public let payoutsNeedsLoginAdd: String
     public let title: String
@@ -44,7 +49,9 @@ public struct AccountChangeCopy: Decodable, Equatable, Sendable {
     public let providerGoogle: String
 
     enum CodingKeys: String, CodingKey {
-        case change, title, body, confirm, cancel
+        case change, title, body, confirm, cancel, connected
+        case signOut = "sign_out"
+        case signOutBody = "sign_out_body"
         case mismatchBody = "mismatch_body"
         case mismatchSignIn = "mismatch_sign_in"
         case mismatchChange = "mismatch_change"
@@ -73,8 +80,8 @@ public struct AccountChangeCopy: Decodable, Equatable, Sendable {
     /// The payload fields this shell decodes, by wire name; compared with the
     /// live export by `TCBridgeTests`.
     public static let consumedFields = [
-        "mismatch_body", "mismatch_sign_in", "mismatch_change", "change",
-        "payouts_needs_login_body", "payouts_needs_login_add", "title", "body",
+        "mismatch_body", "mismatch_sign_in", "mismatch_change", "change", "connected", "sign_out",
+        "sign_out_body", "payouts_needs_login_body", "payouts_needs_login_add", "title", "body",
         "body_old_unknown", "body_wallet", "private_ai", "confirm", "cancel", "step_current",
         "step_current_wallet", "step_new", "error_current_login", "error_wallet", "error_in_use",
         "error_too_soon", "error_unavailable", "error_retired", "step_current_accessibility_name",
@@ -84,7 +91,8 @@ public struct AccountChangeCopy: Decodable, Equatable, Sendable {
 
     public var sentences: [String] {
         [
-            mismatchBody, mismatchSignIn, mismatchChange, change, payoutsNeedsLoginBody,
+            mismatchBody, mismatchSignIn, mismatchChange, change, connected, signOut, signOutBody,
+            payoutsNeedsLoginBody,
             payoutsNeedsLoginAdd, title, body, bodyOldUnknown, bodyWallet, privateAI, confirm,
             cancel, stepCurrent, stepCurrentWallet, stepNew, errorCurrentLogin, errorWallet,
             errorInUse, errorTooSoon, errorUnavailable, errorRetired, stepCurrentAccessibilityName,

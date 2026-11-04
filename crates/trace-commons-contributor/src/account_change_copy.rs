@@ -35,6 +35,25 @@ pub const ACCOUNT_LOGIN_MISMATCH_CHANGE: &str = "Use a different account";
 /// Owner-approved 2026-11-03. Beside the connected line: starts a change.
 pub const ACCOUNT_LOGIN_CHANGE: &str = "Use a different account";
 
+/// Owner-approved 2026-11-04 (Settings IA D6; change spec section 5.1,
+/// `account.login.connected`). The account section's connected line, naming
+/// the login the account last accepted. Shown only when that login is known
+/// and the account needs no attention; otherwise the plain connected word.
+pub const ACCOUNT_LOGIN_CONNECTED: &str = "Connected with {provider}";
+
+// ---- Signing out (one-connected-account spec section 5, F9) ----
+
+/// Owner-approved 2026-11-04 (Settings IA D3; `account.disconnect.button`).
+/// The account section's Sign out: clears this computer's account session
+/// and NEAR AI login (`account_sign_out`). It replaces NEAR AI "Forget" on
+/// macOS (spec Q1 answered no).
+pub const ACCOUNT_SIGN_OUT: &str = "Sign out";
+/// Owner-approved 2026-11-04 (Settings IA D3; `account.disconnect.body`),
+/// the spec's text as written. Drawn above the button, as Forget's
+/// explanation was.
+pub const ACCOUNT_SIGN_OUT_BODY: &str =
+    "Signs out of NEAR AI on this Mac. Private AI and uploads stop until you sign in again.";
+
 // ---- Payouts, for a wallet-origin account (spec 2.1) ----
 
 /// Owner-approved 2026-11-03 (a notice, spec 2.6 item 2). Where the payout
@@ -106,6 +125,9 @@ pub struct AccountChangeCopy {
     pub mismatch_sign_in: &'static str,
     pub mismatch_change: &'static str,
     pub change: &'static str,
+    pub connected: &'static str,
+    pub sign_out: &'static str,
+    pub sign_out_body: &'static str,
     pub payouts_needs_login_body: &'static str,
     pub payouts_needs_login_add: &'static str,
     pub title: &'static str,
@@ -142,6 +164,9 @@ pub fn account_change_copy() -> AccountChangeCopy {
         mismatch_sign_in: ACCOUNT_LOGIN_MISMATCH_SIGN_IN,
         mismatch_change: ACCOUNT_LOGIN_MISMATCH_CHANGE,
         change: ACCOUNT_LOGIN_CHANGE,
+        connected: ACCOUNT_LOGIN_CONNECTED,
+        sign_out: ACCOUNT_SIGN_OUT,
+        sign_out_body: ACCOUNT_SIGN_OUT_BODY,
         payouts_needs_login_body: PAYOUTS_NEEDS_LOGIN_BODY,
         payouts_needs_login_add: PAYOUTS_NEEDS_LOGIN_ADD,
         title: ACCOUNT_CHANGE_TITLE,
@@ -386,12 +411,13 @@ mod tests {
                 .rev()
                 .take_while(|line| line.starts_with("///"))
                 .any(|line| {
-                    line.contains("Owner-approved 2026-11-03")
+                    line.contains("Owner-approved 2026-11-04")
+                        || line.contains("Owner-approved 2026-11-03")
                         || line.contains("Owner-approved 2026-11-02")
                 });
             assert!(doc, "not marked approved: {line}");
         }
-        assert_eq!(declared, 25);
+        assert_eq!(declared, 28);
     }
 
     /// The spec's exact words (section 2), so a later edit is a decision.
@@ -406,6 +432,18 @@ mod tests {
         assert_eq!(ACCOUNT_CHANGE_TITLE, "Use a different NEAR AI account");
         assert_eq!(ACCOUNT_CHANGE_CONFIRM, "Switch");
         assert_eq!(PAYOUTS_NEEDS_LOGIN_ADD, "Add a NEAR AI login");
+        // Settings IA, 2026-11-04 (D3, D6): the specs' own words.
+        assert_eq!(ACCOUNT_LOGIN_CONNECTED, "Connected with {provider}");
+        assert_eq!(ACCOUNT_SIGN_OUT, "Sign out");
+        assert_eq!(
+            ACCOUNT_SIGN_OUT_BODY,
+            "Signs out of NEAR AI on this Mac. Private AI and uploads stop until you sign in again."
+        );
+        assert_eq!(
+            render(ACCOUNT_LOGIN_CONNECTED, Some("github"), None, None).as_deref(),
+            Some("Connected with GitHub")
+        );
+        assert_eq!(render(ACCOUNT_LOGIN_CONNECTED, None, None, None), None);
     }
 
     #[test]

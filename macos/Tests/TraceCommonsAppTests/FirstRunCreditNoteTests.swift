@@ -58,8 +58,15 @@ final class FirstRunCreditNoteTests: XCTestCase {
         // (Zaki's review of #1690), and is unchanged once credit is on.
         XCTAssertTrue(source.contains("let earnsCredit = !TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses)"))
         XCTAssertTrue(source.contains("earnsCredit: earnsCredit) {"))
-        // The final-credit line shows only while credit is on (owner, 2026-11-04).
-        XCTAssertTrue(source.contains("if earnsCredit {\n                    Text(copy.traces.creditDepends)"))
+        // The final-credit line shows only while credit is on (owner,
+        // 2026-11-04): the core's note, or the commons' note in its place.
+        XCTAssertTrue(source.contains("coreNote: copy.traces.creditDepends,"))
+        let copyNote = copy.traces.creditDepends
+        XCTAssertEqual(
+            TracesScreenLayout.lines(found: 1, served: nil, coreLine: "line", coreNote: copyNote, earnsCredit: true)?.note,
+            copyNote)
+        XCTAssertNil(
+            TracesScreenLayout.lines(found: 1, served: nil, coreLine: "line", coreNote: copyNote, earnsCredit: false)?.note)
     }
 
     func testTracesLineIsConditionalWhileTrainCodingModelsIsOff() throws {

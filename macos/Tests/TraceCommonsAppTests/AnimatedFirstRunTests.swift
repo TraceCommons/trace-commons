@@ -143,6 +143,70 @@ final class AnimatedFirstRunTests: XCTestCase {
         XCTAssertEqual(FirstRunStageLayout.countEase(0.5), 0.875, accuracy: 0.001)
     }
 
+    /// The lines under the count are the daemon's `first_run_copy` answer
+    /// (owner, 2026-11-04): the commons' lines, or the protocol's default
+    /// lines it fell back to, in the same layout: the headline, and under
+    /// it the note while the use that earns credit is on. Without an answer,
+    /// the core's own line alone. Nothing found draws nothing. Synthetic
+    /// commons lines.
+    func test_tracesDrawsTheDaemonsLinesOrTheCoresLine() throws {
+        let decode = { (json: String) in
+            try JSONDecoder().decode(DaemonData.FirstRunCopyLines.self, from: Data(json.utf8))
+        }
+        let commons = try decode(
+            #"{"found_credit":"SAMPLE line.","found_could_credit":"SAMPLE could line.","credit_depends":"SAMPLE note.","source":"commons"}"#)
+        XCTAssertEqual(commons.source, "commons")
+        let on = try XCTUnwrap(TracesScreenLayout.lines(found: 1365, served: commons, coreLine: "core", coreNote: "core note", earnsCredit: true))
+        XCTAssertEqual(on.headline, "SAMPLE line.")
+        XCTAssertEqual(on.note, "SAMPLE note.")
+        let off = try XCTUnwrap(TracesScreenLayout.lines(found: 1365, served: commons, coreLine: "core", coreNote: "core note", earnsCredit: false))
+        XCTAssertEqual(off.headline, "SAMPLE could line.")
+        XCTAssertNil(off.note, "the no-credit note sits there instead")
+
+        // The daemon's fallback: the protocol's default lines, drawn alike.
+        let fallback = try decode(
+            #"{"found_credit":"We have detected some traces that can earn you credit.","found_could_credit":"We have detected some traces that could earn you credit.","credit_depends":"Final credit depends on how many traces are accepted.","source":"fallback"}"#)
+        let drawn = try XCTUnwrap(TracesScreenLayout.lines(found: 10, served: fallback, coreLine: nil, coreNote: "core note", earnsCredit: true))
+        XCTAssertEqual(drawn.headline, "We have detected some traces that can earn you credit.")
+        XCTAssertEqual(drawn.note, "Final credit depends on how many traces are accepted.")
+
+        // A commons answer with no note draws the headline alone.
+        let bare = try decode(#"{"found_credit":"SAMPLE line.","found_could_credit":"SAMPLE could line."}"#)
+        XCTAssertNil(try XCTUnwrap(TracesScreenLayout.lines(found: 1, served: bare, coreLine: nil, coreNote: "core note", earnsCredit: true)).note)
+
+        // No answer: the core's line, with its note while credit is on.
+        let core = try XCTUnwrap(TracesScreenLayout.lines(
+            found: 1365, served: nil, coreLine: "core line", coreNote: "core note", earnsCredit: true))
+        XCTAssertEqual(core.headline, "core line")
+        XCTAssertEqual(core.note, "core note")
+        XCTAssertNil(try XCTUnwrap(TracesScreenLayout.lines(
+            found: 1365, served: nil, coreLine: "core line", coreNote: "core note", earnsCredit: false)).note)
+        XCTAssertNil(TracesScreenLayout.lines(found: 1365, served: nil, coreLine: nil, coreNote: "core note", earnsCredit: true))
+
+        for found in [nil, 0] as [UInt64?] {
+            XCTAssertNil(TracesScreenLayout.lines(found: found, served: commons, coreLine: "core", coreNote: "core note", earnsCredit: true))
+        }
+    }
+
+    /// The size sent beside the count is the watched tools' session files'
+    /// total, from discovery's `total_bytes`; a store not measured adds 0.
+    func test_tracesSendsTheWatchedToolsTotalSize() throws {
+        let rows = try SourceCandidate.decodeList(from: """
+            [{"source":"claude-code","path":"/a","exists":true,"session_count":3,"most_recent":null,"total_bytes":3000,"relocated_by_env":false,"answers_at":"Anthropic"},
+             {"source":"codex","path":"/b","exists":true,"session_count":2,"most_recent":null,"total_bytes":500,"relocated_by_env":false,"answers_at":"OpenAI"},
+             {"source":"cline","path":"/c","exists":true,"session_count":9,"most_recent":null,"total_bytes":99999,"relocated_by_env":false,"answers_at":null},
+             {"source":"opencode","path":"/d","exists":true,"session_count":4,"most_recent":null,"total_bytes":null,"relocated_by_env":false,"answers_at":null}]
+            """)
+        XCTAssertEqual(rows.map(\.totalBytes), [3000, 500, 99999, nil])
+        var state = FirstRunState(step: .traces)
+        state.recordDiscovery(rows)
+        state.answer(.claudeCode, .watch(path: "/a"))
+        state.answer(.codex, .watch(path: "/b"))
+        state.answer(.opencode, .watch(path: "/d"))
+        XCTAssertEqual(TracesScreenLayout.totalBytes(state, discovered: rows), 3500, "cline is not watched")
+        XCTAssertEqual(TracesScreenLayout.totalBytes(state, discovered: nil), 0)
+    }
+
     // MARK: Private AI
 
     /// The diagram includes all three persistent connection tools, with

@@ -36,7 +36,7 @@ public class LegacyMigrationShellWiringTests
 
         string main = ShellSource("TraceCommons.App/ViewModels/MainViewModel.cs");
         Assert.Contains("LegacyOffer.SetStatus(parsedStatus.LegacyInviteMigration, parsedStatus.TenantId)", main);
-        Assert.Contains("new NearAiPasskeyStep(", main);
+        Assert.Contains("new NearAiLoginStep(", main);
         Assert.Contains("move.Settled += () => _ = RefreshAsync();", main);
     }
 

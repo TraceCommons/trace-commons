@@ -4,10 +4,12 @@ import TCDesign
 import TCShellCore
 
 /// What Traces shows, apart from the view so it can be tested: the watched
-/// tools' traces counted, and one line in the core's words that they can
-/// earn credit (`tc_first_run_estimate_line`). The line names no amount
-/// (owner, 2026-11-04); the request still carries the commons' and an
-/// invite's ranges, which the core ignores.
+/// tools' traces counted, and the lines under the count. The commons words
+/// them (owner, 2026-11-04): the daemon asks it with the count and size,
+/// coarsened, and answers with its lines or the protocol's default lines
+/// (`first_run_copy`). Without that answer, the core's own line
+/// (`tc_first_run_estimate_line`), which names no amount either, with its
+/// final-credit note.
 enum TracesScreenLayout {
     /// A watched tool and its traces on this Mac.
     struct Row: Equatable {
@@ -20,6 +22,35 @@ enum TracesScreenLayout {
         ToolsScreenLayout.watchedKinds(state).map { kind in
             Row(kind: kind, traces: discovered?.first { $0.source == kind && $0.exists }?.sessionCount ?? 0)
         }
+    }
+
+    /// The watched tools' session files' total size, the figure the
+    /// `first_run_copy` ask sends beside the count. A store not measured
+    /// adds nothing.
+    static func totalBytes(_ state: FirstRunState, discovered: [SourceCandidate]?) -> UInt64 {
+        ToolsScreenLayout.watchedKinds(state).reduce(0) { sum, kind in
+            let row = discovered?.first { $0.source == kind && $0.exists }
+            return sum &+ (row?.totalBytes ?? 0)
+        }
+    }
+
+    /// The headline under the count and the smaller note under it, or nil
+    /// for none (nothing found or counted yet). The daemon's lines when it
+    /// answered `first_run_copy`, else the core's line and its final-credit
+    /// note. Either way, while the use that earns credit is off the headline
+    /// is the could-earn one and there is no note: the no-credit note sits
+    /// there instead (owner, 2026-11-04).
+    static func lines(
+        found: UInt64?, served: DaemonData.FirstRunCopyLines?, coreLine: String?, coreNote: String,
+        earnsCredit: Bool
+    ) -> (headline: String, note: String?)? {
+        guard let found, found > 0 else { return nil }
+        if let served {
+            return earnsCredit
+                ? (served.foundCredit, served.creditDepends)
+                : (served.foundCouldCredit, nil)
+        }
+        return coreLine.map { ($0, earnsCredit ? coreNote : nil) }
     }
 
     static func total(_ rows: [Row]) -> UInt64 {
@@ -133,6 +164,11 @@ struct TracesScreen: View {
             openedAt = memory.tracesCounted ? .distantPast : Date()
         }
         .task { await runner.loadDollarEstimate() }
+        .task(id: TracesScreenLayout.found(runner.state, discovered: memory.discovered)) {
+            await runner.loadTraceLines(
+                traceCount: TracesScreenLayout.found(runner.state, discovered: memory.discovered),
+                totalBytes: TracesScreenLayout.totalBytes(runner.state, discovered: memory.discovered))
+        }
     }
 
     private func graphic(rows: [TracesScreenLayout.Row], total: UInt64) -> some View {
@@ -249,22 +285,25 @@ struct TracesScreen: View {
         .frame(maxWidth: 460)
     }
 
-    /// The one line under the count, or nothing at all when there is none,
-    /// and, while the use that earns credit is on, that the final credit
-    /// depends on which traces are accepted (owner, 2026-11-04).
+    /// The headline under the count, with its note when there is one, or
+    /// nothing at all when there is none.
     @ViewBuilder
     private func estimate(found: UInt64?) -> some View {
         let done = memory.tracesCounted || reduceMotion
         let earnsCredit = !TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses)
-        if let line = TracesScreenLayout.estimate(
-            found: found, lookup: runner.lookup, dollars: runner.dollarEstimate,
+        if let lines = TracesScreenLayout.lines(
+            found: found, served: runner.traceLines,
+            coreLine: TracesScreenLayout.estimate(
+                found: found, lookup: runner.lookup, dollars: runner.dollarEstimate,
+                earnsCredit: earnsCredit),
+            coreNote: copy.traces.creditDepends,
             earnsCredit: earnsCredit) {
             VStack(spacing: GlassTokens.Space.s1) {
-                Text(line)
+                Text(lines.headline)
                     .glassType(GlassTokens.TypeScale.heading)
                     .foregroundStyle(GlassColor.textPrimary)
-                if earnsCredit {
-                    Text(copy.traces.creditDepends)
+                if let note = lines.note {
+                    Text(note)
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textSecondary)
                 }
