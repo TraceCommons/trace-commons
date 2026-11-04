@@ -292,6 +292,10 @@ struct DaemonStatus: Decodable, Equatable {
     /// AI login, and whether a refused login is held aside for it. A daemon
     /// that predates the keys offers nothing.
     let loginChange: AccountLoginChangeStatus
+    /// The login the account last accepted, by tag (`near`, `github`,
+    /// `google`), for "Connected with {provider}" (Settings IA D6). Nil when
+    /// the daemon does not know it, or predates the key.
+    let accountLogin: String?
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -318,6 +322,7 @@ struct DaemonStatus: Decodable, Equatable {
         case payoutsNeedLogin = "payouts_need_login"
         case loginChangeHeld = "login_change_held"
         case loginMismatch = "login_mismatch"
+        case accountLogin = "account_login"
     }
 
     init(
@@ -339,7 +344,8 @@ struct DaemonStatus: Decodable, Equatable {
         gateHeld: GateHeld = .none,
         legacyInviteMigration: LegacyMigrationWire = .none,
         accountAttention: AccountAttentionWire = .none,
-        loginChange: AccountLoginChangeStatus = .none
+        loginChange: AccountLoginChangeStatus = .none,
+        accountLogin: String? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
@@ -360,6 +366,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.legacyInviteMigration = legacyInviteMigration
         self.accountAttention = accountAttention
         self.loginChange = loginChange
+        self.accountLogin = accountLogin
     }
 
     init(from decoder: Decoder) throws {
@@ -402,6 +409,7 @@ struct DaemonStatus: Decodable, Equatable {
         loginChange = AccountLoginChangeStatus(
             available: flag(.loginChangeAvailable), payoutsNeedLogin: flag(.payoutsNeedLogin),
             held: flag(.loginChangeHeld), mismatch: flag(.loginMismatch))
+        accountLogin = (try? c.decodeIfPresent(String.self, forKey: .accountLogin)).flatMap { $0 }
     }
 
     /// This status as the daemon reports it straight after `unenroll`: not

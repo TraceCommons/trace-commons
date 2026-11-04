@@ -1128,7 +1128,7 @@ private struct MonitorMapPane: View {
                     // Settings' Devices section, which starts linking a
                     // server on the request (owner, 2026-10-27).
                     AccountDeviceLinkRequest.shared.ask()
-                    OpenMonitor.request(.settings(.connection))
+                    OpenMonitor.request(.settings(.account))
                 },
                 addDeviceLabel: devices.surface?.copy.linkAccessibilityName ?? "")
         case .privateAI:

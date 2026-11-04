@@ -95,7 +95,8 @@ struct PrivateAISettingsPanels: View {
                     onDismiss: { store.dismissPrivateAIRefusal() },
                     onRefresh: { refreshConnection() },
                     // #1146: the sign-in is part of the connection panel.
-                    credential: AnyView(CredentialSection(copy: copy, prominent: true, titled: false)))
+                    credential: AnyView(CredentialSection(
+                        copy: copy, prominent: true, titled: false, placement: .signInShortcut)))
             }
         }
     }

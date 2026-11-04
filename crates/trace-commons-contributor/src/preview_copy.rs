@@ -1178,7 +1178,16 @@ pub struct MonitorFlowMapCopy {
 /// under that section's name.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct MonitorSettingsNavCopy {
+    /// Ron's #1146 name for the section macOS now calls Account. GTK,
+    /// Windows and Tauri still read it.
     pub connection: &'static str,
+    /// macOS's name for that section since the Settings IA review: who you
+    /// are, the NEAR AI login, devices, and signing out. Owner-approved
+    /// 2026-11-04 (D1).
+    pub account: &'static str,
+    /// macOS's section for NEAR AI credit payouts. Owner-approved 2026-11-04
+    /// (D2).
+    pub payouts: &'static str,
     pub startup: &'static str,
     pub watching: &'static str,
     /// Approved 2026-10-08 (button rule).
@@ -1736,6 +1745,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         },
         settings_nav: MonitorSettingsNavCopy {
             connection: "Connection",
+            account: "Account",
+            payouts: "Payouts",
             startup: "Startup & notifications",
             watching: "Watching",
             uses: "Data uses",
@@ -2063,7 +2074,11 @@ mod tests {
         let screens = monitor_screens_copy();
         let nav = &screens.settings_nav;
         let names: Vec<String> = words_of(nav).into_iter().map(|(_, word)| word).collect();
-        assert_eq!(names.len(), 12, "#1146 lists twelve sections: {names:?}");
+        // #1146's twelve, plus macOS's Account and Payouts (2026-11-04).
+        assert_eq!(names.len(), 14, "#1146's twelve and two more: {names:?}");
+        assert_eq!(nav.connection, "Connection");
+        assert_eq!(nav.account, "Account");
+        assert_eq!(nav.payouts, "Payouts");
         assert_eq!(nav.startup, "Startup & notifications");
         assert_eq!(nav.uses, "Data uses");
         assert_eq!(nav.profile, "Public profile");
