@@ -71,21 +71,10 @@ final class FirstRunCreditNoteTests: XCTestCase {
 
     func testTracesLineIsConditionalWhileTrainCodingModelsIsOff() throws {
         XCTAssertEqual(
-            TracesScreenLayout.estimate(found: 1365, lookup: nil, dollars: nil, earnsCredit: false),
+            TracesScreenLayout.estimate(found: 1365, lookup: nil, earnsCredit: false),
             "We have detected some traces that could earn you credit.")
         XCTAssertEqual(
-            TracesScreenLayout.estimate(found: 1365, lookup: nil, dollars: nil, earnsCredit: true),
-            "We have detected some traces that can earn you credit.")
-        // The commons' range (synthetic) names no amount either (owner,
-        // 2026-11-04: the MVP shows no figure).
-        let commons = try JSONDecoder().decode(
-            DaemonData.FirstRunEstimate.self,
-            from: Data(#"{"usd_micros_per_accepted_trace":{"min":120000,"max":340000}}"#.utf8))
-        XCTAssertEqual(
-            TracesScreenLayout.estimate(found: 1365, lookup: nil, dollars: commons, earnsCredit: false),
-            "We have detected some traces that could earn you credit.")
-        XCTAssertEqual(
-            TracesScreenLayout.estimate(found: 1365, lookup: nil, dollars: commons, earnsCredit: true),
+            TracesScreenLayout.estimate(found: 1365, lookup: nil, earnsCredit: true),
             "We have detected some traces that can earn you credit.")
     }
 

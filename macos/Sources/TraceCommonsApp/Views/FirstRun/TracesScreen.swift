@@ -69,14 +69,10 @@ enum TracesScreenLayout {
     /// (`earnsCredit` false) it says what the traces could earn (Zaki's
     /// review of #1690).
     static func estimate(
-        found: UInt64?, lookup: DaemonData.InviteLookup?, dollars: DaemonData.FirstRunEstimate?,
-        earnsCredit: Bool = true
+        found: UInt64?, lookup: DaemonData.InviteLookup?, earnsCredit: Bool = true
     ) -> String? {
         guard let found, found > 0 else { return nil }
         var request: [String: Any] = ["traces": found, "earns_credit": earnsCredit]
-        if let range = dollars?.usdMicrosPerAcceptedTrace {
-            request["usd_micros_per_accepted_trace"] = ["min": range.min, "max": range.max]
-        }
         if let range = lookup?.creditRange {
             request["credit_range"] = ["min": range.min, "max": range.max, "unit": range.unit]
         }
@@ -163,7 +159,6 @@ struct TracesScreen: View {
         .onAppear {
             openedAt = memory.tracesCounted ? .distantPast : Date()
         }
-        .task { await runner.loadDollarEstimate() }
         .task(id: TracesScreenLayout.found(runner.state, discovered: memory.discovered)) {
             await runner.loadTraceLines(
                 traceCount: TracesScreenLayout.found(runner.state, discovered: memory.discovered),
@@ -294,7 +289,7 @@ struct TracesScreen: View {
         if let lines = TracesScreenLayout.lines(
             found: found, served: runner.traceLines,
             coreLine: TracesScreenLayout.estimate(
-                found: found, lookup: runner.lookup, dollars: runner.dollarEstimate,
+                found: found, lookup: runner.lookup,
                 earnsCredit: earnsCredit),
             coreNote: copy.traces.creditDepends,
             earnsCredit: earnsCredit) {

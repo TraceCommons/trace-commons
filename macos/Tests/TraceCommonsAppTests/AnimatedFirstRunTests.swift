@@ -93,12 +93,9 @@ final class AnimatedFirstRunTests: XCTestCase {
 
     // MARK: Traces
 
-    /// The watched tools' traces are counted, and Traces shows one total
-    /// for them, worded by the core (owner, 2026-10-23): points, the count
-    /// times the core's 3 to 8 default or an invite's own range; or, when
-    /// the commons publishes a dollar range per accepted trace, dollars of
-    /// NEAR AI credit in its place, never both. Nothing counted yet, or
-    /// nothing found, draws no line.
+    /// The watched tools' traces are counted, and the core's line names no
+    /// amount, whatever an invite says (owner, 2026-11-04). Nothing counted
+    /// yet, or nothing found, draws no line.
     func test_tracesShowsOneTotalInPointsOrInTheCommonsDollars() throws {
         let discovered = [
             Self.candidate(.claudeCode, exists: true, sessions: 953), Self.candidate(.codex, exists: true, sessions: 412),
@@ -118,23 +115,20 @@ final class AnimatedFirstRunTests: XCTestCase {
         // One line, no amount, whatever an invite or the commons says
         // (owner, 2026-11-04: the MVP shows no figure).
         XCTAssertEqual(
-            TracesScreenLayout.estimate(found: 1365, lookup: nil, dollars: nil), copy.traces.foundCredit)
+            TracesScreenLayout.estimate(found: 1365, lookup: nil), copy.traces.foundCredit)
         let invite = try JSONDecoder().decode(
             DaemonData.InviteLookup.self,
             from: Data(#"{"valid":true,"credit_range":{"min":2,"max":6,"unit":"points_per_accepted_trace"}}"#.utf8))
-        let commons = try JSONDecoder().decode(
-            DaemonData.FirstRunEstimate.self,
-            from: Data(#"{"usd_micros_per_accepted_trace":{"min":120000,"max":340000}}"#.utf8))
         XCTAssertEqual(
-            TracesScreenLayout.estimate(found: 1365, lookup: invite, dollars: commons), copy.traces.foundCredit)
+            TracesScreenLayout.estimate(found: 1365, lookup: invite), copy.traces.foundCredit)
         for line in [copy.traces.foundCredit, copy.traces.foundCouldCredit] {
             XCTAssertFalse(line.contains("$"), line)
             XCTAssertFalse(line.contains("point"), line)
         }
 
         for found in [nil, 0] as [UInt64?] {
-            XCTAssertNil(TracesScreenLayout.estimate(found: found, lookup: nil, dollars: commons))
-            XCTAssertNil(TracesScreenLayout.estimate(found: found, lookup: nil, dollars: nil))
+            XCTAssertNil(TracesScreenLayout.estimate(found: found, lookup: invite))
+            XCTAssertNil(TracesScreenLayout.estimate(found: found, lookup: nil))
         }
 
         XCTAssertEqual(TracesScreenLayout.counted(after: 0, reduceMotion: false), 0)
