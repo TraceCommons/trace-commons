@@ -50,13 +50,24 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             // The managed-session terminal: the picker reads it from the
             // managed snapshot (`capabilities.terminal_current`), with the
             // installed choices beside it, and writes it with
-            // `set_managed_terminal`.
-            "managed_terminal",
+            // `set_managed_terminal`. Whether it was chosen is read the same
+            // way (`capabilities.terminal_chosen`).
+            "managed_terminal", "managed_terminal_chosen",
+            // "Group sessions in herdr": read from the managed snapshot
+            // (`capabilities.herdr_grouping`) and written with
+            // `set_managed_herdr`.
+            "managed_herdr",
+            // Favorite models: the Launch sheet's picker reads them from
+            // `managed_model_catalogue`'s `favorites` and writes them with
+            // `managed_model_favorite_set`.
+            "managed_favorite_models",
         ]
         // Staging builds only: where the signed NEAR AI pin set stands, and
         // the last attestation outcome under it (owner decision S16):
         // labels no screen draws yet. A production daemon never sends them.
-        let status: Set<String> = ["near_ai_pins", "near_ai_attestation"]
+        let status: Set<String> = [
+            "near_ai_pins", "near_ai_attestation",
+        ]
         return ["get_settings": settings, "set_settings": settings, "status": status]
     }()
 

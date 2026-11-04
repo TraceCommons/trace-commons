@@ -400,10 +400,6 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try await call("invite_lookup", params: ["code": code], as: DaemonData.InviteLookup.self)
     }
 
-    public func passkeyState() async throws -> DaemonData.PasskeyState {
-        try await call("passkey_state", as: DaemonData.PasskeyState.self)
-    }
-
     public func accountState() async throws -> DaemonData.AccountState {
         try await call("account_session_status", as: DaemonData.AccountState.self)
     }

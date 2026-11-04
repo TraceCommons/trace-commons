@@ -81,8 +81,8 @@ final class DigestCopyTests: XCTestCase {
         XCTAssertFalse(without?.contains("credit") ?? true, without ?? "")
     }
 
-    /// Settlement is off on every deployment shipped so far, so a bare figure
-    /// would be read as money that exists. The word is always "pending".
+    /// The fallback sentence for a daemon that sent no text says only
+    /// "pending": it is never given credit the server has decided.
     func testPendingCreditIsNeverCalledEarned() {
         let line = DigestCopy.contributionLine(count: 2, projects: ["api"], creditPending: 4.25)
         XCTAssertTrue(line?.contains("pending") ?? false, line ?? "")

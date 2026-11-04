@@ -28,22 +28,21 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertTrue(pile.contains("charge > 0 ? GlassTokens.Color.mapOrbShared.color"))
     }
 
-    /// The Not contributed card has no border. A shimmer crossed it from
-    /// 2026-10-20; since 2026-10-22 a soft light turns round its edge
-    /// instead (`DesignRulings20261022Tests`), over its fill and
-    /// watermark.
-    func test_aLightTurnsRoundTheNotContributedCard() throws {
+    /// The Not contributed card has no border and nothing moving on it
+    /// (owner, 2026-11-02). A shimmer crossed it from 2026-10-20, a soft
+    /// light turned round its edge from 2026-10-22, and a brighter light
+    /// glanced across it from 2026-10-27; all are gone.
+    func test_theNotContributedCardIsStill() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         let card = try XCTUnwrap(home.range(of: "private struct HomeNotContributedCard: View {"))
         let end = try XCTUnwrap(home.range(of: "\n}\n", range: card.upperBound..<home.endIndex))
         let body = home[card.upperBound..<end.lowerBound]
         XCTAssertFalse(body.contains("strokeBorder"), "the border is back")
-        XCTAssertFalse(body.contains("glassCardShimmer"), "the shimmer is back")
+        XCTAssertFalse(body.contains("glassCardBeacon"), "the beacon is back")
+        XCTAssertFalse(body.contains("Shimmer"), "the shimmer is back")
         let mark = try XCTUnwrap(body.range(of: ".glassCardWatermark("))
-        let tier = try XCTUnwrap(body.range(of: ".glassTier(.card"))
-        let beacon = try XCTUnwrap(body.range(of: ".glassCardBeacon()"))
+        let tier = try XCTUnwrap(body.range(of: ".glassTier(.card,"))
         XCTAssertLessThan(mark.lowerBound, tier.lowerBound)
-        XCTAssertLessThan(tier.lowerBound, beacon.lowerBound, "the light sits over the card's fill")
     }
 
     /// The card's line is the core's call to share; an older core's plain
@@ -68,9 +67,10 @@ final class DesignRulings20261020Tests: XCTestCase {
     }
 
     /// Home's groups are titled, in the owner's words. The order is the
-    /// 2026-10-28 ruling: Traces first, then Account, then Private AI,
-    /// below and smaller than Traces. The Traces hero sits above the Traces
-    /// heading (owner, 2026-10-29), so the heading is over Waiting.
+    /// Private AI first again (owner, 2026-11-02; the 2026-10-28 ruling put
+    /// it under Traces and Account), then Traces, then Account. The Traces
+    /// hero, when it shows, takes the Traces cards' place under the heading
+    /// (owner, 2026-11-02; it sat above the heading from 2026-10-29).
     func test_homesSectionsAreTitledInOrder() throws {
         let words = try XCTUnwrap(MonitorWords.table).homeHistory
         XCTAssertEqual(words.sectionPrivateAI, "Private AI")
@@ -78,16 +78,19 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertEqual(words.sectionAccount, "Account")
         XCTAssertEqual(words.privateAISignIn, "Sign in to NEAR AI to get started.")
         let home = try Self.text("Views/Monitor/HomeViews.swift")
-        let hero = try XCTUnwrap(home.range(of: "            tracesHero\n            HomeSection(words?.sectionTraces) {\n                Grid("))
+        let hero = try XCTUnwrap(home.range(of: "                    tracesHero\n                } else {\n                    Grid("))
         let traces = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionTraces) {"))
         let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))
-        let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount) {"))
-        let privateAI = try XCTUnwrap(home.range(of: "                HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)\n            }\n            privateAI\n"))
+        let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount, accessory: accountSignIn) {"))
+        let tiles = try XCTUnwrap(home.range(of: "                HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)\n            }\n"))
+        let privateAI = try XCTUnwrap(home.range(of: "            privateAI\n            HomeSection(words?.sectionTraces) {"))
         let credit = try XCTUnwrap(home.range(of: "HomeStatTile(label: HomeFormat.creditPendingWord"))
-        XCTAssertLessThan(hero.lowerBound, traces.lowerBound)
-        XCTAssertLessThan(traces.lowerBound, waiting.lowerBound)
+        XCTAssertNil(home.range(of: "            privateAI\n", range: tiles.upperBound..<home.endIndex),
+                     "Private AI is back under Account")
+        XCTAssertLessThan(privateAI.lowerBound, traces.lowerBound)
+        XCTAssertLessThan(traces.lowerBound, hero.lowerBound)
+        XCTAssertLessThan(hero.lowerBound, waiting.lowerBound)
         XCTAssertLessThan(waiting.lowerBound, account.lowerBound)
-        XCTAssertLessThan(account.lowerBound, privateAI.lowerBound)
         XCTAssertLessThan(account.lowerBound, credit.lowerBound)
         XCTAssertEqual(HomeSection<EmptyView>.titleType, GlassTabHeading<EmptyView>.titleType)
     }
@@ -139,7 +142,7 @@ final class DesignRulings20261020Tests: XCTestCase {
     func test_thePrivateAIStateFollowsItsTitle() throws {
         let tab = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(tab.contains(
-            "GlassTabHeading(copy.inspectorStatus) {\n                GlassStatusLabel(status.word,"))
+            "GlassTabHeading(copy.inspectorStatus) {\n                GlassChip(status.word,"))
     }
 
     /// The refresh glyph's ring sits on the circle's centre: its box is
@@ -172,9 +175,11 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertFalse(glass.contains("            InsightsInfo(title, info)\n            Spacer("), "the title's i is at the row's end again")
     }
 
-    /// Every refresh is the round refresh icon button at the trailing end
-    /// of what it re-reads (owner, 2026-10-20): no "Refresh" in words, no
-    /// bare glyph, and the icon card's beside its title no more.
+    /// Every refresh is the refresh control at the trailing end of what it
+    /// re-reads (owner, 2026-10-20), never a bare glyph, and the icon
+    /// card's beside its title no more. Since 2026-11-02 (owner) that
+    /// control is a pill with "Refresh" before its icon, not a round icon
+    /// button, and never a plain worded button.
     func test_everyRefreshIsTheRightAlignedIconButton() throws {
         XCTAssertEqual(GlassRefreshButton.systemImage, "arrow.clockwise")
         let files = ["Views/MissionDraftsView.swift",
@@ -192,7 +197,7 @@ final class DesignRulings20261020Tests: XCTestCase {
         // In the drafts' row it comes after the spacer, on the right.
         let drafts = try Self.text("Views/MissionDraftsView.swift")
         let spacer = try XCTUnwrap(drafts.range(of: "Spacer(minLength: 0)\n            // At the row's trailing end"))
-        let refresh = try XCTUnwrap(drafts.range(of: "GlassRefreshButton(model.text(\"refresh\"))"))
+        let refresh = try XCTUnwrap(drafts.range(of: "GlassRefreshButton(model.text(\"refresh\"), title: SettingsLegacyWords.refresh)"))
         XCTAssertLessThan(spacer.lowerBound, refresh.lowerBound)
         let card = try String(
             contentsOf: GlassSurfaceRulesTests.root.deletingLastPathComponent()
@@ -201,7 +206,7 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertFalse(card.contains("GlassRefreshButton(refresh.label, size: 12"), "the icon card's refresh is beside its title again")
         XCTAssertTrue(card.contains(
             "Spacer(minLength: GlassTokens.Space.s4)\n                // The re-read control at the head's trailing end"))
-        XCTAssertTrue(card.contains("GlassRefreshButton(refresh.label, small: true, isRefreshing: refresh.isRefreshing, action: refresh.action)"))
+        XCTAssertTrue(card.contains("GlassRefreshButton(refresh.label, title: refresh.title, small: true,"))
     }
 
     /// Home's small cards draw their icons as watermarks (owner,

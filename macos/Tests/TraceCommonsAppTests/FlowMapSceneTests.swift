@@ -245,7 +245,7 @@ final class FlowMapSceneTests: XCTestCase {
     }
 
     /// Nothing moves to the commons while the core says something stops it:
-    /// paused, held for review, a voided grant, a spent budget, signed out,
+    /// paused, held for review, a voided grant, signed out,
     /// no route for sessions, or any of those unread. Each still draws the
     /// armed tool's arc, dashed.
     func test_nothingFlowsWhileTheCoreSaysItIsStopped() async throws {
@@ -256,11 +256,6 @@ final class FlowMapSceneTests: XCTestCase {
             ("held unread", { $0["automatic_contribution_held"] = NSNull() }),
             ("grant voided", { $0["grant_voids"] = [["id": 1, "kind": "project", "project_id": "p"]] }),
             ("voids unread", { $0["grant_voids"] = NSNull() }),
-            ("budget spent", { object in
-                var budget = object["daily_budget"] as? [String: Any] ?? [:]
-                budget["blocked"] = true
-                object["daily_budget"] = budget
-            }),
             ("signed out", { $0["logged_in"] = false }),
         ]
         for (name, edit) in stops {

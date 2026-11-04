@@ -14,19 +14,6 @@ export const coreStatusSchema = z.object({
     // Older daemons do not report this aggregate. Keep an unavailable
     // count distinct from a confirmed zero and preserve the other status.
     decisions_owed: z.number().int().nonnegative().nullable().catch(null),
-    daily_budget: z
-      .object({
-        bytes_today: z.number(),
-        max_bytes_per_day: z.number(),
-        bytes_remaining: z.number(),
-        uploads_today: z.number(),
-        max_uploads_per_day: z.number(),
-        uploads_remaining: z.number(),
-        blocked: z.boolean(),
-        blocked_entries: z.number(),
-        blocked_bytes: z.number(),
-      })
-      .optional(),
     routing: z
       .object({
         state: z.string(),
@@ -57,6 +44,12 @@ export const coreStatusSchema = z.object({
     // value rather than letting it fail the whole status payload.
     arming_rewordings: z.unknown().optional(),
     automatic_contribution_held: z.unknown().optional(),
+    // Whether this app's account needs setting up again. Read by
+    // `accountAttentionWire`; the core words it. A daemon too old to say
+    // omits all three.
+    account_state: z.string().optional().catch(undefined),
+    account_state_reason: z.string().nullable().optional().catch(null),
+    near_ai_login_unconfirmed: z.boolean().optional().catch(undefined),
   }),
 });
 

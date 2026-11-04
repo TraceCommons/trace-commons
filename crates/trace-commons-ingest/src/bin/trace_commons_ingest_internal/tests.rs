@@ -6,8 +6,6 @@ use super::*;
 #[path = "tests/multitenant_settlement_tests.rs"]
 mod multitenant_settlement_tests;
 
-#[path = "tests/account_binding_gate_tests.rs"]
-mod account_binding_gate_tests;
 #[path = "tests/activity_missions_tests.rs"]
 mod activity_missions_tests;
 #[path = "tests/large_envelope_tests.rs"]
@@ -18,12 +16,12 @@ mod legacy_invite_link_tests;
 mod mission_catalog_tests;
 #[path = "tests/model_training_consent_tests.rs"]
 mod model_training_consent_tests;
-#[path = "tests/native_passkey_tests.rs"]
-mod native_passkey_tests;
 #[path = "tests/native_session_sliding_expiry_tests.rs"]
 mod native_session_sliding_expiry_tests;
-#[path = "tests/near_ai_bind_tests.rs"]
-mod near_ai_bind_tests;
+#[path = "tests/near_ai_provisioning_tests.rs"]
+mod near_ai_provisioning_tests;
+#[path = "tests/passkey_removal_tests.rs"]
+mod passkey_removal_tests;
 #[path = "tests/payout_link_tests.rs"]
 mod payout_link_tests;
 #[path = "tests/payout_rails_tests.rs"]
@@ -38,8 +36,6 @@ mod referral_admin_tests;
 mod referral_tests;
 #[path = "tests/reward_participant_tests.rs"]
 mod reward_participant_tests;
-#[path = "tests/step_up_page_tests.rs"]
-mod step_up_page_tests;
 
 /// Shorthand for the direct-call handler tests. See [SubmitBody::for_test].
 fn submit_body(envelope: TraceContributionEnvelope) -> SubmitBody {
@@ -781,14 +777,14 @@ async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
         return None;
     }
     // Reset the process-global account-surface rate limiter at the START of every
-    // DB-backed test. The account/passkey/session/rotation tests all drive handlers
+    // DB-backed test. The account/session/rotation tests all drive handlers
     // that share the `ACCOUNT_RATE_LIMITER` singleton (keyed by IP / global /
     // per-credential buckets); without this, a test inherits hit counts from
     // whatever ran before it and flakes with spurious rate-limit denials under
-    // default parallelism (e.g. `passkey_login_binds_only_to_owning_account`). The
+    // default parallelism. The
     // reset is harmless for tests that don't touch the limiter (it clears empty
     // maps) and runs before any test logic, so no test can accumulate state across
-    // this boundary. This makes each DB-backed account/passkey test independent of
+    // this boundary. This makes each DB-backed account test independent of
     // limiter state. NOTE: it does NOT remove the repo-wide requirement that the
     // DB-backed ingest suite run `--test-threads=1`; the shared `tenant-a` rows
     // (cleaned per-test via `cleanup_pg_trace_tenant`) still serialize those tests.
@@ -955,120 +951,6 @@ async fn login_resolver_reads_tenant_across_rls_under_set_role() {
     drop(tx);
     let reset = client.batch_execute("RESET ROLE").await;
     let _ = reset; // best-effort; connection returns to the pool either way.
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-}
-
-/// BLOCKER regression (Slice 2 passkeys): the `trace_login_resolver` role must be
-/// able to map a globally-unique WebAuthn `credential_id` -> `tenant_id` even
-/// though an unauthenticated assertion arrives with NO tenant context.
-/// `trace_webauthn_credentials` has FORCE RLS with the PUBLIC
-/// `trace_corpus_tenant_isolation` policy (`tenant_id = trace_current_tenant_id()`),
-/// which alone excludes EVERY row for a role with no tenant set — so without the
-/// resolver-scoped permissive policy (`trace_login_resolver_credential_read`) the
-/// login path always fails closed and every assertion 400s in production. The
-/// column GRANT does not relax RLS, and `credential_id` uniqueness is irrelevant
-/// to row visibility under forced RLS.
-///
-/// This mirrors `login_resolver_reads_tenant_across_rls_under_set_role` for
-/// trace_login_links. `SET ROLE trace_login_resolver` drops the superuser RLS
-/// bypass, so the resolver role's real RLS treatment runs even from a superuser
-/// test connection. It asserts the column-scoped read returns the correct tenant
-/// (permissive policy in effect) and that an out-of-grant column read is rejected
-/// (least privilege retained).
-#[tokio::test]
-async fn credential_resolver_reads_tenant_across_rls_under_set_role() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-
-    // Seed a tenant + account via the normal tenant-scoped path, then raw-insert a
-    // webauthn credential under tenant context (the credential FK needs the account).
-    let account_id = backend
-        .create_or_reuse_account("tenant-a", "principal-a")
-        .await
-        .expect("seed account");
-    let credential_id = "cred-resolver-test-globally-unique";
-
-    let mut client = backend
-        .raw_pool_for_tests_and_diagnostics()
-        .get()
-        .await
-        .expect("conn");
-    {
-        let tx = client.transaction().await.expect("seed tx");
-        tx.execute(
-            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-            &[&"tenant-a"],
-        )
-        .await
-        .expect("set seed tenant context");
-        let passkey_json = serde_json::json!({});
-        tx.execute(
-            "INSERT INTO trace_webauthn_credentials
-                 (tenant_id, credential_id, account_id, passkey)
-             VALUES (trace_current_tenant_id(), $1, $2, $3)",
-            &[&credential_id, &account_id, &passkey_json],
-        )
-        .await
-        .expect("seed credential row");
-        tx.commit().await.expect("commit seed");
-    }
-
-    let tx = client.transaction().await.expect("tx");
-    // Deliberately set NO tenant context: the resolver path has none. SET ROLE to a
-    // non-superuser role makes RLS apply (superuser bypass is dropped), so this is
-    // the resolver's real RLS treatment.
-    tx.execute("SET ROLE trace_login_resolver", &[])
-        .await
-        .expect("set resolver role");
-
-    // The column-scoped, cross-tenant SELECT the resolver pool runs must RETURN the
-    // tenant despite forced RLS + no tenant context (permissive resolver policy).
-    let resolved: Option<String> = tx
-        .query_opt(
-            "SELECT tenant_id FROM trace_webauthn_credentials WHERE credential_id = $1",
-            &[&credential_id],
-        )
-        .await
-        .expect("resolver SELECT runs under RLS")
-        .map(|row| row.get::<_, String>(0));
-    assert_eq!(
-        resolved.as_deref(),
-        Some("tenant-a"),
-        "resolver must resolve the tenant for a known credential_id under forced RLS"
-    );
-
-    // Least privilege: an out-of-grant column read is rejected by the column GRANT
-    // (the resolver may read only tenant_id + credential_id). This keeps the
-    // permissive RLS policy from widening the resolver's effective surface.
-    let out_of_grant = tx
-        .query_opt(
-            "SELECT account_id FROM trace_webauthn_credentials WHERE credential_id = $1",
-            &[&credential_id],
-        )
-        .await;
-    assert!(
-        out_of_grant.is_err(),
-        "resolver must NOT be able to read columns outside its (tenant_id, credential_id) grant"
-    );
-
-    // The transaction is poisoned by the rejected statement; roll it back and reset.
-    drop(tx);
-    let reset = client.batch_execute("RESET ROLE").await;
-    let _ = reset; // best-effort; connection returns to the pool either way.
-
-    // Also exercise the inherent resolver method end-to-end (narrow resolver pool).
-    let via_method = backend
-        .resolve_credential_tenant(credential_id)
-        .await
-        .expect("resolver method runs");
-    assert_eq!(
-        via_method.as_deref(),
-        Some("tenant-a"),
-        "resolve_credential_tenant must return the seeded tenant via the narrow pool"
-    );
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
@@ -2215,71 +2097,6 @@ async fn account_migration_applies_and_enforces_rls() {
         let forced: bool = row.get(0);
         assert!(forced, "{table} must FORCE ROW LEVEL SECURITY");
     }
-}
-
-#[tokio::test]
-async fn webauthn_migration_applies_credentials_table_and_session_rotation_columns() {
-    // Self-skips without a DB (TRACE_COMMONS_TEST_DATABASE_URL unset).
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    let client = backend
-        .raw_pool_for_tests_and_diagnostics()
-        .get()
-        .await
-        .expect("conn");
-
-    // The credentials table exists and FORCES row-level security.
-    let row = client
-        .query_one(
-            "SELECT relforcerowsecurity FROM pg_class WHERE relname = $1",
-            &[&"trace_webauthn_credentials"],
-        )
-        .await
-        .expect("trace_webauthn_credentials exists");
-    let forced: bool = row.get(0);
-    assert!(
-        forced,
-        "trace_webauthn_credentials must FORCE ROW LEVEL SECURITY"
-    );
-
-    // trace_sessions gained the rotation columns.
-    for column in [
-        "prev_token_hash",
-        "prev_token_valid_until",
-        "auth_credential_id",
-        "token_issued_at",
-    ] {
-        let present: bool = client
-            .query_one(
-                "SELECT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'trace_sessions' AND column_name = $1
-                 )",
-                &[&column],
-            )
-            .await
-            .expect("column probe")
-            .get(0);
-        assert!(present, "trace_sessions must have column {column}");
-    }
-
-    // The widened client_kind CHECK now accepts 'passkey'.
-    let check_def: String = client
-        .query_one(
-            "SELECT pg_get_constraintdef(oid)
-             FROM pg_constraint
-             WHERE conrelid = 'trace_sessions'::regclass
-               AND conname = 'trace_sessions_client_kind_check'",
-            &[],
-        )
-        .await
-        .expect("client_kind check exists")
-        .get(0);
-    assert!(
-        check_def.contains("passkey"),
-        "client_kind CHECK must accept 'passkey': {check_def}"
-    );
 }
 
 #[tokio::test]
@@ -4028,9 +3845,9 @@ fn rotation_test_set_cookie_value(response: &axum::response::Response) -> Option
         .map(|(_, value)| value.to_string())
 }
 
-/// Drive `GET /v1/account/passkeys` through the FULL app (and thus the auth
-/// middleware) with the given cookie value. Returns the response.
-async fn rotation_test_get_passkeys(
+/// Drive `GET /v1/account/near-identities` through the FULL app (and thus the
+/// auth middleware) with the given cookie value. Returns the response.
+async fn rotation_test_get_authenticated(
     state: &Arc<AppState>,
     cookie_value: &str,
 ) -> axum::response::Response {
@@ -4040,7 +3857,7 @@ async fn rotation_test_get_passkeys(
         .oneshot(
             axum::http::Request::builder()
                 .method("GET")
-                .uri("/v1/account/passkeys")
+                .uri("/v1/account/near-identities")
                 .header(
                     axum::http::header::COOKIE,
                     format!("{ACCOUNT_SESSION_COOKIE}={cookie_value}"),
@@ -4077,7 +3894,7 @@ async fn session_rotation_fires_and_attaches_set_cookie() {
     assert_eq!(updated, 1, "exactly one session backdated");
 
     // Drive an authenticated endpoint through the middleware.
-    let response = rotation_test_get_passkeys(&state, &cookie_value).await;
+    let response = rotation_test_get_authenticated(&state, &cookie_value).await;
     assert_eq!(
         response.status(),
         StatusCode::OK,
@@ -4174,14 +3991,14 @@ async fn session_rotation_grace_lets_old_cookie_validate_then_expires() {
         "token_issued_at = now() - INTERVAL '13 hours'",
     )
     .await;
-    let first = rotation_test_get_passkeys(&state, &old_cookie).await;
+    let first = rotation_test_get_authenticated(&state, &old_cookie).await;
     assert_eq!(first.status(), StatusCode::OK);
     let new_cookie = rotation_test_set_cookie_value(&first).expect("rotation set-cookie");
     assert_ne!(new_cookie, old_cookie);
 
     // Multi-tab: the OLD cookie still validates within grace, and does NOT
     // re-rotate (no second Set-Cookie, since the prev-token path is ineligible).
-    let within_grace = rotation_test_get_passkeys(&state, &old_cookie).await;
+    let within_grace = rotation_test_get_authenticated(&state, &old_cookie).await;
     assert_eq!(
         within_grace.status(),
         StatusCode::OK,
@@ -4201,7 +4018,7 @@ async fn session_rotation_grace_lets_old_cookie_validate_then_expires() {
         "prev_token_valid_until = now() - INTERVAL '1 minute'",
     )
     .await;
-    let after_grace = rotation_test_get_passkeys(&state, &old_cookie).await;
+    let after_grace = rotation_test_get_authenticated(&state, &old_cookie).await;
     assert_eq!(
         after_grace.status(),
         StatusCode::UNAUTHORIZED,
@@ -4209,7 +4026,7 @@ async fn session_rotation_grace_lets_old_cookie_validate_then_expires() {
     );
 
     // The NEW cookie remains valid throughout.
-    let new_still_ok = rotation_test_get_passkeys(&state, &new_cookie).await;
+    let new_still_ok = rotation_test_get_authenticated(&state, &new_cookie).await;
     assert_eq!(new_still_ok.status(), StatusCode::OK);
 
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
@@ -4227,7 +4044,7 @@ async fn fresh_session_does_not_rotate() {
 
     let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
     // A just-minted (un-aged) session must NOT rotate -> no Set-Cookie.
-    let response = rotation_test_get_passkeys(&state, &cookie_value).await;
+    let response = rotation_test_get_authenticated(&state, &cookie_value).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(
         rotation_test_set_cookie_value(&response).is_none(),
@@ -4254,7 +4071,7 @@ async fn account_middleware_accepts_cookie_and_rejects_device_bearer_or_ambiguou
     let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
 
     // Cookie path -> 200.
-    let cookie_ok = rotation_test_get_passkeys(&state, &cookie_value).await;
+    let cookie_ok = rotation_test_get_authenticated(&state, &cookie_value).await;
     assert_eq!(cookie_ok.status(), StatusCode::OK, "cookie auth -> 200");
 
     // Bearer path -> 401. A device upload claim is not an account credential
@@ -4264,7 +4081,7 @@ async fn account_middleware_accepts_cookie_and_rejects_device_bearer_or_ambiguou
         .oneshot(
             axum::http::Request::builder()
                 .method("GET")
-                .uri("/v1/account/passkeys")
+                .uri("/v1/account/near-identities")
                 .header(AUTHORIZATION, "Bearer token-a")
                 .body(Body::empty())
                 .expect("request builds"),
@@ -4282,7 +4099,7 @@ async fn account_middleware_accepts_cookie_and_rejects_device_bearer_or_ambiguou
         .oneshot(
             axum::http::Request::builder()
                 .method("GET")
-                .uri("/v1/account/passkeys")
+                .uri("/v1/account/near-identities")
                 .header(AUTHORIZATION, "Bearer token-a")
                 .header(
                     axum::http::header::COOKIE,
@@ -4304,7 +4121,7 @@ async fn account_middleware_accepts_cookie_and_rejects_device_bearer_or_ambiguou
         .oneshot(
             axum::http::Request::builder()
                 .method("GET")
-                .uri("/v1/account/passkeys")
+                .uri("/v1/account/near-identities")
                 .body(Body::empty())
                 .expect("request builds"),
         )
@@ -4330,7 +4147,6 @@ async fn export_worker_cannot_read_account_identity_or_payout_endpoints() {
     for path in [
         "/v1/account/near-identities",
         "/v1/account/payout-rails",
-        "/v1/account/binding",
         "/v1/account/credit-summary",
     ] {
         let response = app(state.clone())
@@ -4481,14 +4297,14 @@ async fn logout_while_rotation_revokes_the_rotated_session() {
 
     // The rotated cookie the middleware handed back is dead: a follow-up with the
     // new cookie -> 401.
-    let after_new = rotation_test_get_passkeys(&state, &rotated_cookie).await;
+    let after_new = rotation_test_get_authenticated(&state, &rotated_cookie).await;
     assert_eq!(
         after_new.status(),
         StatusCode::UNAUTHORIZED,
         "the rotated cookie lands on a revoked row -> 401"
     );
     // And the old cookie is dead too.
-    let after_old = rotation_test_get_passkeys(&state, &old_cookie).await;
+    let after_old = rotation_test_get_authenticated(&state, &old_cookie).await;
     assert_eq!(
         after_old.status(),
         StatusCode::UNAUTHORIZED,
@@ -4498,25 +4314,25 @@ async fn logout_while_rotation_revokes_the_rotated_session() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
-/// Regression (Set-Cookie clobber): if rotation fires during register/start, the
-/// middleware must APPEND the rotated session cookie alongside the handler's
-/// ceremony cookie, not replace it. Assert the response carries BOTH a
-/// `ACCOUNT_PASSKEY_CEREMONY_COOKIE` and a `ACCOUNT_SESSION_COOKIE` Set-Cookie.
+/// Regression (Set-Cookie clobber): if rotation fires during NEAR enroll/start,
+/// the middleware must APPEND the rotated session cookie alongside the
+/// handler's ceremony cookie, not replace it. Assert the response carries BOTH
+/// a `ACCOUNT_NEAR_CEREMONY_COOKIE` and a `ACCOUNT_SESSION_COOKIE` Set-Cookie.
 #[tokio::test]
-async fn register_start_while_rotation_keeps_both_set_cookies() {
+async fn enroll_start_while_rotation_keeps_both_set_cookies() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
     let temp = tempfile::tempdir().expect("temp dir");
     let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+    let state = test_state_with_full_access_near(temp.path().to_path_buf(), Some(db_mirror));
 
     let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
     let secret = cookie_value.split_once('.').expect("tenant.secret").1;
     let old_hash = trace_commons_server::account_session::hash_secret(secret);
 
-    // Backdate so the register/start request rotates.
+    // Backdate so the enroll/start request rotates.
     let updated = rotation_test_update_session(
         backend.as_ref(),
         "tenant-a",
@@ -4533,7 +4349,7 @@ async fn register_start_while_rotation_keeps_both_set_cookies() {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/v1/account/passkeys/register/start")
+                    .uri("/v1/account/near/enroll/start")
                     .header(
                         axum::http::header::COOKIE,
                         format!("{ACCOUNT_SESSION_COOKIE}={cookie_value}"),
@@ -4544,14 +4360,14 @@ async fn register_start_while_rotation_keeps_both_set_cookies() {
             .await
             .expect("response")
     };
-    assert_eq!(response.status(), StatusCode::OK, "register/start -> 200");
+    assert_eq!(response.status(), StatusCode::OK, "enroll/start -> 200");
 
     // BOTH cookies must be present as distinct Set-Cookie headers (append, not
     // clobber). Before the fix, the rotated session cookie replaced the ceremony
-    // cookie and register/finish would then fail with no ceremony in progress.
+    // cookie and the finish would then fail with no ceremony in progress.
     let names = rotation_test_all_set_cookie_names(&response);
     assert!(
-        names.contains(ACCOUNT_PASSKEY_CEREMONY_COOKIE),
+        names.contains(ACCOUNT_NEAR_CEREMONY_COOKIE),
         "ceremony cookie must survive rotation; got {names:?}"
     );
     assert!(
@@ -4656,7 +4472,7 @@ async fn insert_account_test_credit_event(
 }
 
 /// The account's own figures, summed over its whole principal set: a
-/// contributor with a device key AND a passkey is one contributor, not one
+/// contributor with a device key AND a browser sign-in is one contributor, not one
 /// per credential -- and never anything belonging to another account.
 ///
 /// Seeds the three-way shape `account_traces_list_returns_only_owned_submissions`
@@ -6926,6 +6742,11 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
         submit_principal_limits: SubmitPrincipalLimits::default(),
         large_body_bytes: Arc::new(tokio::sync::Semaphore::new(LARGE_BODY_GLOBAL_BYTES)),
+        // The whole budget: fixture principals are shared across parallel
+        // tests, and the focused share tests set their own.
+        large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(LARGE_BODY_GLOBAL_BYTES)),
+        upload_body_idle_timeout: UPLOAD_BODY_IDLE_TIMEOUT,
+        submission_attempts: Arc::new(HourlySubmissionAttempts::default()),
         analytics_min_cell_count: 0,
         analytics_broad_release_noise: None,
         analytics_broad_release_privacy_accounting: None,
@@ -6979,13 +6800,10 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         vector_index_scheduler: None,
         perplexity_score_driver: None,
         pii_backstop_driver: None,
-        unbound_account_reaper: None,
         witness_bypass: None,
         witness_capture_pin: None,
         admission: None,
         account_admission: None,
-        client_upload_allowance: None,
-        client_upload_trust_policy: None,
         client_upload_trust_database: None,
         account_trust_shadow_policy: None,
         near_ai_starter_mode: starter_advance::StarterMode::Disabled,
@@ -7020,16 +6838,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         novelty_utility_require_production_gate: false,
         novelty_utility_settle_from: None,
         scoring_driver_credit_issuer_principal_ref: None,
-        account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
-        account_unbound_ceiling: Arc::new(
-            trace_commons_server::account_native_passkey::UnboundAccountCeiling::disabled(),
-        ),
-        account_native_creation_cap: Arc::new(
-            trace_commons_server::account_native_passkey::PerSourceCreationCap::with_limit(
-                trace_commons_server::account_native_passkey::DEFAULT_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY,
-            ),
-        ),
         account_native_requests: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL)),
         account_native_codes: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL)),
         account_near_config: None,
@@ -7147,9 +6956,86 @@ fn assert_submit_rate_limited(error: &ApiError) {
 /// A concurrency refusal carries the same label and the short fixed hint.
 fn assert_submit_concurrency_limited(error: &ApiError) {
     assert_eq!(error.error, SUBMIT_RATE_LIMITED_LABEL);
-    assert_eq!(
-        error.retry_after_seconds,
-        Some(SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS)
+    assert!(
+        error
+            .retry_after_seconds
+            .is_some_and(is_concurrency_retry_hint),
+        "{:?}",
+        error.retry_after_seconds
+    );
+}
+
+/// A concurrency hint is 2 to 5 seconds (a fixed number made every refused
+/// client return in the same second).
+fn is_concurrency_retry_hint(seconds: i64) -> bool {
+    (SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS
+        ..=SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS + SUBMIT_CONCURRENCY_RETRY_AFTER_SPREAD_SECONDS)
+        .contains(&seconds)
+}
+
+/// The spread is bounded whatever the random value is, and does spread.
+#[test]
+fn retry_after_spread_stays_in_bounds_and_varies() {
+    let mut seen = std::collections::BTreeSet::new();
+    for random in (0..1000_u64).chain([u64::MAX, u64::MAX - 1, 1 << 63]) {
+        let hint = retry_after_with_spread(
+            SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS,
+            SUBMIT_CONCURRENCY_RETRY_AFTER_SPREAD_SECONDS,
+            random,
+        );
+        assert!(is_concurrency_retry_hint(hint), "{hint}");
+        seen.insert(hint);
+    }
+    assert_eq!(seen.len(), 4, "2, 3, 4 and 5 all occur: {seen:?}");
+    for random in (0..1000_u64).chain([u64::MAX]) {
+        let hint = retry_after_with_spread(
+            TRANSIENT_UNAVAILABLE_RETRY_AFTER_SECONDS,
+            TRANSIENT_UNAVAILABLE_RETRY_AFTER_SPREAD_SECONDS,
+            random,
+        );
+        assert!((5..=15).contains(&hint), "{hint}");
+    }
+}
+
+/// A transient 503 carries `Retry-After` and the body's `retry_after_seconds`
+/// with the same value, through the response the submit route builds.
+#[tokio::test]
+async fn a_transient_503_carries_a_matching_retry_after_header_and_body() {
+    let response = api_error_response_with_retry_after(routing_read_failed(&"db down"));
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let header: i64 = response
+        .headers()
+        .get(axum::http::header::RETRY_AFTER)
+        .expect("a transient 503 carries Retry-After")
+        .to_str()
+        .expect("ASCII")
+        .parse()
+        .expect("delta-seconds");
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .expect("body reads");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
+    assert_eq!(value["error"], PIPELINE_ROUTING_UNAVAILABLE_LABEL);
+    assert_eq!(value["retry_after_seconds"], header);
+    assert!((5..=15).contains(&header), "{header}");
+}
+
+/// A 503 that means a missing control, not a passing condition, has no
+/// retry hint: waiting does not fix it.
+#[test]
+fn a_not_transient_503_has_no_retry_hint() {
+    let (status, Json(error)) = api_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        PIPELINE_BUNDLE_NOT_QUALIFIED_LABEL,
+    );
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error.retry_after_seconds, None);
+    let response = api_error_response_with_retry_after((status, Json(error)));
+    assert!(
+        response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .is_none()
     );
 }
 
@@ -7374,22 +7260,21 @@ async fn submit_rate_limit_refusal_sends_retry_after_header_through_the_router()
 async fn large_body_concurrency_refusal_names_the_rate_limit_and_retry_hint() {
     let response = large_body_concurrency_refusal();
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    let expected_header = SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS.to_string();
-    assert_eq!(
-        response
-            .headers()
-            .get(axum::http::header::RETRY_AFTER)
-            .and_then(|v| v.to_str().ok()),
-        Some(expected_header.as_str())
-    );
+    let header: i64 = response
+        .headers()
+        .get(axum::http::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .expect("a numeric Retry-After");
+    assert!(is_concurrency_retry_hint(header), "{header}");
     let body = axum::body::to_bytes(response.into_body(), 4096)
         .await
         .expect("refusal body reads");
     let value: serde_json::Value = serde_json::from_slice(&body).expect("refusal body is JSON");
     assert_eq!(value["error"], SUBMIT_RATE_LIMITED_LABEL);
     assert_eq!(
-        value["retry_after_seconds"],
-        SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS
+        value["retry_after_seconds"], header,
+        "the body and the header carry one value"
     );
 }
 
@@ -10587,6 +10472,7 @@ async fn submit_quota_limits_tenant_new_submissions_but_allows_idempotent_retry(
         TraceSubmissionQuotaConfig {
             max_per_tenant_per_hour: 1,
             max_per_principal_per_hour: 0,
+            max_per_account_per_hour: 0,
         },
     );
     let envelope = sample_envelope().await;
@@ -10622,6 +10508,7 @@ async fn submit_quota_limits_principal_without_blocking_other_contributors() {
         TraceSubmissionQuotaConfig {
             max_per_tenant_per_hour: 0,
             max_per_principal_per_hour: 1,
+            max_per_account_per_hour: 0,
         },
     );
 
@@ -10647,6 +10534,7 @@ async fn submit_quota_ignores_revoked_submissions() {
         TraceSubmissionQuotaConfig {
             max_per_tenant_per_hour: 1,
             max_per_principal_per_hour: 1,
+            max_per_account_per_hour: 0,
         },
     );
     let first = sample_envelope().await;
@@ -10670,6 +10558,460 @@ async fn submit_quota_ignores_revoked_submissions() {
     let _ = test_submit(state, "token-a", replacement)
         .await
         .expect("revoked submission no longer consumes quota");
+}
+
+#[test]
+fn account_hourly_submission_ceiling_is_on_by_default_and_zero_turns_it_off() {
+    // The arguments `parse_submission_quota_config_from_env` passes.
+    let parse_account_ceiling = |configured: Option<&str>| {
+        parse_submission_quota_limit(
+            TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR,
+            configured,
+            ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT,
+        )
+    };
+    assert_eq!(ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT, 600);
+    assert_eq!(
+        parse_account_ceiling(None).expect("unset takes the default"),
+        ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT
+    );
+    assert_eq!(
+        parse_account_ceiling(Some("0")).expect("zero parses"),
+        0,
+        "zero turns the ceiling off"
+    );
+    assert_eq!(
+        parse_account_ceiling(Some(" 25 ")).expect("a count parses"),
+        25
+    );
+    let error =
+        parse_account_ceiling(Some("many")).expect_err("a non-numeric ceiling refuses startup");
+    assert!(
+        error
+            .to_string()
+            .contains(TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR)
+    );
+}
+
+#[tokio::test]
+async fn account_hourly_submission_ceiling_refuses_the_next_upload_with_a_retry_hint() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_submission_quota(
+        temp.path().to_path_buf(),
+        TraceSubmissionQuotaConfig {
+            max_per_account_per_hour: 1,
+            ..TraceSubmissionQuotaConfig::default()
+        },
+    );
+    // Accepted, so a retry only replays its receipt (a quarantined one would
+    // be remediated, and counted).
+    let first = low_risk_envelope().await;
+    let Json(first_receipt) = test_submit(state.clone(), "token-a", first.clone())
+        .await
+        .expect("the first upload of the hour is admitted");
+    assert_eq!(first_receipt.status, "accepted");
+    let Json(retry_receipt) = test_submit(state.clone(), "token-a", first)
+        .await
+        .expect("a retry of a recorded submission is not counted against itself");
+    assert_eq!(retry_receipt.status, first_receipt.status);
+
+    let blocked = test_submit(state.clone(), "token-a", sample_envelope().await)
+        .await
+        .expect_err("a new upload past the ceiling is refused");
+    assert_eq!(blocked.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        blocked.1.0.error, SUBMIT_RATE_LIMITED_LABEL,
+        "the label clients already keep an upload queued for"
+    );
+    let retry_after = blocked
+        .1
+        .0
+        .retry_after_seconds
+        .expect("the refusal says when to come back");
+    assert!(
+        (1..=3600).contains(&retry_after),
+        "the wait is inside the hour window: {retry_after}"
+    );
+    let response = api_error_response_with_retry_after(blocked);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some(retry_after.to_string().as_str())
+    );
+
+    // A tenant outside the account namespaces (a legacy invite or pooled
+    // tenant) is bounded per principal: another contributor in it, and
+    // another tenant, are not refused.
+    let _ = test_submit(state.clone(), "token-a-2", sample_envelope().await)
+        .await
+        .expect("another principal in a legacy tenant has its own ceiling");
+    let _ = test_submit(state, "token-b", sample_envelope().await)
+        .await
+        .expect("another tenant has its own ceiling");
+}
+
+/// In a tenant counted per principal (a legacy invite or pooled tenant), a
+/// principal at its ceiling cannot pass it by sending another principal's
+/// submission id: only an id of its own is exempt as a retry.
+#[tokio::test]
+async fn account_hourly_submission_ceiling_does_not_exempt_another_principals_id() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_submission_quota(
+        temp.path().to_path_buf(),
+        TraceSubmissionQuotaConfig {
+            max_per_account_per_hour: 1,
+            ..TraceSubmissionQuotaConfig::default()
+        },
+    );
+    let others = sample_envelope().await;
+    let _ = test_submit(state.clone(), "token-a-2", others.clone())
+        .await
+        .expect("another principal in the tenant records its submission");
+    let _ = test_submit(state.clone(), "token-a", sample_envelope().await)
+        .await
+        .expect("the principal's first upload of the hour is admitted");
+
+    let blocked = test_submit(state, "token-a", others)
+        .await
+        .expect_err("another principal's id is not a retry of this principal's");
+    assert_eq!(blocked.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(blocked.1.0.error, SUBMIT_RATE_LIMITED_LABEL);
+}
+
+/// The ceiling counts attempts, not only recorded submissions (decision 5 on
+/// #1794): an upload refused after the ceiling leaves no record, but it was
+/// let through, so it counts. Here the refusal is an ownership conflict on
+/// another principal's id; any later refusal (the tombstone, a witness or
+/// policy refusal) is counted the same way.
+#[tokio::test]
+async fn account_hourly_submission_ceiling_counts_attempts_refused_after_it() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_submission_quota(
+        temp.path().to_path_buf(),
+        TraceSubmissionQuotaConfig {
+            max_per_account_per_hour: 1,
+            ..TraceSubmissionQuotaConfig::default()
+        },
+    );
+    let others = sample_envelope().await;
+    let _ = test_submit(state.clone(), "token-a-2", others.clone())
+        .await
+        .expect("another principal in the tenant records its submission");
+
+    let refused_downstream = test_submit(state.clone(), "token-a", others)
+        .await
+        .expect_err("another principal's id is refused after the ceiling");
+    assert_eq!(refused_downstream.0, StatusCode::CONFLICT);
+
+    let blocked = test_submit(state.clone(), "token-a", sample_envelope().await)
+        .await
+        .expect_err("the refused attempt counted, so the ceiling is reached");
+    assert_eq!(blocked.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(blocked.1.0.error, SUBMIT_RATE_LIMITED_LABEL);
+    assert!(
+        blocked
+            .1
+            .0
+            .retry_after_seconds
+            .is_some_and(|seconds| (3590..=3600).contains(&seconds)),
+        "room returns when the attempt leaves the hour: {:?}",
+        blocked.1.0.retry_after_seconds
+    );
+}
+
+/// A re-POST of a known quarantined id with a new body is a remediation
+/// that re-runs the re-scrub, so it counts like a new upload (decision 6 on
+/// #1794; an identical body counts too since the #1800 review, see
+/// `account_hourly_submission_ceiling_counts_every_remediation_of_a_quarantined_id`).
+#[tokio::test]
+async fn account_hourly_submission_ceiling_counts_a_known_id_with_a_new_body() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_submission_quota(
+        temp.path().to_path_buf(),
+        TraceSubmissionQuotaConfig {
+            max_per_account_per_hour: 1,
+            ..TraceSubmissionQuotaConfig::default()
+        },
+    );
+    let first = sample_envelope().await;
+    let Json(first_receipt) = test_submit(state.clone(), "token-a", first.clone())
+        .await
+        .expect("the first upload of the hour is admitted");
+    assert_eq!(
+        first_receipt.status, "quarantined",
+        "the fixture is remediable"
+    );
+
+    let mut new_body = first;
+    new_body.events[0].redacted_content = Some("A different body for the same id".to_string());
+    let blocked = test_submit(state.clone(), "token-a", new_body)
+        .await
+        .expect_err("the same id with a new body counts against the ceiling");
+    assert_eq!(blocked.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(blocked.1.0.error, SUBMIT_RATE_LIMITED_LABEL);
+}
+
+/// A re-POST of an owned quarantined id re-runs the re-scrub (remediation),
+/// so every one counts against the ceiling, an identical body included
+/// (#1800 review). Before, an identical re-POST was exempt, and a client
+/// looping on the same bytes re-scrubbed under the per-minute limiter only.
+#[tokio::test]
+async fn account_hourly_submission_ceiling_counts_every_remediation_of_a_quarantined_id() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_submission_quota(
+        temp.path().to_path_buf(),
+        TraceSubmissionQuotaConfig {
+            max_per_account_per_hour: 2,
+            ..TraceSubmissionQuotaConfig::default()
+        },
+    );
+    let quarantined = sample_envelope().await;
+    let Json(first) = test_submit(state.clone(), "token-a", quarantined.clone())
+        .await
+        .expect("the first upload is admitted");
+    assert_eq!(first.status, "quarantined", "the fixture is remediable");
+    let _ = test_submit(state.clone(), "token-a", quarantined.clone())
+        .await
+        .expect("the first remediation is under the ceiling");
+    let blocked = test_submit(state, "token-a", quarantined)
+        .await
+        .expect_err("an identical remediation still counts");
+    assert_eq!(blocked.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(blocked.1.0.error, SUBMIT_RATE_LIMITED_LABEL);
+}
+
+/// A retry of an accepted submission only replays its receipt, so it is
+/// never counted against the ceiling, whatever this process remembers: after
+/// a restart (an empty attempt table), on another instance, or with the
+/// envelope serialised differently, the client gets its receipt rather than
+/// waiting out the hour (#1800 review).
+#[tokio::test]
+async fn account_hourly_submission_ceiling_replays_a_recorded_receipt_this_process_never_saw() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state_with_submission_quota(
+        temp.path().to_path_buf(),
+        TraceSubmissionQuotaConfig {
+            max_per_account_per_hour: 1,
+            ..TraceSubmissionQuotaConfig::default()
+        },
+    );
+    let accepted = low_risk_envelope().await;
+    let Json(first) = test_submit(state.clone(), "token-a", accepted.clone())
+        .await
+        .expect("the first upload of the hour is admitted");
+    assert_eq!(first.status, "accepted", "the fixture only replays");
+
+    // A restart: the recorded count is still at the ceiling, the attempts
+    // this process saw are gone.
+    Arc::make_mut(&mut state).submission_attempts = Arc::new(HourlySubmissionAttempts::default());
+    let Json(replayed) = test_submit(state.clone(), "token-a", accepted.clone())
+        .await
+        .expect("a retry of a recorded submission gets its receipt after a restart");
+    assert_eq!(replayed.status, "accepted");
+
+    let mut reserialised = accepted;
+    reserialised.events[0].redacted_content = Some("Bytes that differ, same id".to_string());
+    let Json(replayed) = test_submit(state, "token-a", reserialised)
+        .await
+        .expect("a retry with other bytes for an accepted id gets its receipt");
+    assert_eq!(replayed.status, "accepted");
+}
+
+/// The in-process attempt table on its own: attempts count by scope, never
+/// past the limit, and leave after an hour; the refusal names the later of
+/// the two counts' room; a sweep drops scopes with nothing left in the hour.
+#[test]
+fn hourly_submission_attempts_count_by_scope_and_leave_after_an_hour() {
+    use trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow;
+
+    let attempts = HourlySubmissionAttempts::default();
+    let now = Utc::now();
+    let empty = RecentTraceSubmissionWindow {
+        counted: 0,
+        oldest_counted_at: None,
+        submission_known: false,
+    };
+    for _ in 0..2 {
+        assert_eq!(
+            attempts.admit_at_for_test("scope-a", 2, &empty, now),
+            Some(HourlySubmissionAttemptDecision::Admitted)
+        );
+    }
+    assert_eq!(
+        attempts.admit_at_for_test("scope-a", 2, &empty, now + Duration::seconds(1)),
+        Some(HourlySubmissionAttemptDecision::Refused {
+            room_after: Some(now)
+        }),
+        "at the limit, room returns when the oldest attempt leaves"
+    );
+    assert_eq!(
+        attempts.attempts_for_test("scope-a"),
+        2,
+        "never past the limit"
+    );
+    assert_eq!(
+        attempts.admit_at_for_test("scope-b", 2, &empty, now),
+        Some(HourlySubmissionAttemptDecision::Admitted),
+        "another scope has its own count"
+    );
+
+    // The recorded count can be the later one to free up.
+    let later = now + Duration::minutes(10);
+    let recorded_full = RecentTraceSubmissionWindow {
+        counted: 2,
+        oldest_counted_at: Some(later),
+        submission_known: false,
+    };
+    assert_eq!(
+        attempts.admit_at_for_test("scope-a", 2, &recorded_full, later),
+        Some(HourlySubmissionAttemptDecision::Refused {
+            room_after: Some(later)
+        })
+    );
+
+    // An hour on, the attempts have left and the sweep drops both scopes.
+    let next_hour = now + Duration::hours(1) + Duration::seconds(1);
+    assert_eq!(
+        attempts.admit_at_for_test("scope-c", 2, &empty, next_hour),
+        Some(HourlySubmissionAttemptDecision::Admitted)
+    );
+    assert_eq!(attempts.scopes_for_test(), 1, "only the live scope is kept");
+    assert_eq!(
+        attempts.admit_at_for_test("scope-a", 2, &empty, next_hour),
+        Some(HourlySubmissionAttemptDecision::Admitted)
+    );
+    assert_eq!(attempts.attempts_for_test("scope-a"), 1);
+}
+
+/// The table holds at most `max_scopes` scopes (#1800 review). A new scope
+/// that finds it full is refused, after a sweep that could not make room; an
+/// existing scope is still counted; once scopes leave the hour, new ones are
+/// let in again.
+#[test]
+fn hourly_submission_attempts_cap_the_number_of_scopes() {
+    use trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow;
+
+    let attempts = HourlySubmissionAttempts::with_max_scopes_for_test(2);
+    let now = Utc::now();
+    let empty = RecentTraceSubmissionWindow {
+        counted: 0,
+        oldest_counted_at: None,
+        submission_known: false,
+    };
+    for scope in ["scope-a", "scope-b"] {
+        assert_eq!(
+            attempts.admit_at_for_test(scope, 5, &empty, now),
+            Some(HourlySubmissionAttemptDecision::Admitted)
+        );
+    }
+    assert_eq!(
+        attempts.admit_at_for_test("scope-c", 5, &empty, now),
+        Some(HourlySubmissionAttemptDecision::Full),
+        "a new scope past the cap is refused"
+    );
+    assert_eq!(attempts.scopes_for_test(), 2);
+    assert_eq!(
+        attempts.admit_at_for_test("scope-a", 5, &empty, now),
+        Some(HourlySubmissionAttemptDecision::Admitted),
+        "a scope already held is still counted"
+    );
+    let next_hour = now + Duration::hours(1) + Duration::seconds(1);
+    assert_eq!(
+        attempts.admit_at_for_test("scope-c", 5, &empty, next_hour),
+        Some(HourlySubmissionAttemptDecision::Admitted),
+        "a forced sweep makes room once the old scopes leave the hour"
+    );
+    assert_eq!(attempts.scopes_for_test(), 1);
+}
+
+/// A poisoned attempt table fails closed: the caller refuses the upload.
+#[test]
+fn hourly_submission_attempts_fail_closed_on_a_poisoned_lock() {
+    use trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow;
+
+    let attempts = Arc::new(HourlySubmissionAttempts::default());
+    let poisoner = attempts.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = poisoner.table.lock().expect("lock");
+        panic!("poison the table");
+    })
+    .join();
+    let empty = RecentTraceSubmissionWindow {
+        counted: 0,
+        oldest_counted_at: None,
+        submission_known: false,
+    };
+    assert_eq!(attempts.admit("scope", 1, &empty), None);
+}
+
+/// The ceiling's `Retry-After` rounds up, so a client that waits exactly as
+/// long as it was told is not refused again.
+#[test]
+fn hourly_ceiling_retry_after_rounds_up() {
+    let now = Utc::now();
+    let oldest_leaving_in = |millis: i64| {
+        hourly_ceiling_retry_after_seconds(
+            Some(now - Duration::hours(1) + Duration::milliseconds(millis)),
+            now,
+        )
+    };
+    assert_eq!(oldest_leaving_in(59_900), 60, "59.9 s is 60, not 59");
+    assert_eq!(oldest_leaving_in(60_000), 60);
+    assert_eq!(oldest_leaving_in(60_001), 61);
+    assert_eq!(oldest_leaving_in(1), 1);
+    assert_eq!(oldest_leaving_in(-5_000), 1, "never below 1");
+    assert_eq!(hourly_ceiling_retry_after_seconds(None, now), 3600);
+}
+
+#[tokio::test]
+async fn account_hourly_submission_ceiling_of_zero_bounds_nothing() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_submission_quota(
+        temp.path().to_path_buf(),
+        TraceSubmissionQuotaConfig {
+            max_per_account_per_hour: 0,
+            ..TraceSubmissionQuotaConfig::default()
+        },
+    );
+    for _ in 0..3 {
+        let _ = test_submit(state.clone(), "token-a", sample_envelope().await)
+            .await
+            .expect("a ceiling of zero refuses nothing");
+    }
+}
+
+/// The ceiling runs before the admission reservation, and both hourly checks
+/// run before the server re-scrub and the per-tenant history reads, so an
+/// upload refused for its rate costs neither.
+#[test]
+fn hourly_submission_checks_run_before_the_rescrub_and_history_reads() {
+    let source = include_str!("../trace-commons-ingest.rs");
+    let handler = source
+        .find("async fn submit_trace_handler_authenticated(")
+        .expect("the submit handler");
+    let at = |needle: &str| {
+        handler
+            + source[handler..]
+                .find(needle)
+                .unwrap_or_else(|| panic!("submit handler calls {needle}"))
+    };
+    let ceiling = at("enforce_account_hourly_submission_ceiling(");
+    let reserve = at("admission::reserve(");
+    let quota = at("enforce_submission_quota(state.as_ref(), &tenant)");
+    let rescrub = at("rescrub_trace_envelope(&mut envelope)");
+    let derived = at("read_all_derived_records(&state.root, tenant.tenant_id())");
+    assert!(
+        ceiling < reserve,
+        "the ceiling runs before admission reserves"
+    );
+    assert!(ceiling < rescrub, "the ceiling runs before the rescrub");
+    assert!(quota < rescrub, "the hourly quota runs before the rescrub");
+    assert!(
+        quota < derived,
+        "the hourly quota runs before the derived-record read"
+    );
 }
 
 #[test]
@@ -11205,19 +11547,30 @@ fn validates_configured_credit_settlement_near_contract_id() {
 #[test]
 fn parses_submission_quota_limits() {
     assert_eq!(
-        parse_submission_quota_limit(TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR, "25")
-            .expect("tenant quota parses"),
+        parse_submission_quota_limit(
+            TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR,
+            Some("25"),
+            0
+        )
+        .expect("tenant quota parses"),
         25
     );
     assert_eq!(
-        parse_submission_quota_limit(TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR, "0")
-            .expect("zero disables principal quota"),
+        parse_submission_quota_limit(
+            TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR,
+            Some("0"),
+            0
+        )
+        .expect("zero disables principal quota"),
         0
     );
 
-    let parse_error =
-        parse_submission_quota_limit(TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR, "many")
-            .expect_err("non-numeric quota is invalid");
+    let parse_error = parse_submission_quota_limit(
+        TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR,
+        Some("many"),
+        0,
+    )
+    .expect_err("non-numeric quota is invalid");
     assert!(
         parse_error
             .to_string()
@@ -12071,6 +12424,47 @@ fn the_main_gate_configuration_is_read_only_for_an_assembled_pipeline() {
     );
 
     unsafe { std::env::remove_var(TRACE_COMMONS_GATE_EMBED_INSERT_NOVELTY_MICROS) };
+}
+
+/// Owner decision D1 (2026-11-03): the credit rule is part of `main`'s gate
+/// configuration, read only for an assembled pipeline. Unset or empty is
+/// `flat`; `graded_perplexity_v1` selects the graded rule; anything else
+/// refuses the start with a safe label naming the variable.
+#[test]
+fn the_credit_rule_is_read_with_the_main_gate_configuration() {
+    use trace_commons_server::versioned_pipeline_compat::{
+        CompatibilityCreditRule, NOVELTY_UTILITY_CREDIT_RULE_ENV,
+    };
+    // SAFETY: env mutation in tests is OK here -- only startup reads this
+    // variable, and no other test sets it.
+    unsafe { std::env::remove_var(NOVELTY_UTILITY_CREDIT_RULE_ENV) };
+    assert_eq!(
+        pipeline_main_gate_config_from_env(true, 0.0)
+            .unwrap()
+            .credit_rule,
+        CompatibilityCreditRule::Flat
+    );
+    unsafe { std::env::set_var(NOVELTY_UTILITY_CREDIT_RULE_ENV, "graded_perplexity_v1") };
+    assert_eq!(
+        pipeline_main_gate_config_from_env(true, 1.0)
+            .unwrap()
+            .credit_rule,
+        CompatibilityCreditRule::GradedPerplexityV1
+    );
+    assert_eq!(
+        pipeline_main_gate_config_from_env(false, 1.0)
+            .unwrap()
+            .credit_rule,
+        CompatibilityCreditRule::Flat,
+        "no pipeline: the rule is not read"
+    );
+    unsafe { std::env::set_var(NOVELTY_UTILITY_CREDIT_RULE_ENV, "graded") };
+    let error = pipeline_main_gate_config_from_env(true, 1.0).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "novelty_utility_credit_rule_invalid (TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_RULE)"
+    );
+    unsafe { std::env::remove_var(NOVELTY_UTILITY_CREDIT_RULE_ENV) };
 }
 
 #[test]
@@ -13196,6 +13590,13 @@ async fn pipeline_runtime_compatibility_holds_mains_gate_configuration() {
         ),
         (
             MainGateConfig {
+                credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::GradedPerplexityV1,
+                ..TEST_MAIN_GATE
+            },
+            "a credit rule main does not run (owner decision D1, 2026-11-03)",
+        ),
+        (
+            MainGateConfig {
                 novelty_floor_micros: Some(400_000),
                 ..TEST_MAIN_GATE
             },
@@ -14071,6 +14472,7 @@ const TEST_MAIN_GATE: trace_commons_server::versioned_pipeline_compat::MainGateC
         chunk_cap: 16,
         chunk_min_tokens: 64,
         novelty_utility_microcredits: 0,
+        credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
     };
 
 /// The `main` gate configuration `config` holds, for a test assembler that
@@ -14078,18 +14480,10 @@ const TEST_MAIN_GATE: trace_commons_server::versioned_pipeline_compat::MainGateC
 fn main_gate_of(
     config: &trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig,
 ) -> trace_commons_server::versioned_pipeline_compat::MainGateConfig {
-    trace_commons_server::versioned_pipeline_compat::MainGateConfig {
-        perplexity_floor_micros: Some(config.perplexity_floor_micros),
-        tail_fraction_floor_micros: Some(config.tail_fraction_floor_micros),
-        novelty_floor_micros: Some(config.novelty_floor_micros),
-        embed_insert_novelty_micros: config.embed_insert_novelty_micros,
-        top_k: config.top_k,
-        chunk_target_tokens: config.chunk_target_tokens,
-        chunk_max_tokens: config.chunk_max_tokens,
-        chunk_cap: config.chunk_cap,
-        chunk_min_tokens: config.chunk_min_tokens,
-        novelty_utility_microcredits: config.novelty_utility_microcredits,
-    }
+    // The configuration's own inverse, every field included: a hand-copied
+    // field list here dropped the credit rule once, and the production
+    // corpus harness then refused a graded package (stage 2, 2026-11-03).
+    config.main_gate()
 }
 
 /// `main`'s NEAR payout controls the pipeline tests assemble with: the
@@ -16231,7 +16625,8 @@ async fn admin_config_status_route_returns_safe_projection() {
                 "submission_quota",
                 serde_json::json!({
                     "max_per_tenant_per_hour": 0,
-                    "max_per_principal_per_hour": 0
+                    "max_per_principal_per_hour": 0,
+                    "max_per_account_per_hour": 0
                 }),
             ),
             (
@@ -31083,6 +31478,11 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
         submit_principal_limits: SubmitPrincipalLimits::default(),
         large_body_bytes: Arc::new(tokio::sync::Semaphore::new(LARGE_BODY_GLOBAL_BYTES)),
+        // The whole budget: fixture principals are shared across parallel
+        // tests, and the focused share tests set their own.
+        large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(LARGE_BODY_GLOBAL_BYTES)),
+        upload_body_idle_timeout: UPLOAD_BODY_IDLE_TIMEOUT,
+        submission_attempts: Arc::new(HourlySubmissionAttempts::default()),
         analytics_min_cell_count: 0,
         analytics_broad_release_noise: None,
         analytics_broad_release_privacy_accounting: None,
@@ -31138,13 +31538,10 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         vector_index_scheduler: None,
         perplexity_score_driver: None,
         pii_backstop_driver: None,
-        unbound_account_reaper: None,
         witness_bypass: None,
         witness_capture_pin: None,
         admission: None,
         account_admission: None,
-        client_upload_allowance: None,
-        client_upload_trust_policy: None,
         client_upload_trust_database: None,
         account_trust_shadow_policy: None,
         near_ai_starter_mode: starter_advance::StarterMode::Disabled,
@@ -31179,16 +31576,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         novelty_utility_require_production_gate: false,
         novelty_utility_settle_from: None,
         scoring_driver_credit_issuer_principal_ref: None,
-        account_webauthn: None,
         account_ceremony_store: Arc::new(CeremonyStore::new()),
-        account_unbound_ceiling: Arc::new(
-            trace_commons_server::account_native_passkey::UnboundAccountCeiling::disabled(),
-        ),
-        account_native_creation_cap: Arc::new(
-            trace_commons_server::account_native_passkey::PerSourceCreationCap::with_limit(
-                trace_commons_server::account_native_passkey::DEFAULT_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY,
-            ),
-        ),
         account_native_requests: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL)),
         account_native_codes: Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL)),
         account_near_config: None,
@@ -32020,8 +32408,6 @@ fn the_applied_policy_is_read_only_from_a_tiered_admission_policy() {
 fn independent_upload_trust_policy(version: &str) -> upload_allowance::ClientUploadTrustPolicy {
     let json = tiered_admission_policy(version, 172800);
     upload_allowance::ClientUploadTrustPolicy {
-        bounded: trace_commons_server::account_trust::parse_bounded_policy(&json, &[version])
-            .unwrap(),
         growth: trace_commons_server::account_trust_rule::parse_growth_policy(&json, &[version])
             .unwrap(),
     }
@@ -32078,13 +32464,17 @@ fn independent_upload_trust_selects_the_same_applied_policy_without_admission_co
     )
     .unwrap()
     .unwrap();
-    assert_eq!(selected.version(), independent.bounded.version());
+    assert_eq!(selected.version(), independent.growth.version());
     assert_eq!(
         selected.effective_allowance(1),
         independent.growth.effective_allowance(1)
     );
     let admission = admission::AccountAdmissionConfig {
-        policy: independent.bounded.clone(),
+        policy: trace_commons_server::account_trust::parse_bounded_policy(
+            &tiered_admission_policy("client-upload-v1", 172800),
+            &["client-upload-v1"],
+        )
+        .unwrap(),
         lease_seconds: 60,
         providers: None,
     };
@@ -32141,7 +32531,6 @@ async fn independent_upload_trust_scheduler_accepts_applied_policy_with_both_led
         .unwrap()
         .unwrap(),
     ));
-    state_mut.client_upload_trust_policy = Some(independent);
     assert!(state.admission.is_none());
     assert!(state.account_admission.is_none());
     let config = account_trust_growth_routes::AccountTrustSchedulerConfig::new(
@@ -32648,6 +33037,47 @@ async fn db_audit_table_mirrors_the_file_audit_log_in_both_dual_write_modes() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// A JSON record file is replaced whole: a write that fails partway leaves
+/// the previous file as it was, with nothing beside it, and the mode is the
+/// one `File::create` gives. Written in place, the file sat empty until the
+/// flush, and a concurrent submission reading every derived record parsed
+/// it and answered 500 (the test below).
+#[test]
+fn write_json_file_replaces_the_file_whole() {
+    struct FailsPartway;
+    impl serde::Serialize for FailsPartway {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::{Error as _, SerializeSeq as _};
+            let mut seq = serializer.serialize_seq(None)?;
+            // Past the writer's 1 MiB buffer, so bytes reach the file.
+            seq.serialize_element(&"x".repeat(2 << 20))?;
+            Err(S::Error::custom("fails partway"))
+        }
+    }
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("derived").join("record.json");
+    let previous = serde_json::json!({ "kept": true });
+    write_json_file(&path, &previous, "test record").expect("first write");
+    write_json_file(&path, &FailsPartway, "test record").expect_err("second write fails");
+
+    let body = std::fs::read_to_string(&path).expect("previous file still there");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).expect("previous file parses"),
+        previous
+    );
+    let entries = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+    assert_eq!(entries, 1, "no temporary is left beside the record");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let created = temp.path().join("created.json");
+        std::fs::File::create(&created).unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), mode(&created));
+    }
+}
+
 /// Concurrent submissions: the append lock orders each event's chain fields,
 /// its DB row and its file line together, so both logs hold one unforked
 /// chain in the same order, in both dual-write modes.
@@ -32681,13 +33111,13 @@ async fn concurrent_submissions_keep_one_audit_chain_in_file_and_db() {
                 submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
                     .await
                     .map(|_| ())
-                    .map_err(|(status, _)| status)
+                    .map_err(|(status, body)| format!("{status}: {:?}", body.0))
             }));
         }
         for task in tasks {
             task.await
                 .expect("submission task joins")
-                .unwrap_or_else(|status| panic!("{context}: submission failed with {status}"));
+                .unwrap_or_else(|error| panic!("{context}: submission failed with {error}"));
         }
 
         let file_events = read_all_audit_events(temp.path(), "tenant-a").expect("file audit log");
@@ -61526,14 +61956,29 @@ fn legacy_scoring_award_event(
 
 /// A `NoveltyUtility` event as a compatibility pipeline run writes it
 /// (`settle_internal_credit`): the pipeline's ledger source key as its
-/// `external_ref`. The pipeline never batches that leg (Ruling S10).
+/// `external_ref`. Under the flat rule the pipeline never batches that leg
+/// (Ruling S10).
 fn pipeline_scoring_award_event(
     submission_id: Uuid,
     credit_points_delta: f32,
 ) -> TraceCommonsCreditLedgerRecord {
+    pipeline_scoring_award_event_of(
+        submission_id,
+        credit_points_delta,
+        trace_commons_server::versioned_pipeline_bundle::PipelineTraceCreditEvent::NoveltyUtility,
+    )
+}
+
+/// As [`pipeline_scoring_award_event`], for the leg `event` writes: under
+/// the graded rule (`SettledNoveltyUtility`) the pipeline batches it itself.
+fn pipeline_scoring_award_event_of(
+    submission_id: Uuid,
+    credit_points_delta: f32,
+    event: trace_commons_server::versioned_pipeline_bundle::PipelineTraceCreditEvent,
+) -> TraceCommonsCreditLedgerRecord {
     TraceCommonsCreditLedgerRecord {
         reason: Some(
-            trace_commons_server::versioned_pipeline_credit::pipeline_novelty_utility_reason(),
+            trace_commons_server::versioned_pipeline_credit::pipeline_novelty_utility_reason(event),
         ),
         external_ref: Some(
             trace_commons_server::versioned_pipeline_credit::pipeline_ledger_source_key(
@@ -61561,6 +62006,22 @@ fn only_the_legacy_gate_scoring_award_counts_toward_legacy_settlement() {
     // `main` paying it would pay what the pipeline chose not to.
     assert!(!trace_credit_event_counts_toward_settlement(
         &pipeline_scoring_award_event(submission_id, 1.0),
+        settle_from
+    ));
+    // Owner decision D2 (2026-11-03): a graded-rule leg, which the pipeline
+    // batches and a payout rail pays, is never `main`'s to settle either, so
+    // it is paid once.
+    let graded = pipeline_scoring_award_event_of(
+        submission_id,
+        1.0,
+        trace_commons_server::versioned_pipeline_bundle::PipelineTraceCreditEvent::SettledNoveltyUtility,
+    );
+    assert_eq!(
+        graded.reason.as_deref(),
+        Some("novelty_utility:compatibility_graded_perplexity_v1")
+    );
+    assert!(!trace_credit_event_counts_toward_settlement(
+        &graded,
         settle_from
     ));
     // Fail closed on a scoring award with no gate provenance.
@@ -81543,6 +82004,11 @@ async fn authenticated_upload_status(method: &str, path: &str, body_bytes: usize
 /// there for fixture-specific reasons) rather than being refused by the
 /// ordinary API ceiling -- or by the pre-body gate, which would make a
 /// non-413 status prove nothing.
+///
+/// Bundle finalize is the exception in this fixture: bundles are not enabled
+/// here, so its bundle pre-check answers 503 before the body is read, and
+/// its row proves only that the gate let it through. Its declared-length
+/// ceiling is pinned by `upload_routes_admit_their_ceiling_by_declared_length`.
 #[tokio::test]
 async fn large_upload_routes_retain_the_upload_body_ceiling() {
     for (method, path, _) in large_upload_route_ceilings() {
@@ -81700,6 +82166,14 @@ async fn large_upload_gate_caps_in_flight_bodies_per_principal() {
         TraceAuthMethod::StaticToken,
         &static_token_principal_ref(TOKEN),
     );
+    // The submit route's own in-flight cap (2) is also taken before the body
+    // is read; lift it for this principal so the stalled submits reach the
+    // large-body cap under test.
+    configure_submit_rate_limits_for_test(
+        &static_submit_rate_limit_key("tenant-a", TOKEN),
+        u32::MAX,
+        u32::MAX,
+    );
     let (addr, server) = serve_ingest_for_test(state).await;
     let cap = LARGE_BODY_PER_PRINCIPAL_CONCURRENCY;
 
@@ -81754,6 +82228,521 @@ async fn large_upload_gate_caps_in_flight_bodies_per_principal() {
     .await
     .expect("abandoned uploads release their principal slots");
     server.abort();
+}
+
+/// Through the router, the per-principal submission rate is checked before
+/// the body is read: once the window is spent, an upload whose body is never
+/// sent is still answered, with the same 429, label and `Retry-After`.
+#[tokio::test]
+async fn submit_rate_limit_refuses_before_reading_the_body() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).submit_principal_limits = SubmitPrincipalLimits {
+        rate_per_window: 1,
+        concurrency: SUBMIT_PER_PRINCIPAL_CONCURRENCY,
+    };
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+    let body = serde_json::to_vec(&invalid).expect("envelope serialises");
+    let first = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/traces")
+                .header(AUTHORIZATION, format!("Bearer {SUBMIT_RATE_LIMIT_TOKEN_A}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .expect("submit request builds"),
+        )
+        .await
+        .expect("first response");
+    assert_eq!(first.status(), StatusCode::BAD_REQUEST);
+
+    let (addr, server) = serve_ingest_for_test(state).await;
+    let mut refused = send_upload_headers_without_body(
+        addr,
+        "POST",
+        "/v1/traces",
+        Some(SUBMIT_RATE_LIMIT_TOKEN_A),
+    )
+    .await;
+    assert_eq!(
+        response_status_within(&mut refused, StdDuration::from_secs(2))
+            .await
+            .as_deref(),
+        Some("HTTP/1.1 429 Too Many Requests"),
+        "a principal past its rate is refused without its body being read"
+    );
+    // Another principal's window is its own: its upload is admitted and
+    // waits for the body.
+    let mut other = send_upload_headers_without_body(
+        addr,
+        "POST",
+        "/v1/traces",
+        Some(SUBMIT_RATE_LIMIT_TOKEN_B),
+    )
+    .await;
+    assert_eq!(
+        response_status_within(&mut other, StdDuration::from_millis(300)).await,
+        None,
+        "a principal under its rate is admitted and waits for its body"
+    );
+    server.abort();
+}
+
+/// A finalize for a bundle that cannot be finalized (bundles disabled here,
+/// as in every non-PostgreSQL fixture, or an unknown or revoked bundle) is
+/// answered before its body is read and before it takes a submit slot or a
+/// unit of the submit rate (decision 3 on #1794): it costs the principal's
+/// submit window nothing. The rate a finalize that reaches submit work
+/// spends, and its counting once, are pinned by the PostgreSQL journey test.
+#[tokio::test]
+async fn token_bundle_finalize_of_a_bundle_it_cannot_finalize_costs_no_submit_slot_or_rate() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).submit_principal_limits = SubmitPrincipalLimits {
+        rate_per_window: 1,
+        concurrency: SUBMIT_PER_PRINCIPAL_CONCURRENCY,
+    };
+    let key = static_submit_rate_limit_key("tenant-a", SUBMIT_RATE_LIMIT_TOKEN_A);
+    let count = || {
+        submit_rate_limit_count_for_test(
+            "tenant-a",
+            TraceAuthMethod::StaticToken,
+            &static_token_principal_ref(SUBMIT_RATE_LIMIT_TOKEN_A),
+        )
+    };
+    let path = format!("/v1/token-bundles/{}/r1", Uuid::nil());
+    let envelope = serde_json::to_vec(&sample_envelope().await).expect("envelope serialises");
+    for _ in 0..2 {
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(path.as_str())
+                    .header(AUTHORIZATION, format!("Bearer {SUBMIT_RATE_LIMIT_TOKEN_A}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(envelope.clone()))
+                    .expect("finalize request builds"),
+            )
+            .await
+            .expect("finalize response");
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "bundles are not enabled in this fixture"
+        );
+    }
+    assert_eq!(
+        count(),
+        0,
+        "a finalize refused for its bundle spends no rate"
+    );
+
+    let (addr, server) = serve_ingest_for_test(state.clone()).await;
+    let mut headers_only =
+        send_upload_headers_without_body(addr, "POST", &path, Some(SUBMIT_RATE_LIMIT_TOKEN_A))
+            .await;
+    assert_eq!(
+        response_status_within(&mut headers_only, StdDuration::from_secs(2))
+            .await
+            .as_deref(),
+        Some("HTTP/1.1 503 Service Unavailable"),
+        "the bundle is checked before the body is read"
+    );
+    assert_eq!(count(), 0);
+    assert_eq!(
+        ACCOUNT_RATE_LIMITER.in_flight_for_test(&key),
+        0,
+        "and before a submit slot is taken"
+    );
+    server.abort();
+
+    // The window is untouched: the principal's one submission this minute
+    // is still there to spend.
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+    let submit = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/traces")
+                .header(AUTHORIZATION, format!("Bearer {SUBMIT_RATE_LIMIT_TOKEN_A}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&invalid).expect("envelope serialises"),
+                ))
+                .expect("submit request builds"),
+        )
+        .await
+        .expect("submit response");
+    assert_eq!(submit.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(count(), 1);
+}
+
+/// The submission in-flight cap is also taken before the body is read: with
+/// the principal's slots held by stalled uploads, the next one is answered
+/// at once with the concurrency refusal.
+#[tokio::test]
+async fn submit_concurrency_limit_refuses_before_reading_the_body() {
+    use tokio::io::AsyncReadExt;
+
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let key = static_submit_rate_limit_key("tenant-a", SUBMIT_RATE_LIMIT_TOKEN_A);
+    let (addr, server) = serve_ingest_for_test(state).await;
+
+    let mut stalled = Vec::new();
+    for _ in 0..SUBMIT_PER_PRINCIPAL_CONCURRENCY {
+        stalled.push(
+            send_upload_headers_without_body(
+                addr,
+                "POST",
+                "/v1/traces",
+                Some(SUBMIT_RATE_LIMIT_TOKEN_A),
+            )
+            .await,
+        );
+    }
+    tokio::time::timeout(StdDuration::from_secs(2), async {
+        while ACCOUNT_RATE_LIMITER.in_flight_for_test(&key) < SUBMIT_PER_PRINCIPAL_CONCURRENCY {
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("stalled uploads hold the principal's submission slots before their bodies arrive");
+
+    let mut next = send_upload_headers_without_body(
+        addr,
+        "POST",
+        "/v1/traces",
+        Some(SUBMIT_RATE_LIMIT_TOKEN_A),
+    )
+    .await;
+    let mut response = vec![0u8; 1024];
+    let read = tokio::time::timeout(StdDuration::from_secs(2), next.read(&mut response))
+        .await
+        .expect("the refusal does not wait for the body")
+        .expect("response reads");
+    let text = String::from_utf8_lossy(&response[..read]).to_ascii_lowercase();
+    assert!(
+        text.starts_with("http/1.1 429 too many requests"),
+        "refused: {text}"
+    );
+    let retry_after = text
+        .lines()
+        .find_map(|line| line.strip_prefix("retry-after: "))
+        .and_then(|value| value.trim().parse::<i64>().ok());
+    assert!(
+        retry_after.is_some_and(is_concurrency_retry_hint),
+        "carries a concurrency Retry-After: {text}"
+    );
+    assert!(
+        text.contains(SUBMIT_RATE_LIMITED_LABEL),
+        "names the label: {text}"
+    );
+
+    drop(stalled);
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        while ACCOUNT_RATE_LIMITER.in_flight_for_test(&key) > 0 {
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("abandoned uploads release their submission slots");
+    server.abort();
+}
+
+/// A routed submission is counted against the principal's window once, by
+/// the pre-body check; the handler does not count it again.
+#[tokio::test]
+async fn routed_submit_counts_against_the_rate_window_once() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/traces")
+                .header(AUTHORIZATION, format!("Bearer {SUBMIT_RATE_LIMIT_TOKEN_A}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&invalid).expect("envelope serialises"),
+                ))
+                .expect("submit request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        submit_rate_limit_count_for_test(
+            "tenant-a",
+            TraceAuthMethod::StaticToken,
+            &static_token_principal_ref(SUBMIT_RATE_LIMIT_TOKEN_A),
+        ),
+        1
+    );
+}
+
+/// A request refused because the principal's in-flight slots are all held
+/// does not spend its rate window: the slot is taken before the rate is
+/// counted, so retrying while slow uploads hold the slots costs nothing.
+#[tokio::test]
+async fn submit_concurrency_refusal_does_not_spend_the_rate_window() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let tenant = authenticate_ctx(state.as_ref(), &auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A))
+        .expect("the rate-limit fixture token authenticates");
+    let limits = SubmitPrincipalLimits {
+        rate_per_window: 30,
+        concurrency: 1,
+    };
+    let count = || {
+        submit_rate_limit_count_for_test(
+            "tenant-a",
+            TraceAuthMethod::StaticToken,
+            &static_token_principal_ref(SUBMIT_RATE_LIMIT_TOKEN_A),
+        )
+    };
+    let held = admit_submit_principal(&tenant, limits).expect("the first request is admitted");
+    assert_eq!(count(), 1);
+    for _ in 0..5 {
+        let Err(refused) = admit_submit_principal(&tenant, limits) else {
+            panic!("the principal's only slot is held");
+        };
+        assert_eq!(refused.0, StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            refused
+                .1
+                .0
+                .retry_after_seconds
+                .is_some_and(is_concurrency_retry_hint),
+            "{:?}",
+            refused.1.0.retry_after_seconds
+        );
+    }
+    assert_eq!(count(), 1, "concurrency refusals are not counted");
+    drop(held);
+    let _next = admit_submit_principal(&tenant, limits).expect("a freed slot admits again");
+    assert_eq!(count(), 2);
+}
+
+/// The submit handler counts a request only when the router has not already
+/// admitted it before the body: handed the pre-body admission (as
+/// `POST /v1/traces` and bundle finalize hand it on), it does not count again.
+#[tokio::test]
+async fn submit_handler_does_not_count_a_request_admitted_before_the_body() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let headers = auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A);
+    let tenant = authenticate_ctx(state.as_ref(), &headers)
+        .expect("the rate-limit fixture token authenticates");
+    let count = || {
+        submit_rate_limit_count_for_test(
+            "tenant-a",
+            TraceAuthMethod::StaticToken,
+            &static_token_principal_ref(SUBMIT_RATE_LIMIT_TOKEN_A),
+        )
+    };
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let _ = submit_trace_handler_authenticated(
+        State(state.clone()),
+        headers.clone(),
+        submit_body(invalid.clone()),
+        Some(SubmitAdmittedBeforeBody(tenant)),
+    )
+    .await;
+    assert_eq!(count(), 0, "an admitted request is not counted again");
+
+    let _ =
+        submit_trace_handler_authenticated(State(state), headers, submit_body(invalid), None).await;
+    assert_eq!(count(), 1, "a direct call is counted by the handler");
+}
+
+/// Read a response until `needle` shows up, the server closes, or `wait`
+/// runs out, and return what arrived, lowercased.
+async fn response_text_until(
+    stream: &mut tokio::net::TcpStream,
+    needle: &str,
+    wait: StdDuration,
+) -> String {
+    use tokio::io::AsyncReadExt;
+
+    let mut text = String::new();
+    let _ = tokio::time::timeout(wait, async {
+        let mut buffer = vec![0u8; 4096];
+        loop {
+            match stream.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    text.push_str(&String::from_utf8_lossy(&buffer[..read]).to_ascii_lowercase());
+                    if text.contains(needle) {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    text
+}
+
+/// An upload whose body stops arriving is refused once it has been idle for
+/// the timeout, with a fixed label, on `POST /v1/traces` and the token-bundle
+/// upload routes (decision 1 on #1794), and gives back the submit slot, the
+/// large-body slot and the byte share it held. Without the timeout it held
+/// them until the socket died, and two stalled uploads locked the principal
+/// out of submitting.
+#[tokio::test]
+async fn a_stalled_upload_is_refused_and_releases_its_slots_and_bytes() {
+    use tokio::io::AsyncWriteExt;
+
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).upload_body_idle_timeout = StdDuration::from_millis(200);
+    let principal = static_token_principal_ref(SUBMIT_RATE_LIMIT_TOKEN_A);
+    let submit_key = static_submit_rate_limit_key("tenant-a", SUBMIT_RATE_LIMIT_TOKEN_A);
+    let large_key = large_body_principal_key("tenant-a", TraceAuthMethod::StaticToken, &principal);
+    let shares = state.large_body_principal_bytes.clone();
+    let (addr, server) = serve_ingest_for_test(state).await;
+
+    for (method, path) in [
+        ("POST", "/v1/traces"),
+        ("POST", "/v1/token-bundles"),
+        (
+            "PUT",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev/artifact",
+        ),
+    ] {
+        let mut stream =
+            send_upload_headers_without_body(addr, method, path, Some(SUBMIT_RATE_LIMIT_TOKEN_A))
+                .await;
+        // A first chunk arrives, then nothing more.
+        stream.write_all(b"{").await.expect("first chunk writes");
+        let text = response_text_until(
+            &mut stream,
+            UPLOAD_BODY_IDLE_TIMEOUT_LABEL,
+            StdDuration::from_secs(5),
+        )
+        .await;
+        assert!(
+            text.starts_with("http/1.1 408 request timeout"),
+            "{method} {path}: a stalled upload is refused: {text:?}"
+        );
+        assert!(
+            text.contains(UPLOAD_BODY_IDLE_TIMEOUT_LABEL),
+            "{method} {path}: with the fixed label: {text:?}"
+        );
+    }
+
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        while ACCOUNT_RATE_LIMITER.in_flight_for_test(&submit_key) > 0
+            || ACCOUNT_RATE_LIMITER.in_flight_for_test(&large_key) > 0
+            || shares.held_for_test(&large_key) > 0
+        {
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a refused stalled upload releases its submit slot, large-body slot and bytes");
+    server.abort();
+}
+
+/// The timeout is between chunks, not on the whole upload: a body that keeps
+/// arriving is read to the end however long it takes in all.
+#[tokio::test]
+async fn a_slow_upload_that_keeps_moving_is_not_timed_out() {
+    use tokio::io::AsyncWriteExt;
+
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let idle = StdDuration::from_millis(300);
+    Arc::make_mut(&mut state).upload_body_idle_timeout = idle;
+    let (addr, server) = serve_ingest_for_test(state).await;
+    let body = serde_json::to_vec(&sample_envelope().await).expect("envelope serialises");
+
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connects to the test server");
+    stream
+        .write_all(
+            format!(
+                "POST /v1/traces HTTP/1.1\r\nHost: ingest.test\r\n\
+                 Authorization: Bearer {SUBMIT_RATE_LIMIT_TOKEN_A}\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("request headers write");
+    let started = std::time::Instant::now();
+    let chunks = 8;
+    for chunk in body.chunks(body.len().div_ceil(chunks)) {
+        tokio::time::sleep(idle / 3).await;
+        stream.write_all(chunk).await.expect("chunk writes");
+    }
+    assert!(
+        started.elapsed() > idle * 2,
+        "the upload took longer in all than the idle timeout"
+    );
+    let text = response_text_until(&mut stream, "\r\n", StdDuration::from_secs(10)).await;
+    assert!(
+        text.starts_with("http/1.1 200 ok"),
+        "an upload that keeps moving is read to the end: {text:?}"
+    );
+    server.abort();
+}
+
+/// A poisoned per-principal byte table refuses every upload, as the rate
+/// limiter does, rather than carrying on with whatever it held.
+#[test]
+fn large_body_principal_bytes_fail_closed_on_a_poisoned_lock() {
+    let table = Arc::new(LargeBodyPrincipalBytes::new(MAX_INGEST_BODY_BYTES));
+    let held = table
+        .try_take("large-body:poison".to_string(), 10)
+        .expect("within the share");
+    let poisoner = table.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = poisoner.held.lock().expect("lock");
+        panic!("poison the table");
+    })
+    .join();
+    assert!(table.held.is_poisoned());
+    assert!(
+        table.try_take("large-body:poison".to_string(), 1).is_none(),
+        "a poisoned table refuses"
+    );
+    drop(held);
 }
 
 /// The deployment-wide in-flight bound holds across principals, and each
@@ -81994,7 +82983,7 @@ async fn legacy_session_cookie_name_is_not_authenticated() {
             .oneshot(
                 axum::http::Request::builder()
                     .method("GET")
-                    .uri("/v1/account/passkeys")
+                    .uri("/v1/account/near-identities")
                     .header(
                         axum::http::header::COOKIE,
                         format!("{LEGACY_ACCOUNT_SESSION_COOKIE}={cookie_value}"),
@@ -82489,352 +83478,6 @@ async fn isolation_e_account_actor_ref_is_inert_end_to_end() {
 }
 
 // ---------------------------------------------------------------------------
-// Slice 2 (passkeys) Task 4: webauthn credential DB operations.
-//
-// DB-backed: self-skip when neither TRACE_COMMONS_PG_TEST_DATABASE_URL nor
-// DATABASE_URL is set. Each test cleans tenant-a first so it is self-isolating
-// on a reused database, and seeds accounts via the normal tenant-scoped path so
-// the credential FK (tenant_id, account_id) -> trace_accounts is satisfied.
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn webauthn_credential_insert_load_round_trips() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-roundtrip").await;
-
-    let account_id = backend
-        .create_or_reuse_account("tenant-wa-roundtrip", "principal-a")
-        .await
-        .expect("seed account");
-    let credential_id = "cred-roundtrip-globally-unique";
-    let passkey = serde_json::json!({"counter": 7, "aaguid": "abc", "nested": {"k": [1, 2, 3]}});
-
-    backend
-        .insert_webauthn_credential(
-            "tenant-wa-roundtrip",
-            account_id,
-            credential_id,
-            &passkey,
-            Some("My Key"),
-        )
-        .await
-        .expect("insert credential");
-
-    let loaded = backend
-        .load_webauthn_credential_for_login("tenant-wa-roundtrip", credential_id)
-        .await
-        .expect("load credential")
-        .expect("credential present");
-    assert_eq!(loaded.account_id, account_id);
-    assert_eq!(loaded.passkey, passkey, "passkey JSON preserved exactly");
-
-    // Unknown credential -> None.
-    let missing = backend
-        .load_webauthn_credential_for_login("tenant-wa-roundtrip", "cred-does-not-exist")
-        .await
-        .expect("load missing");
-    assert!(missing.is_none(), "unknown credential resolves to None");
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-roundtrip").await;
-}
-
-#[tokio::test]
-async fn webauthn_credential_update_after_login_persists_passkey() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-update").await;
-
-    let account_id = backend
-        .create_or_reuse_account("tenant-wa-update", "principal-a")
-        .await
-        .expect("seed account");
-    let credential_id = "cred-update-globally-unique";
-    let passkey = serde_json::json!({"counter": 1});
-    backend
-        .insert_webauthn_credential(
-            "tenant-wa-update",
-            account_id,
-            credential_id,
-            &passkey,
-            None,
-        )
-        .await
-        .expect("insert credential");
-
-    let bumped = serde_json::json!({"counter": 42, "post_finish": true});
-    backend
-        .update_webauthn_credential_after_login("tenant-wa-update", credential_id, &bumped)
-        .await
-        .expect("update credential");
-
-    let loaded = backend
-        .load_webauthn_credential_for_login("tenant-wa-update", credential_id)
-        .await
-        .expect("load credential")
-        .expect("credential present");
-    assert_eq!(
-        loaded.passkey, bumped,
-        "post-finish passkey (new sign count) persisted"
-    );
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-update").await;
-}
-
-#[tokio::test]
-async fn webauthn_credential_list_excludes_revoked_and_orders_by_created_at() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-list").await;
-
-    let account_id = backend
-        .create_or_reuse_account("tenant-wa-list", "principal-a")
-        .await
-        .expect("seed account");
-    let passkey = serde_json::json!({});
-    backend
-        .insert_webauthn_credential(
-            "tenant-wa-list",
-            account_id,
-            "cred-1",
-            &passkey,
-            Some("first"),
-        )
-        .await
-        .expect("insert cred-1");
-    backend
-        .insert_webauthn_credential(
-            "tenant-wa-list",
-            account_id,
-            "cred-2",
-            &passkey,
-            Some("second"),
-        )
-        .await
-        .expect("insert cred-2");
-
-    let listed = backend
-        .list_account_credentials("tenant-wa-list", account_id)
-        .await
-        .expect("list credentials");
-    assert_eq!(listed.len(), 2, "both active credentials listed");
-    let ids: Vec<&str> = listed.iter().map(|c| c.credential_id.as_str()).collect();
-    assert_eq!(ids, vec!["cred-1", "cred-2"], "ordered by created_at");
-    assert_eq!(listed[0].label.as_deref(), Some("first"));
-
-    // Revoke one -> excluded from the list.
-    let revoke = backend
-        .revoke_account_credential("tenant-wa-list", account_id, "cred-1")
-        .await
-        .expect("revoke cred-1");
-    assert!(revoke.removed, "revoke affected a row");
-    assert_eq!(revoke.remaining, 1, "one credential remains active");
-
-    let after = backend
-        .list_account_credentials("tenant-wa-list", account_id)
-        .await
-        .expect("list after revoke");
-    assert_eq!(after.len(), 1, "revoked credential excluded");
-    assert_eq!(after[0].credential_id, "cred-2");
-
-    // load_for_login no longer resolves the revoked credential.
-    let revoked_load = backend
-        .load_webauthn_credential_for_login("tenant-wa-list", "cred-1")
-        .await
-        .expect("load revoked");
-    assert!(
-        revoked_load.is_none(),
-        "revoked credential not loadable for login"
-    );
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-list").await;
-}
-
-#[tokio::test]
-async fn webauthn_credential_rename_updates_label_and_reports_match() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-rename").await;
-
-    let account_id = backend
-        .create_or_reuse_account("tenant-wa-rename", "principal-a")
-        .await
-        .expect("seed account");
-    let passkey = serde_json::json!({});
-    backend
-        .insert_webauthn_credential(
-            "tenant-wa-rename",
-            account_id,
-            "cred-rename",
-            &passkey,
-            Some("old"),
-        )
-        .await
-        .expect("insert credential");
-
-    let renamed = backend
-        .rename_account_credential(
-            "tenant-wa-rename",
-            account_id,
-            "cred-rename",
-            Some("new label"),
-        )
-        .await
-        .expect("rename credential");
-    assert!(renamed, "rename of owned active credential returns true");
-
-    let listed = backend
-        .list_account_credentials("tenant-wa-rename", account_id)
-        .await
-        .expect("list credentials");
-    assert_eq!(
-        listed[0].label.as_deref(),
-        Some("new label"),
-        "label updated"
-    );
-
-    // Unknown credential id -> false (no row affected).
-    let unknown = backend
-        .rename_account_credential("tenant-wa-rename", account_id, "cred-unknown", Some("x"))
-        .await
-        .expect("rename unknown");
-    assert!(!unknown, "rename of unknown credential returns false");
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-rename").await;
-}
-
-#[tokio::test]
-async fn webauthn_credential_revoke_is_idempotent_and_counts_remaining() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-revoke").await;
-
-    let account_id = backend
-        .create_or_reuse_account("tenant-wa-revoke", "principal-a")
-        .await
-        .expect("seed account");
-    let passkey = serde_json::json!({});
-    backend
-        .insert_webauthn_credential("tenant-wa-revoke", account_id, "cred-a", &passkey, None)
-        .await
-        .expect("insert cred-a");
-    backend
-        .insert_webauthn_credential("tenant-wa-revoke", account_id, "cred-b", &passkey, None)
-        .await
-        .expect("insert cred-b");
-
-    let first = backend
-        .revoke_account_credential("tenant-wa-revoke", account_id, "cred-a")
-        .await
-        .expect("revoke cred-a");
-    assert!(first.removed);
-    assert_eq!(first.remaining, 1, "one credential left after first revoke");
-
-    // Idempotent: revoking an already-revoked credential affects no row.
-    let again = backend
-        .revoke_account_credential("tenant-wa-revoke", account_id, "cred-a")
-        .await
-        .expect("revoke cred-a again");
-    assert!(
-        !again.removed,
-        "already-revoked credential is not removed again"
-    );
-    assert_eq!(again.remaining, 1, "remaining count unchanged");
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-revoke").await;
-}
-
-#[tokio::test]
-async fn webauthn_credential_account_scoping_blocks_cross_account_access() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-scope").await;
-
-    // Two distinct accounts in the SAME tenant.
-    let account_a = backend
-        .create_or_reuse_account("tenant-wa-scope", "principal-a")
-        .await
-        .expect("seed account A");
-    let account_b = backend
-        .create_or_reuse_account("tenant-wa-scope", "principal-b")
-        .await
-        .expect("seed account B");
-    assert_ne!(account_a, account_b, "distinct accounts");
-
-    let passkey = serde_json::json!({"owner": "a"});
-    backend
-        .insert_webauthn_credential(
-            "tenant-wa-scope",
-            account_a,
-            "cred-owned-by-a",
-            &passkey,
-            Some("A's key"),
-        )
-        .await
-        .expect("insert A's credential");
-
-    // Account B's list must NOT see account A's credential.
-    let b_list = backend
-        .list_account_credentials("tenant-wa-scope", account_b)
-        .await
-        .expect("list B");
-    assert!(
-        b_list.is_empty(),
-        "account B sees none of account A's credentials"
-    );
-
-    // Account B cannot rename account A's credential.
-    let b_rename = backend
-        .rename_account_credential(
-            "tenant-wa-scope",
-            account_b,
-            "cred-owned-by-a",
-            Some("hijack"),
-        )
-        .await
-        .expect("rename attempt by B");
-    assert!(!b_rename, "account B cannot rename account A's credential");
-
-    // Account B cannot revoke account A's credential; remaining counts only B's.
-    let b_revoke = backend
-        .revoke_account_credential("tenant-wa-scope", account_b, "cred-owned-by-a")
-        .await
-        .expect("revoke attempt by B");
-    assert!(
-        !b_revoke.removed,
-        "account B cannot revoke account A's credential"
-    );
-    assert_eq!(
-        b_revoke.remaining, 0,
-        "account B has no active credentials of its own"
-    );
-
-    // Account A's credential is untouched: still listable, still original label.
-    let a_list = backend
-        .list_account_credentials("tenant-wa-scope", account_a)
-        .await
-        .expect("list A");
-    assert_eq!(
-        a_list.len(),
-        1,
-        "account A's credential survived B's attempts"
-    );
-    assert_eq!(
-        a_list[0].label.as_deref(),
-        Some("A's key"),
-        "label not hijacked"
-    );
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-wa-scope").await;
-}
-
-// ---------------------------------------------------------------------------
 // Slice 3a (login-with-NEAR) Task 5: NEAR identity DB operations and the
 // strong-authenticator count.
 //
@@ -83151,7 +83794,7 @@ async fn near_identity_account_scoping_blocks_cross_account_access() {
 }
 
 #[tokio::test]
-async fn strong_authenticator_count_sums_webauthn_and_near() {
+async fn strong_authenticator_count_is_active_near_identities() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
     };
@@ -83169,30 +83812,23 @@ async fn strong_authenticator_count_sums_webauthn_and_near() {
         .expect("count empty");
     assert_eq!(zero, 0, "no strong authenticators initially");
 
-    // Enroll one webauthn credential AND one NEAR identity -> 2.
-    let passkey = serde_json::json!({"counter": 1});
-    backend
-        .insert_webauthn_credential("tenant-strong-count", account_id, "cred-x", &passkey, None)
-        .await
-        .expect("insert webauthn credential");
-    backend
-        .insert_near_identity(
-            "tenant-strong-count",
-            account_id,
-            "ed25519:strong-key",
-            "alice.near",
-            None,
-        )
-        .await
-        .expect("insert near identity");
-
+    // Enroll two NEAR identities -> 2.
+    for (key, name) in [
+        ("ed25519:strong-key", "alice.near"),
+        ("ed25519:strong-key-2", "bob.near"),
+    ] {
+        backend
+            .insert_near_identity("tenant-strong-count", account_id, key, name, None)
+            .await
+            .expect("insert near identity");
+    }
     let two = backend
         .count_active_strong_authenticators("tenant-strong-count", account_id)
         .await
         .expect("count two");
-    assert_eq!(two, 2, "webauthn + near summed");
+    assert_eq!(two, 2, "both NEAR identities counted");
 
-    // Revoke the NEAR identity -> 1, and remaining_strong reported in the SAME tx.
+    // Revoke one -> 1, and remaining_strong reported in the SAME tx.
     let revoke_near = backend
         .revoke_account_near_identity("tenant-strong-count", account_id, "ed25519:strong-key")
         .await
@@ -83200,20 +83836,15 @@ async fn strong_authenticator_count_sums_webauthn_and_near() {
     assert!(revoke_near.removed);
     assert_eq!(
         revoke_near.remaining_strong, 1,
-        "webauthn credential still counts as strong"
+        "the other NEAR key still counts"
     );
-    let one = backend
-        .count_active_strong_authenticators("tenant-strong-count", account_id)
-        .await
-        .expect("count one");
-    assert_eq!(one, 1, "one strong authenticator after near revoke");
 
-    // Revoke the webauthn credential -> 0.
-    let revoke_cred = backend
-        .revoke_account_credential("tenant-strong-count", account_id, "cred-x")
+    // Revoke the other -> 0.
+    let revoke_last = backend
+        .revoke_account_near_identity("tenant-strong-count", account_id, "ed25519:strong-key-2")
         .await
-        .expect("revoke webauthn");
-    assert!(revoke_cred.removed);
+        .expect("revoke last near");
+    assert_eq!(revoke_last.remaining_strong, 0);
     let zero_again = backend
         .count_active_strong_authenticators("tenant-strong-count", account_id)
         .await
@@ -83502,296 +84133,6 @@ async fn near_payout_resolution_is_fail_closed() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-payout-resolve").await;
 }
 
-// ============================================================================
-// Slice 2 Task 5: passkey enrollment ceremony handlers.
-//
-// Coverage:
-//   * Full happy path is driven end-to-end against real PostgreSQL using the
-//     dev-only `webauthn-authenticator-rs` SoftPasskey software authenticator:
-//     authenticated ctx -> register/start -> SoftPasskey produces a real
-//     attestation -> register/finish -> a `trace_webauthn_credentials` row
-//     exists for the account with the expected credential_id + passkey JSON, and
-//     the `account_passkey_enrolled` audit row is written.
-//   * `register/start` also asserted in isolation: returns WebAuthn options, sets
-//     the `ACCOUNT_PASSKEY_CEREMONY_COOKIE` cookie, stashes `CeremonyState::Registration`,
-//     and (after one credential is enrolled) carries that credential in the
-//     options' `exclude_credentials`.
-//   * `register/finish` ceremony-binding gate: a missing ceremony cookie and an
-//     unknown/expired/already-consumed ceremony id both yield 400 with no row
-//     written. (A wrong-variant ceremony shares the exact same
-//     `Some(_) | None => 400` arm; it cannot be constructed in a test because
-//     `DiscoverableAuthentication` is only producible by a live ceremony.)
-// ============================================================================
-
-/// Build a test `AppState` with a real WebAuthn relying party injected. The
-/// state is freshly constructed (refcount 1) so `Arc::get_mut` can set the
-/// otherwise-`None` `account_webauthn` field before any clone escapes.
-fn test_state_with_webauthn(root: PathBuf, db_mirror: Option<Arc<dyn Database>>) -> Arc<AppState> {
-    let mut state = test_state_with_options(root, db_mirror, None, false, false, false, false);
-    let webauthn = build_webauthn(&WebauthnConfig {
-        rp_id: "localhost".to_string(),
-        rp_origin: "http://localhost".to_string(),
-        rp_name: "TraceCommons Test".to_string(),
-    })
-    .expect("test relying party builds");
-    Arc::get_mut(&mut state)
-        .expect("fresh state is uniquely owned")
-        .account_webauthn = Some(Arc::new(webauthn));
-    state
-}
-
-/// A syntactically-valid but cryptographically-meaningless
-/// `RegisterPublicKeyCredential` JSON body. Deserializes fine (so the `Json`
-/// extractor and the ceremony-gate path are reachable) but would never pass
-/// attestation verification — which is irrelevant here because the ceremony-gate
-/// rejection happens BEFORE `finish_passkey_registration` is ever called.
-fn dummy_register_finish_body() -> AccountPasskeyRegisterFinishBody {
-    serde_json::from_value(serde_json::json!({
-        "id": "AAAA",
-        "rawId": "AAAA",
-        "response": {
-            "attestationObject": "AAAA",
-            "clientDataJSON": "AAAA"
-        },
-        "type": "public-key"
-    }))
-    .expect("dummy register body deserializes")
-}
-
-/// Origin the test relying party (`test_state_with_webauthn`) is configured for.
-/// The SoftPasskey driver must present this exact origin; webauthn-rs only allows
-/// an `http://` scheme for `localhost`.
-fn test_passkey_origin() -> webauthn_rs::prelude::Url {
-    webauthn_rs::prelude::Url::parse("http://localhost").expect("test origin parses")
-}
-
-/// Drive the dev-only SoftPasskey software authenticator through a REGISTRATION
-/// ceremony: given the server's `register/start` challenge JSON (the
-/// `CreationChallengeResponse`), produce the `RegisterPublicKeyCredential`
-/// attestation the browser would POST to `register/finish`.
-///
-/// Each call uses a FRESH `SoftPasskey` (its credential state is per-instance),
-/// which is what we want for enrollment: a brand-new authenticator. `falsify_uv`
-/// is true because our relying party requests user-verification-required and the
-/// software authenticator has no real UV gesture to perform.
-///
-/// Reusable by Task 6: pair this with [`softpasskey_authenticate`] (below) to
-/// drive a full register-then-login round trip against the same `SoftPasskey`
-/// instance (hold the authenticator across both calls so the enrolled credential
-/// is available to assert).
-fn softpasskey_register(
-    authenticator: &mut webauthn_authenticator_rs::WebauthnAuthenticator<
-        webauthn_authenticator_rs::softpasskey::SoftPasskey,
-    >,
-    challenge: &serde_json::Value,
-) -> webauthn_rs::prelude::RegisterPublicKeyCredential {
-    let options: webauthn_rs::prelude::CreationChallengeResponse =
-        serde_json::from_value(challenge.clone()).expect("creation challenge deserializes");
-    authenticator
-        .do_registration(test_passkey_origin(), options)
-        .expect("software authenticator completes registration")
-}
-
-/// Drive the SoftPasskey through an AUTHENTICATION (assertion) ceremony. Kept
-/// here (test-only) so Task 6's login test can reuse the same authenticator
-/// instance that enrolled the credential. Currently unused by Task 5 itself; it
-/// is `#[allow(dead_code)]` until Task 6 wires the login handler.
-#[allow(dead_code)]
-fn softpasskey_authenticate(
-    authenticator: &mut webauthn_authenticator_rs::WebauthnAuthenticator<
-        webauthn_authenticator_rs::softpasskey::SoftPasskey,
-    >,
-    challenge: &serde_json::Value,
-) -> webauthn_rs::prelude::PublicKeyCredential {
-    let options: webauthn_rs::prelude::RequestChallengeResponse =
-        serde_json::from_value(challenge.clone()).expect("request challenge deserializes");
-    authenticator
-        .do_authentication(test_passkey_origin(), options)
-        .expect("software authenticator completes authentication")
-}
-
-/// Construct a fresh SoftPasskey-backed authenticator. UV is falsified because
-/// the test relying party requests user-verification-required.
-fn new_software_authenticator() -> webauthn_authenticator_rs::WebauthnAuthenticator<
-    webauthn_authenticator_rs::softpasskey::SoftPasskey,
-> {
-    webauthn_authenticator_rs::WebauthnAuthenticator::new(
-        webauthn_authenticator_rs::softpasskey::SoftPasskey::new(true),
-    )
-}
-
-/// Call `register/start` for an already-authenticated cookie session and return
-/// `(challenge_json, ceremony_cookie_header_value)`. The returned cookie value is
-/// the full `name=value` first pair, ready to feed into a `Cookie:` header for
-/// `register/finish`.
-async fn passkey_register_start(
-    state: &Arc<AppState>,
-    session_cookie: &str,
-) -> (serde_json::Value, String) {
-    use axum::response::IntoResponse;
-    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, session_cookie);
-    let ext = account_ctx_ext(state, &headers).await;
-    let response = account_passkey_register_start_handler(State(state.clone()), ext)
-        .await
-        .expect("register/start succeeds")
-        .into_response();
-    assert_eq!(response.status(), StatusCode::OK);
-    let set_cookie = response
-        .headers()
-        .get(axum::http::header::SET_COOKIE)
-        .expect("ceremony cookie set")
-        .to_str()
-        .expect("ascii cookie")
-        .to_string();
-    let ceremony_pair = set_cookie
-        .split(';')
-        .next()
-        .expect("cookie pair")
-        .to_string();
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body bytes");
-    let challenge: serde_json::Value =
-        serde_json::from_slice(&body).expect("challenge json deserializes");
-    (challenge, ceremony_pair)
-}
-
-/// `register/start` returns WebAuthn options, sets the ceremony cookie, and
-/// stashes the server-side registration state in the ceremony store.
-#[tokio::test]
-async fn passkey_register_start_returns_options_and_stashes_ceremony() {
-    use axum::response::IntoResponse;
-
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-    let temp = tempfile::tempdir().expect("temp dir");
-    let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
-
-    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
-
-    let start_ext = account_ctx_ext(&state, &headers).await;
-    let response = account_passkey_register_start_handler(State(state.clone()), start_ext)
-        .await
-        .expect("start succeeds")
-        .into_response();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    // The ceremony cookie is set: Secure + HttpOnly + SameSite=Strict, carrying
-    // the opaque ceremony id.
-    let set_cookie = response
-        .headers()
-        .get(axum::http::header::SET_COOKIE)
-        .expect("ceremony cookie set")
-        .to_str()
-        .expect("ascii cookie");
-    assert!(set_cookie.starts_with(&format!("{ACCOUNT_PASSKEY_CEREMONY_COOKIE}=")));
-    assert_set_cookies_are_host_bound(response.headers());
-    assert!(set_cookie.contains("HttpOnly"));
-    assert!(set_cookie.contains("Secure"));
-    assert!(set_cookie.contains("SameSite=Strict"));
-
-    // Recover the opaque ceremony id from the cookie before consuming the body.
-    let first = set_cookie.split(';').next().expect("cookie pair");
-    let (_name, ceremony_id) = first.split_once('=').expect("cookie name=value");
-    let ceremony_id = ceremony_id.to_string();
-
-    // The body deserializes as a WebAuthn creation challenge (has a publicKey
-    // member with a challenge).
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body bytes");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("challenge json");
-    assert!(
-        json.get("publicKey")
-            .and_then(|pk| pk.get("challenge"))
-            .is_some(),
-        "challenge response carries publicKey.challenge: {json}"
-    );
-
-    // The server-side ceremony state was stashed under the cookie's ceremony id:
-    // a same-id `take` recovers a Registration variant.
-    let stashed = account_ceremony_store(state.as_ref()).take(&ceremony_id);
-    assert!(
-        matches!(stashed, Some(CeremonyState::Registration(_))),
-        "registration state stashed under ceremony id"
-    );
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-}
-
-/// `register/finish` with NO ceremony cookie is rejected 400 before any
-/// attestation verification, and writes no credential row.
-#[tokio::test]
-async fn passkey_register_finish_without_ceremony_cookie_is_400() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-    let temp = tempfile::tempdir().expect("temp dir");
-    let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
-
-    let cookie_value = mint_redeem_session_cookie_value(&state, "token-a").await;
-    // Only the session cookie; no `ACCOUNT_PASSKEY_CEREMONY_COOKIE`.
-    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &cookie_value);
-
-    let finish_ext = account_ctx_ext(&state, &headers).await;
-    let err = account_passkey_register_finish_handler(
-        State(state.clone()),
-        finish_ext,
-        headers,
-        Json(dummy_register_finish_body()),
-    )
-    .await
-    .expect_err("missing ceremony must 400");
-    assert_eq!(err.0, StatusCode::BAD_REQUEST);
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-}
-
-/// `register/finish` with a ceremony cookie that does not resolve to a stored
-/// ceremony (unknown / expired / already-consumed) is rejected 400. This is the
-/// same `Some(_) | None => 400` arm that also rejects a wrong-variant ceremony.
-#[tokio::test]
-async fn passkey_register_finish_with_unknown_ceremony_is_400() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-    let temp = tempfile::tempdir().expect("temp dir");
-    let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
-
-    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    // Present BOTH the session cookie and a bogus ceremony cookie. The ceremony
-    // id was never `put` into the store, so `take` returns None -> 400.
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::COOKIE,
-        HeaderValue::from_str(&format!(
-            "{ACCOUNT_SESSION_COOKIE}={session_cookie}; {ACCOUNT_PASSKEY_CEREMONY_COOKIE}=never-issued-ceremony-id"
-        ))
-        .expect("valid cookie header"),
-    );
-
-    let finish_ext = account_ctx_ext(&state, &headers).await;
-    let err = account_passkey_register_finish_handler(
-        State(state.clone()),
-        finish_ext,
-        headers,
-        Json(dummy_register_finish_body()),
-    )
-    .await
-    .expect_err("unknown ceremony must 400");
-    assert_eq!(err.0, StatusCode::BAD_REQUEST);
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-}
-
 /// Resolve the account id linked to a device principal under a tenant, via the
 /// raw test pool under that tenant's RLS context.
 async fn account_id_for_principal(
@@ -83850,162 +84191,6 @@ async fn account_audit_count(backend: &PgBackend, tenant_id: &str, action: &str)
     row.get(0)
 }
 
-/// Full enrollment round trip driven by the dev-only SoftPasskey authenticator:
-/// register/start -> software attestation -> register/finish -> a credential row
-/// exists with the expected credential_id + passkey JSON, and the
-/// `account_passkey_enrolled` audit row is written. Also asserts that a SECOND
-/// register/start now carries the enrolled credential in `exclude_credentials`.
-#[tokio::test]
-async fn passkey_enroll_round_trip_persists_credential_and_audit() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-    let temp = tempfile::tempdir().expect("temp dir");
-    let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
-
-    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let account_id = account_id_for_principal(
-        backend.as_ref(),
-        "tenant-a",
-        &static_token_principal_ref("token-a"),
-    )
-    .await;
-
-    // No credentials and no enroll audit yet.
-    assert!(
-        backend
-            .list_account_credentials("tenant-a", account_id)
-            .await
-            .expect("list before")
-            .is_empty()
-    );
-    assert_eq!(
-        account_audit_count(backend.as_ref(), "tenant-a", "account_passkey_enrolled").await,
-        0
-    );
-
-    // register/start -> drive SoftPasskey -> register/finish.
-    let (challenge, ceremony_pair) = passkey_register_start(&state, &session_cookie).await;
-    let mut authenticator = new_software_authenticator();
-    let attestation = softpasskey_register(&mut authenticator, &challenge);
-
-    // The finish request carries BOTH the session cookie and the ceremony cookie.
-    let mut finish_headers = HeaderMap::new();
-    finish_headers.insert(
-        axum::http::header::COOKIE,
-        HeaderValue::from_str(&format!(
-            "{ACCOUNT_SESSION_COOKIE}={session_cookie}; {ceremony_pair}"
-        ))
-        .expect("valid cookie header"),
-    );
-    // Serialize the authenticator's attestation exactly as the browser would
-    // (the RegisterPublicKeyCredential shape), then attach a label.
-    let mut finish_json =
-        serde_json::to_value(&attestation).expect("attestation serializes to JSON object");
-    finish_json
-        .as_object_mut()
-        .expect("attestation is a JSON object")
-        .insert("label".to_string(), serde_json::json!("My laptop"));
-    let finish_body: AccountPasskeyRegisterFinishBody =
-        serde_json::from_value(finish_json).expect("finish body builds from attestation");
-
-    let finish_ext = account_ctx_ext(&state, &finish_headers).await;
-    let Json(finish_out) = account_passkey_register_finish_handler(
-        State(state.clone()),
-        finish_ext,
-        finish_headers,
-        Json(finish_body),
-    )
-    .await
-    .expect("register/finish succeeds");
-    let returned_credential_id = finish_out
-        .get("credential_id")
-        .and_then(|v| v.as_str())
-        .expect("credential_id returned")
-        .to_string();
-
-    // The returned id matches the canonical encoding of the authenticator's
-    // credential id.
-    let expected_credential_id = credential_id_to_string(
-        &webauthn_rs::prelude::CredentialID::from(attestation.raw_id.as_ref()),
-    );
-    assert_eq!(returned_credential_id, expected_credential_id);
-
-    // A credential row exists for the account, with the expected id and label.
-    let creds = backend
-        .list_account_credentials("tenant-a", account_id)
-        .await
-        .expect("list after");
-    assert_eq!(creds.len(), 1, "exactly one credential enrolled");
-    assert_eq!(creds[0].credential_id, expected_credential_id);
-    assert_eq!(creds[0].label.as_deref(), Some("My laptop"));
-
-    // The stored passkey JSON is present and loadable for the login path (Task 6
-    // consumes this), confirming we persisted real serialized key material.
-    let loaded = backend
-        .load_webauthn_credential_for_login("tenant-a", &expected_credential_id)
-        .await
-        .expect("load query")
-        .expect("credential row loadable");
-    assert_eq!(loaded.account_id, account_id);
-    assert!(loaded.passkey.is_object(), "passkey stored as JSON object");
-
-    // The enroll audit row was written (hash-only; we only count it here).
-    assert_eq!(
-        account_audit_count(backend.as_ref(), "tenant-a", "account_passkey_enrolled").await,
-        1
-    );
-
-    // A SECOND register/start now excludes the enrolled credential. The first
-    // passkey makes the account strong, so this second start must come from a
-    // STRONG session (Slice 3a Task 8 authenticator-change gate): log in with the
-    // just-enrolled credential and drive register/start from the passkey session.
-    let strong_cookie = passkey_login_cookie_value(
-        &state,
-        &mut authenticator,
-        &returned_credential_id,
-        account_id,
-    )
-    .await;
-    let (challenge2, _ceremony2) = passkey_register_start(&state, &strong_cookie).await;
-    let excluded = challenge2
-        .get("publicKey")
-        .and_then(|pk| pk.get("excludeCredentials"))
-        .and_then(|e| e.as_array())
-        .expect("excludeCredentials present after first enroll");
-    let excluded_ids: Vec<String> = excluded
-        .iter()
-        .filter_map(|d| d.get("id").and_then(|v| v.as_str()).map(str::to_string))
-        .collect();
-    assert!(
-        excluded_ids.contains(&expected_credential_id),
-        "second start excludes the already-enrolled credential: {excluded_ids:?}"
-    );
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-}
-
-// ============================================================================
-// Slice 2 Task 6: discoverable passkey login (unauthenticated surface).
-//
-// All tests are DB-backed against real PostgreSQL and drive a real WebAuthn
-// ceremony end-to-end with the dev-only SoftPasskey software authenticator.
-// Coverage:
-//   * Round-trip: enroll -> login/start -> SoftPasskey assertion -> login/finish
-//     mints a `ACCOUNT_SESSION_COOKIE` cookie (client_kind='passkey',
-//     auth_credential_id set) and 303s.
-//   * Sign-counter / clone defense: a stale (replayed) assertion is rejected
-//     with the uniform deny and mints no session.
-//   * Cross-account binding: a login only ever mints a session for the account
-//     the credential belongs to.
-//   * No-write regression: a forged/unknown credential id (resolver miss) denies
-//     AND creates no bogus trace_tenants row.
-//   * Uniform deny: unknown credential / missing ceremony / malformed body all
-//     return byte-identical status + body.
-// ============================================================================
-
 /// Count `trace_tenants` rows via the raw test pool.
 async fn trace_tenants_count(backend: &PgBackend) -> i64 {
     let client = backend
@@ -84049,968 +84234,6 @@ async fn session_kind_and_credential(
         .expect("session query");
     tx.commit().await.expect("commit");
     row.map(|row| (row.get("client_kind"), row.get("auth_credential_id")))
-}
-
-/// Enroll a fresh passkey for the account linked to `token`'s device principal
-/// under tenant-a, driving the Task 5 register ceremony end to end. Returns the
-/// `(authenticator, credential_id)` so the caller can then drive a login ceremony
-/// against the SAME authenticator instance (which holds the enrolled credential).
-async fn enroll_passkey_for_token(
-    state: &Arc<AppState>,
-    session_cookie: &str,
-) -> (
-    webauthn_authenticator_rs::WebauthnAuthenticator<
-        webauthn_authenticator_rs::softpasskey::SoftPasskey,
-    >,
-    String,
-) {
-    let (challenge, ceremony_pair) = passkey_register_start(state, session_cookie).await;
-    let mut authenticator = new_software_authenticator();
-    let attestation = softpasskey_register(&mut authenticator, &challenge);
-
-    let mut finish_headers = HeaderMap::new();
-    finish_headers.insert(
-        axum::http::header::COOKIE,
-        HeaderValue::from_str(&format!(
-            "{ACCOUNT_SESSION_COOKIE}={session_cookie}; {ceremony_pair}"
-        ))
-        .expect("valid cookie header"),
-    );
-    let finish_json =
-        serde_json::to_value(&attestation).expect("attestation serializes to JSON object");
-    let finish_body: AccountPasskeyRegisterFinishBody =
-        serde_json::from_value(finish_json).expect("finish body builds from attestation");
-    let finish_ext = account_ctx_ext(state, &finish_headers).await;
-    let Json(finish_out) = account_passkey_register_finish_handler(
-        State(state.clone()),
-        finish_ext,
-        finish_headers,
-        Json(finish_body),
-    )
-    .await
-    .expect("register/finish succeeds");
-    let credential_id = finish_out
-        .get("credential_id")
-        .and_then(|v| v.as_str())
-        .expect("credential_id returned")
-        .to_string();
-    (authenticator, credential_id)
-}
-
-/// Drive the dev-only SoftPasskey through a DISCOVERABLE-login assertion.
-///
-/// The SoftPasskey is a non-resident U2F-style software authenticator: it selects
-/// a credential by matching the request's `allowCredentials` (it cannot "discover"
-/// a credential from an empty allow-list) and it never returns a `userHandle`. A
-/// real discoverable/resident authenticator does both. To exercise the server's
-/// discoverable path with this stand-in we faithfully reproduce what a real
-/// authenticator returns: (1) inject the enrolled `credential_id` into the
-/// challenge's `allowCredentials` so the SoftPasskey can find and sign with the
-/// right key, then (2) set the assertion's `response.userHandle` to the account's
-/// uuid bytes (base64url), which is exactly the resident-key user handle a real
-/// authenticator stores at enrollment and replays here. The signature, RP-id hash,
-/// and sign counter in the assertion are produced by the SoftPasskey for real and
-/// are verified for real by the server; only these two transport details (which
-/// the SoftPasskey omits) are supplied by the test. Passing `user_handle = None`
-/// reproduces the broken-client case where the authenticator returns no handle.
-fn softpasskey_authenticate_discoverable(
-    authenticator: &mut webauthn_authenticator_rs::WebauthnAuthenticator<
-        webauthn_authenticator_rs::softpasskey::SoftPasskey,
-    >,
-    challenge: &serde_json::Value,
-    credential_id: &str,
-    user_handle: Option<Uuid>,
-) -> webauthn_rs::prelude::PublicKeyCredential {
-    // (1) Inject the enrolled credential id into allowCredentials so the
-    // non-resident SoftPasskey has a credential to select. The server's
-    // DiscoverableAuthentication state ignores the client allow-list; it verifies
-    // the asserted credential id against the DiscoverableKey we pass to finish.
-    let mut patched = challenge.clone();
-    let public_key = patched
-        .get_mut("publicKey")
-        .and_then(|pk| pk.as_object_mut())
-        .expect("challenge has publicKey object");
-    public_key.insert(
-        "allowCredentials".to_string(),
-        serde_json::json!([{ "type": "public-key", "id": credential_id }]),
-    );
-    let options: webauthn_rs::prelude::RequestChallengeResponse =
-        serde_json::from_value(patched).expect("patched request challenge deserializes");
-    let assertion = authenticator
-        .do_authentication(test_passkey_origin(), options)
-        .expect("software authenticator completes authentication");
-
-    // (2) Replay the resident-key user handle the way a discoverable authenticator
-    // would. Serialize, set response.userHandle (base64url of the uuid bytes), and
-    // re-deserialize into a PublicKeyCredential.
-    let mut assertion_json =
-        serde_json::to_value(&assertion).expect("assertion serializes to JSON");
-    let response = assertion_json
-        .get_mut("response")
-        .and_then(|r| r.as_object_mut())
-        .expect("assertion has response object");
-    match user_handle {
-        Some(handle) => {
-            let encoded =
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(handle.as_bytes());
-            response.insert("userHandle".to_string(), serde_json::json!(encoded));
-        }
-        None => {
-            response.insert("userHandle".to_string(), serde_json::Value::Null);
-        }
-    }
-    serde_json::from_value(assertion_json).expect("assertion re-deserializes with user handle")
-}
-
-/// Call `login/start` and return `(challenge_json, ceremony_cookie_pair)`.
-async fn passkey_login_start(state: &Arc<AppState>) -> (serde_json::Value, String) {
-    let response = account_passkey_login_start_handler(
-        State(state.clone()),
-        HeaderMap::new(),
-        axum::extract::RawQuery(None),
-    )
-    .await;
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "login/start returns options"
-    );
-    let set_cookie = response
-        .headers()
-        .get(axum::http::header::SET_COOKIE)
-        .expect("ceremony cookie set")
-        .to_str()
-        .expect("ascii cookie")
-        .to_string();
-    assert!(set_cookie.starts_with(&format!("{ACCOUNT_PASSKEY_CEREMONY_COOKIE}=")));
-    assert_set_cookies_are_host_bound(response.headers());
-    let ceremony_pair = set_cookie
-        .split(';')
-        .next()
-        .expect("cookie pair")
-        .to_string();
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body bytes");
-    let challenge: serde_json::Value =
-        serde_json::from_slice(&body).expect("challenge json deserializes");
-    (challenge, ceremony_pair)
-}
-
-/// Drive a discoverable passkey login with `authenticator`/`credential_id` for
-/// `account_id` and return the minted STRONG (`client_kind='passkey'`) session
-/// cookie value. Used by the Task 8 gate tests (and the tightened management
-/// tests) to obtain a strong session that may freely change authenticators.
-async fn passkey_login_cookie_value(
-    state: &Arc<AppState>,
-    authenticator: &mut webauthn_authenticator_rs::WebauthnAuthenticator<
-        webauthn_authenticator_rs::softpasskey::SoftPasskey,
-    >,
-    credential_id: &str,
-    account_id: Uuid,
-) -> String {
-    let (challenge, ceremony_pair) = passkey_login_start(state).await;
-    let assertion = softpasskey_authenticate_discoverable(
-        authenticator,
-        &challenge,
-        credential_id,
-        Some(account_id),
-    );
-    let mut finish_headers = HeaderMap::new();
-    finish_headers.insert(
-        axum::http::header::COOKIE,
-        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
-    );
-    let response = account_passkey_login_finish_handler(
-        State(state.clone()),
-        finish_headers,
-        PasskeyAssertionBody(assertion),
-    )
-    .await;
-    assert_eq!(
-        response.status(),
-        StatusCode::SEE_OTHER,
-        "passkey login 303s"
-    );
-    assert_set_cookies_are_host_bound(response.headers());
-    assert_clears_legacy_session_cookie(response.headers());
-    response
-        .headers()
-        .get_all(axum::http::header::SET_COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
-        .and_then(|c| c.split(';').next())
-        .and_then(|p| p.split_once('='))
-        .map(|(_, v)| v.to_string())
-        .expect("passkey session cookie value")
-}
-
-/// Full enroll -> discoverable login round trip: a `ACCOUNT_SESSION_COOKIE` cookie is
-/// minted with `client_kind='passkey'` and `auth_credential_id` set, and the
-/// response is a 303 to the account view.
-#[tokio::test]
-async fn passkey_login_round_trip_mints_passkey_session() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-    let temp = tempfile::tempdir().expect("temp dir");
-    let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
-
-    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let account_id = account_id_for_principal(
-        backend.as_ref(),
-        "tenant-a",
-        &static_token_principal_ref("token-a"),
-    )
-    .await;
-    let (mut authenticator, credential_id) =
-        enroll_passkey_for_token(&state, &session_cookie).await;
-
-    let (challenge, ceremony_pair) = passkey_login_start(&state).await;
-    let assertion = softpasskey_authenticate_discoverable(
-        &mut authenticator,
-        &challenge,
-        &credential_id,
-        Some(account_id),
-    );
-
-    let mut finish_headers = HeaderMap::new();
-    finish_headers.insert(
-        axum::http::header::COOKIE,
-        HeaderValue::from_str(&ceremony_pair).expect("valid cookie header"),
-    );
-    let response = account_passkey_login_finish_handler(
-        State(state.clone()),
-        finish_headers,
-        PasskeyAssertionBody(assertion),
-    )
-    .await;
-
-    assert_eq!(
-        response.status(),
-        StatusCode::SEE_OTHER,
-        "login/finish 303s on success"
-    );
-    let set_cookie = response
-        .headers()
-        .get_all(axum::http::header::SET_COOKIE)
-        .iter()
-        .map(|v| v.to_str().expect("ascii cookie").to_string())
-        .collect::<Vec<_>>();
-    let session_set = set_cookie
-        .iter()
-        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
-        .expect("session cookie set on login");
-    assert!(session_set.contains("HttpOnly"));
-    assert!(session_set.contains("Secure"));
-    assert!(session_set.contains("SameSite=Strict"));
-    let first = session_set.split(';').next().expect("cookie pair");
-    let (_name, value) = first.split_once('=').expect("name=value");
-    let secret = value.split_once('.').expect("tenant.secret").1;
-    let token_hash = hash_secret(secret);
-    let (kind, stored_cred) =
-        session_kind_and_credential(backend.as_ref(), "tenant-a", &token_hash)
-            .await
-            .expect("passkey session row exists");
-    assert_eq!(kind, "passkey", "session client_kind is passkey");
-    assert_eq!(
-        stored_cred.as_deref(),
-        Some(credential_id.as_str()),
-        "auth_credential_id records the asserting credential"
-    );
-
-    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, value);
-    let ctx = resolve_account_ctx(state.as_ref(), &headers)
-        .await
-        .expect("passkey session cookie resolves");
-    assert_eq!(ctx.tenant_id, "tenant-a");
-    assert_eq!(ctx.account_id.as_uuid(), account_id);
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-}
-
-/// Sign-counter / clone defense: a STALE assertion (captured, then re-finished
-/// after the credential's counter has advanced via a later login) is rejected
-/// with the uniform deny and mints no session. The SoftPasskey increments its
-/// counter on every assertion, so replaying an earlier assertion regresses the
-/// counter relative to the stored credential, which finish rejects.
-#[tokio::test]
-async fn passkey_login_rejects_stale_counter_assertion() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-    let temp = tempfile::tempdir().expect("temp dir");
-    let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
-
-    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let account_id = account_id_for_principal(
-        backend.as_ref(),
-        "tenant-a",
-        &static_token_principal_ref("token-a"),
-    )
-    .await;
-    let (mut authenticator, credential_id) =
-        enroll_passkey_for_token(&state, &session_cookie).await;
-
-    let (challenge1, ceremony_pair1) = passkey_login_start(&state).await;
-    let stale_assertion = softpasskey_authenticate_discoverable(
-        &mut authenticator,
-        &challenge1,
-        &credential_id,
-        Some(account_id),
-    );
-
-    let (challenge2, ceremony_pair2) = passkey_login_start(&state).await;
-    let fresh_assertion = softpasskey_authenticate_discoverable(
-        &mut authenticator,
-        &challenge2,
-        &credential_id,
-        Some(account_id),
-    );
-    let mut finish2 = HeaderMap::new();
-    finish2.insert(
-        axum::http::header::COOKIE,
-        HeaderValue::from_str(&ceremony_pair2).expect("cookie header"),
-    );
-    let ok = account_passkey_login_finish_handler(
-        State(state.clone()),
-        finish2,
-        PasskeyAssertionBody(fresh_assertion),
-    )
-    .await;
-    assert_eq!(ok.status(), StatusCode::SEE_OTHER, "second login succeeds");
-
-    let mut finish1 = HeaderMap::new();
-    finish1.insert(
-        axum::http::header::COOKIE,
-        HeaderValue::from_str(&ceremony_pair1).expect("cookie header"),
-    );
-    let denied = account_passkey_login_finish_handler(
-        State(state.clone()),
-        finish1,
-        PasskeyAssertionBody(stale_assertion),
-    )
-    .await;
-    assert_eq!(
-        denied.status(),
-        StatusCode::BAD_REQUEST,
-        "stale-counter assertion is denied"
-    );
-    assert!(
-        denied
-            .headers()
-            .get(axum::http::header::SET_COOKIE)
-            .is_none(),
-        "no session cookie is set on a clone-defense denial"
-    );
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-}
-
-/// Cross-account binding: a credential enrolled under account A only ever mints a
-/// session for A. The asserted user-handle equals A's account id, and the session
-/// resolves to A. (The step-8 handle/account check would deny any mismatch.)
-#[tokio::test]
-async fn passkey_login_binds_only_to_owning_account() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-    let temp = tempfile::tempdir().expect("temp dir");
-    let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
-
-    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let account_id = account_id_for_principal(
-        backend.as_ref(),
-        "tenant-a",
-        &static_token_principal_ref("token-a"),
-    )
-    .await;
-    let (mut authenticator, credential_id) =
-        enroll_passkey_for_token(&state, &session_cookie).await;
-
-    // Positive control: a login asserting the REAL owning account binds to A.
-    let (challenge, ceremony_pair) = passkey_login_start(&state).await;
-    let assertion = softpasskey_authenticate_discoverable(
-        &mut authenticator,
-        &challenge,
-        &credential_id,
-        Some(account_id),
-    );
-    let mut finish_headers = HeaderMap::new();
-    finish_headers.insert(
-        axum::http::header::COOKIE,
-        HeaderValue::from_str(&ceremony_pair).expect("cookie header"),
-    );
-    let response = account_passkey_login_finish_handler(
-        State(state.clone()),
-        finish_headers,
-        PasskeyAssertionBody(assertion),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let value = response
-        .headers()
-        .get_all(axum::http::header::SET_COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
-        .and_then(|c| c.split(';').next())
-        .and_then(|p| p.split_once('='))
-        .map(|(_, v)| v.to_string())
-        .expect("session cookie value");
-    let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &value);
-    let ctx = resolve_account_ctx(state.as_ref(), &headers)
-        .await
-        .expect("session resolves");
-    assert_eq!(
-        ctx.account_id.as_uuid(),
-        account_id,
-        "session is bound ONLY to the credential's owning account"
-    );
-
-    // Negative: a login asserting a DIFFERENT user handle for the SAME credential
-    // is caught by the step-8 handle/account binding check and denied with no
-    // session minted. This is the defense against rebinding a credential to
-    // another account via a forged user handle.
-    let (challenge_mm, ceremony_mm) = passkey_login_start(&state).await;
-    let foreign_handle = Uuid::new_v4();
-    assert_ne!(foreign_handle, account_id);
-    let mismatched = softpasskey_authenticate_discoverable(
-        &mut authenticator,
-        &challenge_mm,
-        &credential_id,
-        Some(foreign_handle),
-    );
-    let mut mm_headers = HeaderMap::new();
-    mm_headers.insert(
-        axum::http::header::COOKIE,
-        HeaderValue::from_str(&ceremony_mm).expect("cookie header"),
-    );
-    let denied = account_passkey_login_finish_handler(
-        State(state.clone()),
-        mm_headers,
-        PasskeyAssertionBody(mismatched),
-    )
-    .await;
-    assert_eq!(
-        denied.status(),
-        StatusCode::BAD_REQUEST,
-        "a foreign user handle for the credential is denied"
-    );
-    assert!(
-        denied
-            .headers()
-            .get(axum::http::header::SET_COOKIE)
-            .is_none(),
-        "no session cookie on a handle-mismatch deny"
-    );
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-}
-
-/// No-write regression (the Slice 1 Codex bug): a `login/finish` whose assertion
-/// carries a credential id the resolver does not know returns the uniform deny
-/// AND creates no bogus `trace_tenants` row. Driven with an authenticator that
-/// produced a credential we never persisted, so the resolver misses.
-#[tokio::test]
-async fn passkey_login_unknown_credential_denies_and_writes_no_tenant() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-    let temp = tempfile::tempdir().expect("temp dir");
-    let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
-
-    // Drive register/start to get well-formed options + a SoftPasskey credential,
-    // but never call register/finish -> the DB has never seen this credential.
-    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let (challenge, _ceremony_pair) = passkey_register_start(&state, &session_cookie).await;
-    let mut authenticator = new_software_authenticator();
-    let attestation = softpasskey_register(&mut authenticator, &challenge);
-    let orphan_credential_id = credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(
-        attestation.raw_id.as_ref(),
-    ));
-
-    let tenants_before = trace_tenants_count(backend.as_ref()).await;
-
-    let (login_challenge, ceremony_pair) = passkey_login_start(&state).await;
-    let assertion = softpasskey_authenticate_discoverable(
-        &mut authenticator,
-        &login_challenge,
-        &orphan_credential_id,
-        Some(Uuid::new_v4()),
-    );
-    let mut finish_headers = HeaderMap::new();
-    finish_headers.insert(
-        axum::http::header::COOKIE,
-        HeaderValue::from_str(&ceremony_pair).expect("cookie header"),
-    );
-    let denied = account_passkey_login_finish_handler(
-        State(state.clone()),
-        finish_headers,
-        PasskeyAssertionBody(assertion),
-    )
-    .await;
-    assert_eq!(
-        denied.status(),
-        StatusCode::BAD_REQUEST,
-        "unknown credential is denied"
-    );
-    assert!(
-        denied
-            .headers()
-            .get(axum::http::header::SET_COOKIE)
-            .is_none(),
-        "no session cookie on unknown-credential deny"
-    );
-
-    let tenants_after = trace_tenants_count(backend.as_ref()).await;
-    assert_eq!(
-        tenants_before, tenants_after,
-        "an unknown credential must NOT create any trace_tenants row"
-    );
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-}
-
-/// Uniform deny: unknown credential, missing ceremony cookie, and a malformed
-/// body all return byte-identical status + body.
-#[tokio::test]
-async fn passkey_login_denials_are_byte_identical() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-    let temp = tempfile::tempdir().expect("temp dir");
-    let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
-
-    async fn as_status_body(response: axum::response::Response) -> (StatusCode, Vec<u8>) {
-        let status = response.status();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body bytes")
-            .to_vec();
-        (status, body)
-    }
-
-    // (a) Unknown credential: a never-persisted authenticator + a real ceremony.
-    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let (reg_challenge, _p) = passkey_register_start(&state, &session_cookie).await;
-    let mut orphan = new_software_authenticator();
-    let orphan_attestation = softpasskey_register(&mut orphan, &reg_challenge);
-    let orphan_credential_id = credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(
-        orphan_attestation.raw_id.as_ref(),
-    ));
-    let (login_challenge, ceremony_pair) = passkey_login_start(&state).await;
-    let assertion = softpasskey_authenticate_discoverable(
-        &mut orphan,
-        &login_challenge,
-        &orphan_credential_id,
-        Some(Uuid::new_v4()),
-    );
-    let mut h_unknown = HeaderMap::new();
-    h_unknown.insert(
-        axum::http::header::COOKIE,
-        HeaderValue::from_str(&ceremony_pair).expect("cookie header"),
-    );
-    let unknown = as_status_body(
-        account_passkey_login_finish_handler(
-            State(state.clone()),
-            h_unknown,
-            PasskeyAssertionBody(assertion),
-        )
-        .await,
-    )
-    .await;
-
-    // (b) Missing ceremony cookie: a well-formed assertion but no ceremony stored.
-    let account_id = account_id_for_principal(
-        backend.as_ref(),
-        "tenant-a",
-        &static_token_principal_ref("token-a"),
-    )
-    .await;
-    let (mut enrolled, enrolled_cred) = enroll_passkey_for_token(&state, &session_cookie).await;
-    let (login_challenge2, _ceremony2) = passkey_login_start(&state).await;
-    let assertion2 = softpasskey_authenticate_discoverable(
-        &mut enrolled,
-        &login_challenge2,
-        &enrolled_cred,
-        Some(account_id),
-    );
-    let missing_ceremony = as_status_body(
-        account_passkey_login_finish_handler(
-            State(state.clone()),
-            HeaderMap::new(),
-            PasskeyAssertionBody(assertion2),
-        )
-        .await,
-    )
-    .await;
-
-    // (c) Malformed body: route junk JSON through the real extractor, whose
-    // rejection IS the uniform deny.
-    let malformed_rejection = {
-        let request = axum::http::Request::builder()
-            .method("POST")
-            .uri("/account/passkey/login/finish")
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from("{not valid json"))
-            .expect("request builds");
-        match <PasskeyAssertionBody as axum::extract::FromRequest<()>>::from_request(request, &())
-            .await
-        {
-            Ok(_) => panic!("malformed body must be rejected"),
-            Err(response) => as_status_body(response).await,
-        }
-    };
-
-    assert_eq!(
-        unknown, missing_ceremony,
-        "unknown-credential and missing-ceremony denies are byte-identical"
-    );
-    assert_eq!(
-        unknown, malformed_rejection,
-        "unknown-credential and malformed-body denies are byte-identical"
-    );
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-}
-
-// ============================================================================
-// Slice 2 Task 7: passkey credential management endpoints.
-// ============================================================================
-
-/// Decode the `passkeys` array from a `GET /v1/account/passkeys` response value
-/// into `(credential_id, label, this_device)` tuples for assertion.
-fn decode_passkey_list(body: &serde_json::Value) -> Vec<(String, Option<String>, bool)> {
-    body.get("passkeys")
-        .and_then(|v| v.as_array())
-        .expect("passkeys array present")
-        .iter()
-        .map(|item| {
-            let credential_id = item
-                .get("credential_id")
-                .and_then(|v| v.as_str())
-                .expect("credential_id present")
-                .to_string();
-            let label = item
-                .get("label")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let this_device = item
-                .get("this_device")
-                .and_then(|v| v.as_bool())
-                .expect("this_device present");
-            (credential_id, label, this_device)
-        })
-        .collect()
-}
-
-/// List the caller's passkeys via the GET handler under a given header set,
-/// returning the decoded tuples.
-async fn list_passkeys(
-    state: &Arc<AppState>,
-    headers: HeaderMap,
-) -> Vec<(String, Option<String>, bool)> {
-    let ext = account_ctx_ext(state, &headers).await;
-    let Json(body) = account_passkeys_list_handler(State(state.clone()), ext)
-        .await
-        .expect("passkeys list succeeds");
-    decode_passkey_list(&body)
-}
-
-/// Enroll two passkeys for account A (via the Task 5 register path), list them
-/// under a bearer session (this_device always false), then log in via passkey
-/// (Task 6) with ONE credential and assert that exact credential shows
-/// this_device=true on a cookie-session list while the other stays false.
-#[tokio::test]
-async fn passkey_list_flags_this_device_only_for_authenticating_credential() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-    let temp = tempfile::tempdir().expect("temp dir");
-    let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
-
-    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let account_id = account_id_for_principal(
-        backend.as_ref(),
-        "tenant-a",
-        &static_token_principal_ref("token-a"),
-    )
-    .await;
-    let (mut auth1, cred1) = enroll_passkey_for_token(&state, &session_cookie).await;
-    // Task 8 gate: the first passkey makes the account strong, so the SECOND
-    // enrollment must come from a strong session. Log in with cred1, then enroll
-    // cred2 from the resulting `client_kind='passkey'` cookie.
-    let strong_cookie = passkey_login_cookie_value(&state, &mut auth1, &cred1, account_id).await;
-    let (_auth2, cred2) = enroll_passkey_for_token(&state, &strong_cookie).await;
-    assert_ne!(
-        cred1, cred2,
-        "the two enrollments produce distinct credentials"
-    );
-
-    // (1) Bearer session lists BOTH with this_device=false (no passkey authed it).
-    let bearer = list_passkeys(&state, account_session_headers(&state, "token-a").await).await;
-    assert_eq!(bearer.len(), 2, "both credentials listed");
-    assert!(
-        bearer.iter().all(|(_, _, this_device)| !*this_device),
-        "bearer session never flags this_device"
-    );
-    let listed: std::collections::BTreeSet<&str> =
-        bearer.iter().map(|(id, _, _)| id.as_str()).collect();
-    assert!(listed.contains(cred1.as_str()) && listed.contains(cred2.as_str()));
-
-    // (2) Log in via passkey with cred1 -> cookie session carries auth_credential_id.
-    let (challenge, ceremony_pair) = passkey_login_start(&state).await;
-    let assertion =
-        softpasskey_authenticate_discoverable(&mut auth1, &challenge, &cred1, Some(account_id));
-    let mut finish_headers = HeaderMap::new();
-    finish_headers.insert(
-        axum::http::header::COOKIE,
-        HeaderValue::from_str(&ceremony_pair).expect("cookie header"),
-    );
-    let response = account_passkey_login_finish_handler(
-        State(state.clone()),
-        finish_headers,
-        PasskeyAssertionBody(assertion),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let passkey_cookie = response
-        .headers()
-        .get_all(axum::http::header::SET_COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .find(|c| c.starts_with(&format!("{ACCOUNT_SESSION_COOKIE}=")))
-        .and_then(|c| c.split(';').next())
-        .and_then(|p| p.split_once('='))
-        .map(|(_, v)| v.to_string())
-        .expect("passkey session cookie value");
-
-    // (3) Cookie-session list flags cred1 as this_device, cred2 false.
-    let cookie_list = list_passkeys(
-        &state,
-        cookie_request_headers(ACCOUNT_SESSION_COOKIE, &passkey_cookie),
-    )
-    .await;
-    assert_eq!(cookie_list.len(), 2);
-    for (id, _label, this_device) in &cookie_list {
-        if *id == cred1 {
-            assert!(
-                *this_device,
-                "authenticating credential flagged this_device"
-            );
-        } else {
-            assert!(!*this_device, "non-authenticating credential not flagged");
-        }
-    }
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-}
-
-/// Rename updates the label (reflected in the list); rename of an unknown (or
-/// already-revoked) credential is a uniform 404.
-#[tokio::test]
-async fn passkey_rename_updates_label_and_404s_unknown() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-    let temp = tempfile::tempdir().expect("temp dir");
-    let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
-
-    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let (_auth, cred) = enroll_passkey_for_token(&state, &session_cookie).await;
-
-    // Rename succeeds and is reflected in the list.
-    let rename_ext =
-        account_ctx_ext(&state, &account_session_headers(&state, "token-a").await).await;
-    let status = account_passkey_rename_handler(
-        State(state.clone()),
-        rename_ext,
-        AxumPath(cred.clone()),
-        Json(
-            serde_json::from_value(serde_json::json!({ "label": "  Work laptop  " }))
-                .expect("rename body"),
-        ),
-    )
-    .await
-    .expect("rename succeeds");
-    assert_eq!(status, StatusCode::NO_CONTENT);
-
-    let listed = list_passkeys(&state, account_session_headers(&state, "token-a").await).await;
-    let entry = listed
-        .iter()
-        .find(|(id, _, _)| *id == cred)
-        .expect("renamed credential listed");
-    assert_eq!(
-        entry.1.as_deref(),
-        Some("Work laptop"),
-        "label is trimmed and stored"
-    );
-
-    // Rename of an UNKNOWN credential -> 404.
-    let rename_ext =
-        account_ctx_ext(&state, &account_session_headers(&state, "token-a").await).await;
-    let err = account_passkey_rename_handler(
-        State(state.clone()),
-        rename_ext,
-        AxumPath("unknown-credential-id".to_string()),
-        Json(serde_json::from_value(serde_json::json!({ "label": "x" })).expect("rename body")),
-    )
-    .await
-    .expect_err("unknown credential rename 404s");
-    assert_eq!(err.0, StatusCode::NOT_FOUND);
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-}
-
-/// Remove soft-deletes (excluded from the list afterward) and reports the correct
-/// remaining count; remove of an unknown / already-revoked credential -> 404.
-#[tokio::test]
-async fn passkey_remove_soft_deletes_and_404s_unknown() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-    let temp = tempfile::tempdir().expect("temp dir");
-    let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
-
-    let session_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let account_id = account_id_for_principal(
-        backend.as_ref(),
-        "tenant-a",
-        &static_token_principal_ref("token-a"),
-    )
-    .await;
-    let (mut a1, cred1) = enroll_passkey_for_token(&state, &session_cookie).await;
-    // Task 8 gate: the account is now strong, so the second enroll AND the removes
-    // must run from a strong (passkey-login) session. Log in with cred1.
-    let strong_cookie = passkey_login_cookie_value(&state, &mut a1, &cred1, account_id).await;
-    let (_a2, cred2) = enroll_passkey_for_token(&state, &strong_cookie).await;
-    let strong_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &strong_cookie);
-
-    // Remove cred1 from the STRONG session: removed=true, one remaining.
-    let remove_ext = account_ctx_ext(&state, &strong_headers).await;
-    let Json(body) =
-        account_passkey_remove_handler(State(state.clone()), remove_ext, AxumPath(cred1.clone()))
-            .await
-            .expect("remove succeeds");
-    assert_eq!(body.get("removed").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(
-        body.get("remaining_credentials").and_then(|v| v.as_i64()),
-        Some(1),
-        "one credential remains after removing one of two"
-    );
-
-    // cred1 excluded from the list; cred2 still present.
-    let listed = list_passkeys(&state, account_session_headers(&state, "token-a").await).await;
-    let ids: std::collections::BTreeSet<&str> =
-        listed.iter().map(|(id, _, _)| id.as_str()).collect();
-    assert!(!ids.contains(cred1.as_str()), "removed credential excluded");
-    assert!(ids.contains(cred2.as_str()), "remaining credential listed");
-
-    // Re-removing cred1 (already revoked) -> 404. Still one strong credential
-    // (cred2) remains, so this MUST run from the strong session to pass the gate.
-    let remove_ext = account_ctx_ext(&state, &strong_headers).await;
-    let err =
-        account_passkey_remove_handler(State(state.clone()), remove_ext, AxumPath(cred1.clone()))
-            .await
-            .expect_err("already-revoked credential 404s");
-    assert_eq!(err.0, StatusCode::NOT_FOUND);
-
-    // Remove of an UNKNOWN credential -> 404 (strong session, gate satisfied).
-    let remove_ext = account_ctx_ext(&state, &strong_headers).await;
-    let err = account_passkey_remove_handler(
-        State(state.clone()),
-        remove_ext,
-        AxumPath("unknown-credential-id".to_string()),
-    )
-    .await
-    .expect_err("unknown credential 404s");
-    assert_eq!(err.0, StatusCode::NOT_FOUND);
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-}
-
-/// Cross-account isolation: account B never lists A's credentials; PATCH/DELETE of
-/// A's credential by B is a uniform 404; A's credential is unaffected. Account B
-/// is `token-a-2` — a SECOND contributor in the SAME tenant, so this exercises the
-/// account_id predicate (not merely tenant RLS).
-#[tokio::test]
-async fn passkey_management_is_cross_account_isolated() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
-    let temp = tempfile::tempdir().expect("temp dir");
-    let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
-
-    // Account A enrolls a passkey.
-    let a_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let (_a_auth, a_cred) = enroll_passkey_for_token(&state, &a_cookie).await;
-
-    // Account B (token-a-2, same tenant) gets an account but no passkeys.
-    let _b_cookie = mint_redeem_session_cookie_value(&state, "token-a-2").await;
-
-    // B lists NONE of A's credentials.
-    let b_listed = list_passkeys(&state, account_session_headers(&state, "token-a-2").await).await;
-    assert!(
-        b_listed.iter().all(|(id, _, _)| *id != a_cred),
-        "account B never sees account A's credential"
-    );
-
-    // B's PATCH of A's credential -> 404.
-    let b_rename_ext =
-        account_ctx_ext(&state, &account_session_headers(&state, "token-a-2").await).await;
-    let err = account_passkey_rename_handler(
-        State(state.clone()),
-        b_rename_ext,
-        AxumPath(a_cred.clone()),
-        Json(
-            serde_json::from_value(serde_json::json!({ "label": "stolen" })).expect("rename body"),
-        ),
-    )
-    .await
-    .expect_err("B cannot rename A's credential");
-    assert_eq!(err.0, StatusCode::NOT_FOUND);
-
-    // B's DELETE of A's credential -> 404.
-    let b_remove_ext =
-        account_ctx_ext(&state, &account_session_headers(&state, "token-a-2").await).await;
-    let err = account_passkey_remove_handler(
-        State(state.clone()),
-        b_remove_ext,
-        AxumPath(a_cred.clone()),
-    )
-    .await
-    .expect_err("B cannot remove A's credential");
-    assert_eq!(err.0, StatusCode::NOT_FOUND);
-
-    // A's credential is unaffected: still listed, with no label set by B.
-    let a_listed = list_passkeys(&state, account_session_headers(&state, "token-a").await).await;
-    let entry = a_listed
-        .iter()
-        .find(|(id, _, _)| *id == a_cred)
-        .expect("A's credential still active");
-    assert_eq!(entry.1, None, "B's forged rename never touched A's label");
-
-    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
 // ============================================================================
@@ -85292,7 +84515,7 @@ async fn near_enroll_finish_persists_identity_when_binding_holds() {
 
     // Browsers send all cookies in ONE `Cookie` header; `cookie_value_from_headers`
     // reads only the first such header, so the session + ceremony cookies MUST be
-    // combined into a single value (mirrors the passkey-finish test threading).
+    // combined into a single value (mirrors the enroll-finish test threading).
     let mut headers = HeaderMap::new();
     headers.insert(
         axum::http::header::COOKIE,
@@ -85348,7 +84571,7 @@ async fn near_enroll_finish_rejects_when_key_not_full_access() {
 
     // Browsers send all cookies in ONE `Cookie` header; `cookie_value_from_headers`
     // reads only the first such header, so the session + ceremony cookies MUST be
-    // combined into a single value (mirrors the passkey-finish test threading).
+    // combined into a single value (mirrors the enroll-finish test threading).
     let mut headers = HeaderMap::new();
     headers.insert(
         axum::http::header::COOKIE,
@@ -85403,7 +84626,7 @@ async fn near_enroll_finish_fails_closed_on_rpc_error() {
 
     // Browsers send all cookies in ONE `Cookie` header; `cookie_value_from_headers`
     // reads only the first such header, so the session + ceremony cookies MUST be
-    // combined into a single value (mirrors the passkey-finish test threading).
+    // combined into a single value (mirrors the enroll-finish test threading).
     let mut headers = HeaderMap::new();
     headers.insert(
         axum::http::header::COOKIE,
@@ -85458,7 +84681,7 @@ async fn near_enroll_finish_rejects_bad_signature() {
 
     // Browsers send all cookies in ONE `Cookie` header; `cookie_value_from_headers`
     // reads only the first such header, so the session + ceremony cookies MUST be
-    // combined into a single value (mirrors the passkey-finish test threading).
+    // combined into a single value (mirrors the enroll-finish test threading).
     let mut headers = HeaderMap::new();
     headers.insert(
         axum::http::header::COOKIE,
@@ -86118,10 +85341,10 @@ async fn near_login_rejects_malformed_public_key_shape() {
 //
 // DB-backed (real PG): self-skip when no PG URL is set; each test uses a DISTINCT
 // tenant and cleans it first. The gate (`require_authenticator_change_allowed`)
-// is applied at the top of passkey register start/finish, NEAR enroll
-// start/finish, and passkey remove. A STRONG session (`client_kind='passkey'` or
-// `'near'`) may always change authenticators; a WEAK session (a device-link
-// `'web'` cookie or a `'device'` bearer) may add/remove only while the account
+// is applied at the top of NEAR enroll start/finish, NEAR identity remove and
+// payout designation. A STRONG session (`client_kind='near'`) may always change
+// authenticators; a WEAK session (a device-link `'web'` cookie, a native token,
+// or a pre-removal `'passkey'` session) may add/remove only while the account
 // holds ZERO strong authenticators (the bootstrapping carve-out). Rename/list are
 // NOT gated (label-only) and are not exercised here.
 // ============================================================================
@@ -86153,31 +85376,20 @@ async fn gate_denied_audit_count(backend: &PgBackend, tenant_id: &str) -> i64 {
     row.get::<_, i64>(0)
 }
 
-/// Build an `AppState` wired with BOTH a WebAuthn relying party and a NEAR config
-/// (mock RPC = FullAccess), so a single test can drive passkey and NEAR ceremonies
-/// against the same backend.
-fn test_state_with_webauthn_and_near(
+/// Build an `AppState` wired with a NEAR config whose mock RPC answers
+/// FullAccess, so a test can drive the NEAR enroll and login ceremonies.
+fn test_state_with_full_access_near(
     root: std::path::PathBuf,
     db_mirror: Option<Arc<dyn Database>>,
 ) -> Arc<AppState> {
     let checker: Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker> =
         Arc::new(StubNearAccessKeyChecker { result: Ok(true) });
-    let mut state = test_state_with_near(root, db_mirror, Some(checker));
-    let webauthn = build_webauthn(&WebauthnConfig {
-        rp_id: "localhost".to_string(),
-        rp_origin: "http://localhost".to_string(),
-        rp_name: "TraceCommons Test".to_string(),
-    })
-    .expect("test relying party builds");
-    Arc::get_mut(&mut state)
-        .expect("fresh state is uniquely owned")
-        .account_webauthn = Some(Arc::new(webauthn));
-    state
+    test_state_with_near(root, db_mirror, Some(checker))
 }
 
 /// CARVE-OUT: an account with ZERO strong authenticators, on a WEAK device-link
 /// (`client_kind='web'`) session, CAN start adding its FIRST authenticator —
-/// passkey register/start AND NEAR enroll/start both return 200, not 403.
+/// NEAR enroll/start returns 200, not 403.
 #[tokio::test]
 async fn gate_allows_first_authenticator_from_weak_session() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
@@ -86187,20 +85399,13 @@ async fn gate_allows_first_authenticator_from_weak_session() {
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
     let temp = tempfile::tempdir().expect("temp dir");
     let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+    let state = test_state_with_full_access_near(temp.path().to_path_buf(), Some(db_mirror));
 
     let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
     let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &weak_cookie);
 
-    // passkey register/start from the weak session -> 200 (carve-out).
-    let ext = account_ctx_ext(&state, &headers).await;
-    let pk = account_passkey_register_start_handler(State(state.clone()), ext)
-        .await
-        .expect("first passkey enrollment is allowed from a weak session");
     use axum::response::IntoResponse;
-    assert_eq!(pk.into_response().status(), StatusCode::OK);
-
-    // NEAR enroll/start from the weak session -> 200 (still zero strong).
+    // NEAR enroll/start from the weak session -> 200 (zero strong).
     let ext = account_ctx_ext(&state, &headers).await;
     let near = account_near_enroll_start_handler(State(state.clone()), ext)
         .await
@@ -86217,9 +85422,9 @@ async fn gate_allows_first_authenticator_from_weak_session() {
 }
 
 /// GATE BLOCKS 2nd FROM WEAK: an account that already holds one strong
-/// authenticator (an enrolled passkey) is, on a WEAK session, BLOCKED (403) from
-/// BOTH passkey register/start and NEAR enroll/start, and a hash-only
-/// `account_authenticator_gate_denied` audit row is written for each refusal.
+/// authenticator (an enrolled NEAR identity) is, on a WEAK session, BLOCKED
+/// (403) from NEAR enroll/start, and a hash-only
+/// `account_authenticator_gate_denied` audit row is written for the refusal.
 #[tokio::test]
 async fn gate_blocks_second_authenticator_from_weak_session() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
@@ -86229,20 +85434,13 @@ async fn gate_blocks_second_authenticator_from_weak_session() {
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
     let temp = tempfile::tempdir().expect("temp dir");
     let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+    let state = test_state_with_full_access_near(temp.path().to_path_buf(), Some(db_mirror));
 
+    // Enroll the first NEAR identity (carve-out) -> account now holds 1 strong.
+    let _ = seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+        .await;
     let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    // Enroll the first passkey (carve-out) -> account now holds 1 strong.
-    let (_auth, _cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
-
     let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &weak_cookie);
-
-    // passkey register/start from the weak session -> 403.
-    let ext = account_ctx_ext(&state, &headers).await;
-    let err = account_passkey_register_start_handler(State(state.clone()), ext)
-        .await
-        .expect_err("second passkey enrollment is blocked from a weak session");
-    assert_eq!(err.0, StatusCode::FORBIDDEN);
 
     // NEAR enroll/start from the weak session -> 403.
     let ext = account_ctx_ext(&state, &headers).await;
@@ -86253,16 +85451,16 @@ async fn gate_blocks_second_authenticator_from_weak_session() {
 
     assert_eq!(
         gate_denied_audit_count(backend.as_ref(), tenant).await,
-        2,
-        "each weak-session refusal writes one gate-denied audit row"
+        1,
+        "the weak-session refusal writes one gate-denied audit row"
     );
 
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
 }
 
-/// STRONG SESSION ALWAYS ALLOWED: from a `client_kind='passkey'` session the
-/// account may add ANOTHER authenticator (passkey register/start AND NEAR
-/// enroll/start both 200), even though it already holds a strong authenticator.
+/// STRONG SESSION ALWAYS ALLOWED: from a `client_kind='near'` session the
+/// account may add ANOTHER authenticator (NEAR enroll/start 200), even though
+/// it already holds a strong authenticator.
 #[tokio::test]
 async fn gate_allows_any_authenticator_from_strong_session() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
@@ -86272,34 +85470,21 @@ async fn gate_allows_any_authenticator_from_strong_session() {
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
     let temp = tempfile::tempdir().expect("temp dir");
     let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+    let state = test_state_with_full_access_near(temp.path().to_path_buf(), Some(db_mirror));
 
-    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let account_id = account_id_for_principal(
-        backend.as_ref(),
-        tenant,
-        &static_token_principal_ref("token-a"),
-    )
-    .await;
-    let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
-    // Log in with the passkey -> STRONG (`client_kind='passkey'`) session cookie.
-    let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_id).await;
+    let (_account_id, kp, pk) =
+        seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+            .await;
+    // Log in with the NEAR key -> STRONG (`client_kind='near'`) session cookie.
+    let strong_cookie = near_login_cookie_value(&state, &kp, &pk, "alice.testnet").await;
     let headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &strong_cookie);
 
     use axum::response::IntoResponse;
-    // passkey register/start from the strong session -> 200.
     let ext = account_ctx_ext(&state, &headers).await;
     assert!(
         ext.0.is_strong_session(),
-        "the login cookie is a strong session"
+        "the NEAR login cookie is a strong session"
     );
-    let pk = account_passkey_register_start_handler(State(state.clone()), ext)
-        .await
-        .expect("strong session may add another passkey");
-    assert_eq!(pk.into_response().status(), StatusCode::OK);
-
-    // NEAR enroll/start from the strong session -> 200.
-    let ext = account_ctx_ext(&state, &headers).await;
     let near = account_near_enroll_start_handler(State(state.clone()), ext)
         .await
         .expect("strong session may add a NEAR key");
@@ -86309,66 +85494,6 @@ async fn gate_allows_any_authenticator_from_strong_session() {
         gate_denied_audit_count(backend.as_ref(), tenant).await,
         0,
         "a strong session never trips the gate"
-    );
-
-    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
-}
-
-/// REMOVE GATED: removing an authenticator from a WEAK session is blocked (403)
-/// while >=1 strong authenticator exists, and ALLOWED once the account is back at
-/// zero strong (bootstrapping). Drives the gate through passkey remove.
-#[tokio::test]
-async fn gate_blocks_weak_remove_until_back_to_bootstrap() {
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
-        return;
-    };
-    let tenant = "tenant-a";
-    cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
-    let temp = tempfile::tempdir().expect("temp dir");
-    let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
-
-    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let account_id = account_id_for_principal(
-        backend.as_ref(),
-        tenant,
-        &static_token_principal_ref("token-a"),
-    )
-    .await;
-    // Enroll the only passkey (carve-out) -> 1 strong.
-    let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
-    let weak_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &weak_cookie);
-
-    // Removing it from the WEAK session is blocked: 1 strong still present.
-    let remove_ext = account_ctx_ext(&state, &weak_headers).await;
-    let err =
-        account_passkey_remove_handler(State(state.clone()), remove_ext, AxumPath(cred.clone()))
-            .await
-            .expect_err("weak-session remove is blocked while a strong authenticator exists");
-    assert_eq!(err.0, StatusCode::FORBIDDEN);
-    assert_eq!(
-        gate_denied_audit_count(backend.as_ref(), tenant).await,
-        1,
-        "the blocked remove wrote one gate-denied audit"
-    );
-
-    // From a STRONG (passkey-login) session the remove is allowed; this returns the
-    // account to zero strong authenticators.
-    let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_id).await;
-    let strong_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &strong_cookie);
-    let remove_ext = account_ctx_ext(&state, &strong_headers).await;
-    let Json(out) =
-        account_passkey_remove_handler(State(state.clone()), remove_ext, AxumPath(cred.clone()))
-            .await
-            .expect("strong-session remove succeeds");
-    assert_eq!(out.get("removed").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(
-        backend
-            .count_active_strong_authenticators(tenant, account_id)
-            .await
-            .expect("count"),
-        0,
-        "account is back at zero strong authenticators"
     );
 
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
@@ -86392,7 +85517,7 @@ async fn gate_treats_redeemed_device_link_session_as_weak() {
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
     let temp = tempfile::tempdir().expect("temp dir");
     let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+    let state = test_state_with_full_access_near(temp.path().to_path_buf(), Some(db_mirror));
 
     use axum::response::IntoResponse;
     // Minting and redeeming a device login-link links the device principal to a
@@ -86410,20 +85535,20 @@ async fn gate_treats_redeemed_device_link_session_as_weak() {
     );
 
     // Carve-out: with zero strong authenticators the weak session may add the
-    // first passkey -> register/start 200.
+    // first NEAR key -> enroll/start 200.
     let ext = account_ctx_ext(&state, &account_session_headers(&state, "token-a").await).await;
-    let pk = account_passkey_register_start_handler(State(state.clone()), ext)
+    let near = account_near_enroll_start_handler(State(state.clone()), ext)
         .await
         .expect("weak session may add the first authenticator (carve-out)");
-    assert_eq!(pk.into_response().status(), StatusCode::OK);
+    assert_eq!(near.into_response().status(), StatusCode::OK);
 
-    // Now enroll a passkey end-to-end so the account holds 1 strong, then the
-    // weak session next register/start is gated -> 403.
-    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let (_auth, _cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
+    // Now enroll a NEAR identity end-to-end so the account holds 1 strong, then
+    // the weak session's next enroll/start is gated -> 403.
+    let _ = seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+        .await;
 
     let ext = account_ctx_ext(&state, &account_session_headers(&state, "token-a").await).await;
-    let err = account_passkey_register_start_handler(State(state.clone()), ext)
+    let err = account_near_enroll_start_handler(State(state.clone()), ext)
         .await
         .expect_err("a weak session is gated once a strong authenticator exists");
     assert_eq!(err.0, StatusCode::FORBIDDEN);
@@ -86527,6 +85652,21 @@ async fn near_login_cookie_value(
         .expect("near session cookie value")
 }
 
+/// Enroll a NEAR identity for `token`'s account (the carve-out lets its weak
+/// session add the first one) and sign in with it, returning a STRONG
+/// (`client_kind='near'`) session cookie VALUE.
+async fn strong_near_session_cookie(
+    state: &Arc<AppState>,
+    backend: &PgBackend,
+    tenant: &str,
+    token: &str,
+    near_account_id: &str,
+) -> String {
+    let (_account_id, kp, public_key) =
+        seed_near_login_identity(state, backend, tenant, token, near_account_id).await;
+    near_login_cookie_value(state, &kp, &public_key, near_account_id).await
+}
+
 // ============================================================================
 // Slice 3b Task 8: merge start + strong-auth-gated confirm HTTP handlers.
 //
@@ -86622,9 +85762,9 @@ async fn merge_account_closed(backend: &PgBackend, tenant_id: &str, account_id: 
     n > 0
 }
 
-/// ROUND TRIP: account A with a STRONG passkey session stages a merge by
+/// ROUND TRIP: account A with a STRONG NEAR session stages a merge by
 /// consuming device B's raw login-link, then confirms it. B's principal moves
-/// under A, B's webauthn credential moves under A, and B is closed.
+/// under A, B's NEAR identity moves under A, and B is closed.
 #[tokio::test]
 async fn merge_start_then_confirm_folds_device_b_into_a() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
@@ -86634,34 +85774,35 @@ async fn merge_start_then_confirm_folds_device_b_into_a() {
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
     let temp = tempfile::tempdir().expect("temp dir");
     let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+    let state = test_state_with_full_access_near(temp.path().to_path_buf(), Some(db_mirror));
 
-    // Account A: weak redeem cookie, then enroll a passkey and log in -> STRONG.
-    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
+    // Account A: a redeemed device link, then enroll a NEAR key and log in -> STRONG.
+    mint_redeem_session_cookie_value(&state, "token-a").await;
     let account_a = account_id_for_principal(
         backend.as_ref(),
         tenant,
         &static_token_principal_ref("token-a"),
     )
     .await;
-    let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
-    let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_a).await;
+    let strong_cookie =
+        strong_near_session_cookie(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+            .await;
     let strong_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &strong_cookie);
 
-    // Device B: its own account + a webauthn credential + an UNREDEEMED login-link.
+    // Device B: its own account + a NEAR identity + an UNREDEEMED login-link.
     let (merge_code, account_b) =
         mint_device_login_code(&state, backend.as_ref(), tenant, "token-a-2").await;
     assert_ne!(account_a, account_b, "A and B are distinct accounts");
     backend
-        .insert_webauthn_credential(
+        .insert_near_identity(
             tenant,
             account_b,
-            "cred-device-b",
-            &serde_json::json!({ "fake": "passkey" }),
+            "ed25519:device-b-wallet",
+            "device-b.testnet",
             Some("b-key"),
         )
         .await
-        .expect("seed webauthn for B");
+        .expect("seed NEAR identity for B");
 
     // start (strong session OK) -> 200 with proposal_id + absorbed_principal_count.
     let ext = account_ctx_ext(&state, &strong_headers).await;
@@ -86712,7 +85853,7 @@ async fn merge_start_then_confirm_folds_device_b_into_a() {
             .get("authenticators_moved")
             .and_then(|v| v.as_i64()),
         Some(1),
-        "B's single webauthn credential moved"
+        "B's single NEAR identity moved"
     );
 
     // B's principal now sits under A; B is closed.
@@ -86747,14 +85888,13 @@ async fn merge_confirm_is_blocked_from_weak_session() {
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
     let temp = tempfile::tempdir().expect("temp dir");
     let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+    let state = test_state_with_full_access_near(temp.path().to_path_buf(), Some(db_mirror));
 
-    // Account A: weak redeem cookie, plus a passkey enrolled so a strong
-    // authenticator EXISTS (so the gate is armed for the weak session).
+    // Account A: a NEAR key enrolled so a strong authenticator EXISTS (so the
+    // gate is armed for the weak session), then a weak redeem cookie.
+    let _ = seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+        .await;
     let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    // Enroll a passkey so a strong authenticator EXISTS (arming the gate); the
-    // account id is not needed since enrollment binds to the session cookie.
-    let (_auth, _cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
     let weak_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &weak_cookie);
 
     // Device B with an unredeemed login-link.
@@ -86822,18 +85962,12 @@ async fn merge_rejects_bogus_code_and_foreign_or_unknown_proposal() {
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
     let temp = tempfile::tempdir().expect("temp dir");
     let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn(temp.path().to_path_buf(), Some(db_mirror));
+    let state = test_state_with_full_access_near(temp.path().to_path_buf(), Some(db_mirror));
 
     // Caller account A, strong session (so confirm reaches execute_merge, not the gate).
-    let weak_cookie = mint_redeem_session_cookie_value(&state, "token-a").await;
-    let account_a = account_id_for_principal(
-        backend.as_ref(),
-        tenant,
-        &static_token_principal_ref("token-a"),
-    )
-    .await;
-    let (mut auth, cred) = enroll_passkey_for_token(&state, &weak_cookie).await;
-    let strong_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_a).await;
+    let strong_cookie =
+        strong_near_session_cookie(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
+            .await;
     let strong_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &strong_cookie);
 
     // (1) start with a bogus code -> 400 (no matching login-link).
@@ -86864,15 +85998,14 @@ async fn merge_rejects_bogus_code_and_foreign_or_unknown_proposal() {
 
     // (3) A FOREIGN proposal: account C stages a real proposal absorbing device B,
     // then account A tries to confirm it -> 400 (not owned by A).
-    let c_weak = mint_redeem_session_cookie_value(&state, "token-a-3").await;
-    let account_c = account_id_for_principal(
+    let c_strong = strong_near_session_cookie(
+        &state,
         backend.as_ref(),
         tenant,
-        &static_token_principal_ref("token-a-3"),
+        "token-a-3",
+        "carol.testnet",
     )
     .await;
-    let (mut c_auth, c_cred) = enroll_passkey_for_token(&state, &c_weak).await;
-    let c_strong = passkey_login_cookie_value(&state, &mut c_auth, &c_cred, account_c).await;
     let c_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &c_strong);
 
     let (merge_code, _account_b) =
@@ -86909,8 +86042,7 @@ async fn merge_rejects_bogus_code_and_foreign_or_unknown_proposal() {
 
 /// List flags `this_session` ONLY for the NEAR identity that authenticated the
 /// current session: bearer/device sessions see all false; a NEAR-login cookie
-/// session flags exactly the asserting identity; a passkey session sees all
-/// false.
+/// session flags exactly the asserting identity.
 #[tokio::test]
 async fn near_identity_list_flags_this_session_only_for_authenticating_key() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
@@ -86920,7 +86052,7 @@ async fn near_identity_list_flags_this_session_only_for_authenticating_key() {
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
     let temp = tempfile::tempdir().expect("temp dir");
     let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+    let state = test_state_with_full_access_near(temp.path().to_path_buf(), Some(db_mirror));
 
     // Identity #1 is enrolled via the real Task 6 path (returns a usable keypair).
     let (account_id, kp1, pk1) =
@@ -86961,18 +86093,6 @@ async fn near_identity_list_flags_this_session_only_for_authenticating_key() {
         "only the authenticating NEAR identity flags this_session"
     );
 
-    // (3) A passkey session sees all false (its auth_credential_id is a credential
-    // id, never a NEAR public key). Enroll a passkey from the NEAR (strong) session,
-    // then log in via passkey.
-    let (mut auth, cred) = enroll_passkey_for_token(&state, &near_cookie).await;
-    let passkey_cookie = passkey_login_cookie_value(&state, &mut auth, &cred, account_id).await;
-    let passkey_headers = cookie_request_headers(ACCOUNT_SESSION_COOKIE, &passkey_cookie);
-    let passkey_listed = list_near_identities(&state, passkey_headers).await;
-    assert!(
-        passkey_listed.iter().all(|(_, _, _, this, _)| !*this),
-        "a passkey session never flags a NEAR identity as this_session"
-    );
-
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
 }
 
@@ -86987,7 +86107,7 @@ async fn near_identity_rename_endpoint_updates_label_and_404s_unknown() {
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
     let temp = tempfile::tempdir().expect("temp dir");
     let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+    let state = test_state_with_full_access_near(temp.path().to_path_buf(), Some(db_mirror));
 
     let (_account_id, _kp, pk) =
         seed_near_login_identity(&state, backend.as_ref(), tenant, "token-a", "alice.testnet")
@@ -87048,7 +86168,7 @@ async fn near_identity_remove_endpoint_gated_and_soft_deletes() {
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
     let temp = tempfile::tempdir().expect("temp dir");
     let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+    let state = test_state_with_full_access_near(temp.path().to_path_buf(), Some(db_mirror));
 
     // Identity #1 (enrolled, gives a keypair for the NEAR-login session) plus a
     // directly-inserted identity #2 -> the account holds 2 strong authenticators.
@@ -87174,7 +86294,7 @@ async fn near_identity_management_is_cross_account_isolated() {
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
     let temp = tempfile::tempdir().expect("temp dir");
     let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+    let state = test_state_with_full_access_near(temp.path().to_path_buf(), Some(db_mirror));
 
     // Account A enrolls a NEAR identity.
     let (_account_a, _kp_a, pk_a) =
@@ -87272,7 +86392,7 @@ async fn near_payout_endpoint_designates_clears_and_flips_prior() {
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
     let temp = tempfile::tempdir().expect("temp dir");
     let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+    let state = test_state_with_full_access_near(temp.path().to_path_buf(), Some(db_mirror));
 
     // Identity #1 (enrolled, gives the keypair for a STRONG NEAR-login session)
     // plus a directly-inserted identity #2 for the same account.
@@ -87370,7 +86490,7 @@ async fn near_payout_endpoint_gated_for_weak_session() {
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
     let temp = tempfile::tempdir().expect("temp dir");
     let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+    let state = test_state_with_full_access_near(temp.path().to_path_buf(), Some(db_mirror));
 
     // The account holds one strong authenticator (the enrolled NEAR identity).
     let (_account_id, _kp1, pk1) =
@@ -87411,7 +86531,7 @@ async fn near_payout_endpoint_unknown_and_cross_account_404() {
     cleanup_pg_trace_tenant(backend.as_ref(), tenant).await;
     let temp = tempfile::tempdir().expect("temp dir");
     let db_mirror: Arc<dyn Database> = backend.clone();
-    let state = test_state_with_webauthn_and_near(temp.path().to_path_buf(), Some(db_mirror));
+    let state = test_state_with_full_access_near(temp.path().to_path_buf(), Some(db_mirror));
 
     // Account A enrolls a NEAR identity (strong session available).
     let (_account_a, kp_a, pk_a) =
@@ -93678,17 +92798,12 @@ struct NativeTestSession {
 }
 
 /// In-memory `Database` covering native sign-in plus the owned session-detail
-/// read. Everything else keeps the trait's fail-closed default.
-///
-/// The unbound-gate tests (Z2 S1) also set the binding state every session
-/// validates with (`None` is legacy), make the binding read fail, force a
-/// rotation, and read back the account audit rows.
+/// read. Everything else keeps the trait's fail-closed default. A test can
+/// also force a rotation and read back the account audit rows.
 #[derive(Default)]
 struct NativeAuthTestDb {
     sessions: std::sync::Mutex<Vec<NativeTestSession>>,
     submissions: std::sync::Mutex<Vec<StorageTraceSubmissionRecord>>,
-    binding: std::sync::Mutex<Option<trace_commons_server::account_binding::AccountBindingState>>,
-    binding_read_fails: std::sync::atomic::AtomicBool,
     rotate_to: std::sync::Mutex<Option<String>>,
     account_audits: std::sync::Mutex<Vec<(String, String, serde_json::Value)>>,
     object_refs: std::sync::Mutex<Vec<StorageTraceObjectRefRecord>>,
@@ -93787,8 +92902,6 @@ impl Database for NativeAuthTestDb {
         token_hash: &str,
     ) -> Result<Option<trace_commons_server::db::ValidatedSession>, DatabaseError> {
         let now = Utc::now();
-        let binding = (*self.binding.lock().unwrap())
-            .unwrap_or(trace_commons_server::account_binding::AccountBindingState::Legacy);
         let rotated_secret = self.rotate_to.lock().unwrap().clone();
         let sessions = self.sessions.lock().unwrap();
         let session = sessions
@@ -93804,20 +92917,8 @@ impl Database for NativeAuthTestDb {
                 auth_credential_id: None,
                 client_kind: s.client_kind.clone(),
                 rotated_secret: rotated_secret.clone(),
-                binding,
                 expires_at: s.expires_at,
             });
-        // The binding state is read in the same query as the session, so a
-        // failure is a failure of the whole validation.
-        if session.is_some()
-            && self
-                .binding_read_fails
-                .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            return Err(DatabaseError::Serialization(
-                "account_binding_state_unknown".into(),
-            ));
-        }
         Ok(session)
     }
 
@@ -95199,7 +94300,7 @@ fn every_driver_registers_a_distinct_name() {
     }
     assert_eq!(
         seen.len(),
-        14,
+        13,
         "every spawned driver loop must register; got {seen:?}"
     );
 }
@@ -100772,6 +99873,10 @@ mod migrated_pg_fixture;
 #[path = "nearai_ceremony_pg_tests.rs"]
 mod nearai_ceremony_pg_tests;
 
+/// F10, changing an account's NEAR AI login, against PostgreSQL. Selected in
+/// CI by `near_ai_rebind_pg_tests -- --ignored`, like the two suites above.
+#[path = "near_ai_rebind_pg_tests.rs"]
+mod near_ai_rebind_pg_tests;
 /// Full wallet v2 completion through the router, real signatures and PostgreSQL.
 /// CI selects this ignored module explicitly with a fresh database.
 #[path = "wallet_v2_pg_tests.rs"]
@@ -104265,6 +103370,242 @@ mod first_run_estimate_tests {
         assert_eq!(
             body,
             serde_json::json!({"usd_micros_per_accepted_trace": {"min": 120_000, "max": 340_000}})
+        );
+    }
+}
+
+#[test]
+fn read_last_nonempty_line_matches_a_whole_file_scan() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("audit.jsonl");
+    let long_line = format!("{{\"pad\":\"{}\"}}", "x".repeat(50_000));
+    let cases: Vec<(String, Option<&str>)> = vec![
+        (String::new(), None),
+        ("\n\n  \n".to_string(), None),
+        ("only".to_string(), Some("only")),
+        ("first\nsecond\n".to_string(), Some("second")),
+        ("first\r\nsecond\r\n\r\n".to_string(), Some("second")),
+        ("first\n  second  \n \n\t\n".to_string(), Some("second")),
+        (format!("first\n{long_line}\n\n"), Some(long_line.as_str())),
+        (format!("{long_line}\nlast\n"), Some("last")),
+        (long_line.clone(), Some(long_line.as_str())),
+        (format!("first\n{}\n", " ".repeat(20_000)), Some("first")),
+        ("a\n\u{e9}t\u{e9}\n".to_string(), Some("\u{e9}t\u{e9}")),
+    ];
+    for (body, expected) in cases {
+        std::fs::write(&path, &body).expect("write");
+        let scanned = body
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty());
+        assert_eq!(scanned, expected, "whole-file scan disagrees with the case");
+        assert_eq!(
+            read_last_nonempty_line(&path).expect("read").as_deref(),
+            expected,
+            "tail read of a {}-byte body",
+            body.len()
+        );
+    }
+}
+
+#[test]
+fn internal_error_answers_a_pool_timeout_with_503_database_busy() {
+    let timeout = || deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait);
+    let busy: Vec<(&str, (StatusCode, Json<ApiError>))> = vec![
+        ("raw pool error", internal_error(timeout())),
+        (
+            "database error",
+            internal_error(DatabaseError::PoolRuntime(timeout())),
+        ),
+        (
+            "anyhow with context",
+            internal_error(
+                anyhow::Error::new(DatabaseError::PoolRuntime(timeout()))
+                    .context("failed to read the routing row"),
+            ),
+        ),
+        (
+            "create timeout",
+            internal_error(deadpool_postgres::PoolError::Timeout(
+                deadpool_postgres::TimeoutType::Create,
+            )),
+        ),
+        (
+            "closed pool",
+            internal_error(DatabaseError::PoolRuntime(
+                deadpool_postgres::PoolError::Closed,
+            )),
+        ),
+    ];
+    for (case, (status, Json(body))) in busy {
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{case}");
+        assert_eq!(body.error, DATABASE_BUSY_LABEL, "{case}");
+        assert!(
+            body.retry_after_seconds.is_some_and(|seconds| seconds > 0),
+            "{case} carries a retry hint"
+        );
+    }
+
+    let failed: Vec<(&str, (StatusCode, Json<ApiError>))> = vec![
+        (
+            "unconfigured pool",
+            internal_error(DatabaseError::Pool("gate_driver_pool_unconfigured".into())),
+        ),
+        (
+            "query failure",
+            internal_error(DatabaseError::Query("boom".into())),
+        ),
+        ("plain text", internal_error("boom")),
+        ("anyhow", internal_error(anyhow::anyhow!("boom"))),
+    ];
+    for (case, (status, Json(body))) in failed {
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{case}");
+        assert_eq!(body.retry_after_seconds, None, "{case}");
+    }
+}
+
+/// A content read-back that failed on a busy pool answers 503 without
+/// waiting for its failed-read audit: the audit is only spawned. On this
+/// single-threaded runtime the spawned task cannot run until the test
+/// yields, so finding no audit row right after the call shows the answer
+/// did not wait for it. The audit still lands once the task runs, and is
+/// skipped (with the read still refused) when the background budget is
+/// full.
+#[tokio::test]
+async fn a_busy_pool_content_read_answers_before_its_audit_runs() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let audit_tenant = TenantAuth {
+        tenant_id: "tenant-a".to_string(),
+        role: TokenRole::Contributor,
+        principal_ref: "account-actor".to_string(),
+        legacy_principal_ref: None,
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    };
+    let read_failure_rows = |submission_id: Uuid| {
+        read_all_audit_events(temp.path(), "tenant-a")
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|event| {
+                event.kind == "trace_content_read"
+                    && event.submission_id == submission_id
+                    && event
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("surface=account_trace_content"))
+            })
+            .count()
+    };
+    let error = anyhow::Error::new(DatabaseError::PoolRuntime(
+        deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait),
+    ))
+    .context("failed to read the envelope object ref");
+    assert!(
+        database_busy_response(&error).is_some(),
+        "the read-back path answers this error with 503"
+    );
+
+    // The background budget is full: the audit is skipped, nothing waits.
+    let held = Arc::clone(&ACCOUNT_CONTENT_BACKGROUND_AUDITS)
+        .try_acquire_many_owned(ACCOUNT_CONTENT_BACKGROUND_AUDIT_LIMIT as u32)
+        .expect("no other test holds the background audit budget");
+    let skipped = Uuid::new_v4();
+    assert!(
+        spawn_account_content_read_failure_audit(
+            Arc::clone(&state),
+            audit_tenant.clone(),
+            skipped,
+        )
+        .is_none()
+    );
+    drop(held);
+
+    let submission_id = Uuid::new_v4();
+    let audit = spawn_account_content_read_failure_audit(
+        Arc::clone(&state),
+        audit_tenant.clone(),
+        submission_id,
+    )
+    .expect("the budget has room");
+    assert_eq!(
+        read_failure_rows(submission_id),
+        0,
+        "the caller has its answer before the audit runs"
+    );
+    audit.await.expect("audit task");
+    assert_eq!(
+        read_failure_rows(submission_id),
+        1,
+        "the failed read is still audited"
+    );
+    assert_eq!(
+        read_failure_rows(skipped),
+        0,
+        "a skipped audit writes nothing"
+    );
+    assert_eq!(
+        ACCOUNT_CONTENT_BACKGROUND_AUDITS.available_permits(),
+        ACCOUNT_CONTENT_BACKGROUND_AUDIT_LIMIT,
+        "a finished audit gives its slot back"
+    );
+}
+
+#[test]
+fn a_database_pool_error_never_uses_up_a_scoring_or_pii_backstop_attempt() {
+    let pool_errors = [
+        anyhow::Error::new(DatabaseError::PoolRuntime(
+            deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait),
+        ))
+        .context("failed to load the gate decision"),
+        anyhow::Error::new(deadpool_postgres::PoolError::Closed),
+        anyhow::Error::new(DatabaseError::PoolRuntime(
+            deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Create),
+        )),
+    ];
+    for error in &pool_errors {
+        assert!(is_transient_gate_scoring_failure(error), "{error:#}");
+        assert!(is_transient_pii_backstop_failure(error), "{error:#}");
+    }
+    let permanent = [
+        anyhow::anyhow!("envelope failed to decode"),
+        anyhow::Error::new(DatabaseError::Query("constraint".into())),
+        anyhow::Error::new(DatabaseError::Pool("pool unconfigured".into())),
+    ];
+    for error in &permanent {
+        assert!(!is_transient_gate_scoring_failure(error), "{error:#}");
+        assert!(!is_transient_pii_backstop_failure(error), "{error:#}");
+    }
+}
+
+#[test]
+fn read_last_nonempty_line_skips_unicode_blank_lines() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("audit.jsonl");
+    for body in [
+        "{\"event\":1}\n\u{a0}\n",
+        "{\"event\":1}\n\u{2028}\n\u{85}\n",
+        "{\"event\":1}\n\u{b}\n",
+    ] {
+        std::fs::write(&path, body).expect("write");
+        assert_eq!(
+            read_last_nonempty_line(&path).expect("read").as_deref(),
+            Some("{\"event\":1}"),
+            "{body:?}"
         );
     }
 }

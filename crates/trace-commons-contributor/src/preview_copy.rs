@@ -237,25 +237,8 @@ pub struct MonitorTracesCopy {
 /// `section` is the part of the app an edge rail peek links into. `path` is
 /// the command-line tool's link path.
 pub const MONITOR_PLACEHOLDERS: &[&str] = &[
-    "count",
-    "total",
-    "min",
-    "max",
-    "tool",
-    "label",
-    "seconds",
-    "when",
-    "size",
-    "start",
-    "end",
-    "shown",
-    "hours",
-    "uploads",
-    "megabytes",
-    "amount",
-    "days",
-    "section",
-    "path",
+    "count", "total", "min", "max", "tool", "label", "seconds", "when", "size", "start", "end",
+    "shown", "hours", "amount", "days", "section", "path",
 ];
 
 /// The Traces tree (`traces-tree.tsx`).
@@ -304,6 +287,21 @@ pub struct MonitorTreeCopy {
     /// The folder and tool switches' accessible names.
     pub watch_folder: &'static str,
     pub watch_tool: &'static str,
+    /// The Automatic switch on each folder row, its accessible name with
+    /// `{label}`; the tab's switch for every folder, its accessible name
+    /// (owner, 2026-10-30: auto on and off on the Traces tab, beside
+    /// Submit). DRAFT, NEEDS APPROVAL.
+    pub automatic_folder: &'static str,
+    pub automatic_all: &'static str,
+    /// The line under the tab switch, with `{count}` and `{total}`: the
+    /// owner's approved Proposal A mockup, verbatim (2026-10-31).
+    pub automatic_count: &'static str,
+    /// The titles over the tree's columns while the Automatic switches
+    /// show: the folders, their Submit, and their Automatic switch (owner,
+    /// 2026-10-30, Proposal A). DRAFT, NEEDS APPROVAL.
+    pub column_folders: &'static str,
+    pub column_submit: &'static str,
+    pub column_automatic: &'static str,
     /// The session row menu's one item, and its confirmation.
     pub dismiss_session: &'static str,
     pub dismiss_session_title: &'static str,
@@ -376,7 +374,6 @@ pub struct MonitorSummaryCopy {
     pub tools_watched: &'static str,
     pub waiting_for_you: &'static str,
     pub worth_a_second_look: &'static str,
-    pub uploads_today: &'static str,
     pub statistics: &'static str,
     pub top_projects: &'static str,
     pub top_tools: &'static str,
@@ -482,22 +479,15 @@ pub struct MonitorUndoCopy {
 }
 
 /// The queue's safeguards panel (`queue-status-panel.tsx`): the labels
-/// `HealthCopy`, `DailyBudgetCopy` and `routing_copy` do not already hold.
+/// `HealthCopy` and `routing_copy` do not already hold.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct MonitorSafeguardsCopy {
     pub eyebrow: &'static str,
     pub heading: &'static str,
-    pub daily_limit: &'static str,
     pub inference_routing: &'static str,
     pub daemon_owned: &'static str,
     pub rows_unavailable_one: &'static str,
     pub rows_unavailable: &'static str,
-    /// The daily limit row: uploads and megabytes left today. The shell
-    /// fills both numbers and adds no unit.
-    pub remaining: &'static str,
-    /// Approved sessions the spent limit holds back: one, then counted.
-    pub held_by_limit_one: &'static str,
-    pub held_by_limit: &'static str,
     /// `witness_capacity` was reported but could not be read: never "none
     /// waiting".
     pub capacity_unreadable: &'static str,
@@ -589,7 +579,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             submit: "Submit",
             submit_count: "Submit \u{00b7} {count}",
             submitting: "Submitting\u{2026}",
-            submit_tip: "Sends every eligible waiting trace here.",
+            submit_tip: "Submits this folder's eligible traces.",
             submit_trace_tip: "Sends this trace now.",
             eligible_count: "{count} eligible",
             reviewing: "Reviewing",
@@ -599,6 +589,14 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             folder_menu: "Directory options",
             watch_folder: "Watch this folder",
             watch_tool: "Watch {tool}",
+            // DRAFT, NEEDS APPROVAL (2026-10-30).
+            automatic_folder: "Automatic for {label}",
+            automatic_all: "Automatic for every folder",
+            automatic_count: "Every folder sends on its own, except folders set to Ask or Never. \
+                {count} of {total} folders automatic.",
+            column_folders: "Folders on this Mac",
+            column_submit: "Submit",
+            column_automatic: "Auto",
             dismiss_session: "Dismiss trace",
             dismiss_session_title: "Dismiss this trace?",
             dismiss_session_body: "{when} \u{00b7} {size}. Dismissing removes it from the traces \
@@ -642,7 +640,6 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             tools_watched: "{count} of {total} tools watched",
             waiting_for_you: "{count} waiting for you",
             worth_a_second_look: "{count} worth a second look",
-            uploads_today: "{count} of {max} uploads today",
             statistics: "Statistics",
             top_projects: "Top projects",
             top_tools: "Top tools",
@@ -1336,28 +1333,37 @@ pub struct MonitorHomeHistoryCopy {
     pub section_traces: &'static str,
     pub section_account: &'static str,
     pub private_ai_sign_in: &'static str,
+    /// Beside the Account heading while its figures wait on a sign-in,
+    /// before the managed copy's "Sign in" as a link; the Account cards
+    /// themselves say nothing about signing in (owner, 2026-11-02, in the
+    /// owner's words: "No data - Sign in").
+    pub account_no_data: &'static str,
     /// Home's Traces hero, which leads Home (owner, 2026-10-28: the macOS
-    /// MVP is "contribute traces, earn credit", so it is the first and
-    /// largest card, over Private AI): its title, one line on what
-    /// contributing is and what it earns, and the way into Traces.
-    /// Approved by the product owner 2026-10-28; the title gained ", use
-    /// Private AI" on 2026-10-29 (product owner).
+    /// MVP is "contribute traces, earn credit", so it is the first card,
+    /// over Private AI): its title and the way into Traces. No line under
+    /// the title: the steps say it (product owner, 2026-11-02: reduce the
+    /// copy). The title is DRAFT, NEEDS APPROVAL; "Start earning" was
+    /// approved 2026-10-28.
     pub traces_hero_title: &'static str,
-    pub traces_hero_body: &'static str,
     pub traces_hero_action: &'static str,
     /// The hero's three steps, left to right, each a title over one line
     /// (owner, 2026-10-29, from the owner's mock-up): contribute, earn,
-    /// spend on Private AI.
+    /// spend on Private AI. Each title and its line read as one short
+    /// sentence ("Earn credit / for each trace"). The first two lines are
+    /// the owner's words (2026-11-02: "Traces from tools", "For each
+    /// trace"); the titles and "With your credit" are DRAFT, NEEDS
+    /// APPROVAL (2026-11-02 rewrite).
     pub traces_hero_step_contribute: &'static str,
     pub traces_hero_step_contribute_detail: &'static str,
     pub traces_hero_step_earn: &'static str,
     pub traces_hero_step_earn_detail: &'static str,
     pub traces_hero_step_use: &'static str,
     pub traces_hero_step_use_detail: &'static str,
-    /// Home's Credit tile: the change in total credit since the last day
-    /// this Mac saw, `{amount}` signed. No change says nothing (owner,
-    /// 2026-10-16). DRAFT, NEEDS APPROVAL.
-    pub credit_delta: &'static str,
+    /// Home's Credit earned tile: the account's whole total under this
+    /// Mac's figure, `{amount}` the commons' lifetime points (product
+    /// owner, 2026-10-29: show the account-wide total, and leave the change
+    /// since yesterday out). DRAFT, NEEDS APPROVAL.
+    pub credit_account_total: &'static str,
     /// Home's Insights promotion: today's routed tokens, and its line while
     /// no figures are read. DRAFT, NEEDS APPROVAL.
     pub insights_today: &'static str,
@@ -1509,14 +1515,10 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         safeguards: MonitorSafeguardsCopy {
             eyebrow: "RUNTIME",
             heading: "Contribution safeguards",
-            daily_limit: "Daily limit",
             inference_routing: "Inference routing",
             daemon_owned: "daemon-owned",
             rows_unavailable_one: "1 row unavailable",
             rows_unavailable: "{count} rows unavailable",
-            remaining: "{uploads} uploads left \u{00b7} {megabytes} MB left",
-            held_by_limit_one: "1 queued trace held by limit",
-            held_by_limit: "{count} queued traces held by limit",
             capacity_unreadable: "Some approved traces may be waiting and have not been sent, \
                 but this build could not read how many or why.",
             routing_not_declared: "Not declared",
@@ -1528,7 +1530,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         history_actions: MonitorHistoryActionsCopy {
             request_refresh: "Refresh",
             requesting: "Requesting\u{2026}",
-            refresh_requested: "Asked Trace Commons for the latest results. Changes show here when they arrive.",
+            refresh_requested: "Asked for the latest results. Changes show here when they arrive.",
             refresh_failed: "Could not ask for updates. Nothing changed; try again.",
             checking_account: "Checking account session\u{2026}",
             sign_in_to_withdraw: "Sign in",
@@ -1686,17 +1688,17 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             section_private_ai: "Private AI",
             section_traces: "Traces",
             section_account: "Account",
+            account_no_data: "No data",
             private_ai_sign_in: "Sign in to NEAR AI to get started.",
-            traces_hero_title: "Contribute traces, earn credit, use Private AI",
-            traces_hero_body: "Share the sessions from your AI coding tools with Trace Commons. Each accepted trace earns you credit.",
+            traces_hero_title: "Your traces earn Private AI credit",
             traces_hero_action: "Start earning",
-            traces_hero_step_contribute: "Contribute traces",
-            traces_hero_step_contribute_detail: "Share the sessions from your AI coding tools",
+            traces_hero_step_contribute: "Contribute",
+            traces_hero_step_contribute_detail: "Traces from tools",
             traces_hero_step_earn: "Earn credit",
-            traces_hero_step_earn_detail: "Each accepted trace earns you credit",
+            traces_hero_step_earn_detail: "For each trace",
             traces_hero_step_use: "Use Private AI",
-            traces_hero_step_use_detail: "Spend your credit on Private AI",
-            credit_delta: "{amount} since yesterday",
+            traces_hero_step_use_detail: "With your credit",
+            credit_account_total: "{amount} across your account",
             insights_today: "{total} tokens today",
             insights_teaser: "See where your agents spend their tokens.",
             campaign_eyebrow: "New on NEAR AI",
@@ -1916,6 +1918,16 @@ mod tests {
         }
     }
 
+    /// Owner, 2026-10-30: the folder Submit tip read awkwardly ("Sends
+    /// every eligible waiting trace here."). The core's withheld line
+    /// follows it whenever some traces are held back.
+    #[test]
+    fn the_folder_submit_tip_names_the_folder() {
+        let tree = monitor_traces_copy().tree;
+        assert!(tree.submit_tip.contains("folder"), "{}", tree.submit_tip);
+        assert_ne!(tree.submit_tip, tree.submit_trace_tip);
+    }
+
     /// Ron's lines verbatim, with his numbers as `{name}` holes.
     #[test]
     fn rons_counted_lines_hold_their_numbers() {
@@ -1925,15 +1937,6 @@ mod tests {
         assert_eq!(traces.inspector.submit_all_eligible, "Submit {count}");
         assert_eq!(traces.inspector.waiting_sessions, "{count} waiting traces");
         assert_eq!(traces.inspector.waiting_sessions_one, "1 waiting trace");
-        // `queue-status-panel.tsx`'s daily limit row and its held line.
-        assert_eq!(
-            monitor_screens_copy().safeguards.remaining,
-            "{uploads} uploads left \u{00b7} {megabytes} MB left"
-        );
-        assert_eq!(
-            monitor_screens_copy().safeguards.held_by_limit,
-            "{count} queued traces held by limit"
-        );
         assert_eq!(traces.optional_automation, "OPTIONAL AUTOMATION");
         assert_eq!(
             traces.inspector.apply_outcome,

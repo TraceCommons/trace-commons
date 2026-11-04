@@ -3,8 +3,7 @@ import TCShellCore
 import XCTest
 
 /// The build channel, read through the real ABI: the one place Swift learns
-/// which channel it is, its state directory and its passkey relying party
-/// (spec 4.1, 4.3). The TCShellCore tests inject fixtures; this checks the
+/// which channel it is and its state directory (spec 4.1, 4.3). The TCShellCore tests inject fixtures; this checks the
 /// dylib's answer decodes into the same shape.
 final class BuildChannelBridgeTests: XCTestCase {
     func test_theDylibReportsADecodableChannel() throws {
@@ -12,7 +11,6 @@ final class BuildChannelBridgeTests: XCTestCase {
         XCTAssertTrue(["production", "staging"].contains(channel.channel))
         XCTAssertTrue(channel.stateDirName.hasPrefix("trace-commons"))
         XCTAssertTrue(channel.stateDirEnv.hasSuffix("CONTRIBUTOR_DIR"))
-        XCTAssertFalse(channel.passkeyRelyingParty.isEmpty)
         XCTAssertTrue(channel.urlScheme.hasPrefix("tracecommons"))
         XCTAssertTrue(channel.nearAiDashboardOrigin.hasPrefix("https://"))
         // Production offers the NEAR wallet; staging signs in through NEAR

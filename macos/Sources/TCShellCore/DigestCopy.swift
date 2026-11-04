@@ -39,8 +39,9 @@ public enum DigestCopy {
         // Stated only when there is some. "0 credit pending" reads as a
         // failure rather than as a fresh start, and the first digest after
         // arming a project is exactly when that would show. Always
-        // "pending", never "earned": settlement is off on every deployment
-        // shipped so far, so a bare figure would be read as money.
+        // "pending", never "earned". This is the shell's fallback for a daemon
+        // that sent no `text`; the daemon's own digest text (posted unchanged)
+        // also says credit the server has decided as "earned".
         if creditPending > 0 {
             // Rounded half away from zero before formatting, matching the
             // daemon and the other two shells. `%.1f` alone rounds half to

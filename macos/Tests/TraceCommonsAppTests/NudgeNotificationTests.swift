@@ -76,6 +76,13 @@ final class NudgeNotificationTests: XCTestCase {
         XCTAssertNotNil(Notifier.digestBody(text: "", pendingCount: 1, projects: ["api"]))
     }
 
+    /// The core's digest text carries the earned sentence (owner, 2026-11-01);
+    /// the shell posts it exactly as sent rather than word credit itself.
+    func testTheDigestPostsTheCoresEarnedSentenceUnchanged() {
+        let text = "2 traces contributed from api. 4.3 credit earned. 1.5 credit pending."
+        XCTAssertEqual(Notifier.digestBody(text: text, pendingCount: 0, projects: []), text)
+    }
+
     /// Launch registers every category a delivered notification can name:
     /// `setNotificationCategories` replaces the whole set, so a
     /// re-engagement notification still in Notification Center after a

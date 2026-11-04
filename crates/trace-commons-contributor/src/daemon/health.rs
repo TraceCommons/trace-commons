@@ -23,8 +23,6 @@ pub const LABEL_PII_FILTER_UNAVAILABLE: &str = "pii-filter-unavailable";
 pub const LABEL_CLAIM_MINT_FAILED: &str = "claim-mint-failed";
 /// The ingest endpoint could not be reached after retries.
 pub const LABEL_INGEST_UNREACHABLE: &str = "ingest-unreachable";
-/// A daily volume cap is in force until the UTC day rolls over.
-pub const LABEL_DAILY_CAP_REACHED: &str = "daily-cap-reached";
 /// The commons declined a contribution. A decision it made deliberately, not
 /// a failure to reach it: retrying changes nothing until something else does.
 ///
@@ -89,7 +87,7 @@ pub const LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED: &str = "opencode-export-ver
 /// copy's, among others), so a new label is covered the day it is added;
 /// `all_labels_lists_every_label_constant` fails if a `LABEL_` constant is
 /// left out.
-pub const ALL_LABELS: [&str; 14] = [
+pub const ALL_LABELS: [&str; 13] = [
     LABEL_NOT_LOGGED_IN,
     LABEL_NEAR_AI_NOTICE_PENDING,
     LABEL_CANARY_FAILED,
@@ -101,7 +99,6 @@ pub const ALL_LABELS: [&str; 14] = [
     LABEL_WITNESS_SATURATED,
     LABEL_AUTOMATIC_CONTRIBUTION_HELD,
     LABEL_ADMISSION_LIMIT_REACHED,
-    LABEL_DAILY_CAP_REACHED,
     LABEL_SESSION_TOO_LARGE,
     LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED,
 ];
@@ -110,16 +107,15 @@ pub const ALL_LABELS: [&str; 14] = [
 /// decision about a trace. While one of these is in force, pending entries do
 /// not age out.
 ///
-/// Both admission conditions are here for that reason. A spent budget is the
-/// same kind of fact as a daily cap, and a refused contribution is a decision
+/// Both admission conditions are here for that reason. A spent budget comes
+/// back on its own, and a refused contribution is a decision
 /// somewhere else that the contributor cannot argue with -- burning the clock
 /// on either would delete traces for a condition they had no move against.
-const EXPIRY_BLOCKING_LABELS: [&str; 11] = [
+const EXPIRY_BLOCKING_LABELS: [&str; 10] = [
     LABEL_NOT_LOGGED_IN,
     LABEL_PII_FILTER_UNAVAILABLE,
     LABEL_CLAIM_MINT_FAILED,
     LABEL_INGEST_UNREACHABLE,
-    LABEL_DAILY_CAP_REACHED,
     LABEL_NEAR_AI_NOTICE_PENDING,
     LABEL_CANARY_FAILED,
     LABEL_ADMISSION_REFUSED,
@@ -158,17 +154,15 @@ pub fn precedence(label: &str) -> u8 {
         // `status.automatic_contribution_held` reports it whatever holds
         // this slot.
         LABEL_AUTOMATIC_CONTRIBUTION_HELD => 9,
-        // Beside the daily cap, which it is the server-side twin of: both are
-        // budgets that come back on their own.
+        // A budget that comes back on its own.
         LABEL_ADMISSION_LIMIT_REACHED => 10,
-        LABEL_DAILY_CAP_REACHED => 11,
         // Last, below every condition above it, because it is the only one
         // that is not about the daemon: everything else here stops the
         // whole pipeline, while this describes one file the contributor can
         // still work around by leaving it alone. It must never mask an
         // outage.
-        LABEL_SESSION_TOO_LARGE | LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED => 12,
-        _ => 13,
+        LABEL_SESSION_TOO_LARGE | LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED => 11,
+        _ => 12,
     }
 }
 
@@ -368,7 +362,6 @@ mod tests {
             LABEL_WITNESS_SATURATED,
             LABEL_AUTOMATIC_CONTRIBUTION_HELD,
             LABEL_ADMISSION_LIMIT_REACHED,
-            LABEL_DAILY_CAP_REACHED,
         ];
         let mut seen = std::collections::BTreeSet::new();
         for l in order {

@@ -276,13 +276,13 @@ struct LegacyMigrationMoveControls: View {
             // The action first, the dismiss after it as a link (Ron,
             // 2026-10-09).
             HStack(spacing: GlassTokens.Space.s4) {
-                if model.legacyMigrationAwaitingPasskey {
-                    // The passkey step runs in the browser; Cancel stops
+                if model.legacyMigrationAwaitingNearAILogin {
+                    // The NEAR AI login step runs in the browser; Cancel stops
                     // waiting on it and moves nothing.
-                    Text(offer.passkeyWaiting)
+                    Text(offer.nearAILoginWaiting)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityAddTraits(.updatesFrequently)
-                    Button(offer.passkeyCancel) { model.cancelLegacyMigrationPasskey() }
+                    Button(offer.nearAILoginCancel) { model.cancelLegacyMigrationNearAILogin() }
                         .buttonStyle(GlassButtonStyle(.link))
                         .lineLimit(1)
                 } else if model.legacyMigrationBusy {
@@ -307,8 +307,8 @@ struct LegacyMigrationMoveControls: View {
             // A refused or unstarted move, under the buttons it is about.
             if let refusal = model.legacyMigrationRefusal {
                 GlassAlert(refusal)
-            } else if model.legacyMigrationPasskeyFailed {
-                GlassAlert(offer.passkeyFailed)
+            } else if model.legacyMigrationNearAILoginFailed {
+                GlassAlert(offer.nearAILoginFailed)
             } else if model.legacyMigrationStartFailed {
                 GlassAlert(offer.startFailed)
             }

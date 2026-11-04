@@ -112,20 +112,18 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                     .frame(maxWidth: floating ? nil : .infinity)
                     .frame(minHeight: floating ? nil : GlassTokens.Size.tab)
                     .background {
-                        // The press darkens the selected fill, or a wash
-                        // behind an unselected label; never the label.
+                        // No press state (owner, 2026-11-02: no click fill
+                        // on any tab): the selection moving is the answer.
                         if selected {
                             if floating {
                                 // #1146's floating selection: a brighter fill, no edge.
-                                Capsule().fill(GlassTokens.Color.controlSelectedFloating.color).glassPressedFill()
+                                Capsule().fill(GlassTokens.Color.controlSelectedFloating.color)
                             } else {
                                 Capsule().fill(GlassTokens.Color.controlSelected.color)
-                                    .glassPressedFill()
                                     .glassEdge(GlassTokens.Shadow.controlSelectedEdge, in: Capsule())
                             }
                         }
                     }
-                    .glassPressedWash(Capsule())
                     .contentShape(Capsule())
                 }
                 .buttonStyle(GlassPressStyle())
@@ -163,6 +161,16 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
 /// fading out 30% past the tab each side, and a faint halo rising behind
 /// its title. The ember glides to a newly selected tab; under Reduce Motion
 /// it moves at once. Segments, badges and dots are `GlassSegment`'s.
+///
+/// Given `onMove`, a movable tab can be dragged along the strip (owner,
+/// 2026-10-30): it follows the pointer, and each time it passes the middle
+/// of a neighbouring movable tab the two trade places (`onMove` with the
+/// dragged value and the one whose place it takes). A press held for
+/// `liftDelay` lifts the tab first (owner, 2026-11-02): it pops out of the
+/// strip, a little larger and raised on a control's surface, and only then
+/// follows the pointer; a quick drag moves nothing. A click opens a tab, as
+/// before; a tab held and let go where it was opens too, and one that was
+/// moved never does. No tab draws a press fill (owner, 2026-11-02).
 public struct GlassRuleTabs<Value: Hashable>: View {
     private let label: String
     private let segments: [GlassSegment<Value>]
@@ -171,15 +179,35 @@ public struct GlassRuleTabs<Value: Hashable>: View {
     /// pane's edges from inside its padding. `toPaneEdge` outruns any pane
     /// inset; the pane clips the rule, and the ember, at its own edge.
     private let bleed: CGFloat
+    private let movable: (Value) -> Bool
+    private let onMove: ((Value, Value) -> Void)?
     @State private var hovered: Value?
+    /// The tab lifted by a held press, while the press lasts. SwiftUI
+    /// clears it however the gesture ends, so a lifted tab always drops.
+    @GestureState private var lifted: Value?
+    /// The tab being dragged, and how far it sits from its slot.
+    @State private var dragging: Value?
+    /// The lifted tab has moved, so letting go does not open it.
+    @State private var moved = false
+    @State private var dragOffset: CGFloat = 0
+    /// The dragged tab's slot when the drag began.
+    @State private var dragOrigin = 0
+    /// The strip's width, which with the count gives one tab's width: the
+    /// tabs share it equally.
+    @State private var stripWidth: CGFloat = 0
     @Namespace private var ember
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    public init(_ label: String, selection: Binding<Value>, segments: [GlassSegment<Value>], bleed: CGFloat = 0) {
+    public init(
+        _ label: String, selection: Binding<Value>, segments: [GlassSegment<Value>], bleed: CGFloat = 0,
+        movable: @escaping (Value) -> Bool = { _ in false }, onMove: ((Value, Value) -> Void)? = nil
+    ) {
         self.label = label
         self._selection = selection
         self.segments = segments
         self.bleed = bleed
+        self.movable = movable
+        self.onMove = onMove
     }
 
     /// A bleed past any pane inset, for tabs inside a pane that clips its
@@ -202,7 +230,28 @@ public struct GlassRuleTabs<Value: Hashable>: View {
                 .padding(.horizontal, -bleed)
             HStack(spacing: 0) {
                 ForEach(segments) { segment in
-                    tab(segment)
+                    if onMove != nil, movable(segment.value) {
+                        let up = lifted == segment.value || dragging == segment.value
+                        tab(segment, lifted: up)
+                            .scaleEffect(up ? Self.liftScale : 1)
+                            .offset(x: dragging == segment.value ? dragOffset : 0, y: up ? -Self.liftRise : 0)
+                            .zIndex(up ? 1 : 0)
+                            .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.8), value: up)
+                            .simultaneousGesture(drag(segment.value))
+                    } else {
+                        tab(segment, lifted: false)
+                    }
+                }
+            }
+            // However the press ends, a lifted tab drops.
+            .onChange(of: lifted) { _, now in
+                if now == nil, dragging != nil { drop() }
+            }
+            .background {
+                GeometryReader { proxy in
+                    Color.clear
+                        .onAppear { stripWidth = proxy.size.width }
+                        .onChange(of: proxy.size.width) { _, width in stripWidth = width }
                 }
             }
         }
@@ -211,9 +260,12 @@ public struct GlassRuleTabs<Value: Hashable>: View {
         .accessibilityLabel(label)
     }
 
-    private func tab(_ segment: GlassSegment<Value>) -> some View {
+    private func tab(_ segment: GlassSegment<Value>, lifted: Bool) -> some View {
         let selected = segment.value == selection
         return Button {
+            // A drag ends with the pointer still on the tab; a tab that
+            // moved is not opened by it. One held and let go in place is.
+            guard !moved else { return }
             selection = segment.value
         } label: {
             HStack(spacing: GlassTokens.Space.inlineGap) {
@@ -227,9 +279,18 @@ public struct GlassRuleTabs<Value: Hashable>: View {
             .background(alignment: .bottom) {
                 if selected { emberGlow.matchedGeometryEffect(id: "ember", in: ember) }
             }
-            // The press is a wash behind the title and the ember, never the
-            // title, as on the segmented tabs.
-            .glassPressedWash(RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous))
+            // Lifted, the tab stands on a control's surface with a soft
+            // shadow under it, behind its title and ember.
+            .background {
+                if lifted {
+                    Color.clear
+                        .glassSurface(.control, radius: GlassTokens.Radius.control)
+                        .shadow(color: .black.opacity(Self.liftShadowOpacity), radius: 8, y: 3)
+                        .padding(.vertical, GlassTokens.Space.s1)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(GlassPressStyle())
@@ -281,6 +342,87 @@ public struct GlassRuleTabs<Value: Hashable>: View {
 
     static func inksPrimary(selected: Bool, hovering: Bool) -> Bool {
         selected || hovering
+    }
+}
+
+/// Dragging a rule tab to move it (owner, 2026-10-30), once a held press
+/// has lifted it (owner, 2026-11-02).
+extension GlassRuleTabs {
+    /// How long a press is held before the tab lifts.
+    static var liftDelay: Double { 0.35 }
+    /// How far the pointer may wander while the press is held; past it,
+    /// the press lifts nothing and stays a click.
+    static var liftSlop: CGFloat { 6 }
+    /// How much larger a lifted tab is, how far it rises, and its shadow.
+    static var liftScale: CGFloat { 1.06 }
+    static var liftRise: CGFloat { 2 }
+    static var liftShadowOpacity: Double { 0.18 }
+    /// How far a lifted tab travels before letting go no longer opens it.
+    static var dragThreshold: CGFloat { 6 }
+
+    /// Where a tab dragged from `from` by `offset` lands, as an index: the
+    /// slot whose middle it has passed, kept to the movable tabs (`allowed`)
+    /// and never past the strip's ends.
+    static func landing(from: Int, offset: CGFloat, tabWidth: CGFloat, allowed: ClosedRange<Int>) -> Int {
+        guard tabWidth > 0 else { return from }
+        let slot = from + Int((offset / tabWidth).rounded())
+        return min(max(slot, allowed.lowerBound), allowed.upperBound)
+    }
+
+    /// Whether a lifted tab has travelled far enough that letting go moves
+    /// it rather than opening it.
+    static func hasMoved(_ translation: CGFloat) -> Bool {
+        abs(translation) >= dragThreshold
+    }
+
+    /// A held press lifts a movable tab; then it follows the pointer, and
+    /// trades places with a movable neighbour once past that neighbour's
+    /// middle, keeping its place under the pointer as the strip reorders.
+    private func drag(_ value: Value) -> some Gesture {
+        LongPressGesture(minimumDuration: Self.liftDelay, maximumDistance: Self.liftSlop)
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
+            .updating($lifted) { phase, state, _ in
+                if case .second(true, _) = phase { state = value }
+            }
+            .onChanged { phase in
+                guard case .second(true, let gesture) = phase else { return }
+                follow(value, translation: gesture?.translation.width ?? 0)
+            }
+            .onEnded { _ in drop() }
+    }
+
+    private func follow(_ value: Value, translation: CGFloat) {
+        guard let onMove, let from = segments.firstIndex(where: { $0.value == value }),
+              let first = segments.firstIndex(where: { movable($0.value) }),
+              let last = segments.lastIndex(where: { movable($0.value) }) else { return }
+        let tabWidth = stripWidth / CGFloat(segments.count)
+        if dragging != value {
+            dragging = value
+            dragOrigin = from
+        }
+        if Self.hasMoved(translation) { moved = true }
+        // The pointer's travel is from the slot the drag began in; the tab
+        // sits that far from it, so its offset from the slot it holds now
+        // is the travel less the slots it moved.
+        let offset = translation - CGFloat(from - dragOrigin) * tabWidth
+        let to = Self.landing(from: from, offset: offset, tabWidth: tabWidth, allowed: first...last)
+        if to != from {
+            onMove(value, segments[to].value)
+        }
+        dragOffset = offset - CGFloat(to - from) * tabWidth
+    }
+
+    /// Lets the tab down into its slot. Twice is harmless: the gesture's end
+    /// and the lift clearing both call it.
+    private func drop() {
+        withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85)) {
+            dragOffset = 0
+        }
+        // Cleared after the click the release delivers.
+        DispatchQueue.main.async {
+            dragging = nil
+            moved = false
+        }
     }
 }
 

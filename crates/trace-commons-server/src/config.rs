@@ -167,80 +167,12 @@ impl DatabaseConfig {
     }
 }
 
-/// WebAuthn relying-party configuration for the passkey ceremonies (Slice 2).
-///
-/// All three fields are required together. The loader is fail-closed: it returns
-/// `Some` only when every one of `TRACE_COMMONS_WEBAUTHN_RP_ID`,
-/// `TRACE_COMMONS_WEBAUTHN_RP_ORIGIN`, and `TRACE_COMMONS_WEBAUTHN_RP_NAME` is set
-/// to a non-blank value. A partial configuration (some-but-not-all set) is treated
-/// as a misconfiguration and yields `None`, so the passkey surface stays disabled
-/// (its accessor fails closed) rather than building a relying party from incomplete
-/// state. Mirrors `DatabaseConfig::login_resolver_url_from_env`: blank is unset.
-#[derive(Debug, Clone)]
-pub struct WebauthnConfig {
-    /// Relying-party id (an effective domain, e.g. `tracecommons.ai`). Credentials
-    /// bind to this value; it cannot change without invalidating every passkey.
-    pub rp_id: String,
-    /// Relying-party origin (a full URL, e.g. `https://tracecommons.ai`), or a
-    /// comma-separated list of them. The first is the primary origin; the rest
-    /// are also accepted (see `account_passkey::build_webauthn`). A single
-    /// value means exactly what it always did.
-    pub rp_origin: String,
-    /// Human-readable relying-party name shown in authenticator prompts.
-    pub rp_name: String,
-}
-
-impl WebauthnConfig {
-    /// Load the relying-party config from the environment. Returns `Some` only when
-    /// all three of `TRACE_COMMONS_WEBAUTHN_RP_ID`, `_RP_ORIGIN`, and `_RP_NAME` are
-    /// present and non-blank. A partial set fails closed (`None`).
-    pub fn from_env() -> Option<Self> {
-        let rp_id = Self::non_blank_env("TRACE_COMMONS_WEBAUTHN_RP_ID");
-        let rp_origin = Self::non_blank_env("TRACE_COMMONS_WEBAUTHN_RP_ORIGIN");
-        let rp_name = Self::non_blank_env("TRACE_COMMONS_WEBAUTHN_RP_NAME");
-        match (rp_id, rp_origin, rp_name) {
-            (Some(rp_id), Some(rp_origin), Some(rp_name)) => Some(Self {
-                rp_id,
-                rp_origin,
-                rp_name,
-            }),
-            // Partial config is a misconfiguration: fail closed rather than build a
-            // relying party from incomplete state. A fully-unset config is the
-            // normal "passkeys disabled" state and is silent; a SOME-but-not-all
-            // config is almost certainly an operator mistake, so warn loudly (by
-            // env-var NAME only — never values; an origin/rp_id may be sensitive)
-            // so it is not silently inert.
-            (rp_id, rp_origin, rp_name) => {
-                let any_set = rp_id.is_some() || rp_origin.is_some() || rp_name.is_some();
-                if any_set {
-                    let name_state = |label: &str, value: &Option<String>| {
-                        format!(
-                            "{}={}",
-                            label,
-                            if value.is_some() { "set" } else { "unset" }
-                        )
-                    };
-                    tracing::warn!(
-                        target: "trace_commons::passkey",
-                        "partial WebAuthn relying-party config detected ({}, {}, {}); \
-                         passkey surface DISABLED (fail-closed) — all three of \
-                         TRACE_COMMONS_WEBAUTHN_RP_ID/ORIGIN/NAME must be set together",
-                        name_state("TRACE_COMMONS_WEBAUTHN_RP_ID", &rp_id),
-                        name_state("TRACE_COMMONS_WEBAUTHN_RP_ORIGIN", &rp_origin),
-                        name_state("TRACE_COMMONS_WEBAUTHN_RP_NAME", &rp_name),
-                    );
-                }
-                None
-            }
-        }
-    }
-
-    fn non_blank_env(key: &str) -> Option<String> {
-        std::env::var(key)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    }
+/// Read `key` from the environment, trimmed. Blank is unset.
+fn non_blank_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// NEAR sign-in configuration for the login-with-NEAR ceremony (Slice 3a).
@@ -251,7 +183,7 @@ impl WebauthnConfig {
 /// to a non-blank value. A partial configuration (some-but-not-all set) is treated
 /// as a misconfiguration and yields `None`, so the NEAR sign-in surface stays
 /// disabled (its accessor fails closed) rather than building a verifier from
-/// incomplete state. Mirrors [`WebauthnConfig::from_env`]: blank is unset.
+/// incomplete state. Blank is unset.
 #[derive(Debug, Clone)]
 pub struct NearConfig {
     /// NEAR JSON-RPC endpoint used to resolve access keys for an account
@@ -271,9 +203,9 @@ impl NearConfig {
     /// `_NEAR_LOGIN_RECIPIENT` are present and non-blank. A partial set fails closed
     /// (`None`) and warns by env-var NAME only (never values).
     pub fn from_env() -> Option<Self> {
-        let rpc_url = WebauthnConfig::non_blank_env("TRACE_COMMONS_NEAR_RPC_URL");
-        let network = WebauthnConfig::non_blank_env("TRACE_COMMONS_NEAR_NETWORK");
-        let recipient = WebauthnConfig::non_blank_env("TRACE_COMMONS_NEAR_LOGIN_RECIPIENT");
+        let rpc_url = non_blank_env("TRACE_COMMONS_NEAR_RPC_URL");
+        let network = non_blank_env("TRACE_COMMONS_NEAR_NETWORK");
+        let recipient = non_blank_env("TRACE_COMMONS_NEAR_LOGIN_RECIPIENT");
         match (rpc_url, network, recipient) {
             (Some(rpc_url), Some(network), Some(recipient)) => Some(Self {
                 rpc_url,

@@ -205,7 +205,7 @@ final class PrivateInferenceMenuBarTests: XCTestCase {
     /// three tab shortcuts, which are Cmd-1..3 in the tab strip's order.
     @MainActor
     func testTheToggleShortcutDoesNotCollideWithADestination() {
-        let tabs = MonitorWindowView.Tab.allCases.map(MonitorCommands.shortcut)
+        let tabs = MonitorWindowView.Tab.allCases.map { MonitorCommands.shortcut($0) }
         // Insights is the fourth tab (2026-10-15).
         XCTAssertEqual(tabs, ["1", "2", "3", "4"])
         XCTAssertEqual(MonitorCommands.toggleModifiers, [.command, .shift])

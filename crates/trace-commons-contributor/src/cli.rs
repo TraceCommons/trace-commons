@@ -30,7 +30,7 @@ fn version_line() -> &'static str {
     // The semver does not move when a deploy does, so --version carries the
     // commit the binary was built from as well, and then the channel.
     version = version_line(),
-    about = "Submit local coding-agent traces to Trace Commons"
+    about = "Submit local coding-agent traces"
 )]
 struct Cli {
     // The help names the channel's override variable: `channel::CONFIG_DIR_HELP`.
@@ -80,8 +80,11 @@ enum Command {
     RedeemLaunch {
         #[arg(long)]
         session_id: uuid::Uuid,
-        #[arg(long)]
-        ticket: String,
+        /// The launch ticket. A terminal that can give the helper an
+        /// environment (herdr) passes it as `NEAR_AI_LAUNCH_TICKET` instead,
+        /// so it is not in argv; the tool never inherits that variable.
+        #[arg(long, env = "NEAR_AI_LAUNCH_TICKET", hide_env_values = true)]
+        ticket: Option<String>,
     },
     /// Check a local mission proposal; does not fetch, execute, or publish
     MissionDraft {
@@ -557,7 +560,7 @@ fn run_on_this_thread() -> std::process::ExitCode {
     if canonical {
         command = command
             .name("near-ai")
-            .about("NEAR AI — manage native coding sessions and contribute to Trace Commons");
+            .about("NEAR AI — manage native coding sessions and contribute traces");
     }
     let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&command.get_matches())
         .unwrap_or_else(|e| e.exit());
@@ -652,17 +655,22 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Accounts { action } => {
             crate::managed::cli::accounts(&store, action, cli.json).await
         }
-        Command::Sessions { action } => crate::managed::cli::sessions(&store, action, cli.json),
+        Command::Sessions {
+            action: crate::managed::cli::SessionCommand::Resume { session_id },
+        } => {
+            let code = crate::managed::cli::resume(&store, session_id).await?;
+            std::process::exit(code);
+        }
+        Command::Sessions {
+            action: crate::managed::cli::SessionCommand::List,
+        } => crate::managed::cli::list_sessions(&store, cli.json),
         Command::ManagedSessionBind { .. } => {
             unreachable!("binding recorder handled before config resolution")
         }
         Command::RedeemLaunch { session_id, ticket } => {
             let code = crate::managed::supervisor::redeem_and_run(
                 &store,
-                crate::managed::sessions::PreparedLaunch {
-                    session_id,
-                    ticket: Some(ticket),
-                },
+                crate::managed::sessions::PreparedLaunch { session_id, ticket },
             )
             .await?;
             std::process::exit(code);
@@ -801,7 +809,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Update { stage_only } => commands::update(&store, stage_only, cli.json).await,
-        Command::Logout { yes } => commands::logout(&store, yes),
+        Command::Logout { yes } => commands::logout(&store, yes).await,
         Command::Unenroll { yes } => commands::unenroll(&store, yes, cli.json),
         Command::Devices { action } => {
             let mut call = |method: &str, params: serde_json::Value| {
@@ -867,7 +875,13 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             AccountAction::Logout => commands::account_logout(&store).await,
         },
         Command::Daemon { action } => match action {
-            DaemonAction::Run { dry_run } => crate::daemon::run(store, dry_run).await,
+            DaemonAction::Run { dry_run } => {
+                // `install_for` applies the dry-run store first (a no-op when
+                // already applied), so a dev dry run never writes the real
+                // state directory, and the daemon runs against that store.
+                let store = crate::daemon::diagnostics_log::install_for(store)?;
+                crate::daemon::run(store, dry_run).await
+            }
             DaemonAction::TokenStorage {
                 cleanup,
                 discard,
@@ -973,6 +987,71 @@ mod tests {
             std::iter::once("trace-commons-contributor").chain(args.iter().copied()),
         )
         .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+    }
+
+    /// `redeem-launch` takes its ticket from `--ticket`, as every argv
+    /// terminal passes it, or from `NEAR_AI_LAUNCH_TICKET` (herdr), whose
+    /// name is the one the daemon sets.
+    #[test]
+    fn redeem_launch_reads_the_ticket_from_the_flag_or_the_environment() {
+        use clap::CommandFactory;
+        let id = uuid::Uuid::new_v4();
+        let id_text = id.to_string();
+        match parse(&[
+            "redeem-launch",
+            "--session-id",
+            &id_text,
+            "--ticket",
+            "ab12",
+        ])
+        .command
+        {
+            Command::RedeemLaunch { session_id, ticket } => {
+                assert_eq!(session_id, id);
+                assert_eq!(ticket.as_deref(), Some("ab12"));
+            }
+            _ => panic!("redeem-launch"),
+        }
+        let ticket = Cli::command()
+            .find_subcommand("redeem-launch")
+            .expect("redeem-launch")
+            .get_arguments()
+            .find(|arg| arg.get_id() == "ticket")
+            .expect("--ticket")
+            .clone();
+        assert_eq!(
+            ticket.get_env().and_then(|name| name.to_str()),
+            Some(crate::managed::terminal::LAUNCH_TICKET_ENV)
+        );
+        assert!(
+            ticket.is_hide_env_values_set(),
+            "the value is never printed"
+        );
+    }
+
+    /// `sessions resume <session-id>` names the session to continue; the
+    /// id is required and must be one.
+    #[test]
+    fn sessions_resume_takes_a_session_id() {
+        let id = uuid::Uuid::new_v4();
+        match parse(&["sessions", "resume", &id.to_string()]).command {
+            Command::Sessions {
+                action: crate::managed::cli::SessionCommand::Resume { session_id },
+            } => assert_eq!(session_id, id),
+            _ => panic!("not sessions resume"),
+        }
+        for args in [
+            &["sessions", "resume"][..],
+            &["sessions", "resume", "previous"],
+        ] {
+            assert!(
+                Cli::try_parse_from(
+                    std::iter::once("trace-commons-contributor").chain(args.iter().copied())
+                )
+                .is_err(),
+                "{args:?}"
+            );
+        }
     }
 
     /// `daemon project` takes `--from-now` and still takes

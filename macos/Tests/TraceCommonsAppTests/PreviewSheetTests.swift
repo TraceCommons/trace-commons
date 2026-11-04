@@ -91,7 +91,7 @@ final class PreviewSheetTests: XCTestCase {
         // With no Close word, Escape still closes, from an unseen control.
         XCTAssertTrue(sheet.contains("if closeWord == nil {\n                Button(\"\") { close() }\n"
                                      + "                    .keyboardShortcut(.cancelAction)\n"))
-        XCTAssertTrue(sheet.contains("TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.passkey.close"),
+        XCTAssertTrue(sheet.contains("TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.frame.close"),
                       "the fallback Close is the core's word too")
         XCTAssertTrue(footer.contains(".keyboardShortcut(.cancelAction)"), "Escape closes the sheet")
         XCTAssertFalse(footer.contains(".keyboardShortcut(.defaultAction)"))

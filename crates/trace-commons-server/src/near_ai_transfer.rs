@@ -82,8 +82,9 @@ impl NearAiCreditSource {
 pub struct NearAiTransferCredentials {
     /// `oc_` plus 64 hex.
     pub token: SecretString,
-    /// The credential's `id`. Not secret; used only for its log hash.
-    pub credential_id: Uuid,
+    /// The credential's `id`. Not secret; used only for its log hash, and
+    /// optional: unset, log lines carry `credential=unset`.
+    pub credential_id: Option<Uuid>,
     /// The commons' reseller org.
     pub sender_org: Uuid,
     pub source: NearAiCreditSource,
@@ -257,14 +258,14 @@ pub struct NearAiTransferClient {
     http: reqwest::Client,
     base: String,
     credentials: NearAiTransferCredentials,
-    credential_hash: String,
+    credential_label: String,
 }
 
 impl fmt::Debug for NearAiTransferClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("NearAiTransferClient")
-            .field("credential", &self.credential_hash)
+            .field("credential", &self.credential_label)
             .finish_non_exhaustive()
     }
 }
@@ -345,17 +346,23 @@ impl NearAiTransferClient {
             .timeout(timeout)
             .build()
             .map_err(|_| NearAiTransferError::ClientConfig)?;
-        let credential_hash = Self::credential_id_hash(credentials.credential_id);
+        let credential_label = Self::credential_label(credentials.credential_id);
         Ok(Self {
             http,
             base: base.to_string(),
             credentials,
-            credential_hash,
+            credential_label,
         })
     }
 
+    /// What log lines carry for the credential: the hash of its id, or
+    /// `unset` when no id is configured.
+    pub fn credential_label(credential_id: Option<Uuid>) -> String {
+        credential_id.map_or_else(|| "unset".to_string(), Self::credential_id_hash)
+    }
+
     /// The `sha256:` of a credential id, the only form of it that is logged.
-    pub fn credential_id_hash(credential_id: Uuid) -> String {
+    fn credential_id_hash(credential_id: Uuid) -> String {
         format!(
             "sha256:{}",
             hex::encode(Sha256::digest(
@@ -559,14 +566,14 @@ impl NearAiTransferClient {
             Ok(_) => tracing::info!(
                 rail = "near_ai",
                 call,
-                credential = %self.credential_hash,
+                credential = %self.credential_label,
                 outcome = "ok",
                 "near_ai payout call"
             ),
             Err(NearAiTransferError::Refused { status, code }) => tracing::warn!(
                 rail = "near_ai",
                 call,
-                credential = %self.credential_hash,
+                credential = %self.credential_label,
                 outcome = "refused",
                 status,
                 code = code.as_label(),
@@ -575,7 +582,7 @@ impl NearAiTransferClient {
             Err(error) => tracing::warn!(
                 rail = "near_ai",
                 call,
-                credential = %self.credential_hash,
+                credential = %self.credential_label,
                 outcome = error.label(),
                 "near_ai payout call"
             ),
@@ -659,15 +666,29 @@ struct ErrorReply {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn credentials() -> NearAiTransferCredentials {
         NearAiTransferCredentials {
             token: SecretString::from(format!("oc_{}", "ab".repeat(32))),
-            credential_id: Uuid::from_u128(2),
+            credential_id: Some(Uuid::from_u128(2)),
             sender_org: Uuid::from_u128(1),
             source: NearAiCreditSource::Grant,
         }
+    }
+
+    /// An unset credential id is logged as a fixed label, never a hash of
+    /// nothing; a set one keeps its `sha256:` form.
+    #[test]
+    fn an_unset_credential_id_logs_as_unset() {
+        assert_eq!(NearAiTransferClient::credential_label(None), "unset");
+        let set = NearAiTransferClient::credential_label(Some(Uuid::from_u128(2)));
+        assert!(set.starts_with("sha256:"), "{set}");
+        assert_eq!(
+            set,
+            NearAiTransferClient::credential_id_hash(Uuid::from_u128(2))
+        );
     }
 
     #[test]

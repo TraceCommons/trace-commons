@@ -104,11 +104,18 @@ pub const ARMING_BODY: &str = ARMING_BODY_WITH_BACKLOG;
 /// moves into Automatic). Kept as its own wire field (`body_with_backlog`)
 /// because shells already decode it; it now carries the same text as
 /// [`ARMING_BODY`].
-pub const ARMING_BODY_WITH_BACKLOG: &str = "Traces from this project will be scrubbed and \
-     contributed without asking you, including any already waiting. You won't review them \
-     first.\n\nNo trace is sent until it has been quiet for a day.\n\nYou can turn this off \
-     at any time. Anything it hasn't sent yet goes back to waiting for you, and anything already \
-     sent stays sent.";
+///
+/// Since 2026-10-31 it is [`AUTOMATIC_DETAILS`], the owner's words, which
+/// make no claim about scrubbing. `arming_wording::project_arming_claim`
+/// still answers `ModelScrubbed`, the stronger claim, so a folder armed
+/// under these words can only be told too much about a narrowing, never
+/// too little.
+pub const ARMING_BODY_WITH_BACKLOG: &str = AUTOMATIC_DETAILS;
+
+/// What Auto does, in the owner's words (2026-10-31): the Details of the
+/// arming offer and the body of every folder's Auto confirmation.
+pub const AUTOMATIC_DETAILS: &str = "With Auto enabled, traces are submitted automatically. \
+     You don't need to approve each one manually. You can change this setting anytime.";
 
 /// Customize's words for the from-now rule, the past-session picker, and
 /// "Keep on this Mac" (K5), in one table so no shell writes its own.
@@ -865,31 +872,24 @@ mod arming_body_tests {
     use super::{ARMING_BODY, ARMING_BODY_WITH_BACKLOG, customize_copy};
 
     /// Verbatim, because the macOS shell holds its own copy and pins it to
-    /// this one; a change here is a change there.
+    /// this one; a change here is a change there. The owner's words
+    /// (2026-10-31).
     #[test]
     fn the_arming_body_is_exactly_what_was_agreed() {
-        assert_eq!(
-            ARMING_BODY,
-            "Traces from this project will be scrubbed and contributed without asking you, including any already waiting. You won't review them first.\n\nNo trace is sent until it has been quiet for a day.\n\nYou can turn this off at any time. Anything it hasn't sent yet goes back to waiting for you, and anything already sent stays sent."
-        );
-        assert_eq!(
-            ARMING_BODY_WITH_BACKLOG,
-            "Traces from this project will be scrubbed and contributed without asking you, including any already waiting. You won't review them first.\n\nNo trace is sent until it has been quiet for a day.\n\nYou can turn this off at any time. Anything it hasn't sent yet goes back to waiting for you, and anything already sent stays sent."
-        );
+        let agreed = "With Auto enabled, traces are submitted automatically. You don't need to approve each one manually. You can change this setting anytime.";
+        assert_eq!(ARMING_BODY, agreed);
+        assert_eq!(ARMING_BODY_WITH_BACKLOG, agreed);
+        assert_eq!(super::AUTOMATIC_DETAILS, agreed);
     }
 
     /// Switching a folder to Automatic includes its backlog by default
-    /// (owner decision, 2026-10-19), so the body every shell renders must say
-    /// the backlog goes, and must not promise it keeps waiting.
+    /// (owner decision, 2026-10-19), so the body must not promise the
+    /// backlog keeps waiting.
     #[test]
     fn each_arming_body_says_what_happens_to_the_backlog() {
-        assert!(ARMING_BODY.contains("including any already waiting"));
-        assert!(!ARMING_BODY.contains("keep waiting for you"));
-        assert!(!ARMING_BODY.contains("from now on"));
-        assert!(ARMING_BODY_WITH_BACKLOG.contains("including any already waiting"));
         for body in [ARMING_BODY, ARMING_BODY_WITH_BACKLOG] {
-            assert!(body.contains("No trace is sent until it has been quiet for a day."));
-            assert!(body.contains("You can turn this off at any time."));
+            assert!(!body.contains("keep waiting for you"));
+            assert!(!body.contains("from now on"));
         }
     }
 
@@ -914,8 +914,5 @@ mod arming_body_tests {
         ] {
             assert!(!ARMING_BODY.contains(claim), "{claim:?} is not true");
         }
-        assert!(ARMING_BODY_WITH_BACKLOG.contains("including any already waiting"));
-        assert!(ARMING_BODY.contains("goes back to waiting"));
-        assert!(ARMING_BODY_WITH_BACKLOG.contains("goes back to waiting"));
     }
 }

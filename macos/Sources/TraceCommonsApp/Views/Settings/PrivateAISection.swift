@@ -15,6 +15,13 @@ struct PrivateAISection: View {
     /// The switch and the tools, read through the data contract on this
     /// window's own attachment to the daemon, as the Monitor's tab read them.
     @State private var store = InferenceStore(client: nil)
+    /// NEAR AI's catalogue for the favorites card, read only while there
+    /// is a favorite; nil until read, or when it could not be.
+    @State private var favoritesCatalogue: ManagedModelCatalogue?
+    /// Whether the stored list holds a favorite. Keys the catalogue read,
+    /// so opening Settings with none makes no NEAR AI request, and a
+    /// settings read that arrives later still starts it (#1754 review).
+    private var hasFavorites: Bool { !(model.daemonSettings?.managedFavoriteModels ?? []).isEmpty }
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -29,6 +36,9 @@ struct PrivateAISection: View {
             // goes to. Hides itself unless the commons lists the rail as
             // enabled.
             PayoutLinkView()
+            // A wallet-origin account's payouts need a NEAR AI login (F10):
+            // the line and its button, where the link status would be.
+            PayoutsNeedLoginLine()
             // Count Private AI tokens (Ron's #1287 review: moved here from
             // Tools). This section is open before first run (R-38), so the
             // switch waits for it (R-43): no Insights write is reachable
@@ -42,8 +52,19 @@ struct PrivateAISection: View {
             // only managed sessions. Drawn only when the daemon found an
             // app to offer.
             if let snapshot = model.managedSnapshot, !snapshot.terminalChoices.isEmpty {
-                GlassCard { ManagedTerminalPicker(snapshot: snapshot) }
+                GlassCard {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                        ManagedTerminalPicker(snapshot: snapshot)
+                        if snapshot.offersHerdrGrouping {
+                            ManagedHerdrGroupingSwitch(snapshot: snapshot)
+                        }
+                    }
+                }
             }
+            // The models listed first in the Launch sheet's picker, with
+            // the ones NEAR AI stopped offering marked. Drawn only while
+            // there is one.
+            ManagedFavoritesCard(catalogue: favoritesCatalogue)
             switch model.routeDisclosureState {
             case .shown(let disclosure):
                 GlassEyebrowCard(disclosure.copy.title) {
@@ -64,6 +85,10 @@ struct PrivateAISection: View {
         .onAppear { model.refreshRouteDisclosure() }
         // The managed snapshot the terminal picker reads.
         .task { model.refreshManagedSessions() }
+        .task(id: hasFavorites) {
+            guard hasFavorites else { favoritesCatalogue = nil; return }
+            model.managedModelCatalogue(tool: ManagedFavoritesCard.catalogueTool) { favoritesCatalogue = $0 }
+        }
         // Which organization Private AI spends from, read lazily when this
         // section opens and never on the sign-in.
         .task { model.refreshSpendOrganizations() }

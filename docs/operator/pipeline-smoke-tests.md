@@ -88,8 +88,7 @@ ingest. Leave `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` and
 `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` unset on every replica. Before
 starting, read [deployment.md](deployment.md) for any configuration the new
 build reads for the first time, and pin every value whose change is
-user-visible (for example a WebAuthn relying-party id: changing it invalidates
-registered passkeys).
+user-visible.
 
 ### 1c. Smoke the legacy path
 

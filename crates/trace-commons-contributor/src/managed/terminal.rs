@@ -28,31 +28,49 @@ pub enum TerminalApp {
     WindowsTerminal,
     GnomeTerminal,
     Konsole,
+    Kitty,
+    Wezterm,
+    Alacritty,
+    Warp,
+    Rex,
 }
 
 impl TerminalApp {
     /// Every app any platform offers.
-    pub const ALL: [TerminalApp; 6] = [
+    pub const ALL: [TerminalApp; 11] = [
         TerminalApp::Terminal,
         TerminalApp::Ghostty,
         TerminalApp::Iterm2,
         TerminalApp::WindowsTerminal,
         TerminalApp::GnomeTerminal,
         TerminalApp::Konsole,
+        TerminalApp::Kitty,
+        TerminalApp::Wezterm,
+        TerminalApp::Alacritty,
+        TerminalApp::Warp,
+        TerminalApp::Rex,
     ];
     /// macOS, in the order a picker shows them.
-    pub const MACOS: [TerminalApp; 3] = [
+    pub const MACOS: [TerminalApp; 8] = [
         TerminalApp::Terminal,
         TerminalApp::Ghostty,
         TerminalApp::Iterm2,
+        TerminalApp::Kitty,
+        TerminalApp::Wezterm,
+        TerminalApp::Alacritty,
+        TerminalApp::Warp,
+        TerminalApp::Rex,
     ];
     /// Windows.
     pub const WINDOWS: [TerminalApp; 1] = [TerminalApp::WindowsTerminal];
     /// Linux, in the order a picker shows them.
-    pub const LINUX: [TerminalApp; 3] = [
+    pub const LINUX: [TerminalApp; 6] = [
         TerminalApp::GnomeTerminal,
         TerminalApp::Konsole,
         TerminalApp::Ghostty,
+        TerminalApp::Kitty,
+        TerminalApp::Wezterm,
+        TerminalApp::Alacritty,
     ];
 
     /// The apps this platform offers, in picker order. Empty where managed
@@ -78,6 +96,11 @@ impl TerminalApp {
             TerminalApp::WindowsTerminal => "windows_terminal",
             TerminalApp::GnomeTerminal => "gnome_terminal",
             TerminalApp::Konsole => "konsole",
+            TerminalApp::Kitty => "kitty",
+            TerminalApp::Wezterm => "wezterm",
+            TerminalApp::Alacritty => "alacritty",
+            TerminalApp::Warp => "warp",
+            TerminalApp::Rex => "rex",
         }
     }
 
@@ -100,6 +123,11 @@ impl TerminalApp {
             TerminalApp::WindowsTerminal => "Windows Terminal",
             TerminalApp::GnomeTerminal => "GNOME Terminal",
             TerminalApp::Konsole => "Konsole",
+            TerminalApp::Kitty => "kitty",
+            TerminalApp::Wezterm => "WezTerm",
+            TerminalApp::Alacritty => "Alacritty",
+            TerminalApp::Warp => "Warp",
+            TerminalApp::Rex => "Rex",
         }
     }
 
@@ -111,6 +139,11 @@ impl TerminalApp {
             TerminalApp::Terminal => Some("com.apple.Terminal"),
             TerminalApp::Ghostty => Some("com.mitchellh.ghostty"),
             TerminalApp::Iterm2 => Some("com.googlecode.iterm2"),
+            TerminalApp::Kitty => Some("net.kovidgoyal.kitty"),
+            TerminalApp::Wezterm => Some("com.github.wez.wezterm"),
+            TerminalApp::Alacritty => Some("org.alacritty"),
+            TerminalApp::Warp => Some("dev.warp.Warp-Stable"),
+            TerminalApp::Rex => Some(super::rex::BUNDLE_ID),
             _ => None,
         }
     }
@@ -124,7 +157,12 @@ impl TerminalApp {
             TerminalApp::GnomeTerminal => Some("gnome-terminal"),
             TerminalApp::Konsole => Some("konsole"),
             TerminalApp::Ghostty => Some("ghostty"),
-            TerminalApp::Terminal | TerminalApp::Iterm2 => None,
+            TerminalApp::Kitty => Some("kitty"),
+            TerminalApp::Wezterm => Some("wezterm"),
+            TerminalApp::Alacritty => Some("alacritty"),
+            TerminalApp::Terminal | TerminalApp::Iterm2 | TerminalApp::Warp | TerminalApp::Rex => {
+                None
+            }
         }
     }
 
@@ -145,20 +183,16 @@ impl TerminalApp {
         match self {
             // Addressed by bundle id, like the others, so the app that
             // receives the command is the one the installed check found.
-            // The new tab's tty is printed, and read back only as a bare
-            // device path. Any failure there prints nothing: the launch
-            // stands and the session simply cannot be shown.
-            TerminalApp::Terminal => vec![
-                format!("tell application id \"{id}\""),
-                format!("set t to do script \"{literal}\""),
-                "activate".into(),
-                "set found to \"\"".into(),
-                "try".into(),
-                "set found to tty of t".into(),
-                "end try".into(),
-                "return found".into(),
-                "end tell".into(),
-            ],
+            // The new window's tty and window id are printed, and read
+            // back only as a bare device path and digits. Any failure there
+            // prints less: the launch stands and the session simply cannot
+            // be shown.
+            TerminalApp::Terminal => [
+                vec![format!("tell application id \"{id}\"")],
+                open_window(&literal),
+                vec!["return found".into(), "end tell".into()],
+            ]
+            .concat(),
             TerminalApp::Ghostty => vec![
                 format!("tell application id \"{id}\""),
                 "set sessionConfiguration to new surface configuration".into(),
@@ -179,6 +213,105 @@ impl TerminalApp {
     }
 }
 
+/// Terminal's lines that set `wid` to the id of the window holding the tab
+/// whose tty is the AppleScript value `tty` (a quoted literal or a
+/// variable), stopping at the first match, or leave it `missing value`. A
+/// window's id never changes; its position does, whenever one comes
+/// forward.
+#[cfg(any(target_os = "macos", test))]
+fn find_window(tty: &str) -> Vec<String> {
+    vec![
+        "repeat with w in windows".into(),
+        "repeat with x in tabs of w".into(),
+        format!("if tty of x is {tty} then"),
+        "set wid to id of w".into(),
+        "exit repeat".into(),
+        "end if".into(),
+        "end repeat".into(),
+        "if wid is not missing value then exit repeat".into(),
+        "end repeat".into(),
+    ]
+}
+
+/// Terminal's lines that set `tw` to window `wid` and `t` to its tab on
+/// `tty`, or leave `t` `missing value`. Run just before `t` is used, so a
+/// window that moved since the scan cannot put another tab there.
+#[cfg(any(target_os = "macos", test))]
+fn find_tab(tty: &str) -> Vec<String> {
+    vec![
+        "if wid is not missing value then".into(),
+        "set tw to window id wid".into(),
+        "repeat with x in tabs of tw".into(),
+        format!("if tty of x is \"{tty}\" then"),
+        "set t to x".into(),
+        "exit repeat".into(),
+        "end if".into(),
+        "end repeat".into(),
+        "end if".into(),
+    ]
+}
+
+/// Terminal's lines that select tab `t` and bring its window, `tw`,
+/// forward.
+#[cfg(any(target_os = "macos", test))]
+fn raise_tab() -> Vec<String> {
+    vec![
+        "set selected of t to true".into(),
+        "if miniaturized of tw then set miniaturized of tw to false".into(),
+        "set index of tw to 1".into(),
+    ]
+}
+
+/// Terminal's lines that run the AppleScript literal `literal` in a new
+/// window and set `found` to its tab's tty and, on the next line, the id of
+/// Terminal's front window when its selected tab is this one (no other
+/// window is scanned). If another window is in front by then, the row gets
+/// no window id, which is normal. Run after the command is
+/// typed, so each read is inside a `try`: a failure prints less, the launch
+/// stands, and the session simply cannot be shown.
+#[cfg(any(target_os = "macos", test))]
+fn open_window(literal: &str) -> Vec<String> {
+    [vec![
+        format!("set t to do script \"{literal}\""),
+        "activate".into(),
+        "set found to \"\"".into(),
+        "try".into(),
+        "set found to tty of t".into(),
+        "end try".into(),
+        // The window id, read only from the front window and only
+        // when its selected tab is this one: no scan of other windows.
+        "try".into(),
+        "if found is not \"\" and tty of selected tab of front window is found then".into(),
+        "set found to found & linefeed & ((id of front window) as text)".into(),
+        "end if".into(),
+        "end try".into(),
+    ]]
+    .concat()
+}
+
+/// Terminal's lines that bring the tab on `tty` to the front, in whichever
+/// window holds it now, or fail when it is gone. `tty` has passed
+/// `valid_tty`.
+#[cfg(any(target_os = "macos", test))]
+fn focus_script(tty: &str) -> Vec<String> {
+    let id = TerminalApp::Terminal
+        .bundle_id()
+        .unwrap_or("com.apple.Terminal");
+    [
+        vec![
+            format!("tell application id \"{id}\""),
+            "set wid to missing value".into(),
+            "set t to missing value".into(),
+        ],
+        find_window(&format!("\"{tty}\"")),
+        find_tab(tty),
+        vec!["if t is missing value then error \"no tab\"".into()],
+        raise_tab(),
+        vec!["activate".into(), "end tell".into()],
+    ]
+    .concat()
+}
+
 /// The stored choice (`managed_terminal` in the settings file). A value
 /// this build does not know -- a hand edit, a newer build's app, or another
 /// platform's -- reads as no app: no destination, and a launch is refused.
@@ -196,6 +329,11 @@ pub enum TerminalSetting {
     WindowsTerminal,
     GnomeTerminal,
     Konsole,
+    Kitty,
+    Wezterm,
+    Alacritty,
+    Warp,
+    Rex,
     #[serde(other)]
     Unrecognized,
 }
@@ -222,6 +360,11 @@ impl TerminalSetting {
             TerminalSetting::WindowsTerminal => TerminalApp::WindowsTerminal,
             TerminalSetting::GnomeTerminal => TerminalApp::GnomeTerminal,
             TerminalSetting::Konsole => TerminalApp::Konsole,
+            TerminalSetting::Kitty => TerminalApp::Kitty,
+            TerminalSetting::Wezterm => TerminalApp::Wezterm,
+            TerminalSetting::Alacritty => TerminalApp::Alacritty,
+            TerminalSetting::Warp => TerminalApp::Warp,
+            TerminalSetting::Rex => TerminalApp::Rex,
             TerminalSetting::Unrecognized => return None,
         };
         TerminalApp::offered().contains(&app).then_some(app)
@@ -237,6 +380,11 @@ impl From<TerminalApp> for TerminalSetting {
             TerminalApp::WindowsTerminal => TerminalSetting::WindowsTerminal,
             TerminalApp::GnomeTerminal => TerminalSetting::GnomeTerminal,
             TerminalApp::Konsole => TerminalSetting::Konsole,
+            TerminalApp::Kitty => TerminalSetting::Kitty,
+            TerminalApp::Wezterm => TerminalSetting::Wezterm,
+            TerminalApp::Alacritty => TerminalSetting::Alacritty,
+            TerminalApp::Warp => TerminalSetting::Warp,
+            TerminalApp::Rex => TerminalSetting::Rex,
         }
     }
 }
@@ -353,32 +501,396 @@ fn parse_installed(stdout: &str) -> Vec<TerminalApp> {
         .collect()
 }
 
+/// What a macOS launch runs: a scripted app's `osascript -e` lines
+/// (Terminal, Ghostty, iTerm2), the `open` plan of an app that takes its
+/// command as argv (kitty, WezTerm, Alacritty), or a Warp Tab Config.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MacosLaunch {
+    Script(Vec<String>),
+    Open(Plan),
+    Warp(WarpTab),
+    Rex(super::rex::RexTab),
+}
+
+/// A Warp launch: a Tab Config, `<name>.toml` in `~/.warp/tab_configs`,
+/// opened with `warp://tab_config/<name>`. Warp opens it as a new tab in
+/// its active window (a new window when it has none) and runs the command
+/// there. A URL, not an Apple Event, so macOS asks for no permission
+/// (owner, 2026-11-03: sessions as tabs in one window, with no prompts).
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WarpTab {
+    /// `near-ai-` and a fresh uuid: only `[a-z0-9-]`, so it is safe in the
+    /// file name and the URL, and no two launches share a file.
+    name: String,
+    contents: String,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl WarpTab {
+    /// The Tab Config that runs `command` in `cwd`, or in Warp's default
+    /// folder when there is none.
+    fn new(command: &str, cwd: Option<&Path>) -> Result<Self, ManagedError> {
+        let name = format!("near-ai-{}", Uuid::new_v4());
+        let directory = match cwd {
+            Some(cwd) => format!(
+                "directory = {}\n",
+                toml_string(cwd.to_str().ok_or(ManagedError::InvalidRequest)?)
+            ),
+            None => String::new(),
+        };
+        let contents = format!(
+            "name = {name}\ntitle = \"Near.ai\"\n\n[[panes]]\nid = \"main\"\ntype = \"terminal\"\n{directory}commands = [{command}]\n",
+            name = toml_string(&name),
+            command = toml_string(command),
+        );
+        Ok(WarpTab { name, contents })
+    }
+
+    fn url(&self) -> String {
+        format!("warp://tab_config/{}", self.name)
+    }
+}
+
+/// A TOML basic string: `\\` and `\"` escaped, and every control
+/// character as `\uXXXX`, so a folder name never becomes TOML.
+#[cfg(any(target_os = "macos", test))]
+fn toml_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Warp's Tab Config folder, `~/.warp/tab_configs`.
+#[cfg(target_os = "macos")]
+fn warp_tab_configs() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".warp").join("tab_configs"))
+}
+
+/// How long a Tab Config may stay on disk: the ticket's life, so a slow
+/// Warp start can still find it.
+#[cfg(target_os = "macos")]
+fn warp_tab_life() -> std::time::Duration {
+    super::sessions::TICKET_LIFE
+        .to_std()
+        .unwrap_or(std::time::Duration::from_secs(120))
+}
+
+/// The Tab Config files not yet removed, by session. Each holds a
+/// single-use launch ticket. A redeem, or the end of the session without
+/// one, removes its own ([`remove_launch_files`]); [`expire_tab_configs`],
+/// on the lease tick, removes any older than the ticket's life. Unix only:
+/// the files are written owner-only.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+static WARP_TAB_FILES: TabFiles = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// A record of Tab Config files by session. The daemon uses the one static
+/// above; a test makes its own, so tests running in parallel never remove
+/// each other's files.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+type TabFiles = std::sync::Mutex<std::collections::BTreeMap<Uuid, PathBuf>>;
+
+/// The record, usable after a panic elsewhere: the map is never left
+/// half-updated, so a poisoned lock is still safe to use.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn with_tab_files<R>(
+    record: &TabFiles,
+    f: impl FnOnce(&mut std::collections::BTreeMap<Uuid, PathBuf>) -> R,
+) -> R {
+    f(&mut record
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner))
+}
+
+/// Remove one Tab Config file this module wrote. A file already gone is
+/// fine. `remove_file` unlinks a symlink itself and never follows it.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn remove_tab_file(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+/// Remove the Tab Config `session`'s launch wrote, now that its ticket
+/// can no longer be used. Only the file recorded for that session is
+/// touched.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+pub fn remove_launch_files(session: Uuid) {
+    remove_launch_files_in(&WARP_TAB_FILES, session);
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn remove_launch_files_in(record: &TabFiles, session: Uuid) {
+    if let Some(path) = with_tab_files(record, |files| files.remove(&session)) {
+        remove_tab_file(&path);
+    }
+}
+
+/// Only macOS writes Tab Configs.
+#[cfg(not(any(target_os = "macos", all(test, unix))))]
+pub fn remove_launch_files(_session: Uuid) {}
+
+/// Whether a file's age is `age` or more. A modified time in the future
+/// (the clock moved back, or the file came from another machine), or one
+/// that cannot be read, counts as old.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn is_old(meta: &std::fs::Metadata, age: std::time::Duration) -> bool {
+    match meta.modified().ok().and_then(|m| m.elapsed().ok()) {
+        Some(elapsed) => elapsed >= age,
+        None => true,
+    }
+}
+
+/// Remove the recorded Tab Configs older than `age`, and forget any that
+/// are already gone. Run on the lease tick.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn expire_tab_configs_older_than(record: &TabFiles, age: std::time::Duration) {
+    let expired: Vec<(Uuid, PathBuf)> = with_tab_files(record, |files| {
+        let expired: Vec<Uuid> = files
+            .iter()
+            .filter(|(_, path)| match std::fs::symlink_metadata(path) {
+                Ok(meta) => is_old(&meta, age),
+                Err(_) => true,
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        expired
+            .into_iter()
+            .filter_map(|id| files.remove(&id).map(|path| (id, path)))
+            .collect()
+    });
+    for (_, path) in expired {
+        remove_tab_file(&path);
+    }
+}
+
+/// Remove the recorded Tab Configs older than the ticket's life.
+#[cfg(target_os = "macos")]
+pub fn expire_tab_configs() {
+    expire_tab_configs_older_than(&WARP_TAB_FILES, warp_tab_life());
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn expire_tab_configs() {}
+
+/// Write `tab` into `folder`, owner-only, and record it against `session`.
+/// Returns the file's path.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn write_warp_tab(
+    record: &TabFiles,
+    folder: &Path,
+    tab: &WarpTab,
+    session: Uuid,
+) -> Result<PathBuf, ManagedError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::create_dir_all(folder).map_err(|_| ManagedError::LaunchUnknown)?;
+    let path = folder.join(format!("{}.toml", tab.name));
+    // `create_new`: a failure to open means something else is at the path,
+    // which is not ours to remove. Only a file this call made is removed.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|_| ManagedError::LaunchUnknown)?;
+    if file.write_all(tab.contents.as_bytes()).is_err() {
+        drop(file);
+        remove_tab_file(&path);
+        return Err(ManagedError::LaunchUnknown);
+    }
+    with_tab_files(record, |files| files.insert(session, path.clone()));
+    Ok(path)
+}
+
+/// Whether `path` is a Tab Config this module wrote: a regular file named
+/// `near-ai-<uuid>.toml` whose own `name` is that stem and whose title is
+/// ours. A user's `near-ai-dev.toml`, or a lookalike with another shape,
+/// is not.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn is_ours(path: &Path, meta: &std::fs::Metadata) -> Option<Uuid> {
+    let stem = path.file_name()?.to_str()?.strip_suffix(".toml")?;
+    let id = Uuid::parse_str(stem.strip_prefix("near-ai-")?).ok()?;
+    if !meta.is_file() || meta.len() > 64 * 1024 || stem != format!("near-ai-{id}") {
+        return None;
+    }
+    let parsed: toml::Value = toml::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    (parsed.get("name")?.as_str()? == stem && parsed.get("title")?.as_str()? == "Near.ai")
+        .then_some(id)
+}
+
+/// At daemon start, for the Tab Configs in `folder` an earlier run left:
+/// remove those older than `age`, and record the younger ones, so the
+/// lease tick removes them when their ticket has lapsed. Files that are not
+/// ours (see [`is_ours`]) are never touched.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn adopt_or_sweep_tab_configs(record: &TabFiles, folder: &Path, age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let Some(id) = is_ours(&path, &meta) else {
+            continue;
+        };
+        if is_old(&meta, age) {
+            remove_tab_file(&path);
+        } else {
+            with_tab_files(record, |files| {
+                files.entry(id).or_insert(path);
+            });
+        }
+    }
+}
+
+/// At daemon start: deal with Tab Configs an earlier run left behind.
+#[cfg(target_os = "macos")]
+pub fn sweep_warp_tab_configs() {
+    if let Some(folder) = warp_tab_configs() {
+        adopt_or_sweep_tab_configs(&WARP_TAB_FILES, &folder, warp_tab_life());
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn sweep_warp_tab_configs() {}
+
+/// Write `tab` and open it in Warp. The file holds a single-use launch
+/// ticket, so the redeem removes it, and the lease tick does once the
+/// session ends or the ticket's life has passed, whether or not the launch
+/// went ahead.
+#[cfg(target_os = "macos")]
+fn open_warp_tab(tab: &WarpTab, session: Uuid) -> Result<(), ManagedError> {
+    let folder = warp_tab_configs().ok_or(ManagedError::LaunchUnknown)?;
+    write_warp_tab(&WARP_TAB_FILES, &folder, tab, session)?;
+    let mut open = std::process::Command::new("/usr/bin/open");
+    open.arg(tab.url());
+    match super::profiles::bounded_output(open) {
+        Ok(output) if output.status.success() => Ok(()),
+        _ => Err(ManagedError::LaunchUnknown),
+    }
+}
+
 /// The macOS launch with its outside effect passed in. Refuses an
 /// unrecognized choice, and an app that was not found, before running
-/// anything. Never falls back to another app. `run` returns what the
-/// script printed; only Terminal's script prints a tab, which is read back
-/// as a bare tty path and nothing else.
+/// anything. Never falls back to another app. A scripted app gets
+/// `command`, the one shell string; an argv app gets `argv` and `cwd`.
+/// `run` returns what was printed; only Terminal's script prints a tab,
+/// which is read back as a bare tty path and window id and nothing else.
 #[cfg(target_os = "macos")]
 fn launch_macos(
     choice: TerminalSetting,
     installed: &[TerminalApp],
     command: &str,
-    run: impl FnOnce(Vec<String>) -> Result<Vec<u8>, ManagedError>,
-) -> Result<Option<TerminalHandle>, ManagedError> {
+    argv: Vec<std::ffi::OsString>,
+    cwd: Option<&Path>,
+    run: impl FnOnce(MacosLaunch) -> Result<Vec<u8>, ManagedError>,
+) -> Result<Option<TerminalTab>, ManagedError> {
     let app = choice.app().ok_or(ManagedError::InvalidRequest)?;
     if !installed.contains(&app) {
         return Err(ManagedError::TerminalNotFound);
     }
-    let printed = run(app.script(command))?;
+    let how = match app {
+        TerminalApp::Warp => MacosLaunch::Warp(WarpTab::new(command, cwd)?),
+        TerminalApp::Rex => MacosLaunch::Rex(super::rex::RexTab::new(&argv, cwd)?),
+        _ => match open_plan(app, cwd, argv) {
+            Some(plan) => MacosLaunch::Open(plan),
+            None => MacosLaunch::Script(app.script(command)),
+        },
+    };
+    // Once the app is asked, anything that goes wrong may follow a typed
+    // command, so it reads as `LaunchUnknown`, never as a refusal from
+    // before anything ran; only the refusals above release a held launch.
+    // The exception is Rex, whose launch sends the ticket only in its last
+    // request: a refusal it reports came before that request was sent.
+    let printed = run(how).map_err(|error| match error {
+        ManagedError::TerminalNotFound
+        | ManagedError::UnsupportedVersion
+        | ManagedError::RexNotReady
+        | ManagedError::TerminalCallFailed
+            if app == TerminalApp::Rex =>
+        {
+            error
+        }
+        _ => ManagedError::LaunchUnknown,
+    })?;
     Ok(match app {
-        TerminalApp::Terminal => apple_terminal_tab(&printed),
+        TerminalApp::Terminal => terminal_tab(&printed),
+        TerminalApp::Rex => super::rex::tab(&printed),
         _ => None,
     })
 }
 
-/// What a Windows or Linux launch starts: `program` with `args`, each one
+/// A macOS launch of `session`: `run` is handed the session's id, which is
+/// what a Tab Config is recorded under and what the redeem later removes.
+#[cfg(target_os = "macos")]
+fn launch_for_session(
+    choice: TerminalSetting,
+    installed: &[TerminalApp],
+    command: &str,
+    argv: Vec<std::ffi::OsString>,
+    cwd: Option<&Path>,
+    session: Uuid,
+    run: impl FnOnce(MacosLaunch, Uuid) -> Result<Vec<u8>, ManagedError>,
+) -> Result<Option<TerminalTab>, ManagedError> {
+    launch_macos(choice, installed, command, argv, cwd, |how| {
+        run(how, session)
+    })
+}
+
+/// A Tab Config written by the real writer, for a test of the daemon.
+#[cfg(all(test, unix))]
+pub(crate) fn write_tab_for_test(folder: &Path, session: Uuid) -> PathBuf {
+    write_warp_tab(
+        &WARP_TAB_FILES,
+        folder,
+        &WarpTab::new("true", None).unwrap(),
+        session,
+    )
+    .unwrap()
+}
+
+/// Run a macOS launch: `osascript` with the script's lines, or `open` with
+/// the plan's argv. Both return as soon as the app has the command.
+#[cfg(target_os = "macos")]
+fn run_macos(how: MacosLaunch, session: Uuid) -> Result<Vec<u8>, ManagedError> {
+    let command = match how {
+        MacosLaunch::Script(lines) => {
+            let mut script = std::process::Command::new("/usr/bin/osascript");
+            for line in &lines {
+                script.args(["-e", line]);
+            }
+            script
+        }
+        MacosLaunch::Open(plan) => {
+            let mut open = std::process::Command::new(&plan.program);
+            open.args(&plan.args);
+            open
+        }
+        MacosLaunch::Warp(tab) => return open_warp_tab(&tab, session).map(|()| Vec::new()),
+        MacosLaunch::Rex(tab) => return super::rex::open_tab(&tab),
+    };
+    let output = super::profiles::bounded_output(command)?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(ManagedError::LaunchUnknown)
+    }
+}
+
+/// What a Windows or Linux launch starts, and what a macOS launch in kitty,
+/// WezTerm or Alacritty hands to `open`: `program` with `args`, each one
 /// argv element, never joined into a string a shell would parse.
-#[cfg(any(windows, target_os = "linux", test))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Plan {
     program: PathBuf,
@@ -386,17 +898,113 @@ struct Plan {
 }
 
 /// The helper's own arguments, after its path.
-#[cfg(any(windows, target_os = "linux", test))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
 fn helper_args(config: &Path, session: Uuid, ticket: &str) -> Vec<std::ffi::OsString> {
+    let mut args = helper_args_without_ticket(config, session);
+    args.extend(["--ticket".into(), ticket.into()]);
+    args
+}
+
+/// The helper's arguments with no ticket, for a terminal that hands it the
+/// ticket in [`LAUNCH_TICKET_ENV`] instead (herdr).
+pub(crate) fn helper_args_without_ticket(config: &Path, session: Uuid) -> Vec<std::ffi::OsString> {
     vec![
         "--config-dir".into(),
         config.as_os_str().to_owned(),
         "redeem-launch".into(),
         "--session-id".into(),
         session.to_string().into(),
-        "--ticket".into(),
-        ticket.into(),
     ]
+}
+
+/// The variable a terminal that can set one gives the helper the launch
+/// ticket in, instead of argv (`redeem-launch` reads it when `--ticket` is
+/// absent). The helper removes it before starting the tool.
+pub const LAUNCH_TICKET_ENV: &str = "NEAR_AI_LAUNCH_TICKET";
+
+/// The terminal's own arguments, before the command: `cwd` as its working
+/// directory when given, keeping the window after the command exits (as
+/// Terminal's window stays on macOS), and whatever marks where the command
+/// starts. `None` for an app that is not started by argv (Terminal and
+/// iTerm2, which are scripted). The same on every platform an app is
+/// offered on; on macOS it follows `open --args`.
+#[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
+fn terminal_args(app: TerminalApp, cwd: Option<&Path>) -> Option<Vec<std::ffi::OsString>> {
+    use std::ffi::OsString;
+    let with_value = |flag: &str, value: &Path| {
+        let mut joined = OsString::from(flag);
+        joined.push(value.as_os_str());
+        joined
+    };
+    let mut args: Vec<OsString> = Vec::new();
+    match app {
+        // `--working-directory=DIRNAME`, then `--`: "interpret all
+        // subsequent options as a program and arguments".
+        TerminalApp::GnomeTerminal => {
+            args.extend(cwd.map(|cwd| with_value("--working-directory=", cwd)));
+            args.push("--".into());
+        }
+        // `-e` "will catch all following arguments", so it is last.
+        // `--hold`: "Do not close the initial session automatically when
+        // it ends".
+        TerminalApp::Konsole => {
+            if let Some(cwd) = cwd {
+                args.extend(["--workdir".into(), cwd.as_os_str().to_owned()]);
+            }
+            args.extend(["--hold".into(), "-e".into()]);
+        }
+        // Every config key is a flag; `-e` takes the rest as the command
+        // with shell expansion disabled.
+        TerminalApp::Ghostty => {
+            args.extend(cwd.map(|cwd| with_value("--working-directory=", cwd)));
+            args.extend(["--wait-after-command=true".into(), "-e".into()]);
+        }
+        TerminalApp::WindowsTerminal => {
+            args.extend(["new-tab".into(), "--title".into(), "NEAR AI".into()]);
+            if let Some(cwd) = cwd {
+                args.extend(["-d".into(), cwd.as_os_str().to_owned()]);
+            }
+        }
+        // `kitty [options] [program-to-run ...]`: `--directory` "Change to
+        // the specified directory when launching", `--hold` "Remain open,
+        // at a shell prompt, after child process exits". The first
+        // argument that is not an option is the program.
+        TerminalApp::Kitty => {
+            if let Some(cwd) = cwd {
+                args.extend(["--directory".into(), cwd.as_os_str().to_owned()]);
+            }
+            args.push("--hold".into());
+        }
+        // `--config 'exit_behavior="Hold"'` overrides the config file and
+        // keeps the pane; `start --always-new-process` is "don't try to ask
+        // an existing wezterm GUI instance to start the command", so the
+        // override applies; `--cwd`; then `--` and the program.
+        TerminalApp::Wezterm => {
+            args.extend([
+                "--config".into(),
+                "exit_behavior=\"Hold\"".into(),
+                "start".into(),
+                "--always-new-process".into(),
+            ]);
+            if let Some(cwd) = cwd {
+                args.extend(["--cwd".into(), cwd.as_os_str().to_owned()]);
+            }
+            args.push("--".into());
+        }
+        // `--working-directory`, `--hold` "Remain open after child process
+        // exits", and `-e` "Command and args to execute (must be last
+        // argument)".
+        TerminalApp::Alacritty => {
+            if let Some(cwd) = cwd {
+                args.extend(["--working-directory".into(), cwd.as_os_str().to_owned()]);
+            }
+            args.extend(["--hold".into(), "-e".into()]);
+        }
+        TerminalApp::Terminal | TerminalApp::Iterm2 | TerminalApp::Warp | TerminalApp::Rex => {
+            return None;
+        }
+    }
+    Some(args)
 }
 
 /// The argv that opens the helper in `app` with `cwd` as the terminal's
@@ -421,50 +1029,29 @@ fn plan(
         || !helper.is_absolute()
         || !config.is_absolute()
         || !cwd.is_absolute()
-        || ticket.is_empty()
-        || !ticket.bytes().all(|b| b.is_ascii_hexdigit())
+        || !valid_ticket(ticket)
     {
         return Err(ManagedError::InvalidRequest);
     }
-    use std::ffi::OsString;
-    let with_value = |flag: &str, value: &Path| {
-        let mut joined = OsString::from(flag);
-        joined.push(value.as_os_str());
-        joined
-    };
-    let mut args: Vec<OsString> = match app {
-        // `--working-directory=DIRNAME`, then `--`: "interpret all
-        // subsequent options as a program and arguments".
-        TerminalApp::GnomeTerminal => vec![with_value("--working-directory=", cwd), "--".into()],
-        // `-e` "will catch all following arguments", so it is last.
-        // `--hold` keeps the window after the helper exits, as Terminal's
-        // window stays on macOS.
-        TerminalApp::Konsole => vec![
-            "--workdir".into(),
-            cwd.as_os_str().to_owned(),
-            "--hold".into(),
-            "-e".into(),
-        ],
-        // Every config key is a flag; `-e` takes the rest as the command
-        // with shell expansion disabled.
-        TerminalApp::Ghostty => vec![
-            with_value("--working-directory=", cwd),
-            "--wait-after-command=true".into(),
-            "-e".into(),
-        ],
-        TerminalApp::WindowsTerminal => vec![
-            "new-tab".into(),
-            "--title".into(),
-            "NEAR AI".into(),
-            "-d".into(),
-            cwd.as_os_str().to_owned(),
-        ],
-        TerminalApp::Terminal | TerminalApp::Iterm2 => {
-            return Err(ManagedError::InvalidRequest);
-        }
-    };
-    args.push(helper.as_os_str().to_owned());
-    args.extend(helper_args(config, session, ticket));
+    let mut command = vec![helper.as_os_str().to_owned()];
+    command.extend(helper_args(config, session, ticket));
+    program_plan(app, program, cwd, command)
+}
+
+/// The argv that opens `command` (a program and its arguments, each one
+/// element) in `app` with `cwd` as the terminal's working directory.
+#[cfg(any(windows, target_os = "linux", test))]
+fn program_plan(
+    app: TerminalApp,
+    program: &Path,
+    cwd: &Path,
+    command: Vec<std::ffi::OsString>,
+) -> Result<Plan, ManagedError> {
+    if !program.is_absolute() || !cwd.is_absolute() {
+        return Err(ManagedError::InvalidRequest);
+    }
+    let mut args = terminal_args(app, Some(cwd)).ok_or(ManagedError::InvalidRequest)?;
+    args.extend(command);
     if app == TerminalApp::WindowsTerminal
         && args.iter().any(|arg| arg.to_string_lossy().contains(';'))
     {
@@ -472,6 +1059,41 @@ fn plan(
     }
     Ok(Plan {
         program: program.to_path_buf(),
+        args,
+    })
+}
+
+/// A launch ticket is hex, and never empty.
+pub(crate) fn valid_ticket(ticket: &str) -> bool {
+    !ticket.is_empty() && ticket.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// How a macOS app that takes its command as argv (kitty, WezTerm,
+/// Alacritty) is opened: `/usr/bin/open -n -b <bundle id> --args`, then the
+/// terminal's arguments and `command`, each one argv element. `-n` opens a
+/// new instance even when one is running, and `-b` addresses the app by
+/// the bundle id the installed check found, as the scripts do. `open`
+/// passes everything after `--args` to the app's `main` unparsed. `None`
+/// for a scripted app, Ghostty included: on macOS it is scripted.
+#[cfg(any(target_os = "macos", test))]
+fn open_plan(
+    app: TerminalApp,
+    cwd: Option<&Path>,
+    command: Vec<std::ffi::OsString>,
+) -> Option<Plan> {
+    if !matches!(
+        app,
+        TerminalApp::Kitty | TerminalApp::Wezterm | TerminalApp::Alacritty
+    ) {
+        return None;
+    }
+    let id = app.bundle_id()?;
+    let mut args: Vec<std::ffi::OsString> =
+        vec!["-n".into(), "-b".into(), id.into(), "--args".into()];
+    args.extend(terminal_args(app, cwd)?);
+    args.extend(command);
+    Some(Plan {
+        program: PathBuf::from("/usr/bin/open"),
         args,
     })
 }
@@ -491,6 +1113,53 @@ pub enum TerminalHandle {
         #[serde(deserialize_with = "tty_path")]
         tty: String,
     },
+    /// A Rex tab: the "Near.ai" Rex session, the Rex window (a tab) the
+    /// launch opened in it, and its one block. Each id is checked as Rex
+    /// prints it (`session:`, `window:` or `block:` and a UUID) wherever it
+    /// came from.
+    Rex {
+        #[serde(deserialize_with = "rex_session")]
+        session: String,
+        #[serde(deserialize_with = "rex_window")]
+        window: String,
+        #[serde(deserialize_with = "rex_block")]
+        block: String,
+    },
+    /// A herdr pane, by its terminal id (`term_` and hex). herdr's public tab
+    /// and pane ids are positional and move when a pane does; the terminal
+    /// id stays with the process.
+    Herdr {
+        #[serde(deserialize_with = "herdr_terminal")]
+        terminal: String,
+    },
+}
+
+fn checked<'de, D: serde::Deserializer<'de>>(
+    d: D,
+    valid: impl Fn(&str) -> bool,
+) -> Result<String, D::Error> {
+    let text = String::deserialize(d)?;
+    if valid(&text) {
+        Ok(text)
+    } else {
+        Err(serde::de::Error::custom("not an id"))
+    }
+}
+
+fn rex_session<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    checked(d, |t| super::rex::valid_id("session", t))
+}
+
+fn rex_window<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    checked(d, |t| super::rex::valid_id("window", t))
+}
+
+fn rex_block<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    checked(d, |t| super::rex::valid_id("block", t))
+}
+
+fn herdr_terminal<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    checked(d, super::herdr::valid_terminal_id)
 }
 
 /// A bare tty device path, `/dev/tty` and up to 16 letters or digits. Nothing
@@ -511,13 +1180,43 @@ fn tty_path<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> 
     }
 }
 
-/// The tty the launch script printed, or none.
-pub fn apple_terminal_tab(output: &[u8]) -> Option<TerminalHandle> {
+/// The tab a launch opened, as its script printed it: the tab's tty, and
+/// the id of the window that held it then, when that could be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalTab {
+    pub handle: TerminalHandle,
+    /// Terminal's window id. Kept on the row by owner decision
+    /// (2026-11-03) although the window picker it was recorded for is gone;
+    /// nothing in production reads it.
+    pub window: Option<u32>,
+}
+
+/// The tab a launch script printed: a bare tty path, then optionally the
+/// window id on a line of its own. Anything else names no tab.
+pub fn terminal_tab(output: &[u8]) -> Option<TerminalTab> {
     let text = std::str::from_utf8(output).ok()?;
     let text = text.strip_suffix('\n').unwrap_or(text);
-    valid_tty(text).then(|| TerminalHandle::AppleTerminal {
-        tty: text.to_string(),
+    let (tty, window) = match text.split_once('\n') {
+        Some((tty, window)) => {
+            // Digits only: `u32::from_str` would also take a leading `+`.
+            if !window.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            (tty, Some(window.parse::<u32>().ok()?))
+        }
+        None => (text, None),
+    };
+    valid_tty(tty).then(|| TerminalTab {
+        handle: TerminalHandle::AppleTerminal {
+            tty: tty.to_string(),
+        },
+        window,
     })
+}
+
+/// The tty a launch script printed, or none.
+pub fn apple_terminal_tab(output: &[u8]) -> Option<TerminalHandle> {
+    terminal_tab(output).map(|tab| tab.handle)
 }
 
 /// Bring a session's tab to the front, in whichever window holds it now.
@@ -532,27 +1231,10 @@ pub fn focus(handle: &TerminalHandle) -> Result<(), ManagedError> {
             }
             // `tty` passed `valid_tty`, so the script holds only letters,
             // digits and slashes from it.
-            let script = format!(
-                "tell application \"Terminal\"\n\
-                 set done to false\n\
-                 repeat with w in windows\n\
-                 repeat with t in tabs of w\n\
-                 if tty of t is \"{tty}\" then\n\
-                 set selected of t to true\n\
-                 if miniaturized of w then set miniaturized of w to false\n\
-                 set index of w to 1\n\
-                 set done to true\n\
-                 exit repeat\n\
-                 end if\n\
-                 end repeat\n\
-                 if done then exit repeat\n\
-                 end repeat\n\
-                 if not done then error \"no tab\"\n\
-                 activate\n\
-                 end tell"
-            );
             let mut command = std::process::Command::new("/usr/bin/osascript");
-            command.args(["-e", &script]);
+            for line in focus_script(tty) {
+                command.args(["-e", &line]);
+            }
             let output = super::profiles::bounded_output(command)?;
             if output.status.success() {
                 Ok(())
@@ -562,6 +1244,11 @@ pub fn focus(handle: &TerminalHandle) -> Result<(), ManagedError> {
         }
         #[cfg(not(target_os = "macos"))]
         TerminalHandle::AppleTerminal { .. } => Err(ManagedError::UnsupportedVersion),
+        #[cfg(target_os = "macos")]
+        TerminalHandle::Rex { session, block, .. } => super::rex::focus(session, block),
+        #[cfg(not(target_os = "macos"))]
+        TerminalHandle::Rex { .. } => Err(ManagedError::UnsupportedVersion),
+        TerminalHandle::Herdr { terminal } => super::herdr::focus(terminal),
     }
 }
 
@@ -571,11 +1258,7 @@ pub fn shell_command(
     session: Uuid,
     ticket: &str,
 ) -> Result<String, ManagedError> {
-    if !helper.is_absolute()
-        || !config.is_absolute()
-        || ticket.is_empty()
-        || !ticket.bytes().all(|b| b.is_ascii_hexdigit())
-    {
+    if !helper.is_absolute() || !config.is_absolute() || !valid_ticket(ticket) {
         return Err(ManagedError::InvalidRequest);
     }
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
@@ -653,17 +1336,35 @@ pub fn tool_setup_available() -> bool {
     cfg!(target_os = "macos")
 }
 
-/// Keep the vendor output visible in every supported macOS terminal. The
-/// command is built by `tool_setup`, never accepted as an IPC parameter.
+/// The script tool setup runs under `/bin/bash -lc`: the vendor's
+/// commands, then a login shell, so their output stays visible in every
+/// supported macOS terminal. The body is built by `tool_setup`, never
+/// accepted as an IPC parameter.
 #[cfg(any(target_os = "macos", test))]
-fn setup_shell_command(body: &str) -> Result<String, ManagedError> {
+fn setup_script(body: &str) -> Result<String, ManagedError> {
     if body.is_empty() || body.len() > 16_384 || body.contains('\0') {
         return Err(ManagedError::InvalidRequest);
     }
-    let script = format!(
+    Ok(format!(
         "PATH=\"$HOME/.local/bin:$HOME/.opencode/bin:$PATH\"; export PATH; {body}; exec \"${{SHELL:-/bin/zsh}}\" -l"
-    );
+    ))
+}
+
+/// The setup script as one shell string, for a scripted terminal.
+#[cfg(any(target_os = "macos", test))]
+fn setup_shell_command(body: &str) -> Result<String, ManagedError> {
+    let script = setup_script(body)?;
     Ok(format!("/bin/bash -lc '{}'", script.replace('\'', "'\\''")))
+}
+
+/// The setup script as argv, for a terminal that takes one.
+#[cfg(any(target_os = "macos", test))]
+fn setup_argv(body: &str) -> Result<Vec<std::ffi::OsString>, ManagedError> {
+    Ok(vec![
+        "/bin/bash".into(),
+        "-lc".into(),
+        setup_script(body)?.into(),
+    ])
 }
 
 pub fn launch_tool_setup(
@@ -674,18 +1375,15 @@ pub fn launch_tool_setup(
     #[cfg(target_os = "macos")]
     {
         let command = setup_shell_command(body)?;
-        launch_macos(choice, installed, &command, |lines| {
-            let mut script = std::process::Command::new("/usr/bin/osascript");
-            for line in &lines {
-                script.args(["-e", line]);
-            }
-            let output =
-                super::profiles::bounded_output(script).map_err(|_| ManagedError::LaunchUnknown)?;
-            if !output.status.success() {
-                return Err(ManagedError::LaunchUnknown);
-            }
-            Ok(output.stdout)
-        })?;
+        launch_macos(
+            choice,
+            installed,
+            &command,
+            setup_argv(body)?,
+            None,
+            // A setup holds no launch ticket, so no redeem removes its file.
+            |how| run_macos(how, Uuid::new_v4()),
+        )?;
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]
@@ -697,12 +1395,14 @@ pub fn launch_tool_setup(
 
 /// Open the session in the chosen terminal, which must be among
 /// `installed`, with `cwd` as its working directory where the app takes
-/// one by command line (Windows and Linux). On macOS the helper itself
-/// starts the tool in `cwd`, so the scripts stay as they were.
+/// one by command line (Windows, Linux, and kitty, WezTerm and Alacritty
+/// on macOS). The helper itself starts the tool in `cwd` either way, so
+/// the macOS scripts stay as they were.
 ///
 /// The handle names the window it opened in, when the terminal can say
 /// (Terminal's tab, by tty); a launch that cannot is still a launch, with no
 /// handle.
+///
 pub fn launch(
     choice: TerminalSetting,
     installed: &[TerminalApp],
@@ -710,23 +1410,25 @@ pub fn launch(
     cwd: &Path,
     session: Uuid,
     ticket: &str,
-) -> Result<Option<TerminalHandle>, ManagedError> {
+) -> Result<Option<TerminalTab>, ManagedError> {
     #[cfg(target_os = "macos")]
     {
-        let _ = cwd;
-        let command = shell_command(&helper_path()?, config, session, ticket)?;
-        launch_macos(choice, installed, &command, |lines| {
-            let mut script = std::process::Command::new("/usr/bin/osascript");
-            for line in &lines {
-                script.args(["-e", line]);
-            }
-            let output = super::profiles::bounded_output(script)?;
-            if output.status.success() {
-                Ok(output.stdout)
-            } else {
-                Err(ManagedError::LaunchUnknown)
-            }
-        })
+        if !cwd.is_absolute() {
+            return Err(ManagedError::InvalidRequest);
+        }
+        let helper = helper_path()?;
+        let command = shell_command(&helper, config, session, ticket)?;
+        let mut argv = vec![helper.into_os_string()];
+        argv.extend(helper_args(config, session, ticket));
+        launch_for_session(
+            choice,
+            installed,
+            &command,
+            argv,
+            Some(cwd),
+            session,
+            run_macos,
+        )
     }
     #[cfg(any(windows, target_os = "linux"))]
     {
@@ -742,16 +1444,7 @@ pub fn launch(
             .and_then(external_terminal)
             .ok_or(ManagedError::TerminalNotFound)?;
         let plan = plan(app, &program, &helper_path()?, config, cwd, session, ticket)?;
-        let mut process = std::process::Command::new(&plan.program)
-            .args(&plan.args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|_| ManagedError::LaunchUnknown)?;
-        std::thread::spawn(move || {
-            let _ = process.wait();
-        });
+        spawn_plan(&plan)?;
         Ok(None)
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
@@ -761,8 +1454,81 @@ pub fn launch(
     }
 }
 
+/// Start a Windows or Linux terminal and leave it running.
 #[cfg(any(windows, target_os = "linux"))]
-fn external_terminal(name: &str) -> Option<PathBuf> {
+fn spawn_plan(plan: &Plan) -> Result<(), ManagedError> {
+    let mut process = std::process::Command::new(&plan.program)
+        .args(&plan.args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|_| ManagedError::LaunchUnknown)?;
+    std::thread::spawn(move || {
+        let _ = process.wait();
+    });
+    Ok(())
+}
+
+/// Open `program`, with no arguments and nothing secret, in the chosen
+/// terminal with `cwd` as its folder: how a herdr client is started when
+/// none is running. The same refusals as [`launch`]; nothing is recorded.
+/// Only unix speaks herdr's socket, so Windows has no caller yet.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn open_program(
+    choice: TerminalSetting,
+    installed: &[TerminalApp],
+    program: &Path,
+    cwd: &Path,
+) -> Result<(), ManagedError> {
+    if !program.is_absolute() || !cwd.is_absolute() {
+        return Err(ManagedError::InvalidRequest);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let text = program.to_str().ok_or(ManagedError::InvalidRequest)?;
+        let command = format!("'{}'", text.replace('\'', "'\\''"));
+        launch_macos(
+            choice,
+            installed,
+            &command,
+            vec![program.as_os_str().to_owned()],
+            Some(cwd),
+            // herdr alone holds no launch ticket, so no redeem removes a
+            // Warp Tab Config for it: a key of its own lets the backstop.
+            |how| run_macos(how, Uuid::new_v4()),
+        )
+        .map(|_| ())
+    }
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        if !supported() {
+            return Err(ManagedError::UnsupportedVersion);
+        }
+        let app = choice.app().ok_or(ManagedError::InvalidRequest)?;
+        if !installed.contains(&app) {
+            return Err(ManagedError::TerminalNotFound);
+        }
+        let terminal = app
+            .executable()
+            .and_then(external_terminal)
+            .ok_or(ManagedError::TerminalNotFound)?;
+        spawn_plan(&program_plan(
+            app,
+            &terminal,
+            cwd,
+            vec![program.as_os_str().to_owned()],
+        )?)
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+    {
+        let _ = (choice, installed);
+        Err(ManagedError::UnsupportedVersion)
+    }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+pub(crate) fn external_terminal(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .filter(|p| p.is_absolute())
         .map(|p| p.join(name))
@@ -772,6 +1538,587 @@ fn external_terminal(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Owner, 2026-11-03: in Warp a session opens as a tab in the window
+    /// already open, through a Tab Config and a `warp://` link, with no
+    /// macOS prompt. The config runs the command in the folder, and a
+    /// folder or command holding quotes, backslashes or newlines stays
+    /// one TOML string.
+    #[test]
+    fn a_warp_launch_is_a_tab_config_that_runs_the_command_in_the_folder() {
+        let cwd = Path::new("/Users/a/my \"odd\" folder\\x\n");
+        let command = "'/x/near-ai' --config-dir '/c' redeem-launch --ticket 'ab'";
+        let tab = WarpTab::new(command, Some(cwd)).unwrap();
+        assert!(tab.name.starts_with("near-ai-"));
+        assert!(
+            tab.name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        );
+        assert_eq!(tab.url(), format!("warp://tab_config/{}", tab.name));
+        assert_ne!(
+            tab.name,
+            WarpTab::new(command, Some(cwd)).unwrap().name,
+            "one file per launch"
+        );
+
+        let parsed: toml::Value = toml::from_str(&tab.contents).unwrap();
+        assert_eq!(parsed["name"].as_str(), Some(tab.name.as_str()));
+        let pane = &parsed["panes"][0];
+        assert_eq!(pane["type"].as_str(), Some("terminal"));
+        assert_eq!(pane["directory"].as_str(), cwd.to_str());
+        assert_eq!(pane["commands"][0].as_str(), Some(command));
+        assert_eq!(pane["commands"].as_array().unwrap().len(), 1);
+
+        let home =
+            toml::from_str::<toml::Value>(&WarpTab::new(command, None).unwrap().contents).unwrap();
+        assert!(
+            home["panes"][0].get("directory").is_none(),
+            "Warp's own folder"
+        );
+    }
+
+    /// A Warp launch hands `run` the Tab Config, never a script or `open`
+    /// argv, and opens no handle: Warp's tab cannot be found again.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_warp_launch_runs_its_tab_config() {
+        let cwd = Path::new("/tmp/project");
+        let mut seen = None;
+        let opened = launch_macos(
+            TerminalSetting::Warp,
+            &[TerminalApp::Warp],
+            "'/x/near-ai'",
+            vec!["/x/near-ai".into()],
+            Some(cwd),
+            |how| {
+                seen = Some(how);
+                Ok(Vec::new())
+            },
+        );
+        assert_eq!(opened, Ok(None));
+        let Some(MacosLaunch::Warp(tab)) = seen else {
+            panic!("a Tab Config");
+        };
+        let parsed: toml::Value = toml::from_str(&tab.contents).unwrap();
+        assert_eq!(
+            parsed["panes"][0]["directory"].as_str(),
+            Some("/tmp/project")
+        );
+        assert_eq!(
+            parsed["panes"][0]["commands"][0].as_str(),
+            Some("'/x/near-ai'")
+        );
+        assert_eq!(
+            launch_macos(
+                TerminalSetting::Warp,
+                &[TerminalApp::Terminal],
+                "'/x'",
+                vec![],
+                None,
+                |_| Ok(vec![])
+            ),
+            Err(ManagedError::TerminalNotFound),
+            "not installed"
+        );
+    }
+
+    /// Rex (owner, 2026-11-03): macOS only, found by its bundle, and never
+    /// scripted or started through `open --args`: its own CLI opens a tab.
+    #[test]
+    fn rex_is_offered_on_macos_only_and_driven_by_its_cli() {
+        assert_eq!(TerminalApp::Rex.bundle_id(), Some("com.superlogical.rex"));
+        assert!(TerminalApp::MACOS.contains(&TerminalApp::Rex));
+        assert!(!TerminalApp::LINUX.contains(&TerminalApp::Rex));
+        assert!(!TerminalApp::WINDOWS.contains(&TerminalApp::Rex));
+        assert!(
+            TerminalApp::Rex.script("'/x/near-ai'").is_empty(),
+            "no Apple Event"
+        );
+        assert_eq!(open_plan(TerminalApp::Rex, None, vec!["/x".into()]), None);
+        assert_eq!(terminal_args(TerminalApp::Rex, None), None);
+        assert_eq!(TerminalApp::Rex.executable(), None);
+    }
+
+    /// A Rex launch hands `run` the tab's request, with the argv as the
+    /// command and the folder, and keeps the tab its output names. Only the
+    /// refusals Rex's launch reports from before the ticket was sent stay
+    /// refusals; anything else is `LaunchUnknown`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_rex_launch_runs_its_tab_and_keeps_the_ids_it_printed() {
+        let session = "session:01a1a1cb-0d4e-7c1a-9f00-3b2a1c0d9e8f";
+        let window = "window:01a1a1cb-e32b-7000-8000-000000000001";
+        let block = "block:01a1a1cb-e327-7000-8000-000000000002";
+        let mut seen = None;
+        let opened = launch_macos(
+            TerminalSetting::Rex,
+            &[TerminalApp::Rex],
+            "'/x/near-ai'",
+            vec!["/x/near-ai".into(), "--ticket".into(), "ab".into()],
+            Some(Path::new("/tmp/project")),
+            |how| {
+                seen = Some(how);
+                Ok(format!("{session}\n{window}\n{block}\n").into_bytes())
+            },
+        )
+        .unwrap()
+        .expect("a tab");
+        assert_eq!(
+            opened.handle,
+            TerminalHandle::Rex {
+                session: session.into(),
+                window: window.into(),
+                block: block.into(),
+            }
+        );
+        let Some(MacosLaunch::Rex(tab)) = seen else {
+            panic!("a Rex tab");
+        };
+        let request: serde_json::Value = serde_json::from_slice(&tab.request).unwrap();
+        assert_eq!(
+            request["layout"]["block"]["options"]["command"],
+            serde_json::json!(["/x/near-ai", "--ticket", "ab"])
+        );
+        assert_eq!(request["layout"]["block"]["options"]["cwd"], "/tmp/project");
+        let refused = |error: ManagedError| {
+            launch_macos(
+                TerminalSetting::Rex,
+                &[TerminalApp::Rex],
+                "'/x'",
+                vec!["/x".into()],
+                None,
+                |_| Err(error),
+            )
+        };
+        assert_eq!(
+            refused(ManagedError::TerminalNotFound),
+            Err(ManagedError::TerminalNotFound)
+        );
+        assert_eq!(
+            refused(ManagedError::UnsupportedVersion),
+            Err(ManagedError::UnsupportedVersion)
+        );
+        assert_eq!(
+            refused(ManagedError::InvalidRequest),
+            Err(ManagedError::LaunchUnknown)
+        );
+    }
+
+    /// herdr's attach step (D4) opens the herdr program alone in the chosen
+    /// terminal, in the folder: no helper and no ticket.
+    #[cfg(unix)]
+    #[test]
+    fn a_program_opens_alone_in_the_terminal() {
+        let cwd = Path::new("/home/a/project");
+        let plan = program_plan(
+            TerminalApp::Kitty,
+            Path::new("/usr/bin/kitty"),
+            cwd,
+            vec!["/usr/bin/herdr".into()],
+        )
+        .unwrap();
+        let mut expected = terminal_args(TerminalApp::Kitty, Some(cwd)).unwrap();
+        expected.push("/usr/bin/herdr".into());
+        assert_eq!(plan.args, expected);
+        assert_eq!(
+            program_plan(
+                TerminalApp::Kitty,
+                Path::new("kitty"),
+                cwd,
+                vec!["/usr/bin/herdr".into()]
+            ),
+            Err(ManagedError::InvalidRequest)
+        );
+    }
+
+    // Owner, 2026-11-03: the Tab Config holds the launch ticket, so the
+    // redeem (or the end of the session) removes that launch's file, and the
+    // lease tick removes any left past the ticket's life.
+    #[cfg(unix)]
+    fn warp_tab(command: &str) -> WarpTab {
+        WarpTab::new(command, Some(Path::new("/tmp/p"))).unwrap()
+    }
+
+    #[cfg(unix)]
+    const LONG: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    /// Make `path` look two `LONG`s old.
+    #[cfg(unix)]
+    fn age_file(path: &Path) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - LONG * 2)
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_redeem_removes_its_own_launchs_tab_config_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
+        let (mine, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let a = write_warp_tab(&files, dir.path(), &warp_tab("a"), mine).unwrap();
+        let b = write_warp_tab(&files, dir.path(), &warp_tab("b"), other).unwrap();
+        assert!(a.exists() && b.exists());
+        remove_launch_files_in(&files, mine);
+        assert!(!a.exists(), "the redeemed launch's file is gone");
+        assert!(b.exists(), "another launch's file is left");
+        remove_launch_files_in(&files, mine);
+        remove_launch_files_in(&files, other);
+        assert!(!b.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tab_config_already_gone_is_fine() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
+        let session = Uuid::new_v4();
+        let path = write_warp_tab(&files, dir.path(), &warp_tab("a"), session).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        remove_launch_files_in(&files, session);
+        remove_launch_files_in(&files, session);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_tab_config_never_follows_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
+        let session = Uuid::new_v4();
+        let path = write_warp_tab(&files, dir.path(), &warp_tab("a"), session).unwrap();
+        let target = dir.path().join("precious");
+        std::fs::write(&target, "keep").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        remove_launch_files_in(&files, session);
+        assert!(path.symlink_metadata().is_err(), "the link is removed");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_is_not_ours_is_never_removed_by_a_failed_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
+        let tab = warp_tab("a");
+        let theirs = dir.path().join(format!("{}.toml", tab.name));
+        std::fs::write(&theirs, "theirs").unwrap();
+        let session = Uuid::new_v4();
+        assert_eq!(
+            write_warp_tab(&files, dir.path(), &tab, session),
+            Err(ManagedError::LaunchUnknown)
+        );
+        assert_eq!(std::fs::read_to_string(&theirs).unwrap(), "theirs");
+        remove_launch_files_in(&files, session);
+        assert!(theirs.exists(), "nothing was recorded for it");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_lease_tick_removes_a_tab_config_past_the_ticket_life() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
+        let session = Uuid::new_v4();
+        let path = write_warp_tab(&files, dir.path(), &warp_tab("a"), session).unwrap();
+        expire_tab_configs_older_than(&files, LONG);
+        assert!(path.exists(), "still inside the ticket's life");
+        age_file(&path);
+        expire_tab_configs_older_than(&files, LONG);
+        assert!(!path.exists());
+        assert!(with_tab_files(&files, |files| !files.contains_key(&session)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_modified_time_in_the_future_counts_as_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
+        let session = Uuid::new_v4();
+        let path = write_warp_tab(&files, dir.path(), &warp_tab("a"), session).unwrap();
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(std::time::SystemTime::now() + LONG)
+            .unwrap();
+        expire_tab_configs_older_than(&files, std::time::Duration::from_secs(60));
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_poisoned_record_still_removes_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
+        let session = Uuid::new_v4();
+        let path = write_warp_tab(&files, dir.path(), &warp_tab("a"), session).unwrap();
+        let files = std::sync::Arc::new(files);
+        let poisoned = files.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("poison the record");
+        })
+        .join();
+        remove_launch_files_in(&files, session);
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_startup_sweep_touches_only_tab_configs_this_module_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
+        let ours_old = warp_tab("a");
+        let ours_young = warp_tab("b");
+        let old = write_warp_tab(&files, dir.path(), &ours_old, Uuid::new_v4()).unwrap();
+        let young = write_warp_tab(&files, dir.path(), &ours_young, Uuid::new_v4()).unwrap();
+        // Forget what this run wrote: a restart has an empty record.
+        with_tab_files(&files, |files| files.clear());
+        // The user's own files: a name that is not a uuid, a uuid name with
+        // another shape, and a symlink.
+        let dev = dir.path().join("near-ai-dev.toml");
+        std::fs::write(&dev, "name = \"near-ai-dev\"\ntitle = \"Near.ai\"\n").unwrap();
+        let lookalike = dir.path().join(format!("near-ai-{}.toml", Uuid::new_v4()));
+        std::fs::write(&lookalike, "name = \"mine\"\ntitle = \"Mine\"\n").unwrap();
+        let target = dir.path().join("precious");
+        std::fs::write(&target, "x").unwrap();
+        let link = dir.path().join(format!("near-ai-{}.toml", Uuid::new_v4()));
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - LONG)
+            .unwrap();
+
+        adopt_or_sweep_tab_configs(&files, dir.path(), std::time::Duration::from_secs(120));
+        assert!(!old.exists(), "ours and past the ticket's life");
+        assert!(young.exists(), "ours, inside the ticket's life: kept");
+        assert!(dev.exists() && lookalike.exists(), "not ours");
+        assert!(link.symlink_metadata().is_ok() && target.exists());
+        // The kept one is adopted, so the lease tick removes it later.
+        age_file(&young);
+        expire_tab_configs_older_than(&files, LONG);
+        assert!(!young.exists());
+        assert!(dev.exists() && lookalike.exists());
+    }
+
+    /// A real launch records its Tab Config under the session id it is
+    /// given, which is what the redeem removes.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_launch_records_its_tab_config_under_its_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = TabFiles::default();
+        let session = Uuid::new_v4();
+        let mut written = None;
+        launch_for_session(
+            TerminalSetting::Warp,
+            &[TerminalApp::Warp],
+            "'/x/near-ai'",
+            vec![],
+            Some(Path::new("/tmp/p")),
+            session,
+            |how, id| {
+                let MacosLaunch::Warp(tab) = how else {
+                    panic!("a Tab Config");
+                };
+                written = Some(write_warp_tab(&files, dir.path(), &tab, id).unwrap());
+                Ok(Vec::new())
+            },
+        )
+        .unwrap();
+        let path = written.unwrap();
+        assert!(path.exists());
+        remove_launch_files_in(&files, session);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn warp_is_offered_on_macos_only_and_opened_by_its_bundle() {
+        assert_eq!(TerminalApp::Warp.bundle_id(), Some("dev.warp.Warp-Stable"));
+        assert!(TerminalApp::MACOS.contains(&TerminalApp::Warp));
+        assert!(!TerminalApp::LINUX.contains(&TerminalApp::Warp));
+        assert!(!TerminalApp::WINDOWS.contains(&TerminalApp::Warp));
+        assert!(
+            TerminalApp::Warp.script("'/x/near-ai'").is_empty(),
+            "no Apple Event"
+        );
+        assert_eq!(open_plan(TerminalApp::Warp, None, vec!["/x".into()]), None);
+    }
+
+    /// Every launch opens a window of its own (owner, 2026-11-03): Terminal
+    /// runs the plain window script, with the command once and never typed
+    /// into an existing tab, behind the same refusals as every other app.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_terminal_launch_opens_a_window_of_its_own() {
+        let tab = TerminalTab {
+            handle: TerminalHandle::AppleTerminal {
+                tty: "/dev/ttys012".into(),
+            },
+            window: Some(4242),
+        };
+        let argv = || vec![std::ffi::OsString::from("/x/near-ai")];
+        let cwd = Some(Path::new("/Users/x/app"));
+        let mut ran = None;
+        assert_eq!(
+            launch_macos(
+                TerminalSetting::Terminal,
+                &[TerminalApp::Terminal],
+                "'/x/near-ai'",
+                argv(),
+                cwd,
+                |how| {
+                    ran = Some(how);
+                    Ok(b"/dev/ttys012\n4242\n".to_vec())
+                },
+            ),
+            Ok(Some(tab.clone()))
+        );
+        assert_eq!(
+            ran,
+            Some(MacosLaunch::Script(
+                TerminalApp::Terminal.script("'/x/near-ai'")
+            ))
+        );
+        assert_eq!(
+            launch_macos(
+                TerminalSetting::Terminal,
+                &[TerminalApp::Ghostty],
+                "'/x/near-ai'",
+                argv(),
+                cwd,
+                |_| panic!("nothing runs when Terminal is missing"),
+            ),
+            Err(ManagedError::TerminalNotFound)
+        );
+        let mut ran = None;
+        launch_macos(
+            TerminalSetting::Ghostty,
+            &[TerminalApp::Ghostty],
+            "'/x/near-ai'",
+            argv(),
+            cwd,
+            |how| {
+                ran = Some(how);
+                Ok(vec![])
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            ran,
+            Some(MacosLaunch::Script(
+                TerminalApp::Ghostty.script("'/x/near-ai'")
+            ))
+        );
+    }
+
+    /// Every Terminal script here compiles. Compiling sends no Apple Event;
+    /// nothing here addresses Terminal.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_scripts_compile_on_this_mac() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("compiled.scpt");
+        let compile = |language: &str, lines: &[String]| {
+            let mut command = std::process::Command::new("/usr/bin/osacompile");
+            command.args(["-l", language, "-o"]).arg(&out);
+            for line in lines {
+                command.args(["-e", line]);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}: {lines:#?}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        for lines in [
+            TerminalApp::Terminal.script("echo ok"),
+            focus_script("/dev/ttys011"),
+        ] {
+            compile("AppleScript", &lines);
+        }
+    }
+
+    /// Show scans the windows for its tab's window, by id, stopping at the
+    /// match; a launch scans nothing and reads only the front window's id,
+    /// when its selected tab is the launch's. Nothing types into or opens a
+    /// tab in an existing window (owner, 2026-11-02). Built on every
+    /// platform, so no builder is compiled for nothing.
+    #[test]
+    fn show_scans_and_a_launch_reads_only_the_front_window() {
+        let focus = focus_script("/dev/ttys011");
+        assert_eq!(
+            focus.first().unwrap(),
+            "tell application id \"com.apple.Terminal\""
+        );
+        assert!(focus.contains(&"set wid to id of w".to_string()));
+        assert!(focus.contains(&"set tw to window id wid".to_string()));
+        assert!(focus.contains(&"if tty of x is \"/dev/ttys011\" then".to_string()));
+        assert!(focus.contains(&"if t is missing value then error \"no tab\"".to_string()));
+        let launch = TerminalApp::Terminal.script("echo ok");
+        for lines in [&focus, &launch] {
+            assert!(
+                !lines.iter().any(|l| l.contains("keystroke")
+                    || l.contains("System Events")
+                    || l.contains("\" in t")),
+                "{lines:#?}"
+            );
+        }
+        assert_eq!(
+            launch,
+            [
+                vec!["tell application id \"com.apple.Terminal\"".to_string()],
+                open_window("echo ok"),
+                vec!["return found".into(), "end tell".into()],
+            ]
+            .concat()
+        );
+        assert!(
+            !launch
+                .iter()
+                .any(|l| l.contains("repeat with w in windows")),
+            "no scan of the windows"
+        );
+    }
+
+    /// A launch prints its tab's tty and, on the next line, its window's
+    /// id; anything else names no tab.
+    #[test]
+    fn a_launch_prints_its_tab_and_window() {
+        let tab = |tty: &str| TerminalHandle::AppleTerminal { tty: tty.into() };
+        assert_eq!(
+            terminal_tab(b"/dev/ttys003\n4242\n"),
+            Some(TerminalTab {
+                handle: tab("/dev/ttys003"),
+                window: Some(4242)
+            })
+        );
+        assert_eq!(
+            terminal_tab(b"/dev/ttys003\n"),
+            Some(TerminalTab {
+                handle: tab("/dev/ttys003"),
+                window: None
+            })
+        );
+        // Anything else is not what the script prints: no tab.
+        for output in [
+            &b""[..],
+            b"/dev/ttys003\n\n",
+            b"/dev/ttys003\n42 x",
+            b"/dev/ttys003\n/dev/ttys004",
+            b"/dev/ttys003\n42\n43",
+            b"4242\n/dev/ttys003",
+            b"ttys003\n42",
+            b"/dev/ttys003\n99999999999",
+            b"/dev/ttys003\n+42",
+        ] {
+            assert_eq!(terminal_tab(output), None, "{output:?}");
+        }
+    }
 
     #[test]
     fn setup_is_one_quoted_shell_invocation_and_keeps_the_terminal_open() {
@@ -803,7 +2150,7 @@ mod tests {
     /// carries `$`, backticks and non-ASCII text.
     fn hostile_command() -> String {
         shell_command(
-            Path::new("/Applications/Trace Commons.app/Contents/MacOS/near-ai"),
+            Path::new("/Applications/Near.ai Staging.app/Contents/MacOS/near-ai"),
             Path::new(
                 "/Users/x/a\"; do shell script \"touch /tmp/pwn\" --\\\n'b/$HOME/`touch pwn`/año/日本語",
             ),
@@ -851,7 +2198,6 @@ mod tests {
             "iTerm2",
             "Windows Terminal",
             "iterm",
-            "warp",
             "/Applications/Ghostty.app",
             "/usr/bin/konsole",
             "ghostty; rm -rf /",
@@ -862,7 +2208,16 @@ mod tests {
         // Each platform's list, as the docs record it.
         assert_eq!(
             TerminalApp::MACOS.map(TerminalApp::name),
-            ["Terminal", "Ghostty", "iTerm2"]
+            [
+                "Terminal",
+                "Ghostty",
+                "iTerm2",
+                "kitty",
+                "WezTerm",
+                "Alacritty",
+                "Warp",
+                "Rex"
+            ]
         );
         assert_eq!(
             TerminalApp::WINDOWS.map(TerminalApp::name),
@@ -870,7 +2225,14 @@ mod tests {
         );
         assert_eq!(
             TerminalApp::LINUX.map(TerminalApp::name),
-            ["GNOME Terminal", "Konsole", "Ghostty"]
+            [
+                "GNOME Terminal",
+                "Konsole",
+                "Ghostty",
+                "kitty",
+                "WezTerm",
+                "Alacritty"
+            ]
         );
     }
 
@@ -912,7 +2274,12 @@ mod tests {
     #[test]
     fn every_script_holds_the_command_only_as_one_string_literal() {
         let command = hostile_command();
-        for app in TerminalApp::MACOS {
+        // kitty, WezTerm and Alacritty take argv, never a script.
+        for app in [
+            TerminalApp::Terminal,
+            TerminalApp::Ghostty,
+            TerminalApp::Iterm2,
+        ] {
             let lines = app.script(&command);
             let holding: Vec<&String> = lines
                 .iter()
@@ -968,6 +2335,13 @@ mod tests {
                 "try",
                 "set found to tty of t",
                 "end try",
+                // The window id, from the front window only when its
+                // selected tab is this one (#1853).
+                "try",
+                "if found is not \"\" and tty of selected tab of front window is found then",
+                "set found to found & linefeed & ((id of front window) as text)",
+                "end if",
+                "end try",
                 "return found",
                 "end tell",
             ]
@@ -1013,20 +2387,42 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_chosen_app_that_is_not_installed_is_refused_without_running() {
-        let never = |_: Vec<String>| -> Result<Vec<u8>, ManagedError> {
+        let never = |_: MacosLaunch| -> Result<Vec<u8>, ManagedError> {
             panic!("nothing runs when the chosen app is missing")
         };
+        let argv = || vec![std::ffi::OsString::from("/x/near-ai")];
+        let cwd = Some(Path::new("/Users/x/app"));
         assert_eq!(
             launch_macos(
                 TerminalSetting::Ghostty,
                 &[TerminalApp::Terminal],
                 "'/x/near-ai'",
+                argv(),
+                cwd,
                 never
             ),
             Err(ManagedError::TerminalNotFound)
         );
         assert_eq!(
-            launch_macos(TerminalSetting::Iterm2, &[], "'/x/near-ai'", never),
+            launch_macos(
+                TerminalSetting::Iterm2,
+                &[],
+                "'/x/near-ai'",
+                argv(),
+                cwd,
+                never
+            ),
+            Err(ManagedError::TerminalNotFound)
+        );
+        assert_eq!(
+            launch_macos(
+                TerminalSetting::Kitty,
+                &[TerminalApp::Terminal],
+                "'/x/near-ai'",
+                argv(),
+                cwd,
+                never
+            ),
             Err(ManagedError::TerminalNotFound)
         );
         assert_eq!(
@@ -1034,6 +2430,8 @@ mod tests {
                 TerminalSetting::Unrecognized,
                 &TerminalApp::MACOS,
                 "'/x/near-ai'",
+                argv(),
+                cwd,
                 never
             ),
             Err(ManagedError::InvalidRequest)
@@ -1043,23 +2441,56 @@ mod tests {
             TerminalSetting::Ghostty,
             &[TerminalApp::Ghostty],
             "'/x/near-ai'",
-            |lines| {
-                ran = Some(lines);
+            argv(),
+            cwd,
+            |how| {
+                ran = Some(how);
                 // Whatever another app printed is never read as a tab.
                 Ok(b"/dev/ttys001\n".to_vec())
             },
         )
         .unwrap();
-        assert_eq!(ran, Some(TerminalApp::Ghostty.script("'/x/near-ai'")));
+        assert_eq!(
+            ran,
+            Some(MacosLaunch::Script(
+                TerminalApp::Ghostty.script("'/x/near-ai'")
+            ))
+        );
+        let mut ran = None;
+        assert_eq!(
+            launch_macos(
+                TerminalSetting::Wezterm,
+                &[TerminalApp::Wezterm],
+                "'/x/near-ai'",
+                argv(),
+                cwd,
+                |how| {
+                    ran = Some(how);
+                    Ok(b"/dev/ttys001\n".to_vec())
+                },
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            ran,
+            Some(MacosLaunch::Open(
+                open_plan(TerminalApp::Wezterm, cwd, argv()).unwrap()
+            ))
+        );
         assert_eq!(
             launch_macos(
                 TerminalSetting::Terminal,
                 &[TerminalApp::Terminal],
                 "'/x/near-ai'",
+                argv(),
+                cwd,
                 |_| Ok(b"/dev/ttys001\n".to_vec())
             ),
-            Ok(Some(TerminalHandle::AppleTerminal {
-                tty: "/dev/ttys001".into()
+            Ok(Some(TerminalTab {
+                handle: TerminalHandle::AppleTerminal {
+                    tty: "/dev/ttys001".into()
+                },
+                window: None
             }))
         );
         assert_eq!(
@@ -1067,10 +2498,38 @@ mod tests {
                 TerminalSetting::Terminal,
                 &[TerminalApp::Terminal],
                 "'/x/near-ai'",
+                argv(),
+                cwd,
                 |_| Ok(b"not a tty".to_vec())
             ),
             Ok(None)
         );
+    }
+
+    /// #1853 review: once the app is asked, any error reads as
+    /// `LaunchUnknown`, so the daemon keeps the launch held; only the
+    /// refusals from before anything runs are passed through.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_error_once_the_terminal_is_asked_is_launch_unknown() {
+        let argv = || vec![std::ffi::OsString::from("/x/near-ai")];
+        let cwd = Some(Path::new("/Users/x/app"));
+        for error in [
+            ManagedError::StorageUnavailable,
+            ManagedError::UnsupportedVersion,
+            ManagedError::TerminalNotFound,
+        ] {
+            for (choice, app) in [
+                (TerminalSetting::Terminal, TerminalApp::Terminal),
+                (TerminalSetting::Wezterm, TerminalApp::Wezterm),
+            ] {
+                assert_eq!(
+                    launch_macos(choice, &[app], "'/x/near-ai'", argv(), cwd, |_| Err(error)),
+                    Err(ManagedError::LaunchUnknown),
+                    "{error:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1097,6 +2556,15 @@ mod tests {
                 assert_eq!(app.bundle_id(), None, "{app:?}");
                 assert!(app.script("'/x/near-ai'").is_empty(), "{app:?}");
             }
+        }
+
+        // kitty, WezTerm and Alacritty take argv on macOS too: no script.
+        for app in [
+            TerminalApp::Kitty,
+            TerminalApp::Wezterm,
+            TerminalApp::Alacritty,
+        ] {
+            assert!(app.script("'/x/near-ai'").is_empty(), "{app:?}");
         }
     }
 
@@ -1163,8 +2631,8 @@ mod tests {
         plan(
             app,
             Path::new("/usr/bin/term"),
-            Path::new("/opt/Trace Commons/near-ai"),
-            Path::new("/home/x/.config/trace commons"),
+            Path::new("/opt/Near ai/near-ai"),
+            Path::new("/home/x/.config/near ai"),
             cwd,
             Uuid::nil(),
             "abcdef01",
@@ -1174,9 +2642,9 @@ mod tests {
     #[cfg(unix)]
     /// The helper and its arguments, as the tail every plan ends with.
     fn helper_tail() -> Vec<std::ffi::OsString> {
-        let mut tail = vec![std::ffi::OsString::from("/opt/Trace Commons/near-ai")];
+        let mut tail = vec![std::ffi::OsString::from("/opt/Near ai/near-ai")];
         tail.extend(helper_args(
-            Path::new("/home/x/.config/trace commons"),
+            Path::new("/home/x/.config/near ai"),
             Uuid::nil(),
             "abcdef01",
         ));
@@ -1224,7 +2692,32 @@ mod tests {
                 "/home/x/My Projects/app"
             ]
         );
-        // The macOS apps are opened by script, never by argv.
+        assert_eq!(
+            head(TerminalApp::Kitty),
+            ["--directory", "/home/x/My Projects/app", "--hold"]
+        );
+        assert_eq!(
+            head(TerminalApp::Wezterm),
+            [
+                "--config",
+                "exit_behavior=\"Hold\"",
+                "start",
+                "--always-new-process",
+                "--cwd",
+                "/home/x/My Projects/app",
+                "--"
+            ]
+        );
+        assert_eq!(
+            head(TerminalApp::Alacritty),
+            [
+                "--working-directory",
+                "/home/x/My Projects/app",
+                "--hold",
+                "-e"
+            ]
+        );
+        // Terminal and iTerm2 are opened by script, never by argv.
         for app in [TerminalApp::Terminal, TerminalApp::Iterm2] {
             assert_eq!(plan_for(app, cwd), Err(ManagedError::InvalidRequest));
         }
@@ -1240,6 +2733,9 @@ mod tests {
                 TerminalApp::Konsole,
                 TerminalApp::Ghostty,
                 TerminalApp::WindowsTerminal,
+                TerminalApp::Kitty,
+                TerminalApp::Wezterm,
+                TerminalApp::Alacritty,
             ] {
                 let plan = plan_for(app, &cwd).unwrap();
                 let tail = helper_tail();
@@ -1350,8 +2846,61 @@ mod tests {
         );
         assert_eq!(TerminalApp::Konsole.executable(), Some("konsole"));
         assert_eq!(TerminalApp::Ghostty.executable(), Some("ghostty"));
+        assert_eq!(TerminalApp::Kitty.executable(), Some("kitty"));
+        assert_eq!(TerminalApp::Wezterm.executable(), Some("wezterm"));
+        assert_eq!(TerminalApp::Alacritty.executable(), Some("alacritty"));
         assert_eq!(TerminalApp::Terminal.executable(), None);
         assert_eq!(TerminalApp::Iterm2.executable(), None);
+    }
+
+    /// On macOS, kitty, WezTerm and Alacritty are opened with `open -n -b
+    /// <bundle id> --args`, then the same terminal arguments as elsewhere
+    /// and the command, each one argv element. The scripted apps get no
+    /// plan.
+    #[test]
+    fn macos_argv_apps_are_opened_by_bundle_id_with_the_command_as_argv() {
+        let cwd = Path::new("/Users/x/it's \"quoted\"/$HOME");
+        let command: Vec<std::ffi::OsString> = vec![
+            "/Applications/Near.ai Staging.app/near-ai".into(),
+            "--ticket".into(),
+            "ab".into(),
+        ];
+        for (app, id) in [
+            (TerminalApp::Kitty, "net.kovidgoyal.kitty"),
+            (TerminalApp::Wezterm, "com.github.wez.wezterm"),
+            (TerminalApp::Alacritty, "org.alacritty"),
+        ] {
+            let plan = open_plan(app, Some(cwd), command.clone()).unwrap();
+            assert_eq!(plan.program, Path::new("/usr/bin/open"));
+            let mut expected: Vec<std::ffi::OsString> =
+                vec!["-n".into(), "-b".into(), id.into(), "--args".into()];
+            expected.extend(terminal_args(app, Some(cwd)).unwrap());
+            expected.extend(command.clone());
+            assert_eq!(plan.args, expected, "{app:?}");
+            assert_eq!(
+                plan.args
+                    .iter()
+                    .filter(|a| a.as_os_str() == cwd.as_os_str())
+                    .count(),
+                1,
+                "{app:?}: the folder is one whole argument"
+            );
+        }
+        for app in [
+            TerminalApp::Terminal,
+            TerminalApp::Ghostty,
+            TerminalApp::Iterm2,
+        ] {
+            assert_eq!(open_plan(app, Some(cwd), command.clone()), None, "{app:?}");
+        }
+        // Tool setup names no folder: no working-directory flag at all.
+        let plan = open_plan(TerminalApp::Alacritty, None, setup_argv("true").unwrap()).unwrap();
+        assert_eq!(
+            plan.args[4..6].to_vec(),
+            vec![std::ffi::OsString::from("--hold"), "-e".into()]
+        );
+        assert_eq!(plan.args[6], "/bin/bash");
+        assert_eq!(plan.args[7], "-lc");
     }
 
     /// The real probe on a Mac: Terminal ships with macOS, so LaunchServices

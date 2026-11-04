@@ -42,7 +42,9 @@
 //!
 //! The words a nudge must never use are pinned by this module's tests:
 //! nothing that calls pending credit money ("earned", "paid", "settled",
-//! "worth", "$"), no "private inference", no pressure ("unlock", "reward",
+//! "worth", "$"; the digest's contribution line, in `daemon::notify`, says
+//! "earned" of credit the server has decided, owner 2026-11-01, and never
+//! of pending credit), no "private inference", no pressure ("unlock", "reward",
 //! "missing out", "last chance", "streak", "in a row", "don't miss",
 //! "hurry"), nothing about expiry ("expire", "dropped", "days left"), and no
 //! exclamation marks. A folder mode is named only by its
@@ -172,8 +174,10 @@ pub const TOOL_LIST_MANY: &str = "{k} tools";
 /// The History card's title. A zero clause is dropped. DRAFT, NEEDS
 /// APPROVAL.
 pub const NUDGE_VERDICTS_TITLE: &str = "Since {date}: {a} accepted, {h} held for privacy review";
-/// Omitted when the credit is zero. "final", never "earned", "paid" or
-/// "settled"; owner decision 12 asks whether "final" itself reads as
+/// Omitted when the credit is zero. "final", never "paid" or "settled"
+/// (the digest's contribution line says "earned" of decided credit, owner
+/// 2026-11-01; a digest that folds this clause in leaves that sentence out,
+/// so the two never share a body); owner decision 12 asks whether "final" itself reads as
 /// settled. DRAFT, NEEDS APPROVAL.
 pub const NUDGE_VERDICTS_FINAL_CLAUSE: &str = "{x} credit is now final.";
 /// The History card's title when the only news is credit becoming final:
@@ -357,6 +361,13 @@ pub const NUDGE_MISSION_FIT_CLAUSE_ONE: &str = "1 of them fits a mission.";
 pub const LIST_ORDER_SUGGESTED: &str = "Suggested first";
 /// The Traces sort control, queue order. DRAFT, NEEDS APPROVAL.
 pub const LIST_ORDER_QUEUE: &str = "Oldest first";
+/// The Traces sort control, the folders in the order the person dragged
+/// them into (owner, 2026-11-02). DRAFT, NEEDS APPROVAL.
+pub const LIST_ORDER_ARRANGED: &str = "Your order";
+/// A folder row's actions that move it one place in that order, for
+/// VoiceOver and anyone not dragging. DRAFT, NEEDS APPROVAL.
+pub const LIST_ORDER_MOVE_UP: &str = "Move up";
+pub const LIST_ORDER_MOVE_DOWN: &str = "Move down";
 /// The Traces sort control's own accessible name, so it is not read with
 /// the tree's. DRAFT, NEEDS APPROVAL.
 pub const LIST_ORDER_LABEL: &str = "Order of waiting traces";
@@ -445,7 +456,7 @@ pub const MARK_A11Y_SETTLEMENT: &str = "An estimate for traces on this Mac is re
 pub const MARK_TOOLTIP_SETTLEMENT: &str = "Estimate ready";
 /// The estimate's info popover, in plain words (owner, 2026-10-19: the
 /// first wording read as too technical). DRAFT, NEEDS APPROVAL.
-pub const SETTLEMENT_ESTIMATE_EXPLAINER: &str = "This is a guess worked out on your Mac from how big your traces are and what's in them. Nothing was sent to make it, and the price comes from Trace Commons' published rates. The real amount is set once a trace is scored, and a guess for one trace is rougher than the total.";
+pub const SETTLEMENT_ESTIMATE_EXPLAINER: &str = "This is a guess worked out on your Mac from how big your traces are and what's in them. Nothing was sent to make it, and the price comes from the published rates. The real amount is set once a trace is scored, and a guess for one trace is rougher than the total.";
 // ---------------------------------------------------------------------
 // NEAR AI credit received. `{amount}` is a dollar figure from
 // `private_inference_copy::format_amount`. DRAFT, awaiting owner review
@@ -672,6 +683,9 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("NUDGE_MISSION_FIT_CLAUSE_ONE", NUDGE_MISSION_FIT_CLAUSE_ONE),
     ("LIST_ORDER_SUGGESTED", LIST_ORDER_SUGGESTED),
     ("LIST_ORDER_QUEUE", LIST_ORDER_QUEUE),
+    ("LIST_ORDER_ARRANGED", LIST_ORDER_ARRANGED),
+    ("LIST_ORDER_MOVE_UP", LIST_ORDER_MOVE_UP),
+    ("LIST_ORDER_MOVE_DOWN", LIST_ORDER_MOVE_DOWN),
     ("LIST_ORDER_LABEL", LIST_ORDER_LABEL),
     ("ENTRY_MISSION_FIT", ENTRY_MISSION_FIT),
     ("LIST_FILTER_IDLE", LIST_FILTER_IDLE),

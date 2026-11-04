@@ -181,7 +181,7 @@ struct SharingDisclosureSheet: View {
         GlassModal(
             title: title,
             actions: [
-                .cancel(copy.passkey.cancel) { flow = nil },
+                .cancel(copy.frame.cancel) { flow = nil },
                 GlassModalAction(copy.frame.continueButton, isEnabled: isEnabled, isProminent: true) {
                     onContinue()
                     if let finished = flow, finished.step == .done {

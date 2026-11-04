@@ -1,3 +1,4 @@
+pub(crate) mod account_attention;
 pub(crate) mod compute;
 pub(crate) mod consent;
 pub(crate) mod daemon;
@@ -17,6 +18,8 @@ pub(crate) mod witness;
 pub(crate) fn handler<R: tauri::Runtime>()
 -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
+        account_attention::account_attention_copy,
+        account_attention::set_up_again,
         daemon::core_status,
         daemon::retry_daemon_startup,
         daemon::queue_outcome_line,
@@ -48,8 +51,6 @@ pub(crate) fn handler<R: tauri::Runtime>()
         settings::set_quiescence_minutes,
         settings::set_approval_hold_seconds,
         settings::set_digest_hours,
-        settings::set_max_uploads_per_day,
-        settings::set_max_bytes_per_day_mb,
         settings::settings_ranges,
         witness::witness_status,
         witness::configure_witness,

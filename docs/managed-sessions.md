@@ -28,12 +28,23 @@ near-ai launch codex --account Work --cwd /path/to/another-project
 near-ai sessions list
 ```
 
-CLI launches use the current terminal or multiplexer pane. All managed launches,
-including those initiated from the CLI, appear in the app's managed-session list.
+CLI launches use the current terminal or multiplexer pane. Managed launches,
+including those initiated from the CLI, appear in the app's managed-session list,
+one row per conversation: a resumed session continues its conversation's row
+rather than adding one beside it. The row shown is the conversation's latest
+session that is still starting or running, or whose launcher took up its launch;
+a resume whose launch expired unused does not replace the row that ran. Dismissing a row dismisses the
+whole conversation, so no earlier row comes back in its place.
 A session the app opened in Terminal can be shown (its tab brought to the
 front) and stopped from its row; a CLI launch cannot, because the app neither
 opened its window nor started its launcher. An ended session can be started
 again in the same folder with the same account while both still exist.
+Every launch, Start again and Resume included, opens a window of its own; none
+types into an existing tab. Opening a session in a window already open needed
+macOS's System Events Automation and Accessibility prompts, which the owner
+does not want (2026-11-03), so the app does not offer it and the daemon has no such path: an
+older app's `beside` is accepted and ignored, and its two window-list methods
+are refused as unknown. See `docs/contributor-daemon-ipc-v1_1.md`.
 Stop signals only the tool process the launcher supervises: SIGTERM, then
 SIGKILL after a bounded wait. Processes the tool itself started (a shell
 command, a dev server) are not signalled and can outlive it.
@@ -140,6 +151,23 @@ tools whose executable availability is not checked.
     (named by NEAR AI's display name or the id); `model` and `small_model`
     are the default. Its profile is isolated, so the list never reaches the
     person's own OpenCode settings.
+- Each tool is told the context window NEAR AI lists for a model
+  (`context_length` in `/v1/models`, with `max_output_length`), so it
+  compacts before NEAR AI refuses a request as too long. A model NEAR AI
+  gives no window for is left to the tool's own assumption.
+  - Claude Code: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is the default model's
+    window, or removed when NEAR AI gives none. Claude Code applies it only
+    to an id it does not recognize (another vendor's model, or a Claude
+    model newer than the installed Claude Code, which it would otherwise
+    assume is 200,000 tokens); a Claude model it knows keeps its Anthropic
+    API window.
+  - Codex: each catalog entry's `context_window` is NEAR AI's window less
+    the output limit (how Codex sizes its own models: GPT-5's 400,000 less
+    128,000 is Codex's 272,000), and never more than the window Codex ships
+    for a model it knows.
+  - OpenCode: each listed model's `limit` is `{context, output}` from NEAR
+    AI; without an output limit, OpenCode's own 32,000, never above the
+    window.
 - Each NEAR AI session's proxy has its own IronWire home,
   `managed-routes/<session id>` in the state directory, whichever process
   hosts it (the launcher for a saved key, the daemon for the sign-in). Its
@@ -211,6 +239,16 @@ Decided in #1406 (design owner, 2026-10-14): the choice lives in Settings >
 Private AI on every shell, the Start buttons are unchanged, and Windows and
 Linux get the same choice as macOS, as an exception to the #1173 D13 freeze.
 
+**Every launch asks.** On macOS the launch dialogs (the sign-in card's and
+Launch managed session) draw the same "Open sessions in" picker as
+Settings, over the installed apps, starting on the current choice
+(`managed_terminal`), on every launch once the daemon reports
+`capabilities.terminal_chosen` (true or false; an older daemon that omits it
+never asks). Open saves the pick as the default (`set_managed_terminal`),
+then launches, so the session opens there and the next dialog starts on it.
+With one terminal installed nothing is asked. Windows, Linux and Tauri pick
+only in Settings today.
+
 **The test.** A terminal is offered only if it accepts both a command and a
 working directory from its scripting interface or command line, documented
 by its vendor. On Windows and Linux the command reaches it as an argv vector:
@@ -231,10 +269,44 @@ another in Settings." until another is chosen.
 | macOS | Terminal | `terminal` | AppleScript `do script`, addressed by bundle id `com.apple.Terminal` | the launch shipped before the choice |
 | macOS | Ghostty | `ghostty` | AppleScript `new surface configuration`, `command`, `wait after command` | Ghostty AppleScript dictionary |
 | macOS | iTerm2 | `iterm2` | AppleScript `create window with default profile command` | iTerm2 AppleScript dictionary |
+| macOS | kitty | `kitty` | `open -n -b net.kovidgoyal.kitty --args --directory <folder> --hold <helper> <args>` | as Linux kitty below; `--detach`: "On macOS use open -a kitty.app -n instead", kitty(1); bundle id from kitty's `setup.py` (`net.kovidgoyal.{appname}`) |
+| macOS | WezTerm | `wezterm` | `open -n -b com.github.wez.wezterm --args --config exit_behavior="Hold" start --always-new-process --cwd <folder> -- <helper> <args>` | as Linux WezTerm below; the bundle's executable is `wezterm-gui`, which takes `--config` and `start` itself (`wezterm-gui/src/main.rs`); bundle id from `assets/macos/WezTerm.app/Contents/Info.plist` |
+| macOS | Warp | `warp` | a Tab Config, `~/.warp/tab_configs/near-ai-<uuid>.toml` (owner-only, removed as soon as the launch redeems its ticket or its session ends, and by the lease tick once the ticket's two minutes have passed; a daemon restart removes or adopts the ones it left), with the folder as the pane's `directory` and the command as its one `commands` entry, opened with `open warp://tab_config/near-ai-<uuid>`: a new tab in Warp's active window, or a new window when it has none. A URL, not an Apple Event, so macOS asks for no permission (owner, 2026-11-03: sessions as tabs in one window, with no prompts). No tab is recorded, so the row cannot bring it forward | "Tab Configs", <https://docs.warp.dev/terminal/windows/tab-configs/>: `warp://tab_config/<name>` "opens as a new tab in the active window"; "URI scheme", <https://docs.warp.dev/features/uri-scheme>; bundle id `dev.warp.Warp-Stable` from `Warp.app/Contents/Info.plist` |
+| macOS | Rex | `rex` | Rex's own CLI, found inside the bundle LaunchServices names for `com.superlogical.rex` (`Contents/Helpers/Rex Server.rex/Contents/MacOS/rex`) or in the copy the app keeps under Application Support; never on `PATH`. `open -b com.superlogical.rex` starts or raises the app, `rex ls --json` finds the Rex session labelled "Near.ai" (`rex new Near.ai --json -c <folder>` makes it when it is missing), and `rex api call -s <session> session.new_window -` opens the tab, with the request on stdin: a terminal block with `shell: "none"`, the helper's argv as `command`, the folder as `cwd`, and `exit.on_completion: false`. Every session is a tab of that one Rex session. Show runs `rex focus -s <session> <block>` and `open -b` again. No Apple Event, so macOS asks for no permission. Rex has no option to set an environment variable, so the ticket is in argv, as for kitty (owner decision D2) | the installed beta (`Rex Beta 0.1.0 (1758)`, API revision 10), `docs/superpowers/specs/2026-11-03-rex-herdr-terminal-integration.md`. A private beta with no published CLI contract (D8): its `rex ls --json` is read by value, not by field name |
+| macOS | Alacritty | `alacritty` | `open -n -b org.alacritty --args --working-directory <folder> --hold -e <helper> <args>` | as Linux Alacritty below; bundle id from `extra/osx/Alacritty.app/Contents/Info.plist` |
 | Windows | Windows Terminal | `windows_terminal` | `wt.exe new-tab --title "NEAR AI" -d <folder> <helper> <args>` | `new-tab --startingDirectory, -d` and `commandline` ("Executable with optional arguments"), <https://learn.microsoft.com/en-us/windows/terminal/command-line-arguments> |
 | Linux | GNOME Terminal | `gnome_terminal` | `gnome-terminal --working-directory=<folder> -- <helper> <args>` | `--working-directory=DIRNAME` "Set the terminal's working directory"; `--` is what the deprecated `-x, --execute` entry ("interpret all subsequent options as a program and arguments") says to use instead (`-e` is deprecated too), gnome-terminal(1), <https://manpages.debian.org/testing/gnome-terminal/gnome-terminal.1.en.html> |
 | Linux | Konsole | `konsole` | `konsole --workdir <folder> --hold -e <helper> <args>` | `--workdir dir` "Open with dir as the initial working directory"; `-e` "will catch all following arguments ... and execute it as command"; `--hold` "Do not close the initial session automatically when it ends", <https://docs.kde.org/stable_kf6/en/konsole/konsole/command-line-options.html> |
+| Linux | kitty | `kitty` | `kitty --directory <folder> --hold <helper> <args>` | synopsis `kitty [options] [program-to-run ...]`; `--directory` "Change to the specified directory when launching"; `--hold` "Remain open, at a shell prompt, after child process exits", kitty(1), <https://sw.kovidgoyal.net/kitty/invocation/> |
+| Linux | WezTerm | `wezterm` | `wezterm --config exit_behavior="Hold" start --always-new-process --cwd <folder> -- <helper> <args>` | `start`: `--cwd` "Specify the current working directory for the initially spawned program", `--always-new-process` "don't try to ask an existing wezterm GUI instance to start the command", and the program after `--`, <https://wezterm.org/cli/start.html>; `--config 'exit_behavior="Hold"'`, <https://wezterm.org/config/files.html>, "keep the pane open after the program exits", <https://wezterm.org/config/lua/config/exit_behavior.html> |
+| Linux | Alacritty | `alacritty` | `alacritty --working-directory <folder> --hold -e <helper> <args>` | `--working-directory` "Start the shell in the specified working directory"; `--hold` "Remain open after child process exits"; `-e, --command` "Command and args to execute (must be last argument)", alacritty(1), <https://manpages.debian.org/trixie/alacritty/alacritty.1.en.html> |
 | Linux | Ghostty | `ghostty` | `ghostty --working-directory=<folder> --wait-after-command=true -e <helper> <args>` | "Every configuration key is a valid CLI flag", <https://ghostty.org/docs/config>; `working-directory`, `wait-after-command`, and `-e` sets `initial-command` and "Disables shell expansion since the input is expected to already be shell-expanded", <https://ghostty.org/docs/config/reference> |
+
+**Group sessions in herdr.** A switch under the picker (settings key
+`managed_herdr`, off by default; owner decisions D3-D6, 2026-11-03) opens
+every session as a tab of the herdr workspace labelled "Near.ai", on macOS
+and Linux, whichever terminal is chosen. herdr (<https://herdr.dev>,
+Apache-2.0) is a terminal multiplexer that runs inside the chosen terminal;
+it is offered only when the `herdr` program is found on the daemon's `PATH`,
+`/opt/homebrew/bin`, `/usr/local/bin` or `~/.local/bin`. The daemon speaks
+herdr's newline-delimited JSON API on its socket,
+`$XDG_CONFIG_HOME/herdr/herdr.sock` or `~/.config/herdr/herdr.sock`, after
+checking that it is a socket this account owns with no group or other
+access. One `layout.apply` request opens the tab, with the helper's argv as
+the pane's `command` (no shell), the folder as its `cwd`, and the ticket only
+in its `env` as `NEAR_AI_LAUNCH_TICKET`: herdr saves each pane's argv to its
+session file and runs it again after a restart, so argv must hold no ticket,
+and it does not save `env`. `redeem-launch` reads the variable when
+`--ticket` is absent, and the tool never inherits it. When the "Near.ai"
+workspace is missing it is made with `workspace.create`, and the session's
+tab replaces the shell tab it starts with. When no herdr answers, the chosen
+terminal opens `herdr` alone (nothing secret) and the launch waits up to 10
+seconds for its socket. Show switches herdr to the session's tab
+(`tab.focus`, found again by terminal id in `session.snapshot`); it does not
+raise the terminal herdr runs in, which would need Apple Events (D6). A
+launch with the switch on and no herdr found is refused with
+`managed-terminal-not-found`; nothing falls back to opening the terminal
+directly. herdr's Windows named pipe is not spoken yet.
 
 Windows Terminal reads `;` anywhere in its command line as the start of a new
 command (same page: "Commands provide the action, or list of actions separated
@@ -266,9 +338,25 @@ Launch is never turned off this way, because Terminal is always there.
   daemon was started, and that cannot be checked without a Windows run. It
   can be added once a Windows smoke test shows the session gets the console.
   `cmd.exe` takes its command only as one string.
-- Other Linux terminals (kitty, Alacritty, WezTerm, foot, xfce4-terminal,
-  Tilix) were not evaluated in this change; each can be added once its
-  documented flags are checked against the test above.
+- Other Linux terminals (foot, xfce4-terminal, Tilix) have not been
+  evaluated; each can be added once its documented flags are checked
+  against the test above.
+- Warp (macOS), as of 2026-10-30. It has no AppleScript dictionary and no
+  command line that opens a local window with a command
+  (<https://github.com/warpdotdev/warp/issues/3364>; the `oz` CLI runs
+  Warp's own agents, <https://docs.warp.dev/developers/cli>). Its URI
+  scheme opens a folder but "does not run a shell command"
+  (`warp://action/new_window?path=`, <https://docs.warp.dev/features/uri-scheme>).
+  The only route that runs a command is a Tab Config, a TOML file under
+  `~/.warp/tab_configs/` with `directory` and `commands`, opened by
+  `warp://tab_config/<name>?new_window=true`
+  (<https://docs.warp.dev/terminal/windows/tab-configs/>). That fails the
+  test: the command reaches Warp as shell text typed into its shell, not as
+  argv or a string literal, the one-time ticket would be written into a file
+  Warp lists in its own menu, the file has to be removed after Warp has read
+  it with no signal that it has, and nothing reports whether the window
+  opened. Revisit if Warp ships a scripting interface or a CLI that takes a
+  command and a folder.
 
 Every launch path except macOS Terminal still needs the release smoke test
 below on its platform: none of the Windows or Linux terminals is started by
@@ -372,8 +460,16 @@ with Start again. Existing sessions and account sign-in commands keep their
 options. A launch ticket captures the options at preparation, so changing
 Settings while a terminal opens cannot change that launch.
 
-Quote values containing spaces with single or double quotes; backslashes escape
-characters. These values become native process arguments directly. Shell
+Quote values containing spaces with single or double quotes. On macOS and
+Linux a backslash escapes the next character, as in a POSIX shell. On Windows a
+backslash is part of the value, outside quotes and inside double quotes, so a
+path such as `C:\Users\me\shared` can be written as it is. A backslash
+standing alone at the end of a line continues the options on the next line
+on every platform. To put a `"` inside a value, on any platform, close the
+quotes and write it in single quotes: `--name='say "hi"'` or `--name=a'"'b`.
+On Windows, `\"` no longer escapes a quote and `a\ b` is two values, so
+options saved with POSIX escapes may need to be written again. These values
+become native process arguments directly. Shell
 variables, substitutions, wildcard patterns and operators are passed literally;
 there is no shell evaluation. Clear the field and choose Save to restore the
 agent's defaults. The options use the canonical `managed_cli_options` daemon

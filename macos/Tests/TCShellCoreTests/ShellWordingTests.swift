@@ -38,7 +38,6 @@ final class ShellWordingTests: XCTestCase {
         // the Windows interop classes were, and the first thing Slice 1 moves.
         "TCShellCore/ContributorVerdict.swift": 4,
         "TCShellCore/CorrectionCopy.swift": 4,
-        "TCShellCore/DailyBudgetCopy.swift": 6,
         "TCShellCore/MenuBarStatus.swift": 4,
         "TCShellCore/OriginalSearchOutcome.swift": 4,
         // Lowered from 2 (#1273 review): the line under the unresolved bucket

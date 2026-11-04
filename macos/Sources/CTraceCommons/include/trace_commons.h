@@ -29,7 +29,8 @@
  *
  * tc_daemon_stop is idempotent, but it is NOT a teardown barrier for a
  * SECOND CONCURRENT CALLER. If two threads call it at once, one thread
- * performs the teardown and blocks until it completes; the other returns
+ * performs the teardown and waits for it, for at most 2 seconds (see
+ * TEARDOWN BOUNDS below); the other returns
  * IMMEDIATELY, possibly while the daemon is still stopping. Do not treat a
  * tc_daemon_stop return on thread B as proof that thread A's teardown
  * finished. (An earlier revision made the second caller wait; that was
@@ -37,6 +38,23 @@
  * the waiter had to re-acquire, and a waiter parked on one of the daemon
  * runtime's own worker threads could deadlock the teardown it was waiting
  * for. A weaker honest guarantee is better than a stronger false one.)
+ *
+ * TEARDOWN BOUNDS: neither tc_daemon_stop nor tc_handle_free waits on
+ * daemon work without a deadline, so a host may call them on its UI
+ * thread while quitting. tc_daemon_stop waits at most 2 seconds for the
+ * daemon's loop to end: its current pass, which checks for stop only
+ * between steps (a step can block for longer), then the private AI
+ * listener's drain of in-flight model calls. Past the 2 seconds it
+ * returns, and the rest of the teardown finishes on its own thread: the
+ * daemon keeps its exclusive
+ * lock on the state directory until that pass has ended, so a new
+ * tc_daemon_start on the same directory fails, as against any running
+ * daemon, until then. tc_handle_free waits at most 1 second more, for
+ * blocking work outside the pass; if the pass is still running it leaks
+ * the handle's runtime instead of cancelling the pass part way. Neither
+ * bound makes a return mean the daemon has finished stopping, and neither
+ * cancels the pass or any blocking work: what is still running when the
+ * process exits stops there, as it would on a force quit.
  *
  * Every function here catches Rust panics at the boundary and converts them
  * to an ordinary error; a panic never unwinds into the caller. Every
@@ -260,9 +278,9 @@ tc_handle*  tc_daemon_start(const char* config_dir, char** err);
  *
  * settings_json accepts exactly the fields tc_call(handle, "set_settings",
  * ...) does: quiescence_secs, digest_interval_secs, approval_hold_secs,
- * local_notifications, claude_root, codex_root, max_uploads_per_day,
- * max_bytes_per_day -- one shared validation, so there is one
- * definition of "a valid settings object" for both entry points. An
+ * local_notifications, claude_root, codex_root -- one shared validation,
+ * so there is one definition of "a valid settings object" for both entry
+ * points. An
  * unrecognized top-level key, or a recognized key holding the wrong JSON
  * type, is rejected with a fixed error label rather than silently ignored
  * -- silently ignoring a misspelled claude_root would leave the daemon
@@ -303,9 +321,7 @@ tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* se
  *
  * {"quiescence_secs":{"min":0,"max":14400},
  *  "approval_hold_secs":{"min":0,"max":300},
- *  "digest_interval_secs":{"min":3600,"max":86400},
- *  "max_uploads_per_day":{"min":1,"max":1000},
- *  "max_bytes_per_day":{"min":1,"max":5368709120}}
+ *  "digest_interval_secs":{"min":3600,"max":86400}}
  *
  * Reads nothing and writes nothing; the same object for every caller on
  * this build. Returns an owned string; free it with tc_string_free. NULL
@@ -317,7 +333,7 @@ char*       tc_settings_ranges_json(void);
  *
  * {"channel":"production","state_dir_name":"trace-commons",
  *  "state_dir_env":"TRACE_COMMONS_CONTRIBUTOR_DIR",
- *  "passkey_rp_id":"<relying party>","url_scheme":"tracecommons",
+ *  "url_scheme":"tracecommons",
  *  "near_ai_dashboard_origin":"<NEAR AI dashboard origin>",
  *  "near_ai_sign_in_providers":["near","github","google"]}
  *
@@ -1278,19 +1294,6 @@ int64_t     tc_contribution_group_eligible_count(int64_t pending, int64_t contri
  */
 int64_t     tc_contribution_group_withheld_count(int64_t pending, int64_t contributable);
 
-/* K9 (#1118): the toast after a submit -- "Sent. N left to decide - upload
- * limit X of Y", the WYSIWYG design's Flow 2/3 example.
- *
- * uploads_today and max_uploads_per_day are status.daily_budget's fields of
- * the same names; decisions_owed is status.decisions_owed (K6, a separate
- * branch). All three are clamped to 0 on a negative value, which no honest
- * caller sends.
- *
- * Returns an owned string; free it with tc_string_free. NULL only on a
- * caught panic.
- */
-char*       tc_toast_sent_text(int64_t uploads_today, int64_t max_uploads_per_day, int64_t decisions_owed);
-
 /* The sentence for one near_ai_balance state.
  *
  * state is the state field of a near_ai_balance answer. A NULL or non-UTF-8
@@ -1776,6 +1779,31 @@ char*       tc_grant_void_notice(const char* void_json);
  */
 char*       tc_legacy_migration_notice(const char* notice_json);
 
+/* The account section's status while this app's account needs attention
+ * (#1836 F1): its account record cannot be read, or the address it was set
+ * up with is refused. Signing in again does not fix it; setting up again
+ * does.
+ *
+ * status_json is status's object, passed through as the daemon sent it (or
+ * an object holding its account_state, account_state_reason and
+ * near_ai_login_unconfirmed keys). Returns an owned JSON object with title,
+ * body (null for a reason this build does not know), private_ai (null
+ * unless a NEAR AI login is stored), action, confirm_title, confirm_body,
+ * confirm_action, confirm_cancel and failed; free it with tc_string_free.
+ *
+ * THE BRANCH CROSSES, NOT ONLY THE WORDS. Do not read account_state_reason
+ * to choose words natively. Draw it in the account section, never as a
+ * banner or notification. The action first asks confirm_title and
+ * confirm_body with confirm_action and confirm_cancel; only confirm_action
+ * calls unenroll, then opens the first run. Show failed if unenroll is
+ * refused.
+ *
+ * NULL while there is nothing to show (account_state ok, absent or anything
+ * else), for a NULL, non-UTF-8 or unparseable argument, anything that is not
+ * an object, and on a caught panic.
+ */
+char*       tc_account_attention_copy_json(const char* status_json);
+
 /* The notice for approved sessions held because the privacy witness is busy.
  *
  * capacity_json is status's witness_capacity object, passed through as the
@@ -2122,8 +2150,8 @@ char*       tc_witness_copy(void);
 char*       tc_onboarding_copy(void);
 
 /* The first-run wording of #1030 (first_run_copy::first_run_copy): {frame,
- * join, folders, tools, rules, uses, passkey, private_ai}, each a map of
- * strings with {tool}, {host}, {pay_range}, {count}, {folder}, {name},
+ * join, folders, tools, rules, uses, private_ai}, each a map of
+ * strings with {tool}, {host}, {pay_range}, {count}, {folder},
  * {max}, {selected}, {total} and {tools} placeholders the shell fills. NULL
  * only on a caught panic.
  */
@@ -2189,6 +2217,10 @@ int32_t     tc_witness_last_result_tone(void);
  * threads. Does NOT free the handle; call tc_handle_free once nothing else
  * will use it again. Safe to call with NULL.
  *
+ * Waits at most 2 seconds for the daemon's current pass to end, then
+ * returns and leaves the teardown to finish in the background -- see
+ * TEARDOWN BOUNDS above.
+ *
  * Idempotent, but NOT a teardown barrier for a second concurrent caller:
  * of two simultaneous callers, one performs the teardown and the other
  * returns immediately, possibly before the daemon has finished stopping.
@@ -2215,6 +2247,12 @@ void        tc_daemon_stop(tc_handle*);
  * own worker threads is refused (leaking the handle, recorded via
  * tc_last_error) rather than risking the crash that would otherwise
  * follow.
+ *
+ * Bounded like tc_daemon_stop (see TEARDOWN BOUNDS above): up to 2 seconds
+ * for its own stop when tc_daemon_stop was not called first, then at most
+ * 1 second for the runtime's other blocking work. If the daemon's pass is
+ * still running after the stop's bound, the runtime is leaked rather than
+ * shut down, so that pass is never cancelled part way.
  */
 void        tc_handle_free(tc_handle*);
 
@@ -2709,6 +2747,14 @@ char*       tc_referral_code_display(const char* typed);
  * NULL only on a caught panic.
  */
 char*       tc_account_devices_copy_json(void);
+
+/* The words for changing the NEAR AI login an account uses (F10,
+ * account_change_copy::account_change_copy), every one owner-approved.
+ * Templates carry {provider}, {old_provider} or {new_provider}, a login's
+ * title. The daemon methods are account_login_change and
+ * account_login_change_cancel, through tc_call. NULL only on a caught panic.
+ */
+char*       tc_account_change_copy_json(void);
 
 /* The words for adding Train coding models to traces already sent
  * (consent_copy::sent_traces_training_copy), every one a draft for owner

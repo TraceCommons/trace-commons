@@ -22,7 +22,7 @@ import Foundation
 ///
 /// The network methods (C3, #1187) -- `inference_summary`,
 /// `inference_call_proof`, `model_spend`, `private_ai`, `mission_catalogue`,
-/// `invite_lookup`, `passkey_state`, `account_session_status` and
+/// `invite_lookup`, `account_session_status` and
 /// `activity_missions_catalogue` -- are hand-written below in the shapes the
 /// daemon serves, each reply marked `"_sample":"hand-written"`. They are
 /// synthetic, never pilot observations: K2's recorder runs a temp store with
@@ -85,7 +85,6 @@ enum SampleDaemonData {
         case "private_ai": return privateAI(set)
         case "mission_catalogue": return missionCatalogue
         case "invite_lookup": return inviteLookup
-        case "passkey_state": return passkeyState(set)
         case "account_session_status": return accountState(set)
         case "activity_missions_catalogue":
             guard set != .unknownCounts else { return nil }
@@ -291,17 +290,6 @@ enum SampleDaemonData {
 
     static let inviteLookup =
         #"{"_sample":"hand-written","valid":true,"issuer_display_name":"SAMPLE Pilot","credit_range":{"min":1,"max":5,"unit":"points_per_accepted_trace"}}"#
-
-    static func passkeyState(_ set: Sample) -> String {
-        switch set {
-        case .empty:
-            return #"{"_sample":"hand-written","state":"none","passkey_count":0,"remembered_name":null,"signed_in_name":null,"near_ai_connected":null}"#
-        case .unknownCounts:
-            return #"{"_sample":"hand-written","state":"unknown","passkey_count":null,"remembered_name":null,"signed_in_name":null,"near_ai_connected":null}"#
-        default:
-            return #"{"_sample":"hand-written","state":"bound","passkey_count":1,"remembered_name":"SAMPLE passkey","signed_in_name":"SAMPLE passkey","near_ai_connected":true}"#
-        }
-    }
 
     static func accountState(_ set: Sample) -> String {
         switch set {

@@ -4,11 +4,6 @@ import TCShellCore
 @testable import TraceCommonsApp
 
 final class HealthQueueReviewTests: XCTestCase {
-    func testDailyCapBannerTitleIsTheDailyBudgetTitle() {
-        XCTAssertEqual(
-            HealthCopy.core(label: "daily-cap-reached", maxQueueEntries: nil).title, DailyBudgetCopy.title)
-    }
-
     func testUnsupportedOpenCodeVersionUsesSharedRecoveryCopy() throws {
         let shared = try XCTUnwrap(TCSourceChecks.settingsCopy())
         let health = HealthCopy.core(label: "opencode-export-version-unsupported", maxQueueEntries: nil)
@@ -57,7 +52,7 @@ final class HealthQueueReviewTests: XCTestCase {
     func testOnlyQueueFullOffersQueueNavigation() {
         XCTAssertTrue(HealthCopy.core(label: "queue-full", maxQueueEntries: nil).reviewsQueue)
         XCTAssertEqual(HealthCopy.core(label: "queue-full", maxQueueEntries: nil).actionTitle, "Review")
-        for label in ["not-logged-in", "near-ai-notice-not-acknowledged", "daily-cap-reached", "future-label"] {
+        for label in ["not-logged-in", "near-ai-notice-not-acknowledged", "future-label"] {
             XCTAssertFalse(HealthCopy.core(label: label, maxQueueEntries: nil).reviewsQueue)
         }
     }
@@ -90,7 +85,7 @@ final class HealthQueueReviewTests: XCTestCase {
         // other privacy holds are listed because they are the likeliest to
         // be wired to it by mistake.
         for label in [
-            "not-logged-in", "queue-full", "daily-cap-reached",
+            "not-logged-in", "queue-full",
             "privacy-filter-canary-failed", "pii-filter-unavailable",
             "a-status-from-the-future",
         ] {

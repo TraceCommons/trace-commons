@@ -536,10 +536,13 @@ public sealed partial class MainWindow : Window
 
         // The contributed labels come off the frame, not off ViewModel.Pending:
         // an armed project's traces were never in that list.
-        if (DigestText.ContributionLine(
+        // The core's own sentence when the daemon sent one (its credit wording
+        // and rounding are the core's alone); a daemon that predates the
+        // field gets the older pending-only sentence built here.
+        if ((facts.Contribution ?? DigestText.ContributionLine(
                 facts.ContributedCount,
                 facts.ContributedProjects,
-                facts.CreditPending) is { } contributed)
+                facts.CreditPending)) is { } contributed)
         {
             lines.Add(contributed);
         }
@@ -1124,6 +1127,13 @@ public sealed partial class MainWindow : Window
             // pointer at the destination that does, and this is what turns
             // that pointer into navigation.
             settings.OpenPrivateInferenceRequested += (_, _) => ShowPrivateInferencePane();
+            // Set up again unenrolled this device: the first run starts,
+            // with a fresh NEAR AI sign-in, as on a device never set up.
+            settings.SetUpAgainRequested += async (_, _) =>
+            {
+                OpenOnboarding(OnboardingState.Default()).Activate();
+                await ViewModel.RefreshAsync();
+            };
             SettingsPane.Content = settings;
         }
 

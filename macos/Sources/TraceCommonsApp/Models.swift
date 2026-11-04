@@ -265,12 +265,6 @@ struct DaemonStatus: Decodable, Equatable {
     let decisionsOwed: Int?
     let nextDigestAt: Date?
     let health: DaemonHealth
-    /// The daily volume caps and what they are holding back.
-    ///
-    /// Decoded with a fallback rather than as an optional: a daemon that
-    /// predates the field reports an unspent budget blocking nothing, which
-    /// is the only safe reading of silence here.
-    let dailyBudget: DailyBudget
     /// What the daemon is seeing from the declared local proxy, in three
     /// states. Not part of `health`: none of the three is a fault.
     let routing: RoutingStatus
@@ -290,6 +284,14 @@ struct DaemonStatus: Decodable, Equatable {
     /// The notice after a legacy invite identity moved to a NEAR AI account.
     /// A daemon that predates the field has nothing to show.
     let legacyInviteMigration: LegacyMigrationWire
+    /// Whether this app's account needs attention (#1836 F1). A daemon that
+    /// predates the keys has nothing to show.
+    let accountAttention: AccountAttentionWire
+    /// Changing the NEAR AI login the account uses (F10, spec 2.4): whether
+    /// it is offered, whether a wallet-origin account's payouts need a NEAR
+    /// AI login, and whether a refused login is held aside for it. A daemon
+    /// that predates the keys offers nothing.
+    let loginChange: AccountLoginChangeStatus
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -303,13 +305,19 @@ struct DaemonStatus: Decodable, Equatable {
         case decisionsOwed = "decisions_owed"
         case nextDigestAt = "next_digest_at"
         case health
-        case dailyBudget = "daily_budget"
         case routing
         case grantVoids = "grant_voids"
         case witnessCapacity = "witness_capacity"
         case armingRewordings = "arming_rewordings"
         case gateHeld = "automatic_contribution_held"
         case legacyInviteMigration = "legacy_invite_migration"
+        case accountState = "account_state"
+        case accountStateReason = "account_state_reason"
+        case nearAILoginUnconfirmed = "near_ai_login_unconfirmed"
+        case loginChangeAvailable = "login_change_available"
+        case payoutsNeedLogin = "payouts_need_login"
+        case loginChangeHeld = "login_change_held"
+        case loginMismatch = "login_mismatch"
     }
 
     init(
@@ -324,13 +332,14 @@ struct DaemonStatus: Decodable, Equatable {
         decisionsOwed: Int? = nil,
         nextDigestAt: Date?,
         health: DaemonHealth,
-        dailyBudget: DailyBudget = .unknown,
         routing: RoutingStatus = .notDeclared,
         grantVoids: [GrantVoidWire] = [],
         witnessCapacity: WitnessCapacity = .none,
         armingRewordings: [ArmingRewordingWire] = [],
         gateHeld: GateHeld = .none,
-        legacyInviteMigration: LegacyMigrationWire = .none
+        legacyInviteMigration: LegacyMigrationWire = .none,
+        accountAttention: AccountAttentionWire = .none,
+        loginChange: AccountLoginChangeStatus = .none
     ) {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
@@ -343,13 +352,14 @@ struct DaemonStatus: Decodable, Equatable {
         self.decisionsOwed = decisionsOwed
         self.nextDigestAt = nextDigestAt
         self.health = health
-        self.dailyBudget = dailyBudget
         self.routing = routing
         self.grantVoids = grantVoids
         self.witnessCapacity = witnessCapacity
         self.armingRewordings = armingRewordings
         self.gateHeld = gateHeld
         self.legacyInviteMigration = legacyInviteMigration
+        self.accountAttention = accountAttention
+        self.loginChange = loginChange
     }
 
     init(from decoder: Decoder) throws {
@@ -366,7 +376,6 @@ struct DaemonStatus: Decodable, Equatable {
         nextDigestAt = try c.decodeIfPresent(Date.self, forKey: .nextDigestAt)
         health = try c.decodeIfPresent(DaemonHealth.self, forKey: .health)
             ?? DaemonHealth(lastErrorLabel: nil, since: nil)
-        dailyBudget = try c.decodeIfPresent(DailyBudget.self, forKey: .dailyBudget) ?? .unknown
         // A daemon that predates this field has declared no proxy, which is
         // exactly what the fallback says.
         routing = try c.decodeIfPresent(RoutingStatus.self, forKey: .routing) ?? .notDeclared
@@ -379,6 +388,37 @@ struct DaemonStatus: Decodable, Equatable {
         legacyInviteMigration =
             (try? c.decodeIfPresent(LegacyMigrationWire.self, forKey: .legacyInviteMigration))
             .flatMap { $0 } ?? .none
+        // Each key alone, and a wrong type reads as absent: an older daemon,
+        // or one this build cannot read, has nothing to show.
+        accountAttention = AccountAttentionWire(
+            state: (try? c.decodeIfPresent(String.self, forKey: .accountState)).flatMap { $0 },
+            reason: (try? c.decodeIfPresent(String.self, forKey: .accountStateReason)).flatMap { $0 },
+            nearAILoginUnconfirmed:
+                (try? c.decodeIfPresent(Bool.self, forKey: .nearAILoginUnconfirmed)).flatMap { $0 } ?? false)
+        // Each key alone; a wrong type reads as false.
+        func flag(_ key: CodingKeys) -> Bool {
+            (try? c.decodeIfPresent(Bool.self, forKey: key)).flatMap { $0 } ?? false
+        }
+        loginChange = AccountLoginChangeStatus(
+            available: flag(.loginChangeAvailable), payoutsNeedLogin: flag(.payoutsNeedLogin),
+            held: flag(.loginChangeHeld), mismatch: flag(.loginMismatch))
+    }
+
+    /// This status as the daemon reports it straight after `unenroll`: not
+    /// logged in, no tenant, no setup completion, no account scope (the
+    /// config and record are gone, so the account-scoped state resets as it
+    /// does for a real logged-out status), no legacy migration and nothing
+    /// about the account. Everything else is kept. For a model whose status read after
+    /// a confirmed unenroll failed, so `requiresOnboarding` still follows
+    /// the unenroll.
+    func unenrolled() -> DaemonStatus {
+        DaemonStatus(
+            schemaVersion: schemaVersion, loggedIn: false, tenantID: nil, setupComplete: nil,
+            accountScope: nil, consentScopes: consentScopes, paused: paused,
+            queueDepth: queueDepth, decisionsOwed: decisionsOwed, nextDigestAt: nextDigestAt,
+            health: health, routing: routing, grantVoids: grantVoids,
+            witnessCapacity: witnessCapacity, armingRewordings: armingRewordings, gateHeld: gateHeld,
+            legacyInviteMigration: .none, accountAttention: .none)
     }
 
     static let unknown = DaemonStatus(
@@ -696,7 +736,6 @@ struct DaemonSettingsView: Decodable, Equatable {
     let localNotifications: Bool
     let queueTtlDays: Int
     let maxQueueEntries: Int
-    let maxUploadsPerDay: Int
     let nearAIConfigured: Bool
     let claudeRootConfigured: Bool
     let codexRootConfigured: Bool
@@ -749,6 +788,10 @@ struct DaemonSettingsView: Decodable, Equatable {
     /// that predates the key, which draws no switch rather than an "off"
     /// nobody set.
     var insightsLedgerFeed: Bool? = nil
+    /// The stored favorite model ids (`managed_favorite_models`), for
+    /// Settings' favorites list while NEAR AI's catalogue cannot be read.
+    /// Absent from an older daemon.
+    var managedFavoriteModels: [String]? = nil
     /// Whether the daemon counts tokens in the watched folders for
     /// Insights (`insights_counter_pass`; on by default, product owner,
     /// 2026-10-29). Absent from an older daemon: no switch, never an "off".
@@ -782,7 +825,6 @@ struct DaemonSettingsView: Decodable, Equatable {
         case localNotifications = "local_notifications"
         case queueTtlDays = "queue_ttl_days"
         case maxQueueEntries = "max_queue_entries"
-        case maxUploadsPerDay = "max_uploads_per_day"
         case nearAIConfigured = "near_ai_configured"
         case claudeRootConfigured = "claude_root_configured"
         case codexRootConfigured = "codex_root_configured"
@@ -801,6 +843,7 @@ struct DaemonSettingsView: Decodable, Equatable {
         case privateInferenceOfferSeen = "private_inference_offer_seen"
         case privateInferenceState = "private_inference_state"
         case insightsLedgerFeed = "insights_ledger_feed"
+        case managedFavoriteModels = "managed_favorite_models"
         case missionsEnabled = "missions_enabled"
         case insightsCounterPass = "insights_counter_pass"
         case insightsRecapCardEnabled = "insights_recap_card_enabled"

@@ -115,36 +115,34 @@ pub struct AccountCtx {
     pub tenant_id: String,
     /// Device `principal_ref` (bearer path) or `account-actor:{id}` (cookie path).
     pub actor_ref: String,
-    /// The id of the credential that authenticated THIS session — the generic
-    /// "authenticating-credential id" shared by both strong cookie paths. A
-    /// passkey assertion populates it with the asserting `credential_id`, and a
-    /// NEAR login ALSO populates it (with the authenticating NEAR public key).
-    /// `None` for device-link cookie sessions and for the bearer path. Used
-    /// solely to flag the currently-authenticating credential in the per-method
-    /// identity lists (`this_device` for passkeys, `this_session` for NEAR); it
-    /// is a public id, never a secret.
+    /// The id of the credential that authenticated THIS session. A NEAR login
+    /// populates it with the authenticating NEAR public key. `None` for
+    /// device-link cookie sessions and for the bearer path. Used solely to flag
+    /// the currently-authenticating key in the NEAR identity list
+    /// (`this_session`); it is a public id, never a secret.
     pub auth_credential_id: Option<String>,
     /// Strength label for this session, used by the strong-authenticator gate.
-    /// Cookie path: the validated session row's `client_kind` (`'web'` weak,
-    /// `'passkey'`/`'near'` strong). Bearer path: always `'device'` (a device
+    /// Cookie path: the validated session row's `client_kind` (`'near'` strong,
+    /// every other value weak). Bearer path: always `'device'` (a device
     /// bearer is NOT a strong authenticator for the gate). A public label, never
     /// key material.
     pub client_kind: String,
     /// The sha256 `token_hash` of the session credential THIS request
     /// presented (cookie or native token), set by the resolver. Used only to
-    /// spare the caller's own session when a passkey removal revokes the
-    /// sessions that passkey minted. A hash, never the secret; `None` when no
-    /// session was presented.
+    /// spare the caller's own session when a device revoke ends the account's
+    /// other sessions. A hash, never the secret; `None` when no session was
+    /// presented.
     pub session_token_hash: Option<String>,
 }
 
 impl AccountCtx {
-    /// True iff THIS session was minted by a passkey or NEAR assertion. Only a
-    /// strong session may freely change authenticators; a weak (`'web'` /
-    /// `'device'`) session is gated unless the account has zero strong
-    /// authenticators (the bootstrapping carve-out, enforced by the caller).
+    /// True iff THIS session was minted by a NEAR wallet assertion. Only a
+    /// strong session may freely change authenticators; any other session is
+    /// gated unless the account has zero strong authenticators (the
+    /// bootstrapping carve-out, enforced by the caller). A `'passkey'` session
+    /// minted before passkeys were removed is weak.
     pub fn is_strong_session(&self) -> bool {
-        matches!(self.client_kind.as_str(), "passkey" | "near")
+        self.client_kind == "near"
     }
 }
 
@@ -191,6 +189,25 @@ mod tests {
             a.bytes()
                 .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
         );
+    }
+    /// Only a NEAR wallet session is strong. A `'passkey'` session minted
+    /// before passkeys were removed is as weak as a native or device-link one.
+    #[test]
+    fn only_a_near_session_is_strong() {
+        let ctx = |client_kind: &str| AccountCtx {
+            account_id: AccountId::from_uuid(uuid::Uuid::nil()),
+            principal_set: AccountPrincipalSet::from_iter_for_test_only(Vec::<String>::new()),
+            auth_method: AccountAuthMethod::SessionCookie,
+            tenant_id: "t".to_string(),
+            actor_ref: "account-actor:t".to_string(),
+            auth_credential_id: None,
+            client_kind: client_kind.to_string(),
+            session_token_hash: None,
+        };
+        assert!(ctx("near").is_strong_session());
+        for weak in ["passkey", "native", "web", "device"] {
+            assert!(!ctx(weak).is_strong_session(), "{weak}");
+        }
     }
     #[test]
     fn hash_is_sha256_prefixed_shape() {

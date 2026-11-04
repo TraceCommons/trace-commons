@@ -396,7 +396,8 @@ tokens and the rate never go in the repository, in a PR, or in a log.
    - `TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL` (held as `SecretString`,
      refused if empty or not `oc_` plus 64 hex);
    - `TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL_ID` (the credential `id`; not
-     secret, used only for its log hash);
+     secret, used only for its log hash; optional since 2026-10-31: unset,
+     log lines carry `credential=unset`, while a set value must be a UUID);
    - `TRACE_COMMONS_NEAR_AI_PAYOUT_SENDER_ORG` (the reseller org UUID);
    - `TRACE_COMMONS_NEAR_AI_PAYOUT_SOURCE` (`payment`, `grant` or
      `staking_farm`; required, **no default**). It names the credit the
@@ -978,7 +979,9 @@ because of it, and no other rail notices.
 
 - A rail in `dry_run` or `live` with any of its settings missing or
   malformed refuses ingest's start, with a per-rail label (for `near_ai`,
-  `near_ai_payout_config_missing`). A rail in `disabled` needs no settings.
+  `near_ai_payout_config_missing`). The one optional setting is the
+  `near_ai` credential id (2026-10-31): unset is accepted, while a set value
+  that is not a UUID is malformed. A rail in `disabled` needs no settings.
 - An unknown rail id anywhere (a mode setting, a route segment, a stored
   row) is refused, never defaulted.
 - The `near_ai` host is compiled in. A `near-ai-staging` build switches it
@@ -1024,10 +1027,15 @@ account's credit is the account's signed-in session (D5 as superseded on
 
 | Account class | NEAR AI subject on file | Check at link time |
 |---|---|---|
-| `nearai-` tenant, or any account with a `near_ai_login` anchor | yes (the anchor) | `/users/me` `id` must match the anchor, else `subject_mismatch` |
-| `near-` tenant (wallet) | no | the person signs in with NEAR AI in the app; the subject is recorded as `subject_index` on the link |
+| `nearai-` tenant, or any account with a `near_ai_login` anchor | yes (the anchor) | `/users/me` `id` must match one of the anchors, else `subject_mismatch` |
+| `near-` tenant (wallet) with no `near_ai_login` anchor | no | refused (`subject_mismatch`) before the token is spent; a wallet anchor proves nothing (#1862). It links once a NEAR AI login is recorded on it (change-account flow, F10 in the one-connected-account spec) |
 | passkey-origin account, bound or not | per its binding, or none | as the two rows above |
-| account in a legacy or pooled tenant | no | as the wallet row |
+| account in a legacy tenant | no | refused, as the wallet row, until migrated (F11) |
+| account in a pooled Devfolio tenant | no | refused; excluded from payouts by design |
+
+Updated 2026-11-03: the earlier rows let an account with no NEAR AI login
+link on any proof (B9). #1841 refused that, and #1862 made a recorded NEAR
+AI login the only proof, on staging and production alike.
 
 Recording `subject_index` lets an operator see that one NEAR AI subject
 linked several accounts, without opening anything. It is not an anchor and

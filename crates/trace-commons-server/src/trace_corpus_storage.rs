@@ -1006,6 +1006,23 @@ pub struct TraceSubmissionKeysetCursor {
     pub submission_id: Uuid,
 }
 
+/// The recent submissions of one contributor scope, as an hourly submission
+/// ceiling needs them: how many arrived since the window start (counted up
+/// to the caller's limit, never past it), the oldest of those counted, and
+/// whether the submission being uploaded already has a row.
+///
+/// `counted` stops at the limit the caller passed, so the read is bounded by
+/// the limit and not by the scope's history. When `counted` reached the
+/// limit, `oldest_counted_at` is the arrival of the limit-th most recent
+/// submission: the scope falls back under the limit once that one leaves
+/// the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecentTraceSubmissionWindow {
+    pub counted: i64,
+    pub oldest_counted_at: Option<DateTime<Utc>>,
+    pub submission_known: bool,
+}
+
 /// Fallback label for a status reason that is not on the allowlist below.
 pub const STATUS_REASON_OTHER: &str = "other";
 
@@ -2253,6 +2270,71 @@ impl DedupSignalRow {
     }
 }
 
+/// One dedup cluster as a candidate for a new decision: its representative
+/// (earliest-decided member) simhash and stamp, and how many members it has
+/// across every tenant. What `Database::list_dedup_cluster_candidates`
+/// returns, read from `trace_dedup_cluster_representatives` (migration V145)
+/// on Postgres.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedupClusterCandidateRow {
+    pub dedup_cluster_id: Uuid,
+    pub representative_simhash: i64,
+    /// The representative's stored stamp, raw: decoded only by
+    /// [`DedupClusterCandidateRow::effective_signal_version`].
+    pub representative_signal_version: Option<String>,
+    pub member_count: i64,
+}
+
+impl DedupClusterCandidateRow {
+    /// The version the representative's simhash was derived under, which is
+    /// the cluster's version; see [`effective_dedup_signal_version`].
+    pub fn effective_signal_version(&self) -> &str {
+        effective_dedup_signal_version(self.representative_signal_version.as_deref())
+    }
+}
+
+/// The clusters within `max_hamming` of `simhash`, folded from a full
+/// `list_dedup_signals` enumeration (rows in `decided_at ASC` order).
+///
+/// This is the fold the inline gate path did itself before V145, kept as the
+/// reference the cluster table is checked against and as the default for
+/// backends without one: a member is a row with both a cluster id and a
+/// simhash, the representative is the first member seen, and the size counts
+/// every member. Only the simhash distance is filtered here; the stamp check
+/// stays in `dedup_assign::assign_cluster`, the one place it lives.
+pub fn dedup_cluster_candidates_from_signals(
+    signals: &[DedupSignalRow],
+    simhash: i64,
+    max_hamming: u32,
+) -> Vec<DedupClusterCandidateRow> {
+    let mut index: std::collections::HashMap<Uuid, usize> = std::collections::HashMap::new();
+    let mut clusters: Vec<DedupClusterCandidateRow> = Vec::new();
+    for signal in signals {
+        let (Some(cluster_id), Some(member_simhash)) =
+            (signal.dedup_cluster_id, signal.dedup_simhash)
+        else {
+            continue;
+        };
+        match index.get(&cluster_id) {
+            Some(&at) => clusters[at].member_count += 1,
+            None => {
+                index.insert(cluster_id, clusters.len());
+                clusters.push(DedupClusterCandidateRow {
+                    dedup_cluster_id: cluster_id,
+                    representative_simhash: member_simhash,
+                    representative_signal_version: signal.dedup_signal_version.clone(),
+                    member_count: 1,
+                });
+            }
+        }
+    }
+    clusters.retain(|c| {
+        crate::dedup_simhash::hamming_distance(c.representative_simhash as u64, simhash as u64)
+            <= max_hamming
+    });
+    clusters
+}
+
 /// One decision row's identifiers and time, newest first, as the credit
 /// estimate eval enumerates them (through the narrow `trace_gate_driver`
 /// pool, no tenant GUC, every column granted by V45).
@@ -2803,6 +2885,31 @@ pub trait TraceCorpusStore: Send + Sync {
         cursor: Option<TraceSubmissionKeysetCursor>,
         limit: i64,
     ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError>;
+
+    /// The submissions of `tenant_id` received after `since`, counted up to
+    /// `limit` in `(received_at DESC)` order, for an hourly submission
+    /// ceiling. `principal_refs` narrows the scope to those principals; `None`
+    /// counts the whole tenant. `submission_known` says whether
+    /// `submission_id` already has a row in the same scope (the tenant, or
+    /// one of those principals), whatever its age, so a retry of a recorded
+    /// submission is never counted against itself and another principal's
+    /// id is not exempt.
+    /// Tenant and principals MUST come from authentication.
+    ///
+    /// A store that cannot answer refuses, labelled: the caller decides what
+    /// an unanswerable ceiling means, rather than reading an empty window.
+    async fn recent_trace_submission_window(
+        &self,
+        _tenant_id: &str,
+        _principal_refs: Option<&[String]>,
+        _submission_id: Uuid,
+        _since: DateTime<Utc>,
+        _limit: i64,
+    ) -> Result<RecentTraceSubmissionWindow, DatabaseError> {
+        Err(DatabaseError::Query(
+            "TraceSubmissionWindowUnavailable".into(),
+        ))
+    }
 
     /// Read-only activity projection under one statement snapshot. Tenant and
     /// principals MUST come from account authentication, never a request body.
@@ -4199,6 +4306,76 @@ mod dedup_signal_version_tests {
             row(Some(DETERMINISTIC_DEDUP_SIGNAL_VERSION)).effective_signal_version(),
             row(None).effective_signal_version()
         );
+    }
+}
+
+#[cfg(test)]
+mod dedup_cluster_candidate_fold_tests {
+    use super::{DedupSignalRow, dedup_cluster_candidates_from_signals};
+    use uuid::Uuid;
+
+    fn signal(
+        decision: u128,
+        cluster: Option<u128>,
+        simhash: Option<i64>,
+        stamp: Option<&str>,
+    ) -> DedupSignalRow {
+        DedupSignalRow {
+            tenant_id: format!("tenant-{}", decision % 2),
+            decision_id: Uuid::from_u128(decision),
+            dedup_cluster_id: cluster.map(Uuid::from_u128),
+            dedup_simhash: simhash,
+            dedup_signal_version: stamp.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn first_member_seen_is_the_representative_and_every_member_counts() {
+        // Rows arrive in decided_at order, as `list_dedup_signals` returns them.
+        let signals = [
+            signal(1, Some(10), Some(0b0001), Some("v-a")),
+            signal(2, Some(10), Some(0b1110), Some("v-b")), // later member, other stamp
+            signal(3, Some(20), Some(0b0011), None),
+            signal(4, None, Some(0), Some("v-a")), // never clustered
+            signal(5, Some(20), None, Some("v-a")), // cluster but no simhash
+            signal(6, Some(10), Some(-1), Some("v-a")),
+        ];
+        let rows = dedup_cluster_candidates_from_signals(&signals, 0, 64);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].dedup_cluster_id, Uuid::from_u128(10));
+        assert_eq!(rows[0].representative_simhash, 0b0001);
+        assert_eq!(
+            rows[0].representative_signal_version.as_deref(),
+            Some("v-a")
+        );
+        assert_eq!(rows[0].member_count, 3);
+        assert_eq!(rows[1].dedup_cluster_id, Uuid::from_u128(20));
+        assert_eq!(
+            rows[1].member_count, 1,
+            "a row with no simhash is not a member"
+        );
+        assert_eq!(rows[1].representative_signal_version, None);
+    }
+
+    #[test]
+    fn only_representatives_within_the_radius_are_returned() {
+        let signals = [
+            signal(1, Some(10), Some(0b0000_0001), None), // distance 1 from 0
+            signal(2, Some(20), Some(0b0000_0111), None), // distance 3
+            signal(3, Some(20), Some(0), None),           // a near member does not
+            // pull its cluster in
+            signal(4, Some(30), Some(-1), None), // distance 64
+        ];
+        let ids = |max| -> Vec<u128> {
+            dedup_cluster_candidates_from_signals(&signals, 0, max)
+                .iter()
+                .map(|r| r.dedup_cluster_id.as_u128())
+                .collect()
+        };
+        assert_eq!(ids(0), Vec::<u128>::new());
+        assert_eq!(ids(1), vec![10]);
+        assert_eq!(ids(3), vec![10, 20]);
+        assert_eq!(ids(64), vec![10, 20, 30]);
     }
 }
 

@@ -150,6 +150,11 @@ impl Backend {
         if !daemon::settings::roots_declared(&settings) {
             bail!(ERR_ROOTS_NOT_DECLARED);
         }
+        // This process is about to host the daemon, and a GTK app's stderr
+        // is usually unwatched: record panic locations and warn/error
+        // callsites (never messages) in the state directory, as the CLI and
+        // the FFI handle do. Returns the dev dry-run store when one applies.
+        let store = daemon::diagnostics_log::install_for(store)?;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
@@ -423,7 +428,8 @@ pub struct DaemonEvent {
 pub struct DigestFacts {
     pub contributed: usize,
     pub contributed_projects: Vec<String>,
-    pub credit_pending: f32,
+    pub credit_final: f64,
+    pub credit_pending: f64,
 }
 
 /// `digest_due`'s `data` is built in `daemon::tick`. Absent fields decode as
@@ -449,10 +455,14 @@ fn digest_facts(name: &str, data: &serde_json::Value) -> Option<DigestFacts> {
                     .collect()
             })
             .unwrap_or_default(),
+        credit_final: data
+            .get("credit_final")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
         credit_pending: data
             .get("credit_pending")
             .and_then(|v| v.as_f64())
-            .unwrap_or(0.0) as f32,
+            .unwrap_or(0.0),
     })
 }
 

@@ -397,19 +397,32 @@ async fn ensure_codex_idle(
 
 async fn collect_codex(
     login: &LoginSpec,
-    _interactive: bool,
+    interactive: bool,
     lease: Arc<OwnedSemaphorePermit>,
 ) -> Result<Reading, ProbeFailure> {
     let target = codex_oauth::Target::production().map_err(|r| failure(r, None))?;
-    collect_codex_via(login, lease, &target).await
+    collect_codex_in(login, interactive, lease, &target).await
+}
+
+/// A pressed Refresh, the only kind the fixture tests drive.
+#[cfg(test)]
+pub(super) async fn collect_codex_via(
+    login: &LoginSpec,
+    lease: Arc<OwnedSemaphorePermit>,
+    target: &codex_oauth::Target,
+) -> Result<Reading, ProbeFailure> {
+    collect_codex_in(login, true, lease, target).await
 }
 
 /// CodexBar's preferred order (docs/codex.md at 5f93dc3): read-only OAuth
 /// usage first, then the native app-server only when the saved sign-in needs
 /// renewal or the provider rejects it. Only the native path can rewrite
-/// auth.json, so only that path waits for Codex to be closed.
-pub(super) async fn collect_codex_via(
+/// auth.json, so only that path waits for Codex to be closed. A silent read
+/// (opening Insights) stops after the OAuth step; the app-server waits for a
+/// pressed Refresh.
+pub(super) async fn collect_codex_in(
     login: &LoginSpec,
+    interactive: bool,
     lease: Arc<OwnedSemaphorePermit>,
     target: &codex_oauth::Target,
 ) -> Result<Reading, ProbeFailure> {
@@ -424,6 +437,9 @@ pub(super) async fn collect_codex_via(
         .map_err(|r| failure(r, None))?;
     if let Some(reading) = codex_oauth::collect(login, &lease, &base_url, target).await? {
         return Ok(reading);
+    }
+    if !interactive {
+        return Err(failure("not_checked", None));
     }
     // A global single-probe lease serializes our own collectors; external
     // native clients do not share that lease, so recheck before each step.

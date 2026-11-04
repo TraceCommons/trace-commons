@@ -76,11 +76,28 @@ cargo clippy -p trace-commons-server -p trace-commons-ingest --all-targets -- \
   -A clippy::type_complexity -A clippy::collapsible_if \
   -A clippy::manual_option_as_slice -A clippy::useless_vec \
   -A clippy::redundant_pattern_matching
-cargo test -p trace-commons-server --test trace_corpus_storage_contract
+cargo test -p trace-commons-server --test it -- 'trace_corpus_storage_contract::'
 cargo test -p trace-commons-server --test trace_corpus_pg_store   # requires PostgreSQL
 RUSTFLAGS="-D warnings" cargo check -p trace-commons-ingest --bins
 RUSTFLAGS="-D warnings" cargo test -p trace-commons-ingest --no-run
 ```
+
+The server, contributor, FFI and protocol crates build most of their
+integration tests as one binary each, `tests/it.rs`, with each such
+`tests/<name>.rs` as a module (`autotests = false`), so the dependency graph
+links once per crate instead of once per file. Run one file's tests with
+`--test it -- '<name>::'` (quote the filter; in a workflow `run:` line an
+unquoted trailing `::` breaks the YAML). A new `tests/*.rs` file needs a
+`mod <name>;` line in `tests/it.rs` or its own `[[test]]`;
+`it_harness::every_test_file_is_built_once` fails until it has exactly one.
+A file that cannot share a process with the others gets its own `[[test]]`
+with the reason beside it: every PostgreSQL suite (suites pointed at the
+same database must not run at once; run them one at a time, as before), and
+files that set process-wide env vars, install a global tracing subscriber,
+signal their own pid, or are built by the near-ai-staging CI step.
+Workspace crates build with `debug = "line-tables-only"` (root Cargo.toml):
+backtraces keep file:line, but a debugger has no variables; set
+`debug = true` locally to step through.
 
 For client work, select the client packages rather than the whole workspace:
 
@@ -246,11 +263,16 @@ repository's caches were over GitHub's 10 GB ceiling and a main-written
 cache was evicted within minutes: a pull request's cache is restorable by
 that pull request alone, so saving one only evicted `main`'s. A job that
 adds a `target` cache must follow the same shape, or it re-creates the
-churn, and the jobs in `clients.yml` keep no cache at all. Push-to-main
+churn, and the jobs in `clients.yml` keep no cache at all. The three
+`cargo test` jobs (`cargo test (default features)`, `staging channel
+tests`, `wallet SDK and production CSP`) restore through
+`./.github/actions/restore-cargo-test-cache`, which builds the key in one
+place, falls back to another job's key when asked, and warns on the run
+when nothing at all was restored. Push-to-main
 runs are exempt from `cancel-in-progress` for the same reason: a cancelled
 job saves no cache, and merges to `main` land close together.
 
-Running is not the same as blocking. **Eleven** of the nineteen are required
+Running is not the same as blocking. **Thirteen** of the twenty-three are required
 status checks on `main`, and only those block a merge -- `README.md` lists
 them. `main` is also behind a merge queue (`main merge queue`), so the
 required checks are re-run against `main` at merge time; a PR that never
@@ -275,7 +297,15 @@ receives them times out of the queue instead of merging.
   crate can silently come to need one of this workspace's optional features.
   That is the configuration a third-party harness gets, and this job is the
   only thing that exercises it. See #486.
-- `cargo test (default features)` (with `RUSTFLAGS=-D warnings`).
+- `cargo test (default features)` (with `RUSTFLAGS=-D warnings`). Two
+  parts of it run as their own jobs since 2026-10-30, and both are
+  required checks, as they were inside it: `staging channel tests` (the
+  `near-ai-staging` feature build) and `wallet SDK and production CSP`
+  (Playwright/Chromium and the ignored wallet-page test). Each builds a
+  different feature set or package selection, so inside the workspace job
+  each recompiled crates the workspace run had already built, and the job
+  ran into its 30-minute timeout. Branch protection matches these three
+  names exactly; renaming one drops it from the gate.
 - `pilot-bootstrap smoke` — `scripts/operator/pilot-bootstrap-smoke.sh`,
   exercising the JSONL loader path.
 - `operator-binaries smoke`.

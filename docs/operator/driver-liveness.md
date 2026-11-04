@@ -150,8 +150,7 @@ Include it in the periodic operator check alongside
 `vector_index_scheduler`, `benchmark_registry_scheduler`,
 `benchmark_pipeline_scheduler`, `credit_cycle_scheduler`,
 `credit_settlement_scheduler`, `process_evaluation_scheduler`,
-`revocation_propagation_scheduler`, `unbound_account_reaper`,
-`account_trust_scheduler`.
+`revocation_propagation_scheduler`, `account_trust_scheduler`.
 
 A driver appears only if its loop was actually spawned, so a driver missing
 from the response was not started in this deployment — check the feature

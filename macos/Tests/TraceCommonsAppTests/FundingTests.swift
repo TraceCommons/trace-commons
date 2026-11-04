@@ -453,7 +453,9 @@ final class FundingTests: XCTestCase {
 
     /// Signed out, the billing card's button is the balance card's Sign in
     /// (owner, 2026-10-24): pressing it runs the sign-in flow, not another
-    /// funding read ("Check account" cannot help without a login).
+    /// funding read ("Check account" cannot help without a login). One
+    /// click starts it: the login is chosen on the daemon's browser page
+    /// (owner, 2026-11-02), not in a menu here.
     @MainActor
     func testHostedSignedOutBillingButtonRunsTheSignInFlow() async throws {
         let view = try HostedFunding()

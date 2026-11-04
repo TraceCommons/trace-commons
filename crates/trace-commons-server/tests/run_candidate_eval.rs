@@ -6,16 +6,11 @@
 //! Pulls the same `gate_calibrate/` submodules used by the binary in via
 //! `#[path = ...]` so the test suite doesn't need a separate library.
 
-#[path = "../src/bin/gate_calibrate/bakeoff_corpus.rs"]
-mod bakeoff_corpus;
-#[path = "../src/bin/gate_calibrate/bakeoff_manifest.rs"]
-mod bakeoff_manifest;
-#[path = "../src/bin/gate_calibrate/bakeoff_metrics.rs"]
-mod bakeoff_metrics;
-#[path = "../src/bin/gate_calibrate/bakeoff_report.rs"]
-mod bakeoff_report;
-#[path = "../src/bin/gate_calibrate/run_candidate_eval.rs"]
-mod run_candidate_eval;
+use crate::gate_calibrate::bakeoff_corpus;
+use crate::gate_calibrate::bakeoff_manifest;
+use crate::gate_calibrate::bakeoff_metrics;
+use crate::gate_calibrate::bakeoff_report;
+use crate::gate_calibrate::run_candidate_eval;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

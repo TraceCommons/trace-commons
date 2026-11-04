@@ -10,11 +10,9 @@ release to enable; later campaign updates do not require an app release.
 The default content is
 `crates/trace-commons-contributor/src/private_ai_campaign.json`. It is also the
 compiled fallback, exposed through `tc_private_ai_campaign_json`; there is no
-second copy of its text in Swift. The first campaign links to
-[Kimi K3.1 Pro](https://near.ai/models/moonshotai/kimi-k3.1-pro). Its copy says
-Incognito/provider-hosted because that model does not offer model TEE
-attestation. This campaign opens the model page; it does not change a managed
-session's model or privacy mode.
+second copy of its text in Swift. The current campaign is NEAR AI Red and links
+to [near.ai/red](https://near.ai/red). It opens that page; it does not change a
+managed session's model or privacy mode.
 
 Validate a candidate without uploading:
 
@@ -51,11 +49,11 @@ publication.
 ```json
 {
   "schema_version": 1,
-  "id": "kimi-k3-1-pro",
-  "title": "Meet Kimi K3.1 Pro",
-  "body": "1M-token context for coding and multimodal reasoning. Incognito · provider-hosted.",
-  "action_title": "Explore Kimi",
-  "action_url": "https://near.ai/models/moonshotai/kimi-k3.1-pro",
+  "id": "near-ai-red-cybersecurity-models",
+  "title": "NEAR AI Red: AI that helps with security work",
+  "body": "Abliterated DeepSeek V4.1 Flash and Qwen 3.8 answer security questions instead of refusing them. They run in NEAR AI's secure enclaves, so your findings stay private. NEAR AI private.",
+  "action_title": "Explore NEAR AI Red",
+  "action_url": "https://near.ai/red",
   "symbol": "cpu",
   "image_url": null
 }

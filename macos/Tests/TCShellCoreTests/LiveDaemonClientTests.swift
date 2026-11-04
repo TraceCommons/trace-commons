@@ -411,12 +411,11 @@ final class LiveDaemonClientTests: XCTestCase {
         _ = try await client.setNetworkPrivateAI(on: false, consent: DaemonData.PrivateAIConsent(acknowledging: shown))
         _ = try await client.networkMissionCatalogue(limit: 1, before: nil)
         _ = try await client.lookupInvite(code: "c")
-        _ = try await client.passkeyState()
         _ = try await client.accountState()
         _ = try await client.activityMissionsCatalogue()
         XCTAssertEqual(transport.calls.map(\.method), [
             "inference_summary", "inference_call_proof", "model_spend", "private_ai", "set_private_ai",
-            "mission_catalogue", "invite_lookup", "passkey_state", "account_session_status",
+            "mission_catalogue", "invite_lookup", "account_session_status",
             "activity_missions_catalogue",
         ])
         XCTAssertEqual(transport.calls.filter { !$0.onQueue }.map(\.method), [])

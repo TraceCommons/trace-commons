@@ -80,7 +80,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private HealthCopy? _health;
     private HealthNavigationTarget _healthNavigation;
     private ArmingOffer? _armingOffer;
-    private HealthCopy? _budget;
     private HealthCopy? _witness;
     private GateHeldNotice? _gateHeld;
     private HistoryRollup _rollup = new();
@@ -754,25 +753,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(PrivateInferenceOn));
         Raise(nameof(PrivateInferenceQuitDetail));
     }
-
-    // --- The daily-budget banner -------------------------------------------
-    //
-    // Rendered from status.daily_budget, independently of the health label.
-    //
-    // The daemon enforces a daily byte and upload cap, and it does set a
-    // daily-cap-reached health label when one refuses an upload. But that
-    // label is last in the precedence order, so any other condition takes
-    // the single last_error_label slot and the cap vanishes. A contributor
-    // watched fourteen approved traces sit still for an evening while this
-    // window reported a full queue and said nothing about the budget that
-    // was actually holding them.
-
-    /// <summary>Whether approved traces are waiting on the daily budget.</summary>
-    public bool HasBudgetBanner => _budget is not null;
-
-    public string BudgetTitle => _budget?.Title ?? string.Empty;
-
-    public string BudgetDetail => _budget?.Detail ?? string.Empty;
 
     // Approved sessions held because the privacy witness is busy. Drawn from
     // status.witness_capacity rather than the health label, which a higher
@@ -1569,13 +1549,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (!status.IsError && status.ResultAs<DaemonStatus>() is { } parsedStatus)
             {
                 SetPaused(parsedStatus.Paused);
-                // Budget first: SetHealth suppresses the bare
-                // daily-cap-reached line when the budget banner is going to
-                // say the same thing with real numbers, so it has to see
-                // this pass's budget rather than the previous pass's.
-                SetBudget(parsedStatus.DailyBudget);
-                // Likewise the witness banner, which SetHealth steps the bare
-                // witness-saturated line aside for.
+                // The witness banner first: SetHealth steps the bare
+                // witness-saturated line aside for it, so it has to see this
+                // pass's capacity rather than the previous pass's.
                 SetWitnessCapacity(parsedStatus.WitnessCapacity);
                 // And the held notice, which SetHealth steps the bare
                 // automatic-contribution-held line aside for.
@@ -1707,8 +1683,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </remarks>
     private void SetHealth(string? label)
     {
-        HealthCopy? next = (_budget is not null && label == "daily-cap-reached")
-            || (_witness is not null && label == "witness-saturated")
+        HealthCopy? next = (_witness is not null && label == "witness-saturated")
             || (_gateHeld is not null && label == SwitchOnNotices.GateHeldLabel)
             ? null
             : HealthCopy.ForLabel(label);
@@ -1724,30 +1699,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(HealthDetail));
         Raise(nameof(HasHealthAction));
         Raise(nameof(HealthActionLabel));
-    }
-
-    /// <summary>
-    /// Takes status.daily_budget and re-renders the second banner.
-    /// </summary>
-    /// <remarks>
-    /// A second banner rather than another case in SetHealth, because the
-    /// two conditions are independent: the health slot carries one label and
-    /// daily-cap-reached is last in its precedence order, so a spent upload
-    /// budget behind a full queue was announced by neither. Compared by
-    /// value before raising, exactly as SetHealth is.
-    /// </remarks>
-    private void SetBudget(DailyBudget? budget)
-    {
-        HealthCopy? next = HealthCopy.ForBudget(budget);
-        if (Equals(_budget, next))
-        {
-            return;
-        }
-
-        _budget = next;
-        Raise(nameof(HasBudgetBanner));
-        Raise(nameof(BudgetTitle));
-        Raise(nameof(BudgetDetail));
     }
 
     private void SetGrantVoids(IReadOnlyList<GrantVoidCard> cards)
@@ -1905,8 +1856,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// Takes status.witness_capacity and re-renders the third banner, in the
-    /// Rust's words. Independent of SetHealth for the reason SetBudget is.
+    /// Takes status.witness_capacity and re-renders the witness banner, in the
+    /// Rust's words. Independent of SetHealth, whose one label a higher one
+    /// can mask.
     /// Compared by value before raising.
     /// </summary>
     private void SetWitnessCapacity(WitnessCapacity? capacity)

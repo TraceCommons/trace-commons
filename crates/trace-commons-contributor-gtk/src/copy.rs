@@ -29,11 +29,7 @@
 /// why the macro exists. The name appears as a literal nowhere in this file
 /// except through that macro; what is left is prose in comments, which no
 /// contributor reads.
-pub use trace_commons_contributor::{
-    app_name,
-    brand::{APP_NAME, COMMONS_NAME},
-    commons_name,
-};
+pub use trace_commons_contributor::{app_name, brand::APP_NAME};
 
 // --- Queue -------------------------------------------------------------
 
@@ -435,11 +431,8 @@ pub const BODY_NOT_AVAILABLE_HERE: &str = concat!(
 
 pub const PERMISSIONS_INTRO: &str =
     "If you contribute this trace, it will carry these permissions:";
-pub const PERMISSIONS_REQUESTED_NOTE: &str = concat!(
-    "These are the permissions this device requests. ",
-    commons_name!(),
-    " can narrow them, never widen them."
-);
+pub const PERMISSIONS_REQUESTED_NOTE: &str =
+    "These are the permissions this device requests. The server can narrow them, never widen them.";
 pub const UNENROLLED_PREVIEW: &str = "This is an illustration. This device isn't connected yet, so this was built without your \
      identity and nothing here can be contributed.";
 
@@ -906,30 +899,6 @@ pub const KNOBS_NOTE: &str = "These govern the background watcher, not this wind
      effect as soon as they are changed. The same values are readable and settable from the \
      command line.";
 
-// --- Settings: daily upload budget ----------------------------------------
-//
-// A separate section from the three timing knobs above on purpose: those
-// govern *when* the daemon interrupts or waits, and these bound how much it
-// is willing to send in a day -- the cap that exists to stop a runaway
-// client, not a convenience setting. Kept as its own card so lowering it
-// (a contributor's own throttle) and raising it (unsticking a budget that
-// was already spent) read as one topic, distinct from the pacing knobs.
-
-pub const BUDGET_HEADING: &str = "Daily upload budget";
-pub const KNOB_MAX_UPLOADS_TITLE: &str = "Uploads allowed per day";
-pub const KNOB_MAX_UPLOADS_UNIT: &str = "uploads/day";
-pub const KNOB_MAX_BYTES_TITLE: &str = "Data allowed per day";
-pub const KNOB_MAX_BYTES_UNIT: &str = "MB/day";
-
-/// Under both budget knobs. Says why they cannot be turned off entirely and
-/// what turning them down really means, since a cap of zero is refused
-/// rather than silently accepted as "stop uploading" -- see `KNOB_NOT_CHANGED`
-/// for what a contributor sees if they try.
-pub const BUDGET_NOTE: &str = "These bound how much can be sent in a day, not whether anything \
-     can. Lowering either is a throttle you control; there is no way to raise them past a fixed \
-     ceiling, because the whole point of a daily budget is that nothing on this machine can \
-     spend past it. Changes take effect immediately, with nothing queued waiting for a restart.";
-
 /// A refused write. States the data consequence -- nothing changed -- since
 /// a knob that silently snapped back would otherwise look like a value that
 /// had been accepted.
@@ -1043,7 +1012,7 @@ pub fn profile_failure_sentence(label: &str) -> String {
         // or a string -- and handled anyway, so a contract change surfaces
         // as a sentence rather than as the fallback below.
         "bio-required-or-null" | "bio-invalid" => "The bio wasn't sent in a form the roster takes.",
-        "not-logged-in" => concat!("This device isn't connected to ", commons_name!(), "."),
+        "not-logged-in" => "This device isn't connected.",
         // The underlying failure is never forwarded by the daemon -- it can
         // carry a server response body or a URL -- so there is nothing more
         // specific to say than that it did not go through.
@@ -1061,7 +1030,7 @@ pub fn profile_failure_sentence(label: &str) -> String {
 /// roster when they are still on it.
 pub fn roster_leave_failure_sentence(label: &str) -> String {
     let reason = match label {
-        "not-logged-in" => concat!("This device isn't connected to ", commons_name!(), "."),
+        "not-logged-in" => "This device isn't connected.",
         _ => "The request didn't go through.",
     };
     format!(
@@ -1267,20 +1236,7 @@ pub fn health_sentence(label: &str) -> &'static str {
              NEAR AI. Confirm you're OK with that and contributions resume."
         }
         "claim-mint-failed" | "ingest-unreachable" => {
-            concat!(
-                "Can't reach ",
-                commons_name!(),
-                " right now. Your queue is safe; it'll retry on its own."
-            )
-        }
-        // The banner for this condition is built by `daily_cap_sentence`,
-        // which can say how many traces are waiting and exactly when the
-        // limit resets. This line is the fallback for a daemon that
-        // reported the label without the budget object -- so it must not
-        // promise a time it does not have.
-        "daily-cap-reached" => {
-            "Today's upload limit is used up. Approved traces are waiting; nothing has been lost, \
-             and they go out when the limit resets."
+            "Can't reach the server right now. Your queue is safe; it'll retry on its own."
         }
         "queue-full" => {
             concat!(
@@ -1302,8 +1258,7 @@ pub fn health_sentence(label: &str) -> &'static str {
 /// `None` for any other outcome, and for a time this shell cannot read:
 /// never a guessed time. The label is the core review copy's
 /// `busy_retry_at`, the same words Tauri, macOS and Windows show; the time is
-/// the daemon's `view.retry_at`, rendered in local time as the daily-cap
-/// banner renders its reset.
+/// the daemon's `view.retry_at`, rendered in local time.
 pub fn witness_busy_retry_line(result: Option<&serde_json::Value>) -> Option<String> {
     let view = result?.get("view")?;
     if view.get("state")?.as_str()? != "Busy" {
@@ -1367,41 +1322,6 @@ mod witness_busy_retry_tests {
         ] {
             assert_eq!(witness_busy_retry_line(result.as_ref()), None, "{result:?}");
         }
-    }
-}
-
-/// The banner sentence for a spent daily budget.
-///
-/// Said separately from `health_sentence` because the daemon reports the
-/// budget separately from the health label: `daily-cap-reached` is last in
-/// the precedence order, so on the machine this was written for the slot
-/// was occupied by `queue-full` and the real reason nothing was uploading
-/// never reached a screen at all.
-///
-/// Everything in it is something the daemon actually knows. The reset time
-/// is `status.daily_budget.resets_at`, rendered in local time; when it is
-/// absent the sentence stops rather than guessing at "tomorrow". It is not
-/// phrased as an error, because nothing has gone wrong and nothing has been
-/// lost.
-pub fn daily_cap_sentence(
-    blocked_entries: u32,
-    resets_at: Option<chrono::DateTime<chrono::Utc>>,
-) -> String {
-    let waiting = match blocked_entries {
-        0 => "Approved traces are waiting".to_string(),
-        1 => "1 approved trace is waiting".to_string(),
-        n => format!("{n} approved traces are waiting"),
-    };
-    match resets_at {
-        Some(t) => format!(
-            "Today's upload limit is used up. {waiting}. Nothing has been lost -- they go out \
-             when the limit resets at {}.",
-            t.with_timezone(&chrono::Local).format("%H:%M")
-        ),
-        None => format!(
-            "Today's upload limit is used up. {waiting}. Nothing has been lost -- they go out \
-             when the limit resets."
-        ),
     }
 }
 
@@ -1497,12 +1417,9 @@ pub const UPDATE_UNAVAILABLE_BODY: &str = "Updates cannot be offered here: this 
 // change it there first.
 
 pub const ONBOARD_WELCOME_TITLE: &str = APP_NAME;
-pub const ONBOARD_WELCOME_BODY_1: &str = concat!(
-    "Coding agents get better when there are real transcripts to learn from. Almost all of \
-     that data is locked inside companies. ",
-    commons_name!(),
-    " is a shared pool that isn't."
-);
+pub const ONBOARD_WELCOME_BODY_1: &str = "Coding agents get better when there are real transcripts \
+     to learn from. Almost all of that data is locked inside companies. Your traces go to a shared \
+     pool that isn't.";
 /// The bold half of screen 1. Split from the paragraph around it because it
 /// is the promise the whole product is judged against.
 pub const ONBOARD_WELCOME_DECIDES: &str =
@@ -1895,78 +1812,6 @@ pub fn submit_flagged_and_skipped_clause(flagged: u64, skipped: &[&str]) -> Opti
     }
 }
 
-#[cfg(test)]
-mod daily_cap_tests {
-    use super::*;
-
-    fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
-        s.parse().unwrap()
-    }
-
-    /// The reset instant rendered the way the banner renders it, so the
-    /// assertions below do not depend on the machine's timezone.
-    fn local_hhmm(t: chrono::DateTime<chrono::Utc>) -> String {
-        t.with_timezone(&chrono::Local).format("%H:%M").to_string()
-    }
-
-    #[test]
-    fn the_sentence_states_how_many_are_waiting_and_when_the_limit_resets() {
-        let resets = at("2026-08-22T00:00:00Z");
-        let text = daily_cap_sentence(14, Some(resets));
-        assert_eq!(
-            text,
-            format!(
-                "Today's upload limit is used up. 14 approved traces are waiting. Nothing has \
-                 been lost -- they go out when the limit resets at {}.",
-                local_hhmm(resets)
-            )
-        );
-    }
-
-    #[test]
-    fn one_waiting_trace_is_not_described_in_the_plural() {
-        let text = daily_cap_sentence(1, Some(at("2026-08-22T00:00:00Z")));
-        assert!(text.contains("1 approved trace is waiting"), "{text}");
-        assert!(!text.contains("traces are waiting"), "{text}");
-    }
-
-    #[test]
-    fn with_no_reset_time_the_sentence_stops_rather_than_guessing() {
-        // Never "tomorrow": the daemon has not said when, so neither do we.
-        let text = daily_cap_sentence(3, None);
-        assert_eq!(
-            text,
-            "Today's upload limit is used up. 3 approved traces are waiting. Nothing has been \
-             lost -- they go out when the limit resets."
-        );
-        assert!(!text.contains("tomorrow"), "{text}");
-    }
-
-    #[test]
-    fn the_sentence_never_reads_as_a_failure() {
-        for text in [
-            daily_cap_sentence(14, Some(at("2026-08-22T00:00:00Z"))),
-            daily_cap_sentence(0, None),
-            health_sentence("daily-cap-reached").to_string(),
-        ] {
-            let lower = text.to_lowercase();
-            for word in ["error", "failed", "problem", "wrong"] {
-                assert!(!lower.contains(word), "{word} in: {text}");
-            }
-            assert!(lower.contains("nothing has been lost"), "{text}");
-        }
-    }
-
-    #[test]
-    fn the_fallback_line_promises_no_particular_time() {
-        // Used only when a daemon reports the label without the budget
-        // object, and it must not invent what the object would have said.
-        let text = health_sentence("daily-cap-reached");
-        assert!(!text.contains("tomorrow"), "{text}");
-        assert!(text.contains("resets"), "{text}");
-    }
-}
-
 // --- Tools -------------------------------------------------------------
 //
 // One tool, one word.
@@ -2090,9 +1935,9 @@ pub use trace_commons_contributor::private_inference_copy::{
 // connecting a tool they could connect right now.
 pub use trace_commons_contributor::private_inference_copy::{
     CREDENTIAL_CANCEL, CREDENTIAL_COST, CREDENTIAL_FORGET, CREDENTIAL_FORGET_EXPLAINS,
-    CREDENTIAL_MIGRATE, CREDENTIAL_MIGRATE_EXPLAINS, CREDENTIAL_OBTAIN, CREDENTIAL_TITLE,
-    CREDENTIAL_WHAT, CredentialAction, credential_action, credential_state_line,
-    credential_state_tone, harness_credential_notice,
+    CREDENTIAL_FORGET_NOT_REVOKED, CREDENTIAL_MIGRATE, CREDENTIAL_MIGRATE_EXPLAINS,
+    CREDENTIAL_OBTAIN, CREDENTIAL_TITLE, CREDENTIAL_WHAT, CredentialAction, credential_action,
+    credential_state_line, credential_state_tone, harness_credential_notice,
 };
 
 // --- What is left in the account ---------------------------------------
@@ -2629,7 +2474,6 @@ mod tests {
             "near-ai-notice-not-acknowledged",
             "claim-mint-failed",
             "ingest-unreachable",
-            "daily-cap-reached",
             "queue-full",
             "something-nobody-has-written-yet",
         ] {

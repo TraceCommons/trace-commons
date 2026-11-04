@@ -143,14 +143,69 @@ async fn token_bundle_http_journey_recovers_a_lost_finalize_response() {
     journal.approve_payload(id, payload).unwrap();
     journal.mark_approved(id).unwrap();
     let approval_ms = approval_started.elapsed().as_millis();
+    // Finalize is counted against the principal's submit rate once, before
+    // its body, and not again when it reaches the submit handler.
+    let _rate_lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    // A finalize for a bundle this principal does not have is refused before
+    // it takes a submit slot or a unit of the rate (decision 3 on #1794),
+    // and its bundle lookups are bounded by their own per-minute counter
+    // (#1800 review): past it, refused 429 without a lookup.
+    let submit_key = submit_principal_rate_limit_key(
+        tenant.tenant_id(),
+        tenant.safe_auth_method(),
+        tenant.principal_ref(),
+    );
+    let precheck_key = format!("finalize-precheck:{submit_key}");
+    configure_submit_rate_limits_for_test(&precheck_key, 1, SUBMIT_PER_PRINCIPAL_CONCURRENCY);
+    for expected in [StatusCode::NOT_FOUND, StatusCode::TOO_MANY_REQUESTS] {
+        use tower::ServiceExt;
+        let unknown = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/token-bundles/{}/journey-unknown",
+                        envelope.submission_id
+                    ))
+                    .header(AUTHORIZATION, "Bearer token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&envelope).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), expected);
+        assert_eq!(
+            submit_rate_limit_count_for_test(
+                tenant.tenant_id(),
+                tenant.safe_auth_method(),
+                tenant.principal_ref(),
+            ),
+            0,
+            "an unknown bundle's finalize spends no submit rate"
+        );
+    }
+    assert_eq!(
+        ACCOUNT_RATE_LIMITER.count_for_test(&precheck_key),
+        2,
+        "each unknown-bundle finalize spends the pre-check counter"
+    );
+    configure_submit_rate_limits_for_test(&precheck_key, u32::MAX, SUBMIT_PER_PRINCIPAL_CONCURRENCY);
+    let finalize_requests = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let finalize_seen = finalize_requests.clone();
     let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let lost_response = lost.clone();
     let router = app(state.clone()).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
             let lost = lost_response.clone();
+            let finalize_seen = finalize_seen.clone();
             async move {
                 let finalize = request.method() == axum::http::Method::POST
                     && request.uri().path().ends_with("/journey-r1");
+                if finalize {
+                    finalize_seen.fetch_add(1, Ordering::SeqCst);
+                }
                 let response = next.run(request).await;
                 if finalize && response.status().is_success() && !lost.swap(true, Ordering::SeqCst)
                 {
@@ -162,7 +217,8 @@ async fn token_bundle_http_journey_recovers_a_lost_finalize_response() {
         },
     ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let addr = listener.local_addr().unwrap();
+    let endpoint = format!("http://{addr}");
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
@@ -175,6 +231,15 @@ async fn token_bundle_http_journey_recovers_a_lost_finalize_response() {
     assert!(
         lost.load(Ordering::SeqCst),
         "the failure must occur after a successful real finalize"
+    );
+    assert_eq!(
+        submit_rate_limit_count_for_test(
+            tenant.tenant_id(),
+            tenant.safe_auth_method(),
+            tenant.principal_ref(),
+        ),
+        finalize_requests.load(Ordering::SeqCst),
+        "a finalize that reached submit work is counted once, not twice"
     );
     let committed_parent = db
         .get_trace_submission(tenant.tenant_id(), envelope.submission_id)
@@ -210,6 +275,26 @@ async fn token_bundle_http_journey_recovers_a_lost_finalize_response() {
         0
     );
     assert!(restarted.upload_approved(id, &client).await.unwrap() == receipt);
+    // A finalize of a real bundle passes the pre-check and is still held to
+    // the per-minute submit rate before its body is read (#1800 review):
+    // with the window spent, a finalize whose body never comes is answered.
+    let spent = ACCOUNT_RATE_LIMITER.count_for_test(&submit_key);
+    configure_submit_rate_limits_for_test(&submit_key, spent, SUBMIT_PER_PRINCIPAL_CONCURRENCY);
+    let mut past_rate = send_upload_headers_without_body(
+        addr,
+        "POST",
+        &format!("/v1/token-bundles/{}/journey-r1", envelope.submission_id),
+        Some("token-a"),
+    )
+    .await;
+    assert_eq!(
+        response_status_within(&mut past_rate, std::time::Duration::from_secs(2))
+            .await
+            .as_deref(),
+        Some("HTTP/1.1 429 Too Many Requests"),
+        "a finalize of a real bundle past the rate is refused before its body"
+    );
+    configure_submit_rate_limits_for_test(&submit_key, u32::MAX, SUBMIT_PER_PRINCIPAL_CONCURRENCY);
     let recovered_parent = db
         .get_trace_submission(tenant.tenant_id(), envelope.submission_id)
         .await

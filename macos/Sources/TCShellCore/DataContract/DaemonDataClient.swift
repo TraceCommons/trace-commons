@@ -305,8 +305,6 @@ public protocol DaemonDataClient: Sendable {
     func networkMissionCatalogue(limit: Int?, before: String?) async throws -> DaemonData.NetworkMissionCatalogue
     /// Z3.1, invite lookup. `code` carries the full invite URL.
     func lookupInvite(code: String) async throws -> DaemonData.InviteLookup
-    /// Z3.2, passkey binding state.
-    func passkeyState() async throws -> DaemonData.PasskeyState
     /// Z3.4, `account_session_status`.
     func accountState() async throws -> DaemonData.AccountState
     /// Read-only shared trace_activity policy; no matching/profile input leaves the Mac.

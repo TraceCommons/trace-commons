@@ -110,8 +110,6 @@ final class MonitorScreensCopyExportTests: XCTestCase {
         XCTAssertEqual(copy.safeguards.heading, "Contribution safeguards")
         XCTAssertEqual(copy.safeguards.rowsUnavailable, "{count} rows unavailable")
         XCTAssertTrue(copy.safeguards.capacityUnreadable.contains("could not read how many"))
-        XCTAssertEqual(copy.safeguards.remaining, "{uploads} uploads left \u{00B7} {megabytes} MB left")
-        XCTAssertEqual(copy.safeguards.heldByLimitOne, "1 queued trace held by limit")
     }
 
     /// The screens and the Traces tab say the same thing when the core does

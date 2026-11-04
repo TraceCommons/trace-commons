@@ -130,6 +130,59 @@ esac
     assert_eq!(source.discover().unwrap().len(), 1);
 }
 
+/// A resumed OpenCode session exports its root's whole conversation
+/// (`ses_<root>`) and stages it as the resumed row's own file, leaving the
+/// root row's earlier export in place.
+#[cfg(unix)]
+#[test]
+fn resumed_session_stages_under_its_own_row_without_replacing_the_roots_export() {
+    use std::os::unix::fs::PermissionsExt;
+    use trace_commons_contributor::managed::opencode::{OpenCodeSession, STAGING};
+    let tmp = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(tmp.path().join("state")).unwrap();
+    let account = AccountStore::open(&store)
+        .unwrap()
+        .add(ToolId::Opencode, ConnectionKind::ApiKey, "Work")
+        .unwrap();
+    let native = tmp.path().join("opencode");
+    std::fs::write(&native, r#"#!/bin/sh
+if [ "$1" = --version ]; then echo '1.19.0'; exit 0; fi
+shift
+case "$1" in
+import) cp "$2" "$HOME/fixture-seed.json";;
+export) python3 -c 'import json,os,sys; v=json.load(open(os.environ["HOME"]+"/fixture-seed.json")); assert v["info"]["id"] == sys.argv[1]; print(json.dumps(v))' "$2";;
+esac
+"#).unwrap();
+    std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = uuid::Uuid::new_v4();
+    let first = OpenCodeSession::new(&store, &account, &native, root, tmp.path()).unwrap();
+    first.prepare().unwrap();
+    first.collect(&store).unwrap();
+    let staged = store.dir().join(STAGING);
+    let earlier = std::fs::read(staged.join(format!("{root}.json"))).unwrap();
+
+    let row = uuid::Uuid::new_v4();
+    let resumed = OpenCodeSession::new(&store, &account, &native, root, tmp.path()).unwrap();
+    resumed.collect_as(&store, row).unwrap();
+    assert_eq!(
+        std::fs::read(staged.join(format!("{root}.json"))).unwrap(),
+        earlier,
+        "the root's export is not replaced"
+    );
+    assert!(staged.join(format!("{row}.json")).is_file());
+    let settings = trace_commons_contributor::daemon::settings::DaemonSettings::default();
+    let sources = trace_commons_contributor::source::all_sources(&settings.source_roots(&store));
+    let source = sources.iter().find(|s| s.name() == "opencode").unwrap();
+    let refs = source.discover().unwrap();
+    assert_eq!(refs.len(), 2);
+    for reference in refs {
+        assert_eq!(
+            source.load(&reference).unwrap().conversation_id,
+            Some(format!("ses_{}", root.simple()))
+        );
+    }
+}
+
 /// Optional installed-binary qualification. The executable must be a wrapper
 /// that denies external network, e.g. sandbox-exec; never uses real credentials.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

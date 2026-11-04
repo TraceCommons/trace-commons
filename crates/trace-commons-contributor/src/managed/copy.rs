@@ -12,6 +12,11 @@
 //!   `guide_step_use` -- the Private AI tab's step-by-step card, first on
 //!   the tab and closed with its X. Approved by the product owner
 //!   2026-10-28, with `sign_in_title` and `title` "My Private AI sessions".
+//!   On 2026-11-02 the card took the Insights getting-started layout, each
+//!   step a title over one line: `guide_step_earn_title`,
+//!   `guide_step_start_title` and `guide_step_use_title` are new, and
+//!   `guide_step_use` lost its "Work as usual." to its title. Those four
+//!   are DRAFT, NEEDS APPROVAL.
 //! - `sign_in_title` "Start a Private AI session" -- the launch card's
 //!   title on the Private AI tab (approved 2026-10-28).
 //! - `sign_in_scope` "Uses your NEAR AI sign-in." Shortened and approved by
@@ -35,7 +40,27 @@
 //! - `terminal_not_found` "{terminal} wasn't found on this computer.
 //!   Choose another in Settings." The line a shell shows for the refusal
 //!   `managed-terminal-not-found` ("not found", never "not installed");
-//!   it fills `{terminal}` from `capabilities.terminal_destination`.
+//!   it fills `{terminal}` from `capabilities.launch_destination` for a
+//!   launch (herdr while sessions are grouped there) and from
+//!   `capabilities.terminal_destination` for tool setup.
+//! - `herdr_socket_untrusted` "herdr's connection file can't be trusted.
+//!   Remove it or check its permissions." Owner-approved wording,
+//!   2026-11-03. The line a shell shows for the refusal
+//!   `managed-herdr-socket-untrusted`: something at herdr's socket path
+//!   that this account cannot trust.
+//! - `rex_not_ready` "Rex didn't open in time. Try again." Owner-approved
+//!   wording, 2026-11-03. The line a shell shows for the refusal
+//!   `managed-rex-not-ready`: Rex is installed but its app did not connect
+//!   in time. A Rex call that fails before the ticket is sent
+//!   (`managed-terminal-call-failed`) shows the general `action_failed`
+//!   line, never the unsupported-version one.
+//! - `herdr_grouping` "Group sessions in herdr" -- the switch under the
+//!   picker, and its accessible name (owner decision D4, 2026-11-03,
+//!   `docs/superpowers/specs/2026-11-03-rex-herdr-terminal-integration.md`).
+//!   Drawn while `capabilities.herdr_available`, and while
+//!   `capabilities.herdr_grouping` is on even when herdr is no longer found,
+//!   so it can be turned off; on when `capabilities.herdr_grouping`;
+//!   written with `set_managed_herdr`.
 //!
 //! A session row's actions (Ron, #1407, 2026-10-14):
 //! - `show` "Show" and `stop` "Stop" -- the row menu's items and the row's
@@ -44,8 +69,33 @@
 //!   stops what it's doing in {folder}." -- the confirmation, with `cancel`
 //!   and `stop`. Shells fill `{tool}` with the tool's name and `{folder}`
 //!   with the row's folder name.
-//! - `start_again` "Start again" -- an ended row's glass button, before
-//!   `dismiss` as a link.
+//! - `start_again` "Start again" -- an ended row's glass button when it
+//!   has no `resume`; otherwise an item in the row's menu. `dismiss` is that
+//!   row's menu item too, unless neither `resume` nor `start_again` is
+//!   offered; then it is a link, even when the menu holds
+//!   `copy_resume_command`. A row stuck unknown (its launcher gone before
+//!   its first report) that says `can_dismiss` offers `dismiss` alone, as
+//!   the link (owner, 2026-11-02).
+//!
+//! Resuming a session (design agreed 2026-10-31,
+//! `docs/superpowers/specs/2026-10-31-managed-session-resume-design.md`):
+//! - `resume` "Resume" -- an ended row's primary button when the row says
+//!   `can_resume` and the snapshot says `capabilities.terminal_launch` and
+//!   `capabilities.resume`; `start_again` and `dismiss` then move into the
+//!   row's menu. It continues the session's conversation in a new
+//!   session.
+//! - `copy_resume_command` "Copy resume command" -- an item in the row's
+//!   menu on an ended row that says `can_resume`, shown once the shell
+//!   knows the config directory it passes. Copies the
+//!   command line that resumes the session from any terminal.
+//! - `resumed` "Resumed" -- a small secondary label on the status line of a
+//!   row that continues an earlier session (the row says `resumed_from`).
+//!   `resumed_from` "Continues {time}" -- the same label with the root
+//!   row's start time; shells fill `{time}` with it, formatted as they
+//!   format a row's own time.
+//! - `copied` "Copied" -- the row's status text for about two
+//!   seconds after the "Copy resume command" menu item copies, then it
+//!   reverts. An in-place label change, not a notice.
 //!
 //! Installing a coding tool. Approved 2026-10-15 (#1419 review):
 //! - `tools_title` "Coding tools", above the install block shown when no
@@ -54,7 +104,8 @@
 //! - `install` "Install"; its accessible name appends the tool's name.
 //! - `tool_unavailable` "{tool} wasn't found on this computer." Shells fill
 //!   `{tool}` with the tool's display name (`claude`, `codex`, `opencode`).
-//! - `refresh` "Refresh": a bare glyph's tooltip and accessible name.
+//! - `refresh` "Refresh": the refresh pill's word, tooltip and accessible
+//!   name (a pill with its word since 2026-11-02; it was a bare glyph).
 //!
 //! A folder is optional in the launch dialog (owner, 2026-10-29): a session
 //! with none runs in the person's home folder, which the daemon resolves.
@@ -79,6 +130,68 @@
 //! - `model_unavailable` "That model isn't available on NEAR AI. Choose
 //!   another." The line a shell shows for the refusal
 //!   `managed-model-unavailable`.
+//!
+//! Favorite models. Proposed 2026-10-29, not yet approved:
+//! - `model_favorite_add` "Add to favorites" and `model_favorite_remove`
+//!   "Remove from favorites" -- the accessible name and tooltip of the star
+//!   beside the model picker, for the chosen model, while it is not and is a
+//!   favorite. Favorites are listed first in the picker.
+//! - `model_favorite_unavailable` "{model} is no longer available on NEAR
+//!   AI." -- a row beside the picker for each favorite NEAR AI stopped
+//!   listing, with a `remove` button whose accessible name is
+//!   `model_favorite_remove_named` "Remove {model} from favorites". Shells
+//!   fill `{model}` with the model id.
+//! - `favorites_title` "Favorite models" -- the card in Settings > Private
+//!   AI that lists every favorite, each with `remove`; one NEAR AI stopped
+//!   listing reads `model_favorite_unavailable` instead of its bare id.
+//! - `folder_model_unavailable` changed from "The saved model is
+//!   unavailable. Choose a model before launching." -- a saved model NEAR AI
+//!   no longer lists now falls back to the default instead of holding the
+//!   launch, and this line says so.
+//!
+//! The background model picker, under the model picker for Claude Code and
+//! OpenCode on NEAR AI. Approved by the owner 2026-10-31:
+//! - `background_model_title` "Background model" -- the field's visible
+//!   label above the picker.
+//! - `background_model_choice` "Model for background tasks" -- the
+//!   picker's accessible name, apart from the model picker's `model_choice`.
+//!   Its default row reuses `model_default` and `model_default_unknown`.
+//!
+//! The model picker's group headings, one per NEAR AI privacy tier
+//! (`managed::models::ModelTier`). Named by the owner 2026-10-30; the
+//! picker lists them most private first (owner, 2026-10-31):
+//! - `model_group_near_ai` "NEAR AI private models" -- NEAR AI's own TEEs
+//!   (its "Confidential TEE").
+//! - `model_group_external` "External private models" -- a third party's
+//!   TEE (its "3P Confidential TEE").
+//! - `model_group_incognito` "Incognito models" -- a vendor's model on the
+//!   vendor's servers, reached through NEAR AI's gateway (NEAR AI's
+//!   term).
+//!
+//! Refusing a launch on the NEAR AI sign-in whose balance is too low for its
+//! first calls. Proposed 2026-10-30, not yet approved:
+//! - `balance_too_low` "Add funds to your NEAR AI balance to start a
+//!   session." The line a shell shows for the refusal
+//!   `managed-near-ai-balance-too-low`.
+//!
+//! A NEAR AI Claude Code launch and its project's model choices. Approved by
+//! the owner with this wording, 2026-11-01:
+//! - `project_chooses_model` "This project's Claude Code settings, agents,
+//!   commands or skills choose a model. NEAR AI sessions use the session's
+//!   models." The line a shell shows for the refusal
+//!   `managed-project-chooses-model`; the CLI prints the same sentence.
+//! - `project_sets_auto_mode_server` "Remove CLAUDE_CODE_AUTO_MODE_SERVER
+//!   from this project's settings." Owner-approved wording, 2026-11-02. The
+//!   line a shell shows for the refusal
+//!   `managed-project-sets-auto-mode-server`; the CLI prints the same
+//!   sentence.
+//! - `project_workflows` "This project has Claude Code workflows. A workflow
+//!   step can choose its own model, so it may not stay in this session's
+//!   privacy tier." A notice the launcher prints in the session's terminal
+//!   before Claude Code starts, on NEAR AI only; the session still starts.
+//!   The macOS launch sheet also shows it as a caption under the model
+//!   pickers, for a folder `managed_folder_settings_get` reports
+//!   `project_workflows` for, on a NEAR AI session (owner, 2026-11-01).
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "My Private AI sessions",
@@ -90,14 +203,14 @@ pub fn copy() -> serde_json::Value {
             "folder_settings_failed": "Could not load folder settings. Try again.",
             "folder_settings_reset": "Reset",
             "folder_settings_reset_accessibility": "Reset {tool} folder settings",
-            "folder_model_unavailable": "The saved model is unavailable. Choose a model before launching.",
+            "folder_model_unavailable": "The saved model is no longer available, so the default is selected.",
             "cli_options_title": "Agent CLI options",
-            "cli_options_scope": "Applies to new managed sessions. Quote values that contain spaces. Account routing, profiles and session identity are managed by Trace Commons.",
+            "cli_options_scope": "Applies to new managed sessions. Quote values that contain spaces. Account routing, profiles and session identity are managed by this app.",
             "cli_options_label": "CLI options",
             "cli_options_save": "Save",
             "cli_options_save_accessibility": "Save {tool} CLI options",
             "cli_options_invalid": "Check quotes and escapes. Account routing, profile and session overrides are unavailable here; choose the OpenCode model when launching.",
-            "cli_options_unavailable": "Update Trace Commons to edit managed session options.",
+            "cli_options_unavailable": "Update this app to edit managed session options.",
             "cli_options_read_failed": "Could not read managed session options. Try Refresh.",
             "provider_openai": "OpenAI",
             "provider_anthropic": "Anthropic",
@@ -151,9 +264,25 @@ pub fn copy() -> serde_json::Value {
             "opencode": "OpenCode",
             "model": "Model ID",
             "model_choice": "Model",
+            "background_model_title": "Background model",
+            "background_model_choice": "Model for background tasks",
             "model_default": "Default: {model}",
             "model_default_unknown": "Default",
+            "model_group_incognito": "Incognito models",
+            "model_group_near_ai": "NEAR AI private models",
+            "model_group_external": "External private models",
             "model_unavailable": "That model isn't available on NEAR AI. Choose another.",
+            "model_favorite_add": "Add to favorites",
+            "model_favorite_remove": "Remove from favorites",
+            "model_favorite_unavailable": "{model} is no longer available on NEAR AI.",
+            "model_favorite_remove_named": "Remove {model} from favorites",
+            "favorites_title": "Favorite models",
+            "balance_too_low": "Add funds to your NEAR AI balance to start a session.",
+            "project_chooses_model": "This project's Claude Code settings, agents, commands or skills choose a model. NEAR AI sessions use the session's models.",
+            "project_sets_auto_mode_server": "Remove CLAUDE_CODE_AUTO_MODE_SERVER from this project's settings.",
+            "herdr_socket_untrusted": "herdr's connection file can't be trusted. Remove it or check its permissions.",
+            "rex_not_ready": "Rex didn't open in time. Try again.",
+            "project_workflows": "This project has Claude Code workflows. A workflow step can choose its own model, so it may not stay in this session's privacy tier.",
             "collect_traces": "Collect this session",
             "opencode_scope": "Uses only the selected key and model in an isolated profile. Project OpenCode settings and plugins are disabled. API key means an OpenAI key; NEAR AI uses a NEAR AI key.",
             "collection_scope": "Collects this session when OpenCode exits, under your existing review and contribution settings. Other sessions created inside OpenCode are not collected.",
@@ -197,21 +326,30 @@ pub fn copy() -> serde_json::Value {
             "open_tool": "Open {tool}",
             "guide_title": "How Private AI works",
             "guide_body": "Pay for the AI you already use with credit from your traces.",
+            "guide_step_earn_title": "Earn credit",
             "guide_step_earn": "Share traces to earn NEAR AI credit.",
+            "guide_step_start_title": "Pick a tool",
             "guide_step_start": "Start Claude Code, Codex or OpenCode below.",
-            "guide_step_use": "Work as usual. Calls go through Private AI and use your credit.",
+            "guide_step_use_title": "Work as usual",
+            "guide_step_use": "Calls go through Private AI and use your credit.",
             "sign_in_title": "Start a Private AI session",
             "sign_in_scope": "Uses your NEAR AI sign-in.",
             "sign_in_needed": "Sign in to NEAR AI to start a session.",
             "sign_in_near_ai": "Sign in",
             "sign_in_near_ai_accessibility": "Sign in to NEAR AI",
             "terminal_choice": "Open sessions in",
+            "herdr_grouping": "Group sessions in herdr",
             "terminal_not_found": "{terminal} wasn't found on this computer. Choose another in Settings.",
             "show": "Show",
             "stop": "Stop",
             "stop_question": "Stop this session?",
             "stop_description": "{tool} stops what it's doing in {folder}.",
-            "start_again": "Start again"
+            "start_again": "Start again",
+            "resume": "Resume",
+            "copy_resume_command": "Copy resume command",
+            "resumed": "Resumed",
+            "resumed_from": "Continues {time}",
+            "copied": "Copied"
     }"#).expect("static managed copy is valid JSON")
 }
 
@@ -246,6 +384,32 @@ mod tests {
         assert_eq!(copy["clear_folder"], "Use home");
     }
 
+    /// The Private AI tab's guide: each step a title over one line, in the
+    /// Insights getting-started layout (product owner, 2026-11-02).
+    #[test]
+    fn the_guide_steps_each_have_a_title_and_a_line() {
+        let copy = copy();
+        assert_eq!(copy["guide_title"], "How Private AI works");
+        for (title, line) in [
+            ("guide_step_earn_title", "guide_step_earn"),
+            ("guide_step_start_title", "guide_step_start"),
+            ("guide_step_use_title", "guide_step_use"),
+        ] {
+            let title_words = copy[title].as_str().unwrap();
+            let line_words = copy[line].as_str().unwrap();
+            assert!(!title_words.is_empty(), "{title}");
+            assert!(!title_words.ends_with('.'), "{title} is a title");
+            assert!(!line_words.contains(". "), "{line} is one sentence");
+        }
+        assert_eq!(copy["guide_step_use_title"], "Work as usual");
+        assert!(
+            !copy["guide_step_use"]
+                .as_str()
+                .unwrap()
+                .contains("Work as usual")
+        );
+    }
+
     /// The NEAR AI sign-in launch reads these words, exactly as proposed.
     #[test]
     fn the_sign_in_launch_has_its_words() {
@@ -263,11 +427,45 @@ mod tests {
         assert_eq!(copy["sign_in_near_ai_accessibility"], "Sign in to NEAR AI");
     }
 
+    /// The star beside the model picker names its action both ways.
+    #[test]
+    fn the_favorite_star_has_its_words() {
+        let copy = copy();
+        assert_eq!(copy["model_favorite_add"], "Add to favorites");
+        assert_eq!(copy["model_favorite_remove"], "Remove from favorites");
+        assert_eq!(
+            copy["model_favorite_unavailable"],
+            "{model} is no longer available on NEAR AI."
+        );
+        assert_eq!(
+            copy["model_favorite_remove_named"],
+            "Remove {model} from favorites"
+        );
+        assert_eq!(copy["favorites_title"], "Favorite models");
+        // A saved model NEAR AI dropped falls back to the default.
+        assert_eq!(
+            copy["folder_model_unavailable"],
+            "The saved model is no longer available, so the default is selected."
+        );
+    }
+
     /// The terminal choice reads these words, exactly as proposed.
+    /// Owner-approved wording, 2026-11-03 (#1886 follow-up).
+    #[test]
+    fn the_herdr_and_rex_refusals_have_their_words() {
+        let copy = copy();
+        assert_eq!(
+            copy["herdr_socket_untrusted"],
+            "herdr's connection file can't be trusted. Remove it or check its permissions."
+        );
+        assert_eq!(copy["rex_not_ready"], "Rex didn't open in time. Try again.");
+    }
+
     #[test]
     fn the_terminal_choice_has_its_words() {
         let copy = copy();
         assert_eq!(copy["terminal_choice"], "Open sessions in");
+        assert_eq!(copy["herdr_grouping"], "Group sessions in herdr");
         assert_eq!(
             copy["terminal_not_found"],
             "{terminal} wasn't found on this computer. Choose another in Settings."
@@ -287,6 +485,11 @@ mod tests {
             "{tool} stops what it's doing in {folder}."
         );
         assert_eq!(copy["start_again"], "Start again");
+        assert_eq!(copy["resume"], "Resume");
+        assert_eq!(copy["copy_resume_command"], "Copy resume command");
+        assert_eq!(copy["resumed"], "Resumed");
+        assert_eq!(copy["resumed_from"], "Continues {time}");
+        assert_eq!(copy["copied"], "Copied");
         assert_eq!(copy["cancel"], "Cancel");
         assert_eq!(copy["dismiss"], "Dismiss");
     }

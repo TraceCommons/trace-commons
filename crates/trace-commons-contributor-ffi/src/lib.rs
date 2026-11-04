@@ -100,7 +100,7 @@ pub use nudge::{tc_nudge_copy_json, tc_nudge_digest_help_json, tc_nudge_entry_ta
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::UnwindSafe;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use trace_commons_contributor::config::{ConfigStore, OtherChannelStateDir};
@@ -472,6 +472,15 @@ pub struct tc_handle {
     running: Mutex<Option<RunningDaemon>>,
     subscriptions: Mutex<HashMap<u64, tokio::task::JoinHandle<()>>>,
     next_subscription: AtomicU64,
+    /// `false` from the moment `stop_embedded` claims `running` until its
+    /// teardown thread has seen the supervisor end and closed the daemon.
+    /// `true` otherwise, including on a handle that never ran one.
+    ///
+    /// `stop_embedded` stops waiting after [`STOP_WAIT_BOUND`] and leaves
+    /// that thread running; `tc_handle_free` reads this to decide whether it
+    /// may shut the runtime down or must leak it so the abandoned pass can
+    /// finish (see `tc_handle_free`).
+    teardown_finished: Arc<AtomicBool>,
 }
 
 /// Borrow the running daemon's shared state, or `None` if it has been
@@ -516,6 +525,18 @@ pub struct tc_preview {
 /// as one function so the two entry points cannot drift on how the runtime,
 /// `start_embedded`, and the supervisor task get wired together.
 fn start_daemon_handle(store: ConfigStore) -> anyhow::Result<tc_handle> {
+    // The app's stdout and stderr go nowhere, so a panic here (IronWire's
+    // proxy runs on this runtime) would leave no trace. This records its
+    // location, never its message; see `daemon::diagnostics_log`. This
+    // crate's own test builds skip it (see the `test-keep-panic-messages`
+    // feature) so their assertion messages survive; every other build
+    // installs it. `cfg!` rather than `#[cfg]`, so the call is compiled, and
+    // linted by `clippy --all-targets`, in every build, test builds included.
+    let store = if cfg!(any(test, feature = "test-keep-panic-messages")) {
+        store
+    } else {
+        trace_commons_contributor::daemon::diagnostics_log::install_for(store)?
+    };
     // A floor of two workers, not tokio's default of "available
     // parallelism, or whatever TOKIO_WORKER_THREADS says". With exactly one
     // worker, `stop_embedded`'s join-on-the-supervisor and an in-flight
@@ -549,6 +570,7 @@ fn start_daemon_handle(store: ConfigStore) -> anyhow::Result<tc_handle> {
         })),
         subscriptions: Mutex::new(HashMap::new()),
         next_subscription: AtomicU64::new(1),
+        teardown_finished: Arc::new(AtomicBool::new(true)),
     })
 }
 
@@ -750,6 +772,7 @@ pub unsafe extern "C" fn tc_daemon_attach(
             running: Mutex::new(None),
             subscriptions: Mutex::new(HashMap::new()),
             next_subscription: AtomicU64::new(1),
+            teardown_finished: Arc::new(AtomicBool::new(true)),
         };
         let raw = Box::into_raw(Box::new(handle));
         registry_insert(raw as usize, AllocKind::Handle);
@@ -767,9 +790,7 @@ pub unsafe extern "C" fn tc_daemon_attach(
 /// ```json
 /// {"quiescence_secs":{"min":0,"max":14400},
 ///  "approval_hold_secs":{"min":0,"max":300},
-///  "digest_interval_secs":{"min":3600,"max":86400},
-///  "max_uploads_per_day":{"min":1,"max":1000},
-///  "max_bytes_per_day":{"min":1,"max":5368709120}}
+///  "digest_interval_secs":{"min":3600,"max":86400}}
 /// ```
 ///
 /// Reads nothing and writes nothing; the same object for every caller on
@@ -790,7 +811,7 @@ pub extern "C" fn tc_settings_ranges_json() -> *mut c_char {
 /// ```json
 /// {"channel":"production","state_dir_name":"trace-commons",
 ///  "state_dir_env":"TRACE_COMMONS_CONTRIBUTOR_DIR",
-///  "passkey_rp_id":"<relying party>","url_scheme":"tracecommons",
+///  "url_scheme":"tracecommons",
 ///  "near_ai_dashboard_origin":"<NEAR AI dashboard origin>",
 ///  "near_ai_sign_in_providers":["near","github","google"]}
 /// ```
@@ -812,7 +833,6 @@ pub extern "C" fn tc_build_channel_json() -> *mut c_char {
             "channel": channel::CHANNEL,
             "state_dir_name": channel::STATE_DIR_NAME,
             "state_dir_env": channel::STATE_DIR_ENV,
-            "passkey_rp_id": channel::PASSKEY_RP_ID,
             "url_scheme": channel::URL_SCHEME,
             "near_ai_dashboard_origin": channel::NEAR_AI_DASHBOARD_ORIGIN,
             "near_ai_sign_in_providers": channel::NEAR_AI_SIGN_IN_PROVIDERS,
@@ -1044,7 +1064,7 @@ unsafe fn apply_pre_start_settings(
 /// `settings_json` accepts exactly the fields `tc_call(handle,
 /// "set_settings", ...)` does -- `quiescence_secs`, `digest_interval_secs`,
 /// `approval_hold_secs`, `local_notifications`, `claude_root`,
-/// `codex_root`, `max_uploads_per_day`, `max_bytes_per_day` -- validated by the
+/// `codex_root` -- validated by the
 /// same function (`daemon::settings::apply_settings_object`), so there is
 /// one definition of "a valid settings object", not two that can drift. An
 /// unrecognized top-level key, or a recognized key holding the wrong JSON
@@ -1134,8 +1154,8 @@ pub unsafe extern "C" fn tc_daemon_start_with_settings(
 }
 
 /// Tear down the embedded daemon (idempotent) from a dedicated OS thread
-/// that carries no tokio context of its own, so blocking on it with a plain
-/// `JoinHandle::join` is always safe regardless of the calling thread's own
+/// that carries no tokio context of its own, so waiting on it (now with a
+/// deadline, through a channel) is always safe regardless of the calling thread's own
 /// context -- including from inside a `tc_subscribe` callback running on
 /// this handle's own runtime, where calling `handle.rt.block_on(..)`
 /// directly on the calling thread previously panicked ("cannot start a
@@ -1170,6 +1190,16 @@ pub unsafe extern "C" fn tc_daemon_start_with_settings(
 /// teardown barrier for a *second concurrent* caller, and a caller must not
 /// call `tc_handle_free` concurrently with `tc_daemon_stop`. Both are
 /// stated in the header.
+///
+/// Nor is it an unbounded barrier for the winner. It waits for the teardown
+/// thread for at most [`STOP_WAIT_BOUND`] and then returns, leaving that
+/// thread to finish: the supervisor sees the shutdown flag only between the
+/// steps of a pass, and one step can block for many seconds, which on the
+/// macOS app's main thread at quit was a hung app. The thread still awaits
+/// the supervisor before `EmbeddedDaemon::close`, so the exclusive lock is
+/// released only once the pass has really ended, and it sets
+/// `teardown_finished` last, which tells `tc_handle_free` whether the
+/// runtime is safe to shut down.
 fn stop_embedded(handle: &tc_handle) {
     // An attached handle does not own the daemon, so "stop" can only mean
     // "stop listening to it". Dropping the sink ends event delivery; the
@@ -1189,6 +1219,14 @@ fn stop_embedded(handle: &tc_handle) {
     let Some(running) = running else {
         return;
     };
+    handle.teardown_finished.store(false, Ordering::Release);
+    let finished = Arc::clone(&handle.teardown_finished);
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    // Not joined: the caller waits on `done_rx` for at most
+    // `STOP_WAIT_BOUND`, and the thread finishes on its own after that.
+    // It owns everything it touches -- the daemon, the supervisor's
+    // `JoinHandle`, `finished` -- and nothing borrowed from `handle`, so it
+    // stays sound after `tc_handle_free` has freed the handle.
     let _ = std::thread::spawn(move || {
         let RunningDaemon {
             embedded,
@@ -1211,10 +1249,37 @@ fn stop_embedded(handle: &tc_handle) {
                 supervisor.abort();
             }
         }
+        // Only after the supervisor has ended: `close` releases the
+        // exclusive lock, and a new daemon on this directory must not start
+        // while the old pass can still write to it.
         embedded.close();
-    })
-    .join();
+        finished.store(true, Ordering::Release);
+        let _ = done_tx.send(());
+    });
+    // Any outcome returns. A timeout leaves the thread to finish on its
+    // own; a disconnect means it ended without sending (it panicked), so
+    // there is nothing left to wait for.
+    let _ = done_rx.recv_timeout(STOP_WAIT_BOUND);
 }
+
+/// How long `tc_daemon_stop` waits for the supervise loop to end -- its
+/// current pass, then the private-inference proxy's drain after it (whose
+/// own budget is five seconds) -- before it returns and leaves the rest of
+/// the teardown to run in the background.
+///
+/// A pass checks the shutdown flag only between steps, and a step can block
+/// for seconds (a session-root scan, an account-admission read, an upload).
+/// The macOS app calls `tc_daemon_stop` on the main thread while quitting,
+/// and an unbounded wait there is a hung app. Two seconds lets an ordinary
+/// pass, and the daemon's own clean-up after it, finish; past that the
+/// person sees a spinning cursor, so we stop waiting.
+const STOP_WAIT_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long `tc_handle_free` waits for the handle's runtime to shut down:
+/// for blocking work that is not part of the pass (the settlement scan, a
+/// session renewal) to finish. Past it, that work is left running on its
+/// own threads until it ends or the process exits.
+const FREE_WAIT_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The fixed label the handle entry points below report for a pointer
 /// that is not a live `tc_handle*`.
@@ -1296,7 +1361,10 @@ fn handle_pointer_is_live(handle: *const tc_handle) -> bool {
 /// caller**: if two threads call this at once, one performs the teardown
 /// and the other returns immediately, possibly before the daemon has
 /// actually finished stopping. Only the call that wins that race blocks
-/// until teardown completes. See `stop_embedded`'s doc for why waiting
+/// until teardown completes, or for [`STOP_WAIT_BOUND`] (2 seconds),
+/// whichever is first; past the bound the teardown finishes in the
+/// background, and the daemon keeps its lock on the state directory until
+/// it has. See `stop_embedded`'s doc for why waiting
 /// would be unsound rather than merely slower. A caller must **not** call
 /// `tc_handle_free` concurrently with this function.
 ///
@@ -1341,6 +1409,15 @@ pub unsafe extern "C" fn tc_daemon_stop(handle: *mut tc_handle) {
 /// handle, safer than the crash freeing it would otherwise risk) and
 /// records why via `tc_last_error`.
 ///
+/// Bounded: its own stop (when `tc_daemon_stop` was not called first) waits
+/// at most [`STOP_WAIT_BOUND`], and the runtime is shut down with
+/// `Runtime::shutdown_timeout(FREE_WAIT_BOUND)` (1 second) rather than
+/// dropped, since a `Runtime`'s drop waits for every blocking-pool thread
+/// with no deadline. When the stop gave up on a pass that is still running,
+/// the runtime is leaked instead: shutting it down would cancel that pass
+/// at its next `.await`, part way through. Leaking at quit is the accepted
+/// cost, the same trade as the in-flight-call leak in the hosts.
+///
 /// # Safety
 /// `handle`, if non-null, must be a pointer previously returned by
 /// `tc_daemon_start`, must not already have been passed to
@@ -1364,7 +1441,31 @@ pub unsafe extern "C" fn tc_handle_free(handle: *mut tc_handle) {
             let handle_ref = unsafe { &*handle };
             stop_embedded(handle_ref);
         }
-        drop(unsafe { Box::from_raw(handle) });
+        let tc_handle {
+            rt,
+            attached,
+            running,
+            subscriptions,
+            next_subscription: _,
+            teardown_finished,
+        } = *unsafe { Box::from_raw(handle) };
+        if teardown_finished.load(Ordering::Acquire) {
+            // Bounded, where dropping the runtime is not: `Runtime`'s drop
+            // waits for every blocking-pool thread with no deadline.
+            rt.shutdown_timeout(FREE_WAIT_BOUND);
+        } else {
+            // `stop_embedded` stopped waiting for a pass that is still
+            // running. Shutting the runtime down would cancel that pass at
+            // its next `.await`, part way through, and the teardown thread
+            // only releases the lock once it ends. Leak the runtime instead:
+            // the pass finishes and the teardown thread closes the daemon,
+            // or the process exits first. One runtime per abandoned stop.
+            std::mem::forget(rt);
+        }
+        // After the runtime, the order the fields dropped in before.
+        drop(attached);
+        drop(running);
+        drop(subscriptions);
         Ok(())
     });
 }
@@ -1899,8 +2000,8 @@ pub unsafe extern "C" fn tc_unsubscribe(handle: *mut tc_handle, token: u64) {
         };
         if let Some(jh) = jh {
             jh.abort();
-            // A dedicated OS thread and a plain `JoinHandle::join`, exactly
-            // as `stop_embedded` uses -- safe to block on regardless of
+            // A dedicated OS thread and a plain `JoinHandle::join`, as
+            // `stop_embedded` uses (it adds a deadline) -- safe to block on regardless of
             // this calling thread's own context, and the only way to give
             // "no callback after this returns" a real guarantee rather
             // than an incidental one.
@@ -3602,6 +3703,50 @@ pub unsafe extern "C" fn tc_legacy_migration_notice(notice_json: *const c_char) 
     })
 }
 
+/// The account section's status while this app's account needs attention
+/// (#1836 F1), from a `status` object -- the whole status, or an object
+/// holding its `account_state`, `account_state_reason` and
+/// `near_ai_login_unconfirmed` keys -- passed as JSON.
+///
+/// Returns an owned JSON object whose keys are `AccountAttentionCopy`'s
+/// fields -- `title`, `body` (the reason's sentence, or null for a reason
+/// this build does not know), `private_ai` (null unless a NEAR AI login is
+/// stored), `action` (the "Set up again" button), the confirmation it opens
+/// (`confirm_title`, `confirm_body`, `confirm_action`, `confirm_cancel`) and
+/// `failed` -- free it with [`tc_string_free`]. Only `confirm_action`
+/// unenrolls (`unenroll`); then the first run starts.
+///
+/// THE BRANCH CROSSES, NOT ONLY THE WORDS: a shell does not read
+/// `account_state_reason` to choose a sentence. Returns NULL while there is
+/// nothing to show (`account_state` is `ok`, absent or anything else), for a
+/// NULL, non-UTF-8 or unparseable argument, anything that is not an object,
+/// and on a caught panic.
+///
+/// # Safety
+/// `status_json`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_account_attention_copy_json(status_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        if status_json.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let Ok(text) = (unsafe { borrow_str(status_json) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Some(copy) =
+            trace_commons_contributor::consent_copy::account_attention_for_wire(&value)
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
 /// The notice for approved sessions held because the privacy witness is
 /// busy, from `status`'s `witness_capacity` object, passed as the JSON the
 /// daemon sent.
@@ -4652,33 +4797,6 @@ pub extern "C" fn tc_contribution_group_withheld_count(pending: i64, contributab
     .unwrap_or(0)
 }
 
-/// K9 (#1118): the toast after a submit -- "Sent. N left to decide - upload
-/// limit X of Y", the WYSIWYG design's Flow 2/3 example.
-///
-/// `uploads_today` and `max_uploads_per_day` are `status.daily_budget`'s
-/// fields of the same names; `decisions_owed` is `status.decisions_owed`
-/// (K6, a separate branch). All three are clamped to 0 on a negative value,
-/// which no honest caller sends.
-///
-/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
-/// caught panic.
-#[unsafe(no_mangle)]
-pub extern "C" fn tc_toast_sent_text(
-    uploads_today: i64,
-    max_uploads_per_day: i64,
-    decisions_owed: i64,
-) -> *mut c_char {
-    guarded_string_no_err(|| {
-        Ok(to_owned_cstring(
-            &trace_commons_contributor::consent_copy::toast_sent_text(
-                u64::try_from(uploads_today).unwrap_or(0),
-                u64::try_from(max_uploads_per_day).unwrap_or(0),
-                u64::try_from(decisions_owed).unwrap_or(0),
-            ),
-        ))
-    })
-}
-
 /// The sentence for one `near_ai_balance` `state`.
 ///
 /// `state` is the `state` field of a `near_ai_balance` answer. A NULL or
@@ -5658,8 +5776,8 @@ pub extern "C" fn tc_onboarding_copy() -> *mut c_char {
 
 /// The first-run wording of #1030 (`first_run_copy::first_run_copy`): a JSON
 /// object of per-screen groups, `{frame, join, folders, tools, rules, uses,
-/// passkey, private_ai}`, each a map of strings. `{tool}`, `{host}`,
-/// `{pay_range}`, `{count}`, `{folder}`, `{name}`, `{max}`, `{selected}`,
+/// private_ai}`, each a map of strings. `{tool}`, `{host}`,
+/// `{pay_range}`, `{count}`, `{folder}`, `{max}`, `{selected}`,
 /// `{total}` and `{tools}` are placeholders the shell fills.
 ///
 /// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
@@ -6225,6 +6343,22 @@ pub unsafe extern "C" fn tc_referral_code_display(typed: *const c_char) -> *mut 
 pub extern "C" fn tc_account_devices_copy_json() -> *mut c_char {
     guarded_string_no_err(|| {
         let copy = trace_commons_contributor::consent_copy::account_devices_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// The words for changing the NEAR AI login an account uses (F10,
+/// `account_change_copy::account_change_copy`), as a JSON object of
+/// `AccountChangeCopy`'s fields. Every string is owner-approved
+/// (2026-11-03; the mismatch body 2026-11-02). Templates carry
+/// `{provider}`, `{old_provider}` or `{new_provider}`, a login's title.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_account_change_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::account_change_copy::account_change_copy();
         Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
     })
 }
@@ -7220,5 +7354,152 @@ mod managed_availability_tests {
         let guides = owned_json(tc_install_guides_json());
         assert_eq!(guides, trace_commons_contributor::install_guides::json());
         assert_eq!(guides["claude-code"], tools[0]["install_url"]);
+    }
+}
+
+/// Quitting the macOS app calls `tc_daemon_stop` then `tc_handle_free` on
+/// the main thread. Neither may wait on daemon work for longer than its
+/// documented bound, however long that work runs.
+#[cfg(test)]
+mod bounded_teardown_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Far longer than either bound, so a teardown that waits for it is
+    /// unmistakable.
+    const BLOCKED_FOR: Duration = Duration::from_secs(10);
+    /// Generous over the bounds, for slow CI runners.
+    const ASSERT_UNDER: Duration = Duration::from_secs(6);
+
+    fn store_with_roots(dir: &std::path::Path) -> ConfigStore {
+        let store = ConfigStore::open(dir.to_path_buf()).unwrap();
+        std::fs::create_dir_all(dir.join("claude-root")).unwrap();
+        let settings = trace_commons_contributor::daemon::settings::DaemonSettings {
+            claude_source: Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.join("claude-root"),
+                },
+            ),
+            ..Default::default()
+        };
+        settings.save(&store).unwrap();
+        store
+    }
+
+    /// A live embedded handle whose supervise loop is replaced by `fake`:
+    /// a pass that is still running when the stop arrives.
+    fn handle_with_supervisor(
+        dir: &std::path::Path,
+        fake: impl FnOnce(&tokio::runtime::Runtime) -> tokio::task::JoinHandle<anyhow::Result<()>>,
+    ) -> *mut tc_handle {
+        let mut handle = start_daemon_handle(store_with_roots(dir)).unwrap();
+        let replacement = fake(&handle.rt);
+        let running = handle.running.get_mut().unwrap().as_mut().unwrap();
+        std::mem::replace(&mut running.supervisor, replacement).abort();
+        let h = finish_daemon_start(Ok(handle), std::ptr::null_mut());
+        assert!(!h.is_null());
+        h
+    }
+
+    /// The pass shape the user's CPU report showed: synchronous work under
+    /// `block_in_place` (as `daemon::run_blocking` does), which ignores the
+    /// shutdown flag until it returns.
+    fn blocked_pass(rt: &tokio::runtime::Runtime) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+        rt.spawn(async {
+            tokio::task::block_in_place(|| std::thread::sleep(BLOCKED_FOR));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn stop_and_free_do_not_wait_out_a_blocked_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = handle_with_supervisor(dir.path(), blocked_pass);
+        // Let the fake pass enter its blocking section.
+        std::thread::sleep(Duration::from_millis(200));
+
+        let started = Instant::now();
+        unsafe { tc_daemon_stop(h) };
+        let stop_took = started.elapsed();
+
+        let started = Instant::now();
+        unsafe { tc_handle_free(h) };
+        let free_took = started.elapsed();
+
+        assert!(
+            stop_took < ASSERT_UNDER,
+            "tc_daemon_stop waited {stop_took:?} for a blocked pass"
+        );
+        assert!(
+            free_took < ASSERT_UNDER,
+            "tc_handle_free waited {free_took:?} for a blocked pass"
+        );
+    }
+
+    #[test]
+    fn free_does_not_wait_out_a_blocking_pool_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = handle_with_supervisor(dir.path(), |rt| rt.spawn(async { Ok(()) }));
+        // Off-pass blocking work, like the settlement scan or a session
+        // renewal, still running when the host frees the handle.
+        unsafe { &*h }
+            .rt
+            .spawn_blocking(|| std::thread::sleep(BLOCKED_FOR));
+        std::thread::sleep(Duration::from_millis(200));
+
+        unsafe { tc_daemon_stop(h) };
+        let started = Instant::now();
+        unsafe { tc_handle_free(h) };
+        let free_took = started.elapsed();
+
+        assert!(
+            free_took < ASSERT_UNDER,
+            "tc_handle_free waited {free_took:?} for a blocking-pool task"
+        );
+    }
+
+    /// Giving up the wait must not give up the store: the exclusive lock
+    /// stays held until the abandoned pass has actually finished, so a new
+    /// daemon on the same directory cannot overlap it.
+    #[test]
+    fn an_abandoned_pass_keeps_the_lock_until_it_ends() {
+        const SHORT_PASS: Duration = Duration::from_secs(8);
+        let dir = tempfile::tempdir().unwrap();
+        let h = handle_with_supervisor(dir.path(), |rt| {
+            rt.spawn(async {
+                tokio::task::block_in_place(|| std::thread::sleep(SHORT_PASS));
+                Ok(())
+            })
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        let started = Instant::now();
+        unsafe { tc_daemon_stop(h) };
+        unsafe { tc_handle_free(h) };
+        assert!(
+            started.elapsed() < SHORT_PASS,
+            "teardown waited out the pass"
+        );
+
+        assert!(
+            start_daemon_handle(ConfigStore::open(dir.path().to_path_buf()).unwrap()).is_err(),
+            "a second daemon started while the abandoned pass still ran"
+        );
+
+        let deadline = Instant::now() + SHORT_PASS + Duration::from_secs(15);
+        loop {
+            if let Ok(handle) =
+                start_daemon_handle(ConfigStore::open(dir.path().to_path_buf()).unwrap())
+            {
+                let h = finish_daemon_start(Ok(handle), std::ptr::null_mut());
+                unsafe { tc_daemon_stop(h) };
+                unsafe { tc_handle_free(h) };
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the lock was never released after the pass ended"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 }

@@ -91,12 +91,48 @@ final class WindowResizeLoopTests: XCTestCase {
         let mapOnly = GlassPaneLayout.Visibility(map: true, inspector: false)
         let both = GlassPaneLayout.Visibility(map: true, inspector: true)
         let opened = GlassPaneLayout.windowFrame(
-            old, width: GlassPaneLayout.windowWidth(current: old.width, from: mapOnly, to: both), visible: visible)
+            onScreen: old, width: GlassPaneLayout.windowWidth(current: old.width, from: mapOnly, to: both),
+            visible: visible)
         XCTAssertEqual(opened, CGRect(x: old.minX, y: old.minY, width: old.width + pane, height: old.height))
         let closed = GlassPaneLayout.windowFrame(
-            opened, width: GlassPaneLayout.windowWidth(current: opened.width, from: both, to: mapOnly),
+            onScreen: opened, width: GlassPaneLayout.windowWidth(current: opened.width, from: both, to: mapOnly),
             visible: visible)
         XCTAssertEqual(closed, old)
+    }
+
+    /// The macOS convention (owner, 2026-10-30, after Little Snitch's
+    /// Network Monitor): with the window flush against the screen's right
+    /// edge, opening the map and then the inspector each slides the window
+    /// left by that pane and its gap, its right edge staying on the screen
+    /// edge; closing the inspector and then the map each shrinks the window
+    /// from its right, its leading edge staying where the opens put it.
+    func test_nearTheScreenEdgeAPaneSlidesTheWindowLeftAndClosingShrinksItFromTheRight() {
+        let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let none = GlassPaneLayout.Visibility(map: false, inspector: false)
+        let mapOnly = GlassPaneLayout.Visibility(map: true, inspector: false)
+        let both = GlassPaneLayout.Visibility(map: true, inspector: true)
+        let start = GlassPaneLayout.windowWidth(showsMap: false, showsInspector: false)
+        let flush = CGRect(x: screen.maxX - start, y: 200, width: start, height: 700)
+        func step(_ frame: CGRect, _ from: GlassPaneLayout.Visibility, _ to: GlassPaneLayout.Visibility) -> CGRect {
+            GlassPaneLayout.windowFrame(
+                onScreen: frame, width: GlassPaneLayout.windowWidth(current: frame.width, from: from, to: to),
+                visible: screen)
+        }
+        let withMap = step(flush, none, mapOnly)
+        XCTAssertGreaterThan(withMap.width, flush.width)
+        XCTAssertEqual(withMap.maxX, screen.maxX)
+        XCTAssertEqual(withMap.minX, flush.minX - (withMap.width - flush.width))
+        let withBoth = step(withMap, mapOnly, both)
+        XCTAssertEqual(withBoth.width, withMap.width + GlassPaneLayout.inspectorWidth + GlassTokens.Space.paneGap)
+        XCTAssertEqual(withBoth.maxX, screen.maxX)
+        XCTAssertEqual(withBoth.minX, withMap.minX - GlassPaneLayout.inspectorWidth - GlassTokens.Space.paneGap)
+        let inspectorClosed = step(withBoth, both, mapOnly)
+        XCTAssertEqual(inspectorClosed.minX, withBoth.minX)
+        XCTAssertEqual(inspectorClosed.width, withMap.width)
+        XCTAssertLessThan(inspectorClosed.maxX, screen.maxX)
+        let mapClosed = step(inspectorClosed, mapOnly, none)
+        XCTAssertEqual(mapClosed.minX, withBoth.minX)
+        XCTAssertEqual(mapClosed.width, flush.width)
     }
 
     // MARK: Source pins
@@ -110,6 +146,19 @@ final class WindowResizeLoopTests: XCTestCase {
         let monitor = try XCTUnwrap(Self.block(after: "struct MonitorScene: Scene {", in: app))
         XCTAssertFalse(monitor.contains(".windowResizability(.contentSize)"))
         XCTAssertTrue(monitor.contains(".windowResizability(.contentMinSize)"))
+    }
+
+    /// A pane change and the launch sizing both take the on-screen rule, so
+    /// a window is never left running past the screen's edge (owner,
+    /// 2026-10-30, withdrawing "the window never moves on a pane change").
+    func test_paneChangesAndLaunchKeepTheWindowOnScreen() throws {
+        let pane = try Self.text(Self.threePaneSource)
+        XCTAssertFalse(pane.contains("windowFrame(forPaneChange:"))
+        XCTAssertFalse(pane.contains("windowFrame(atLaunch:"))
+        let move = try XCTUnwrap(Self.block(after: "private func move(to new: GlassPaneLayout.Visibility)", in: pane))
+        XCTAssertTrue(move.contains("GlassPaneLayout.windowFrame(onScreen:"))
+        let launch = try XCTUnwrap(Self.block(after: "private func openAtKeptWidth(_ window: NSWindow)", in: pane))
+        XCTAssertTrue(launch.contains("GlassPaneLayout.windowFrame(onScreen:"))
     }
 
     /// The menu-bar panel's hosting view takes #1402's empty sizing options

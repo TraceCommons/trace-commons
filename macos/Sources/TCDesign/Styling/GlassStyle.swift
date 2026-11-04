@@ -24,7 +24,7 @@ public enum GlassColor {
 }
 
 /// Status is carried by a dot and a label, never by a fill.
-public enum GlassStatus: Sendable, Equatable {
+public enum GlassStatus: Sendable, Hashable {
     case on, ask, off, outside, shared, kept, inference
 
     public var rgba: GlassRGBA {

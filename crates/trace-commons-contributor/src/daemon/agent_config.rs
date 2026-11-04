@@ -7,21 +7,15 @@ use super::settings::{self, DaemonSettings};
 
 pub(crate) fn schema() -> Value {
     let mut properties = Map::new();
-    let ranges =
-        serde_json::to_value(settings::settings_ranges()).expect("settings ranges serialize");
-    for (key, bounds) in ranges.as_object().expect("settings ranges object") {
-        let daily_cap = matches!(key.as_str(), "max_uploads_per_day" | "max_bytes_per_day");
-        properties.insert(key.clone(), json!({
-            "type":if daily_cap {json!(["integer","null"])} else {json!("integer")}, "minimum":bounds["min"], "maximum":bounds["max"],
-            "description": match key.as_str() {
-                "quiescence_secs" => "Seconds without writes before a trace is considered finished.",
-                "approval_hold_secs" => "Seconds before an approved upload can start; zero removes the undo hold.",
-                "digest_interval_secs" => "Seconds between interval notifications.",
-                "max_uploads_per_day" => "Local daily upload count limit. A number pins this cap, even at the default; null resets the shared default and follows server allowances. Does not grant upload permission.",
-                _ => "Local daily upload byte limit. A number pins this cap, even at the default; null resets the shared default and follows server allowances. Does not grant upload permission.",
-            },
-            "examples":if daily_cap {json!([bounds["min"],null])} else {json!([bounds["min"]])}
-        }));
+    for (key, bounds, description) in settings::settings_ranges().described() {
+        properties.insert(
+            key.to_string(),
+            json!({
+                "type":"integer", "minimum":bounds.min, "maximum":bounds.max,
+                "description": description,
+                "examples":[bounds.min]
+            }),
+        );
     }
     for (key, description) in [
         (
@@ -59,6 +53,10 @@ pub(crate) fn schema() -> Value {
         ),
         ("notifications_enabled", "Master switch for notifications."),
         ("menu_bar_mark_enabled", "Show the menu-bar news mark."),
+        (
+            "managed_herdr",
+            "Open managed sessions as tabs of herdr's Near.ai workspace, hosted by managed_terminal.",
+        ),
         (
             "verdicts_offer_pending",
             "Whether the one-time verdict notification offer remains pending.",
@@ -163,6 +161,20 @@ pub(crate) fn schema() -> Value {
         terminal["enum"] = json!(terminals);
     }
     properties.insert("managed_terminal".into(), terminal);
+    properties.insert("managed_favorite_models".into(), json!({
+        "type":"object",
+        // No `propertyNames`: it would bind the `false` keys too, which the
+        // daemon takes whatever their shape, and no JSON Schema pattern
+        // matches Rust's whitespace and control classes exactly. The
+        // description states the daemon's rule for a star.
+        "additionalProperties":{"type":"boolean"},
+        "examples":[{}],
+        "description":format!(
+            "Partial update of the models listed first in the managed-session model picker: true stars a NEAR AI model id, false unstars it, omitted ids remain. At most {} favorites. A starred id is at most {} UTF-8 bytes with no whitespace or control characters, which the daemon checks; false removes any stored id, whatever its shape. Whether NEAR AI offers an id is not checked here.",
+            settings::MAX_FAVORITE_MODELS,
+            settings::MAX_FAVORITE_MODEL_ID_BYTES
+        )
+    }));
     properties.insert("managed_folder_settings".into(), json!({
         "type":"array", "items":{
             "type":"object", "required":["tool","cwd"], "additionalProperties":false,
@@ -214,8 +226,8 @@ pub(crate) fn schema() -> Value {
             "type":"object", "minProperties":1,"additionalProperties":false,"properties":properties
         },
         "semantics":{
-            "patch":"Partial settings object; omitted top-level fields remain unchanged. Structured declarations replace their value except notify, managed_cli_options and managed_folder_settings, which merge supplied entries.",
-            "preview":"Validation and proposed canonical changes only; does not persist, start services, submit traces, or reserve a transaction. Daily-cap changes include uses_server_allowance before/after metadata when choosing a local cap or resetting to follow server allowances, even if the saved number is unchanged.",
+            "patch":"Partial settings object; omitted top-level fields remain unchanged. Structured declarations replace their value except notify, managed_favorite_models, managed_cli_options and managed_folder_settings, which merge supplied entries.",
+            "preview":"Validation and proposed canonical changes only; does not persist, start services, submit traces, or reserve a transaction.",
             "apply":"Revalidates against current settings. Runtime result fields are separate from the saved preference.",
             "contextual_validation":"Filesystem and platform constraints are checked by the daemon parser; JSON Schema alone is not sufficient validation.",
             "inspection":"The settings response includes read-only and redacted fields; do not copy it wholesale into a patch."
@@ -225,7 +237,12 @@ pub(crate) fn schema() -> Value {
 
 pub(crate) fn preview(settings: &DaemonSettings, patch: &Value) -> Result<Value, &'static str> {
     let mut candidate = settings.clone();
-    if !settings::apply_settings_object(&mut candidate, patch)? {
+    // `Ok(false)` on a non-empty patch is one of only retired keys: accepted
+    // with nothing to change, as `set_settings` answers it, so it previews
+    // as an empty change list below.
+    if !settings::apply_settings_object(&mut candidate, patch)?
+        && !patch.as_object().is_some_and(|obj| !obj.is_empty())
+    {
         return Err("no-known-setting-supplied");
     }
     // Compare internally before redaction: two different source paths both
@@ -253,39 +270,14 @@ pub(crate) fn preview(settings: &DaemonSettings, patch: &Value) -> Result<Value,
         .collect();
     let mut changes = Vec::new();
     for key in keys {
-        // Persisted provenance is not a public setting. Report its real
-        // behavioral effect on the corresponding cap instead, including
-        // choosing a numeric cap equal to today's default or resetting it.
-        if matches!(
-            key.as_str(),
-            "max_uploads_per_day_explicit" | "max_bytes_per_day_explicit"
-        ) {
-            continue;
-        }
-        let modes = match key.as_str() {
-            "max_uploads_per_day" => Some((
-                !settings.upload_count_is_explicit(),
-                !candidate.upload_count_is_explicit(),
-            )),
-            "max_bytes_per_day" => Some((
-                !settings.upload_bytes_is_explicit(),
-                !candidate.upload_bytes_is_explicit(),
-            )),
-            _ => None,
-        };
-        let mode_changed = modes.is_some_and(|(old, new)| old != new);
-        if before.get(key) == after.get(key) && !mode_changed {
+        if before.get(key) == after.get(key) {
             continue;
         }
         let old = shown_before.get(key).cloned().unwrap_or(Value::Null);
         let new = shown_after.get(key).cloned().unwrap_or(Value::Null);
         let redacted = before.get(key).is_some_and(|raw| raw != &old)
             || after.get(key).is_some_and(|raw| raw != &new);
-        let mut change = json!({"key":key,"before":old,"after":new,"redacted":redacted});
-        if let Some((old, new)) = modes.filter(|_| mode_changed) {
-            change["uses_server_allowance"] = json!({"before":old,"after":new});
-        }
-        changes.push(change);
+        changes.push(json!({"key":key,"before":old,"after":new,"redacted":redacted}));
     }
     Ok(
         json!({"schema_version":"trace_commons.settings_preview.v1","applied":false,"changes":changes}),
@@ -329,6 +321,63 @@ mod tests {
                 &json!({"managed_cli_options":{"future":"--flag"}})
             )
             .is_err()
+        );
+    }
+
+    /// #1754 review: the favorites schema states the daemon's bounds from
+    /// its constants and says the byte bound is the daemon's. It puts no
+    /// shape on the keys: `propertyNames` would also bind the `false` keys
+    /// the daemon accepts whatever their shape, and no JSON Schema pattern
+    /// matches Rust's whitespace and control-character classes exactly.
+    #[test]
+    fn favorite_models_schema_states_the_daemons_bounds() {
+        let entry = &schema()["patch_schema"]["properties"]["managed_favorite_models"];
+        assert!(entry.get("propertyNames").is_none(), "{entry}");
+        let description = entry["description"].as_str().unwrap();
+        assert!(
+            description.contains("false removes any stored id, whatever its shape"),
+            "{description}"
+        );
+        // What the description promises, the daemon does.
+        let mut stored = DaemonSettings {
+            managed_favorite_models: vec!["bad id".into(), String::new()],
+            ..Default::default()
+        };
+        settings::apply_settings_object(
+            &mut stored,
+            &json!({"managed_favorite_models":{"bad id":false,"":false}}),
+        )
+        .unwrap();
+        assert!(stored.managed_favorite_models.is_empty());
+        for refused in ["bad id", "", "c1\u{85}id"] {
+            assert!(
+                settings::apply_settings_object(
+                    &mut DaemonSettings::default(),
+                    &json!({"managed_favorite_models":{ refused: true }}),
+                )
+                .is_err(),
+                "{refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn favorite_models_schema_states_the_daemons_numeric_bounds() {
+        let entry = &schema()["patch_schema"]["properties"]["managed_favorite_models"];
+        let description = entry["description"].as_str().unwrap();
+        assert!(
+            description.contains(&format!(
+                "At most {} favorites",
+                settings::MAX_FAVORITE_MODELS
+            )),
+            "{description}"
+        );
+        assert!(
+            description.contains(&format!(
+                "{} UTF-8 bytes",
+                settings::MAX_FAVORITE_MODEL_ID_BYTES
+            )),
+            "{description}"
         );
     }
 
@@ -402,16 +451,16 @@ mod tests {
         };
         let result = preview(
             &settings,
-            &json!({"notify":{"verdicts_landed":false},"max_uploads_per_day":12}),
+            &json!({"notify":{"verdicts_landed":false},"quiescence_secs":12}),
         )
         .unwrap();
         let changes = result["changes"].as_array().unwrap();
         assert!(
             changes
                 .iter()
-                .any(|c| c["key"] == "max_uploads_per_day" && c["after"] == 12)
+                .any(|c| c["key"] == "quiescence_secs" && c["after"] == 12)
         );
-        assert!(changes.iter().all(|c| c["key"] != "max_bytes_per_day"));
+        assert!(changes.iter().all(|c| c["key"] != "approval_hold_secs"));
         if settings.verdicts_offer_pending {
             assert!(
                 changes
@@ -419,22 +468,6 @@ mod tests {
                     .any(|c| c["key"] == "verdicts_offer_pending" && c["after"] == false)
             );
         }
-        let mut pinned = settings.clone();
-        settings::apply_settings_object(
-            &mut pinned,
-            &json!({
-                "max_uploads_per_day":settings.max_uploads_per_day
-            }),
-        )
-        .unwrap();
-        assert_eq!(
-            preview(
-                &pinned,
-                &json!({"max_uploads_per_day":settings.max_uploads_per_day})
-            )
-            .unwrap()["changes"],
-            json!([])
-        );
     }
 
     #[test]
@@ -450,7 +483,7 @@ mod tests {
             }),
             ..DaemonSettings::default()
         };
-        let result = preview(&settings, &json!({"max_uploads_per_day":12})).unwrap();
+        let result = preview(&settings, &json!({"quiescence_secs":12})).unwrap();
         assert!(!result.to_string().contains("sensitive"));
         assert_eq!(result["changes"].as_array().unwrap().len(), 1);
         assert_eq!(
@@ -460,81 +493,51 @@ mod tests {
         assert!(preview(&settings, &json!({"near_ai_inference":null})).is_err());
     }
 
+    /// The described ranges name the same keys `settings_ranges` serializes
+    /// under, so the agent schema and the IPC ranges agree. Each has its
+    /// text by construction (`SettingsRanges::described`).
     #[test]
-    fn agent_config_daily_caps_discover_null_reset_and_report_same_value_mode_changes() {
-        let schema = schema();
-        let properties = &schema["patch_schema"]["properties"];
-        for key in ["max_uploads_per_day", "max_bytes_per_day"] {
-            assert_eq!(properties[key]["type"], json!(["integer", "null"]));
-            assert!(
-                properties[key]["examples"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&Value::Null)
-            );
-            assert!(properties.get(format!("{key}_explicit")).is_none());
-        }
-        let mut settings = DaemonSettings::default();
-        let original = serde_json::to_value(&settings).unwrap();
-        let previewed = preview(&settings, &json!({"max_uploads_per_day":50})).unwrap();
+    fn the_described_ranges_use_the_serialized_keys() {
+        let ranges = serde_json::to_value(settings::settings_ranges()).unwrap();
+        let serialized: std::collections::BTreeSet<&str> = ranges
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let described: std::collections::BTreeSet<&str> = settings::settings_ranges()
+            .described()
+            .iter()
+            .map(|(key, _, _)| *key)
+            .collect();
+        assert_eq!(described, serialized);
+    }
+
+    /// A patch of only the retired daily-limit keys previews the way
+    /// `set_settings` applies it: accepted, with nothing to change.
+    #[test]
+    fn a_retired_keys_only_patch_previews_as_a_no_op() {
+        let settings = DaemonSettings::default();
+        let result = preview(&settings, &json!({"max_uploads_per_day": 50})).unwrap();
+        assert_eq!(result["applied"], false);
+        assert_eq!(result["changes"], json!([]));
         assert_eq!(
-            previewed["changes"],
-            json!([{
-                "key":"max_uploads_per_day", "before":50,"after":50,"redacted":false,
-                "uses_server_allowance":{"before":true,"after":false}
-            }])
-        );
-        assert!(!previewed.to_string().contains("_explicit"));
-        assert_eq!(serde_json::to_value(&settings).unwrap(), original);
-        settings::apply_settings_object(&mut settings, &json!({"max_uploads_per_day":50})).unwrap();
-        assert_eq!(
-            preview(&settings, &json!({"max_uploads_per_day":50})).unwrap()["changes"],
-            json!([])
-        );
-        let reset = preview(&settings, &json!({"max_uploads_per_day":null})).unwrap();
-        assert_eq!(
-            reset["changes"],
-            json!([{
-                "key":"max_uploads_per_day", "before":50,"after":50,"redacted":false,
-                "uses_server_allowance":{"before":false,"after":true}
-            }])
+            preview(&settings, &json!({})),
+            Err("no-known-setting-supplied")
         );
     }
 
+    /// The daily upload limit is retired: nothing advertises it to an
+    /// agent, though `set_settings` still accepts its keys from an older
+    /// shell.
     #[test]
-    fn agent_config_daily_cap_reset_preserves_other_cap_and_legacy_provenance_is_not_a_change() {
-        let mut settings = DaemonSettings::default();
-        settings::apply_settings_object(
-            &mut settings,
-            &json!({
-                "max_uploads_per_day":7,"max_bytes_per_day":1024
-            }),
-        )
-        .unwrap();
-        let original = serde_json::to_value(&settings).unwrap();
-        let reset = preview(&settings, &json!({"max_bytes_per_day":null})).unwrap();
-        assert_eq!(
-            reset["changes"],
-            json!([{
-                "key":"max_bytes_per_day", "before":1024,"after":209715200,"redacted":false,
-                "uses_server_allowance":{"before":false,"after":true}
-            }])
-        );
-        assert_eq!(serde_json::to_value(&settings).unwrap(), original);
-        settings.max_uploads_per_day_explicit = None;
-        assert_eq!(
-            preview(&settings, &json!({"max_uploads_per_day":7})).unwrap()["changes"],
-            json!([])
-        );
-        let defaults = DaemonSettings::default();
-        assert_eq!(
-            preview(
-                &defaults,
-                &json!({"max_uploads_per_day":null,"max_bytes_per_day":null})
-            )
-            .unwrap()["changes"],
-            json!([])
-        );
+    fn agent_config_does_not_offer_the_retired_daily_limits() {
+        let schema = schema();
+        let properties = &schema["patch_schema"]["properties"];
+        assert!(!schema.to_string().contains("allowance"));
+        for key in ["max_uploads_per_day", "max_bytes_per_day"] {
+            assert!(properties.get(key).is_none(), "{key}");
+        }
     }
 
     #[test]
@@ -542,7 +545,7 @@ mod tests {
         for patch in [
             json!({}),
             json!({"unknown-secret-value":"secret"}),
-            json!({"max_uploads_per_day":0}),
+            json!({"quiescence_secs":99_999_999}),
             json!({"digest_schedule":{"mode":"evening","hour":24}}),
             json!({"notify":{"unknown":true}}),
             json!({"managed_terminal":"/secret/command"}),

@@ -124,17 +124,31 @@ fn clear(root: &gtk::Box) {
     }
 }
 
+/// Where a session opens, for the launch lines and a launch's refusal:
+/// herdr while sessions are grouped there, else the chosen terminal; an
+/// older daemon sends only `terminal_destination` (owner, 2026-11-03). This
+/// shell runs no tool setup, so it never needs the chosen terminal alone.
+fn session_destination(snapshot: &Value) -> Option<&str> {
+    let capabilities = &snapshot["capabilities"];
+    capabilities["launch_destination"]
+        .as_str()
+        .or_else(|| capabilities["terminal_destination"].as_str())
+}
+
 /// The line for a refused terminal launch. A chosen terminal that was not
-/// found has its own, naming it and pointing at Settings; anything else is
-/// the generic launch line.
+/// found has its own, naming it and pointing at Settings, as does an
+/// untrusted herdr socket (owner, 2026-11-03); anything else is the generic
+/// launch line.
 fn launch_refusal(label: &str, destination: Option<&str>) -> String {
-    if label == "managed-terminal-not-found" {
-        let terminal = destination
-            .map(str::to_owned)
-            .unwrap_or_else(|| text("terminal"));
-        text("terminal_not_found").replace("{terminal}", &terminal)
-    } else {
-        text("launch_unknown")
+    match label {
+        "managed-terminal-not-found" => {
+            let terminal = destination
+                .map(str::to_owned)
+                .unwrap_or_else(|| text("terminal"));
+            text("terminal_not_found").replace("{terminal}", &terminal)
+        }
+        "managed-herdr-socket-untrusted" => text("herdr_socket_untrusted"),
+        _ => text("launch_unknown"),
     }
 }
 
@@ -181,8 +195,24 @@ fn action(app: &Rc<App>, method: &str, params: Value, terminal: bool) {
             }));
             window.present();
         }
-        Err(_) => app.toast(&text("action_failed")),
+        Err(error) => app.toast(&text(refusal_key(&error))),
     });
+}
+
+/// The copy key for a refused managed action, as the macOS shell maps it:
+/// no NEAR AI sign-in asks for one, a model NEAR AI does not offer says so,
+/// a balance too low for a session's first calls asks for funds, and a NEAR
+/// AI project that chooses a model says why; anything else is the general
+/// failure.
+fn refusal_key(label: &str) -> &'static str {
+    match label {
+        "managed-near-ai-sign-in-required" => "sign_in_needed",
+        "managed-model-unavailable" => "model_unavailable",
+        "managed-near-ai-balance-too-low" => "balance_too_low",
+        "managed-project-chooses-model" => "project_chooses_model",
+        "managed-project-sets-auto-mode-server" => "project_sets_auto_mode_server",
+        _ => "action_failed",
+    }
 }
 
 pub fn refresh(app: &Rc<App>) {
@@ -221,7 +251,7 @@ pub fn refresh(app: &Rc<App>) {
                 if let Some(install) = install_button(tool) { root.append(&install); }
             }
         }
-        let destination = snapshot["capabilities"]["terminal_destination"].as_str();
+        let destination = session_destination(&snapshot);
         *app.private_inference.managed_destination.borrow_mut() = destination.map(str::to_owned);
         style::append_meta(root, destination.map(|d| text("terminal_scope").replace("{destination}", d)).unwrap_or_else(|| text("terminal_unavailable")));
         for account in snapshot["accounts"].as_array().into_iter().flatten() {
@@ -477,9 +507,7 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
         &content,
         text("launch_scope").replace(
             "{destination}",
-            snapshot["capabilities"]["terminal_destination"]
-                .as_str()
-                .unwrap_or_default(),
+            session_destination(snapshot).unwrap_or_default(),
         ),
     );
     let a = Rc::clone(app);
@@ -497,6 +525,22 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
 
 #[cfg(test)]
 mod tests {
+    /// Owner, 2026-11-03: a session grouped in herdr opens there, so the
+    /// launch lines and a launch's refusal name herdr; an older daemon sends
+    /// only `terminal_destination`, which then names where sessions open.
+    #[test]
+    fn a_launch_names_where_the_session_opens() {
+        let grouped = serde_json::json!({"capabilities":{
+            "terminal_destination":"Konsole","launch_destination":"herdr"}});
+        assert_eq!(session_destination(&grouped), Some("herdr"));
+        let older = serde_json::json!({"capabilities":{"terminal_destination":"Konsole"}});
+        assert_eq!(session_destination(&older), Some("Konsole"));
+        assert_eq!(
+            session_destination(&serde_json::json!({"capabilities":{}})),
+            None
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -513,6 +557,50 @@ mod tests {
             launch_refusal("managed-launch-unknown", Some("Konsole")),
             super::text("launch_unknown")
         );
+    }
+
+    /// Owner, 2026-11-03: something at herdr's socket path this account
+    /// cannot trust has its own line, as on macOS.
+    #[test]
+    fn an_untrusted_herdr_socket_has_its_own_line() {
+        assert_eq!(
+            launch_refusal("managed-herdr-socket-untrusted", Some("herdr")),
+            "herdr's connection file can't be trusted. Remove it or check its permissions."
+        );
+    }
+
+    #[test]
+    fn refusals_map_to_the_macos_lines() {
+        assert_eq!(
+            refusal_key("managed-near-ai-balance-too-low"),
+            "balance_too_low"
+        );
+        assert_eq!(
+            refusal_key("managed-near-ai-sign-in-required"),
+            "sign_in_needed"
+        );
+        assert_eq!(
+            refusal_key("managed-model-unavailable"),
+            "model_unavailable"
+        );
+        assert_eq!(
+            refusal_key("managed-project-chooses-model"),
+            "project_chooses_model"
+        );
+        assert_eq!(
+            refusal_key("managed-project-sets-auto-mode-server"),
+            "project_sets_auto_mode_server"
+        );
+        for key in [
+            "balance_too_low",
+            "sign_in_needed",
+            "model_unavailable",
+            "project_chooses_model",
+            "project_sets_auto_mode_server",
+        ] {
+            assert!(!super::text(key).is_empty(), "{key}");
+        }
+        assert_eq!(refusal_key("managed-conflict"), "action_failed");
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! identities.
 
 pub mod account_auth;
+pub mod account_change_copy;
 pub mod account_contribution;
 pub(crate) mod antigravity;
 pub mod attach_copy;
@@ -113,6 +114,7 @@ pub mod redaction_labels;
 pub mod redaction_summary;
 pub mod referral;
 pub mod referral_copy;
+pub mod retry_jitter;
 pub mod routing;
 pub mod routing_copy;
 pub mod shell_words_copy;

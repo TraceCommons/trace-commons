@@ -248,7 +248,7 @@ struct InsightsView: View {
                     turnOffRecap: turnOffRecapCard.map { turnOff in
                         { Task { try? await turnOff(); await model.loadWeek() } }
                     })
-                .task(id: ObjectIdentifier(subscriptionModel)) { await subscriptionModel.observe() }
+                .task(id: ObjectIdentifier(subscriptionModel)) { await subscriptionModel.observe(readOnOpen: true) }
                 .task { await loadEarnings() }
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,

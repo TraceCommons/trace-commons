@@ -23,8 +23,8 @@ use trace_commons_contributor_ffi::{
     TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING, TC_WITNESS_STATE_REFUSING_PIN_MALFORMED,
     TC_WITNESS_STATE_REFUSING_UNPINNED, TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION,
     TC_WITNESS_TONE_CLEAR, TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED,
-    tc_call, tc_certificate_list_title, tc_certificate_row_line, tc_consent_copy,
-    tc_consent_gate_help, tc_contribution_attestation_line,
+    tc_account_attention_copy_json, tc_call, tc_certificate_list_title, tc_certificate_row_line,
+    tc_consent_copy, tc_consent_gate_help, tc_contribution_attestation_line,
     tc_contribution_attestation_reason_line, tc_contribution_attestation_tone,
     tc_contribution_eligibility_control, tc_contribution_eligibility_line,
     tc_contribution_eligibility_reason_line, tc_contribution_eligibility_tone,
@@ -45,10 +45,9 @@ use trace_commons_contributor_ffi::{
     tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original,
     tc_session_detail_error_line, tc_session_notification_copy, tc_skill_draft_validate,
     tc_skill_learning_copy, tc_skill_learning_error_line, tc_source_check_line, tc_string_free,
-    tc_subscribe, tc_toast_sent_text, tc_unsubscribe, tc_witness_clear, tc_witness_configure,
-    tc_witness_copy, tc_witness_last_result_json, tc_witness_last_result_line,
-    tc_witness_last_result_tone, tc_witness_state_line, tc_witness_state_tone,
-    tc_witness_status_json, tc_witness_trust_state,
+    tc_subscribe, tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
+    tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
+    tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
@@ -1466,7 +1465,7 @@ fn inference_consent_round_trips_without_changing_proxy_or_other_permissions() {
 }
 
 #[test]
-fn the_pre_start_and_ipc_paths_agree_on_the_daily_caps() {
+fn the_pre_start_and_ipc_paths_agree_on_numeric_settings() {
     // `tc_daemon_start_with_settings` and `tc_call(handle, "set_settings",
     // ...)` share one validator (`apply_settings_object`); this proves that
     // in practice, not just by code inspection, by driving both paths for
@@ -1476,8 +1475,8 @@ fn the_pre_start_and_ipc_paths_agree_on_the_daily_caps() {
     write_tempdir_session_roots(dir.path());
 
     let settings_json = serde_json::json!({
-        "max_uploads_per_day": 200,
-        "max_bytes_per_day": 2_147_483_648u64,
+        "quiescence_secs": 600,
+        "approval_hold_secs": 120,
     })
     .to_string();
     let mut err: *mut c_char = std::ptr::null_mut();
@@ -1498,11 +1497,11 @@ fn the_pre_start_and_ipc_paths_agree_on_the_daily_caps() {
     // through the same `get_settings` the IPC path answers.
     let out = call(h, "get_settings", "{}");
     assert!(
-        out.contains("\"max_uploads_per_day\":200"),
+        out.contains("\"quiescence_secs\":600"),
         "pre-start override did not take effect: {out}"
     );
     assert!(
-        out.contains("\"max_bytes_per_day\":2147483648"),
+        out.contains("\"approval_hold_secs\":120"),
         "pre-start override did not take effect: {out}"
     );
 
@@ -1511,15 +1510,15 @@ fn the_pre_start_and_ipc_paths_agree_on_the_daily_caps() {
     let out = call(
         h,
         "set_settings",
-        &serde_json::json!({"max_uploads_per_day": 500}).to_string(),
+        &serde_json::json!({"quiescence_secs": 900}).to_string(),
     );
     assert!(
-        out.contains("\"max_uploads_per_day\":500"),
+        out.contains("\"quiescence_secs\":900"),
         "set_settings did not apply over the socket: {out}"
     );
     // The field it did not touch is untouched.
     assert!(
-        out.contains("\"max_bytes_per_day\":2147483648"),
+        out.contains("\"approval_hold_secs\":120"),
         "set_settings must not disturb a field it was not asked to change: {out}"
     );
 
@@ -1527,11 +1526,11 @@ fn the_pre_start_and_ipc_paths_agree_on_the_daily_caps() {
 }
 
 #[test]
-fn a_daily_cap_above_the_ceiling_is_rejected_on_both_paths() {
+fn a_setting_above_its_range_is_rejected_on_both_paths() {
     let dir = tempfile::tempdir().unwrap();
 
     // The pre-start path.
-    let settings_json = serde_json::json!({ "max_uploads_per_day": 1_000_001u64 }).to_string();
+    let settings_json = serde_json::json!({ "quiescence_secs": 14_401u64 }).to_string();
     let mut err: *mut c_char = std::ptr::null_mut();
     let h = unsafe {
         tc_daemon_start_with_settings(
@@ -1542,7 +1541,7 @@ fn a_daily_cap_above_the_ceiling_is_rejected_on_both_paths() {
     };
     assert!(
         h.is_null(),
-        "an out-of-range cap must not silently start the daemon"
+        "an out-of-range setting must not silently start the daemon"
     );
     assert!(!err.is_null(), "a failure must set the error out-param");
     let msg = take_owned(err);
@@ -1559,11 +1558,11 @@ fn a_daily_cap_above_the_ceiling_is_rejected_on_both_paths() {
     let out = call(
         h2,
         "set_settings",
-        &serde_json::json!({"max_bytes_per_day": 5u64 * 1024 * 1024 * 1024 + 1}).to_string(),
+        &serde_json::json!({"approval_hold_secs": 301}).to_string(),
     );
     assert!(
         out.contains("settings-invalid-value"),
-        "an out-of-range byte cap must be refused over the socket: {out}"
+        "an out-of-range hold must be refused over the socket: {out}"
     );
     stop(h2);
 }
@@ -2534,6 +2533,7 @@ fn write_enrolled_config(
         inference_receipt_endpoint: None,
         consent_scopes_chosen: Some(true),
         witness_origin: None,
+        account_identity: None,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION
             .to_string(),
@@ -3388,26 +3388,6 @@ fn the_session_notification_copy_crosses_the_abi() {
         parsed.as_object().map(|o| o.len()),
         Some(2),
         "body and action, nothing else: {json}"
-    );
-}
-
-/// K9 (#1118): the submit toast crosses the ABI unchanged, argument order
-/// intact, and a negative count (nobody's honest answer) clamps to zero
-/// instead of wrapping.
-#[test]
-fn the_sent_toast_crosses_the_abi_and_clamps_negatives() {
-    use trace_commons_contributor::consent_copy as copy;
-    assert_eq!(
-        take_owned(tc_toast_sent_text(7, 20, 1)),
-        copy::toast_sent_text(7, 20, 1)
-    );
-    assert_eq!(
-        take_owned(tc_toast_sent_text(7, 20, 1)),
-        "Sent. 1 left to decide \u{b7} upload limit 7 of 20"
-    );
-    assert_eq!(
-        take_owned(tc_toast_sent_text(-3, -1, -9)),
-        copy::toast_sent_text(0, 0, 0)
     );
 }
 
@@ -5276,6 +5256,48 @@ fn a_legacy_migration_notice_crosses_the_abi_as_the_rust_builds_it() {
 }
 
 #[test]
+fn the_account_attention_status_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    for wire in [
+        serde_json::json!({"account_state": "needs_attention",
+            "account_state_reason": "account_record_unreadable",
+            "near_ai_login_unconfirmed": true, "logged_in": true}),
+        serde_json::json!({"account_state": "needs_attention",
+            "account_state_reason": "account_address_refused",
+            "near_ai_login_unconfirmed": false}),
+    ] {
+        let arg = CString::new(wire.to_string()).unwrap();
+        let json = take_owned(unsafe { tc_account_attention_copy_json(arg.as_ptr()) });
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let expected =
+            serde_json::to_value(copy::account_attention_for_wire(&wire).expect("shown")).unwrap();
+        assert_eq!(parsed, expected, "the ABI hands over the status unchanged");
+        assert_eq!(parsed["action"], "Set up again");
+    }
+}
+
+#[test]
+fn no_account_attention_is_null_not_a_guess() {
+    use std::ffi::CString;
+    assert!(unsafe { tc_account_attention_copy_json(std::ptr::null()) }.is_null());
+    for text in [
+        "not json",
+        "null",
+        "[]",
+        r#"{"account_state":"ok","account_state_reason":null,"near_ai_login_unconfirmed":false}"#,
+        // A daemon too old to send the keys.
+        r#"{"logged_in":true}"#,
+    ] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { tc_account_attention_copy_json(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn no_legacy_migration_notice_is_null_not_a_guess() {
     use std::ffi::CString;
     assert!(unsafe { tc_legacy_migration_notice(std::ptr::null()) }.is_null());
@@ -5686,6 +5708,17 @@ fn the_account_devices_copy_crosses_the_abi() {
 }
 
 #[test]
+fn the_account_change_copy_crosses_the_abi() {
+    use trace_commons_contributor::account_change_copy::account_change_copy;
+    use trace_commons_contributor_ffi::tc_account_change_copy_json;
+    let copy = json_owned(tc_account_change_copy_json());
+    assert_eq!(copy, serde_json::to_value(account_change_copy()).unwrap());
+    assert!(copy["body"].as_str().unwrap().contains("{new_provider}"));
+    assert_eq!(copy["mismatch_change"], "Use a different account");
+    assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
+}
+
+#[test]
 fn the_sent_traces_training_copy_crosses_the_abi() {
     use trace_commons_contributor::consent_copy::sent_traces_training_copy;
     use trace_commons_contributor_ffi::tc_sent_traces_training_copy_json;
@@ -5711,19 +5744,19 @@ fn the_settings_ranges_cross_the_abi_and_match_what_set_settings_enforces() {
     // and a value at it is the exact value accepted. A drift between the
     // exported range and the enforced one would show up here as one of
     // these two assertions failing, not as a silently wrong control bound.
-    let max_uploads = ranges["max_uploads_per_day"]["max"].as_u64().unwrap();
+    let max_hold = ranges["approval_hold_secs"]["max"].as_u64().unwrap();
     let mut s = DaemonSettings::default();
     assert_eq!(
         settings::apply_settings_object(
             &mut s,
-            &serde_json::json!({ "max_uploads_per_day": max_uploads + 1 }),
+            &serde_json::json!({ "approval_hold_secs": max_hold + 1 }),
         ),
         Err(settings::ERR_SETTINGS_INVALID_VALUE)
     );
     assert_eq!(
         settings::apply_settings_object(
             &mut s,
-            &serde_json::json!({ "max_uploads_per_day": max_uploads }),
+            &serde_json::json!({ "approval_hold_secs": max_hold }),
         ),
         Ok(true)
     );
@@ -6353,7 +6386,7 @@ fn the_first_run_copy_crosses_the_abi() {
     assert_eq!(value["frame"]["quick_setup"], "Quick setup");
 }
 
-/// #1407: Show, Stop and Start again reach the daemon through the same
+/// #1407: Show, Stop, Start again and Resume reach the daemon through the same
 /// `tc_call` as every managed method, and each fails closed on a session
 /// the daemon never opened: a refusal label, never a signal or a window.
 #[test]
@@ -6374,6 +6407,10 @@ fn managed_session_actions_cross_tc_call_and_refuse_an_unknown_session() {
         ),
         (
             "managed_session_start_again",
+            format!(r#"{{"session_id":"{session}","request_id":"{session}"}}"#),
+        ),
+        (
+            "managed_session_resume",
             format!(r#"{{"session_id":"{session}","request_id":"{session}"}}"#),
         ),
     ] {

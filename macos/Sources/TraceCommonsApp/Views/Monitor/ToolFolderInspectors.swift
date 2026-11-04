@@ -185,7 +185,7 @@ struct FolderInspector: View {
                     ) {
                         Task { await store.contributeFolder(folder, verdict: nil) }
                     }
-                    .help(TracesTreeView.submitHelp(offer.withheldLine, words: words))
+                    .actionHelp(TracesTreeView.submitHelp(offer.withheldLine, words: words))
                     // Its menu is drawn over the column (`submitMenu`).
                     .anchorPreference(key: TracesMenuAnchors.self, value: .bounds) {
                         submitMenuOpen ? [Self.submitMenuAnchor: $0] : [:]

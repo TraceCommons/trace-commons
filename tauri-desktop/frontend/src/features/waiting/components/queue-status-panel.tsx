@@ -9,17 +9,6 @@ import { NearAiNoticeRecovery } from "./near-ai-notice-recovery";
 import { WitnessCapacityNotice } from "./witness-capacity-notice";
 
 type Health = { last_error_label: string | null; since: string | null };
-type Budget = {
-  bytes_today: number;
-  max_bytes_per_day: number;
-  bytes_remaining: number;
-  uploads_today: number;
-  max_uploads_per_day: number;
-  uploads_remaining: number;
-  blocked: boolean;
-  blocked_entries: number;
-  blocked_bytes: number;
-};
 type Routing = {
   state: string;
   derived: boolean;
@@ -27,9 +16,6 @@ type Routing = {
   unreadable_rows: number;
 };
 
-function megabytes(bytes: number) {
-  return `${Math.round(bytes / 1024 / 1024)} MB`;
-}
 function routingLabel(state: string) {
   return (
     (
@@ -44,7 +30,7 @@ function routingLabel(state: string) {
   );
 }
 
-// Read apart from `health`, like the budget: the health slot holds one label
+// Read apart from `health`: the health slot holds one label
 // and a higher one can mask `witness-saturated`, while this object always
 // says how many sessions are waiting. A malformed object is not read as
 // "none waiting" -- that would hide held sessions -- but as "unreadable".
@@ -70,13 +56,11 @@ function gateHeldIsDrawn(value: unknown): boolean {
 
 export function QueueStatusPanel({
   health,
-  budget,
   routing,
   witnessCapacity,
   gateHeld,
 }: {
   health: Health;
-  budget?: Budget;
   routing?: Routing;
   witnessCapacity?: unknown;
   gateHeld?: unknown;
@@ -96,7 +80,6 @@ export function QueueStatusPanel({
     capacity.kind !== "none";
   if (
     !health.last_error_label &&
-    !budget?.blocked &&
     !routing &&
     capacity.kind === "none"
   )
@@ -139,21 +122,6 @@ export function QueueStatusPanel({
             </span>
             {health.since && (
               <small>Since {new Date(health.since).toLocaleString()}</small>
-            )}
-          </div>
-        )}
-        {budget && (
-          <div>
-            <strong>Daily limit</strong>
-            <span>
-              {budget.uploads_remaining} uploads left ·{" "}
-              {megabytes(budget.bytes_remaining)} left
-            </span>
-            {budget.blocked && (
-              <small>
-                {budget.blocked_entries} queued trace
-                {budget.blocked_entries === 1 ? "" : "s"} held by limit
-              </small>
             )}
           </div>
         )}

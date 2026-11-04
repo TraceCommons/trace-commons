@@ -19,7 +19,8 @@ FROM ${RUST_IMAGE} AS builder
 
 # openssl and zstd are not the witness's own dependencies. They arrive through
 # `trace-commons-server`'s library, which the witness binary links whole --
-# webauthn-rs pulls `openssl-sys`, and `zstd` builds from source. See the
+# the server crate's dependency tree pulls `openssl-sys`, and `zstd` builds
+# from source. See the
 # README's note on what is inside this image: the witness's blast radius is
 # the whole server crate's dependency tree, not the witness's own code.
 RUN apt-get update && apt-get install -y --no-install-recommends \

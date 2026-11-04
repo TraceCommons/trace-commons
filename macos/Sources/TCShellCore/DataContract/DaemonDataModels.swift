@@ -484,7 +484,6 @@ extension DaemonData {
         public let settlementEstimate: SettlementEstimate?
         public let nextDigestAt: Date?
         public let health: Health?
-        public let dailyBudget: DailyBudget?
         public let routing: Routing?
         public let privateInferenceState: PrivateInferenceState?
         public let witnessCapacity: WitnessCapacity?
@@ -508,6 +507,25 @@ extension DaemonData {
         /// or the unidentified bucket does not upload (#1208): draw the core's
         /// `auto_partial` line under the label.
         public let contributionModePartial: Bool?
+        /// #1836 F1: `ok`, or `needs_attention` while this app's account
+        /// needs setting up again. Words: `TCConsentCopy.accountAttentionJSON`.
+        public let accountState: String?
+        /// `account_record_unreadable` or `account_address_refused` while
+        /// `accountState` is `needs_attention`. A label, never shown as text.
+        public let accountStateReason: String?
+        /// A NEAR AI login is stored while the account needs attention, so
+        /// no Commons check ran for it. The core's words read it.
+        public let nearAILoginUnconfirmed: Bool?
+        /// F10 (spec 2.4): this device may offer "Use a different account".
+        /// Read through `AccountLoginChangeStatus`.
+        public let loginChangeAvailable: Bool?
+        /// F10: a wallet-origin account, whose payouts need a NEAR AI login.
+        public let payoutsNeedLogin: Bool?
+        /// F10: a login the commons refused as another account is held aside
+        /// for the change.
+        public let loginChangeHeld: Bool?
+        /// F10: the last NEAR AI sign-in was refused as another account.
+        public let loginMismatch: Bool?
         /// K2 (#1173): `true` while a debug daemon runs a developer dry
         /// run. A release daemon never sends it. The app's notice reads it
         /// rather than the environment.
@@ -532,7 +550,6 @@ extension DaemonData {
             case settlementEstimate = "settlement_estimate"
             case nextDigestAt = "next_digest_at"
             case health
-            case dailyBudget = "daily_budget"
             case routing
             case privateInferenceState = "private_inference_state"
             case witnessCapacity = "witness_capacity"
@@ -543,6 +560,13 @@ extension DaemonData {
             case contributionOverride = "contribution_override"
             case contributionMode = "contribution_mode"
             case contributionModePartial = "contribution_mode_partial"
+            case accountState = "account_state"
+            case accountStateReason = "account_state_reason"
+            case nearAILoginUnconfirmed = "near_ai_login_unconfirmed"
+            case loginChangeAvailable = "login_change_available"
+            case payoutsNeedLogin = "payouts_need_login"
+            case loginChangeHeld = "login_change_held"
+            case loginMismatch = "login_mismatch"
             case devDryRun = "dev_dry_run"
         }
     }
@@ -697,32 +721,6 @@ extension DaemonData {
         public enum CodingKeys: String, CodingKey {
             case lastErrorLabel = "last_error_label"
             case since
-        }
-    }
-
-    public struct DailyBudget: Codable, Equatable, Sendable {
-        public let bytesToday: Int?
-        public let maxBytesPerDay: Int?
-        public let bytesRemaining: Int?
-        public let uploadsToday: Int?
-        public let maxUploadsPerDay: Int?
-        public let uploadsRemaining: Int?
-        public let resetsAt: Date?
-        public let blocked: Bool?
-        public let blockedEntries: Int?
-        public let blockedBytes: Int?
-
-        public enum CodingKeys: String, CodingKey {
-            case bytesToday = "bytes_today"
-            case maxBytesPerDay = "max_bytes_per_day"
-            case bytesRemaining = "bytes_remaining"
-            case uploadsToday = "uploads_today"
-            case maxUploadsPerDay = "max_uploads_per_day"
-            case uploadsRemaining = "uploads_remaining"
-            case resetsAt = "resets_at"
-            case blocked
-            case blockedEntries = "blocked_entries"
-            case blockedBytes = "blocked_bytes"
         }
     }
 
@@ -941,8 +939,6 @@ extension DaemonData {
         public let scrubCheckReturnedToWaiting: Int?
         /// Whether attested model-call bodies are sent with a session.
         public let ironwireAttestedBodies: Bool?
-        public let maxUploadsPerDay: Int?
-        public let maxBytesPerDay: Int?
         public let privateInference: Bool?
         /// Whether the first-run Private AI question has been answered.
         public let privateInferenceOfferSeen: Bool?
@@ -1019,8 +1015,6 @@ extension DaemonData {
             case scrubCheckDefaultedOnUpgrade = "scrub_check_defaulted_on_upgrade"
             case scrubCheckReturnedToWaiting = "scrub_check_returned_to_waiting"
             case ironwireAttestedBodies = "ironwire_attested_bodies"
-            case maxUploadsPerDay = "max_uploads_per_day"
-            case maxBytesPerDay = "max_bytes_per_day"
             case privateInference = "private_inference"
             case privateInferenceOfferSeen = "private_inference_offer_seen"
             case suggestionsEnabled = "suggestions_enabled"
@@ -1228,8 +1222,17 @@ extension DaemonData {
         public let contributed: Int?
         /// The folders they went from, as labels, never keys.
         public let contributedProjects: [String]?
-        /// Pending credit for them; pending, never earned.
+        /// Credit the server has decided for them: earned.
+        public let creditFinal: Double?
+        /// Credit for them still being scored: pending, never earned.
         public let creditPending: Double?
+        /// The contribution sentence as the core worded it, with every earned
+        /// figure in it; null when nothing was contributed, and absent from
+        /// an older daemon. This shell does not read it (it posts `text`,
+        /// whose copy leaves out credit the folded verdicts sentence already
+        /// states); it is declared so the contract lists every key the
+        /// daemon sends, and Windows posts it.
+        public let contribution: String?
         /// The core's notification body, posted unchanged. When the
         /// attention arbiter folded a re-engagement sentence in, it already
         /// ends with `fold.text`.
@@ -1240,19 +1243,23 @@ extension DaemonData {
 
         public init(
             pending: Int?, contributed: Int? = nil, contributedProjects: [String]? = nil,
-            creditPending: Double? = nil, text: String?, fold: DigestFold? = nil
+            creditFinal: Double? = nil, creditPending: Double? = nil, contribution: String? = nil, text: String?,
+            fold: DigestFold? = nil
         ) {
             self.pending = pending
             self.contributed = contributed
             self.contributedProjects = contributedProjects
+            self.creditFinal = creditFinal
             self.creditPending = creditPending
+            self.contribution = contribution
             self.text = text
             self.fold = fold
         }
 
         public enum CodingKeys: String, CodingKey {
-            case pending, contributed, text, fold
+            case pending, contributed, contribution, text, fold
             case contributedProjects = "contributed_projects"
+            case creditFinal = "credit_final"
             case creditPending = "credit_pending"
         }
     }
@@ -2023,29 +2030,6 @@ extension DaemonData {
             case issuerDisplayName = "issuer_display_name"
             case creditRange = "credit_range"
             case reasonLabel = "reason_label"
-        }
-    }
-
-    public struct PasskeyState: Codable, Equatable, Sendable {
-        /// `none`, `unknown`, or binding labels `unbound|bound|closed|legacy`.
-        public let state: String
-        /// The passkeys this Mac remembers, not the account's on the server;
-        /// null when the daemon cannot read its list. Connection is never
-        /// inferred from a missing binding row.
-        public let passkeyCount: Int?
-        /// The most recently used remembered passkey's name, if it has one.
-        public let rememberedName: String?
-        /// The name remembered for the signed-in account's own record, never
-        /// the most recent record's; nil when signed out or unnamed.
-        public let signedInName: String?
-        public let nearAiConnected: Bool?
-
-        public enum CodingKeys: String, CodingKey {
-            case state
-            case passkeyCount = "passkey_count"
-            case rememberedName = "remembered_name"
-            case signedInName = "signed_in_name"
-            case nearAiConnected = "near_ai_connected"
         }
     }
 

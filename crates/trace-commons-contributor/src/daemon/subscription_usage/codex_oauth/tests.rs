@@ -241,6 +241,25 @@ async fn fresh_token_reads_usage_while_codex_runs_and_never_writes_auth() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn a_silent_read_never_falls_back_to_the_native_app_server() {
+    let near_expiry = jwt(json!({"exp": Utc::now().timestamp() + 120}));
+    let dir = tempfile::tempdir().unwrap();
+    let auth = json!({"tokens":{"access_token":near_expiry,"refresh_token":"r","account_id":"a"}});
+    let bytes = serde_json::to_vec(&auth).unwrap();
+    std::fs::write(dir.path().join("auth.json"), &bytes).unwrap();
+    let server = fake_server(200, USAGE).await;
+    let login = login(dir.path());
+    let failure =
+        super::super::providers::collect_codex_in(&login, false, lease(), &target(&server))
+            .await
+            .unwrap_err();
+    assert_eq!(failure.reason, "not_checked");
+    assert!(server.seen.lock().unwrap().is_empty());
+    assert_eq!(std::fs::read(dir.path().join("auth.json")).unwrap(), bytes);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn stale_token_falls_back_to_native_and_is_refused_while_codex_runs() {
     let near_expiry = jwt(json!({"exp": Utc::now().timestamp() + 120}));
     for auth in [

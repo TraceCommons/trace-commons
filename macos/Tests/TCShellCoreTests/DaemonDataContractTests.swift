@@ -61,7 +61,6 @@ final class DaemonDataContractTests: XCTestCase {
                 _ = try await client.missionCatalogue()
                 _ = try await client.networkMissionCatalogue()
                 _ = try await client.lookupInvite(code: "c")
-                _ = try await client.passkeyState()
                 _ = try await client.accountState()
             } catch {
                 XCTFail("\(set): \(error)")
@@ -267,7 +266,6 @@ final class DaemonDataContractTests: XCTestCase {
             ("missionCatalogue", { _ = try await client.missionCatalogue() }),
             ("networkMissionCatalogue", { _ = try await client.networkMissionCatalogue() }),
             ("lookupInvite", { _ = try await client.lookupInvite(code: "c") }),
-            ("passkeyState", { _ = try await client.passkeyState() }),
             ("accountState", { _ = try await client.accountState() }),
         ]
         for (name, call) in calls {

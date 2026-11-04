@@ -57,7 +57,7 @@ public class ShellWordingTests
             // written a second time in the GTK and macOS shells today.
             { "TraceCommons.Interop/ArmingOffer.cs", 3 },
             { "TraceCommons.Interop/CorrectionCopy.cs", 4 },
-            { "TraceCommons.Interop/HealthCopy.cs", 22 },
+            { "TraceCommons.Interop/HealthCopy.cs", 18 },
             { "TraceCommons.Interop/HistoryCopy.cs", 24 },
             { "TraceCommons.Interop/OriginalSearchOutcome.cs", 4 },
             // PendingInviteActivation.cs predates this guard: it merged to

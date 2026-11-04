@@ -561,7 +561,10 @@ public final class TCDaemon: @unchecked Sendable {
     /// Swift's cooperative pool is not a tokio runtime.
     ///
     /// Blocks the calling thread for up to `drainTimeout` plus
-    /// `unsubscribeTimeout`. That is the point: teardown that does not block
+    /// `unsubscribeTimeout`, plus at most 3 seconds inside `tc_daemon_stop`
+    /// (2) and `tc_handle_free` (1), which stop waiting on a daemon pass
+    /// that is still running (TEARDOWN BOUNDS in the header). That is the
+    /// point: teardown that does not block
     /// is teardown that does not know whether it is safe to free. The
     /// previous implementation slept a fixed 200ms and freed regardless,
     /// which is the defect this replaces -- a sleep is a guess, and a guess

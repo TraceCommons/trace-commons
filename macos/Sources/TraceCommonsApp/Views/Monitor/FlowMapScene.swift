@@ -342,7 +342,7 @@ struct FlowMapScene: Equatable {
         var destinations: DaemonData.ToolDestinations?
 
         /// Whether anything at all can move to the commons now: the screen
-        /// is current, nothing is paused, held, voided or over budget, the
+        /// is current, nothing is paused, held or voided, the
         /// contributor is signed in, and the core names a route for
         /// sessions.
         var open: Bool {
@@ -350,7 +350,6 @@ struct FlowMapScene: Equatable {
             guard status.paused == false, status.loggedIn == true else { return false }
             guard let held = status.automaticContributionHeld?.heldSessions, held == 0 else { return false }
             guard let voids = status.grantVoids, voids.isEmpty else { return false }
-            guard status.dailyBudget?.blocked != true else { return false }
             guard let route = destinations.sessionsRoute, Self.routes.contains(route) else { return false }
             return true
         }

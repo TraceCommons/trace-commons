@@ -7,6 +7,12 @@ use trace_commons_server::account_onboarding::{
 };
 use trace_commons_server::near_ai_api::NEAR_AI_API_BASE_URL;
 
+/// F10: changing the NEAR AI login an account uses. A child of this module
+/// because it runs the same ceremony machinery (readiness, rate limits,
+/// introspection, the wallet page).
+#[path = "near_ai_rebind.rs"]
+pub(super) mod near_ai_rebind;
+
 /// Operator-published trust data, served only after the admission gate is ready.
 #[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -257,17 +263,66 @@ fn near_ai_login_readiness_named(
 }
 
 fn ready_for(state: &AppState, contract: ProvisionContract, wallet: bool) -> bool {
+    ready_or_declined(state, contract, wallet).is_ok()
+}
+
+/// [`ready_for`], naming the control that declined (reported once, as
+/// before).
+fn ready_or_declined(
+    state: &AppState,
+    contract: ProvisionContract,
+    wallet: bool,
+) -> Result<(), &'static str> {
     let result = if wallet {
         wallet_readiness_named(state, contract).map(|_| ())
     } else {
         near_ai_login_readiness_named(state, contract)
     };
-    match result {
-        Ok(()) => true,
-        Err(control) => {
-            report_declined_control(control);
-            false
-        }
+    result.inspect_err(|control| {
+        report_declined_control(control);
+    })
+}
+
+/// Which half of a ceremony is asking about readiness.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CeremonyHalf {
+    Start,
+    Finish,
+}
+
+/// What a ceremony route answers when the commons is not ready to run it.
+///
+/// At **start**, a path the operator did not offer answers the uniform deny
+/// (`None`), as a route that is not there would: it will not start working on
+/// retry, so "unavailable" would be wrong. Not offered: NEAR provisioning
+/// switched off (the default), the wallet ceremony closed on a staging build,
+/// and a v1 route on a commons that publishes no enrollment witness (v1 needs
+/// one; such a commons serves only v2). A path that is offered but whose
+/// configuration is incomplete (no account registry, no identity material, no
+/// issuer, a malformed witness, no origin) is a commons mid deploy or
+/// misconfigured, answered `503`.
+///
+/// At **finish**, every not-ready cause is `503`. A finish only exists because
+/// a start answered, which said the path was offered; if the finish then
+/// reaches a process that disagrees (a rollout, or one replica missing the
+/// witness secret), that is the deployment in flux, not a refusal. The
+/// uniform deny there would read to the #1840 check as "this login belongs to
+/// another account". All of this is deployment state, the same for every
+/// request.
+fn not_ready_answer(control: &'static str, half: CeremonyHalf) -> Option<axum::response::Response> {
+    let not_offered = matches!(
+        control,
+        control::PROVISIONING_ENABLED
+            | control::STAGING_WALLET_CLOSED
+            | control::WITNESS_JSON_ABSENT
+    );
+    match (half, not_offered) {
+        (CeremonyHalf::Start, true) => None,
+        // `503`, with no line per request: anyone can reach this on a commons
+        // that never offered the path (provisioning off is the default), and
+        // `ready_or_declined` already reported the control once.
+        (CeremonyHalf::Finish, true) => Some(unavailable_response()),
+        (_, false) => Some(near_ai_not_ready()),
     }
 }
 
@@ -433,6 +488,10 @@ pub(super) async fn capabilities_v2(
         "wallet_finish_path": "/v1/account/near/provision/finish/v2",
         "near_ai_start_path": "/v1/account/near-ai/provision/start/v2",
         "near_ai_finish_path": "/v1/account/near-ai/provision/finish/v2",
+        // F10: a client offers "Use a different account" only to a commons
+        // that publishes these.
+        "near_ai_rebind_start_path": trace_commons_protocol::account_login_change::REBIND_START_PATH,
+        "near_ai_rebind_finish_path": trace_commons_protocol::account_login_change::REBIND_FINISH_PATH,
         "inference_connection_selection_required": true,
         "inference_connection_offers_path": "/v1/account/inference-connection/offers",
         "inference_connection_selection_path": "/v1/account/inference-connection",
@@ -545,22 +604,34 @@ async fn start(
     body: Result<Json<StartRequest>, JsonRejection>,
     contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
-    if !ready_for(&state, contract, true) || limited(&headers, "start") {
-        return None;
+    // The rate limit first: whatever the readiness answer, a flood from one
+    // address (or everywhere) is capped, so an unready or not-offered route
+    // cannot be driven to an unbounded run of `503`s.
+    if limited(&headers, "start") {
+        return Some(near_ai_sign_in_rate_limited());
+    }
+    if let Err(control) = ready_or_declined(&state, contract, true) {
+        return not_ready_answer(control, CeremonyHalf::Start);
     }
     let Json(body) = body.ok()?;
     if body.code_challenge_method != "S256" || !challenge_is_wellformed(&body.code_challenge) {
         return None;
     }
-    let cfg = account_near_config(&state).ok()?;
-    let db = account_db(&state).ok()?;
+    // Readiness above already required these; if one is missing anyway, it
+    // is the same deployment state, with the cause the NEAR AI ceremony uses.
+    let Ok(db) = account_db(&state) else {
+        return Some(near_ai_sign_in_unavailable("database"));
+    };
+    let (Ok(cfg), Some(origin)) = (
+        account_near_config(&state),
+        state.near_provisioning_public_origin.as_ref(),
+    ) else {
+        return Some(near_ai_sign_in_unavailable("not_ready"));
+    };
     let device = device_key(&body.device_public_key)?;
     let wallet_url = format!(
         "{}/account/near/provision/wallet",
-        state
-            .near_provisioning_public_origin
-            .as_ref()?
-            .trim_end_matches('/')
+        origin.trim_end_matches('/')
     );
     let pending = PendingNearProvisioning::issue(
         &cfg,
@@ -581,16 +652,19 @@ async fn start(
         "recipient":challenge.recipient,"expires_at":expires_at,"wallet_url":wallet_url,"network":cfg.network,
         "device_signing_bytes":base64::engine::general_purpose::STANDARD.encode(pending.device_signing_bytes())
     });
-    db.store_near_provisioning_ceremony(
-        &hash_secret(&ceremony_id),
-        NativeProvisioningPending {
-            ceremony: pending.into_stored(),
-            code_challenge: body.code_challenge,
-        },
-        expires_at,
-    )
-    .await
-    .ok()?;
+    if let Err(error) = db
+        .store_near_provisioning_ceremony(
+            &hash_secret(&ceremony_id),
+            NativeProvisioningPending {
+                ceremony: pending.into_stored(),
+                code_challenge: body.code_challenge,
+            },
+            expires_at,
+        )
+        .await
+    {
+        return near_ai_database_failure(&error);
+    }
     Some(response(result))
 }
 
@@ -620,8 +694,11 @@ async fn finish(
     body: Result<Json<FinishRequest>, JsonRejection>,
     contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
-    if !ready_for(&state, contract, true) || limited(&headers, "finish") {
-        return None;
+    if limited(&headers, "finish") {
+        return Some(near_ai_sign_in_rate_limited());
+    }
+    if let Err(control) = ready_or_declined(&state, contract, true) {
+        return not_ready_answer(control, CeremonyHalf::Finish);
     }
     let Json(body) = body.ok()?;
     if body.ceremony_id.len() > 64
@@ -632,14 +709,49 @@ async fn finish(
     {
         return None;
     }
-    let cfg = account_near_config(&state).ok()?;
-    let db = account_db(&state).ok()?;
     let device = device_key(&body.device_public_key)?;
     let hash = hash_secret(&body.ceremony_id);
+    // The per-ceremony attempt cap stays the uniform deny, as on the NEAR AI
+    // ceremony: a ceremony past its cap is refused, not busy.
     if !ACCOUNT_RATE_LIMITER.check(&format!("near-provision-ceremony:{hash}"), 5) {
         return None;
     }
-    let record = db.take_near_provisioning_ceremony(&hash).await.ok()??;
+    // Readiness above already required these; see `start`.
+    let Ok(db) = account_db(&state) else {
+        return Some(near_ai_sign_in_unavailable("database"));
+    };
+    let (Ok(cfg), Some(origin), Some(identity)) = (
+        account_near_config(&state),
+        state.near_provisioning_public_origin.clone(),
+        state.near_account_identity.clone(),
+    ) else {
+        return Some(near_ai_sign_in_unavailable("not_ready"));
+    };
+    let record = match db.take_near_provisioning_ceremony(&hash).await {
+        Ok(record) => record?,
+        Err(error) => return near_ai_database_failure(&error),
+    };
+    finish_taken(
+        &state, &headers, body, device, &cfg, &db, &origin, &identity, record,
+    )
+    .await
+}
+
+/// A wallet finish after its ceremony was taken: every check that decides
+/// it, and the provisioning. The take consumed the ceremony whatever this
+/// answers, a `503` included; see [`NEAR_AI_SIGN_IN_UNAVAILABLE`].
+#[allow(clippy::too_many_arguments)]
+async fn finish_taken(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: FinishRequest,
+    device: [u8; 32],
+    cfg: &trace_commons_server::config::NearConfig,
+    db: &Arc<dyn Database>,
+    origin: &str,
+    identity: &trace_commons_server::near_account_identity::NearAccountIdentity,
+    record: NativeProvisioningPending,
+) -> Option<axum::response::Response> {
     if !secret_eq(
         &record.code_challenge,
         &challenge_for_verifier(&body.code_verifier),
@@ -649,22 +761,23 @@ async fn finish(
     let browser_binding = binding(&record.code_challenge);
     let wallet_url = format!(
         "{}/account/near/provision/wallet",
-        state
-            .near_provisioning_public_origin
-            .as_ref()?
-            .trim_end_matches('/')
+        origin.trim_end_matches('/')
     );
     let pending = PendingNearProvisioning::restore(
         record.ceremony,
-        &cfg,
+        cfg,
         &body.account_id,
         device,
         Some(&wallet_url),
     )
     .ok()?;
-    let verified = pending
-        .verify(
-            &cfg,
+    // The NEAR RPC not answering is `503`, like NEAR AI's introspection. It
+    // is asked last, after both signatures verified, and an account that does
+    // not exist or does not carry the key is an RPC answer (a refusal), so
+    // `503` says only that the RPC is unreachable, the same for every account.
+    let verified = match pending
+        .verify_classified(
+            cfg,
             ProvisioningAssertion {
                 wallet_public_key: &body.wallet_public_key,
                 wallet_signature: &body.wallet_signature,
@@ -674,11 +787,15 @@ async fn finish(
             Utc::now().timestamp(),
         )
         .await
-        .ok()?;
-    // Absent identity controls collapse to the same uniform deny as every other
-    // failure on this path. Boot already refuses when provisioning is enabled
-    // without them, so reaching here means provisioning is off.
-    let identity = state.near_account_identity.as_ref()?;
+    {
+        Ok(verified) => verified,
+        Err(trace_commons_server::account_onboarding::ProvisioningFailure::Unavailable) => {
+            return Some(near_ai_sign_in_unavailable("near_rpc"));
+        }
+        Err(trace_commons_server::account_onboarding::ProvisioningFailure::Refused) => {
+            return None;
+        }
+    };
     let secret = generate_session_secret();
     let token_hash = hash_secret(&secret);
     let provisioned = db
@@ -691,29 +808,26 @@ async fn finish(
             },
             identity,
         )
-        .await
-        .map_err(|error| trace_commons_server::account_onboarding::is_device_key_revoked(&error));
+        .await;
     let provisioned = match provisioned {
         Ok(provisioned) => provisioned,
-        Err(true) => {
+        Err(error) if trace_commons_server::account_onboarding::is_device_key_revoked(&error) => {
             return Some(no_store(api_error(
                 StatusCode::CONFLICT,
                 DEVICE_KEY_REVOKED,
             )));
         }
-        Err(false) => return None,
+        Err(error) => return near_ai_database_failure(&error),
     };
-    let referral = signup_referral_outcome(
-        &state,
-        &headers,
-        &provisioned,
-        body.referral_code.as_deref(),
-    )
-    .await;
+    let referral =
+        signup_referral_outcome(state, headers, &provisioned, body.referral_code.as_deref()).await;
     let mut answer = serde_json::json!({
         "access_token":native_token_value(&provisioned.tenant_id,&secret),"token_type":"Bearer",
         "expires_in_secs":NATIVE_SESSION_TTL_HOURS*3600,"account_id":provisioned.account_id,
-        "tenant_id":provisioned.tenant_id,"device_key_id":provisioned.device_key_id,"anchor_hash":provisioned.anchor_hash
+        "tenant_id":provisioned.tenant_id,"device_key_id":provisioned.device_key_id,"anchor_hash":provisioned.anchor_hash,
+        // What the account signs in with (F10 decision 4): a device records
+        // it rather than reading the tenant prefix.
+        "identity":"wallet"
     });
     if let Some(referral) = referral {
         answer["referral"] = serde_json::json!(referral.as_str());
@@ -1263,12 +1377,17 @@ async fn near_ai_start(
     // The login path's own readiness, not the wallet's: `published_witness`
     // refuses without the NEP-413 sign-in config and the wallet redirect
     // origin, neither of which this ceremony has or needs.
-    if !ready_for(&state, contract, false) || limited(&headers, "near-ai-start") {
-        return None;
+    if limited(&headers, "near-ai-start") {
+        return Some(near_ai_sign_in_rate_limited());
+    }
+    if let Err(control) = ready_or_declined(&state, contract, false) {
+        return not_ready_answer(control, CeremonyHalf::Start);
     }
     let Json(body) = body.ok()?;
     let draw = NearAiCeremonyDraw::draw(body)?;
-    let db = account_db(&state).ok()?;
+    let Ok(db) = account_db(&state) else {
+        return Some(near_ai_sign_in_unavailable("database"));
+    };
     let pending = trace_commons_server::account_onboarding::NearAiLoginPending {
         nonce_hex: draw.nonce_hex(),
         code_challenge: draw.code_challenge.clone(),
@@ -1287,9 +1406,12 @@ async fn near_ai_start(
         &draw.code_challenge,
         draw.expires_at,
     );
-    db.store_near_ai_login_ceremony(&draw.ceremony_hash(), &pending, draw.expires_at)
+    if let Err(error) = db
+        .store_near_ai_login_ceremony(&draw.ceremony_hash(), &pending, draw.expires_at)
         .await
-        .ok()?;
+    {
+        return near_ai_database_failure(&error);
+    }
     Some(draw.response(&signing_bytes))
 }
 
@@ -1367,20 +1489,134 @@ fn near_ai_verify_device_proof(
         .ok()
 }
 
-/// Spend the NEAR AI token: introspect it and drop it. Always the last check
-/// of a finish, because it is the only one that leaves this machine, and a
+/// Introspect the NEAR AI token and drop it. Always the last check of a
+/// finish, because it is the only one that leaves this machine, and a
 /// request that was going to be refused anyway should not reach NEAR AI.
+/// Introspection does not consume the token, so after a `503` the client can
+/// start a new ceremony and send the same token again.
 async fn near_ai_introspect(
     state: &AppState,
     access_token: String,
-) -> Option<trace_commons_server::near_ai_login::VerifiedNearAiLogin> {
+) -> Result<
+    trace_commons_server::near_ai_login::VerifiedNearAiLogin,
+    trace_commons_server::near_ai_login::LoginIntrospectionFailure,
+> {
     trace_commons_server::near_ai_login::introspect_login(
         introspection_base_url(state),
         &secrecy::SecretString::from(access_token),
         NEAR_AI_INTROSPECTION_TIMEOUT,
     )
     .await
-    .ok()
+}
+
+/// The wire label of a NEAR AI sign-in ceremony that was not answered because
+/// the caller's address, or the deployment as a whole, is over its rate limit.
+pub(super) const NEAR_AI_SIGN_IN_RATE_LIMITED: &str = "near_ai_sign_in_rate_limited";
+
+/// The wire label of a NEAR sign-in ceremony this commons cannot answer now:
+/// it is not ready to run the ceremony, or the database, NEAR AI or the NEAR
+/// RPC did not answer. One label for every cause, so the body never says
+/// which; the cause is logged.
+///
+/// **Wire contract: a `503` (or `429`) at finish means start again.** After
+/// one, the ceremony may or may not still exist: an answer given before the
+/// take (the rate limit, readiness, no account registry) leaves it for the
+/// rest of its expiry, and an answer given after the take has consumed it. A
+/// client always starts again, and never resends the same finish. The
+/// commons never puts a taken ceremony back: a finish body is a complete
+/// credential (the device signature, the PKCE verifier, and on the NEAR AI
+/// route the access token), and a ceremony kept after a failed finish would
+/// let whoever holds a copy of that body complete the sign-in after the owner
+/// gave up.
+pub(super) const NEAR_AI_SIGN_IN_UNAVAILABLE: &str = "near_ai_sign_in_unavailable";
+
+/// `429`, with `Retry-After`: a NEAR AI sign-in start or finish over the
+/// per-address or deployment-wide limit.
+///
+/// Not the uniform deny. A client reads that `400` as "refused", and on the
+/// sign-in check as "this login belongs to another account"; a busy commons
+/// must not say that. The limit is keyed on the caller's address and a fixed
+/// global key, never on an account, login or device, so this answer is the
+/// same whoever the request names.
+fn near_ai_sign_in_rate_limited() -> axum::response::Response {
+    no_store(api_error_response_with_retry_after(api_error_with_retry(
+        StatusCode::TOO_MANY_REQUESTS,
+        NEAR_AI_SIGN_IN_RATE_LIMITED,
+        Some(i64::try_from(ACCOUNT_RATE_WINDOW.as_secs()).unwrap_or(60)),
+    )))
+}
+
+/// `503`: a NEAR AI sign-in this commons cannot answer now. `cause` is a
+/// fixed label for the log line only (`not_ready`, `database`,
+/// `near_ai_identity`, `near_ai_introspection`, `near_ai_client`,
+/// `near_rpc`). Used by both NEAR sign-in ceremonies, NEAR AI login and
+/// wallet.
+fn near_ai_sign_in_unavailable(cause: &'static str) -> axum::response::Response {
+    near_ai_sign_in_unavailable_with(cause, None)
+}
+
+/// [`near_ai_sign_in_unavailable`], with the database error's label on the
+/// same line when the cause is the database.
+fn near_ai_sign_in_unavailable_with(
+    cause: &'static str,
+    database_error: Option<&str>,
+) -> axum::response::Response {
+    tracing::warn!(
+        cause,
+        database_error,
+        "NEAR sign-in answered unavailable; the commons cannot answer it now"
+    );
+    unavailable_response()
+}
+
+/// The `503` body and headers, with no log line: for a caller that has
+/// already logged its one line.
+fn unavailable_response() -> axum::response::Response {
+    no_store(api_error_unlogged(
+        StatusCode::SERVICE_UNAVAILABLE,
+        NEAR_AI_SIGN_IN_UNAVAILABLE,
+    ))
+}
+
+/// A database error on a NEAR AI sign-in: `503` when the database cannot
+/// answer (down, or misconfigured), the uniform deny (`None`) for everything
+/// else. The predicate is narrow, so a refusal the database layer decided can
+/// never come out as `503`; see `is_database_unavailable`.
+///
+/// One label-only line per request (`database_error_label`: a fixed refusal
+/// label, a SQLSTATE or a fixed name, never the error's text): `warn` when
+/// the database cannot answer, `info` for a decided refusal (any requester
+/// holding a device key can produce one per request, so it must not page),
+/// and `warn` for any other error that answers the refusal, so a database
+/// fault that still answers `400` is visible to an operator.
+fn near_ai_database_failure(
+    error: &trace_commons_server::error::DatabaseError,
+) -> Option<axum::response::Response> {
+    use trace_commons_server::account_onboarding::{
+        database_error_label, is_database_unavailable, is_decided_refusal,
+    };
+    let label = database_error_label(error);
+    if is_database_unavailable(error) {
+        Some(near_ai_sign_in_unavailable_with("database", Some(&label)))
+    } else if is_decided_refusal(error) {
+        tracing::info!(database_error = %label, "NEAR sign-in refused");
+        None
+    } else {
+        tracing::warn!(database_error = %label, "NEAR sign-in refused on a database error");
+        None
+    }
+}
+
+/// A commons that offers a NEAR sign-in ceremony but is not ready to run it:
+/// its database, identity material, issuer, witness or origin is not
+/// configured. `503`, not the uniform deny: a client reads that `400` as "this
+/// login belongs to another account", and readiness is deployment state, the
+/// same for every request and already published by the capabilities route.
+/// The control that declined is logged once by `ready_or_declined`. A path
+/// that is switched off is not this at start (the uniform deny) and answers
+/// `503` without a log line at finish; see `not_ready_answer`.
+fn near_ai_not_ready() -> axum::response::Response {
+    near_ai_sign_in_unavailable("not_ready")
 }
 
 async fn near_ai_finish(
@@ -1389,14 +1625,41 @@ async fn near_ai_finish(
     body: Result<Json<NearAiFinishRequest>, JsonRejection>,
     contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
-    if !ready_for(&state, contract, false) || limited(&headers, "near-ai-finish") {
-        return None;
+    if limited(&headers, "near-ai-finish") {
+        return Some(near_ai_sign_in_rate_limited());
+    }
+    if let Err(control) = ready_or_declined(&state, contract, false) {
+        return not_ready_answer(control, CeremonyHalf::Finish);
     }
     let Json(body) = body.ok()?;
+    // Its per-ceremony attempt cap stays the uniform deny: an honest client
+    // never finishes one ceremony twice (the take below consumes it), so a
+    // ceremony past its cap is refused, not busy, and "try again later" would
+    // be the wrong thing to tell the client.
     let (device, hash) = near_ai_finish_precheck(&body)?;
-    let db = account_db(&state).ok()?;
-    // Single use: the take deletes the row, so a replayed finish finds nothing.
-    let pending = db.take_near_ai_login_ceremony(&hash).await.ok()??;
+    let Ok(db) = account_db(&state) else {
+        return Some(near_ai_sign_in_unavailable("database"));
+    };
+    // Single use: the take deletes the row, so a replayed finish finds
+    // nothing, whatever the first finish answered.
+    let pending = match db.take_near_ai_login_ceremony(&hash).await {
+        Ok(pending) => pending?,
+        Err(error) => return near_ai_database_failure(&error),
+    };
+    near_ai_finish_taken(&state, &headers, body, device, &db, pending).await
+}
+
+/// A NEAR AI finish after its ceremony was taken: every check that decides
+/// it, and the provisioning. The take consumed the ceremony whatever this
+/// answers, a `503` included; see [`NEAR_AI_SIGN_IN_UNAVAILABLE`].
+async fn near_ai_finish_taken(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: NearAiFinishRequest,
+    device: [u8; 32],
+    db: &Arc<dyn Database>,
+    pending: trace_commons_server::account_onboarding::NearAiLoginPending,
+) -> Option<axum::response::Response> {
     let nonce: [u8; 32] = hex::decode(&pending.nonce_hex).ok()?.try_into().ok()?;
     let signing_bytes = trace_commons_protocol::onboarding::near_ai_provisioning_device_bytes(
         &nonce,
@@ -1414,8 +1677,31 @@ async fn near_ai_finish(
     )?;
     // Only now, with the device proven and the ceremony consumed, is the token
     // spent.
-    let login = near_ai_introspect(&state, body.access_token).await?;
-    let identity = state.near_account_identity.as_ref()?;
+    //
+    // NEAR AI not answering is `503`. It is reached only after the device
+    // proof and before anything is looked up by the login, and it is the same
+    // for every token at that moment, so it says nothing about whose login
+    // this is. NEAR AI's answer about the token stays the uniform deny.
+    let login = match near_ai_introspect(state, body.access_token).await {
+        Ok(login) => login,
+        Err(trace_commons_server::near_ai_login::LoginIntrospectionFailure::Unavailable) => {
+            return Some(near_ai_sign_in_unavailable("near_ai_introspection"));
+        }
+        Err(trace_commons_server::near_ai_login::LoginIntrospectionFailure::ClientUnbuildable) => {
+            // One line, at error: a local fault that fails every sign-in here.
+            tracing::error!(
+                cause = "near_ai_client",
+                "NEAR AI sign-in answered unavailable: no HTTP client could be built"
+            );
+            return Some(unavailable_response());
+        }
+        Err(trace_commons_server::near_ai_login::LoginIntrospectionFailure::Refused) => {
+            return None;
+        }
+    };
+    let Some(identity) = state.near_account_identity.as_ref() else {
+        return Some(near_ai_sign_in_unavailable("near_ai_identity"));
+    };
     let secret = generate_session_secret();
     let token_hash = hash_secret(&secret);
     let provisioned = db
@@ -1441,19 +1727,31 @@ async fn near_ai_finish(
                 DEVICE_KEY_REVOKED,
             )));
         }
-        Err(_) => return None,
+        // F10: a login a change retired. Shown by name: the device just
+        // proved the login, and the fact is about that login alone.
+        Err(error)
+            if trace_commons_server::account_onboarding::is_near_ai_login_retired(&error) =>
+        {
+            return Some(no_store(api_error(
+                StatusCode::CONFLICT,
+                trace_commons_protocol::account_login_change::NEAR_AI_LOGIN_RETIRED,
+            )));
+        }
+        // Every decided refusal (the device key held by another account, the
+        // device principal bound to another account, the anchor race lost
+        // twice) stays the uniform deny; only the database unable to answer
+        // (down, or misconfigured) is `503`.
+        Err(error) => return near_ai_database_failure(&error),
     };
-    let referral = signup_referral_outcome(
-        &state,
-        &headers,
-        &provisioned,
-        body.referral_code.as_deref(),
-    )
-    .await;
+    let referral =
+        signup_referral_outcome(state, headers, &provisioned, body.referral_code.as_deref()).await;
     let mut answer = serde_json::json!({
         "access_token":native_token_value(&provisioned.tenant_id,&secret),"token_type":"Bearer",
         "expires_in_secs":NATIVE_SESSION_TTL_HOURS*3600,"account_id":provisioned.account_id,
-        "tenant_id":provisioned.tenant_id,"device_key_id":provisioned.device_key_id,"anchor_hash":provisioned.anchor_hash
+        "tenant_id":provisioned.tenant_id,"device_key_id":provisioned.device_key_id,"anchor_hash":provisioned.anchor_hash,
+        // What the account signs in with (F10 decision 4), and the login's
+        // provider label, the person's own fact, so the app can remember it.
+        "identity":"near_ai_login","auth_provider":login.auth_provider()
     });
     if let Some(referral) = referral {
         answer["referral"] = serde_json::json!(referral.as_str());
@@ -1461,88 +1759,7 @@ async fn near_ai_finish(
     Some(response(answer))
 }
 
-// --- Connect near.ai: bind a passkey account (Z2 native passkey identity, S3) --
-//
-// `POST /v1/account/near-ai/provision/bind/{start,finish}`, behind
-// `account_auth_middleware`. For a BOUND account the same routes enroll a
-// further device instead (a second Mac signed in with the account's passkey):
-// the ceremony is the same, and finish attaches the device only if the NEAR AI
-// login is the one the session's own account is bound to
-// (`PgBackend::near_ai_login_enrol`), refusing `near_ai_account_mismatch`
-// otherwise. The rest of this note is the bind.
-//
-// The provisioning ceremony above, run by a signed-in
-// UNBOUND passkey account, with two differences: the ceremony is bound to the
-// `(tenant_id, account_id)` of the session that started it, and the device signs
-// `near_ai_bind_device_bytes`, whose domain is not the provisioning one. The
-// anchor then decides between binding in place and the existing-account refuse
-// branch (`PgBackend::near_ai_login_bind`). NEAR AI verifies nothing about the
-// passkey; the commons introspects a NEAR AI token exactly as provisioning does.
-
-/// The label a bind answers with when the caller's account is neither an
-/// unbound passkey account (bind) nor a bound one (enroll): closed, or legacy
-/// (no binding row). A legacy account has no near.ai login anchor an
-/// enrollment could match.
-pub(super) const ACCOUNT_ALREADY_BOUND: &str = "account_already_bound";
-/// The label (and audit stage) an enrollment finish answers with when the
-/// near.ai identity this Mac proved is not the one the session's own account
-/// is bound to (a second Mac signed in to someone else's near.ai). One fixed
-/// value: the comparison runs inside the session's tenant, so a login that
-/// owns an account elsewhere and one that owns none are the same refusal, and
-/// the account compared against is the session's, never one the body names
-/// (the body has no account field). Nothing was written.
-pub(super) const NEAR_AI_ACCOUNT_MISMATCH: &str = "near_ai_account_mismatch";
-/// The label a bind answers with when the session is not a native one. The
-/// device key the ceremony enrolls lives in the daemon, which holds a `tcn1_`
-/// token; a browser cookie session has no device to prove.
-pub(super) const NATIVE_SESSION_REQUIRED: &str = "native_session_required";
-/// The label (and audit stage) a bind finish answers with when the daemon's
-/// device key is already registered to another account (#1135 review). It is
-/// the one finish refusal that is not the uniform deny: by then the caller has
-/// proven it holds the device key and the NEAR AI token, the fact is about its
-/// own device, and the label names no tenant or account. A client shows it
-/// rather than retrying; nothing was written, and no fresh key is minted.
-pub(super) const BIND_DEVICE_KEY_REGISTERED_ELSEWHERE: &str = "device_key_registered_elsewhere";
-/// The label every sign-in finish answers with when the device's key was
-/// revoked by its account (`DELETE /v1/account/devices/{id}`). Like the one
-/// above, it is shown by name only after the device proved it holds the key,
-/// and it is a fact about that key alone. The device recovers by making a new
-/// key, which signs in as a new device; the revoked one is never revived.
-pub(super) const DEVICE_KEY_REVOKED: &str = "device_key_revoked";
-
-/// What a ceremony on these routes does for an account in `binding`: an
-/// unbound passkey account binds; a bound one enrolls a further device (a
-/// second Mac signed in with the same passkey); anything else has neither.
-fn bind_purpose(
-    binding: trace_commons_server::account_binding::AccountBindingState,
-) -> Option<trace_commons_server::account_onboarding::NearAiBindPurpose> {
-    use trace_commons_server::account_binding::AccountBindingState;
-    use trace_commons_server::account_onboarding::NearAiBindPurpose;
-    match binding {
-        AccountBindingState::Unbound => Some(NearAiBindPurpose::Bind),
-        AccountBindingState::Bound => Some(NearAiBindPurpose::Enrol),
-        _ => None,
-    }
-}
-
-/// The two preconditions both bind verbs share. They answer with a label rather
-/// than the uniform deny: the caller is authenticated, and both facts are its
-/// own.
-fn bind_precondition(
-    ctx: &AccountCtx,
-    binding: trace_commons_server::account_binding::AccountBindingState,
-) -> Option<axum::response::Response> {
-    let refusal = if !matches!(ctx.auth_method, AccountAuthMethod::NativeToken) {
-        api_error(StatusCode::FORBIDDEN, NATIVE_SESSION_REQUIRED)
-    } else if bind_purpose(binding).is_none() {
-        api_error(StatusCode::CONFLICT, ACCOUNT_ALREADY_BOUND)
-    } else {
-        return None;
-    };
-    Some(no_store(refusal))
-}
-
-/// A labelled bind refusal, marked `no-store` like the uniform deny.
+/// A labelled refusal, marked `no-store` like the uniform deny.
 fn no_store(refusal: impl IntoResponse) -> axum::response::Response {
     let mut response = refusal.into_response();
     response.headers_mut().insert(
@@ -1552,314 +1769,12 @@ fn no_store(refusal: impl IntoResponse) -> axum::response::Response {
     response
 }
 
-/// A label-only `account_binding_failed` row in the caller's own tenant.
-/// Best effort: the refusal stands whether or not the row is written.
-async fn bind_failed(state: &AppState, ctx: &AccountCtx, stage: &'static str) {
-    let Ok(db) = account_db(state) else {
-        return;
-    };
-    if db
-        .append_account_audit(
-            &ctx.tenant_id,
-            "account_binding_failed",
-            &ctx.actor_ref,
-            "denied",
-            serde_json::json!({ "stage": stage }),
-        )
-        .await
-        .is_err()
-    {
-        tracing::warn!(
-            label = "account_binding_failed_audit_failed",
-            "bind refusal could not be audited"
-        );
-    }
-}
-
-pub(super) async fn near_ai_bind_start_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(ctx): Extension<AccountCtx>,
-    Extension(binding): Extension<trace_commons_server::account_binding::AccountBindingState>,
-    headers: HeaderMap,
-    body: Result<Json<NearAiStartRequest>, JsonRejection>,
-) -> axum::response::Response {
-    if let Some(refusal) = bind_precondition(&ctx, binding) {
-        return refusal;
-    }
-    let Some(purpose) = bind_purpose(binding) else {
-        return native_generic_deny();
-    };
-    let began = std::time::Instant::now();
-    let result = near_ai_bind_start(state, &ctx, purpose, headers, body).await;
-    sleep_to_redeem_floor(began).await;
-    result.unwrap_or_else(native_generic_deny)
-}
-
-async fn near_ai_bind_start(
-    state: Arc<AppState>,
-    ctx: &AccountCtx,
-    purpose: trace_commons_server::account_onboarding::NearAiBindPurpose,
-    headers: HeaderMap,
-    body: Result<Json<NearAiStartRequest>, JsonRejection>,
-) -> Option<axum::response::Response> {
-    // A bind has no released clients to stay compatible with, so it takes the
-    // v2 contract's readiness: no witness JSON requirement. It draws on the
-    // NEAR AI provisioning budget, not one of its own: both ceremonies end in
-    // the same NEAR AI introspection, and a second bucket would double what
-    // one address may send there.
-    if !ready_for(&state, ProvisionContract::ExplicitSelection, false)
-        || limited(&headers, "near-ai-start")
-    {
-        return None;
-    }
-    let Json(body) = body.ok()?;
-    let draw = NearAiCeremonyDraw::draw(body)?;
-    let db = account_db(&state).ok()?;
-    let account_id = ctx.account_id.as_uuid();
-    // The session's own tenant and account, never the body's: the start body
-    // is `deny_unknown_fields` and carries neither.
-    // The purpose is fixed here from the binding state now; finish refuses a
-    // ceremony whose purpose no longer matches the state then.
-    let pending = trace_commons_server::account_onboarding::NearAiBindPending {
-        purpose,
-        tenant_id: ctx.tenant_id.clone(),
-        account_id,
-        nonce_hex: draw.nonce_hex(),
-        code_challenge: draw.code_challenge.clone(),
-        device_public_key: draw.device_public_key(),
-        expires_at: draw.expires_at,
-    };
-    let signing_bytes = trace_commons_protocol::onboarding::near_ai_bind_device_bytes(
-        &draw.nonce,
-        &draw.ceremony_id,
-        &draw.device,
-        &draw.code_challenge,
-        draw.expires_at,
-        &account_id,
-    );
-    db.store_near_ai_bind_ceremony(&draw.ceremony_hash(), &pending, draw.expires_at)
-        .await
-        .ok()?;
-    // Required, not best effort: a bind that cannot be audited does not start.
-    let started = match purpose {
-        trace_commons_server::account_onboarding::NearAiBindPurpose::Bind => {
-            "account_binding_started"
-        }
-        trace_commons_server::account_onboarding::NearAiBindPurpose::Enrol => {
-            "account_device_enrol_started"
-        }
-    };
-    db.append_account_audit(
-        &ctx.tenant_id,
-        started,
-        &ctx.actor_ref,
-        "success",
-        serde_json::json!({}),
-    )
-    .await
-    .ok()?;
-    Some(draw.response(&signing_bytes))
-}
-
-pub(super) async fn near_ai_bind_finish_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(ctx): Extension<AccountCtx>,
-    Extension(binding): Extension<trace_commons_server::account_binding::AccountBindingState>,
-    headers: HeaderMap,
-    body: Result<Json<NearAiFinishRequest>, JsonRejection>,
-) -> axum::response::Response {
-    if let Some(refusal) = bind_precondition(&ctx, binding) {
-        return refusal;
-    }
-    let began = std::time::Instant::now();
-    let result = match near_ai_bind_finish(&state, &ctx, binding, headers, body).await {
-        Ok(response) => Some(response),
-        Err(Some(stage)) => {
-            bind_failed(&state, &ctx, stage).await;
-            // The two finish refusals shown by name. Both are facts about the
-            // caller's own device or its own account, and neither names
-            // another tenant or account.
-            [
-                BIND_DEVICE_KEY_REGISTERED_ELSEWHERE,
-                NEAR_AI_ACCOUNT_MISMATCH,
-                DEVICE_KEY_REVOKED,
-            ]
-            .contains(&stage)
-            .then(|| no_store(api_error(StatusCode::CONFLICT, stage)))
-        }
-        Err(None) => None,
-    };
-    sleep_to_redeem_floor(began).await;
-    result.unwrap_or_else(native_generic_deny)
-}
-
-/// `Err(Some(stage))` is a refusal worth an `account_binding_failed` row (the
-/// request reached a ceremony); `Err(None)` is one refused before that
-/// (readiness, rate limits, a malformed body), which writes nothing.
-async fn near_ai_bind_finish(
-    state: &Arc<AppState>,
-    ctx: &AccountCtx,
-    binding: trace_commons_server::account_binding::AccountBindingState,
-    headers: HeaderMap,
-    body: Result<Json<NearAiFinishRequest>, JsonRejection>,
-) -> Result<axum::response::Response, Option<&'static str>> {
-    if !ready_for(state, ProvisionContract::ExplicitSelection, false)
-        // The provisioning finish's budget, as at start.
-        || limited(&headers, "near-ai-finish")
-    {
-        return Err(None);
-    }
-    let Json(body) = body.map_err(|_| None)?;
-    let (device, hash) = near_ai_finish_precheck(&body).ok_or(None)?;
-    let db = account_db(state).map_err(|_| None)?;
-    // Single use, and only a bind row parses here: a provisioning ceremony id
-    // is consumed and refused.
-    let pending = db
-        .take_near_ai_bind_ceremony(&hash)
-        .await
-        .ok()
-        .flatten()
-        .ok_or(Some("ceremony"))?;
-    // The ceremony belongs to the session that started it. Account B holding
-    // account A's ceremony id, device key and signature still gets nothing.
-    let account_id = ctx.account_id.as_uuid();
-    if pending.tenant_id != ctx.tenant_id || pending.account_id != account_id {
-        return Err(Some("ceremony_account"));
-    }
-    // A ceremony started as a bind never finishes as an enrollment, or the
-    // reverse: the account's state moved between start and finish (another
-    // Mac bound it meanwhile), so this ceremony is stale. Before the token is
-    // spent.
-    if bind_purpose(binding) != Some(pending.purpose) {
-        return Err(Some("ceremony_purpose"));
-    }
-    let nonce: [u8; 32] = hex::decode(&pending.nonce_hex)
-        .ok()
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or(Some("ceremony"))?;
-    // The account in the preimage is the SESSION's, not the stored one. The
-    // check above already makes them equal; taking the session's here means a
-    // signature is also useless to any other account if that check ever went.
-    let signing_bytes = trace_commons_protocol::onboarding::near_ai_bind_device_bytes(
-        &nonce,
-        &body.ceremony_id,
-        &device,
-        &pending.code_challenge,
-        pending.expires_at,
-        &account_id,
-    );
-    near_ai_verify_device_proof(
-        &body,
-        &device,
-        &pending.code_challenge,
-        &pending.device_public_key,
-        &signing_bytes,
-    )
-    .ok_or(Some("device_proof"))?;
-    let login = near_ai_introspect(state, body.access_token)
-        .await
-        .ok_or(Some("introspection"))?;
-    let identity = state.near_account_identity.as_ref().ok_or(Some("bind"))?;
-    let secret = generate_session_secret();
-    let token_hash = hash_secret(&secret);
-    if pending.purpose == trace_commons_server::account_onboarding::NearAiBindPurpose::Enrol {
-        let provisioned = db
-            .enrol_near_ai_login(
-                &ctx.tenant_id,
-                account_id,
-                &login,
-                &device,
-                trace_commons_server::db::NewSession {
-                    token_hash: &token_hash,
-                    client_kind: NATIVE_SESSION_CLIENT_KIND,
-                    expires_at: Utc::now() + Duration::hours(NATIVE_SESSION_TTL_HOURS),
-                },
-                identity,
-                state.near_ai_signup_policy_template.as_ref(),
-            )
-            .await
-            .map_err(|error| {
-                use trace_commons_server::account_onboarding as onboarding;
-                if onboarding::is_near_ai_enrol_account_mismatch(&error) {
-                    Some(NEAR_AI_ACCOUNT_MISMATCH)
-                } else if onboarding::is_device_key_registered_elsewhere(&error) {
-                    Some(BIND_DEVICE_KEY_REGISTERED_ELSEWHERE)
-                } else if onboarding::is_device_key_revoked(&error) {
-                    Some(DEVICE_KEY_REVOKED)
-                } else {
-                    Some("enrol")
-                }
-            })?;
-        return Ok(bind_response(
-            &provisioned,
-            &secret,
-            "enrolled",
-            trace_commons_server::account_binding::AccountBindingState::Bound,
-        ));
-    }
-    let outcome = db
-        .bind_near_ai_login(
-            &ctx.tenant_id,
-            account_id,
-            &login,
-            &device,
-            trace_commons_server::db::NewSession {
-                token_hash: &token_hash,
-                client_kind: NATIVE_SESSION_CLIENT_KIND,
-                expires_at: Utc::now() + Duration::hours(NATIVE_SESSION_TTL_HOURS),
-            },
-            identity,
-            state.near_ai_signup_policy_template.as_ref(),
-        )
-        .await
-        .map_err(|error| {
-            // The one database refusal shown to the caller: its own device,
-            // proven by the signature above, is held by another account.
-            // Nothing was committed, so the account stays unbound.
-            if trace_commons_server::account_onboarding::is_device_key_registered_elsewhere(&error)
-            {
-                Some(BIND_DEVICE_KEY_REGISTERED_ELSEWHERE)
-            } else if trace_commons_server::account_onboarding::is_device_key_revoked(&error) {
-                Some(DEVICE_KEY_REVOKED)
-            } else {
-                Some("bind")
-            }
-        })?;
-    use trace_commons_server::account_onboarding::NearAiBindOutcome;
-    let (provisioned, outcome, binding_state) = match outcome {
-        NearAiBindOutcome::Bound(provisioned) => (
-            provisioned,
-            "bound",
-            trace_commons_server::account_binding::AccountBindingState::Bound,
-        ),
-        NearAiBindOutcome::ExistingAccount {
-            provisioned,
-            binding_state,
-        } => (provisioned, "existing_account", binding_state),
-    };
-    Ok(bind_response(&provisioned, &secret, outcome, binding_state))
-}
-
-/// A successful bind or enroll finish: the fresh native session and the
-/// account it is on. `outcome` is `bound`, `existing_account` or `enrolled`.
-fn bind_response(
-    provisioned: &trace_commons_server::account_onboarding::ProvisionedNearAccount,
-    secret: &str,
-    outcome: &'static str,
-    binding_state: trace_commons_server::account_binding::AccountBindingState,
-) -> axum::response::Response {
-    response(serde_json::json!({
-        "access_token": native_token_value(&provisioned.tenant_id, secret),
-        "token_type": "Bearer",
-        "expires_in_secs": NATIVE_SESSION_TTL_HOURS * 3600,
-        "account_id": provisioned.account_id,
-        "tenant_id": provisioned.tenant_id,
-        "device_key_id": provisioned.device_key_id,
-        "anchor_hash": provisioned.anchor_hash,
-        "outcome": outcome,
-        "binding_state": binding_state.label(),
-    }))
-}
+/// The label every sign-in finish answers with when the device's key was
+/// revoked by its account (`DELETE /v1/account/devices/{id}`). It is shown by
+/// name only after the device proved it holds the key, and it is a fact about
+/// that key alone. The device recovers by making a new key, which signs in as
+/// a new device; the revoked one is never revived.
+pub(super) const DEVICE_KEY_REVOKED: &str = "device_key_revoked";
 
 #[cfg(test)]
 mod near_ai_login_tests {
@@ -1885,8 +1800,6 @@ mod near_ai_login_tests {
         serde_json::from_value::<NearAiFinishRequest>(ok.clone())
             .expect("the shape without an account parses");
 
-        // `expected_account*` too: an enrollment's expected account is the
-        // session's, never a value on the wire a caller could vary to probe.
         for smuggled in [
             "account_id",
             "near_account_id",
@@ -1904,22 +1817,6 @@ mod near_ai_login_tests {
         }
     }
 
-    /// Which ceremony the bind routes run for each binding state: an unbound
-    /// account binds, a bound one enrolls a further device, and a legacy or
-    /// closed account gets neither (`account_already_bound`).
-    #[test]
-    fn the_binding_state_decides_bind_or_enrol_and_nothing_else_runs() {
-        use trace_commons_server::account_binding::AccountBindingState as S;
-        use trace_commons_server::account_onboarding::NearAiBindPurpose as P;
-        assert_eq!(bind_purpose(S::Unbound), Some(P::Bind));
-        assert_eq!(bind_purpose(S::Bound), Some(P::Enrol));
-        assert_eq!(bind_purpose(S::Legacy), None);
-        assert_eq!(bind_purpose(S::Closed), None);
-    }
-
-    /// The same guarantee on the other verb, and the reason it matters there
-    /// too: start decides what the ceremony commits to, so an extra field it
-    /// silently ignored would be one a client believed had been agreed.
     #[test]
     fn a_start_body_with_anything_extra_is_refused() {
         let ok = serde_json::json!({

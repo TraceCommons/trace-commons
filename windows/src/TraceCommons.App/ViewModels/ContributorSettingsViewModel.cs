@@ -937,6 +937,168 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
     public bool HasConnectionDetail => !Connected;
 
+    private AccountAttention? _accountAttention;
+
+    /// <summary>
+    /// The account section's status while this app's account needs attention
+    /// (#1836 F1), in the Rust's words, or null when there is nothing to
+    /// show. Re-read with every status read, so it goes once the account is
+    /// set up again.
+    /// </summary>
+    public AccountAttention? AccountAttention
+    {
+        get => _accountAttention;
+        private set
+        {
+            if (Equals(_accountAttention, value))
+            {
+                return;
+            }
+
+            _accountAttention = value;
+            if (value is null)
+            {
+                AccountAttentionFailedLine = string.Empty;
+            }
+
+            Raise(nameof(AccountAttention));
+            Raise(nameof(HasAccountAttention));
+            Raise(nameof(AccountAttentionTitle));
+            Raise(nameof(AccountAttentionBody));
+            Raise(nameof(HasAccountAttentionBody));
+            Raise(nameof(AccountAttentionPrivateAi));
+            Raise(nameof(HasAccountAttentionPrivateAi));
+            Raise(nameof(AccountAttentionAction));
+        }
+    }
+
+    public bool HasAccountAttention => AccountAttention is not null;
+
+    public string AccountAttentionTitle => AccountAttention?.Title ?? string.Empty;
+
+    public string AccountAttentionBody => AccountAttention?.Body ?? string.Empty;
+
+    public bool HasAccountAttentionBody => !string.IsNullOrEmpty(AccountAttention?.Body);
+
+    public string AccountAttentionPrivateAi => AccountAttention?.PrivateAi ?? string.Empty;
+
+    public bool HasAccountAttentionPrivateAi => !string.IsNullOrEmpty(AccountAttention?.PrivateAi);
+
+    public string AccountAttentionAction => AccountAttention?.Action ?? string.Empty;
+
+    public string AccountAttentionConfirmTitle => AccountAttention?.ConfirmTitle ?? string.Empty;
+
+    public string AccountAttentionConfirmBody => AccountAttention?.ConfirmBody ?? string.Empty;
+
+    public string AccountAttentionConfirmAction => AccountAttention?.ConfirmAction ?? string.Empty;
+
+    public string AccountAttentionConfirmCancel => AccountAttention?.ConfirmCancel ?? string.Empty;
+
+    private string _accountAttentionFailedLine = string.Empty;
+
+    /// <summary>
+    /// The block's failure line (the Rust's <c>failed</c>), shown after the
+    /// daemon refused to set up again; empty otherwise.
+    /// </summary>
+    public string AccountAttentionFailedLine
+    {
+        get => _accountAttentionFailedLine;
+        private set
+        {
+            if (_accountAttentionFailedLine == value)
+            {
+                return;
+            }
+
+            _accountAttentionFailedLine = value;
+            Raise(nameof(AccountAttentionFailedLine));
+            Raise(nameof(HasAccountAttentionFailedLine));
+        }
+    }
+
+    public bool HasAccountAttentionFailedLine => !string.IsNullOrEmpty(AccountAttentionFailedLine);
+
+    /// <summary>
+    /// The three status keys last handed to the ABI, so an event that did
+    /// not change them words nothing.
+    /// </summary>
+    private string? _accountAttentionKeys;
+    private bool _accountAttentionKeysRead;
+
+    /// <summary>
+    /// Words the attention block from a status reply. An error frame leaves
+    /// the block as it was: a daemon that could not answer has not said the
+    /// account is fine.
+    /// </summary>
+    private void FillAccountAttention(DaemonResponse statusResponse)
+    {
+        if (statusResponse.IsError || statusResponse.Result is not { } result)
+        {
+            return;
+        }
+
+        string? keys = AccountAttentions.Keys(result);
+        if (_accountAttentionKeysRead && keys == _accountAttentionKeys)
+        {
+            return;
+        }
+
+        _accountAttentionKeysRead = true;
+        _accountAttentionKeys = keys;
+        AccountAttention = AccountAttentions.For(keys);
+    }
+
+    /// <summary>
+    /// The confirmation's primary button: the daemon drops this device's
+    /// enrollment (<c>unenroll</c>). True only once it confirmed; the caller
+    /// then starts the first run, which begins with a fresh NEAR AI sign-in.
+    /// A refusal shows the block's failure line. The daemon never does this
+    /// on its own.
+    /// </summary>
+    public async Task<bool> SetUpAgainAsync()
+    {
+        if (IsBusy)
+        {
+            // Another settings write took the turn while the confirmation
+            // was open: nothing ran, so say so rather than nothing.
+            AccountAttentionFailedLine = AccountAttention?.Failed ?? string.Empty;
+            return false;
+        }
+
+        IsBusy = true;
+        AccountAttentionFailedLine = string.Empty;
+        try
+        {
+            DaemonResponse response = await _host
+                .CallAsync(DaemonProtocol.Methods.Unenroll, "{}")
+                .ConfigureAwait(true);
+            if (response.IsError)
+            {
+                AccountAttentionFailedLine = AccountAttention?.Failed ?? string.Empty;
+                return false;
+            }
+
+            // The NEAR AI sign-in goes with the enrollment (#1843): said only
+            // when it did not, as macOS and GTK do.
+            string nearAi = NearAiCredentialSurface.UnenrollNotice(response, _privateInferenceCopy);
+            if (nearAi.Length > 0)
+            {
+                Notice = nearAi;
+            }
+
+            DaemonResponse status = await _host
+                .CallAsync(DaemonProtocol.Methods.Status)
+                .ConfigureAwait(true);
+            Connected = status.ResultAs<DaemonStatus>()?.LoggedIn ?? false;
+            FillAccountAttention(status);
+            return true;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
     public string Notice
     {
         get => _notice;
@@ -1002,6 +1164,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 .ConfigureAwait(true);
             DaemonStatus? status = statusResponse.ResultAs<DaemonStatus>();
             Connected = status?.LoggedIn ?? false;
+            FillAccountAttention(statusResponse);
 
             DaemonResponse settingsResponse = await _host
                 .CallAsync(DaemonProtocol.Methods.GetSettings)
@@ -1821,6 +1984,10 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             .CallAsync(DaemonProtocol.Methods.Status)
             .ConfigureAwait(true);
 
+        // The attention block follows every status event too: a record that
+        // breaks or is set up again elsewhere must not leave this section
+        // saying the old thing.
+        FillAccountAttention(statusResponse);
         DaemonSettingsSnapshot? snapshot = settingsResponse.ResultAs<DaemonSettingsSnapshot>();
         FillRouting(
             snapshot,

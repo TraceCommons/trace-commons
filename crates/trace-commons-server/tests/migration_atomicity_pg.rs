@@ -20,6 +20,9 @@
 //! Everything here lives in a scratch schema of its own and is dropped again,
 //! so the shared test database keeps whatever migration state it already had.
 
+#[path = "support/near_ai_payout_mock.rs"]
+#[allow(dead_code)]
+mod near_ai_payout_mock;
 #[path = "support/pilot_runtime_grants.rs"]
 mod pilot_runtime_grants;
 
@@ -1939,4 +1942,1896 @@ async fn v114_role_setup_accepts_restricted_roles_and_rejects_elevated_roles() {
             tx.rollback().await.expect("remove all probe roles");
         }
     }
+}
+
+/// V144 removes passkeys. Run as the non-superuser owner it runs as in
+/// production, on a database migrated to V143 that holds every kind of
+/// passkey-origin account, because forced row security applies to the owner:
+/// a superuser run cannot tell a migration that works from one that silently
+/// touches zero rows.
+///
+/// Seeded before V144: an `unbound` and a `closed` passkey account (deleted),
+/// a `bound` one with its NEAR AI anchor (untouched), a legacy account with no
+/// binding row that holds a browser passkey (untouched, except that the
+/// credential table is gone), and an `unbound` one that a non-cascading
+/// `trace_account_trust` row keeps from being deleted (closed, sessions
+/// revoked). Every account also holds a session a passkey authenticated,
+/// which V144 revokes whatever the account. Plus a hash-only audit row about a
+/// past passkey sign-in.
+#[tokio::test]
+async fn v144_removes_unbound_and_closed_passkey_accounts_as_a_non_superuser_owner() {
+    let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+    else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return;
+    };
+    let _turn = VIRGIN_DATABASE.lock().await;
+
+    const OWNER: &str = "tc_v144_owner_probe";
+    const DB: &str = "trace_v144_owner_probe_db";
+    let probe = ProbeRole::claim(&url, OWNER, &[DB]).await;
+    let admin = owned_database(&url, OWNER, DB, Standing::Creator).await;
+    let mut owner = connect(&with_user(&with_database(&url, DB), OWNER, "probe")).await;
+    owner
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS _trace_commons_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );",
+        )
+        .await
+        .expect("create the recording table");
+    for (version, name, sql) in registered_migrations()
+        .iter()
+        .filter(|(version, ..)| *version < 144)
+    {
+        apply_and_record_migration(&mut owner, *version, name, sql)
+            .await
+            .unwrap_or_else(|error| panic!("V{version} before V144: {error:?}"));
+    }
+
+    // Seeded as the superuser, which row security does not apply to.
+    let seed = connect(&with_database(&url, DB)).await;
+    let unbound = uuid::Uuid::new_v4();
+    let closed = uuid::Uuid::new_v4();
+    let bound = uuid::Uuid::new_v4();
+    let legacy = uuid::Uuid::new_v4();
+    let held = uuid::Uuid::new_v4();
+    let anchor_hex = "ab".repeat(32);
+    let bound_tenant = format!("near-{anchor_hex}");
+    let accounts: [(&str, uuid::Uuid, Option<&str>); 5] = [
+        ("v144-unbound", unbound, Some("unbound")),
+        ("v144-closed", closed, Some("closed")),
+        (bound_tenant.as_str(), bound, Some("bound")),
+        ("v144-legacy", legacy, None),
+        ("v144-held", held, Some("unbound")),
+    ];
+    for (n, (tenant, account, state)) in accounts.iter().enumerate() {
+        seed.execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+            &[tenant],
+        )
+        .await
+        .expect("seed tenant");
+        seed.execute(
+            "INSERT INTO trace_accounts (tenant_id, account_id, closed_at)
+             VALUES ($1, $2, CASE WHEN $3::text = 'closed' THEN now() END)",
+            &[tenant, account, state],
+        )
+        .await
+        .expect("seed account");
+        if let Some(state) = state {
+            seed.execute(
+                "INSERT INTO trace_account_bindings (tenant_id, account_id, origin, state, bound_at)
+                 VALUES ($1, $2, 'passkey', $3, CASE WHEN $3 = 'bound' THEN now() END)",
+                &[tenant, account, state],
+            )
+            .await
+            .expect("seed binding");
+        }
+        seed.execute(
+            "INSERT INTO trace_webauthn_credentials (tenant_id, credential_id, account_id, passkey)
+             VALUES ($1, $2, $3, '{}'::jsonb)",
+            &[tenant, &format!("v144-credential-{n}"), account],
+        )
+        .await
+        .expect("seed credential");
+        seed.execute(
+            "INSERT INTO trace_sessions
+                 (tenant_id, session_id, account_id, token_hash, client_kind, expires_at, revoked_at)
+             VALUES ($1, $2, $3, $4, 'native', now() + interval '1 day',
+                     CASE WHEN $5::text = 'closed' THEN now() END)",
+            &[
+                tenant,
+                &uuid::Uuid::new_v4(),
+                account,
+                &format!("sha256:{:064x}", n + 1),
+                state,
+            ],
+        )
+        .await
+        .expect("seed session");
+        // A session a passkey authenticated: a browser passkey sign-in on the
+        // legacy account, a native passkey sign-in on the others.
+        let kind = if state.is_none() { "passkey" } else { "native" };
+        seed.execute(
+            "INSERT INTO trace_sessions
+                 (tenant_id, session_id, account_id, token_hash, client_kind, expires_at,
+                  auth_credential_id)
+             VALUES ($1, $2, $3, $4, $5, now() + interval '1 day', $6)",
+            &[
+                tenant,
+                &uuid::Uuid::new_v4(),
+                account,
+                &format!("sha256:{:064x}", n + 100),
+                &kind,
+                &format!("v144-credential-{n}"),
+            ],
+        )
+        .await
+        .expect("seed passkey session");
+    }
+    seed.execute(
+        "INSERT INTO trace_near_account_anchors
+             (tenant_id, anchor_hash, account_id, sealed_account_name,
+              index_pepper_ref, account_name_key_ref)
+         VALUES ($1, $2, $3, $4, 'fixture-pepper', 'fixture-key')",
+        &[
+            &bound_tenant,
+            &format!("sha256:{anchor_hex}"),
+            &bound,
+            &serde_json::json!({"fixture": true}),
+        ],
+    )
+    .await
+    .expect("seed the bound account's anchor");
+    seed.execute(
+        "INSERT INTO trace_account_trust (tenant_id, account_id, authority, trust_version)
+         VALUES ('v144-held', $1, 'invited', 1)",
+        &[&held],
+    )
+    .await
+    .expect("seed a non-cascading row on the held account");
+    seed.execute(
+        "INSERT INTO trace_account_audit (tenant_id, action, actor_ref, outcome)
+         VALUES ('v144-unbound', 'account_passkey_login', 'account-actor:v144', 'ok')",
+        &[],
+    )
+    .await
+    .expect("seed a past passkey audit row");
+
+    let (version, name, sql) = registered_migrations()
+        .iter()
+        .find(|(version, ..)| *version == 144)
+        .expect("V144 is wired into the runner");
+    let applied = apply_and_record_migration(&mut owner, *version, name, sql)
+        .await
+        .map_err(|error| format!("{error:?}"));
+
+    let mut problems: Vec<String> = Vec::new();
+    if let Err(error) = &applied {
+        problems.push(format!("V144 failed for the non-superuser owner: {error}"));
+    } else {
+        let account = |id: uuid::Uuid| {
+            let seed = &seed;
+            async move {
+                seed.query_opt(
+                    "SELECT closed_at IS NOT NULL FROM trace_accounts WHERE account_id = $1",
+                    &[&id],
+                )
+                .await
+                .expect("read account")
+                .map(|row| row.get::<_, bool>(0))
+            }
+        };
+        let live_sessions = |id: uuid::Uuid| {
+            let seed = &seed;
+            async move {
+                seed.query_one(
+                    "SELECT count(*) FROM trace_sessions WHERE account_id = $1 AND revoked_at IS NULL",
+                    &[&id],
+                )
+                .await
+                .expect("count sessions")
+                .get::<_, i64>(0)
+            }
+        };
+        let sessions = |id: uuid::Uuid| {
+            let seed = &seed;
+            async move {
+                seed.query_one(
+                    "SELECT count(*) FROM trace_sessions WHERE account_id = $1",
+                    &[&id],
+                )
+                .await
+                .expect("count sessions")
+                .get::<_, i64>(0)
+            }
+        };
+        for (label, id) in [("unbound", unbound), ("closed", closed)] {
+            if account(id).await.is_some() {
+                problems.push(format!("the {label} passkey account was not deleted"));
+            }
+            if sessions(id).await != 0 {
+                problems.push(format!("the {label} account's sessions were not deleted"));
+            }
+        }
+        for (label, id) in [("bound", bound), ("legacy", legacy)] {
+            if account(id).await != Some(false) {
+                problems.push(format!("the {label} account was deleted or closed"));
+            }
+            if live_sessions(id).await != 1 {
+                problems.push(format!("the {label} account's session was revoked"));
+            }
+        }
+        let passkey_sessions: i64 = seed
+            .query_one(
+                "SELECT count(*) FROM trace_sessions
+                  WHERE auth_credential_id LIKE 'v144-credential-%' AND revoked_at IS NULL",
+                &[],
+            )
+            .await
+            .expect("count passkey sessions")
+            .get(0);
+        if passkey_sessions != 0 {
+            problems.push(format!(
+                "{passkey_sessions} sessions a passkey authenticated are still live"
+            ));
+        }
+        let anchors: i64 = seed
+            .query_one(
+                "SELECT count(*) FROM trace_near_account_anchors WHERE account_id = $1",
+                &[&bound],
+            )
+            .await
+            .expect("count anchors")
+            .get(0);
+        if anchors != 1 {
+            problems.push(format!("the bound account holds {anchors} anchors, not 1"));
+        }
+        if account(held).await != Some(true) {
+            problems.push("the held unbound account was not left closed".into());
+        }
+        if live_sessions(held).await != 0 {
+            problems.push("the held unbound account kept a live session".into());
+        }
+        let audit: i64 = seed
+            .query_one(
+                "SELECT count(*) FROM trace_account_audit
+                  WHERE tenant_id = 'v144-unbound' AND action = 'account_passkey_login'",
+                &[],
+            )
+            .await
+            .expect("read the audit row")
+            .get(0);
+        if audit != 1 {
+            problems.push(format!("{audit} past passkey audit rows remain, not 1"));
+        }
+        let gone: (bool, bool, bool, bool) = seed
+            .query_one(
+                "SELECT to_regclass('public.trace_account_bindings') IS NULL,
+                        to_regclass('public.trace_webauthn_credentials') IS NULL,
+                        to_regprocedure('public.trace_unbound_passkey_account_count()') IS NULL,
+                        to_regprocedure('public.trace_reap_unbound_accounts(bigint,bigint,integer)') IS NULL",
+                &[],
+            )
+            .await
+            .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+            .expect("read the catalog");
+        if gone != (true, true, true, true) {
+            problems.push(format!(
+                "(bindings, credentials, count function, reaper function) dropped = {gone:?}"
+            ));
+        }
+        let forced: i64 = seed
+            .query_one(
+                "SELECT count(*) FROM pg_class
+                  WHERE relname IN ('trace_accounts', 'trace_sessions')
+                    AND relforcerowsecurity",
+                &[],
+            )
+            .await
+            .expect("read FORCE")
+            .get(0);
+        if forced != 2 {
+            problems.push("row security is no longer forced on accounts and sessions".into());
+        }
+        let leftover: i64 = seed
+            .query_one(
+                "SELECT (SELECT count(*) FROM pg_policy p
+                          WHERE p.polrelid = 'trace_accounts'::regclass
+                            AND p.polname LIKE 'trace_unbound_reaper_%')
+                      + (SELECT count(*) FROM information_schema.table_privileges
+                          WHERE grantee LIKE 'trace_unbound_account_%')
+                      + (SELECT count(*) FROM information_schema.column_privileges
+                          WHERE grantee LIKE 'trace_unbound_account_%')
+                      -- Grants of its own on the schema; PUBLIC's USAGE is not one.
+                      + (SELECT count(*) FROM pg_namespace n, aclexplode(n.nspacl) a
+                          JOIN pg_roles r ON r.oid = a.grantee
+                          WHERE n.nspname = 'public'
+                            AND r.rolname LIKE 'trace_unbound_account_%')",
+                &[],
+            )
+            .await
+            .expect("read leftover privileges")
+            .get(0);
+        if leftover != 0 {
+            problems.push(format!(
+                "{leftover} policies or privileges remain for the passkey guard roles"
+            ));
+        }
+    }
+
+    drop(seed);
+    drop(owner);
+    admin
+        .execute(&format!("DROP DATABASE IF EXISTS {DB} WITH (FORCE)"), &[])
+        .await
+        .expect("drop the probe database");
+    assert!(
+        problems.is_empty(),
+        "V144 must delete unbound and closed passkey accounts, close the ones it cannot \
+         delete, and leave bound and legacy accounts and audit rows alone:\n  {}",
+        problems.join("\n  ")
+    );
+    probe.release().await;
+    assert!(
+        !role_exists(&url, OWNER).await,
+        "{OWNER} is per server and must not outlive the test (#1335)"
+    );
+}
+
+/// V145 keeps one row per dedup cluster by trigger and backfills it. Run as
+/// the non-superuser owner it runs as in production: forced row security
+/// applies to the owner, and the trigger runs as a NOBYPASSRLS guard, so a
+/// superuser run could not tell a backfill that reads every tenant from one
+/// that silently reads none, or a trigger that sees one tenant's members from
+/// one that sees them all.
+///
+/// Seeded before V145, across two tenants: a cluster with a member in each,
+/// a single-member cluster, and a decision with no cluster. Then the owner
+/// writes the way the runtime does, inside a tenant-scoped transaction: a new
+/// earlier member joins from the second tenant, the first tenant's member is
+/// cleared, and the single-member cluster's row is deleted.
+#[tokio::test]
+async fn v145_tracks_dedup_clusters_across_tenants_as_a_non_superuser_owner() {
+    let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+    else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return;
+    };
+    let _turn = VIRGIN_DATABASE.lock().await;
+
+    const OWNER: &str = "tc_v145_owner_probe";
+    const DB: &str = "trace_v145_owner_probe_db";
+    let probe = ProbeRole::claim(&url, OWNER, &[DB]).await;
+    let admin = owned_database(&url, OWNER, DB, Standing::Creator).await;
+    let mut owner = connect(&with_user(&with_database(&url, DB), OWNER, "probe")).await;
+    owner
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS _trace_commons_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );",
+        )
+        .await
+        .expect("create the recording table");
+    for (version, name, sql) in registered_migrations()
+        .iter()
+        .filter(|(version, ..)| *version < 145)
+    {
+        apply_and_record_migration(&mut owner, *version, name, sql)
+            .await
+            .unwrap_or_else(|error| panic!("V{version} before V145: {error:?}"));
+    }
+
+    // Seeded as the superuser, which row security does not apply to.
+    let seed = connect(&with_database(&url, DB)).await;
+    let insert = "INSERT INTO trace_gate_decisions
+            (tenant_id, decision_id, submission_id, gate_policy_version, gate_version_hash,
+             perplexity_micros, tail_fraction_micros, perplexity_passed, novelty_score_micros,
+             nearest_neighbor_hash, novelty_passed, embedding_evidence_hash,
+             attestation_chain_hash, decided_at, dedup_cluster_id, dedup_simhash,
+             dedup_signal_version)
+         VALUES ($1, $2, $3, 'v', 'sha256:v', 1, 1, TRUE, 1, 'sha256:n', TRUE, 'sha256:e',
+                 'sha256:a', TIMESTAMPTZ '2026-01-01T00:00:00Z' + make_interval(secs => $4),
+                 $5, $6, $7)";
+    let (t1, t2) = ("v145-tenant-1", "v145-tenant-2");
+    for tenant in [t1, t2] {
+        seed.execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+            &[&tenant],
+        )
+        .await
+        .expect("seed tenant");
+    }
+    let (c1, c2) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let t1_c1 = uuid::Uuid::new_v4();
+    let t2_c2 = uuid::Uuid::new_v4();
+    let rows: [(
+        &str,
+        uuid::Uuid,
+        f64,
+        Option<uuid::Uuid>,
+        Option<i64>,
+        Option<&str>,
+    ); 4] = [
+        (t1, t1_c1, 10.0, Some(c1), Some(5), Some("stamp")),
+        (t2, uuid::Uuid::new_v4(), 20.0, Some(c1), Some(6), None),
+        (t2, t2_c2, 30.0, Some(c2), Some(7), Some("stamp")),
+        (t1, uuid::Uuid::new_v4(), 40.0, None, Some(8), Some("stamp")),
+    ];
+    for (tenant, decision, secs, cluster, simhash, stamp) in rows {
+        seed.execute(
+            insert,
+            &[
+                &tenant,
+                &decision,
+                &uuid::Uuid::new_v4(),
+                &secs,
+                &cluster,
+                &simhash,
+                &stamp,
+            ],
+        )
+        .await
+        .expect("seed gate decision");
+    }
+
+    let (version, name, sql) = registered_migrations()
+        .iter()
+        .find(|(version, ..)| *version == 145)
+        .expect("V145 is wired into the runner");
+    let applied = apply_and_record_migration(&mut owner, *version, name, sql)
+        .await
+        .map_err(|error| format!("{error:?}"));
+
+    // (cluster, representative simhash, member count), read as the superuser.
+    let sorted = |mut v: Vec<(uuid::Uuid, i64, i64)>| {
+        v.sort();
+        v
+    };
+
+    let mut problems: Vec<String> = Vec::new();
+    if let Err(error) = &applied {
+        problems.push(format!("V145 failed for the non-superuser owner: {error}"));
+    } else {
+        let backfilled = v145_cluster_table(&seed).await;
+        let expected = sorted(vec![(c1, 5, 2), (c2, 7, 1)]);
+        if backfilled != expected {
+            problems.push(format!(
+                "backfill read {backfilled:?}, not {expected:?} (both tenants' members)"
+            ));
+        }
+
+        // The owner writing as the runtime does: one tenant per transaction,
+        // forced row security on.
+        // A new member of C1 from tenant 2, decided before any other.
+        let joined = v145_as_tenant(
+            &mut owner,
+            t2,
+            "INSERT INTO trace_gate_decisions
+                (tenant_id, decision_id, submission_id, gate_policy_version, gate_version_hash,
+                 perplexity_micros, tail_fraction_micros, perplexity_passed, novelty_score_micros,
+                 nearest_neighbor_hash, novelty_passed, embedding_evidence_hash,
+                 attestation_chain_hash, decided_at, dedup_cluster_id, dedup_simhash,
+                 dedup_signal_version)
+             VALUES ('v145-tenant-2', $1, $2, 'v', 'sha256:v', 1, 1, TRUE, 1, 'sha256:n', TRUE,
+                     'sha256:e', 'sha256:a', TIMESTAMPTZ '2025-12-31T00:00:00Z', $3, 99,
+                     'stamp')",
+            vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), c1],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let expected = sorted(vec![(c1, 99, 3), (c2, 7, 1)]);
+        if joined.is_err() || now != expected {
+            problems.push(format!(
+                "after an earlier member joined from tenant 2: {joined:?}, read {now:?}, \
+                 not {expected:?}"
+            ));
+        }
+
+        // Tenant 1 clears its C1 member, as a withdrawal does.
+        let cleared = v145_as_tenant(
+            &mut owner,
+            t1,
+            "UPDATE trace_gate_decisions
+                SET dedup_simhash = NULL, dedup_cluster_id = NULL,
+                    dedup_cluster_size = NULL, dedup_signal_version = NULL
+              WHERE decision_id = $1",
+            vec![t1_c1],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let expected = sorted(vec![(c1, 99, 2), (c2, 7, 1)]);
+        if cleared.is_err() || now != expected {
+            problems.push(format!(
+                "after tenant 1 cleared its member: {cleared:?}, read {now:?}, not {expected:?}"
+            ));
+        }
+
+        // Tenant 2 deletes C2's only member.
+        let deleted = v145_as_tenant(
+            &mut owner,
+            t2,
+            "DELETE FROM trace_gate_decisions WHERE decision_id = $1",
+            vec![t2_c2],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let expected = vec![(c1, 99, 2)];
+        if deleted.is_err() || now != expected {
+            problems.push(format!(
+                "after C2's only member was deleted: {deleted:?}, read {now:?}, not {expected:?}"
+            ));
+        }
+
+        // Tenant 2 deletes C1's representative: the next earliest member
+        // (tenant 2's simhash 6) takes over.
+        let rep_deleted = v145_as_tenant(
+            &mut owner,
+            t2,
+            "DELETE FROM trace_gate_decisions WHERE dedup_simhash = 99",
+            vec![],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let expected = vec![(c1, 6, 1)];
+        if rep_deleted.is_err() || now != expected {
+            problems.push(format!(
+                "after C1's representative was deleted: {rep_deleted:?}, read {now:?}, \
+                 not {expected:?}"
+            ));
+        }
+
+        // One statement touching several clusters, as a recluster sweep or a
+        // bulk import would: five new members across three clusters, then
+        // one UPDATE that moves two of them and changes nothing about a third.
+        let c3 = uuid::Uuid::new_v4();
+        let bulk = v145_as_tenant(
+            &mut owner,
+            t2,
+            "INSERT INTO trace_gate_decisions
+                (tenant_id, decision_id, submission_id, gate_policy_version, gate_version_hash,
+                 perplexity_micros, tail_fraction_micros, perplexity_passed, novelty_score_micros,
+                 nearest_neighbor_hash, novelty_passed, embedding_evidence_hash,
+                 attestation_chain_hash, decided_at, dedup_cluster_id, dedup_simhash,
+                 dedup_signal_version)
+             SELECT 'v145-tenant-2', gen_random_uuid(), gen_random_uuid(), 'v', 'sha256:v',
+                    1, 1, TRUE, 1, 'sha256:n', TRUE, 'sha256:e', 'sha256:a',
+                    TIMESTAMPTZ '2026-02-01T00:00:00Z' + make_interval(secs => i),
+                    (ARRAY[$1::uuid, $2::uuid, $3::uuid])[1 + i % 3], 200 + i, 'stamp'
+               FROM generate_series(0, 4) i",
+            vec![c1, c2, c3],
+        )
+        .await;
+        let moved = v145_as_tenant(
+            &mut owner,
+            t2,
+            "UPDATE trace_gate_decisions
+                SET dedup_cluster_id = CASE WHEN dedup_simhash IN (201, 202) THEN $1::uuid
+                                            ELSE dedup_cluster_id END,
+                    dedup_cluster_size = 1
+              WHERE dedup_simhash IN (200, 201, 202)",
+            vec![c3],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        if bulk.is_err() || moved.is_err() || now != truth {
+            problems.push(format!(
+                "after multi-cluster statements: {bulk:?} {moved:?}, read {now:?}, \
+                 a full recompute reads {truth:?}"
+            ));
+        }
+
+        // An UPDATE of members that leaves the dedup columns alone changes
+        // nothing, and one of non-members returns early.
+        let untouched = v145_as_tenant(
+            &mut owner,
+            t2,
+            "UPDATE trace_gate_decisions SET perplexity_micros = perplexity_micros + 1",
+            vec![],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        if untouched.is_err() || now != truth {
+            problems.push(format!(
+                "after an UPDATE of non-dedup columns: {untouched:?}, read {now:?}, \
+                 not {truth:?}"
+            ));
+        }
+
+        // Concurrent writers, each on its own owner connection. `holder`
+        // writes and keeps its transaction open; `waiter` must queue behind
+        // it on the cluster row and then apply its own change on top.
+        let owner_url = with_user(&with_database(&url, DB), OWNER, "probe");
+        let holder = connect(&owner_url).await;
+        let waiter = connect(&owner_url).await;
+
+        // Two READ COMMITTED writers joining one existing cluster.
+        let raced = v145_race(
+            &seed,
+            &holder,
+            waiter,
+            OWNER,
+            &v145_insert(t1, c1, 300, 1),
+            &v145_insert(t2, c1, 301, 2),
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        if raced.is_err() || now != truth {
+            problems.push(format!(
+                "after two writers joined one cluster at once: {raced:?}, read {now:?}, \
+                 a full recompute reads {truth:?}"
+            ));
+        }
+
+        // Two writers creating the same new cluster: the second one's insert
+        // waits on the first's, finds the row, and locks it.
+        let c4 = uuid::Uuid::new_v4();
+        let waiter = connect(&owner_url).await;
+        let created = v145_race(
+            &seed,
+            &holder,
+            waiter,
+            OWNER,
+            &v145_insert(t1, c4, 400, 3),
+            &v145_insert(t2, c4, 401, 4),
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        let c4_row = now.iter().find(|row| row.0 == c4).copied();
+        if created.is_err() || now != truth || c4_row != Some((c4, 400, 2)) {
+            problems.push(format!(
+                "after two writers created one cluster at once: {created:?}, read {now:?}, \
+                 a full recompute reads {truth:?}"
+            ));
+        }
+
+        // A REPEATABLE READ writer whose snapshot predates another writer's
+        // commit to the same cluster fails instead of building on it.
+        let stale = v145_stale_snapshot(
+            &holder,
+            &mut owner,
+            t1,
+            &v145_insert(t2, c1, 500, 5),
+            &v145_insert(t1, c1, 501, 6),
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        if stale.as_deref() != Some(SERIALIZATION_FAILURE) || now != truth {
+            problems.push(format!(
+                "a REPEATABLE READ writer with a stale snapshot got {stale:?}, not a \
+                 serialization failure; read {now:?}, a full recompute reads {truth:?}"
+            ));
+        }
+        drop(holder);
+
+        // A write that skips the triggers leaves the count behind until the
+        // next statement changes the cluster, which recounts it: here a later
+        // member joins and the representative stays.
+        seed.batch_execute(&format!(
+            "SET session_replication_role = replica; {}; SET session_replication_role = origin;",
+            v145_insert(t2, c4, 402, 7)
+        ))
+        .await
+        .expect("insert a member with the triggers skipped");
+        let drifted = v145_cluster_table(&seed).await;
+        let healed = v145_as_tenant(
+            &mut owner,
+            t1,
+            &format!(
+                "INSERT INTO trace_gate_decisions
+                    (tenant_id, decision_id, submission_id, gate_policy_version,
+                     gate_version_hash, perplexity_micros, tail_fraction_micros,
+                     perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                     novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+                     decided_at, dedup_cluster_id, dedup_simhash, dedup_signal_version)
+                 VALUES ('{t1}', gen_random_uuid(), gen_random_uuid(), 'v', 'sha256:v', 1, 1,
+                         TRUE, 1, 'sha256:n', TRUE, 'sha256:e', 'sha256:a',
+                         TIMESTAMPTZ '2026-03-01T00:00:08Z', $1, 403, 'stamp')"
+            ),
+            vec![c4],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        let c4_row = now.iter().find(|row| row.0 == c4).copied();
+        if healed.is_err() || now != truth || c4_row != Some((c4, 400, 4)) {
+            problems.push(format!(
+                "after a trigger-skipping insert ({drifted:?}) and a later member \
+                 joining: {healed:?}, read {now:?}, a full recompute reads {truth:?}"
+            ));
+        }
+
+        // Trigger-skipping deletes take a cluster's representative and all but
+        // one member; a triggered delete of the last member must then drop the
+        // cluster's row, not write a zero count.
+        let c5 = uuid::Uuid::new_v4();
+        let mut seeded = Ok(0);
+        for (simhash, secs) in [(600, 10), (601, 11), (602, 12)] {
+            seeded = seeded.and(
+                v145_as_tenant(&mut owner, t1, &v145_insert(t1, c5, simhash, secs), vec![]).await,
+            );
+        }
+        seed.batch_execute(
+            "SET session_replication_role = replica;
+             DELETE FROM trace_gate_decisions WHERE dedup_simhash IN (600, 601);
+             SET session_replication_role = origin;",
+        )
+        .await
+        .expect("delete members with the triggers skipped");
+        let emptied = v145_as_tenant(
+            &mut owner,
+            t1,
+            "DELETE FROM trace_gate_decisions WHERE dedup_simhash = 602",
+            vec![],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        if seeded.is_err() || emptied.is_err() || now != truth || now.iter().any(|r| r.0 == c5) {
+            problems.push(format!(
+                "after trigger-skipping deletes left one member and it was deleted: \
+                 {seeded:?} {emptied:?}, read {now:?}, a full recompute reads {truth:?}"
+            ));
+        }
+
+        // Trigger-skipping writes remove a small cluster's representative and
+        // add 1100 members. The next triggered change finds its delta count
+        // (3) wrong, counts past the cap in full, and finds the new earliest.
+        let c6 = uuid::Uuid::new_v4();
+        let mut seeded = Ok(0);
+        for (simhash, secs) in [(700, 20), (701, 21)] {
+            seeded = seeded.and(
+                v145_as_tenant(&mut owner, t2, &v145_insert(t2, c6, simhash, secs), vec![]).await,
+            );
+        }
+        seed.batch_execute(&format!(
+            "SET session_replication_role = replica;
+             DELETE FROM trace_gate_decisions WHERE dedup_simhash = 700;
+             INSERT INTO trace_gate_decisions
+                (tenant_id, decision_id, submission_id, gate_policy_version, gate_version_hash,
+                 perplexity_micros, tail_fraction_micros, perplexity_passed, novelty_score_micros,
+                 nearest_neighbor_hash, novelty_passed, embedding_evidence_hash,
+                 attestation_chain_hash, decided_at, dedup_cluster_id, dedup_simhash,
+                 dedup_signal_version)
+             SELECT '{t2}', gen_random_uuid(), gen_random_uuid(), 'v', 'sha256:v', 1, 1, TRUE, 1,
+                    'sha256:n', TRUE, 'sha256:e', 'sha256:a',
+                    TIMESTAMPTZ '2026-03-01T00:00:00Z' + make_interval(secs => 100 + i),
+                    '{c6}', 800, 'stamp'
+               FROM generate_series(1, 1100) i;
+             SET session_replication_role = origin;"
+        ))
+        .await
+        .expect("change a cluster with the triggers skipped");
+        let recounted = v145_as_tenant(&mut owner, t2, &v145_insert(t2, c6, 702, 30), vec![]).await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        let c6_row = now.iter().find(|row| row.0 == c6).copied();
+        if seeded.is_err() || recounted.is_err() || now != truth || c6_row != Some((c6, 701, 1102))
+        {
+            problems.push(format!(
+                "after trigger-skipping writes past the recount cap: {seeded:?} {recounted:?}, \
+                 read {c6_row:?}, a full recompute reads {truth:?}"
+            ));
+        }
+
+        // A trigger-skipping update moves the representative behind another
+        // member without changing the count. The next triggered change to the
+        // small cluster must still find the new earliest member.
+        let c7 = uuid::Uuid::new_v4();
+        let mut seeded = Ok(0);
+        for (simhash, secs) in [(900, 40), (901, 41)] {
+            seeded = seeded.and(
+                v145_as_tenant(&mut owner, t1, &v145_insert(t1, c7, simhash, secs), vec![]).await,
+            );
+        }
+        seed.batch_execute(
+            "SET session_replication_role = replica;
+             UPDATE trace_gate_decisions
+                SET decided_at = TIMESTAMPTZ '2026-03-01T00:00:50Z'
+              WHERE dedup_simhash = 900;
+             SET session_replication_role = origin;",
+        )
+        .await
+        .expect("move the representative with the triggers skipped");
+        let reprobed = v145_as_tenant(&mut owner, t1, &v145_insert(t1, c7, 902, 60), vec![]).await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        let c7_row = now.iter().find(|row| row.0 == c7).copied();
+        if seeded.is_err() || reprobed.is_err() || now != truth || c7_row != Some((c7, 901, 3)) {
+            problems.push(format!(
+                "after a trigger-skipping update moved the representative: {seeded:?} \
+                 {reprobed:?}, read {c7_row:?}, a full recompute reads {truth:?}"
+            ));
+        }
+
+        // Nobody but the guard and the gate driver sees the table, and the
+        // migrator gave the guard back.
+        let visible: i64 = owner
+            .query_one(
+                "SELECT count(*) FROM trace_dedup_cluster_representatives",
+                &[],
+            )
+            .await
+            .map(|r| r.get(0))
+            .unwrap_or(-1);
+        if visible > 0 {
+            problems.push(format!(
+                "the owner sees {visible} cluster rows through row security"
+            ));
+        }
+        let still_member: bool = seed
+            .query_one(
+                // ADMIN from CREATE ROLE stays (see `Standing::Creator`); what
+                // must not stay is the right to act as the guard.
+                "SELECT pg_has_role($1, 'trace_dedup_cluster_guard', 'USAGE')
+                     OR pg_has_role($1, 'trace_dedup_cluster_guard', 'SET')",
+                &[&OWNER],
+            )
+            .await
+            .expect("read guard membership")
+            .get(0);
+        if still_member {
+            problems.push("the migrator can still act as the guard role".into());
+        }
+
+        // TRUNCATE skips row and statement DML triggers; its own trigger
+        // must empty the table.
+        let truncated = owner
+            .batch_execute("TRUNCATE trace_gate_decisions CASCADE")
+            .await
+            .map_err(|e| format!("{e:?}"));
+        let now = v145_cluster_table(&seed).await;
+        if truncated.is_err() || !now.is_empty() {
+            problems.push(format!(
+                "after TRUNCATE: {truncated:?}, read {now:?}, not an empty table"
+            ));
+        }
+    }
+
+    drop(seed);
+    drop(owner);
+    admin
+        .execute(&format!("DROP DATABASE IF EXISTS {DB} WITH (FORCE)"), &[])
+        .await
+        .expect("drop the probe database");
+    assert!(
+        problems.is_empty(),
+        "V145 must backfill every tenant's clusters and keep them in step with \
+         tenant-scoped writes:\n  {}",
+        problems.join("\n  ")
+    );
+    probe.release().await;
+    assert!(
+        !role_exists(&url, OWNER).await,
+        "{OWNER} is per server and must not outlive the test (#1335)"
+    );
+}
+
+const SERIALIZATION_FAILURE: &str = "40001";
+
+/// A member insert as SQL with literals, for the raw-transaction helpers.
+fn v145_insert(tenant: &str, cluster: uuid::Uuid, simhash: i64, secs: i64) -> String {
+    format!(
+        "INSERT INTO trace_gate_decisions
+            (tenant_id, decision_id, submission_id, gate_policy_version, gate_version_hash,
+             perplexity_micros, tail_fraction_micros, perplexity_passed, novelty_score_micros,
+             nearest_neighbor_hash, novelty_passed, embedding_evidence_hash,
+             attestation_chain_hash, decided_at, dedup_cluster_id, dedup_simhash,
+             dedup_signal_version)
+         VALUES ('{tenant}', gen_random_uuid(), gen_random_uuid(), 'v', 'sha256:v', 1, 1, TRUE,
+                 1, 'sha256:n', TRUE, 'sha256:e', 'sha256:a',
+                 TIMESTAMPTZ '2026-03-01T00:00:00Z' + make_interval(secs => {secs}),
+                 '{cluster}', {simhash}, 'stamp')"
+    )
+}
+
+fn v145_tenant_tx(tenant: &str, isolation: &str, statement: &str) -> String {
+    format!(
+        "BEGIN ISOLATION LEVEL {isolation};
+         SELECT set_config('trace_commons.trace_tenant_id', '{tenant}', true);
+         {statement};"
+    )
+}
+
+fn v145_tenant_of(statement: &str) -> &str {
+    statement
+        .split("VALUES ('")
+        .nth(1)
+        .and_then(|rest| rest.split('\'').next())
+        .expect("the insert names its tenant")
+}
+
+/// `holder` runs `first` and keeps its transaction open; `waiter` runs
+/// `second` in its own transaction, which must block on a lock (seen from
+/// `seed` in pg_stat_activity) until `holder` commits, then succeed.
+async fn v145_race(
+    seed: &tokio_postgres::Client,
+    holder: &tokio_postgres::Client,
+    waiter: tokio_postgres::Client,
+    owner: &str,
+    first: &str,
+    second: &str,
+) -> Result<(), String> {
+    holder
+        .batch_execute(&v145_tenant_tx(
+            v145_tenant_of(first),
+            "READ COMMITTED",
+            first,
+        ))
+        .await
+        .map_err(|e| format!("holder: {e:?}"))?;
+    let second = format!(
+        "{} COMMIT;",
+        v145_tenant_tx(v145_tenant_of(second), "READ COMMITTED", second)
+    );
+    let blocked = tokio::spawn(async move {
+        let result = waiter.batch_execute(&second).await;
+        drop(waiter);
+        result.map_err(|e| format!("waiter: {e:?}"))
+    });
+    // Poll until the waiter is seen blocked or finishes. A slow runner only
+    // makes this take longer; finishing without ever waiting is the failure.
+    let mut waited = false;
+    for _ in 0..1200 {
+        let n: i64 = seed
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity
+                  WHERE usename = $1 AND wait_event_type = 'Lock'",
+                &[&owner],
+            )
+            .await
+            .expect("read pg_stat_activity")
+            .get(0);
+        if n > 0 {
+            waited = true;
+            break;
+        }
+        if blocked.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    holder
+        .batch_execute("COMMIT")
+        .await
+        .map_err(|e| format!("holder commit: {e:?}"))?;
+    blocked.await.map_err(|e| format!("join: {e:?}"))??;
+    if waited {
+        Ok(())
+    } else {
+        Err("the second writer never waited on the first".into())
+    }
+}
+
+/// `stale` opens a REPEATABLE READ transaction and takes its snapshot; then
+/// `other` commits `first`; then `stale` runs `second`. Returns the SQLSTATE
+/// `second` failed with, or None if it succeeded.
+async fn v145_stale_snapshot(
+    other: &tokio_postgres::Client,
+    stale: &mut tokio_postgres::Client,
+    stale_tenant: &str,
+    first: &str,
+    second: &str,
+) -> Option<String> {
+    stale
+        .batch_execute(&format!(
+            "BEGIN ISOLATION LEVEL REPEATABLE READ;
+             SELECT set_config('trace_commons.trace_tenant_id', '{stale_tenant}', true);"
+        ))
+        .await
+        .expect("open the REPEATABLE READ transaction");
+    other
+        .batch_execute(&format!(
+            "{} COMMIT;",
+            v145_tenant_tx(v145_tenant_of(first), "READ COMMITTED", first)
+        ))
+        .await
+        .expect("commit the other writer");
+    let result = stale.batch_execute(second).await;
+    let code = match &result {
+        Ok(()) => None,
+        Err(e) => Some(e.code().map(|c| c.code().to_string()).unwrap_or_default()),
+    };
+    stale
+        .batch_execute(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })
+        .await
+        .expect("end the REPEATABLE READ transaction");
+    code
+}
+
+/// One statement in a tenant-scoped transaction, the way the runtime writes.
+async fn v145_as_tenant(
+    owner: &mut tokio_postgres::Client,
+    tenant: &str,
+    statement: &str,
+    args: Vec<uuid::Uuid>,
+) -> Result<u64, String> {
+    let tx = owner.transaction().await.expect("begin tenant transaction");
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .expect("set the tenant");
+    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = args
+        .iter()
+        .map(|a| a as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect();
+    let result = tx.execute(statement, &params).await;
+    tx.commit().await.expect("commit tenant transaction");
+    result.map_err(|e| format!("{e:?}"))
+}
+
+/// What a full recompute of trace_gate_decisions gives, in the same shape.
+async fn v145_cluster_truth(seed: &tokio_postgres::Client) -> Vec<(uuid::Uuid, i64, i64)> {
+    seed.query(
+        "SELECT DISTINCT ON (dedup_cluster_id) dedup_cluster_id, dedup_simhash,
+                count(*) OVER (PARTITION BY dedup_cluster_id)
+           FROM trace_gate_decisions
+          WHERE dedup_cluster_id IS NOT NULL AND dedup_simhash IS NOT NULL
+          ORDER BY dedup_cluster_id, decided_at, decision_id",
+        &[],
+    )
+    .await
+    .expect("recompute the cluster table")
+    .iter()
+    .map(|r| {
+        (
+            r.get::<_, uuid::Uuid>(0),
+            r.get::<_, i64>(1),
+            r.get::<_, i64>(2),
+        )
+    })
+    .collect()
+}
+
+/// (cluster, representative simhash, member count), read as the superuser.
+async fn v145_cluster_table(seed: &tokio_postgres::Client) -> Vec<(uuid::Uuid, i64, i64)> {
+    seed.query(
+        "SELECT dedup_cluster_id, representative_simhash, member_count
+         FROM trace_dedup_cluster_representatives ORDER BY dedup_cluster_id",
+        &[],
+    )
+    .await
+    .expect("read the cluster table")
+    .iter()
+    .map(|r| {
+        (
+            r.get::<_, uuid::Uuid>(0),
+            r.get::<_, i64>(1),
+            r.get::<_, i64>(2),
+        )
+    })
+    .collect()
+}
+
+/// V147 revokes every live payout link on an account with no recorded NEAR
+/// AI login (owner, 2026-11-03, on #1862). Run as the non-superuser owner it
+/// runs as in production: forced row security applies to the owner, so a
+/// superuser run could not tell an update that reaches every tenant from one
+/// that silently reaches none.
+///
+/// Seeded before V147 in two tenants:
+/// - an account with a `near_ai_login` anchor and an active link (kept);
+/// - accounts with only a `wallet` anchor or none, holding an active link, a
+///   waiting link and a closing link;
+/// - pending link and unlink requests.
+/// After V147, on the `near_ai` rail, an unanchored account's waiting link
+/// is closed at zero and its active link carries the unlink mark, each with
+/// one hash-only audit row in V146's release shapes; no recipient is marked
+/// unavailable; closing links, another rail's link, a link V146 carried to
+/// a legacy account and the anchored account's link are untouched; pending
+/// requests are left to expire; the guard trigger is back; and a second run
+/// changes nothing.
+#[tokio::test]
+async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
+    let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+    else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return;
+    };
+    let _turn = VIRGIN_DATABASE.lock().await;
+
+    const OWNER: &str = "tc_v147_owner_probe";
+    const DB: &str = "trace_v147_owner_probe_db";
+    let probe = ProbeRole::claim(&url, OWNER, &[DB]).await;
+    let admin = owned_database(&url, OWNER, DB, Standing::Creator).await;
+    let mut owner = connect(&with_user(&with_database(&url, DB), OWNER, "probe")).await;
+    owner
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS _trace_commons_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );",
+        )
+        .await
+        .expect("create the recording table");
+    for (version, name, sql) in registered_migrations()
+        .iter()
+        .filter(|(version, ..)| *version < 147)
+    {
+        apply_and_record_migration(&mut owner, *version, name, sql)
+            .await
+            .unwrap_or_else(|error| panic!("V{version} before V147: {error:?}"));
+    }
+
+    // Seeded as the superuser, which row security does not apply to.
+    let seed = connect(&with_database(&url, DB)).await;
+    let sha = |value: &str| {
+        use sha2::{Digest, Sha256};
+        format!("sha256:{:x}", Sha256::digest(value.as_bytes()))
+    };
+    let (t1, t2) = ("v147-tenant-1", "v147-tenant-2");
+    for tenant in [t1, t2] {
+        seed.execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+            &[&tenant],
+        )
+        .await
+        .expect("seed tenant");
+    }
+    let account = |tenant: &'static str| (tenant, uuid::Uuid::new_v4());
+    let anchored = account(t1);
+    let wallet_active = account(t1);
+    let bare_waiting = account(t2);
+    let bare_closing = account(t2);
+    let carried = account(t1);
+    let both = account(t2);
+    for (tenant, id) in [
+        anchored,
+        wallet_active,
+        bare_waiting,
+        bare_closing,
+        carried,
+        both,
+    ] {
+        seed.execute(
+            "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+            &[&tenant, &id],
+        )
+        .await
+        .expect("seed account");
+    }
+    let anchor = "INSERT INTO trace_near_account_anchors
+            (tenant_id, account_id, anchor_hash, sealed_account_name, index_pepper_ref,
+             account_name_key_ref, identity_source, auth_provider)
+         VALUES ($1, $2, $3, '{\"fixture\": true}', 'pepper', 'key', $4, $5)";
+    seed.execute(
+        anchor,
+        &[
+            &anchored.0,
+            &anchored.1,
+            &sha("v147-login"),
+            &"near_ai_login",
+            &Some("github"),
+        ],
+    )
+    .await
+    .expect("seed login anchor");
+    seed.execute(
+        anchor,
+        &[
+            &wallet_active.0,
+            &wallet_active.1,
+            &sha("v147-wallet"),
+            &"wallet",
+            &None::<&str>,
+        ],
+    )
+    .await
+    .expect("seed wallet anchor");
+    let link = |(tenant, account): (&'static str, uuid::Uuid), state: &'static str| {
+        let id = uuid::Uuid::new_v4();
+        (tenant, account, id, state)
+    };
+    let links = [
+        link(anchored, "active"),
+        link(wallet_active, "active"),
+        link(bare_waiting, "waiting"),
+        link(bare_closing, "closing"),
+        // Another rail's link on an unanchored account: not V147's rule.
+        link(bare_waiting, "active"),
+        // A link V146 carried from a NEAR AI account to a legacy account.
+        link(carried, "active"),
+        // One unanchored account with an active link and its waiting
+        // successor: both revoked.
+        link(both, "active"),
+        link(both, "waiting"),
+    ];
+    for (index, (tenant, account, id, state)) in links.into_iter().enumerate() {
+        let rail = if index == 4 { "other_rail" } else { "near_ai" };
+        seed.execute(
+            "INSERT INTO trace_payout_links (
+                 tenant_id, account_id, rail_id, link_id, recipient_kind, state,
+                 sealed_recipient, recipient_index, recipient_key_ref, index_pepper_ref,
+                 subject_index, program
+             ) VALUES ($1, $2, $8, $3, 'near_ai_org', $4, '{\"v\": 1}', $5, 'key',
+                       'pepper', $6, $7)",
+            &[
+                &tenant,
+                &account,
+                &id,
+                &state,
+                &sha(&format!("index:{id}")),
+                &sha(&format!("subject:{id}")),
+                &format!("tc1-{}", id.simple()),
+                &rail,
+            ],
+        )
+        .await
+        .expect("seed link");
+    }
+    seed.execute(
+        "INSERT INTO trace_legacy_payout_carries
+            (tenant_id, account_id, rail_id, link_id, legacy_link_hash, source_link_hash)
+         VALUES ($1, $2, 'near_ai', $3, $4, $5)",
+        &[
+            &links[5].0,
+            &links[5].1,
+            &links[5].2,
+            &sha("v147-legacy-link"),
+            &sha("v147-source-link"),
+        ],
+    )
+    .await
+    .expect("seed carry");
+    let request = |tenant: &str, account: uuid::Uuid, action: &str| {
+        let key = uuid::Uuid::new_v4();
+        let link = action == "link";
+        (
+            tenant.to_owned(),
+            account,
+            key,
+            action.to_owned(),
+            link.then(|| "near_ai_org".to_owned()),
+            link.then(|| serde_json::json!({"v": 1})),
+            link.then(|| sha(&format!("index:{key}"))),
+            link.then(|| "key".to_owned()),
+            link.then(|| "pepper".to_owned()),
+            link.then(|| sha(&format!("subject:{key}"))),
+        )
+    };
+    let requests = [
+        request(anchored.0, anchored.1, "link"),
+        request(wallet_active.0, wallet_active.1, "link"),
+        request(bare_waiting.0, bare_waiting.1, "unlink"),
+    ];
+    for (tenant, account, key, action, kind, sealed, index, key_ref, pepper, subject) in &requests {
+        seed.execute(
+            "INSERT INTO trace_payout_link_requests (
+                 tenant_id, account_id, rail_id, idempotency_key, handle_hash, request_digest,
+                 action, recipient_kind, sealed_recipient, recipient_index, recipient_key_ref,
+                 index_pepper_ref, subject_index, expires_at
+             ) VALUES ($1, $2, 'near_ai', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                       now() + interval '5 minutes')",
+            &[
+                tenant,
+                account,
+                key,
+                &sha(&format!("handle:{key}")),
+                &sha(&format!("digest:{key}")),
+                action,
+                kind,
+                sealed,
+                index,
+                key_ref,
+                pepper,
+                subject,
+            ],
+        )
+        .await
+        .expect("seed request");
+    }
+
+    let (version, name, sql) = registered_migrations()
+        .iter()
+        .find(|(version, ..)| *version == 147)
+        .expect("V147 is wired into the runner");
+    let applied = apply_and_record_migration(&mut owner, *version, name, sql)
+        .await
+        .map_err(|error| format!("{error:?}"));
+
+    // (link, state, unavailable, unlink requested), read as the superuser.
+    let read_links = || async {
+        let mut rows: Vec<(uuid::Uuid, String, bool, bool)> = seed
+            .query(
+                "SELECT link_id, state || ':' || COALESCE(final_paid::text, '-'),
+                        recipient_unavailable_at IS NOT NULL,
+                        unlink_requested_at IS NOT NULL
+                   FROM trace_payout_links",
+                &[],
+            )
+            .await
+            .expect("read links")
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+            .collect();
+        rows.sort();
+        rows
+    };
+    let read_audit = || async {
+        let mut rows: Vec<(String, String, String, String, String, String)> = seed
+            .query(
+                "SELECT tenant_id, action, account_id_hash, link_id_hash, prior_state || '>' || new_state,
+                        label || ' ' || actor_ref_hash
+                   FROM trace_payout_audit",
+                &[],
+            )
+            .await
+            .expect("read audit")
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4), row.get(5)))
+            .collect();
+        rows.sort();
+        rows
+    };
+    let read_requests = || async {
+        let mut rows: Vec<uuid::Uuid> = seed
+            .query(
+                "SELECT idempotency_key FROM trace_payout_link_requests",
+                &[],
+            )
+            .await
+            .expect("read requests")
+            .into_iter()
+            .map(|row| row.get(0))
+            .collect();
+        rows.sort();
+        rows
+    };
+
+    let mut problems: Vec<String> = Vec::new();
+    if let Err(error) = &applied {
+        problems.push(format!("V147 failed for the non-superuser owner: {error}"));
+    } else {
+        // (link, state:final_paid, unavailable, unlink requested) after V147.
+        let row = |link: (&str, uuid::Uuid, uuid::Uuid, &str), state: &str, unlink: bool| {
+            (link.2, state.to_owned(), false, unlink)
+        };
+        let mut expected = vec![
+            row(links[0], "active:-", false),
+            row(links[1], "active:-", true),
+            row(links[2], "closed:0", false),
+            row(links[3], "closing:-", false),
+            row(links[4], "active:-", false),
+            row(links[5], "active:-", false),
+            row(links[6], "active:-", true),
+            row(links[7], "closed:0", false),
+        ];
+        expected.sort();
+        let after = read_links().await;
+        if after != expected {
+            problems.push(format!("links read {after:?}, not {expected:?}"));
+        }
+
+        let actor = sha("payout-migration-actor-v1:V147");
+        let audit_row = |(tenant, account, id, _): (&str, uuid::Uuid, uuid::Uuid, &str),
+                         action: &str,
+                         moved: &str| {
+            (
+                tenant.to_owned(),
+                action.to_owned(),
+                trace_commons_server::db::payout_account_id_hash(account),
+                trace_commons_server::db::payout_link_id_hash(id),
+                moved.to_owned(),
+                format!("near_ai_login_required {actor}"),
+            )
+        };
+        let mut expected = vec![
+            audit_row(links[1], "unlink_requested", "active>active"),
+            audit_row(links[2], "link_closed", "waiting>closed"),
+            audit_row(links[6], "unlink_requested", "active>active"),
+            audit_row(links[7], "link_closed", "waiting>closed"),
+        ];
+        expected.sort();
+        let audit = read_audit().await;
+        if audit != expected {
+            problems.push(format!("audit read {audit:?}, not {expected:?}"));
+        }
+
+        let mut expected: Vec<uuid::Uuid> = requests.iter().map(|request| request.2).collect();
+        expected.sort();
+        let kept = read_requests().await;
+        if kept != expected {
+            problems.push(format!(
+                "requests read {kept:?}, not {expected:?} (V147 deletes no request)"
+            ));
+        }
+
+        let guard_enabled: bool = seed
+            .query_one(
+                "SELECT tgenabled <> 'D' FROM pg_trigger
+                  WHERE tgname = 'trace_payout_links_guard_update'",
+                &[],
+            )
+            .await
+            .expect("read the guard trigger")
+            .get(0);
+        if !guard_enabled {
+            problems.push("the link guard trigger was left disabled".into());
+        }
+
+        let unforced: Vec<String> = seed
+            .query(
+                "SELECT relname::text FROM pg_class
+                  WHERE relname IN ('trace_near_account_anchors', 'trace_payout_links',
+                                    'trace_payout_lines', 'trace_payout_audit',
+                                    'trace_legacy_payout_carries')
+                    AND NOT relforcerowsecurity",
+                &[],
+            )
+            .await
+            .expect("read row security")
+            .into_iter()
+            .map(|row| row.get(0))
+            .collect();
+        if !unforced.is_empty() {
+            problems.push(format!("row security left unforced on {unforced:?}"));
+        }
+
+        // A second run changes nothing and writes no second audit row.
+        let (links_before, audit_before) = (read_links().await, read_audit().await);
+        if let Err(error) = owner.batch_execute(sql).await {
+            problems.push(format!("a second run failed: {error:?}"));
+        }
+        if read_links().await != links_before || read_audit().await != audit_before {
+            problems.push("a second run changed links or wrote audit rows".into());
+        }
+
+        // A waiting link with a payout line cannot be closed at zero; V147
+        // refuses to run rather than leave it to be activated and paid, and
+        // changes nothing.
+        let lined = account(t2);
+        seed.execute(
+            "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+            &[&lined.0, &lined.1],
+        )
+        .await
+        .expect("seed lined account");
+        let lined_link = uuid::Uuid::new_v4();
+        seed.execute(
+            "INSERT INTO trace_payout_links (
+                 tenant_id, account_id, rail_id, link_id, recipient_kind, state,
+                 sealed_recipient, recipient_index, recipient_key_ref, index_pepper_ref,
+                 subject_index, program
+             ) VALUES ($1, $2, 'near_ai', $3, 'near_ai_org', 'waiting', '{\"v\": 1}', $4,
+                       'key', 'pepper', $5, $6)",
+            &[
+                &lined.0,
+                &lined.1,
+                &lined_link,
+                &sha(&format!("index:{lined_link}")),
+                &sha(&format!("subject:{lined_link}")),
+                &format!("tc1-{}", lined_link.simple()),
+            ],
+        )
+        .await
+        .expect("seed lined link");
+        seed.execute(
+            "INSERT INTO trace_payout_lines (
+                 tenant_id, line_id, account_id, rail_id, link_id, target_total, delta,
+                 owed_through_accrual_count, state
+             ) VALUES ($1, gen_random_uuid(), $2, 'near_ai', $3, 1, 1, 0, 'pending')",
+            &[&lined.0, &lined.1, &lined_link],
+        )
+        .await
+        .expect("seed line");
+        let (links_before, audit_before) = (read_links().await, read_audit().await);
+        match owner.batch_execute(sql).await {
+            Ok(()) => problems.push("a waiting link with a line did not stop V147".into()),
+            Err(error) if !format!("{error:?}").contains("has a payout line") => {
+                problems.push(format!("V147 refused for another reason: {error:?}"))
+            }
+            Err(_) => {}
+        }
+        if read_links().await != links_before || read_audit().await != audit_before {
+            problems.push("a refused run changed links or wrote audit rows".into());
+        }
+    }
+
+    drop(seed);
+    drop(owner);
+    admin
+        .execute(&format!("DROP DATABASE IF EXISTS {DB} WITH (FORCE)"), &[])
+        .await
+        .expect("drop the probe database");
+    assert!(
+        problems.is_empty(),
+        "V147 must revoke exactly the live links of accounts with no NEAR AI login:\n  {}",
+        problems.join("\n  ")
+    );
+    probe.release().await;
+    assert!(
+        !role_exists(&url, OWNER).await,
+        "{OWNER} is per server and must not outlive the test (#1335)"
+    );
+}
+
+/// Staging's shape (deploy/staging-gcp/README.md): one non-superuser login
+/// owns the database and every table, migrates it, and is the ingest
+/// runtime; it is not a member of `trace_ingest_runtime`, and holds the two
+/// payout roles exactly as the README grants them. A live payout pass over a
+/// NEAR AI tenant with a live link must complete. After #1879 it ended
+/// `payout_store_failed` on staging: the account standing calls V146/V148
+/// definer functions whose EXECUTE was granted to `trace_ingest_runtime`
+/// only.
+#[tokio::test]
+async fn an_owner_run_deployment_completes_a_live_payout_pass() {
+    use std::sync::Arc;
+    use trace_commons_gate_api::pipeline::AtomicUnits;
+    use trace_commons_gate_api::{PayoutRail, RecipientKind};
+    use trace_commons_server::db::{
+        PayoutLinkInsert, PayoutLinkState, PayoutLinkWrite, PayoutStore, SealedRecipient,
+    };
+    use trace_commons_server::payout_pass::{
+        PayoutPass, PayoutPassOutcome, PayoutPassSettings, PayoutRecipientOpener,
+        UnconfiguredRecipientOpener,
+    };
+    use trace_commons_server::payout_rate::PayoutMode;
+    use uuid::Uuid;
+
+    let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+    else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return;
+    };
+    // The pass logs a store error's class; show it when this fails.
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let _turn = VIRGIN_DATABASE.lock().await;
+
+    const OWNER: &str = "trace_payout_owner_probe";
+    const OWNER_DB: &str = "trace_payout_owner_probe_db";
+    let probe = ProbeRole::claim(&url, OWNER, &[OWNER_DB]).await;
+    let admin = owned_database(&url, OWNER, OWNER_DB, Standing::Creator).await;
+    let owner_url = with_user(&with_database(&url, OWNER_DB), OWNER, "probe");
+    let backend = Arc::new(
+        PgBackend::new(&DatabaseConfig {
+            url: SecretString::from(owner_url.clone()),
+            pool_size: 4,
+            ssl_mode: SslMode::Prefer,
+            login_resolver_url: None,
+            gate_driver_url: None,
+            pii_backstop_driver_url: None,
+            invite_registry_url: None,
+        })
+        .await
+        .expect("owner backend"),
+    );
+    backend.run_migrations().await.expect("the owner migrates");
+    // The README's payout grant, as the superuser made it on staging.
+    admin
+        .batch_execute(&format!(
+            "GRANT trace_payout_enumerator, trace_payout_config_writer
+                 TO {OWNER} WITH INHERIT FALSE, SET TRUE;"
+        ))
+        .await
+        .expect("grant the payout roles like the staging README");
+    // A role's creator holds ADMIN on it with no inheritance (PostgreSQL
+    // 16), which `MEMBER` counts; privileges reach a login only through
+    // `USAGE`, and staging's `app` has none.
+    let inherits: bool = admin
+        .query_one(
+            "SELECT pg_has_role($1, 'trace_ingest_runtime', 'USAGE')",
+            &[&OWNER],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        !inherits,
+        "staging's login does not inherit trace_ingest_runtime"
+    );
+    // Every function granted to the runtime role is one the runtime calls,
+    // so a login that serves without that role must hold EXECUTE as well.
+    // `pg_proc` is per database: ask in the migrated one.
+    let catalog = connect(&with_database(&url, OWNER_DB)).await;
+    let unreachable: Vec<String> = catalog
+        .query(
+            "SELECT p.oid::regprocedure::text
+               FROM pg_catalog.pg_proc p, aclexplode(p.proacl) a
+              WHERE a.grantee = 'trace_ingest_runtime'::regrole
+                AND a.privilege_type = 'EXECUTE'
+                AND NOT has_function_privilege($1, p.oid, 'EXECUTE')
+              ORDER BY 1",
+            &[&OWNER],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert!(
+        unreachable.is_empty(),
+        "the owner-runtime login cannot execute: {unreachable:#?}"
+    );
+
+    // A NEAR AI tenant: an account with a recorded login and a live link.
+    let tenant = format!("nearai-{}", "ab".repeat(32));
+    let account = Uuid::new_v4();
+    let seed = connect(&owner_url).await;
+    seed.batch_execute(&format!(
+        "BEGIN;
+         SELECT set_config('trace_commons.trace_tenant_id', '{tenant}', true);
+         INSERT INTO trace_tenants (tenant_id) VALUES ('{tenant}');
+         INSERT INTO trace_accounts (tenant_id, account_id) VALUES ('{tenant}', '{account}');
+         INSERT INTO trace_near_account_anchors
+             (tenant_id, account_id, anchor_hash, sealed_account_name, index_pepper_ref,
+              account_name_key_ref, identity_source, auth_provider)
+         VALUES ('{tenant}', '{account}', 'sha256:{h}', '{{}}', 'p', 'k', 'near_ai_login', 'github');
+         COMMIT;",
+        h = "c".repeat(64)
+    ))
+    .await
+    .expect("seed the NEAR AI account");
+    let mock = near_ai_payout_mock::Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let link_id = Uuid::new_v4();
+    let digest = |label: &str| {
+        use sha2::{Digest, Sha256};
+        format!("sha256:{:x}", Sha256::digest(label.as_bytes()))
+    };
+    assert_eq!(
+        backend
+            .insert_payout_link(
+                &tenant,
+                &PayoutLinkWrite {
+                    account_id: account,
+                    rail_id: rail.descriptor().rail_id.clone(),
+                    link_id,
+                    recipient_kind: RecipientKind::new("near_ai_org").unwrap(),
+                    recipient: SealedRecipient {
+                        sealed: serde_json::json!({"v": 1}),
+                        recipient_index: digest("index"),
+                        recipient_key_ref: "key-test-1".into(),
+                        index_pepper_ref: "pepper-test-1".into(),
+                        subject_index: digest("subject"),
+                        recipient_ref: None,
+                    },
+                    program: rail.program_for_link(link_id),
+                    state: PayoutLinkState::Active,
+                    actor_ref_hash: digest("actor"),
+                },
+            )
+            .await
+            .expect("insert the link"),
+        PayoutLinkInsert::Inserted
+    );
+
+    let report = PayoutPass::new(
+        rail,
+        backend.clone() as Arc<dyn PayoutStore>,
+        backend.clone() as Arc<dyn Database>,
+        Arc::new(UnconfiguredRecipientOpener) as Arc<dyn PayoutRecipientOpener>,
+        PayoutPassSettings {
+            mode: PayoutMode::Live,
+            account_ceiling: AtomicUnits::from_raw(1_000_000),
+            local_send_limit: 10,
+            rate_in_force: true,
+        },
+    )
+    .run_once()
+    .await;
+
+    drop(seed);
+    drop(catalog);
+    drop(backend);
+    let dropped = admin
+        .execute(
+            &format!("DROP DATABASE IF EXISTS {OWNER_DB} WITH (FORCE)"),
+            &[],
+        )
+        .await;
+    assert_eq!(
+        report.outcome,
+        PayoutPassOutcome::Completed,
+        "an owner-run deployment's live pass must complete: {report:?}"
+    );
+    dropped.expect("drop the owner-probe database");
+    probe.release().await;
+}
+
+/// V150, applied by a non-superuser owner, as staging applies it:
+///
+/// - an account holding two live anchors (a V82 merge left both) stops the
+///   migration, which changes nothing, and it applies once one is gone;
+/// - one live anchor per account holds afterwards;
+/// - the replaced merge keeps it: an absorbed live anchor arrives retired on
+///   a survivor that already holds a live one, and every survivor device
+///   points at that live anchor.
+#[tokio::test]
+async fn v150_keeps_one_live_anchor_per_account_as_a_non_superuser_owner() {
+    let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+    else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return;
+    };
+    let _turn = VIRGIN_DATABASE.lock().await;
+
+    const OWNER: &str = "tc_v150_owner_probe";
+    const DB: &str = "trace_v150_owner_probe_db";
+    let probe = ProbeRole::claim(&url, OWNER, &[DB]).await;
+    let admin = owned_database(&url, OWNER, DB, Standing::Creator).await;
+    let mut owner = connect(&with_user(&with_database(&url, DB), OWNER, "probe")).await;
+    owner
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS _trace_commons_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );",
+        )
+        .await
+        .expect("create the recording table");
+    for (version, name, sql) in registered_migrations()
+        .iter()
+        .filter(|(version, ..)| *version < 150)
+    {
+        apply_and_record_migration(&mut owner, *version, name, sql)
+            .await
+            .unwrap_or_else(|error| panic!("V{version} before V150: {error:?}"));
+    }
+
+    // Seeded as the superuser, which row security does not apply to.
+    let seed = connect(&with_database(&url, DB)).await;
+    let tenant = format!("nearai-{}", "5".repeat(64));
+    let (survivor, absorbed) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let anchor_of = |n: char| format!("sha256:{}", n.to_string().repeat(64));
+    let (live, other, absorbed_anchor) = (anchor_of('1'), anchor_of('2'), anchor_of('3'));
+    seed.batch_execute(&format!(
+        "INSERT INTO trace_tenants (tenant_id) VALUES ('{tenant}');
+         INSERT INTO trace_accounts (tenant_id, account_id)
+             VALUES ('{tenant}', '{survivor}'), ('{tenant}', '{absorbed}');"
+    ))
+    .await
+    .expect("seed accounts");
+    let anchor = |account: uuid::Uuid, hash: &str| {
+        format!(
+            "INSERT INTO trace_near_account_anchors
+                 (tenant_id, account_id, anchor_hash, sealed_account_name, index_pepper_ref,
+                  account_name_key_ref, identity_source, auth_provider)
+             VALUES ('{tenant}', '{account}', '{hash}', '{{}}', 'p', 'k', 'near_ai_login', 'github');"
+        )
+    };
+    seed.batch_execute(&format!(
+        "{}{}",
+        anchor(survivor, &live),
+        anchor(survivor, &other)
+    ))
+    .await
+    .expect("seed two anchors on one account");
+
+    let (version, name, sql) = registered_migrations()
+        .iter()
+        .find(|(version, ..)| *version == 150)
+        .expect("V150 is wired into the runner");
+    let mut problems = Vec::new();
+    match apply_and_record_migration(&mut owner, *version, name, sql).await {
+        Ok(()) => problems.push("V150 applied over an account with two live anchors".to_string()),
+        Err(error) => {
+            let text = format!("{error:?}");
+            if !text.contains("more than one live anchor") {
+                problems.push(format!("V150 refused for another reason: {text}"));
+            }
+        }
+    }
+    let column: i64 = seed
+        .query_one(
+            "SELECT count(*) FROM information_schema.columns
+              WHERE table_name = 'trace_near_account_anchors' AND column_name = 'retired_at'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    if column != 0 {
+        problems.push("a refused V150 left its column behind".into());
+    }
+
+    // Resolve it as an operator would, then apply.
+    seed.execute(
+        "DELETE FROM trace_near_account_anchors WHERE anchor_hash = $1",
+        &[&other],
+    )
+    .await
+    .unwrap();
+    apply_and_record_migration(&mut owner, *version, name, sql)
+        .await
+        .expect("V150 applies once each account holds one anchor");
+
+    // One live anchor per account, enforced.
+    if seed.batch_execute(&anchor(survivor, &other)).await.is_ok() {
+        problems.push("a second live anchor was accepted".into());
+    }
+
+    // The merge, as its guard: the absorbed account's live anchor and its
+    // device move to the survivor, the anchor retired, the device re-keyed.
+    seed.batch_execute(&format!(
+        "{}
+         INSERT INTO device_keys (device_key_id, tenant_id, public_key, onboarding_origin)
+             VALUES ('sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', '{tenant}', 'pk-v150', 'near_ai');
+         INSERT INTO trace_near_provisioned_devices
+             (tenant_id, principal_ref, account_id, device_key_id, anchor_hash)
+             VALUES ('{tenant}', 'principal-v150', '{absorbed}', 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                     '{absorbed_anchor}');",
+        anchor(absorbed, &absorbed_anchor)
+    ))
+    .await
+    .expect("seed the absorbed account");
+    let merged = owner
+        .batch_execute(&format!(
+            "BEGIN;
+             SELECT set_config('trace_commons.trace_tenant_id', '{tenant}', true);
+             INSERT INTO trace_account_merge_proposals
+                 (tenant_id, proposal_id, surviving_account_id, absorbed_account_id,
+                  expires_at, consumed_at)
+                 VALUES ('{tenant}', '{p}', '{survivor}', '{absorbed}',
+                         now() + interval '1 hour', now());
+             SELECT trace_near_account_merge('{tenant}', '{survivor}', '{absorbed}', '{p}');
+             COMMIT;",
+            p = uuid::Uuid::new_v4()
+        ))
+        .await;
+    if let Err(error) = merged {
+        problems.push(format!("the merge failed under V150: {error:?}"));
+    } else {
+        let rows: Vec<(String, bool)> = seed
+            .query(
+                "SELECT anchor_hash, retired_at IS NULL FROM trace_near_account_anchors
+                  WHERE tenant_id = $1 AND account_id = $2 ORDER BY anchor_hash",
+                &[&tenant, &survivor],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        if rows != vec![(live.clone(), true), (absorbed_anchor.clone(), false)] {
+            problems.push(format!("after the merge the survivor holds {rows:?}"));
+        }
+        let device: String = seed
+            .query_one(
+                "SELECT anchor_hash FROM trace_near_provisioned_devices
+                  WHERE device_key_id = 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if device != live {
+            problems.push("the absorbed device still points at a retired anchor".into());
+        }
+    }
+
+    drop(seed);
+    drop(owner);
+    admin
+        .execute(&format!("DROP DATABASE IF EXISTS {DB} WITH (FORCE)"), &[])
+        .await
+        .expect("drop the probe database");
+    assert!(problems.is_empty(), "V150:\n  {}", problems.join("\n  "));
+    probe.release().await;
+    assert!(
+        !role_exists(&url, OWNER).await,
+        "{OWNER} is per server and must not outlive the test (#1335)"
+    );
 }

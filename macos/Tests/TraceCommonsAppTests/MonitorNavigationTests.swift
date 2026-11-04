@@ -768,7 +768,8 @@ final class MonitorNavigationTests: XCTestCase {
                                     selection: Binding(
                                         get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
                                         set: { tab = $0 }),
-                                    segments: MonitorWindowView.Tab.shown(requiresOnboarding: model.requiresOnboarding).map { item in
+                                    segments: MonitorWindowView.Tab.shown(
+                                        requiresOnboarding: model.requiresOnboarding, order: tabOrder).map { item in
         """), "the strip must show the onboarding-filtered tabs, under the notices")
         XCTAssertTrue(window.contains("""
                         if gate == .awaiting {

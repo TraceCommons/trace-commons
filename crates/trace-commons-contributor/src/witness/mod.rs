@@ -358,7 +358,7 @@ pub async fn witness_session(
             reported: None,
         });
     }
-    crate::envelope::raw_contribution_size_ok(&raw)
+    crate::envelope::raw_contribution_size_ok(&raw, transport.envelope_limit_bytes())
         .map_err(|_| WitnessTrustError::WitnessPayloadTooLarge)?;
 
     let nonce = transport::WitnessNonce::fresh()?;
@@ -399,7 +399,7 @@ pub async fn witness_token_session(
     if !request.options.restricted_token_consent || request.attested.receipt.is_none() {
         return Err(WitnessTrustError::WitnessAdmissionEvidenceRefused);
     }
-    crate::envelope::raw_contribution_size_ok(&request.raw)
+    crate::envelope::raw_contribution_size_ok(&request.raw, transport.envelope_limit_bytes())
         .map_err(|_| WitnessTrustError::WitnessPayloadTooLarge)?;
     let nonce = transport::WitnessNonce::fresh()?;
     let evidence = transport.attestation(&nonce).await?;

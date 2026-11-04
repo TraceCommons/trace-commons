@@ -13,8 +13,6 @@ const settings = {
   quiescence_secs: 300,
   approval_hold_secs: 30,
   digest_interval_secs: 21600,
-  max_uploads_per_day: 100,
-  max_bytes_per_day: 512 * 1024 * 1024,
 };
 export const Ready: Story = {
   args: {

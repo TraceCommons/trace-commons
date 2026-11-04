@@ -258,6 +258,8 @@ private struct EdgeRailPeekCard: View {
                 .disabled(model.managedBusy)
             }
             HomeAccountTiles(store: data.home) { open(.inference) }
+                // Over the map, so the Balance tile's coins fall over it.
+                .zIndex(1)
             if let label = model.privateInferenceCopy?.destination {
                 EdgeRailPrivateAIMap(data: data, label: label)
             }
@@ -315,28 +317,6 @@ private struct EdgeRailTracesGraph: View {
             GlassBarGraph(buckets.map { TracesGraphFooter.bar($0, words: words) }, scaleFloor: 5, hovered: $hovered)
                 .frame(height: EdgeRailGraph.height)
         }
-    }
-}
-
-/// The Private AI calls in a peek: the calls on the ledger's page, by day,
-/// over the same days the Traces graph shows.
-private struct EdgeRailCallsGraph: View {
-    let page: DaemonData.InferenceCallPage
-    @State private var hovered: String?
-
-    var body: some View {
-        let buckets = TracesGraphModel.buckets(
-            shared: page.calls.map(\.at), kept: [], offset: 0, now: .now, range: .days)
-        GlassBarGraph(
-            buckets.map { bucket in
-                let day = TracesGraphModel.day(bucket.start)
-                return GlassBarBucket(
-                    id: bucket.start.formatted(.iso8601), label: bucket.label,
-                    up: Double(bucket.shared), down: 0,
-                    description: "\(day), \(FlowMapScene.pair(MonitorWords.calls, bucket.shared))")
-            },
-            scaleFloor: 5, hovered: $hovered)
-            .frame(height: EdgeRailGraph.height)
     }
 }
 
@@ -465,6 +445,7 @@ struct EdgeRailFolderList: View {
         let split = submits && outcome != nil
         let title = busy ? words.tree.submitting : TracesTreeView.submitTitle(offer.count, words: words)
         let writing = store.writing.contains(folder.id)
+        let submitTip = submits ? TracesTreeView.submitHelp(offer.withheldLine, words: words) : ""
         let floats = rowMenu == .folder(folder.id) || rowMenu == .submit(folder.id)
         GlassListRow(
             depth: .folder, tile: .folder, title: folder.label,
@@ -472,11 +453,13 @@ struct EdgeRailFolderList: View {
             off: folder.mode == .ignore,
             expanded: folder.sessions.isEmpty ? nil : expanded.contains(folder.id),
             submitTitle: submits && !split ? title : nil,
+            submitHelp: submitTip,
             accessory: split ? AnyView(
                 GlassSplitButton(title, menuLabel: outcome?.submitAllAs ?? "", menuOpen: rowMenu == .submit(folder.id),
                                  onMenu: { rowMenu = TracesTreeView.toggled(.submit(folder.id), current: rowMenu) }) {
                     submit(folder)
                 }
+                .actionHelp(submitTip)
                 .disabled(busy)) : nil,
             expandLabel: folder.label,
             menuLabel: menu ? words.tree.folderMenu : "",
@@ -487,7 +470,6 @@ struct EdgeRailFolderList: View {
             onMenu: menu ? { rowMenu = TracesTreeView.toggled(.folder(folder.id), current: rowMenu) } : nil)
             // Its own height: the list's spare room is not the rows'.
             .fixedSize(horizontal: false, vertical: true)
-            .help(submits ? TracesTreeView.submitHelp(offer.withheldLine, words: words) : "")
             .disabled(writing)
             .opacity(writing ? TracesRowBusy.opacity : 1)
             .anchorPreference(key: TracesMenuAnchors.self, value: .bounds) {
@@ -512,11 +494,12 @@ struct EdgeRailFolderList: View {
             flag: TracesTreeView.flag(entry, ineligible: lines.ineligible != nil, attestation: lines.tone),
             off: off,
             submitTitle: words.tree.submit,
+            // On the pill, which sends it; the row's click opens it.
+            submitHelp: words.tree.submitTraceTip,
             onSelect: { open(.traces(entryId: entry.entryId)) },
             onSubmit: store.maySubmitSession(entry, folderIgnored: off)
                 ? { Task { await store.submitSession(entry, folderIgnored: off) } } : nil)
             .fixedSize(horizontal: false, vertical: true)
-            .help(words.tree.submitTraceTip)
             .disabled(store.acting.contains(entry.entryId))
             .opacity(store.acting.contains(entry.entryId) ? TracesRowBusy.opacity : 1)
     }

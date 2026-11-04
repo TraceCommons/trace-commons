@@ -210,7 +210,7 @@ async fn round_trip(
     target_bytes: u64,
     read_back: bool,
 ) -> (SyntheticEnvelope, StdDuration, String) {
-    reset_account_rate_limiter_for_test();
+    reset_account_rate_limiter_for_db_test().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let fixture = temp.path().join("envelope.json");
     let written = write_synthetic_envelope(&fixture, target_bytes).await;
@@ -394,6 +394,115 @@ fn large_body_byte_budget_parses_within_its_bounds() {
     }
 }
 
+#[test]
+fn large_body_principal_byte_share_parses_within_its_bounds() {
+    // Unset: half the budget, but never less than one maximal upload.
+    assert_eq!(
+        parse_large_body_principal_byte_share(None, LARGE_BODY_GLOBAL_BYTES).unwrap(),
+        MAX_INGEST_BODY_BYTES
+    );
+    let large = 4 * MAX_INGEST_BODY_BYTES;
+    assert_eq!(
+        parse_large_body_principal_byte_share(None, large).unwrap(),
+        large / 2
+    );
+    assert_eq!(
+        parse_large_body_principal_byte_share(Some(&MAX_INGEST_BODY_BYTES.to_string()), large)
+            .unwrap(),
+        MAX_INGEST_BODY_BYTES
+    );
+    assert_eq!(
+        parse_large_body_principal_byte_share(Some(&large.to_string()), large).unwrap(),
+        large
+    );
+    for refused in [
+        (MAX_INGEST_BODY_BYTES - 1).to_string(),
+        (large + 1).to_string(),
+        "0".to_string(),
+        "lots".to_string(),
+    ] {
+        let error = parse_large_body_principal_byte_share(Some(&refused), large).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES),
+            "a refusal names the variable: {error}"
+        );
+    }
+}
+
+/// One principal may hold only its share of the upload byte budget: past it,
+/// its next upload is refused before the body is read (429 with
+/// `Retry-After`) while another principal's upload is still admitted, and its
+/// bytes come back when its upload ends.
+#[tokio::test]
+async fn one_principal_is_held_to_its_share_of_the_upload_byte_budget() {
+    const FIRST: &str = "byte-share-token-first";
+    const SECOND: &str = "byte-share-token-second";
+    const SHARE: usize = 64 * 1024;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut tokens = BTreeMap::new();
+    for token in [FIRST, SECOND] {
+        insert_token(&mut tokens, "tenant-a", token, TokenRole::Contributor);
+    }
+    let mut state = test_state(temp.path().to_path_buf());
+    let shares = Arc::new(LargeBodyPrincipalBytes::new(SHARE));
+    {
+        let state = Arc::make_mut(&mut state);
+        state.tokens = Arc::new(tokens);
+        state.large_body_principal_bytes = shares.clone();
+    }
+    let first_key = large_body_principal_key(
+        "tenant-a",
+        TraceAuthMethod::StaticToken,
+        &static_token_principal_ref(FIRST),
+    );
+    let (addr, server) = serve_ingest_for_test(state).await;
+
+    let mut holder = send_declared_upload(addr, "/v1/traces", FIRST, SHARE as u64 - 1000).await;
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        while shares.held_for_test(&first_key) == 0 {
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the stalled upload holds its declared bytes against its share");
+    assert_eq!(
+        response_status_within(&mut holder, StdDuration::from_millis(300)).await,
+        None,
+        "the first upload fits its share and waits for its body"
+    );
+
+    let mut refused = send_declared_upload(addr, "/v1/traces", FIRST, 2048).await;
+    assert_eq!(
+        response_status_within(&mut refused, StdDuration::from_secs(2)).await,
+        Some("HTTP/1.1 429 Too Many Requests".to_string()),
+        "2048 more bytes are past the first principal's share"
+    );
+    let mut other = send_declared_upload(addr, "/v1/traces", SECOND, 2048).await;
+    assert_eq!(
+        response_status_within(&mut other, StdDuration::from_millis(300)).await,
+        None,
+        "another principal's upload is admitted and waits for its body"
+    );
+
+    drop(holder);
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        while shares.held_for_test(&first_key) > 0 {
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("an abandoned upload gives its share back");
+    let mut admitted = send_declared_upload(addr, "/v1/traces", FIRST, 2048).await;
+    assert_eq!(
+        response_status_within(&mut admitted, StdDuration::from_millis(300)).await,
+        None,
+        "with its share free, the first principal is admitted again"
+    );
+    server.abort();
+}
+
 /// Uploads are admitted against a budget of body bytes, not just a count: an
 /// upload that does not fit beside the bytes already in flight is refused
 /// before its body is read (429 with `Retry-After`), and fits again once the
@@ -454,7 +563,7 @@ async fn an_upload_whose_claim_expires_mid_body_is_still_accepted() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const TOKEN: &str = "expiring-upload-token";
-    reset_account_rate_limiter_for_test();
+    reset_account_rate_limiter_for_db_test().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = state_with_token(
         temp.path(),
@@ -522,10 +631,18 @@ async fn upload_routes_admit_their_ceiling_by_declared_length() {
             stream
         };
         let mut at = send(ceiling as u64).await;
+        // Bundle finalize checks its bundle after the gate and before the
+        // body, and bundles are not enabled in this fixture: past the gate it
+        // is answered 503 at once rather than waiting for the body.
+        let past_the_gate = if method == "POST" && path.starts_with("/v1/token-bundles/") {
+            Some("HTTP/1.1 503 Service Unavailable".to_string())
+        } else {
+            None
+        };
         assert_eq!(
             response_status_within(&mut at, StdDuration::from_millis(300)).await,
-            None,
-            "{method} {path} admits a declared {ceiling} bytes and waits for them"
+            past_the_gate,
+            "{method} {path} admits a declared {ceiling} bytes past the gate"
         );
         // Give its bytes back, so the next request meets the body limit and
         // not the byte budget.
@@ -605,7 +722,7 @@ async fn large_envelope_pilot_shaped_submit_probe() {
         .await
         .expect("this probe needs TRACE_COMMONS_PG_TEST_DATABASE_URL");
     cleanup_pg_trace_tenant(&backend, "tenant-a").await;
-    reset_account_rate_limiter_for_test();
+    reset_account_rate_limiter_for_db_test().await;
     let target: u64 = std::env::var("TC_LARGE_ENVELOPE_BYTES")
         .ok()
         .and_then(|value| value.parse().ok())

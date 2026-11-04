@@ -3,8 +3,8 @@
 //!
 //! There are two channels. A default build is **production**. A build with
 //! the `near-ai-staging` feature is **staging**: it signs in to NEAR AI
-//! staging, contributes to the staging server and keeps its state, keychain
-//! entries and passkeys apart from production's (design:
+//! staging, contributes to the staging server and keeps its state and keychain
+//! entries apart from production's (design:
 //! `docs/superpowers/specs/2026-10-21-staging-environment-design.md`,
 //! sections 4.1 and 4.2). No release workflow or shipped manifest may enable
 //! the feature: `scripts/ci/check-release-staging-feature.sh` refuses one that
@@ -24,8 +24,7 @@ use sha2::{Digest, Sha256};
 use trace_commons_contributor_platform::os_secret_store::KeychainIdentity;
 
 /// The staging site. Every staging Trace Commons host is this name or a
-/// subdomain of it, and it is the staging passkey relying party. The one
-/// place the name is written.
+/// subdomain of it. The one place the name is written.
 #[cfg(feature = "near-ai-staging")]
 macro_rules! staging_host {
     () => {
@@ -101,8 +100,6 @@ mod values {
     pub const KEYCHAIN_CLAUDE_USAGE_SERVICE: &str = "trace-commons.claude-usage.token-cache";
 
     pub const NATIVE_ACCOUNT_ORIGIN: &str = "https://ingest.tracecommons.ai";
-    pub const PASSKEY_RP_ID: &str = "tracecommons.ai";
-    pub const PASSKEY_ORIGIN: &str = "https://tracecommons.ai";
     pub const URL_SCHEME: &str = url_scheme!();
     pub const PUBLIC_SITE_HOST: &str = "tracecommons.ai";
     pub const PUBLIC_RUNS_PREFIX: &str = "https://tracecommons.ai/runs/";
@@ -140,8 +137,6 @@ mod values {
         "trace-commons-staging.claude-usage.token-cache";
 
     pub const NATIVE_ACCOUNT_ORIGIN: &str = concat!("https://ingest.", staging_host!());
-    pub const PASSKEY_RP_ID: &str = staging_host!();
-    pub const PASSKEY_ORIGIN: &str = concat!("https://", staging_host!());
     pub const URL_SCHEME: &str = url_scheme!();
     pub const PUBLIC_SITE_HOST: &str = staging_host!();
     pub const PUBLIC_RUNS_PREFIX: &str = concat!("https://", staging_host!(), "/runs/");
@@ -208,10 +203,6 @@ pub const KEYCHAIN: KeychainIdentity = KeychainIdentity {
 /// The native app's account API: the one origin trusted before any config
 /// exists. An IPC URL or a retained credential cannot establish another.
 pub const NATIVE_ACCOUNT_ORIGIN: &str = values::NATIVE_ACCOUNT_ORIGIN;
-/// The passkey relying party, which the signed app's associated domain names.
-pub const PASSKEY_RP_ID: &str = values::PASSKEY_RP_ID;
-/// The origin a passkey ceremony's client data must carry.
-pub const PASSKEY_ORIGIN: &str = values::PASSKEY_ORIGIN;
 /// The app's URL scheme (the bundle registers it; spec 4.5). The deep-link
 /// parser accepts only this one, so a staging build never opens a
 /// production link or the reverse.
@@ -243,17 +234,14 @@ pub const NEAR_AI_PRIVACY_FILTER_BASE: &str = values::NEAR_AI_INFERENCE_BASE;
 pub const NEAR_AI_DASHBOARD_ORIGIN: &str = values::NEAR_AI_DASHBOARD_ORIGIN;
 /// The NEP-413 recipient NEAR AI expects in a NEAR wallet sign-in.
 pub const NEAR_AI_WALLET_RECIPIENT: &str = values::NEAR_AI_WALLET_RECIPIENT;
-/// The NEAR AI sign-in providers this build offers, in the order a picker
-/// lists them: `near` is the NEAR wallet ceremony, `github` and `google`
-/// NEAR AI's own login through that provider. The daemon refuses a
-/// ceremony for any other name, so a provider left out here is not reachable
-/// from any shell. The shells read the list from the core
-/// (`tc_build_channel_json`) and never keep one of their own.
+/// The NEAR AI sign-in providers this build offers, in the order the
+/// browser's login page lists them: `near` is the NEAR wallet ceremony,
+/// `github` and `google` NEAR AI's own login through that provider. A
+/// sign-in that names none opens that page (`daemon::nearai_credential::
+/// chooser`), or, with one provider, goes straight to it. The daemon refuses
+/// a ceremony for any other name, so a provider left out here is not
+/// reachable from any shell.
 pub const NEAR_AI_SIGN_IN_PROVIDERS: &[&str] = values::NEAR_AI_SIGN_IN_PROVIDERS;
-/// The provider a sign-in that names none starts: the first one offered.
-/// Production's is the NEAR wallet; staging's is NEAR AI's Google login,
-/// its only one.
-pub const NEAR_AI_DEFAULT_SIGN_IN_PROVIDER: &str = values::NEAR_AI_SIGN_IN_PROVIDERS[0];
 
 /// Where a staging build fetches its signed NEAR AI measurement pins (spec
 /// 5.3): a static file on the staging site. The device never takes this from
@@ -304,8 +292,6 @@ pub const VERSION_CHANNEL_SUFFIX: &str = concat!(" channel ", channel_name!());
 /// Every host-bearing value of this build, for the ratchet test.
 pub const HOST_VALUES: &[&str] = &[
     NATIVE_ACCOUNT_ORIGIN,
-    PASSKEY_RP_ID,
-    PASSKEY_ORIGIN,
     PUBLIC_SITE_HOST,
     PUBLIC_RUNS_PREFIX,
     INVITE_PLACEHOLDER,

@@ -79,6 +79,6 @@ enum FoldersScreenLayout {
     static func signInCancel(
         waiting: Bool, copy: FirstRunCopy, action: @escaping () -> Void
     ) -> FirstRunFooter.Cancel? {
-        waiting ? FirstRunFooter.Cancel(title: copy.passkey.cancel, action: action) : nil
+        waiting ? FirstRunFooter.Cancel(title: copy.frame.cancel, action: action) : nil
     }
 }

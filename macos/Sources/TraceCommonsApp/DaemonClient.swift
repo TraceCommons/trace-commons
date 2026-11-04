@@ -78,8 +78,8 @@ final class DaemonClient: Sendable {
 
     /// NEAR AI's chat models and `tool`'s default, for the Launch sheet's
     /// model picker.
-    func managedModelCatalogue(tool: String) throws -> ManagedModelCatalogue {
-        try call("managed_model_catalogue", params: ["tool": tool], as: ManagedModelCatalogue.self)
+    func managedModelCatalogue(tool: String, cacheOnly: Bool = false) throws -> ManagedModelCatalogue {
+        try call("managed_model_catalogue", params: ManagedSurface.catalogueParams(tool: tool, cacheOnly: cacheOnly), as: ManagedModelCatalogue.self)
     }
 
     // MARK: - Read
@@ -323,18 +323,17 @@ final class DaemonClient: Sendable {
         return try call("list_audit", params: ["limit": limit], as: Wrapper.self).entries
     }
 
-    /// A confirmed Ask choice holds prior unattended approvals as well.
-    func setAskEachTime() throws -> DaemonData.ContributionOverrideResult {
-        let result = try call("set_contribution_override", params: ["mode": ProjectMode.ask.rawValue],
-                              as: DaemonData.ContributionOverrideResult.self)
-        guard result.contributionOverride?.mode == ProjectMode.ask.rawValue else {
-            throw Failure(code: "unavailable", message: "sharing-choice-unconfirmed")
-        }
-        // Stop sends before withdrawing the standing default: projects the
-        // grant armed retain their own policy entries after withdrawal.
+    /// "Ask each time", in setup or Settings: the standing Automatic grant
+    /// is withdrawn and every folder it armed goes back to Ask. A folder's
+    /// own rule still wins: one set to Automatic sends, one set to Never
+    /// never does. It used to set a global Ask override instead, which no
+    /// screen could clear and under which a folder set to Automatic kept
+    /// asking with no error (#1753 A2). Returns whether a grant was in force.
+    @discardableResult
+    func setAskEachTime() throws -> Bool {
         struct Withdrawal: Decodable { let withdrawn: Bool }
-        _ = try call("withdraw_automatic_grant", as: Withdrawal.self)
-        return result
+        return try call("withdraw_automatic_grant", params: ["return_folders_to_ask": true],
+                        as: Withdrawal.self).withdrawn
     }
 
     func consentOptions() throws -> [ConsentScope] {
@@ -610,10 +609,11 @@ final class DaemonClient: Sendable {
     /// The URL is served ONCE, here. Nothing re-serves it, so a caller that
     /// drops the returned attempt has to begin again -- which is why this
     /// returns the whole thing rather than just the id.
-    func nearAiCredentialStart(provider: String? = nil) throws -> CredentialAttempt? {
-        let params: [String: Any] = provider.map { ["provider": $0] } ?? [:]
-        return CredentialAttempt.parse(
-            fromJSON: try rawResultJSON(CredentialSurface.startMethod, params: params))
+    ///
+    /// It names no provider; the daemon's browser page lists the build's
+    /// logins and the person picks one there (owner, 2026-11-02).
+    func nearAiCredentialStart() throws -> CredentialAttempt? {
+        CredentialAttempt.parse(fromJSON: try rawResultJSON(CredentialSurface.startMethod))
     }
 
     /// Stops waiting on the browser. The attempt id is optional: the daemon
@@ -626,12 +626,10 @@ final class DaemonClient: Sendable {
 
     /// Removes the stored key from this machine.
     ///
-    /// The answer's `revoked` is always `false` and is deliberately not
-    /// surfaced as a flag: forgetting is local, the key stays valid at the
-    /// service, and that fact is a SENTENCE beside the button rather than
-    /// something a view could forget to draw.
-    func nearAiCredentialForget() throws {
-        _ = try rawResultJSON(CredentialSurface.forgetMethod)
+    /// Answers the result JSON, so the caller can tell a revoke at NEAR AI
+    /// that did not happen (`CredentialSurface.forgetLeftKeyAtService`).
+    func nearAiCredentialForget() throws -> String {
+        try rawResultJSON(CredentialSurface.forgetMethod)
     }
 
     /// Copies the sign-in an earlier build kept in the login keychain into

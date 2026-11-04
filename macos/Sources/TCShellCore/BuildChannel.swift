@@ -6,8 +6,8 @@ import Foundation
 /// Swift holds no copy of any of these values. The channel module in the
 /// contributor crate is their one spelling; the app reads them from the
 /// dylib it links and passes this value to everything that needs one, so a
-/// staging dylib names the staging directory and relying party, and a
-/// production one names production's.
+/// staging dylib names the staging directory, and a production one names
+/// production's.
 public struct BuildChannel: Decodable, Equatable, Sendable {
     /// `production` or `staging`.
     public let channel: String
@@ -15,8 +15,6 @@ public struct BuildChannel: Decodable, Equatable, Sendable {
     public let stateDirName: String
     /// The one environment variable that overrides the state directory.
     public let stateDirEnv: String
-    /// The passkey relying party a ceremony's options must name.
-    public let passkeyRelyingParty: String
     /// The URL scheme the bundle registers.
     public let urlScheme: String
     /// The NEAR AI dashboard the funding row's credits link opens.
@@ -28,13 +26,12 @@ public struct BuildChannel: Decodable, Equatable, Sendable {
 
     public init(
         channel: String, stateDirName: String, stateDirEnv: String,
-        passkeyRelyingParty: String, urlScheme: String, nearAiDashboardOrigin: String,
+        urlScheme: String, nearAiDashboardOrigin: String,
         nearAiSignInProviders: [String]
     ) {
         self.channel = channel
         self.stateDirName = stateDirName
         self.stateDirEnv = stateDirEnv
-        self.passkeyRelyingParty = passkeyRelyingParty
         self.urlScheme = urlScheme
         self.nearAiDashboardOrigin = nearAiDashboardOrigin
         self.nearAiSignInProviders = nearAiSignInProviders
@@ -44,7 +41,6 @@ public struct BuildChannel: Decodable, Equatable, Sendable {
         case channel
         case stateDirName = "state_dir_name"
         case stateDirEnv = "state_dir_env"
-        case passkeyRelyingParty = "passkey_rp_id"
         case urlScheme = "url_scheme"
         case nearAiDashboardOrigin = "near_ai_dashboard_origin"
         case nearAiSignInProviders = "near_ai_sign_in_providers"
@@ -59,7 +55,7 @@ public struct BuildChannel: Decodable, Equatable, Sendable {
         else { return nil }
         let fields = [
             channel.channel, channel.stateDirName, channel.stateDirEnv,
-            channel.passkeyRelyingParty, channel.urlScheme, channel.nearAiDashboardOrigin,
+            channel.urlScheme, channel.nearAiDashboardOrigin,
         ]
         let providers = channel.nearAiSignInProviders
         if providers.isEmpty || providers.contains(where: \.isEmpty) { return nil }

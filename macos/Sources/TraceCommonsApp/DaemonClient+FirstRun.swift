@@ -41,17 +41,28 @@ extension DaemonClient {
     /// because the daemon refuses a request that does not say. Finishing
     /// onboarding explicitly includes eligible history from watched folders;
     /// other grant callers keep their existing from-now semantics.
-    func grantAutomatic(witnessSigningAddress: String?) throws -> AutomaticGrant {
+    ///
+    /// `keepFolderAsks`: a folder already set to Ask keeps asking (owner,
+    /// 2026-10-30, and #1753's ruling that a folder's own rule always wins);
+    /// false makes every folder but a Never one Automatic.
+    func grantAutomatic(witnessSigningAddress: String?, keepFolderAsks: Bool = true) throws -> AutomaticGrant {
         let witness: Any = witnessSigningAddress ?? NSNull()
         let grant = try call(
             "grant_automatic_including_existing",
-            params: ["confirmed": true, "witness_signing_address": witness, "include_existing": true],
+            params: ["confirmed": true, "witness_signing_address": witness, "include_existing": true,
+                     "keep_folder_asks": keepFolderAsks],
             as: AutomaticGrant.self
         )
         guard !grant.granted || grant.includeExisting == true else {
             throw Failure(code: "unavailable", message: "automatic-existing-traces-unsupported")
         }
         return grant
+    }
+
+    /// `automatic_grant`: whether the standing Automatic grant is in force,
+    /// for Settings' sharing choice.
+    func automaticGrant() throws -> AutomaticGrant {
+        try call("automatic_grant", as: AutomaticGrant.self)
     }
 
     /// `first_run_estimate`: the commons' dollar estimate per accepted

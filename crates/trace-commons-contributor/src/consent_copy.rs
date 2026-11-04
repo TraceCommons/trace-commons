@@ -68,14 +68,12 @@
 //! Approved 2026-10-06, every sentence in both. The spec's Open list left
 //! the switch-on notice wording open; that question is now closed.
 //!
-//! # The submit toast and the per-session notification (K9, #1118)
+//! # The per-session notification (K9, #1118)
 //!
-//! Two more WYSIWYG design sentences, matched here so no shell writes its
-//! own: [`toast_sent_text`] (`tc_toast_sent_text`), "Sent. N left to decide
-//! (middle dot) upload limit X of Y"; and [`session_notification_copy`]
-//! (`tc_session_notification_copy`), the per-session notification whose body
-//! is [`GATE_STATEMENT`] and whose one action is "Look, then decide". Both
-//! approved 2026-10-06.
+//! One more WYSIWYG design sentence, matched here so no shell writes its
+//! own: [`session_notification_copy`] (`tc_session_notification_copy`), the
+//! per-session notification whose body is [`GATE_STATEMENT`] and whose one
+//! action is "Look, then decide". Approved 2026-10-06.
 
 /// Approved 2026-10-06.
 /// Core-owned disclosure for configured activity missions with rewards disabled.
@@ -374,7 +372,7 @@ pub fn void_notice_title(project_label: Option<&str>) -> String {
 #[must_use]
 pub fn void_reason_line(label: &str) -> &'static str {
     match label {
-        "destination-changed" => "Your traces would now go to a different Trace Commons server.",
+        "destination-changed" => "Your traces would now go to a different server.",
         "identity-changed" => {
             "Your traces would now be sent under a different account, identity or device."
         }
@@ -962,10 +960,10 @@ pub fn witness_capacity_notice_for_wire(value: &serde_json::Value) -> Option<Wit
 /// `status.legacy_invite_migration.offered` is true.
 pub const LEGACY_MIGRATION_OFFER_TITLE: &str = "Move to your NEAR AI account";
 
-/// Reworded 2026-10-11 around the passkey step (owner direction); the new
-/// wording is not yet approved. The offer. Says it is optional and that
+/// Reworded 2026-10-11 (owner direction), and its passkey clause deleted
+/// 2026-10-31 when passkeys were removed; not yet approved. The offer. Says it is optional and that
 /// declining changes nothing, because coexistence is the default.
-pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. You can move your contributions to your NEAR AI account instead, by creating or using your passkey in your browser. Nothing changes unless you choose to, and your invite keeps working if you don't.";
+pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. You can move your contributions to your NEAR AI account instead. Nothing changes unless you choose to, and your invite keeps working if you don't.";
 
 /// Approved 2026-10-06. The button that starts the move. Approved 2026-10-08 (button rule).
 pub const LEGACY_MIGRATION_OFFER_ACTION: &str = "Move";
@@ -979,10 +977,11 @@ pub const LEGACY_MIGRATION_OFFER_DISMISS: &str = "Dismiss";
 /// card away is not taken for declining the move for good.
 pub const LEGACY_MIGRATION_OFFER_LATER: &str = "You can move later from Settings.";
 
-/// Not yet approved. Shown while the shell waits on the passkey step in the
-/// browser, which it starts itself when the move needs it
-/// (`legacy_migration_no_near_ai_session`), before it retries the move.
-pub const LEGACY_MIGRATION_PASSKEY_WAITING: &str = "Waiting for your passkey in your browser...";
+/// Not yet approved. Shown while the shell waits on the NEAR AI sign-in in
+/// the browser, which it starts itself when the move needs it
+/// (`legacy_migration_no_near_ai_session`), before it retries the move. The
+/// key keeps its old `passkey_` name.
+pub const LEGACY_MIGRATION_PASSKEY_WAITING: &str = "Waiting for your browser...";
 
 /// Not yet approved. The passkey step ended without finishing (it failed,
 /// or ran out of time). Nothing ran.
@@ -1083,9 +1082,9 @@ pub fn legacy_migration_refusal_line(label: &str) -> &'static str {
         "legacy_migration_admission_not_ready" => {
             "This commons isn't accepting contributions by account yet. Your invite keeps working; try again later."
         }
-        // Reworded 2026-10-11 around the passkey step; not yet approved.
+        // Approved 2026-10-31, when passkeys were removed.
         "legacy_migration_no_near_ai_session" => {
-            "Finish the passkey step in your browser first, then try again. Your invite keeps working."
+            "Sign in to NEAR AI in your browser first, then try again. Your invite keeps working."
         }
         "legacy_migration_invite_needed" => {
             "We couldn't tell which invite you joined with. Paste your invite link to continue."
@@ -1530,7 +1529,7 @@ pub const DISCLOSURE_ROUTE_WITNESS_REFUSING: &str =
 /// The local redactor runs before upload; the hosted service applies its
 /// own privacy-filter pass at ingest. This does not promise complete PII
 /// removal. What an attached local filter receives is the next sentence's job.
-pub const DISCLOSURE_ROUTE_LOCAL: &str = "Traces are redacted on this computer. Trace Commons' servers apply an additional personal information (PII) removal pass.";
+pub const DISCLOSURE_ROUTE_LOCAL: &str = "Traces are redacted on this computer. The server that receives your traces applies an additional personal information (PII) removal pass.";
 
 /// The route line for a device that is not enrolled.
 ///
@@ -2404,39 +2403,6 @@ pub(crate) fn unlabelled_envelope_keys(
 }
 
 // ---------------------------------------------------------------------------
-// The submit toast (K9, #1118): "Sent. N left to decide - upload limit X of Y"
-// ---------------------------------------------------------------------------
-//
-// Not the same sentence as the GTK/macOS/Windows "one-click submit" toast
-// (`crate::daemon::queue`'s redaction-count toast, e.g. "Approved. 4
-// redactions applied. 1 flagged."). This is a second, later line from the
-// WYSIWYG design's Flow 2 and Flow 3: after a submit, how many decisions are
-// still owed and where today's upload cap stands. It lives here, not in a
-// shell, for the reason the module doc gives -- one Rust sentence rather
-// than three native copies of the same arithmetic.
-
-/// Approved 2026-10-06. The toast after a submit, matching the design's
-/// worked example exactly: "Sent. 1 left to decide - upload limit 7 of 20".
-///
-/// `uploads_today` and `max_uploads_per_day` are `status.daily_budget`'s
-/// fields of the same names. `decisions_owed` is `status.decisions_owed`
-/// (K6, a separate branch): this function only formats the count it is
-/// given and never reads the queue itself, so it has nothing to say about
-/// what counts as "owed" -- that is K6's decision, not this one's.
-#[must_use]
-pub fn toast_sent_text(
-    uploads_today: u64,
-    max_uploads_per_day: u64,
-    decisions_owed: u64,
-) -> String {
-    // `\u{b7}` is the design's middle dot (·), written as an escape so the
-    // source stays plain ASCII like the rest of this file's comments.
-    format!(
-        "Sent. {decisions_owed} left to decide \u{b7} upload limit {uploads_today} of {max_uploads_per_day}"
-    )
-}
-
-// ---------------------------------------------------------------------------
 // The per-session notification (K9, #1118)
 // ---------------------------------------------------------------------------
 
@@ -2687,6 +2653,208 @@ pub fn account_devices_copy() -> AccountDevicesCopy {
         session_ended: ACCOUNT_DEVICES_SESSION_ENDED,
         too_many: ACCOUNT_DEVICES_TOO_MANY,
         failed: ACCOUNT_DEVICES_FAILED,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The account needs attention (#1836 section 3.2a, fix F1). The daemon puts
+// `account_state`, `account_state_reason` and `near_ai_login_unconfirmed` in
+// every status; a shell passes them to `account_attention_for_wire` and
+// draws what comes back in its account section. A status there, never a
+// banner, notification or tray state. Every string approved by the owner
+// 2026-11-02.
+
+/// `status.account_state` while nothing about the account needs saying.
+pub const ACCOUNT_STATE_OK: &str = "ok";
+/// `status.account_state` while this app's account is locally broken: its
+/// record cannot be read, or the address it was set up with is refused.
+/// Signing in again does not fix it; setting up again does.
+pub const ACCOUNT_STATE_NEEDS_ATTENTION: &str = "needs_attention";
+/// `status.account_state_reason`: the stored account record is unreadable.
+pub const ACCOUNT_ATTENTION_RECORD_UNREADABLE: &str = "account_record_unreadable";
+/// `status.account_state_reason`: this build refuses the address the
+/// account was set up with.
+pub const ACCOUNT_ATTENTION_ADDRESS_REFUSED: &str = "account_address_refused";
+
+/// Approved 2026-11-02. The heading of the status.
+pub const ACCOUNT_ATTENTION_TITLE: &str = "This app's account needs attention";
+/// Approved 2026-11-02. For [`ACCOUNT_ATTENTION_RECORD_UNREADABLE`].
+pub const ACCOUNT_ATTENTION_RECORD_UNREADABLE_BODY: &str = "This app can't read its account details on this computer. Set it up again to keep sending traces.";
+/// Approved 2026-11-02. For [`ACCOUNT_ATTENTION_ADDRESS_REFUSED`].
+pub const ACCOUNT_ATTENTION_ADDRESS_REFUSED_BODY: &str = "This app can no longer reach the service it was set up with. Update the app, or set it up again.";
+/// Approved 2026-11-02. Only while a NEAR AI login is stored
+/// (`near_ai_login_unconfirmed`).
+pub const ACCOUNT_ATTENTION_PRIVATE_AI: &str = "Private AI still works with your NEAR AI account.";
+/// Approved 2026-11-02. The button: asks [`ACCOUNT_ATTENTION_CONFIRM_TITLE`]
+/// first, then unenrolls and opens the first run.
+pub const ACCOUNT_ATTENTION_ACTION: &str = "Set up again";
+/// Approved 2026-11-02. The confirmation before setting up again runs.
+pub const ACCOUNT_ATTENTION_CONFIRM_TITLE: &str = "Set up this app again?";
+/// Approved 2026-11-02. Under [`ACCOUNT_ATTENTION_CONFIRM_TITLE`].
+pub const ACCOUNT_ATTENTION_CONFIRM_BODY: &str =
+    "This signs out of NEAR AI on this computer. You'll sign in again to keep sending traces.";
+/// Approved 2026-11-02. The confirmation's button that goes ahead.
+pub const ACCOUNT_ATTENTION_CONFIRM_ACTION: &str = ACCOUNT_ATTENTION_ACTION;
+/// Approved 2026-11-02. The confirmation's button that changes nothing.
+pub const ACCOUNT_ATTENTION_CONFIRM_CANCEL: &str = ACCOUNT_DEVICES_CANCEL_BUTTON;
+/// Approved 2026-11-02 for this use. Shown under the button when the
+/// daemon refused to set up again. Its own constant, so a change to another
+/// surface's failure line does not change it.
+pub const ACCOUNT_ATTENTION_FAILED: &str = "Nothing changed. Try again.";
+
+/// What the account section shows while `status.account_state` is
+/// `needs_attention` (`tc_account_attention_copy_json`). The branch is the
+/// core's: a shell draws the fields it gets and chooses no words.
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct AccountAttentionCopy {
+    pub title: &'static str,
+    /// The reason's sentence; `None` for a reason this build does not know,
+    /// which is then shown with the title and button alone.
+    pub body: Option<&'static str>,
+    /// Present only while a NEAR AI login is stored.
+    pub private_ai: Option<&'static str>,
+    pub action: &'static str,
+    /// The confirmation [`Self::action`] opens; nothing runs until
+    /// [`Self::confirm_action`] is pressed.
+    pub confirm_title: &'static str,
+    pub confirm_body: &'static str,
+    pub confirm_action: &'static str,
+    pub confirm_cancel: &'static str,
+    /// Shown when the daemon refused to set up again.
+    pub failed: &'static str,
+}
+
+/// The account section's status for a `status` object (or any object with
+/// its `account_state`, `account_state_reason` and
+/// `near_ai_login_unconfirmed` keys). `None` while there is nothing to
+/// show: `account_state` is `ok`, absent (a daemon too old to say) or any
+/// other value, or the argument is not an object.
+#[must_use]
+pub fn account_attention_for_wire(status: &serde_json::Value) -> Option<AccountAttentionCopy> {
+    let object = status.as_object()?;
+    if object.get("account_state")?.as_str()? != ACCOUNT_STATE_NEEDS_ATTENTION {
+        return None;
+    }
+    let body = match object
+        .get("account_state_reason")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(ACCOUNT_ATTENTION_RECORD_UNREADABLE) => Some(ACCOUNT_ATTENTION_RECORD_UNREADABLE_BODY),
+        Some(ACCOUNT_ATTENTION_ADDRESS_REFUSED) => Some(ACCOUNT_ATTENTION_ADDRESS_REFUSED_BODY),
+        _ => None,
+    };
+    let unconfirmed = object
+        .get("near_ai_login_unconfirmed")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    Some(AccountAttentionCopy {
+        title: ACCOUNT_ATTENTION_TITLE,
+        body,
+        private_ai: unconfirmed.then_some(ACCOUNT_ATTENTION_PRIVATE_AI),
+        action: ACCOUNT_ATTENTION_ACTION,
+        confirm_title: ACCOUNT_ATTENTION_CONFIRM_TITLE,
+        confirm_body: ACCOUNT_ATTENTION_CONFIRM_BODY,
+        confirm_action: ACCOUNT_ATTENTION_CONFIRM_ACTION,
+        confirm_cancel: ACCOUNT_ATTENTION_CONFIRM_CANCEL,
+        failed: ACCOUNT_ATTENTION_FAILED,
+    })
+}
+
+#[cfg(test)]
+mod account_attention_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn each_reason_gets_its_own_sentence() {
+        let unreadable = account_attention_for_wire(&json!({
+            "account_state": "needs_attention",
+            "account_state_reason": "account_record_unreadable",
+            "near_ai_login_unconfirmed": false,
+        }))
+        .unwrap();
+        assert_eq!(unreadable.title, "This app's account needs attention");
+        assert_eq!(
+            unreadable.body,
+            Some(
+                "This app can't read its account details on this computer. Set it up again to keep sending traces."
+            )
+        );
+        assert_eq!(unreadable.private_ai, None);
+        assert_eq!(unreadable.action, "Set up again");
+
+        let refused = account_attention_for_wire(&json!({
+            "account_state": "needs_attention",
+            "account_state_reason": "account_address_refused",
+            "near_ai_login_unconfirmed": true,
+        }))
+        .unwrap();
+        assert_eq!(
+            refused.body,
+            Some(
+                "This app can no longer reach the service it was set up with. Update the app, or set it up again."
+            )
+        );
+        assert_eq!(
+            refused.private_ai,
+            Some("Private AI still works with your NEAR AI account.")
+        );
+    }
+
+    /// A healthy account, an old daemon's status (no keys), and anything
+    /// that is not an object show nothing.
+    #[test]
+    fn nothing_to_show_is_none() {
+        assert_eq!(
+            account_attention_for_wire(&json!({
+                "account_state": "ok",
+                "account_state_reason": null,
+                "near_ai_login_unconfirmed": false,
+            })),
+            None
+        );
+        assert_eq!(
+            account_attention_for_wire(&json!({"logged_in": true})),
+            None
+        );
+        assert_eq!(account_attention_for_wire(&json!(null)), None);
+        assert_eq!(account_attention_for_wire(&json!("needs_attention")), None);
+    }
+
+    /// Every shell asks before it unenrolls, in the owner's words, and the
+    /// unreadable-record sentence names no platform.
+    #[test]
+    fn setting_up_again_is_confirmed_first_and_names_no_platform() {
+        let copy = account_attention_for_wire(&json!({
+            "account_state": "needs_attention",
+            "account_state_reason": "account_record_unreadable",
+        }))
+        .unwrap();
+        assert_eq!(copy.confirm_title, "Set up this app again?");
+        assert_eq!(
+            copy.confirm_body,
+            "This signs out of NEAR AI on this computer. You'll sign in again to keep sending traces."
+        );
+        assert_eq!(copy.confirm_action, "Set up again");
+        assert_eq!(copy.confirm_cancel, "Cancel");
+        assert_eq!(copy.failed, "Nothing changed. Try again.");
+        for sentence in [copy.title, copy.body.unwrap(), copy.confirm_body] {
+            assert!(!sentence.contains("Mac"), "{sentence}");
+        }
+    }
+
+    /// A reason this build does not know still shows the state, with no
+    /// sentence the core did not choose.
+    #[test]
+    fn an_unknown_reason_shows_the_title_and_button_alone() {
+        let copy = account_attention_for_wire(&json!({
+            "account_state": "needs_attention",
+            "account_state_reason": "something_new",
+        }))
+        .unwrap();
+        assert_eq!(copy.body, None);
+        assert_eq!(copy.private_ai, None);
+        assert_eq!(copy.action, ACCOUNT_ATTENTION_ACTION);
     }
 }
 
@@ -4026,29 +4194,30 @@ mod tests {
         }
     }
 
-    /// The move leads with the passkey step (owner, 2026-10-11): with no
-    /// session the shell runs the browser step itself, and the offer, the
-    /// wait and the refusal speak of the passkey, never of signing in to
-    /// NEAR AI. The step's own words are separate keys, and its button is
-    /// short.
+    /// The move leads with the browser step (owner, 2026-10-11): with no
+    /// session the shell runs the browser step itself. The offer and the
+    /// wait offer no passkey (removed 2026-10-31), and none of the step's
+    /// lines speaks of signing in. The step's own words are separate keys,
+    /// and its button is short.
     #[test]
-    fn the_migration_leads_with_the_passkey_step() {
+    fn the_migration_leads_with_the_browser_step() {
         let offer = legacy_migration_offer();
         assert_eq!(offer.passkey_waiting, LEGACY_MIGRATION_PASSKEY_WAITING);
         assert_eq!(offer.passkey_failed, LEGACY_MIGRATION_PASSKEY_FAILED);
         assert_eq!(offer.passkey_cancel, LEGACY_MIGRATION_PASSKEY_CANCEL);
         let no_session = legacy_migration_refusal_line("legacy_migration_no_near_ai_session");
         for line in [offer.body, offer.passkey_waiting, no_session] {
-            assert!(line.contains("passkey"), "{line}");
+            assert!(!line.to_lowercase().contains("passkey"), "{line}");
         }
-        for line in [
-            offer.body,
-            offer.passkey_waiting,
-            offer.passkey_failed,
-            no_session,
-        ] {
+        for line in [offer.body, offer.passkey_waiting, offer.passkey_failed] {
             assert!(!line.to_lowercase().contains("sign in"), "{line}");
         }
+        // The refusal names the step it sends the contributor to (owner,
+        // 2026-10-31).
+        assert_eq!(
+            no_session,
+            "Sign in to NEAR AI in your browser first, then try again. Your invite keeps working."
+        );
         assert!(offer.passkey_failed.contains("nothing was moved"));
         assert!(offer.passkey_failed.contains("keeps working"));
         assert!(offer.passkey_cancel.split_whitespace().count() <= 2);
@@ -4214,23 +4383,6 @@ mod tests {
             SCRUB_CHECK_AUTOMATIC_HELP.contains("does not check that the scrubbing was right"),
             "Automatic says what it is not"
         );
-    }
-
-    /// The design's own worked example (Flow 2), verbatim.
-    #[test]
-    fn toast_sent_text_matches_the_design_example() {
-        assert_eq!(
-            toast_sent_text(7, 20, 1),
-            "Sent. 1 left to decide \u{b7} upload limit 7 of 20"
-        );
-    }
-
-    #[test]
-    fn toast_sent_text_states_both_counts_whatever_they_are() {
-        let text = toast_sent_text(0, 50, 0);
-        assert!(text.starts_with("Sent."), "{text}");
-        assert!(text.contains("0 left to decide"), "{text}");
-        assert!(text.contains("upload limit 0 of 50"), "{text}");
     }
 
     /// The per-session notification's body is the consent sentence itself,

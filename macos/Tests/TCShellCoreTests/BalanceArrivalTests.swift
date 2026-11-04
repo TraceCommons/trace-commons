@@ -33,25 +33,6 @@ final class BalanceArrivalTests: XCTestCase {
         XCTAssertNil(older.receivedTotalNanos)
     }
 
-    func testRollingReceivedCreditPreservesAmountsAndReadTime() {
-        let status = BalanceStatus.parse(fromJSON: """
-            {"state":"known","scale":9,"remaining_nanos":8200000000,
-             "received_24h_nanos":1250000000,
-             "received_24h_text":"$1.25 received in the last 24 hours",
-             "received_24h_checked_at":"2026-10-25T02:42:28Z"}
-            """)
-        XCTAssertEqual(status.received24hNanos, 1_250_000_000)
-        XCTAssertEqual(status.received24hText, "$1.25 received in the last 24 hours")
-        XCTAssertEqual(status.received24hCheckedAt, DaemonTimestamp.parse("2026-10-25T02:42:28Z"))
-        let zero = BalanceStatus.parse(fromJSON: #"{"state":"known","received_24h_nanos":0}"#)
-        XCTAssertEqual(zero.received24hNanos, 0)
-        let unknown = BalanceStatus.parse(fromJSON: #"{"state":"known","received_24h_nanos":null}"#)
-        XCTAssertNil(unknown.received24hNanos)
-        XCTAssertNil(unknown.received24hText)
-        XCTAssertNil(unknown.received24hCheckedAt)
-        XCTAssertNil(BalanceStatus.unreported.received24hNanos)
-    }
-
     func testDisplayDirectionIsOptionalAndBounded() {
         let neutral = BalanceStatus.parse(fromJSON: #"{"state":"known","change_24h_nanos":9000000,"change_24h_direction":0}"#)
         XCTAssertEqual(neutral.change24hNanos, 9_000_000)

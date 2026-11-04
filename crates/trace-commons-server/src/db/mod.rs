@@ -16,6 +16,7 @@ use crate::trace_invite_registry::InviteTenantMode;
 
 pub mod postgres;
 pub mod postgres_inference_connection;
+mod postgres_legacy_payout_carry;
 mod postgres_payout;
 mod postgres_referral;
 #[doc(hidden)]
@@ -1124,28 +1125,9 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
-    /// Resolve the tenant for a WebAuthn `credential_id` via the SAME NARROW
-    /// restricted-role resolver pool used by `resolve_login_link_tenant` (separate
-    /// role, column-scoped SELECT, no BYPASSRLS). Returns the tenant ONLY. The
-    /// discoverable-login path (Task 6) calls this with the credential id parsed
-    /// from an UNAUTHENTICATED assertion, BEFORE any tenant context exists, then
-    /// re-confirms tenant inside an RLS-scoped tx via
-    /// `load_webauthn_credential_for_login`. Fail-closed: an unconfigured resolver
-    /// pool MUST error with a safe missing-control name, never fall back to the
-    /// runtime pool. NO `ensure_trace_tenant` here: this is a pure read on a
-    /// globally-UNIQUE column and MUST NOT write any tenant row for a forged id.
-    async fn resolve_credential_tenant(
-        &self,
-        _credential_id: &str,
-    ) -> Result<Option<String>, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "resolve_credential_tenant not implemented".to_string(),
-        ))
-    }
-
     /// Resolve a NEAR access public_key to its tenant via the column-scoped,
-    /// restricted-role resolver pool, exactly as `resolve_credential_tenant` does
-    /// for webauthn credentials. Returns the tenant ONLY. The NEAR-login path
+    /// restricted-role resolver pool, exactly as `resolve_login_link_tenant` does
+    /// for login codes. Returns the tenant ONLY. The NEAR-login path
     /// (Task 7) calls this with the public_key parsed from an UNAUTHENTICATED,
     /// wallet-signed assertion, BEFORE any tenant context exists, then re-confirms
     /// tenant inside an RLS-scoped tx. Fail-closed: an unconfigured resolver pool
@@ -1229,65 +1211,44 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
-    /// Store a NEAR AI bind ceremony (Z2 S3) in the provisioning ceremony
-    /// table. Fail-closed by default.
-    async fn store_near_ai_bind_ceremony(
+    /// Store a change ceremony (F10) in the provisioning ceremony table.
+    /// Fail-closed by default.
+    async fn store_near_ai_rebind_ceremony(
         &self,
         _ceremony_hash: &str,
-        _pending: &crate::account_onboarding::NearAiBindPending,
+        _pending: &crate::account_login_change::NearAiRebindPending,
         _expires_at: i64,
     ) -> Result<(), DatabaseError> {
-        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
+        Err(DatabaseError::Pool("near_ai_rebind_unconfigured".into()))
     }
 
-    /// Consume a NEAR AI bind ceremony. Single use; a row that is not a bind
-    /// ceremony (a provisioning or wallet row) is consumed and refused.
-    async fn take_near_ai_bind_ceremony(
+    /// Consume a change ceremony. Single use.
+    async fn take_near_ai_rebind_ceremony(
         &self,
         _ceremony_hash: &str,
-    ) -> Result<Option<crate::account_onboarding::NearAiBindPending>, DatabaseError> {
-        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
+    ) -> Result<Option<crate::account_login_change::NearAiRebindPending>, DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_rebind_unconfigured".into()))
     }
 
-    /// Bind a verified NEAR AI login to the unbound passkey account
-    /// `(tenant_id, account_id)` (Z2 S3), or, when the login's anchor already
-    /// belongs to another account, provision that account exactly as
-    /// [`Self::provision_near_ai_login`] would and close the passkey account.
-    /// The default refuses.
-    #[allow(clippy::too_many_arguments)]
-    async fn bind_near_ai_login(
+    /// Whether the session's account can change its login now, and what its
+    /// current identity is (F10 start). Read in the session's tenant only.
+    async fn near_ai_rebind_precheck(
         &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _login: &crate::near_ai_login::VerifiedNearAiLogin,
-        _device_public_key: &[u8; 32],
-        _session: NewSession<'_>,
-        _identity: &crate::near_account_identity::NearAccountIdentity,
-        _grant_template: Option<&crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
-    ) -> Result<crate::account_onboarding::NearAiBindOutcome, DatabaseError> {
-        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
+        _session: &crate::account_login_change::RebindSession,
+    ) -> Result<crate::account_login_change::RebindPrecheck, DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_rebind_unconfigured".into()))
     }
 
-    /// Enroll a further device into the `bound` account `(tenant_id,
-    /// account_id)` from a verified NEAR AI login: a second Mac signed in with
-    /// the account's passkey. Attaches the device only if the login's anchor
-    /// is that account's own, decided in the same transaction that would
-    /// write the device; otherwise refuses with
-    /// [`crate::account_onboarding::NEAR_AI_ENROL_ACCOUNT_MISMATCH`] having
-    /// written nothing. Never claims an anchor or mints a tenant or account.
-    /// The default refuses.
-    #[allow(clippy::too_many_arguments)]
-    async fn enrol_near_ai_login(
+    /// Move the account from its proven current identity to `new_login`, in
+    /// one transaction in the session's tenant (F10 finish, spec 4.3).
+    async fn near_ai_rebind(
         &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _login: &crate::near_ai_login::VerifiedNearAiLogin,
-        _device_public_key: &[u8; 32],
-        _session: NewSession<'_>,
+        _session: &crate::account_login_change::RebindSession,
+        _current: &crate::account_login_change::RebindCurrent,
+        _new_login: &crate::near_ai_login::VerifiedNearAiLogin,
         _identity: &crate::near_account_identity::NearAccountIdentity,
-        _grant_template: Option<&crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
-    ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
-        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
+    ) -> Result<crate::account_login_change::RebindOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_rebind_unconfigured".into()))
     }
 
     /// Write the NEAR AI sign-up contributor grant for a device NEAR AI
@@ -1464,79 +1425,13 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
-    /// Insert a registered passkey for `account_id`. The serialized webauthn-rs
-    /// `Passkey` (public key, sign counter, AAGUID, transports) is stored as
-    /// JSONB; `credential_id` is the globally-UNIQUE base64url WebAuthn id and
-    /// `label` is an optional user-supplied display name. Tenant- + account-
-    /// scoped under forced RLS.
-    async fn insert_webauthn_credential(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _credential_id: &str,
-        _passkey: &serde_json::Value,
-        _label: Option<&str>,
-    ) -> Result<(), DatabaseError> {
-        Err(DatabaseError::Pool(
-            "insert_webauthn_credential not implemented".to_string(),
-        ))
-    }
-
-    /// Load an ACTIVE credential for the LOGIN (assertion) path by its
-    /// `credential_id`, under the already-resolved `tenant_id`. Returns the
-    /// account id and serialized `Passkey` JSON, or `None` for an unknown /
-    /// revoked / other-tenant credential. Runs inside an RLS-scoped tx; the
-    /// `tenant_id = trace_current_tenant_id()` predicate is belt-and-suspenders
-    /// on top of forced RLS, and `credential_id` is globally UNIQUE.
-    async fn load_webauthn_credential_for_login(
-        &self,
-        _tenant_id: &str,
-        _credential_id: &str,
-    ) -> Result<Option<WebauthnCredentialRow>, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "load_webauthn_credential_for_login not implemented".to_string(),
-        ))
-    }
-
-    /// The label `account_id` gave its ACTIVE credential `credential_id`, for
-    /// the native sign-in answer (`passkey_label`). `None` for no label, and
-    /// for an unknown, revoked, other-account or other-tenant credential: the
-    /// row must match the tenant, the account AND the credential, so a caller
-    /// can only ever read the label of a credential its own account holds.
-    /// Tenant-scoped under forced RLS.
-    async fn credential_label_for_account(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _credential_id: &str,
-    ) -> Result<Option<String>, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "credential_label_for_account not implemented".to_string(),
-        ))
-    }
-
-    /// Persist the post-finish `Passkey` after a successful assertion so the
-    /// updated sign counter (clone-detection state) is durable, and stamp
-    /// `last_used_at`. Tenant-scoped under forced RLS; only an active
-    /// (unrevoked) credential is updated.
-    async fn update_webauthn_credential_after_login(
-        &self,
-        _tenant_id: &str,
-        _credential_id: &str,
-        _passkey: &serde_json::Value,
-    ) -> Result<(), DatabaseError> {
-        Err(DatabaseError::Pool(
-            "update_webauthn_credential_after_login not implemented".to_string(),
-        ))
-    }
-
     /// Issue a session for a native-app loopback sign-in whose one-time code and
     /// PKCE verifier have ALREADY been checked. Mirrors
-    /// [`Database::issue_passkey_session`] except `client_kind = 'native'` and
-    /// `auth_credential_id` is NULL: no passkey or wallet key authenticated this
+    /// [`Database::issue_near_session`] except `client_kind = 'native'` and
+    /// `auth_credential_id` is NULL: no wallet key authenticated this
     /// session, the human's browser login did.
     ///
-    /// As with the passkey/NEAR paths there is NO `ensure_trace_tenant` here.
+    /// As with the NEAR path there is NO `ensure_trace_tenant` here.
     /// The tenant came from a login link that a human already redeemed in a
     /// browser, so the account row provably exists; the insert is FK-bound to
     /// `(tenant_id, account_id)` and a bogus pair simply fails rather than
@@ -1553,34 +1448,9 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
-    /// Issue a browser session for a passkey login that has ALREADY been verified
-    /// (Task 6). Inserts a `trace_sessions` row (hash-only `token_hash`,
-    /// `client_kind = 'passkey'`, `auth_credential_id` = the base64url credential
-    /// id STRING that authenticated the session, `token_issued_at` defaulted) plus
-    /// a hash-only audit row, in ONE RLS-scoped tx under the already-resolved
-    /// tenant. The caller MUST have verified the assertion (and thereby the
-    /// credential's FK-backed tenant) before calling this; there is therefore NO
-    /// `ensure_trace_tenant` here — the tenant provably exists via the credential
-    /// row, and an UPSERT before verification would let a forged assertion spray
-    /// tenant rows. The raw session secret never reaches the database; only its
-    /// sha256 `token_hash` is stored.
-    async fn issue_passkey_session(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _session: NewSession<'_>,
-        _auth_credential_id: &str,
-        _audit: RedeemAudit,
-    ) -> Result<(), DatabaseError> {
-        Err(DatabaseError::Pool(
-            "issue_passkey_session not implemented".to_string(),
-        ))
-    }
-
     /// Issue a browser session for a NEAR wallet login that has ALREADY been
-    /// verified (Slice 3a Task 7). Mirrors [`Database::issue_passkey_session`]
-    /// exactly except `client_kind = 'near'` and `auth_credential_id` carries the
-    /// NEAR access key (`ed25519:...` public key) that authenticated the session.
+    /// verified (Slice 3a Task 7): `client_kind = 'near'` and `auth_credential_id`
+    /// carries the NEAR access key (`ed25519:...` public key) that authenticated the session.
     /// Inserts a `trace_sessions` row (hash-only `token_hash`, `token_issued_at`
     /// defaulted) plus a hash-only audit row in ONE RLS-scoped tx under the
     /// already-resolved tenant. The caller MUST have verified the NEP-413 assertion
@@ -1599,72 +1469,6 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<(), DatabaseError> {
         Err(DatabaseError::Pool(
             "issue_near_session not implemented".to_string(),
-        ))
-    }
-
-    /// List the ACTIVE (unrevoked) credentials for `account_id`, oldest first.
-    /// Label- and timestamp-only; no key material. Tenant- + account-scoped
-    /// under forced RLS so another account's credentials are never returned.
-    async fn list_account_credentials(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-    ) -> Result<Vec<AccountCredentialSummary>, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "list_account_credentials not implemented".to_string(),
-        ))
-    }
-
-    /// Rename one of `account_id`'s ACTIVE credentials. Returns whether a row was
-    /// affected (`false` for an unknown / revoked / other-account credential).
-    /// Tenant- + account-scoped under forced RLS so a caller can never rename a
-    /// credential they do not own.
-    async fn rename_account_credential(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _credential_id: &str,
-        _label: Option<&str>,
-    ) -> Result<bool, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "rename_account_credential not implemented".to_string(),
-        ))
-    }
-
-    /// Soft-revoke one of `account_id`'s ACTIVE credentials and report how many of
-    /// the account's credentials remain active afterwards. `removed` is `false`
-    /// for an unknown / already-revoked / other-account credential. Tenant- +
-    /// account-scoped under forced RLS so a caller can never revoke a credential
-    /// they do not own; the remaining-count lets the caller refuse to remove the
-    /// last passkey. When a credential is removed, every live session it
-    /// minted (`auth_credential_id` = that credential, browser or native) is
-    /// revoked in the same transaction. See
-    /// [`Database::revoke_account_credential_sparing_session`], which the
-    /// removal route calls to keep the caller's own session.
-    async fn revoke_account_credential(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _credential_id: &str,
-    ) -> Result<RevokeCredentialResult, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "revoke_account_credential not implemented".to_string(),
-        ))
-    }
-
-    /// [`Database::revoke_account_credential`], sparing one session: the one
-    /// whose current or within-grace previous `token_hash` is
-    /// `caller_token_hash` (the session making the removal request). `None`
-    /// spares nothing. Sessions with no recorded credential are never touched.
-    async fn revoke_account_credential_sparing_session(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _credential_id: &str,
-        _caller_token_hash: Option<&str>,
-    ) -> Result<RevokeCredentialResult, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "revoke_account_credential_sparing_session not implemented".to_string(),
         ))
     }
 
@@ -1692,7 +1496,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// other-tenant key. Runs inside an RLS-scoped tx; the `tenant_id =
     /// trace_current_tenant_id()` predicate is belt-and-suspenders on top of forced
     /// RLS, and `public_key` is globally UNIQUE. NO `ensure_trace_tenant` here: this
-    /// mirrors `load_webauthn_credential_for_login` — the tenant already exists for
+    /// the tenant already exists for
     /// any registered identity, and the resolver mapped public_key -> tenant first.
     async fn load_near_identity_for_login(
         &self,
@@ -1748,7 +1552,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     }
 
     /// Soft-revoke one of `account_id`'s ACTIVE NEAR identities and report how many
-    /// strong authenticators (webauthn credentials + NEAR identities) remain active
+    /// NEAR identities (NEAR keys) remain active
     /// for the account afterwards, computed in the SAME tx as the revoke. `removed`
     /// is `false` for an unknown / already-revoked / other-account key. Tenant- +
     /// account-scoped under forced RLS so a caller can never revoke an identity they
@@ -1800,7 +1604,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// `device_keys.revoked_at` (the upload-claim issuer then refuses the key),
     /// revoke the device principal's active tenant access grants, and revoke
     /// the native sessions minted for the device. The account's native sessions
-    /// that name neither a device nor a passkey (issued before V139, or by the
+    /// that name neither a device nor a credential (issued before V139, or by the
     /// login-link native sign-in) cannot be attributed, so they are revoked
     /// too, except the caller's own (`caller_session_token_hash`). The device's principal
     /// stays linked, so traces it already contributed remain in the account's
@@ -1921,10 +1725,10 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
-    /// Count `account_id`'s ACTIVE strong authenticators: webauthn credentials plus
-    /// NEAR identities, summed in ONE RLS-scoped tx. Lets a caller enforce
-    /// "keep at least one strong authenticator" before revoking the last passkey or
-    /// NEAR key. Tenant- + account-scoped under forced RLS.
+    /// Count `account_id`'s ACTIVE strong authenticators in ONE RLS-scoped tx:
+    /// its NEAR identities, plus one if it signs in with NEAR AI. The
+    /// strong-authenticator gate reads it. Tenant- + account-scoped under
+    /// forced RLS.
     async fn count_active_strong_authenticators(
         &self,
         _tenant_id: &str,
@@ -1932,46 +1736,6 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<i64, DatabaseError> {
         Err(DatabaseError::Pool(
             "count_active_strong_authenticators not implemented".to_string(),
-        ))
-    }
-
-    /// Count passkey-origin accounts that hold a slot under the unbound-account
-    /// ceiling, in EVERY tenant (Z2 S2): `unbound` ones, and since V102
-    /// `closed` ones the reaper has not yet removed, so create-then-close
-    /// cycles cannot escape the ceiling. A cross-tenant read, so the
-    /// PostgreSQL backend answers through the V98 SECURITY DEFINER function,
-    /// never through a runtime-pool query. The default refuses: a backend that
-    /// cannot count cannot enforce the ceiling, so creation stays closed.
-    async fn count_unbound_passkey_accounts(&self) -> Result<i64, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "unbound_passkey_account_count_unconfigured".to_string(),
-        ))
-    }
-
-    /// Create a passkey-origin account from a verified native `create/finish`
-    /// (Z2 S2): in ONE transaction under the freshly minted tenant, re-check
-    /// the unbound-account ceiling, then write the tenant, the account and its
-    /// `unbound` binding row, the credential, a native session and the audit
-    /// row. Either every row is written or none is. The default refuses.
-    async fn create_passkey_origin_account(
-        &self,
-        _account: NewPasskeyOriginAccount<'_>,
-    ) -> Result<PasskeyOriginAccountOutcome, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "create_passkey_origin_account not implemented".to_string(),
-        ))
-    }
-
-    /// The binding state of one account, read under its tenant's RLS. No
-    /// binding row is `Legacy`. Used by native passkey sign-in to report
-    /// `binding_state`; the unbound gate reads it inside `validate_session`.
-    async fn account_binding_state(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-    ) -> Result<crate::account_binding::AccountBindingState, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "account_binding_state not implemented".to_string(),
         ))
     }
 
@@ -2201,6 +1965,30 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The dedup clusters whose representative simhash is within
+    /// `max_hamming` bits of `simhash`, cross-tenant, each with its
+    /// representative's stamp and its member count. What the inline gate path
+    /// assigns a new decision against.
+    ///
+    /// Postgres answers from `trace_dedup_cluster_representatives` (V145), one
+    /// row per cluster kept in step by trigger. Default: the pre-V145 fold over
+    /// a full [`Database::list_dedup_signals`] enumeration, which is also the
+    /// reference the table is tested against.
+    async fn list_dedup_cluster_candidates(
+        &self,
+        simhash: i64,
+        max_hamming: u32,
+    ) -> Result<Vec<crate::trace_corpus_storage::DedupClusterCandidateRow>, DatabaseError> {
+        let signals = self.list_dedup_signals(i64::MAX).await?;
+        Ok(
+            crate::trace_corpus_storage::dedup_cluster_candidates_from_signals(
+                &signals,
+                simhash,
+                max_hamming,
+            ),
+        )
+    }
+
     /// Enumerate every decision row for the dedup re-derivation pass,
     /// cross-tenant, ordered `decided_at ASC, decision_id ASC`, capped at
     /// `limit`. Not filtered by stamp: the pass reuses rows already on its
@@ -2363,18 +2151,20 @@ pub struct RedeemedSession {
 
 /// Outcome of a successful [`Database::validate_session`] lookup. Carries the
 /// durable account id and the `auth_credential_id` recorded on the session row
-/// (the base64url WebAuthn credential id that authenticated a passkey session, or
-/// `None` for a device-link session). The credential id is a public identifier,
-/// never key material.
+/// (the NEAR access key that authenticated a NEAR session, the WebAuthn
+/// credential id of a session minted before passkeys were removed, or `None`
+/// otherwise, which covers device-link and native sessions; a keyed native
+/// session names its device in `device_key_id`). The credential id is a public
+/// identifier, never key material.
 #[derive(Debug, Clone)]
 pub struct ValidatedSession {
     pub account_id: uuid::Uuid,
     pub auth_credential_id: Option<String>,
     /// The `client_kind` recorded on the session row (`'web'` for a device-link
-    /// session, `'passkey'` for a passkey login, `'near'` for a NEAR login). Used
-    /// by the strong-authenticator gate to classify session strength: a `'web'`
-    /// session is WEAK, a `'passkey'`/`'near'` session is STRONG. A public label,
-    /// never key material.
+    /// session, `'near'` for a NEAR login, `'native'` for the app; `'passkey'`
+    /// on a session minted before passkeys were removed). Used by the
+    /// strong-authenticator gate to classify session strength: only a `'near'`
+    /// session is STRONG. A public label, never key material.
     pub client_kind: String,
     /// Set to the NEW raw session secret when rotation-on-use fired for this
     /// request (the matched row's `token_issued_at` aged past the rotation
@@ -2385,12 +2175,6 @@ pub struct ValidatedSession {
     /// matched the previous token within grace (multi-tab) does NOT re-rotate and
     /// leaves this `None`.
     pub rotated_secret: Option<String>,
-    /// The account's binding state (Z2 S1), read in the SAME query that
-    /// validated the session, so the unbound gate costs no second round trip
-    /// and cannot see a different account than the session did. No binding row
-    /// is [`AccountBindingState::Legacy`](crate::account_binding::AccountBindingState::Legacy),
-    /// which is never gated.
-    pub binding: crate::account_binding::AccountBindingState,
     /// The session's expiry, as stored once this validation is done. A
     /// browser session's rotation never moves it; the auth middleware caps a
     /// rotated cookie's Max-Age at what is left of it, so a rotated cookie never
@@ -2398,70 +2182,6 @@ pub struct ValidatedSession {
     /// `account_native_auth::NATIVE_SESSION_MAX_LIFETIME_DAYS`), and this is the
     /// extended value, which the middleware hands back beside the new token.
     pub expires_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// A registered passkey resolved for the LOGIN (assertion) path. Carries only
-/// the durable account id and the serialized webauthn-rs `Passkey` JSON (public
-/// key, sign counter, AAGUID, transports); never PII. The loader runs under the
-/// already-resolved tenant's RLS, so the row is tenant-scoped by construction.
-#[derive(Debug, Clone)]
-pub struct WebauthnCredentialRow {
-    pub account_id: uuid::Uuid,
-    pub passkey: serde_json::Value,
-}
-
-/// A single ACTIVE credential as surfaced in the account's credential list.
-/// Label-only and timestamp-only: no public-key material or counter state. The
-/// `credential_id` is the base64url WebAuthn id (a label, not a secret).
-#[derive(Debug, Clone)]
-pub struct AccountCredentialSummary {
-    pub credential_id: String,
-    pub label: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// Outcome of revoking one of an account's credentials. `removed` is whether the
-/// soft-delete affected a row (false for an unknown / already-revoked / other
-/// account's credential); `remaining` is the count of the account's credentials
-/// still active after the revoke, so the caller can refuse to remove the last
-/// passkey if policy requires it.
-#[derive(Debug, Clone, Copy)]
-pub struct RevokeCredentialResult {
-    pub removed: bool,
-    pub remaining: i64,
-}
-
-/// Everything native passkey `create/finish` writes for a new passkey-origin
-/// account (Z2 S2). Every value is server-minted or came out of a verified
-/// attestation: the tenant from the OS RNG, the account id from `start`, the
-/// credential from `finish_passkey_registration`. Nothing here is client
-/// supplied except the optional label, which the start handler bounded.
-#[derive(Debug)]
-pub struct NewPasskeyOriginAccount<'a> {
-    pub tenant_id: &'a str,
-    pub account_id: uuid::Uuid,
-    /// Canonical base64url credential id; globally UNIQUE (V32), so a replayed
-    /// attestation fails the insert and rolls the whole account back.
-    pub credential_id: &'a str,
-    /// The serialized webauthn-rs `Passkey`.
-    pub passkey: &'a serde_json::Value,
-    pub label: Option<&'a str>,
-    /// The weak native session minted with the account. Its `client_kind`
-    /// must be `native`; the backend refuses anything else.
-    pub session: NewSession<'a>,
-    /// The unbound-account ceiling, re-checked inside the transaction.
-    pub ceiling: i64,
-}
-
-/// What `create_passkey_origin_account` did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PasskeyOriginAccountOutcome {
-    /// Every row was written and committed.
-    Created,
-    /// The ceiling was reached when re-checked inside the transaction; nothing
-    /// was written.
-    CeilingReached,
 }
 
 /// A registered NEAR identity resolved for the LOGIN (wallet-assertion) path.
@@ -2558,9 +2278,10 @@ pub enum PayoutResolution {
 
 /// Outcome of revoking one of an account's NEAR identities. `removed` is whether
 /// the soft-delete affected a row (false for an unknown / already-revoked / other
-/// account's key); `remaining_strong` is the count of the account's strong
-/// authenticators (webauthn credentials + NEAR identities) still active after the
-/// revoke, so the caller can refuse to remove the last strong authenticator.
+/// account's key); `remaining_strong` is the count of the account's NEAR
+/// identities (NEAR keys) still active after the revoke. It does not count a
+/// NEAR AI login, so `0` means no NEAR key is left, not that the account has
+/// no strong authenticator.
 #[derive(Debug, Clone, Copy)]
 pub struct RevokeNearResult {
     pub removed: bool,
@@ -2701,9 +2422,9 @@ pub struct RevokeAccountDeviceResult {
     pub removed: bool,
     pub sessions_revoked: u64,
     pub grants_revoked: u64,
-    /// The account's live native sessions that named neither a device key nor
-    /// a passkey (issued before V139, or by the login-link native sign-in),
-    /// revoked with the
+    /// The account's live native sessions that named no device key (issued
+    /// before V139, by the login-link native sign-in, or by a passkey sign-in
+    /// before V144, whatever credential id it carries), revoked with the
     /// device because they cannot be told apart from its own. The caller's
     /// session is never among them.
     pub unattributed_sessions_revoked: u64,
@@ -2721,7 +2442,7 @@ pub struct StagedMergeProposal {
 }
 
 /// Outcome of a successful [`Database::execute_merge`]: how many active principal
-/// links and strong authenticators (webauthn credentials + NEAR identities) were
+/// links and strong authenticators (NEAR identities) were
 /// re-keyed from the absorbed account onto the surviving account. Counts only;
 /// never identifiers.
 #[derive(Debug, Clone, Copy)]
@@ -3538,7 +3259,7 @@ impl PayoutLinkAction {
     }
 }
 
-/// A link or unlink request awaiting a passkey confirmation. A link request
+/// A link or unlink request awaiting the contributor's confirmation. A link request
 /// carries its verified, sealed recipient; an unlink request none. `Debug`
 /// redacts the account, the handle and the recipient.
 #[derive(Clone, PartialEq, Eq)]
@@ -3553,6 +3274,11 @@ pub struct PayoutLinkRequestWrite {
     pub recipient: Option<(RecipientKind, SealedRecipient)>,
     pub expires_at: chrono::DateTime<chrono::Utc>,
     pub actor_ref_hash: String,
+    /// For a link, which anchor its proof matched
+    /// ([`crate::payout_recipient_proof::ProofKind::label`]). Written as the
+    /// `label` of the request's audit row, so links proved one way can be
+    /// found later. `None` for an unlink.
+    pub proof_label: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3580,11 +3306,39 @@ pub struct PayoutLinkRequest {
 /// What a confirm writes beside the request it takes: the new link's id and
 /// program (for a `link`) and the confirming account's actor hash. The
 /// recipient comes from the request row, never from the confirm call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PayoutLinkConfirmWrite {
     pub link_id: Uuid,
     pub program: String,
     pub actor_ref_hash: String,
+    /// The rail's program for a carried link's id, so a confirm on a NEAR
+    /// account carries its link to the legacy accounts it has linked, in
+    /// the same transaction (V146; legacy payout migration spec, section
+    /// 3.3). `None` carries nothing.
+    pub carry_programs: Option<CarryPrograms>,
+}
+
+/// `PayoutRail::program_for_link`, for links the store creates itself (a
+/// carried link gets its own id and so its own program).
+#[derive(Clone)]
+pub struct CarryPrograms(pub std::sync::Arc<dyn Fn(Uuid) -> String + Send + Sync>);
+
+impl std::fmt::Debug for CarryPrograms {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CarryPrograms(..)")
+    }
+}
+
+/// What one carry call did across the account's linked legacy tenants
+/// (V146). Counts only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LegacyCarryReport {
+    /// Carried links written.
+    pub carried: u32,
+    /// Carries released (unlinked, closed at zero, or superseded).
+    pub released: u32,
+    /// Legacy accounts skipped because they hold a link of their own.
+    pub skipped: u32,
 }
 
 /// The outcome of [`PayoutStore::confirm_payout_link_request`]. Every
@@ -3607,6 +3361,10 @@ pub enum PayoutLinkConfirm {
     ChangePending,
     /// An unlink with no active link.
     NotLinked,
+    /// A link on an account that has no NEAR AI login anchor at confirm:
+    /// only a recorded NEAR AI login proves a link, so it links nothing.
+    /// Unlinks are never refused this way.
+    NoLoginAnchor,
 }
 
 /// One account's link state on one rail, for the link routes.
@@ -3745,12 +3503,19 @@ pub struct PayoutAccountStanding {
     /// An open `trace_credit_holds` row names the account's `account:` key
     /// or a principal actively linked to it.
     pub credit_held: bool,
+    /// The account holds a live carried link that must not be paid (V146,
+    /// `trace_legacy_payout_carry_invalid`): its tenant was marked pooled,
+    /// its tenant link is gone or revoked, or its source account or link
+    /// no longer stands.
+    pub carry_invalid: bool,
 }
 
 /// An account whose row is gone or closed.
 pub const PAYOUT_ACCOUNT_CLOSED: &str = "payout_account_closed";
 /// An open credit hold on the account or a principal linked to it.
 pub const PAYOUT_ACCOUNT_CREDIT_HOLD: &str = "payout_account_credit_hold";
+/// A carried link that no longer has a standing source (V146).
+pub const PAYOUT_LEGACY_CARRY_INVALID: &str = "payout_legacy_carry_invalid";
 
 impl PayoutAccountStanding {
     /// The shared hold label, if any. A missing account row holds like a
@@ -3760,12 +3525,15 @@ impl PayoutAccountStanding {
             Some(PAYOUT_ACCOUNT_CLOSED)
         } else if self.credit_held {
             Some(PAYOUT_ACCOUNT_CREDIT_HOLD)
+        } else if self.carry_invalid {
+            Some(PAYOUT_LEGACY_CARRY_INVALID)
         } else {
             None
         }
     }
 }
 
+pub use postgres_legacy_payout_carry::legacy_link_hash as payout_legacy_link_hash;
 pub use postgres_payout::{
     PayoutPassLock, account_id_hash as payout_account_id_hash, link_id_hash as payout_link_id_hash,
 };
@@ -4088,9 +3856,10 @@ pub trait PayoutStore: Send + Sync {
         rail: &RailId,
     ) -> Result<PayoutAccountLinkView, DatabaseError>;
 
-    /// The account's NEAR AI login anchors (`trace_near_account_anchors`
-    /// rows with `identity_source = 'near_ai_login'`), which a `near_ai`
-    /// proof's subject must match. Empty for an account with none.
+    /// The account's recorded NEAR AI login anchors
+    /// (`trace_near_account_anchors` rows with `identity_source =
+    /// 'near_ai_login'`), which a `near_ai` proof's subject must match. Empty
+    /// for an account with none; wallet anchors prove nothing here.
     async fn payout_account_login_anchors(
         &self,
         tenant: &str,
@@ -4112,6 +3881,51 @@ pub trait PayoutStore: Send + Sync {
         handle_hash: &str,
         confirm: &PayoutLinkConfirmWrite,
     ) -> Result<PayoutLinkConfirm, DatabaseError>;
+
+    /// Carries the account's live link on `rail` to every open account of
+    /// each legacy tenant it has linked (V81), and releases carries that no
+    /// longer match: an unlinked source, a pooled tenant, a closed account
+    /// (V146; legacy payout migration spec, section 3.3). Idempotent. A
+    /// confirm already does this in its own transaction; this is for the
+    /// tenant-link route, after a new tenant link. Nothing for an account
+    /// outside `near-` / `nearai-` or without a `near_ai_login` anchor.
+    async fn carry_legacy_payout_links(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        programs: &CarryPrograms,
+        actor_ref_hash: &str,
+    ) -> Result<LegacyCarryReport, DatabaseError>;
+
+    /// Create or reuse the account for `principal_ref` in `tenant`, as
+    /// [`Database::create_or_reuse_account`] does, and, in the same
+    /// transaction, carry the linked NEAR AI account's live link on each of
+    /// `rails` to it when `tenant` is a legacy tenant linked through V81
+    /// (#1873; owner, 2026-11-03: carry only at events, and opening an
+    /// account in a linked tenant is one). Nothing is carried for a tenant
+    /// outside a live tenant link, or from a closed source account. A
+    /// failure rolls the whole transaction back, the account included.
+    /// Owner decision, 2026-11-03 (V148:444): release every live carry on
+    /// `rail` in legacy tenant `tenant` whose account is no longer proven, at
+    /// send time, audited with `actor_ref_hash` (the pass's actor). A live
+    /// pass calls this before it reads the tenant's links; a dry run does
+    /// not. It only ends carries. Nothing for a `near-` / `nearai-` tenant.
+    /// Returns how many carries it released.
+    async fn release_unproven_legacy_carries(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+        actor_ref_hash: &str,
+    ) -> Result<u32, DatabaseError>;
+
+    async fn create_or_reuse_account_carrying(
+        &self,
+        tenant: &str,
+        principal_ref: &str,
+        rails: &[(RailId, CarryPrograms)],
+        actor_ref_hash: &str,
+    ) -> Result<Uuid, DatabaseError>;
 
     /// The audit actions on `rail` in this tenant, oldest first.
     async fn payout_audit_actions(
@@ -5020,6 +4834,7 @@ mod payout_debug_tests {
                 recipient: Some((kind.clone(), sealed())),
                 expires_at: expires,
                 actor_ref_hash: ACCOUNT_HASH.into(),
+                proof_label: Some("near_ai_login"),
             }
         ));
         assert_redacted(format!(

@@ -99,7 +99,7 @@ struct MissionDraftsView: View {
             Spacer(minLength: 0)
             // At the row's trailing end, as every refresh is (owner,
             // 2026-10-20).
-            GlassRefreshButton(model.text("refresh")) { model.refresh() }
+            GlassRefreshButton(model.text("refresh"), title: SettingsLegacyWords.refresh) { model.refresh() }
         }
         .disabled(model.mutationBusy)
     }

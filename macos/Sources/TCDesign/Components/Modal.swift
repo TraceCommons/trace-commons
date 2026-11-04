@@ -466,8 +466,8 @@ private struct GlassModalHost: ViewModifier {
             .accessibilityHidden(covered)
             // #1146's `.tc-scrim` backdrop: the window behind blurred by
             // `size.modalScrimBlur` (8) under the 40% dim, so what the
-            // modal is raised over (Join, under a passkey sheet) stays
-            // faintly legible. Never a system material, which hides it.
+            // modal is raised over stays faintly legible. Never a system
+            // material, which hides it.
             .blur(radius: covered ? GlassTokens.Size.modalScrimBlur : 0)
             .onPreferenceChange(GlassModalPresence.self) { ids in
                 presented = ids

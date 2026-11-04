@@ -121,7 +121,7 @@ pub async fn record_account_trust_facts(
 /// is never logged.
 pub fn database_error_label(error: &DatabaseError) -> &'static str {
     match error {
-        DatabaseError::Pool(_) => "pool",
+        DatabaseError::Pool(_) | DatabaseError::PoolRuntime(_) => "pool",
         DatabaseError::Postgres(_) => "postgres",
         _ => "other",
     }

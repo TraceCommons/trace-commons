@@ -1,4 +1,5 @@
 pub mod account_device_code;
+pub mod account_login_change;
 pub mod activity_missions;
 pub mod admission;
 pub mod canonical_json;
@@ -27,6 +28,7 @@ pub mod public_run;
 mod redaction;
 pub mod referral;
 pub mod settlement_estimate;
+pub mod submit_rate;
 pub mod trace_contribution;
 pub mod upload_allowance;
 pub mod witness_pacing;

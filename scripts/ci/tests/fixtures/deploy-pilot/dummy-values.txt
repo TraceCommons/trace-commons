@@ -14,4 +14,3 @@ TC_PII_BACKSTOP_DRIVER_PASSWORD=dummy-backstop-password
 TC_PUBLIC_HOST=pilot.example.invalid
 TC_RUNTIME_SA=dummy-runtime@example.invalid
 TC_TENANT_ID=dummy-tenant
-TC_WEBAUTHN_RP_ID=example.invalid

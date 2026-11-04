@@ -123,7 +123,7 @@ impl ParticipantFixture {
             .batch_execute(&format!(
                 "GRANT SELECT,INSERT,UPDATE ON trace_tenants TO {0};
                  GRANT SELECT,UPDATE ON trace_accounts,trace_account_merge_proposals,trace_account_principals,
-                     trace_webauthn_credentials,trace_near_identities,trace_public_runs,trace_sessions TO {0};
+                     trace_near_identities,trace_public_runs,trace_sessions TO {0};
                  GRANT INSERT ON trace_account_audit TO {0};
                  GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO {0};",
                 self.login

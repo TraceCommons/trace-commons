@@ -173,6 +173,15 @@ public struct MonitorTreeCopy: MonitorWordTable {
     public let folderMenu: String
     public let watchFolder: String
     public let watchTool: String
+    /// The Automatic switches: a folder row's (`{label}`), the tab's for
+    /// every folder, and the line under the tab's.
+    public let automaticFolder: String?
+    public let automaticAll: String?
+    public let automaticCount: String?
+    /// The titles over the tree's columns while the Automatic switches show.
+    public let columnFolders: String?
+    public let columnSubmit: String?
+    public let columnAutomatic: String?
     public let dismissSession: String
     public let dismissSessionTitle: String
     public let dismissSessionBody: String
@@ -209,6 +218,12 @@ public struct MonitorTreeCopy: MonitorWordTable {
         case folderMenu = "folder_menu"
         case watchFolder = "watch_folder"
         case watchTool = "watch_tool"
+        case automaticFolder = "automatic_folder"
+        case automaticAll = "automatic_all"
+        case automaticCount = "automatic_count"
+        case columnFolders = "column_folders"
+        case columnSubmit = "column_submit"
+        case columnAutomatic = "column_automatic"
         case dismissSession = "dismiss_session"
         case dismissSessionTitle = "dismiss_session_title"
         case dismissSessionBody = "dismiss_session_body"
@@ -294,7 +309,6 @@ public struct MonitorSummaryCopy: MonitorWordTable {
     public let toolsWatched: String
     public let waitingForYou: String
     public let worthASecondLook: String
-    public let uploadsToday: String
     public let statistics: String
     public let topProjects: String
     public let topTools: String
@@ -305,7 +319,6 @@ public struct MonitorSummaryCopy: MonitorWordTable {
         case toolsWatched = "tools_watched"
         case waitingForYou = "waiting_for_you"
         case worthASecondLook = "worth_a_second_look"
-        case uploadsToday = "uploads_today"
         case statistics
         case topProjects = "top_projects"
         case topTools = "top_tools"
@@ -474,18 +487,14 @@ public struct MonitorUndoCopy: MonitorWordTable {
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
 }
 
-/// The queue's safeguards panel labels that `HealthCopy`, `DailyBudgetCopy` and the routing copy do not already hold.
+/// The queue's safeguards panel labels that `HealthCopy` and the routing copy do not already hold.
 public struct MonitorSafeguardsCopy: MonitorWordTable {
     public let eyebrow: String
     public let heading: String
-    public let dailyLimit: String
     public let inferenceRouting: String
     public let daemonOwned: String
     public let rowsUnavailableOne: String
     public let rowsUnavailable: String
-    public let remaining: String
-    public let heldByLimitOne: String
-    public let heldByLimit: String
     public let capacityUnreadable: String
     public let routingNotDeclared: String
     public let routingAwaitingRows: String
@@ -496,14 +505,10 @@ public struct MonitorSafeguardsCopy: MonitorWordTable {
     enum CodingKeys: String, CodingKey, CaseIterable {
         case eyebrow
         case heading
-        case dailyLimit = "daily_limit"
         case inferenceRouting = "inference_routing"
         case daemonOwned = "daemon_owned"
         case rowsUnavailableOne = "rows_unavailable_one"
         case rowsUnavailable = "rows_unavailable"
-        case remaining
-        case heldByLimitOne = "held_by_limit_one"
-        case heldByLimit = "held_by_limit"
         case capacityUnreadable = "capacity_unreadable"
         case routingNotDeclared = "routing_not_declared"
         case routingAwaitingRows = "routing_awaiting_rows"
@@ -726,10 +731,12 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let sectionTraces: String
     public let sectionAccount: String
     public let privateAISignIn: String
-    /// Home's Traces hero: its title, line and way into Traces (owner,
-    /// 2026-10-28).
+    /// Beside the Account heading while its figures wait on a sign-in
+    /// (owner, 2026-11-02).
+    public let accountNoData: String
+    /// Home's Traces hero: its title and way into Traces (owner,
+    /// 2026-10-28; no line under the title since 2026-11-02).
     public let tracesHeroTitle: String
-    public let tracesHeroBody: String
     public let tracesHeroAction: String
     /// The hero's three steps, each a title over one line (owner,
     /// 2026-10-29).
@@ -739,7 +746,9 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let tracesHeroStepEarnDetail: String
     public let tracesHeroStepUse: String
     public let tracesHeroStepUseDetail: String
-    public let creditDelta: String
+    /// Home's Credit earned tile: the account's whole total, `{amount}`
+    /// (product owner, 2026-10-29).
+    public let creditAccountTotal: String
     public let insightsToday: String
     public let insightsTeaser: String
     public let campaignEyebrow: String
@@ -792,8 +801,8 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case sectionTraces = "section_traces"
         case sectionAccount = "section_account"
         case privateAISignIn = "private_ai_sign_in"
+        case accountNoData = "account_no_data"
         case tracesHeroTitle = "traces_hero_title"
-        case tracesHeroBody = "traces_hero_body"
         case tracesHeroAction = "traces_hero_action"
         case tracesHeroStepContribute = "traces_hero_step_contribute"
         case tracesHeroStepContributeDetail = "traces_hero_step_contribute_detail"
@@ -801,7 +810,7 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case tracesHeroStepEarnDetail = "traces_hero_step_earn_detail"
         case tracesHeroStepUse = "traces_hero_step_use"
         case tracesHeroStepUseDetail = "traces_hero_step_use_detail"
-        case creditDelta = "credit_delta"
+        case creditAccountTotal = "credit_account_total"
         case insightsToday = "insights_today"
         case insightsTeaser = "insights_teaser"
         case campaignEyebrow = "campaign_eyebrow"

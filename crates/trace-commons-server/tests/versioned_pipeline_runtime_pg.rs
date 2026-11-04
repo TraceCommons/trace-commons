@@ -76,7 +76,8 @@ use trace_commons_server::versioned_pipeline_bundle::{
     pipeline_operation_ref, pipeline_result_ref,
 };
 use trace_commons_server::versioned_pipeline_compat::{
-    COMPATIBILITY_SCORE_RULE, CompatibilityBundleConfig,
+    COMPATIBILITY_GRADED_SCORE_RULE, COMPATIBILITY_SCORE_RULE, CompatibilityBundleConfig,
+    CompatibilityCreditRule, GRADED_ANOMALY_TERM_LABEL, GRADED_PERPLEXITY_TERM_LABEL,
 };
 use trace_commons_server::versioned_pipeline_credit::{
     DryRunNearPayoutAdapter, NearConfirmationEvidence, NearPayoutAdapter, NearPayoutConfirmation,
@@ -3131,6 +3132,7 @@ fn production_test_packages() -> (BundlePackage, BundlePackage) {
         chunk_cap: 16,
         chunk_min_tokens: 64,
         novelty_utility_microcredits: 2_500_000,
+        credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
     };
     let other_gate = MainGateConfig {
         novelty_floor_micros: Some(600_000),
@@ -3220,6 +3222,8 @@ async fn production_assembly_is_constructible_from_the_library() {
             chunk_cap: 16,
             chunk_min_tokens: 64,
             novelty_utility_microcredits: 2_500_000,
+            credit_rule:
+                trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
         },
         components,
         score_policies: Default::default(),
@@ -19521,6 +19525,343 @@ async fn a_compatibility_award_needs_the_model_training_allowed_use() {
     );
 }
 
+/// A compatibility service under the graded credit rule (owner decisions
+/// D1-D4, 2026-11-03), with `CHECKED_DELTA_MICROCREDITS` as its ceiling.
+async fn graded_compatibility_service(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    authority: Arc<dyn PipelineAuthorityProvider>,
+    checks: PipelineNoveltyUtilityChecks,
+) -> Arc<PipelineService> {
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+    config.credit_rule = CompatibilityCreditRule::GradedPerplexityV1;
+    compatibility_test_service_with(
+        backend.clone(),
+        artifact_store(dir),
+        config,
+        None,
+        authority,
+        checks,
+    )
+    .await
+}
+
+/// Owner decisions D2-D4 (2026-11-03): under the graded rule, a passing
+/// trace's award is the delta scaled by its perplexity and anomaly terms,
+/// recorded as award adjustments; Settle writes it as `main`'s
+/// `NoveltyUtility` event (after `main`'s checks) and, unlike the flat rule,
+/// composes and finalizes it into a batch. The NEAR AI rail's accrual
+/// prices that pipeline-written batch like any other.
+#[tokio::test]
+async fn a_graded_award_is_batched_and_the_payout_rail_prices_it() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service =
+        graded_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks()).await;
+    let tenant = format!("compat-graded-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-graded";
+    service.register_default_bundle(&tenant).await.unwrap();
+    let run = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        principal,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+
+    // Score: the graded award and the adjustments that recompute it.
+    let score = service
+        .store()
+        .outcome_for_phase(&tenant, run.run_id, Phase::Score)
+        .await
+        .unwrap()
+        .expect("Score committed its outcome");
+    let evidence: ScoreEvidence = serde_json::from_value(score.evidence).unwrap();
+    let labels: Vec<&str> = evidence
+        .award_adjustments
+        .iter()
+        .map(|adjustment| adjustment.label.as_str())
+        .collect();
+    assert_eq!(
+        labels,
+        [GRADED_PERPLEXITY_TERM_LABEL, GRADED_ANOMALY_TERM_LABEL]
+    );
+    let award = evidence.award_adjustments.iter().fold(
+        u128::from(CHECKED_DELTA_MICROCREDITS),
+        |amount, adjustment| amount * u128::from(adjustment.factor_micros) / 1_000_000,
+    );
+    assert!(award > 0 && award <= u128::from(CHECKED_DELTA_MICROCREDITS));
+    let evaluation: serde_json::Value = score.evaluation;
+    assert_eq!(evaluation["rule_id"], COMPATIBILITY_GRADED_SCORE_RULE);
+
+    // Settle: the leg completed into a finalized batch.
+    let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(leg.operation_state, "complete", "{leg:?}");
+    assert_eq!(leg.atomic_units, AtomicUnits::from_raw(award));
+    let event_id = leg.credit_event_id.expect("the leg's ledger event");
+    let batch_id = leg.settlement_batch_id.expect("the graded leg is batched");
+    assert_eq!(
+        settlement_batch_status(&backend, &tenant, batch_id)
+            .await
+            .as_deref(),
+        Some("finalized")
+    );
+    assert_eq!(
+        finalized_batches_carrying(&backend, &tenant, event_id).await,
+        vec![(
+            batch_id,
+            Some(InstrumentId::trace_credit().as_str().to_string())
+        )]
+    );
+    assert_eq!(
+        credit_event_state(&backend, &tenant, event_id)
+            .await
+            .as_deref(),
+        Some("final")
+    );
+    assert_eq!(
+        count_novelty_utility_rows_for_run(&backend, &tenant, run.run_id).await,
+        1
+    );
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let row = tx
+        .query_one(
+            "SELECT reason, actor_principal_ref, credit_account_ref FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND credit_event_id = $2",
+            &[&tenant, &event_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        row.get::<_, String>("reason"),
+        "novelty_utility:compatibility_graded_perplexity_v1"
+    );
+    assert_eq!(
+        row.get::<_, String>("actor_principal_ref"),
+        TEST_PIPELINE_ISSUER
+    );
+    let status = PipelineProductStore::new(backend.clone())
+        .contributor_statuses(&tenant, principal, &[run.submission_id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(status.credit, PipelineCreditStatus::Finalized);
+
+    // The NEAR AI rail's accrual prices the batch the pipeline wrote, at
+    // the pilot's $0.25 per point.
+    let batches = backend
+        .list_trace_credit_settlement_batches(&tenant)
+        .await
+        .unwrap();
+    let events = backend.list_trace_credit_events(&tenant).await.unwrap();
+    let epochs = [trace_commons_server::db::PayoutRateEpoch {
+        rate: trace_commons_gate_api::RailRate::new("s-test", 250_000 * 1_000, 1_000_000).unwrap(),
+        pricing_label: None,
+        observed_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+    }];
+    let plan = trace_commons_server::payout_accrual::plan_rail_accruals(
+        &trace_commons_server::near_ai_rail::near_ai_rail_descriptor(),
+        &trace_commons_server::payout_accrual::AccrualInputs {
+            batches: &batches,
+            events: &events,
+            principal_accounts: &std::collections::HashMap::new(),
+            existing: &[],
+            epochs: &epochs,
+            now: chrono::Utc::now() + chrono::Duration::minutes(1),
+        },
+    )
+    .unwrap();
+    assert_eq!(plan.writes.len(), 1, "{plan:?}");
+    let accrual = &plan.writes[0];
+    assert_eq!(accrual.settlement_batch_id, batch_id);
+    assert_eq!(accrual.award_units.get(), award);
+    assert_eq!(
+        accrual.rail_units.get(),
+        award * 250,
+        "nano-USD at $0.25 per point"
+    );
+
+    // `main`'s settlement never selects the event (its `external_ref` is
+    // the pipeline's ledger source key): `credit_settlement_enumerator_pg`
+    // and `only_the_legacy_gate_scoring_award_counts_toward_legacy_settlement`
+    // pin that, under the enumerator role this login does not hold.
+}
+
+/// The graded leg passes `main`'s `NoveltyUtility` credit checks first: a
+/// default-consent submission (no model training) is withheld
+/// `policy_mismatch`, with no ledger row and no batch.
+#[tokio::test]
+async fn a_graded_award_without_model_training_consent_is_withheld_unbatched() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service =
+        graded_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks()).await;
+    let tenant = format!("compat-graded-consent-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-graded-consent";
+    let default_consent = envelope(uuid::Uuid::new_v4()).await;
+    assert!(
+        !default_consent
+            .trace_card
+            .allowed_uses
+            .contains(&TraceAllowedUse::ModelTraining)
+    );
+    let run = submit_envelope_and_complete(&service, &tenant, principal, &default_consent).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(leg.operation_state, "complete", "{leg:?}");
+    assert_eq!(leg.credit_event_id, None);
+    assert_eq!(leg.settlement_batch_id, None);
+    assert_eq!(
+        leg.last_error_label.as_deref(),
+        Some(PIPELINE_NOVELTY_UTILITY_POLICY_MISMATCH_LABEL)
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+        0
+    );
+    assert!(
+        backend
+            .list_trace_credit_settlement_batches(&tenant)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Owner decision D7: a graded leg settles into a batch, so a credit hold on
+/// its account stops it as it stops a `PipelineScore` leg (the flat
+/// `NoveltyUtility` leg ignores holds, since it is never paid).
+#[tokio::test]
+async fn a_held_principals_graded_award_stays_held() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service =
+        graded_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks()).await;
+    let tenant = format!("compat-graded-held-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:compat-graded-held";
+    service.register_default_bundle(&tenant).await.unwrap();
+    backend
+        .upsert_trace_credit_hold(TraceCreditHoldWrite {
+            tenant_id: tenant.clone(),
+            hold_id: uuid::Uuid::new_v4(),
+            credit_account_ref: principal.to_string(),
+            credit_account_hash: credit_account_hash(principal),
+            reason: TraceCreditHoldReason::PolicyMigration,
+            reason_hash: credit_account_hash("pipeline-hold"),
+            actor_principal_ref: principal.to_string(),
+            released_at: None,
+        })
+        .await
+        .expect("hold the principal's credit");
+    let run = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        principal,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    assert_eq!(run.state, PipelineRunState::Retry, "{run:?}");
+    assert_eq!(
+        run.last_error_label.as_deref(),
+        Some(PIPELINE_CREDIT_HELD_LABEL)
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+        0
+    );
+}
+
+/// Owner decision D6: after `main`'s award is raised (here, to the graded
+/// rule), a tenant still on the old compatibility bundle that awards
+/// nothing passes the startup checks of its bundles, and the loop can tell
+/// it apart; the exact check (the default package's, an armed set's) still
+/// refuses it, and a bundle that differs in a scoring value is refused
+/// everywhere.
+#[tokio::test]
+async fn a_tenant_on_a_bundle_that_awards_nothing_passes_its_startup_checks() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let old = compatibility_test_service_with(
+        backend.clone(),
+        artifact_store(&dir),
+        CompatibilityBundleConfig::local_reference(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+    )
+    .await;
+    let tenant = format!("compat-d6-{}", uuid::Uuid::new_v4());
+    old.register_default_bundle(&tenant).await.unwrap();
+    let old_bundle = old.default_package().bundle_id.clone();
+
+    let raised =
+        graded_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks()).await;
+    let raised_gate = {
+        let mut config = CompatibilityBundleConfig::local_reference();
+        config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+        config.credit_rule = CompatibilityCreditRule::GradedPerplexityV1;
+        config.main_gate()
+    };
+    raised
+        .check_tenant_bundles(&tenant, &raised_gate, false)
+        .await
+        .expect("a tenant on the no-award bundle passes");
+    let old_package = old.default_package().clone();
+    assert_eq!(
+        raised.check_tenant_package(&old_package, &raised_gate, false),
+        Ok(())
+    );
+    assert_eq!(
+        raised.check_runnable_package(&old_package, &raised_gate, false),
+        Err("pipeline_runtime_main_gate_config_mismatch"),
+        "the exact check never tolerates it"
+    );
+    assert!(
+        raised
+            .bundle_awards_nothing_under(&tenant, &old_bundle, &raised_gate)
+            .await
+    );
+    let raised_bundle = raised.default_package().bundle_id.clone();
+    raised
+        .register_default_bundle(&format!("{tenant}-new"))
+        .await
+        .unwrap();
+    assert!(
+        !raised
+            .bundle_awards_nothing_under(&format!("{tenant}-new"), &raised_bundle, &raised_gate)
+            .await,
+        "the armed bundle itself is not one to move"
+    );
+
+    // A scoring value differs: refused at startup too.
+    let mut other_floor = raised_gate;
+    other_floor.novelty_floor_micros = Some(1);
+    assert!(
+        raised
+            .check_tenant_bundles(&tenant, &other_floor, false)
+            .await
+            .is_err()
+    );
+    assert!(
+        !raised
+            .bundle_awards_nothing_under(&tenant, &old_bundle, &other_floor)
+            .await
+    );
+}
+
 /// Ruling T15-10: with a non-empty central-issuer allowlist, a positive
 /// compatibility award needs the pipeline's configured issuer on it, where
 /// `main` needs its calling gate worker there. No issuer, or one not on the
@@ -29117,18 +29458,9 @@ async fn a_novelty_utility_award_with_no_configured_issuer_is_withheld() {
 fn main_gate_of(
     config: &CompatibilityBundleConfig,
 ) -> trace_commons_server::versioned_pipeline_compat::MainGateConfig {
-    trace_commons_server::versioned_pipeline_compat::MainGateConfig {
-        perplexity_floor_micros: Some(config.perplexity_floor_micros),
-        tail_fraction_floor_micros: Some(config.tail_fraction_floor_micros),
-        novelty_floor_micros: Some(config.novelty_floor_micros),
-        embed_insert_novelty_micros: config.embed_insert_novelty_micros,
-        top_k: config.top_k,
-        chunk_target_tokens: config.chunk_target_tokens,
-        chunk_max_tokens: config.chunk_max_tokens,
-        chunk_cap: config.chunk_cap,
-        chunk_min_tokens: config.chunk_min_tokens,
-        novelty_utility_microcredits: config.novelty_utility_microcredits,
-    }
+    // The configuration's own inverse, every field included (the credit
+    // rule was once dropped by a hand-copied field list here).
+    config.main_gate()
 }
 
 /// Multi-lens review L5-2 and Zaki review 3, Z3-2: startup checks every
@@ -31686,6 +32018,8 @@ fn production_compatible_config() -> CompatibilityBundleConfig {
             chunk_cap: 16,
             chunk_min_tokens: 64,
             novelty_utility_microcredits: 0,
+            credit_rule:
+                trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
         },
     )
     .expect("production-compatible config validates")

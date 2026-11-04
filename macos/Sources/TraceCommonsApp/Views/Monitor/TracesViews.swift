@@ -58,6 +58,15 @@ struct TracesTreeView: View, Equatable {
     /// `traces-workspace.tsx`, `expanded = []`), and one opens when a
     /// session in it is selected from elsewhere (#1146 `reveal`).
     @State private var expanded: Set<String> = []
+    /// A folder being dragged into place (owner, 2026-11-02, as the tabs
+    /// are dragged): which one, and where its middle was when grabbed.
+    @State private var draggingFolder: String?
+    @State private var dragStartMid: CGFloat = 0
+    /// How far the dragged folder sits from its slot.
+    @State private var dragOffset: CGFloat = 0
+    /// Each drawn folder row's frame in the tree, for the drag.
+    @State private var folderFrames: [String: CGRect] = [:]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The folders the search opened that were not open already: they
     /// close again when the search is cleared. A folder the person opens or
     /// closes by hand leaves this set and stays as they left it.
@@ -176,7 +185,7 @@ struct TracesTreeView: View, Equatable {
                         // so, with its way out: the idle filter's Clear, or
                         // Show ignored folders when it hides every folder.
                         if Self.keepsControlsWhenEmpty(idleOnly: store.idleOnly, hiddenIgnored: store.tree.hiddenIgnored) {
-                            TracesListControls(store: store, openHistory: openHistory)
+                            TracesListControls(store: store, openHistory: openHistory, automatic: automaticToggle)
                         }
                         if store.phase == .loaded { emptyTree }
                     }
@@ -184,8 +193,12 @@ struct TracesTreeView: View, Equatable {
                 .scrollIndicators(.never)
             } else {
                 VStack(spacing: 0) {
-                    TracesListControls(store: store, openHistory: openHistory)
+                    TracesListControls(store: store, openHistory: openHistory, automatic: automaticToggle)
                         .padding(.bottom, GlassTokens.Space.s2)
+                    if automaticToggle != nil, let tree = store.words?.tree,
+                        let folders = tree.columnFolders, let submit = tree.columnSubmit, let auto = tree.columnAutomatic {
+                        TracesColumnTitles(folders: folders, submit: submit, automatic: auto)
+                    }
                     tree
                 }
             }
@@ -293,6 +306,11 @@ struct TracesTreeView: View, Equatable {
                 }
                 // Folders are the top level: no tool level to indent past.
                 .environment(\.glassTreeRoot, .folder)
+                .coordinateSpace(.named(Self.foldersSpace))
+                // A folder dragged into place must not take the window with
+                // it (owner, 2026-11-02): the window moves by its background.
+                .holdsWindowStill()
+                .onPreferenceChange(TracesFolderFrames.self) { folderFrames = $0 }
                 .overlayPreferenceValue(TracesMenuAnchors.self, alignment: .topLeading) { anchors in
                     GeometryReader { space in openMenus(anchors, in: space) }
                 }
@@ -357,6 +375,21 @@ struct TracesTreeView: View, Equatable {
         }
     }
 
+    /// Automatic for every folder (owner, 2026-10-30): the Settings choice
+    /// as one toggle, an eye in the toolbar left of History (owner,
+    /// 2026-11-02), with its count in the tooltip. Nil without the core's
+    /// words.
+    private var automaticToggle: SharingChoiceCard.ToolbarToggle? {
+        guard let tree = store.words?.tree, let name = tree.automaticAll, let line = tree.automaticCount else {
+            return nil
+        }
+        let store = store
+        return SharingChoiceCard.ToolbarToggle(
+            accessibleName: name,
+            line: SharingChoice.automaticCount(store.tree.folders, words: line),
+            saved: { await store.load() })
+    }
+
     /// A mode change's confirmation, in the core's words for that folder.
     private func confirmation(_ pending: Confirmation) -> GlassConfirmation {
         let cancel = { confirming = nil }
@@ -415,6 +448,21 @@ struct TracesTreeView: View, Equatable {
     private func apply(_ folder: TracesTree.FolderNode, _ mode: ProjectMode) {
         confirming = nil
         Task { await store.setFolderMode(folder, mode, promised: folder.sessions.count) }
+    }
+
+    /// A folder row's Automatic switch (owner, 2026-10-30): on at
+    /// Automatic, off at Ask, when the core offers the other; nil at Never
+    /// or for a folder the core lists no mode for. Turning it on arms the
+    /// folder through `modeChange`, so the core's arming question is asked.
+    nonisolated static func automaticSwitch(_ folder: TracesTree.FolderNode) -> Bool? {
+        // Traces with no project: a switch that stays off (owner,
+        // 2026-10-30); pressing it says why.
+        if folder.isBucket { return folder.mode == nil ? nil : false }
+        return switch folder.mode {
+        case .autoUpload: folder.offerableModes.contains(.ask) ? true : nil
+        case .ask: folder.offerableModes.contains(.autoUpload) ? false : nil
+        case .ignore, nil: nil
+        }
     }
 
     static func status(_ mode: ProjectMode) -> GlassStatus {
@@ -603,6 +651,7 @@ struct TracesTreeView: View, Equatable {
         // offers others; and Ignore.
         let rulable = folder.mode != nil && !folder.offerableModes.isEmpty
         let menu = rulable || ignorable
+        let automatic = words?.tree.automaticFolder == nil ? nil : Self.automaticSwitch(folder)
         // Submit is the Folder inspector's split button (owner, 2026-10-19):
         // the action, and a chevron to Submit all as, when the core's
         // outcome words are read; else the plain pill.
@@ -634,6 +683,8 @@ struct TracesTreeView: View, Equatable {
                 menuOpen: rowMenu == .submit(folder.id), busy: busy) : nil,
             menuLabel: menu ? words?.tree.folderMenu ?? "" : "",
             menuOpen: rowMenu == .folder(folder.id),
+            automatic: automatic,
+            automaticLabel: words?.tree.automaticFolder.map { $0.replacingOccurrences(of: "{label}", with: folder.label) } ?? "",
             floats: (menu && rowMenu == .folder(folder.id)) || (split && rowMenu == .submit(folder.id)),
             help: submits ? Self.submitHelp(offer.withheldLine, words: words) : "",
             writing: writing,
@@ -646,10 +697,91 @@ struct TracesTreeView: View, Equatable {
             onSplitSubmit: { Task { await store.contributeFolder(folder, verdict: nil) } },
             onSplitMenu: { rowMenu = Self.toggled(.submit(folder.id), current: rowMenu) },
             onMenu: menu ? { rowMenu = Self.toggled(.folder(folder.id), current: rowMenu) } : nil,
+            onAutomatic: { on in
+                if folder.isBucket {
+                    if on, let note = ProjectCopy.unresolvedBucketNote { store.say(note) }
+                } else {
+                    request(folder, on ? .autoUpload : .ask)
+                }
+            },
             spoken: $spoken
         )
         .equatable()
         .id(Self.rowID(.folder(projectID: folder.id)))
+        // Dragged as the tabs are (owner, 2026-11-02): the folder follows
+        // the pointer, and trades places with the folder above or below
+        // once past its middle. The list is then in the person's order.
+        .offset(y: draggingFolder == folder.id ? dragOffset : 0)
+        // Measured outside the offset, so the frame is the slot the
+        // folder holds, not where the drag has moved it to.
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: TracesFolderFrames.self,
+                    value: [folder.id: proxy.frame(in: .named(Self.foldersSpace))])
+            }
+        }
+        .zIndex(draggingFolder == folder.id ? 1 : 0)
+        .simultaneousGesture(folderDrag(folder.id))
+        .modifier(FolderMoveActions(store: store, id: folder.id))
+    }
+
+    /// The tree's space, where folder rows and the drag are measured.
+    static let foldersSpace = "tracesFolders"
+    /// How far the pointer travels before a press on a folder becomes a
+    /// drag, as for the tabs.
+    static let folderDragThreshold: CGFloat = 6
+
+    /// The folder a folder dragged to `center` trades places with: the one
+    /// above once its middle is passed going up, the one below going down;
+    /// nil while it is between them.
+    nonisolated static func folderSwap(
+        center: CGFloat, above: (id: String, midY: CGFloat)?, below: (id: String, midY: CGFloat)?
+    ) -> String? {
+        if let above, center < above.midY { return above.id }
+        if let below, center > below.midY { return below.id }
+        return nil
+    }
+
+    private func folderDrag(_ id: String) -> some Gesture {
+        // As the tabs: the pointer's travel, not its place in the tree,
+        // which moves under it as the folder is offset.
+        DragGesture(minimumDistance: Self.folderDragThreshold, coordinateSpace: .global)
+            .onChanged { gesture in
+                guard let frame = folderFrames[id] else { return }
+                if draggingFolder != id {
+                    draggingFolder = id
+                    dragStartMid = frame.midY
+                }
+                // Where the dragged folder's middle is under the pointer,
+                // against the slot it holds now.
+                let center = dragStartMid + gesture.translation.height
+                let shown = store.shownTree.folders.map(\.id)
+                if let index = shown.firstIndex(of: id) {
+                    let above = index > 0 ? folderFrames[shown[index - 1]].map { (shown[index - 1], $0.midY) } : nil
+                    let below = index + 1 < shown.count ? folderFrames[shown[index + 1]].map { (shown[index + 1], $0.midY) } : nil
+                    if let other = Self.folderSwap(center: center, above: above, below: below) {
+                        store.moveFolder(id, onto: other)
+                        // The rows trade places next pass; until then the
+                        // dragged one is measured from where it lands.
+                        if let otherFrame = folderFrames[other] {
+                            let landed = other == above?.0
+                                ? otherFrame.minY + frame.height / 2
+                                : otherFrame.maxY - frame.height / 2
+                            folderFrames[id] = CGRect(x: frame.minX, y: landed - frame.height / 2,
+                                                      width: frame.width, height: frame.height)
+                        }
+                    }
+                }
+                dragOffset = center - (folderFrames[id]?.midY ?? frame.midY)
+            }
+            .onEnded { _ in
+                withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85)) {
+                    dragOffset = 0
+                }
+                // Cleared after the click the drag's release delivers.
+                DispatchQueue.main.async { draggingFolder = nil }
+            }
     }
 
     /// A session row's values, worked out here and handed to its own view.
@@ -983,6 +1115,11 @@ struct TracesFolderRow: View, Equatable {
     let split: Split?
     let menuLabel: String
     let menuOpen: Bool
+    /// The folder's Automatic switch beside Submit (owner, 2026-10-30): on
+    /// for Automatic, off for Ask; nil for a folder it cannot switch
+    /// (Never, or a mode the core does not offer). Its accessible name.
+    let automatic: Bool?
+    let automaticLabel: String
     /// One of this row's menus is open: it publishes its bounds for it.
     let floats: Bool
     let help: String
@@ -995,6 +1132,7 @@ struct TracesFolderRow: View, Equatable {
     let onSplitSubmit: () -> Void
     let onSplitMenu: () -> Void
     let onMenu: (() -> Void)?
+    let onAutomatic: (Bool) -> Void
     /// The tree's VoiceOver focus, put on the `GlassListRow`: the element
     /// VoiceOver lands on, an accessibility container. Left out of `==`:
     /// it is the same focus state for every row.
@@ -1005,7 +1143,8 @@ struct TracesFolderRow: View, Equatable {
         MainActor.assumeIsolated {
             lhs.folder == rhs.folder && lhs.sub == rhs.sub && lhs.selected == rhs.selected && lhs.off == rhs.off
                 && lhs.open == rhs.open && lhs.submitTitle == rhs.submitTitle && lhs.split == rhs.split
-                && lhs.menuLabel == rhs.menuLabel && lhs.menuOpen == rhs.menuOpen && lhs.floats == rhs.floats
+                && lhs.menuLabel == rhs.menuLabel && lhs.menuOpen == rhs.menuOpen && lhs.automatic == rhs.automatic
+                && lhs.automaticLabel == rhs.automaticLabel && lhs.floats == rhs.floats
                 && lhs.help == rhs.help && lhs.writing == rhs.writing && lhs.spins == rhs.spins && lhs.notes == rhs.notes
                 && (lhs.onSubmit == nil) == (rhs.onSubmit == nil) && (lhs.onMenu == nil) == (rhs.onMenu == nil)
         }
@@ -1026,9 +1165,10 @@ struct TracesFolderRow: View, Equatable {
                 off: off,
                 expanded: folder.sessions.isEmpty ? nil : open,
                 submitTitle: submitTitle,
+                submitHelp: help,
                 accessory: accessory,
-                // No watch switch on the row (owner, 2026-10-08): a folder's
-                // mode is in the row menu and the Folder inspector's picker.
+                // The Automatic switch is on the row again (owner,
+                // 2026-10-30), beside Submit; Never stays in the row menu.
                 expandLabel: folder.label,
                 menuLabel: menuLabel,
                 menuOpen: menuOpen,
@@ -1038,7 +1178,9 @@ struct TracesFolderRow: View, Equatable {
                 onMenu: onMenu
             )
             .accessibilityFocused(spoken, equals: TracesTreeView.rowID(.folder(projectID: folder.id)))
-            .help(help)
+            // Spoken, not a hover tip: the pill carries that, and VoiceOver
+            // lands on the row, so the core's withheld sentence is heard here.
+            .accessibilityHint(help)
             .disabled(writing)
             .opacity(writing ? TracesRowBusy.opacity : 1)
             .anchorPreference(key: TracesMenuAnchors.self, value: .bounds) {
@@ -1063,17 +1205,30 @@ struct TracesFolderRow: View, Equatable {
     }
 
     /// The row's Submit as the Folder inspector's split button (owner,
-    /// 2026-10-19): Submit all, and a chevron to Submit all as; and the
-    /// spinner while a mode change is in flight.
+    /// 2026-10-19): Submit all, and a chevron to Submit all as; the
+    /// spinner while a mode change is in flight; and the Automatic switch
+    /// after them (owner, 2026-10-30).
     private var accessory: AnyView? {
-        guard split != nil || spins else { return nil }
+        guard split != nil || spins || automatic != nil else { return nil }
         return AnyView(HStack(spacing: GlassTokens.Space.s3) {
             if spins { GlassSpinner() }
             if let split {
                 GlassSplitButton(split.title, menuLabel: split.menuLabel, menuOpen: split.menuOpen, onMenu: onSplitMenu) {
                     onSplitSubmit()
                 }
+                .actionHelp(help)
                 .disabled(split.busy)
+            }
+            if let automatic {
+                Toggle(automaticLabel, isOn: Binding(get: { automatic }, set: { onAutomatic($0) }))
+                    .toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
+                    .help(automaticLabel)
+            } else {
+                // A row with no switch (Traces with no project) keeps its
+                // place, so every Submit lines up.
+                Color.clear
+                    .frame(width: GlassTokens.Size.watchSwitchWidth, height: 1)
+                    .accessibilityHidden(true)
             }
         })
     }
@@ -1128,6 +1283,7 @@ struct TracesSessionRow: View, Equatable {
                 selected: selected,
                 off: off,
                 submitTitle: pill,
+                submitHelp: help,
                 submitFocusable: selected && !acting,
                 accessory: acting ? AnyView(GlassSpinner()) : nil,
                 menuLabel: menuLabel,
@@ -1137,7 +1293,6 @@ struct TracesSessionRow: View, Equatable {
                 onMenu: acting ? nil : onMenu
             )
             .accessibilityFocused(spoken, equals: TracesTreeView.rowID(.session(entryID: entry.entryId)))
-            .help(help)
             .opacity(acting ? TracesRowBusy.opacity : 1)
             .accessibilityHint(toolName)
             .anchorPreference(key: TracesMenuAnchors.self, value: .bounds) {
@@ -1378,6 +1533,64 @@ struct TracesRowMenuPill: View {
         .onExitCommand(perform: onDismiss)
         .accessibilityAddTraits(.isButton)
         .offset(Self.offset)
+    }
+}
+
+/// The titles over the tree's columns while the Automatic switches show
+/// (owner, 2026-10-30, Proposal A): the folders at the left, Submit, and
+/// Auto over the rows' switches. Decorative: each control has its own
+/// accessible name, so the titles are hidden from assistive tech.
+struct TracesColumnTitles: View {
+    let folders: String
+    let submit: String
+    let automatic: String
+
+    var body: some View {
+        HStack(spacing: GlassTokens.Space.s4) {
+            Text(folders)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            // Submit and the switch sit 6pt apart in the row's accessory;
+            // the switch ends it, before the row menu's 22pt column and the
+            // row's 6pt trailing inset. Submit's title is centred over the
+            // usual split button, "Submit all (n)" and its chevron.
+            HStack(spacing: GlassTokens.Space.s3) {
+                Text(submit)
+                    .frame(minWidth: 128)
+                Text(automatic)
+                    .frame(width: GlassTokens.Size.watchSwitchWidth)
+            }
+            Color.clear.frame(width: 22, height: 0)
+        }
+        .glassType(GlassTokens.TypeScale.eyebrow)
+        .foregroundStyle(GlassColor.textTertiary)
+        .lineLimit(1)
+        .padding(.leading, 8)
+        .padding(.trailing, 6)
+        .padding(.bottom, GlassTokens.Space.s2)
+        .accessibilityHidden(true)
+    }
+}
+
+/// A folder row's Move up and Move down, in the core's words: the drag's
+/// order without dragging, for VoiceOver and the keyboard. Nothing without
+/// the words, and none past either end.
+private struct FolderMoveActions: ViewModifier {
+    let store: TracesStore
+    let id: String
+
+    func body(content: Content) -> some View {
+        let copy = store.nudgeCopy
+        content
+            .accessibilityAction(named: Text(copy?[.listOrderMoveUp] ?? "")) { store.moveFolder(id, by: -1) }
+            .accessibilityAction(named: Text(copy?[.listOrderMoveDown] ?? "")) { store.moveFolder(id, by: 1) }
+    }
+}
+
+/// Each drawn folder row's frame in the tree, for dragging folders.
+private struct TracesFolderFrames: PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { $1 }
     }
 }
 

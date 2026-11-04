@@ -519,7 +519,7 @@ mod tests {
         let client =
             NearAiTransferClient::new(crate::near_ai_transfer::NearAiTransferCredentials {
                 token: secrecy::SecretString::from(format!("oc_{}", "ab".repeat(32))),
-                credential_id: Uuid::from_u128(2),
+                credential_id: Some(Uuid::from_u128(2)),
                 sender_org: Uuid::from_u128(1),
                 source: crate::near_ai_transfer::NearAiCreditSource::Payment,
             })
@@ -551,7 +551,7 @@ mod tests {
         let client =
             NearAiTransferClient::new(crate::near_ai_transfer::NearAiTransferCredentials {
                 token: secrecy::SecretString::from(format!("oc_{}", "ab".repeat(32))),
-                credential_id: Uuid::from_u128(2),
+                credential_id: Some(Uuid::from_u128(2)),
                 sender_org: Uuid::from_u128(1),
                 source: crate::near_ai_transfer::NearAiCreditSource::Payment,
             })

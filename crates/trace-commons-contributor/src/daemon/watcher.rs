@@ -2118,6 +2118,7 @@ fn new_entry(
         retry_after: None,
         transient_redaction_failures: 0,
         transient_upload_failures: 0,
+        transient_upload_run_started_at: None,
         submission_id: None,
         approved_scopes: armed.then(|| ctx.consent_scopes.clone()),
         // A fresh entry has no answer to give yet, armed or not: it is
@@ -4417,6 +4418,7 @@ mod tests {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: Some(true),
             witness_origin: None,
+            account_identity: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.invalid".to_string(),
@@ -4897,35 +4899,60 @@ mod tests {
         assert_eq!(state_at(&f, &path), (QueueState::Approved, true));
     }
 
+    /// Owner decision 2026-10-29 (Ron's staging report): Ask is offered on
+    /// every real folder under the include-existing grant, beside Automatic
+    /// and Never. The unknown bucket keeps its own two.
     #[tokio::test]
-    async fn onboarding_broad_grant_offers_only_effective_modes_and_refuses_stale_ask() {
+    async fn onboarding_broad_grant_offers_ask_and_refuses_only_a_from_now_arming() {
         let f = WatcherFixture::new();
         f.shared
             .store
             .save_config(&grant_test_cfg(&["debugging_evaluation"]))
             .unwrap();
         f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        f.write_session_with_cwd(
+            "no-cwd",
+            "relative/dir",
+            "22222222-2222-2222-2222-222222222222",
+        );
         grant_automatic_with_existing(&f);
         f.settle(Utc::now() + chrono::Duration::hours(30)).await;
         let key = project_key_for(Some(&abs("Users/testuser/code/old")));
-        let listed = ipc_call(&f, "list_projects", serde_json::json!({}))
-            .result
-            .unwrap();
+        let listed = ipc_call(
+            &f,
+            "list_projects",
+            serde_json::json!({"include_found": true}),
+        )
+        .result
+        .unwrap();
         let rows = listed["projects"].as_array().unwrap();
         let id = crate::daemon::policy::project_id_for(&key);
         let row = rows.iter().find(|row| row["project_id"] == id).unwrap();
         assert_eq!(
             row["offerable_modes"],
-            serde_json::json!(["auto_upload", "ignore"])
+            serde_json::json!(["notify_only", "auto_upload", "ignore"])
+        );
+        let unknown_id =
+            crate::daemon::policy::project_id_for(crate::daemon::policy::UNKNOWN_PROJECT_KEY);
+        let unknown = rows
+            .iter()
+            .find(|row| row["project_id"] == unknown_id)
+            .unwrap_or_else(|| panic!("no unknown bucket row in {rows:?}"));
+        assert_eq!(
+            unknown["offerable_modes"],
+            serde_json::json!(["notify_only", "ignore"])
         );
         let before = f.shared.policy.lock().unwrap().clone();
-        for params in [
-            serde_json::json!({"project_id": id, "mode": "notify_only"}),
-            serde_json::json!({"project_id": id, "mode": "auto_upload", "include_backlog": false}),
-        ] {
-            assert!(ipc_call(&f, "set_project_mode", params).error.is_some());
-            assert_eq!(*f.shared.policy.lock().unwrap(), before);
-        }
+        assert!(
+            ipc_call(
+                &f,
+                "set_project_mode",
+                serde_json::json!({"project_id": id, "mode": "auto_upload", "include_backlog": false}),
+            )
+            .error
+            .is_some()
+        );
+        assert_eq!(*f.shared.policy.lock().unwrap(), before);
         // Re-sending Automatic must not introduce a new history hold.
         assert!(
             ipc_call(
@@ -4953,6 +4980,285 @@ mod tests {
             .is_none()
         );
         assert_eq!(mode_of(&f, "old"), (ProjectMode::Ignore, true));
+    }
+
+    /// A folder set to Ask after the include-existing grant is an exception
+    /// to it: what it had approved unattended goes back to waiting, its new
+    /// sessions wait for a person, and every other folder under the grant
+    /// stays automatic. Setting it back to Automatic resumes, backlog
+    /// included, as the grant's own arming did.
+    #[tokio::test]
+    async fn a_folder_set_to_ask_under_the_broad_grant_waits_while_the_rest_stay_automatic() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let old_ask = f.write_session("ask", "11111111-1111-1111-1111-111111111111", 0);
+        let old_auto = f.write_session("auto", "22222222-2222-2222-2222-222222222222", 0);
+        grant_automatic_with_existing(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(state_at(&f, &old_ask), (QueueState::Approved, true));
+        assert_eq!(state_at(&f, &old_auto), (QueueState::Approved, true));
+
+        let key = project_key_for(Some(&abs("Users/testuser/code/ask")));
+        let id = crate::daemon::policy::project_id_for(&key);
+        let set = ipc_call(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_id": id, "mode": "notify_only"}),
+        );
+        assert!(set.error.is_none(), "{:?}", set.error);
+        assert_eq!(set.result.unwrap()["retracted"], 1);
+        assert_eq!(state_at(&f, &old_ask).0, QueueState::Pending);
+
+        let new_ask = f.write_session("ask", "33333333-3333-3333-3333-333333333333", 0);
+        let new_auto = f.write_session("auto", "44444444-4444-4444-4444-444444444444", 0);
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        assert_eq!(mode_of(&f, "ask"), (ProjectMode::NotifyOnly, true));
+        assert_eq!(state_at(&f, &old_ask), (QueueState::Pending, false));
+        assert_eq!(state_at(&f, &new_ask), (QueueState::Pending, false));
+        assert_eq!(state_at(&f, &new_auto), (QueueState::Approved, true));
+        assert!(
+            f.shared
+                .policy
+                .lock()
+                .unwrap()
+                .includes_existing_automatically()
+        );
+        let status = ipc_call(&f, "status", serde_json::json!({}))
+            .result
+            .unwrap();
+        assert_eq!(status["decisions_owed"], 2, "{status}");
+
+        let set = ipc_call(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_id": id, "mode": "auto_upload"}),
+        );
+        assert!(set.error.is_none(), "{:?}", set.error);
+        assert_eq!(set.result.unwrap()["from_now"], false);
+        f.settle(Utc::now() + chrono::Duration::hours(32)).await;
+        assert_eq!(mode_of(&f, "ask"), (ProjectMode::AutoUpload, true));
+        assert_eq!(state_at(&f, &old_ask), (QueueState::Approved, true));
+        assert_eq!(state_at(&f, &new_ask), (QueueState::Approved, true));
+    }
+
+    /// The `list_projects` row for `project` (a folder under the fixture's
+    /// code directory) in `listed`.
+    fn listed_row(listed: &serde_json::Value, project: &str) -> serde_json::Value {
+        let key = project_key_for(Some(&abs(&format!("Users/testuser/code/{project}"))));
+        let id = crate::daemon::policy::project_id_for(&key);
+        listed["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["project_id"] == id)
+            .unwrap_or_else(|| panic!("no row for {project} in {listed}"))
+            .clone()
+    }
+
+    /// Finding 2 on #1747: under the include-existing grant a folder the
+    /// grant will arm on its next pass -- one set to Ask before the grant,
+    /// one with a session queued before it, one only found on disk -- lists
+    /// as the mode the daemon will apply, Automatic, not as Ask. Its
+    /// sessions are then approved unattended, as the row said. The pill's
+    /// roll-up reads the same value, so it says Automatic, not Mixed.
+    #[tokio::test]
+    async fn a_folder_the_broad_grant_will_arm_lists_as_automatic() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let queued = f.write_session("queued", "11111111-1111-1111-1111-111111111111", 0);
+        let pre = f.write_session("pre", "22222222-2222-2222-2222-222222222222", 0);
+        {
+            let mut policy = f.shared.policy.lock().unwrap();
+            let key = project_key_for(Some(&abs("Users/testuser/code/pre")));
+            policy
+                .set_mode(&key, ProjectMode::NotifyOnly, Utc::now())
+                .unwrap();
+        }
+        f.settle(Utc::now() + chrono::Duration::hours(29)).await;
+        assert_eq!(state_at(&f, &queued), (QueueState::Pending, false));
+        grant_automatic_with_existing(&f);
+        let found = f.write_session("found", "33333333-3333-3333-3333-333333333333", 0);
+
+        let listed = ipc_ok(
+            &f,
+            "list_projects",
+            serde_json::json!({"include_found": true}),
+        );
+        for (project, configured) in [("pre", true), ("queued", false), ("found", false)] {
+            let row = listed_row(&listed, project);
+            assert_eq!(row["configured"], configured, "{project}: {row}");
+            assert_eq!(row["mode"], "auto_upload", "{project}: {row}");
+            assert_eq!(row["folder_mode"], "auto_upload", "{project}: {row}");
+        }
+        let status = ipc_ok(&f, "status", serde_json::json!({}));
+        assert_eq!(status["contribution_mode"], "auto_upload", "{status}");
+
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        for path in [&queued, &pre, &found] {
+            assert_eq!(state_at(&f, path), (QueueState::Approved, true), "{path:?}");
+        }
+    }
+
+    /// Every row that reads `auto_upload` carries the K6
+    /// `automatic_disclosure` and `from_now`, which macOS and Tauri need to
+    /// draw what an Automatic folder's sessions have removed -- a discovered
+    /// or found row the grant will arm as much as a configured one.
+    #[tokio::test]
+    async fn a_grant_armed_unconfigured_row_carries_the_automatic_disclosure() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        grant_automatic_with_existing(&f);
+        f.write_session("found", "11111111-1111-1111-1111-111111111111", 0);
+        let listed = ipc_ok(
+            &f,
+            "list_projects",
+            serde_json::json!({"include_found": true}),
+        );
+        let row = listed_row(&listed, "found");
+        assert_eq!(row["configured"], false, "{row}");
+        assert_eq!(row["mode"], "auto_upload", "{row}");
+        assert!(row.get("automatic_disclosure").is_some(), "{row}");
+        assert_eq!(row["from_now"], false, "{row}");
+    }
+
+    /// `list_past_sessions` reports the folder's rule as `list_projects`
+    /// does: a folder the include-existing grant will arm is
+    /// `auto_upload`, not the `notify_only` it has no entry for.
+    #[tokio::test]
+    async fn past_sessions_report_the_mode_the_broad_grant_will_apply() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        grant_automatic_with_existing(&f);
+        f.write_session("found", "11111111-1111-1111-1111-111111111111", 0);
+        let listed = ipc_ok(
+            &f,
+            "list_projects",
+            serde_json::json!({"include_found": true}),
+        );
+        let row = listed_row(&listed, "found");
+        assert_eq!(row["mode"], "auto_upload", "{row}");
+        let past = ipc_ok(
+            &f,
+            "list_past_sessions",
+            serde_json::json!({"project_id": row["project_id"]}),
+        );
+        assert_eq!(past["project_mode"], "auto_upload", "{past}");
+    }
+
+    /// On such a row, picking Ask differs from the mode shown, so a shell
+    /// sends it, and it makes the folder an exception to the grant: its
+    /// session waits for a person and the row then reads Ask.
+    #[tokio::test]
+    async fn picking_ask_on_a_folder_the_broad_grant_will_arm_makes_the_exception() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        grant_automatic_with_existing(&f);
+        let path = f.write_session("found", "11111111-1111-1111-1111-111111111111", 0);
+        let listed = ipc_ok(
+            &f,
+            "list_projects",
+            serde_json::json!({"include_found": true}),
+        );
+        let row = listed_row(&listed, "found");
+        assert_eq!(row["mode"], "auto_upload", "{row}");
+
+        ipc_ok(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_id": row["project_id"], "mode": "notify_only"}),
+        );
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(state_at(&f, &path), (QueueState::Pending, false));
+        assert_eq!(mode_of(&f, "found"), (ProjectMode::NotifyOnly, true));
+        let listed = ipc_ok(&f, "list_projects", serde_json::json!({}));
+        let row = listed_row(&listed, "found");
+        assert_eq!(row["mode"], "notify_only", "{row}");
+        assert_eq!(row["folder_mode"], "notify_only", "{row}");
+    }
+
+    /// What the grant does not arm still lists as itself under it: Never
+    /// reads Never, an Ask set after the grant reads Ask, and the unknown
+    /// bucket reads Ask and is never armed. One Ask exception is enough for
+    /// the pill to read Mixed.
+    #[tokio::test]
+    async fn under_the_broad_grant_never_a_later_ask_and_the_unknown_bucket_list_as_themselves() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("never", "11111111-1111-1111-1111-111111111111", 0);
+        f.write_session("post", "22222222-2222-2222-2222-222222222222", 0);
+        f.write_session("auto", "33333333-3333-3333-3333-333333333333", 0);
+        f.write_session_with_cwd(
+            "no-cwd",
+            "relative/dir",
+            "44444444-4444-4444-4444-444444444444",
+        );
+        {
+            let mut policy = f.shared.policy.lock().unwrap();
+            let key = project_key_for(Some(&abs("Users/testuser/code/never")));
+            policy
+                .set_mode(&key, ProjectMode::Ignore, Utc::now())
+                .unwrap();
+        }
+        grant_automatic_with_existing(&f);
+        {
+            let mut policy = f.shared.policy.lock().unwrap();
+            let key = project_key_for(Some(&abs("Users/testuser/code/post")));
+            policy
+                .set_mode(&key, ProjectMode::NotifyOnly, Utc::now())
+                .unwrap();
+        }
+        let listed = ipc_ok(
+            &f,
+            "list_projects",
+            serde_json::json!({"include_found": true}),
+        );
+        for (project, mode) in [
+            ("never", "ignore"),
+            ("post", "notify_only"),
+            ("auto", "auto_upload"),
+        ] {
+            let row = listed_row(&listed, project);
+            assert_eq!(row["mode"], mode, "{project}: {row}");
+            assert_eq!(row["folder_mode"], mode, "{project}: {row}");
+        }
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        let listed = ipc_ok(&f, "list_projects", serde_json::json!({}));
+        let unknown_id =
+            crate::daemon::policy::project_id_for(crate::daemon::policy::UNKNOWN_PROJECT_KEY);
+        let unknown = listed["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["project_id"] == unknown_id)
+            .unwrap_or_else(|| panic!("no unknown bucket row in {listed}"))
+            .clone();
+        assert_eq!(unknown["mode"], "notify_only", "{unknown}");
+        assert_eq!(unknown["folder_mode"], "notify_only", "{unknown}");
+        assert_eq!(
+            mode_of(&f, "post"),
+            (ProjectMode::NotifyOnly, true),
+            "a later Ask is never armed"
+        );
+        let status = ipc_ok(&f, "status", serde_json::json!({}));
+        assert_eq!(status["contribution_mode"], "mixed", "{status}");
     }
 
     #[tokio::test]
@@ -5019,6 +5325,85 @@ mod tests {
         );
         assert!(response.error.is_some());
         assert_eq!(*f.shared.policy.lock().unwrap(), before);
+    }
+
+    /// Settings' sharing choice (owner, 2026-10-30): Automatic keeps the
+    /// folders marked Ask with `keep_folder_asks: true`, makes every folder
+    /// Automatic with `false`, and "Ask each time" puts the folders the
+    /// grant armed back to Ask with `return_folders_to_ask`.
+    #[tokio::test]
+    async fn the_sharing_choice_keeps_or_clears_folder_asks_and_returns_armed_folders() {
+        use crate::daemon::policy::ProjectMode;
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let call = |method: &str, params: serde_json::Value| {
+            super::super::ipc::handle_request(
+                &f.shared,
+                &super::super::ipc::Request {
+                    id: 1,
+                    method: method.to_string(),
+                    params,
+                },
+            )
+        };
+        let grant = |keep: serde_json::Value| {
+            call(
+                "grant_automatic_including_existing",
+                serde_json::json!({"confirmed": true, "witness_signing_address": null,
+                    "include_existing": true, "keep_folder_asks": keep}),
+            )
+        };
+        let marked = project_key_for(Some(&abs("Users/testuser/code/marked")));
+        f.shared
+            .policy
+            .lock()
+            .unwrap()
+            .set_mode(&marked, ProjectMode::NotifyOnly, Utc::now())
+            .unwrap();
+
+        assert!(grant(serde_json::json!(true)).error.is_none());
+        assert!(f.shared.policy.lock().unwrap().asks_despite_grant(&marked));
+
+        assert!(grant(serde_json::json!(false)).error.is_none());
+        {
+            let policy = f.shared.policy.lock().unwrap();
+            assert!(
+                !policy.projects.contains_key(&marked),
+                "the mark is cleared"
+            );
+            assert!(!policy.asks_despite_grant(&marked));
+        }
+
+        let armed = project_key_for(Some(&abs("Users/testuser/code/armed")));
+        {
+            let mut policy = f.shared.policy.lock().unwrap();
+            policy
+                .set_mode(&armed, ProjectMode::AutoUpload, Utc::now())
+                .unwrap();
+            policy.armed_by_grant.insert(armed.clone());
+        }
+        let withdrawn = call(
+            "withdraw_automatic_grant",
+            serde_json::json!({"return_folders_to_ask": true}),
+        );
+        assert_eq!(withdrawn.result.unwrap()["withdrawn"], true);
+        let policy = f.shared.policy.lock().unwrap();
+        assert!(policy.automatic_grant.is_none());
+        assert_eq!(policy.resolve(&armed), ProjectMode::NotifyOnly);
+        drop(policy);
+
+        assert!(grant(serde_json::json!("yes")).error.is_some());
+        assert!(
+            call(
+                "withdraw_automatic_grant",
+                serde_json::json!({"return_folders_to_ask": 1})
+            )
+            .error
+            .is_some()
+        );
     }
 
     /// K3: under the Flow 1 grant a project first seen after it is armed,
@@ -8120,6 +8505,7 @@ mod tests {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: Some(true),
             witness_origin: None,
+            account_identity: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),

@@ -685,6 +685,7 @@ impl PreviewJobRunner for DaemonPreviewRunner {
                 };
             };
             match super::preview::build_preview_card(
+                &shared.store,
                 cfg.as_ref(),
                 near_ai,
                 attested_bodies,

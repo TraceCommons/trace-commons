@@ -8,9 +8,13 @@
 //! Each rail's recipient-link kind has a verifier. For `near_ai` the proof
 //! is an org id and a fresh NEAR AI access token. [`NearAiOrgVerifier`]
 //! spends the token on one `GET {base}/users/me`, reads only the subject id
-//! and each org's `id`, `role` and `is_active` (never a name), checks the
-//! subject against the account's NEAR AI login anchor when it has one, and
-//! checks the org is in the list, active, and owned. It then asks the rail
+//! and each org's `id`, `role` and `is_active` (never a name), checks that
+//! the subject is one of the account's recorded NEAR AI login anchors, and
+//! checks the org is in the list, active, and owned. Only a recorded NEAR AI
+//! login proves a link, on every deployment (owner, 2026-11-02: "It should
+//! just be NEAR AI login on both staging and production"); a NEAR wallet
+//! anchor proves nothing here. An account with no NEAR AI login anchor is
+//! refused before the token is spent. It then asks the rail
 //! whether the org can receive (`probe_recipient`: a zero cumulative send on
 //! the probe program, which writes nothing). The token is dropped when the
 //! call returns; it is never stored, logged or placed in an error.
@@ -68,11 +72,30 @@ impl From<trace_commons_protocol::payout_link::PayoutLinkProof> for RecipientPro
     }
 }
 
-/// What a passed proof yields: the recipient to seal and the subject that
-/// proved it, to index. Neither is printed by `Debug`.
+/// Which of the account's anchors the proving login matched. A label for
+/// logs and the request's audit row, never an identifier. Only a recorded
+/// NEAR AI login proves a link, so there is one kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProofKind {
+    /// The NEAR AI subject is one of the account's `near_ai_login` anchors.
+    NearAiLogin,
+}
+
+impl ProofKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NearAiLogin => "near_ai_login",
+        }
+    }
+}
+
+/// What a passed proof yields: the recipient to seal, the subject that
+/// proved it (to index), and which anchor it matched. Neither the recipient
+/// nor the subject is printed by `Debug`.
 pub struct VerifiedRecipient {
     pub recipient: RecipientRef,
     pub subject_id: Zeroizing<String>,
+    pub proof: ProofKind,
 }
 
 impl std::fmt::Debug for VerifiedRecipient {
@@ -88,6 +111,12 @@ pub enum RecipientProofRefusal {
     LoginUnverified,
     /// The account is anchored on another NEAR AI subject.
     SubjectMismatch,
+    /// The account has no recorded NEAR AI login anchor, so no login could
+    /// match. A wallet-origin account that never recorded a NEAR AI login,
+    /// and a principal-linked legacy account, are such. On the wire it
+    /// is `subject_mismatch`, the generic refusal shipped apps already show;
+    /// [`Self::log_reason`] tells the two apart in logs.
+    NoLoginAnchor,
     /// The org is not in the list, not active, or not owned.
     OrgNotOwned,
     /// The rail answered that the org is gone.
@@ -102,11 +131,20 @@ impl RecipientProofRefusal {
     pub fn label(self) -> &'static str {
         match self {
             Self::LoginUnverified => "near_ai_login_unverified",
-            Self::SubjectMismatch => "subject_mismatch",
+            Self::SubjectMismatch | Self::NoLoginAnchor => "subject_mismatch",
             Self::OrgNotOwned => "org_not_owned",
             Self::OrgUnavailable => "near_ai_org_unavailable",
             Self::OrgNotPermitted => "near_ai_org_not_permitted",
             Self::Unavailable => "payout_unavailable",
+        }
+    }
+
+    /// The cause, for log lines only: [`Self::label`] except where two
+    /// causes share a wire label.
+    pub fn log_reason(self) -> &'static str {
+        match self {
+            Self::NoLoginAnchor => "no_near_ai_login",
+            other => other.label(),
         }
     }
 }
@@ -116,7 +154,7 @@ impl RecipientProofRefusal {
 pub trait RecipientProofVerifier: Send + Sync {
     /// `login_anchors` are the account's NEAR AI login anchors
     /// (`trace_near_account_anchors.anchor_hash` with `identity_source =
-    /// 'near_ai_login'`); empty for an account with none.
+    /// 'near_ai_login'`). An empty set is refused as `NoLoginAnchor`.
     async fn verify(
         &self,
         proof: RecipientProof,
@@ -127,6 +165,9 @@ pub trait RecipientProofVerifier: Send + Sync {
 /// What `/users/me` is read into, and nothing else. `serde` drops every
 /// other field, so an org's name never becomes a value in this process. Do
 /// not add `name`, a `flatten` map or a `serde_json::Value` here.
+/// Nor `email` or `auth_provider`: nothing here needs them, so they never
+/// become values here. (reqwest still buffers the raw body, which is
+/// dropped without zeroization, as it always was.)
 #[derive(Deserialize)]
 struct UsersMe {
     id: String,
@@ -218,14 +259,18 @@ impl RecipientProofVerifier for NearAiOrgVerifier {
             organization_id,
             access_token,
         } = proof;
+        // An account with no recorded NEAR AI login links nothing (owner
+        // decisions 2026-11-02). Refused before the token is spent.
+        if login_anchors.is_empty() {
+            return Err(RecipientProofRefusal::NoLoginAnchor);
+        }
         let user = self.users_me(&access_token).await?;
         drop(access_token);
         let subject_id = Zeroizing::new(user.id.trim().to_owned());
-        if !login_anchors.is_empty()
-            && !login_anchors.contains(&self.identity.login_index_label(&subject_id))
-        {
+        if !login_anchors.contains(&self.identity.login_index_label(&subject_id)) {
             return Err(RecipientProofRefusal::SubjectMismatch);
         }
+        let proof = ProofKind::NearAiLogin;
         let owned = user.organizations.unwrap_or_default().iter().any(|org| {
             Uuid::parse_str(org.id.trim()).is_ok_and(|id| id == organization_id)
                 && org.is_active
@@ -243,6 +288,7 @@ impl RecipientProofVerifier for NearAiOrgVerifier {
         Ok(VerifiedRecipient {
             recipient,
             subject_id,
+            proof,
         })
     }
 }
@@ -333,7 +379,7 @@ mod tests {
             base,
             NearAiTransferCredentials {
                 token: SecretString::from(CREDENTIAL),
-                credential_id: Uuid::from_u128(2),
+                credential_id: Some(Uuid::from_u128(2)),
                 sender_org: Uuid::from_u128(3),
                 source: NearAiCreditSource::Payment,
             },
@@ -379,6 +425,46 @@ mod tests {
         }
     }
 
+    /// The account's login anchors when it is anchored on the token's
+    /// subject.
+    fn anchored() -> Vec<String> {
+        vec![identity().login_index_label(SUBJECT)]
+    }
+
+    /// `UsersMe` declares no `email` or `auth_provider` field, so neither is
+    /// deserialized into a value.
+    #[test]
+    fn users_me_reads_no_email_or_provider() {
+        let source = include_str!("payout_recipient_proof.rs");
+        let start = source.find("struct UsersMe {").unwrap();
+        // The struct ends at the first line that is only `}`.
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        assert!(body.contains("organizations"), "{body}");
+        assert!(!body.contains("email"), "{body}");
+        assert!(!body.contains("auth_provider"), "{body}");
+    }
+
+    /// An account with no NEAR AI login anchor (a wallet-origin account)
+    /// links nothing, and the token is never spent (owner decision
+    /// 2026-11-02, B9 in the one-connected-account spec).
+    #[tokio::test]
+    async fn an_account_with_no_login_anchor_is_refused_before_users_me() {
+        let (base, mock) = serve(Mock {
+            users_me: Some((200, me(owned_org("owner", true)))),
+            probe: Some(no_op()),
+            ..Mock::default()
+        })
+        .await;
+        assert_eq!(
+            verifier(&base).verify(proof(), &[]).await.unwrap_err(),
+            RecipientProofRefusal::NoLoginAnchor
+        );
+        let mock = mock.lock().unwrap();
+        assert_eq!(mock.users_me_calls, 0);
+        assert!(mock.bearer_seen.is_empty());
+        assert!(mock.probe_bodies.is_empty());
+    }
+
     #[tokio::test]
     async fn an_owned_active_org_passes_and_is_probed_once() {
         let (base, mock) = serve(Mock {
@@ -387,7 +473,7 @@ mod tests {
             ..Mock::default()
         })
         .await;
-        let verified = verifier(&base).verify(proof(), &[]).await.unwrap();
+        let verified = verifier(&base).verify(proof(), &anchored()).await.unwrap();
         assert_eq!(verified.recipient.expose(), org().to_string());
         assert_eq!(verified.subject_id.as_str(), SUBJECT);
         assert!(!format!("{verified:?}").contains(SUBJECT));
@@ -419,7 +505,10 @@ mod tests {
             })
             .await;
             assert_eq!(
-                verifier(&base).verify(proof(), &[]).await.unwrap_err(),
+                verifier(&base)
+                    .verify(proof(), &anchored())
+                    .await
+                    .unwrap_err(),
                 RecipientProofRefusal::OrgNotOwned,
                 "{orgs}"
             );
@@ -460,7 +549,10 @@ mod tests {
             })
             .await;
             assert_eq!(
-                verifier(&base).verify(proof(), &[]).await.unwrap_err(),
+                verifier(&base)
+                    .verify(proof(), &anchored())
+                    .await
+                    .unwrap_err(),
                 RecipientProofRefusal::LoginUnverified,
                 "{status} {body}"
             );
@@ -497,7 +589,10 @@ mod tests {
             })
             .await;
             assert_eq!(
-                verifier(&base).verify(proof(), &[]).await.unwrap_err(),
+                verifier(&base)
+                    .verify(proof(), &anchored())
+                    .await
+                    .unwrap_err(),
                 want,
                 "{status} {code}"
             );
@@ -516,6 +611,10 @@ mod tests {
                 RecipientProofRefusal::SubjectMismatch,
                 Outcome::SubjectMismatch,
             ),
+            (
+                RecipientProofRefusal::NoLoginAnchor,
+                Outcome::SubjectMismatch,
+            ),
             (RecipientProofRefusal::OrgNotOwned, Outcome::OrgNotOwned),
             (
                 RecipientProofRefusal::OrgUnavailable,
@@ -532,6 +631,14 @@ mod tests {
         ] {
             assert_eq!(refusal.label(), outcome.as_str());
         }
+        assert_eq!(
+            RecipientProofRefusal::NoLoginAnchor.log_reason(),
+            "no_near_ai_login"
+        );
+        assert_eq!(
+            RecipientProofRefusal::SubjectMismatch.log_reason(),
+            "subject_mismatch"
+        );
     }
 
     #[test]

@@ -360,6 +360,7 @@ public struct GlassBarGraph: View {
     private let scaleFloor: Double
     private let period: Int
     private let compact: Bool
+    private let paused: Bool
     @Binding private var hovered: String?
     /// The window last drawn, so a change knows which side it came from.
     @State private var shownPeriod: Int?
@@ -370,16 +371,27 @@ public struct GlassBarGraph: View {
     /// window lies on (#1146 `tc-slide-l` / `tc-slide-r`). `compact` closes
     /// the gaps between and inside the columns for a narrow panel (the
     /// menu-bar popover, owner, 2026-10-22), so its dots keep the full
-    /// graph's pitch instead of crowding together.
+    /// graph's pitch instead of crowding together. `paused` greys every lit
+    /// dot while watching is paused (the menu-bar popover, product owner,
+    /// 2026-10-29), keeping every height.
     public init(
         _ buckets: [GlassBarBucket], scaleFloor: Double = 1, period: Int = 0, compact: Bool = false,
-        hovered: Binding<String?> = .constant(nil)
+        paused: Bool = false, hovered: Binding<String?> = .constant(nil)
     ) {
         self.buckets = buckets
         self.scaleFloor = scaleFloor
         self.period = period
         self.compact = compact
+        self.paused = paused
         self._hovered = hovered
+    }
+
+    /// The lit dots' inks: shared purple over kept blue, or both the
+    /// menu bar's paused grey while watching is paused.
+    static func dotInks(paused: Bool) -> (shared: GlassRGBA, kept: GlassRGBA) {
+        paused
+            ? (GlassTokens.Color.menuBarsPaused, GlassTokens.Color.menuBarsPaused)
+            : (GlassTokens.Color.dataShared, GlassTokens.Color.dataKept)
     }
 
     /// The gap between columns and the matrix's inset inside each: a thin
@@ -424,6 +436,7 @@ public struct GlassBarGraph: View {
                             radius: thin ? 1.5 : 1.9, inset: gaps.inset, end: Self.matrixEnd,
                             up: Self.dotAlphas(bucket.up, of: maximum),
                             down: Self.dotAlphas(bucket.down, of: maximum),
+                            inks: Self.dotInks(paused: paused),
                             unlit: GlassColor.ink(isHovered ? 0.2 : 0.09))
                     }
                     // Under the pointer the column takes a solid wash, never
@@ -487,10 +500,11 @@ public struct GlassBarGraph: View {
     }
 
     /// Shared rises from the axis in purple and kept hangs from it in blue
-    /// (#1146 `.tc-bar-graph__down { top: 50% }`), on a 1pt axis rule.
+    /// (#1146 `.tc-bar-graph__down { top: 50% }`), on a 1pt axis rule; both
+    /// grey while paused (`inks`).
     private static func drawMatrix(
         in context: inout GraphicsContext, size: CGSize, columns: Int, radius: CGFloat, inset: CGFloat,
-        end: CGFloat, up: [Double], down: [Double], unlit: Color
+        end: CGFloat, up: [Double], down: [Double], inks: (shared: GlassRGBA, kept: GlassRGBA), unlit: Color
     ) {
         let half = size.height / 2
         // Rows keep one pitch in every column, whatever its width, so a
@@ -499,8 +513,8 @@ public struct GlassBarGraph: View {
         let pitch = (half - 1 - end) / CGFloat(rows)
         let across = min(pitch, (size.width - inset * 2) / CGFloat(columns))
         let left = (size.width - across * CGFloat(columns)) / 2 + across / 2
-        let shared = GlassTokens.Color.dataShared.color
-        let kept = GlassTokens.Color.dataKept.color
+        let shared = inks.shared.color
+        let kept = inks.kept.color
         func dot(_ x: CGFloat, _ y: CGFloat, _ alpha: Double, _ color: Color) {
             let rect = CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)
             context.fill(Path(ellipseIn: rect), with: .color(alpha > 0 ? color.opacity(alpha) : unlit))
@@ -700,25 +714,11 @@ enum GlassMapMarks {
     static let shimmerSlant: Double = 20
 
     /// The shimmer band at `sweep` (its fractional part; each whole step is
-    /// one pass): the gradient's start and end. The band leans
-    /// `shimmerSlant` degrees from upright and travels left to right, from
-    /// wholly before the field's first corner to wholly past its last, so a
-    /// pass starts and ends off the field whatever the field's shape.
+    /// one pass): the gradient's start and end (`GlassShimmerBand`), leaning
+    /// `shimmerSlant` degrees from upright.
     static func shimmerBand(sweep: Double, size: CGSize) -> (start: CGPoint, end: CGPoint) {
-        let progress = CGFloat(sweep - sweep.rounded(.down))
-        let angle = shimmerSlant * .pi / 180
-        // Square to the band: rightward, tipped down by the slant (y runs
-        // down), so the band itself leans with its top to the right.
-        let unit = CGVector(dx: CGFloat(cos(angle)), dy: CGFloat(sin(angle)))
-        let corners = [CGPoint.zero, CGPoint(x: size.width, y: 0), CGPoint(x: 0, y: size.height),
-                       CGPoint(x: size.width, y: size.height)]
-        let along = corners.map { $0.x * unit.dx + $0.y * unit.dy }
-        let half = shimmerHalfWidth * max(hypot(size.width, size.height), 1)
-        let from = (along.min() ?? 0) - half
-        let to = (along.max() ?? 0) + half
-        let centre = from + (to - from) * progress
-        return (CGPoint(x: unit.dx * (centre - half), y: unit.dy * (centre - half)),
-                CGPoint(x: unit.dx * (centre + half), y: unit.dy * (centre + half)))
+        GlassShimmerBand.band(progress: sweep - sweep.rounded(.down), size: size,
+                              slant: shimmerSlant, halfWidth: shimmerHalfWidth)
     }
 
     /// The dots' centres in a field of `size`, from the cells that touch

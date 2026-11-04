@@ -3,7 +3,7 @@ import Foundation
 /// `status.witness_capacity`: how many approved sessions are held because
 /// the privacy witness is busy, and when the first is tried again.
 ///
-/// Beside `health` rather than in it, for the reason `DailyBudget` is: the
+/// Beside `health` rather than in it because the
 /// health slot holds one label and a higher one can mask
 /// `witness-saturated`, while this object always says how many are waiting.
 /// A daemon that predates it reports nothing waiting.

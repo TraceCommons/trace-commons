@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Refuse a shipped build that could compile the contributor crate's
-# `test-credential-store` feature.
+# Refuse a shipped build that could compile a test-only feature of the
+# contributor crates: `test-credential-store` or the FFI crate's
+# `test-keep-panic-messages` (see the second half of this header).
+#
+# `test-credential-store`:
 #
 # That feature replaces the OS credential store (device key, account session,
 # Private AI credentials) with a PLAINTEXT file in the config directory. It
@@ -13,6 +16,15 @@
 # on in its `[dependencies]`, or the feature entering `default`. A
 # `compile_error!` is not an option -- it would break `cargo test --release`.
 #
+# `test-keep-panic-messages` (FFI crate) makes `start_daemon_handle` skip
+# installing the daemon's location-only panic hook, the privacy control that
+# keeps panic messages, which can quote prompt text, out of stderr and the
+# on-disk logs. A release or staging build with it on ships without that
+# control. It is enabled only by the FFI crate's self dev-dependency. The same
+# three routes are refused: naming it in a release/staging build file, a
+# build command with --all-features, and any crate or workspace manifest
+# enabling it other than that self dev-dependency (and its [features] line).
+#
 # Usage:
 #   scripts/ci/check-release-credential-store.sh check [ROOT]
 #       Scan the release/packaging workflows, the build scripts they invoke,
@@ -24,6 +36,7 @@
 set -euo pipefail
 
 FEATURE="test-credential-store"
+PANIC_FEATURE="test-keep-panic-messages"
 
 # Files that build or package a shipped artifact. Listed, not discovered,
 # because a release step can call any script; a missing file is an error, so a
@@ -32,6 +45,7 @@ FEATURE="test-credential-store"
 BUILD_FILES=(
   .github/workflows/release-apps.yml          # macOS DMG, FFI dylib/DLL, MSIX, appinstaller, flatpak
   .github/workflows/release-contributor.yml   # contributor CLI release binaries
+  .github/workflows/staging-macos.yml         # the staging macOS app
   macos/scripts/make-app-bundle.sh
   macos/scripts/make-release-dmg.sh
   windows/scripts/make-msix.ps1
@@ -57,6 +71,17 @@ SHIPPED_MANIFESTS=(
   tauri-desktop/src-tauri/Cargo.toml
 )
 
+# Every manifest that could enable PANIC_FEATURE: the workspace root and every
+# crate, not only the shipped ones, because a workspace-level or helper-crate
+# edit reaches a release build through feature unification. Globbed so a new
+# crate is covered without editing this script.
+panic_manifests() {
+  local m
+  for m in Cargo.toml crates/*/Cargo.toml tauri-desktop/src-tauri/Cargo.toml; do
+    [[ -f "$m" ]] && printf '%s\n' "$m"
+  done
+}
+
 check() {
   local root="${1:-.}" failures=0 file
   cd "$root"
@@ -75,13 +100,16 @@ check() {
     fi
   done
 
-  # 1. No release/packaging file names the feature at all.
-  for file in "${files[@]}"; do
-    [[ -f "$file" ]] || continue
-    while IFS= read -r hit; do
-      echo "REFUSING: $file:$hit names the test-only '$FEATURE' feature in a release build path." >&2
-      failures=$((failures + 1))
-    done < <(grep -n -- "$FEATURE" "$file" || true)
+  # 1. No release/packaging file names either feature at all.
+  local feature
+  for feature in "$FEATURE" "$PANIC_FEATURE"; do
+    for file in "${files[@]}"; do
+      [[ -f "$file" ]] || continue
+      while IFS= read -r hit; do
+        echo "REFUSING: $file:$hit names the test-only '$feature' feature in a release build path." >&2
+        failures=$((failures + 1))
+      done < <(grep -n -- "$feature" "$file" || true)
+    done
   done
 
   # 2. No build command in those files uses --all-features, which would
@@ -91,7 +119,7 @@ check() {
   for file in "${files[@]}"; do
     [[ -f "$file" ]] || continue
     while IFS= read -r hit; do
-      echo "REFUSING: $file: a build command uses --all-features, which enables '$FEATURE': $hit" >&2
+      echo "REFUSING: $file: a build command uses --all-features, which enables '$FEATURE' and '$PANIC_FEATURE': $hit" >&2
       failures=$((failures + 1))
     done < <(
       awk '{
@@ -132,11 +160,36 @@ check() {
     )
   done
 
+  # 4. PANIC_FEATURE in any manifest. Permitted: the FFI crate's own
+  #    [features] definition and its self dev-dependency, which cargo applies
+  #    to tests only. Anything else -- another crate or the workspace root
+  #    enabling it, a normal dependency, or `default = [...]` -- ships it.
+  local manifest
+  while IFS= read -r manifest; do
+    while IFS= read -r hit; do
+      echo "REFUSING: $manifest: $hit" >&2
+      failures=$((failures + 1))
+    done < <(
+      awk -v feature="$PANIC_FEATURE" -v file="$manifest" '
+        /^[[:space:]]*\[/ { section = $0; gsub(/[[:space:]]/, "", section) }
+        index($0, feature) == 0 { next }
+        /^[[:space:]]*#/ { next }
+        {
+          line = $0; gsub(/[[:space:]]/, "", line)
+          if (file ~ /trace-commons-contributor-ffi\/Cargo.toml$/) {
+            if (section == "[features]" && line == feature "=[]") next
+            if (section == "[dev-dependencies]" && line == "trace-commons-contributor-ffi={path=\".\",features=[\"" feature "\"]}") next
+          }
+          printf "line %d in %s enables the test-only feature outside the FFI self dev-dependency: %s\n", NR, section, $0
+        }' "$manifest"
+    )
+  done < <(panic_manifests)
+
   if ((failures > 0)); then
-    echo "$failures release credential-store violation(s)." >&2
+    echo "$failures release test-only-feature violation(s)." >&2
     return 1
   fi
-  echo "no release or packaging build can enable '$FEATURE'"
+  echo "no release or packaging build can enable '$FEATURE' or '$PANIC_FEATURE'"
 }
 
 self_test() {
@@ -146,7 +199,8 @@ self_test() {
   trap 'rm -rf "$scratch"' RETURN
 
   local file
-  for file in "${BUILD_FILES[@]}" "${SHIPPED_MANIFESTS[@]}" "$repo"/.github/workflows/release-*.yml; do
+  for file in "${BUILD_FILES[@]}" "${SHIPPED_MANIFESTS[@]}" "$repo"/.github/workflows/release-*.yml \
+    "$repo"/Cargo.toml "$repo"/crates/*/Cargo.toml; do
     file="${file#"$repo"/}"
     mkdir -p "$scratch/$(dirname "$file")"
     cp "$repo/$file" "$scratch/$file"
@@ -169,6 +223,13 @@ self_test() {
     "the feature entering default|crates/trace-commons-contributor/Cargo.toml|s/^$FEATURE = .*\$/\$&\\ndefault = [\"$FEATURE\"]/m"
     "Insights enabling the forwarded feature by default|crates/trace-commons-contributor-insights/Cargo.toml|s/^$FEATURE = .*\$/\$&\\ndefault = [\"$FEATURE\"]/m"
     "platform enabling the feature by default|crates/trace-commons-contributor-platform/Cargo.toml|s/^$FEATURE = .*\$/\$&\\ndefault = [\"$FEATURE\"]/m"
+    "--features test-keep-panic-messages on the contributor release build|.github/workflows/release-contributor.yml|s/cargo build --locked --release --bin trace-commons-contributor/\$& --features trace-commons-contributor-ffi\/$PANIC_FEATURE/"
+    "--features test-keep-panic-messages on the FFI dylib build|.github/workflows/release-apps.yml|s/cargo build --locked -p trace-commons-contributor-ffi --release/\$& --features $PANIC_FEATURE/"
+    "test-keep-panic-messages on the staging build|.github/workflows/staging-macos.yml|s/cargo build -p trace-commons-contributor-ffi/\$& --features $PANIC_FEATURE/"
+    "the FFI crate enabling it by default|crates/trace-commons-contributor-ffi/Cargo.toml|s/^$PANIC_FEATURE = .*\$/\$&\ndefault = [\"$PANIC_FEATURE\"]/m"
+    "the FFI crate enabling it in its normal dependencies|crates/trace-commons-contributor-ffi/Cargo.toml|s/^(anyhow = \"1\")/\$1\ntrace-commons-contributor-ffi = { path = \".\", features = [\"$PANIC_FEATURE\"] }/m"
+    "the Tauri shell enabling it on the FFI crate|tauri-desktop/src-tauri/Cargo.toml|s/\A/trace-commons-contributor-ffi = { path = \"..\/..\/crates\/trace-commons-contributor-ffi\", features = [\"$PANIC_FEATURE\"] }\n/"
+    "the workspace root enabling it|Cargo.toml|s/\z/\n[workspace.dependencies.seeded]\nfeatures = [\"$PANIC_FEATURE\"]\n/"
     "a flatpak build naming it|crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml|s/\\A/# $FEATURE\\n/"
   )
   local entry desc target program before

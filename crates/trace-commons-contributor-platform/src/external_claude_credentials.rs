@@ -85,10 +85,22 @@ pub fn read(service: &str, allow_ui: bool) -> Result<Option<SecretBytes>, &'stat
     }
 }
 
-/// Opaque item revision obtained without decrypting credentials. An error means
+/// An item's attribute-only revision, in two parts. `item` names the item
+/// itself (its persistent reference, creation date and account), so it
+/// changes when the item is deleted and recreated, as a Claude Code logout
+/// and login do. `content` changes on any write, including an in-place
+/// update that keeps the item. Both are opaque equality discriminators that
+/// carry no account name or reference.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemRevision {
+    pub item: String,
+    pub content: String,
+}
+
+/// Item revision obtained without decrypting credentials. An error means
 /// unknown freshness, never permission to reuse a previous identity. OS calls
 /// can stall even without UI: invoke on a leased OS thread, not a status path.
-pub fn version(service: &str) -> Result<Option<String>, &'static str> {
+pub fn version(service: &str) -> Result<Option<ItemRevision>, &'static str> {
     if !valid_service(service) {
         return Err("unavailable");
     }

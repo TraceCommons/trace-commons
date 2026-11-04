@@ -259,7 +259,7 @@ final class FirstRunNavigationTests: XCTestCase {
     /// so it offers Automatic to everyone (Ron's 2026-10-21 canvas); only
     /// an enrollment the daemon holds can be granted it, at Start.
     func test_usesOffersAutomaticButOnlyAnEnrolmentIsGrantedIt() {
-        for account: AccountAnswer in [.none, .watchOnly, .nearAI, .passkey(name: "Laptop"), .enrolled] {
+        for account: AccountAnswer in [.none, .watchOnly, .nearAI, .enrolled] {
             XCTAssertEqual(FirstRunNavigation.sharingPaths(for: FirstRunState(account: account)), [.askMe, .automatic])
         }
         XCTAssertFalse(FirstRunNavigation.canChooseAutomatic(FirstRunState(account: .watchOnly)))
@@ -274,24 +274,6 @@ final class FirstRunNavigationTests: XCTestCase {
         // Watching has no tenant to key the enrollment's marker by, so Start
         // finishes on the watch-only one (`AppModel.markWatchOnlyComplete`).
         XCTAssertEqual(calls.last, .markWatchOnlyComplete, "Start finishes watching")
-    }
-
-    /// A passkey chosen on Join is not an account yet: its sheets open once
-    /// the daemon runs and may close or sign out, so Automatic waits for the
-    /// passkey the daemon holds. Start with Automatic grants nothing for it.
-    func test_aPasskeyNotYetCreatedCannotChooseAutomatic() {
-        XCTAssertFalse(FirstRunNavigation.canChooseAutomatic(FirstRunState(account: .passkeyChosen)))
-        XCTAssertFalse(FirstRunNavigation.canChooseAutomatic(FirstRunState(account: .none)))
-        XCTAssertTrue(FirstRunNavigation.canChooseAutomatic(FirstRunState(account: .passkey(name: ""))))
-
-        var state = FirstRunState(step: .join)
-        state.account = .passkeyChosen
-        state.sharing = .automatic
-        state.scopes = ["research"]
-        let calls = FirstRunPlan.calls(for: state, at: .start)
-        XCTAssertFalse(calls.contains { if case .grantAutomatic = $0 { return true } else { return false } })
-        // Its Start reopens the sheets and finishes nothing (Kristi's #1235 I1).
-        XCTAssertEqual(calls, [.openPasskeySheets])
     }
 
     func test_backKeepsEveryAnswer() {
@@ -371,9 +353,6 @@ final class FirstRunNavigationTests: XCTestCase {
         var watching = returned
         watching.account = .watchOnly
         XCTAssertEqual(FirstRunPlan.calls(for: watching, at: .signIn), [])
-        var passkey = returned
-        passkey.account = .passkeyChosen
-        XCTAssertEqual(FirstRunPlan.calls(for: passkey, at: .signIn), [.openPasskeySheets])
         var again = returned
         again.account = .nearAI
         XCTAssertEqual(FirstRunPlan.calls(for: again, at: .signIn), [.nearAILogin, .enrollNearAI])
@@ -383,8 +362,8 @@ final class FirstRunNavigationTests: XCTestCase {
     /// account.
     func test_aNearAIFailureKeepsAnyOtherAccount() {
         var state = FirstRunState(step: .join)
-        state.account = .passkey(name: "Mac")
-        XCTAssertEqual(FirstRunNavigation.returnToJoin(afterNearAIFailure: state).account, .passkey(name: "Mac"))
+        state.account = .enrolled
+        XCTAssertEqual(FirstRunNavigation.returnToJoin(afterNearAIFailure: state).account, .enrolled)
     }
 
     func test_aDeadInviteKeepsAnEarlierEnrolment() {
@@ -442,7 +421,7 @@ final class FirstRunNavigationTests: XCTestCase {
         var state = FirstRunState(step: .uses)
         state.invite = "INVITE-1"
         state.issuerHost = "issuer.example"
-        state.account = .passkey(name: "Laptop")
+        state.account = .nearAI
         state.toolAnswers = [.claudeCode: .watch(path: "/a"), .codex: .off, .cline: .undecided]
         state.addedFolders = [
             AddedFolder(kind: .trajectory, path: "/t"),
@@ -466,7 +445,7 @@ final class FirstRunNavigationTests: XCTestCase {
 
     /// Kristi's #1235 B1 floor: Automatic and Start read an enrollment the
     /// daemon holds, not an account answer. near.ai holds one once its
-    /// invite enrolled; a passkey only once Verify bound it.
+    /// invite enrolled.
     func test_automaticAndStartNeedARealEnrolment() {
         func state(_ account: AccountAnswer, enrolledInvite: String? = nil) -> FirstRunState {
             var state = FirstRunState(step: .join)
@@ -476,64 +455,18 @@ final class FirstRunNavigationTests: XCTestCase {
             state.sharingChosen = true
             return state
         }
-        for account: AccountAnswer in [.none, .watchOnly, .passkeyChosen, .nearAI] {
+        for account: AccountAnswer in [.none, .watchOnly, .nearAI] {
             XCTAssertFalse(state(account).holdsEnrolment, "\(account)")
             XCTAssertFalse(FirstRunNavigation.canChooseAutomatic(state(account)), "\(account)")
         }
-        for held in [state(.nearAI, enrolledInvite: "INVITE-1"), state(.passkey(name: "")), state(.enrolled)] {
+        for held in [state(.nearAI, enrolledInvite: "INVITE-1"), state(.enrolled)] {
             XCTAssertTrue(held.holdsEnrolment, "\(held.account)")
             XCTAssertTrue(FirstRunNavigation.canChooseAutomatic(held), "\(held.account)")
             XCTAssertTrue(FirstRunNavigation.canContinue(held, candidates: [], requiredScope: "required"))
         }
-        // Start is offered to watching only and to a chosen passkey, whose
-        // Start reopens the sheets; never to an account without an enrollment.
+        // Start is offered to watching only; never to an account without an
+        // enrollment.
         XCTAssertTrue(FirstRunNavigation.canContinue(state(.watchOnly), candidates: [], requiredScope: "required"))
-        XCTAssertTrue(FirstRunNavigation.canContinue(state(.passkeyChosen), candidates: [], requiredScope: "required"))
         XCTAssertFalse(FirstRunNavigation.canContinue(state(.nearAI), candidates: [], requiredScope: "required"))
-    }
-
-    // MARK: Welcome back (P-7), Ron's review of #1235 item 4
-
-    private func remembered(
-        _ state: String = "none", count: Int? = 1, name: String? = "Home"
-    ) -> NativePasskeyState {
-        NativePasskeyState(state: state, passkeyCount: count, rememberedName: name, nearAiConnected: nil)
-    }
-
-    /// A returning person: the first run has reached Join, the last step,
-    /// with nothing answered, nobody is signed in, and this Mac remembers a
-    /// passkey.
-    func test_welcomeBackOpensForAReturningPersonOnJoin() {
-        let join = FirstRunState(step: .join, daemonStarted: true)
-        XCTAssertTrue(FirstRunNavigation.opensWelcomeBack(join, passkeys: remembered(), completed: false))
-        // A remembered passkey without a name is still a returning person.
-        XCTAssertTrue(
-            FirstRunNavigation.opensWelcomeBack(join, passkeys: remembered(name: nil), completed: false))
-    }
-
-    func test_welcomeBackStaysShutForAnyoneElse() {
-        let join = FirstRunState(step: .join, daemonStarted: true)
-        // Nothing remembered here, or the daemon cannot say.
-        XCTAssertFalse(FirstRunNavigation.opensWelcomeBack(join, passkeys: remembered(count: 0), completed: false))
-        XCTAssertFalse(FirstRunNavigation.opensWelcomeBack(join, passkeys: remembered(count: nil), completed: false))
-        XCTAssertFalse(FirstRunNavigation.opensWelcomeBack(join, passkeys: nil, completed: false))
-        // Already signed in, or the session cannot be read: not a sign-in to offer.
-        for state in ["unbound", "bound", "legacy", "closed", "unknown"] {
-            XCTAssertFalse(
-                FirstRunNavigation.opensWelcomeBack(join, passkeys: remembered(state), completed: false), state)
-        }
-        // Finished, or past Join.
-        XCTAssertFalse(FirstRunNavigation.opensWelcomeBack(join, passkeys: remembered(), completed: true))
-        var later = join
-        later.step = .tools
-        XCTAssertFalse(FirstRunNavigation.opensWelcomeBack(later, passkeys: remembered(), completed: false))
-        // An account is already answered or held on Join.
-        for account: AccountAnswer in [.watchOnly, .nearAI, .passkeyChosen, .passkey(name: "x"), .enrolled] {
-            var answered = join
-            answered.account = account
-            XCTAssertFalse(
-                FirstRunNavigation.opensWelcomeBack(answered, passkeys: remembered(), completed: false),
-                "\(account)")
-        }
     }
 }

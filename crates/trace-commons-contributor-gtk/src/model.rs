@@ -38,14 +38,6 @@ pub struct Status {
     pub next_digest_at: Option<String>,
     #[serde(default)]
     pub health: Health,
-    /// The daily volume caps, and what they are holding back.
-    ///
-    /// Read independently of `health`: `daily-cap-reached` is last in the
-    /// daemon's precedence order, so any other condition takes the single
-    /// health slot and the cap disappears from view. That is exactly how a
-    /// spent budget came to be indistinguishable from a broken app.
-    #[serde(default)]
-    pub daily_budget: DailyBudget,
     /// What the daemon is seeing from the local proxy it was told about.
     ///
     /// Absent on a daemon older than the block, and `RoutingStatus`'s
@@ -60,8 +52,8 @@ pub struct Status {
     #[serde(default)]
     pub grant_voids: Vec<serde_json::Value>,
     /// Approved sessions held because the privacy witness is busy. Read
-    /// independently of `health` for the reason `daily_budget` is: a higher
-    /// label can hold the slot while these sessions are still waiting.
+    /// independently of `health` because a higher label can hold the slot
+    /// while these sessions are still waiting.
     /// Absent on a daemon older than the field, which holds nothing on it.
     #[serde(default)]
     pub witness_capacity: WitnessCapacity,
@@ -82,6 +74,19 @@ pub struct Status {
     /// which chooses the words. Absent on a daemon older than the field.
     #[serde(default)]
     pub legacy_invite_migration: serde_json::Value,
+    /// `ok`, or `needs_attention` while this app's account must be set up
+    /// again (#1836 F1). Absent on a daemon older than the field, which
+    /// reads as nothing to show. Kept as sent: the words come from
+    /// `consent_copy::account_attention_for_wire`, never chosen here.
+    #[serde(default)]
+    pub account_state: Option<String>,
+    /// The daemon's reason label beside `account_state`, as sent.
+    #[serde(default)]
+    pub account_state_reason: Option<String>,
+    /// True while `account_state` is `needs_attention` and a NEAR AI login
+    /// is stored. Absent reads as false.
+    #[serde(default)]
+    pub near_ai_login_unconfirmed: bool,
 }
 
 /// One rewording notice as the window draws it (K5).
@@ -98,6 +103,19 @@ pub struct ArmingRewordingCard {
 }
 
 impl Status {
+    /// The account section's status while this app's account needs
+    /// attention, in the core's words, or `None` while there is nothing to
+    /// show (healthy, or a daemon too old to say).
+    pub fn account_attention(
+        &self,
+    ) -> Option<trace_commons_contributor::consent_copy::AccountAttentionCopy> {
+        trace_commons_contributor::consent_copy::account_attention_for_wire(&serde_json::json!({
+            "account_state": self.account_state,
+            "account_state_reason": self.account_state_reason,
+            "near_ai_login_unconfirmed": self.near_ai_login_unconfirmed,
+        }))
+    }
+
     /// Shared completion is proof only for a live, identified enrollment.
     pub fn shared_setup_complete(&self) -> bool {
         self.logged_in
@@ -149,31 +167,23 @@ pub struct WitnessCapacity {
 
 impl Status {
     /// The health banner's lines, in order: the health label's own
-    /// sentence, the spent budget, and sessions waiting on the witness.
+    /// sentence, and sessions waiting on the witness.
     ///
     /// The label's sentence steps aside where a line below says the same
-    /// thing with real numbers: `daily-cap-reached` for the budget, and
-    /// `witness-saturated` for the witness. Both of those are drawn from
-    /// their own status objects rather than waiting for the label, because
-    /// the slot holds one label and either can be masked.
+    /// thing with real numbers: `witness-saturated` for the witness, drawn
+    /// from its own status object rather than waiting for the label,
+    /// because the slot holds one label and it can be masked.
     pub fn health_banner_lines(&self) -> Vec<String> {
         let witness = self.witness_capacity_line();
         let mut lines: Vec<String> = Vec::new();
         if let Some(label) = self.health.last_error_label.as_deref() {
             // And `automatic-contribution-held`, whose card names the folders
             // and says why, drawn beside the banner from its own object.
-            let shown_below = (label == "daily-cap-reached" && self.daily_budget.blocked)
-                || (label == crate::copy::WITNESS_SATURATED_LABEL && witness.is_some())
+            let shown_below = (label == crate::copy::WITNESS_SATURATED_LABEL && witness.is_some())
                 || (label == crate::copy::GATE_HELD_LABEL && self.gate_held_notice().is_some());
             if !shown_below {
                 lines.push(crate::copy::health_sentence(label).to_string());
             }
-        }
-        if self.daily_budget.blocked {
-            lines.push(crate::copy::daily_cap_sentence(
-                self.daily_budget.blocked_entries,
-                self.daily_budget.resets_at,
-            ));
         }
         lines.extend(witness);
         lines
@@ -260,34 +270,6 @@ pub struct RoutingStatus {
     /// checked" and never a date this install began.
     #[serde(default)]
     pub last_refresh_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// `status.daily_budget`. Counts and one timestamp; nothing identifying.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct DailyBudget {
-    #[serde(default)]
-    pub bytes_today: u64,
-    #[serde(default)]
-    pub max_bytes_per_day: u64,
-    #[serde(default)]
-    pub bytes_remaining: u64,
-    #[serde(default)]
-    pub uploads_today: u32,
-    #[serde(default)]
-    pub max_uploads_per_day: u32,
-    #[serde(default)]
-    pub uploads_remaining: u32,
-    /// When the counters zero. The daemon derives this from its own day
-    /// bucket, so it may be stated rather than paraphrased as "tomorrow".
-    #[serde(default)]
-    pub resets_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Whether at least one approved trace cannot go out before the reset.
-    #[serde(default)]
-    pub blocked: bool,
-    #[serde(default)]
-    pub blocked_entries: u32,
-    #[serde(default)]
-    pub blocked_bytes: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -903,10 +885,6 @@ pub struct Settings {
     #[serde(default)]
     pub approval_hold_secs: u64,
     #[serde(default)]
-    pub max_uploads_per_day: u64,
-    #[serde(default)]
-    pub max_bytes_per_day: u64,
-    #[serde(default)]
     pub local_notifications: bool,
     #[serde(default)]
     pub near_ai_configured: bool,
@@ -1221,6 +1199,73 @@ pub fn human_when(then: Option<chrono::DateTime<chrono::Utc>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1836 F1: the account status is the core's, for both reasons, with
+    /// the Private AI line only while a NEAR AI login is stored.
+    #[test]
+    fn an_account_needing_attention_is_worded_by_the_core() {
+        let status: Status = serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "account_state": "needs_attention",
+            "account_state_reason": "account_record_unreadable",
+            "near_ai_login_unconfirmed": true,
+        }))
+        .expect("status decodes");
+        let copy = status.account_attention().expect("shown");
+        assert_eq!(copy.title, "This app's account needs attention");
+        assert_eq!(
+            copy.body,
+            Some(
+                "This app can't read its account details on this computer. Set it up again to keep sending traces."
+            )
+        );
+        assert_eq!(
+            copy.private_ai,
+            Some("Private AI still works with your NEAR AI account.")
+        );
+        assert_eq!(copy.action, "Set up again");
+        assert_eq!(copy.confirm_title, "Set up this app again?");
+        assert_eq!(
+            copy.confirm_body,
+            "This signs out of NEAR AI on this computer. You'll sign in again to keep sending traces."
+        );
+        assert_eq!(copy.confirm_action, "Set up again");
+        assert_eq!(copy.confirm_cancel, "Cancel");
+        assert_eq!(copy.failed, "Nothing changed. Try again.");
+
+        let status: Status = serde_json::from_value(serde_json::json!({
+            "account_state": "needs_attention",
+            "account_state_reason": "account_address_refused",
+            "near_ai_login_unconfirmed": false,
+        }))
+        .expect("status decodes");
+        let copy = status.account_attention().expect("shown");
+        assert_eq!(
+            copy.body,
+            Some(
+                "This app can no longer reach the service it was set up with. Update the app, or set it up again."
+            )
+        );
+        assert_eq!(copy.private_ai, None);
+    }
+
+    /// A healthy account and a daemon too old to send the fields show
+    /// nothing.
+    #[test]
+    fn a_healthy_account_or_an_old_daemon_shows_no_account_status() {
+        let healthy: Status = serde_json::from_value(serde_json::json!({
+            "logged_in": true,
+            "account_state": "ok",
+            "account_state_reason": null,
+            "near_ai_login_unconfirmed": false,
+        }))
+        .expect("status decodes");
+        assert_eq!(healthy.account_attention(), None);
+        let old: Status =
+            serde_json::from_value(serde_json::json!({"logged_in": true})).expect("old decodes");
+        assert_eq!(old.account_attention(), None);
+        assert!(!old.near_ai_login_unconfirmed);
+    }
 
     fn status_with_voids(voids: serde_json::Value) -> Status {
         serde_json::from_value(serde_json::json!({

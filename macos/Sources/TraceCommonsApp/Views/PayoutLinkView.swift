@@ -6,8 +6,8 @@ import TCShellCore
 /// credit to. Hidden unless the commons lists `near_ai` as enabled, or this
 /// device has no account session, which the section says. Every
 /// sentence is the core's draft copy (`PayoutLinkCopy`); this only lays them
-/// out. There is no passkey step: the person's click on Choose, after the
-/// consent for the selected organization is on screen, is the confirmation.
+/// out. The person's click on Choose, after the consent for the selected
+/// organization is on screen, is the confirmation.
 ///
 /// This standalone picker starts without a selection. First-run onboarding
 /// configures a verified sole organization before showing this picker.

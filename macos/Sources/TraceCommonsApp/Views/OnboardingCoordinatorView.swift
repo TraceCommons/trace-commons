@@ -20,8 +20,6 @@ import TCShellCore
 ///   is logged, label only, so a broken table is diagnosable;
 /// - the scene, the step thread and what the stage remembers
 ///   (`FirstRunStageMemory`), so going Back does not replay the scan;
-/// - the passkey sheets, mounted here exactly once, so a request raised on
-///   any step presents over it;
 /// - invite links (`PendingInvite`), which fill Join's invite, in a host
 ///   that takes them (`takesInvites`).
 ///
@@ -30,9 +28,7 @@ import TCShellCore
 /// (`CommitPoint.leaveTools`, or Customize's `declareRoots`). Signing in is
 /// the last step, Join, where the daemon is already running, so the invite
 /// is looked up and joined, and near.ai signed in, at once
-/// (`CommitPoint.signIn`). Create passkey still starts the daemon itself
-/// when it is not running, with both roots declared `off`
-/// (`CommitPoint.passkeyOnJoin`).
+/// (`CommitPoint.signIn`).
 ///
 /// ## Resuming
 ///
@@ -107,10 +103,6 @@ private struct FirstRunSteps: View {
     let onComplete: () -> Void
 
     @ObservedObject private var pendingInvite = PendingInvite.shared
-    /// The account the passkey sheets complete with: the running daemon's.
-    /// Nil until it runs, which Join reads as "start it, then open them".
-    @State private var passkeyAccount: LivePasskeyAccount?
-    @State private var passkeyClient: DaemonClient?
     @StateObject private var memory = FirstRunStageMemory()
     @Namespace private var actors
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -132,18 +124,12 @@ private struct FirstRunSteps: View {
             .environment(\.firstRunActors, actors)
             .animation(GlassMotion.spatial(reduceMotion), value: runner.state.step)
         }
-        .firstRunPasskeySheets(copy: copy, runner: runner, account: passkeyAccount)
         .onChange(of: runner.state.step, initial: true) { _, step in
             onStep?(step)
-            // Welcome back is offered once Join, the last step, is reached.
-            if step == .join, let passkeyAccount {
-                Task { await runner.offerWelcomeBack(from: passkeyAccount) }
-            }
         }
         .onChange(of: runner.completed) { _, completed in
             if completed { onComplete() }
         }
-        .onChange(of: model.startup, initial: true) { _, _ in refreshPasskeyAccount() }
         .onChange(of: model.status.loggedIn, initial: true) { _, _ in recordEnrolment() }
         // Not `onOpenURL`: a link can arrive before any window exists,
         // so `AppDelegate` parks it and the first run collects it when
@@ -174,23 +160,8 @@ private struct FirstRunSteps: View {
             PrivateAIScreen(copy: copy, runner: runner, memory: memory)
                 .transition(.opacity)
         case .join:
-            JoinScreen(copy: copy, runner: runner, passkeyAccount: passkeyAccount)
+            JoinScreen(copy: copy, runner: runner)
                 .transition(.opacity)
-        }
-    }
-
-    /// One account per daemon client: a restarted daemon gets a new one.
-    /// Once there is one, a returning person on Join is offered Welcome
-    /// back (P-7); the runner decides, and offers it at most once.
-    private func refreshPasskeyAccount() {
-        let client = model.passkeyClient
-        guard client !== passkeyClient else { return }
-        passkeyClient = client
-        passkeyAccount = client.map {
-            LivePasskeyAccount(client: $0, presentationAnchor: { NSApp.keyWindow ?? NSApp.mainWindow })
-        }
-        if let passkeyAccount {
-            Task { await runner.offerWelcomeBack(from: passkeyAccount) }
         }
     }
 

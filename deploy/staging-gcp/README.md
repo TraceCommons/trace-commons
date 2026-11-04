@@ -25,7 +25,7 @@ fork (design 3.6). This directory holds only what is staging's own.
   `ingest.` and `issuer.staging.tracecommons.ai`). Serves
   `/.well-known/apple-app-site-association` and
   `/near-ai-pins/current.json`; everything else is 404.
-- `apple-app-site-association` -- the passkey association for
+- `apple-app-site-association` -- the webcredentials association (unused since passkeys were removed) for
   `KXSWJN7WY8.ai.tracecommons.shell.staging`.
 - `render-env.sh` -- reads the `tc-staging-*` secrets from Secret Manager on
   the VM and writes `/etc/tracecommons/ingest.env`, `issuer.env` and the
@@ -284,7 +284,6 @@ directories `/etc/tracecommons`, `/var/log/tracecommons` and
    # The v2 contract reports the staging login path ready:
    # "near_ai_login_ready": true.
    curl -fsS https://ingest.staging.tracecommons.ai/v1/account/near/provision/capabilities/v2
-   scripts/check-aasa.sh https://staging.tracecommons.ai KXSWJN7WY8.ai.tracecommons.shell.staging
    # 200, not 503 attestation_signing_key_unconfigured: proves systemd read
    # the multi-line attestation keys out of ingest.env. This is the only
    # check of that; no CI job parses ingest.env the way systemd does. Do not
@@ -521,10 +520,12 @@ What this changes, and what it does not:
   carries the payout rate, from the operator, not committed) at an absolute
   path the `tracecommons` user can read; run the payout rail grant in step 6;
   then rerun step 4 with `TC_NEAR_AI_PAYOUT_MODE=dry_run`,
-  `TC_NEAR_AI_PAYOUT_CREDENTIAL_ID`, `_SENDER_ORG`, `_SOURCE` (`payment` for
+  `TC_NEAR_AI_PAYOUT_SENDER_ORG`, `_SOURCE` (`payment` for
   an org funded with paid credit; no default), `_ACCOUNT_CEILING_NANO` and
   `TC_CREDIT_SETTLEMENT_TABLE_PATH`, which also reads
   `tc-staging-nearai-reseller-key` (an `oc_` credential, `oc_` and 64 hex).
+  `TC_NEAR_AI_PAYOUT_CREDENTIAL_ID` (a UUID that only labels log lines) is
+  optional: unset, nothing is written and they carry `credential=unset`.
   The ingest then refuses to boot unless sign-up provisioning is on with the
   account-index pepper and account-name KEK set (the link routes seal each
   recipient under them); the staging template already sets all three. Values

@@ -20,7 +20,7 @@ final class InsightsSampleWeekTests: XCTestCase {
             .init("analyze", source: "claude_code", file: "/tmp/trace.jsonl", save: false),
             .init("delete", id: "unknown"), .init("episode_create", snapshotIDs: ["x"]),
             .init("question_cards", snapshotIDs: [], questions: InsightQuestion.allCases),
-            .init("goal_set"), .init("lever_feedback"), .init("lever_card", enabled: false),
+            .init("goal_set"), .init("lever_feedback"),
         ]
         for operation in writes { _ = try? await service(.init(operation: operation)) }
         let reached = await store.operations

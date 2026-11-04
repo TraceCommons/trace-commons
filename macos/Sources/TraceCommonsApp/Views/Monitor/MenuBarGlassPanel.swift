@@ -125,7 +125,9 @@ struct MenuBarGlassPanel: View {
     /// 2026-10-22: the popover's graph matches the app's), as the edge
     /// rail's Traces peek draws them: the Traces graph's days, counted as
     /// it counts them, in its compact form for the narrower panel. The
-    /// legend counts the graph's days, or the day under the pointer. Each
+    /// legend counts the graph's days, or the day under the pointer. The
+    /// bars grey while watching is paused, as the menu-bar item's do
+    /// (product owner, 2026-10-29, #1753); the legend keeps its colours. Each
     /// count comes from its own read (`store.sharedCount`,
     /// `store.keptCount`); one that is not current is the core's unknown
     /// word, never the last count and never a bare dash.
@@ -143,7 +145,7 @@ struct MenuBarGlassPanel: View {
             }
             GlassBarGraph(
                 MenuPanelData.bars(buckets, words: MonitorShellWords.graphWords),
-                scaleFloor: 5, compact: true, hovered: $hovered)
+                scaleFloor: 5, compact: true, paused: model.status.paused, hovered: $hovered)
                 .frame(height: EdgeRailGraph.height)
         }
     }

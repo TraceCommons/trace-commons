@@ -33,13 +33,24 @@ public sealed record ManagedTool(string Tool, bool Installed,
 /// daemon, or for a stored choice the daemon does not know.</param>
 /// <param name="TerminalChoices">The terminals the daemon found on this
 /// computer; absent from an older daemon.</param>
+/// <param name="TerminalDestination">The chosen terminal's name.</param>
+/// <param name="LaunchDestination">Where a session opens: herdr while sessions
+/// are grouped there, else the chosen terminal. Absent from an older
+/// daemon.</param>
 public sealed record ManagedCapabilities(
     [property: JsonPropertyName("managed_launch")] bool ManagedLaunch,
     [property: JsonPropertyName("terminal_launch")] bool TerminalLaunch,
     [property: JsonPropertyName("terminal_destination")] string? TerminalDestination,
     [property: JsonPropertyName("near_ai_signin")] bool NearAiSignin = false,
     [property: JsonPropertyName("terminal_current")] string? TerminalCurrent = null,
-    [property: JsonPropertyName("terminal_choices")] ManagedTerminalChoice[]? TerminalChoices = null);
+    [property: JsonPropertyName("terminal_choices")] ManagedTerminalChoice[]? TerminalChoices = null,
+    [property: JsonPropertyName("launch_destination")] string? LaunchDestination = null)
+{
+    /// <summary>Where a session opens, for the launch lines and a launch's
+    /// refusal: <see cref="LaunchDestination"/>, or the chosen terminal from
+    /// an older daemon (owner, 2026-11-03).</summary>
+    public string? SessionDestination => LaunchDestination ?? TerminalDestination;
+}
 
 /// <param name="SignInAccounts">One entry per tool, derived from the NEAR AI
 /// sign-in and never saved. Empty, or absent from an older daemon, without one.</param>
@@ -144,12 +155,18 @@ public static class ManagedSignIn
         template.Replace("{destination}", destination ?? fallback);
 
     /// <summary>The line for a failed managed action: the sign-in prompt
-    /// when the daemon refused for want of a NEAR AI sign-in, and the
-    /// not-found line when the chosen terminal was not found.</summary>
+    /// when the daemon refused for want of a NEAR AI sign-in, the not-found
+    /// line when the chosen terminal was not found, the add-funds line
+    /// when the sign-in's balance cannot pay for a session's first calls,
+    /// and the line that says why when a NEAR AI project chooses a
+    /// model.</summary>
     public static string ErrorKey(string? code) => code switch
     {
         "managed-near-ai-sign-in-required" => "sign_in_needed",
         "managed-terminal-not-found" => "terminal_not_found",
+        "managed-near-ai-balance-too-low" => "balance_too_low",
+        "managed-project-chooses-model" => "project_chooses_model",
+        "managed-project-sets-auto-mode-server" => "project_sets_auto_mode_server",
         _ => "action_failed",
     };
 

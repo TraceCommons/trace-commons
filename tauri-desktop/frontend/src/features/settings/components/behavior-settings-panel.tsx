@@ -89,37 +89,6 @@ export function BehaviorSettingsPanel({
           onSave={onSave}
         />
       </div>
-      <div className="mt-5 grid gap-px border-t border-border">
-        <BehaviorSettingRow
-          label="Daily upload count"
-          detail="Hard maximum accepted by daemon."
-          setting="max_uploads"
-          value={numberValue(settings, "max_uploads_per_day", 100)}
-          min={1}
-          max={1000}
-          unit="uploads"
-          busy={busy === "max_uploads"}
-          onSave={onSave}
-        />
-        <BehaviorSettingRow
-          label="Daily upload volume"
-          detail="Hard maximum accepted by daemon."
-          setting="max_bytes"
-          value={Math.max(
-            1,
-            Math.round(
-              numberValue(settings, "max_bytes_per_day", 512 * 1024 * 1024) /
-                1024 /
-                1024,
-            ),
-          )}
-          min={1}
-          max={5120}
-          unit="MB"
-          busy={busy === "max_bytes"}
-          onSave={onSave}
-        />
-      </div>
     </section>
   );
 }

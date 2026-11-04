@@ -18,10 +18,8 @@
 //!
 //! # Who authorizes a link
 //!
-//! The owner superseded the passkey confirmation on 2026-10-23 ("We aren't
-//! using passkeys at all in the app right now"). The contributor's signed-in
-//! account session is the authority: the daemon presents it on start and on
-//! confirm, and there is no step-up page and no passkey. What stands behind
+//! The contributor's signed-in account session is the authority: the daemon
+//! presents it on start and on confirm, and there is no step-up page. What stands behind
 //! a link is the commons' own check with NEAR AI that the org is owned and
 //! active, the "changed since shown" version, and the audit trail on both
 //! sides.

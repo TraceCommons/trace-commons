@@ -21,10 +21,12 @@ old behaviour, because no application has shipped against `v1` yet. See
 
 **New in this revision (additive, no existing field or shape changed):**
 
-- `set_settings` now accepts `max_uploads_per_day` and `max_bytes_per_day`,
-  each validated against a fixed ceiling rather than left open (see
-  [`set_settings`](#set_settings)). Before this, the only way to raise either
-  cap was to stop the daemon and hand-edit `daemon-settings.json`.
+- The daily upload limit is retired. `set_settings` accepts
+  `max_uploads_per_day` and `max_bytes_per_day` and ignores them, so a
+  shell built while the limit existed can still save its other settings;
+  `get_settings` no longer returns them. `status.daily_budget` is no longer
+  sent (see [`daily_budget` (retired)](#daily_budget-retired)), and the health label
+  `daily-cap-reached` is never set.
 - `project_id` is an opaque, daemon-issued handle for a project. It appears
   on every queue entry (`list_pending`, the `snapshot` event) and on every
   `list_projects` row, and `set_project_mode` accepts it in place of
@@ -633,7 +635,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `near_account_start` | `ingest_url`, `account_id` | `attempt_id`, `browser_url`, `status` | explicit wallet ceremony; keys and PKCE stay in daemon |
 | `near_account_status` | `attempt_id` | `attempt_id`, `status` | no account token or signing material |
 | `near_account_cancel` | `attempt_id` | cancellation state | cancels the matching local attempt |
-| `near_ai_credential_start` | `provider` (optional; the build's `channel::NEAR_AI_SIGN_IN_PROVIDERS`: production `near`, `github`, `google`, default `near`; a `near-ai-staging` build `google` only, and `near` and `github` are refused) | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. The browser URL is returned **once** and no poll re-serves it |
+| `near_ai_credential_start` | `provider` (optional; one of the build's `channel::NEAR_AI_SIGN_IN_PROVIDERS`: production `near`, `github`, `google`; a `near-ai-staging` build `google` only, and `near` and `github` are refused). Shells send none | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. With no `provider`, `browser_url` is the daemon's own loopback page listing the build's logins, and the one picked there continues on the same port; a build with one login goes straight to it. When the Commons has accepted a NEAR AI login on this device (first enrollment, or a renewal with the stored login), the page lists that login first and marks it; the tag (`near`, `github` or `google`, nothing else) is kept in the daemon file `near-ai-login.json` and removed by `unenroll`. The browser URL is returned **once** and no poll re-serves it |
 | `near_ai_credential_status` | `attempt_id` (optional) | `state`, plus `attempt_id` and `attempt_status` for a caller that named the current attempt | never errors on a missing or stale `attempt_id`: `state` is a fact about the machine. See "The credential state" below |
 | `near_ai_credential_cancel` | `attempt_id` (optional) | `attempt_id`, `status` when named; `status` alone when not | stops this machine waiting on the browser; unnamed, it stops whatever sign-in is in flight and never echoes the id; `near_ai_credential_unknown` if a named id is not the current attempt, or if an unnamed cancel finds no sign-in in flight (none ever started, or the last one finished); a named cancel of the finished current attempt answers its terminal status and changes nothing |
 | `near_ai_credential_forget` | — | `removed`, `revoked: false` | removes the key from **this machine only**; `revoked` is always false and is not a placeholder. See "The credential state" below |
@@ -689,7 +691,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `complete_setup` | `expected_scope` from `get_setup_status`; optional `scopes[]` of wire-name data uses | durable completion state for the same enrollment | agent-selected scopes use the existing validation/audit path; publishes `status_changed`; grants no automatic-upload permission |
 | `get_config_schema` | empty object | versioned settings-patch JSON Schema, effects and patch semantics | read-only; credentials and read-only settings are not settable properties |
 | `preview_settings` | partial object accepted by `set_settings` | versioned canonical before/after changes; redacted values remain hidden | read-only; validates without persistence or runtime effects |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `subscription_usage_codex_enabled`, `subscription_usage_claude_on`, `subscription_usage_claude_enabled`, `managed_terminal`, `managed_cli_options`, `managed_folder_settings` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `subscription_usage_codex_enabled`, `subscription_usage_claude_on`, `subscription_usage_claude_enabled`, `managed_terminal`, `managed_favorite_models`, `managed_cli_options`, `managed_folder_settings` | updated settings | see "`set_settings`" below |
+| `set_managed_herdr` | `on` (**required** boolean; anything else is `bad_params` / `on-required`) | `managed_herdr` | "Group sessions in herdr": writes `managed_herdr` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -709,9 +712,11 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `nudge_opened` | `kind` (**required**: `idle_sessions`, `review_backlog` or `verdicts_landed`); `subject` (reserved, as above) | `opened: true` | sent only from the suggestion's own action, never for being shown; for `verdicts_landed` it acknowledges the news; local only; publishes `status_changed`; see "`status.nudge`" below |
 | `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
 | `set_menu_bar_mark_enabled` | `on` (**required**, boolean) | `menu_bar_mark_enabled` | the menu-bar news mark and halo switch; writes `menu_bar_mark_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
-| `set_managed_terminal` | `terminal` (**required**: one of this platform's ids -- macOS `terminal`, `ghostty`, `iterm2`; Windows `windows_terminal`; Linux `gnome_terminal`, `konsole`, `ghostty`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
+| `set_managed_terminal` | `terminal` (**required**: one of this platform's ids -- macOS `terminal`, `ghostty`, `iterm2`, `kitty`, `wezterm`, `alacritty`, `warp`, `rex`; Windows `windows_terminal`; Linux `gnome_terminal`, `konsole`, `ghostty`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
+| `managed_model_favorite_set` | `model` (**required**, a model id), `favorite` (**required**, boolean) | `favorites` (`[string]`, the stored list) | async only; stars or unstars one model for the Launch sheet's picker; writes `managed_favorite_models` through `set_settings`; see "Managed session model choice" below |
+| `managed_cli_model` | `tool` (**required**), `cli_options` (**required**, the session's CLI options text) | `model` (string or null) | local only, reads nothing from NEAR AI; the model the tool's own flag names in `cli_options` (Claude Code `--model`; Codex `-m`/`--model`), which the launcher runs instead of the picker's and weighs every secondary model against; options that do not parse name none. The macOS background picker reads `managed_model_catalogue`'s `background`/`background_sets` for this model |
 | `managed_cli_options_set` | `tool` (`claude`, `codex`, `opencode`), `options` (string) | `tool`, `options`, `revision` | validates and saves through `set_settings.managed_cli_options`; returns the current saved value and managed revision so older snapshots cannot undo an acknowledged save; invalid quoting or reserved flags return `managed-cli-options-invalid` |
-| `managed_folder_settings_get` | `tool`, `cwd` (existing absolute folder) | `tool`, `model`, `collect_traces`, `cli_options`, `remembered`, `revision` | canonical folder/agent preferences; falls back to global CLI options, default model and collection off; never selects an account |
+| `managed_folder_settings_get` | `tool`, `cwd` (existing absolute folder) | `tool`, `model`, `collect_traces`, `cli_options`, `remembered`, `revision`, `project_workflows` | canonical folder/agent preferences; falls back to global CLI options, default model and collection off; never selects an account. `project_workflows` (boolean; absent from an older daemon) says whether Claude Code would find workflows for this folder, in the folders the launch reads; always `false` for other tools. The macOS sheet shows the shared `project_workflows` line when it is `true` and the session is on NEAR AI |
 | `managed_folder_settings_reset` | `tool`, `cwd` | same as lookup | removes only this canonical folder/agent profile through the normal settings writer and returns effective defaults |
 | `set_notifications_enabled` | `on` (**required**, boolean) | `notifications_enabled` | "Notifications from Trace Commons", the master switch; writes `notifications_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
 | `set_notify_kind` | `kind` (**required**: `digest`, `idle_sessions`, `verdicts_landed`, `weekly_recap` or `insights_tip`), `on` (**required**, boolean) | `kind`, `on` | one notification kind's switch; writes `notify.<kind>` through `set_settings`; answering `verdicts_landed` or `idle_sessions` ends that kind's one-time offer; publishes `status_changed` when it changes; see "Notification settings" below |
@@ -744,18 +749,6 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   "idle_sessions": { "count": 0, "tools": [], "threshold_days": 3 },
   "next_digest_at": null,
   "health": { "last_error_label": null, "since": null },
-  "daily_budget": {
-    "bytes_today": 204659969,
-    "max_bytes_per_day": 209715200,
-    "bytes_remaining": 5055231,
-    "uploads_today": 12,
-    "max_uploads_per_day": 50,
-    "uploads_remaining": 38,
-    "resets_at": "2026-08-22T00:00:00Z",
-    "blocked": true,
-    "blocked_entries": 14,
-    "blocked_bytes": 137283584
-  },
   "routing": { "state": "not_declared", "last_refresh_at": null },
   "grant_voids": [],
   "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null },
@@ -837,67 +830,26 @@ nothing to say), it is that target, at or before now -- already due, the
 same reading `interval` gives when last-plus-interval is in the past.
 Otherwise it is the next occurrence of the configured local hour.
 
-#### `daily_budget`
+#### `daily_budget` (retired)
 
-Added in `trace_commons.daemon.v1_1` as an additive field. It reports the
-daily volume caps and, crucially, how much already-approved work they are
-holding back.
+Removed. The daemon has no daily upload limit, so nothing is counted
+per day, nothing approved is ever held for one, and `status` no longer
+carries the field. Every shell built while the limit existed decodes its
+absence and hides the lines that showed it. A new client must not expect
+it.
 
-These are the effective caps used by upload enforcement. A supporting daemon
-refreshes the authenticated account's upload allowance on the first active
-pass and every five minutes while an armed folder/automatic grant or an
-approved queued session can contribute, including while capped. Idle,
-paused, update-quiesced and dry-run clients make no allowance request or
-OS-credential read. Resuming activity can refresh immediately; skipped
-polls do not consume the cadence. Explicit approvals do not require an
-armed project or an anchored tenant for this refresh. The server scales
-both daily caps by
-the account's validated applied admission `effective_allowance` divided by
-`bounded_allowance`, rounding down and clipping at 1,000 uploads and 5 GiB.
-Operator-configured caps are the base; when absent, earned growth above 1
-uses 50 uploads and 200 MiB. Without a configured base or validated earned
-growth, the server returns null. Existing external and tiered trust modes
-retain their admission validation, freshness, and generation safeguards;
-legacy/invited compatibility paths retain the configured base unchanged.
+The daemon also stopped asking the server for an upload allowance
+(`GET /v1/account/upload-allowance`, which now always answers
+`{"allowance": null}`; see
+[the operator contract](operator/client-upload-allowance.md)).
 
-The allowance can raise untouched count and byte defaults independently;
-explicit local choices remain in force. `get_settings` still returns the
-saved local values, so its caps can differ from `status.daily_budget`.
-Send `null` for either cap in `set_settings` to reset that dimension to its
-shared default and follow server allowances again. Persisted per-cap
-provenance flags are internal: they are omitted from `get_settings` and
-`set_settings` responses, and writing them is rejected as an unknown field.
-Refreshing an allowance never resets `bytes_today` or `uploads_today`.
-A successful null response, including trust fallback with no configured
-base, removes a previous uplift; transient refresh failures retain it for
-the current identity. These daily volume caps do not establish submission
-readiness: server processing-cost admission uses its own period and units.
-See [the operator contract](operator/client-upload-allowance.md).
-
-It is deliberately **not** routed through `health`. The daemon does set
-`daily-cap-reached` when a cap refuses an upload, but that label sits at the
-bottom of the precedence order, so any other condition, including the full
-queue that prompted this field, occupies the single
-`health.last_error_label` slot and the cap becomes invisible. A client that
-only reads `health` therefore cannot tell a spent budget from a broken
-daemon. Read `daily_budget` independently of `health`.
-
-| field | meaning |
-| --- | --- |
-| `bytes_today` / `uploads_today` | consumed so far in the current UTC day |
-| `max_bytes_per_day` / `max_uploads_per_day` | the caps in force |
-| `bytes_remaining` / `uploads_remaining` | what is left, saturating at zero |
-| `resets_at` | the next UTC midnight, when the counters zero. Derived from the daemon's own day bucket, so a client may state it |
-| `blocked` | whether at least one approved entry cannot be uploaded before `resets_at` |
-| `blocked_entries` / `blocked_bytes` | how many, and their combined on-disk size |
-
-`blocked_entries` counts every approved entry that will not go out today,
-not only the ones that individually overflow the budget: the upload pass
-stops at the first entry that does not fit rather than skipping past it, so
-a small entry queued behind a large one waits as well.
-
-`blocked` is false when the budget is spent but nothing is approved and
-waiting. No contributor action is pending in that case.
+What still paces uploads: a local burst guard holds a daemon to at most 25
+upload attempts in any sixty seconds, under ingest's default per-principal
+submission rate. A pass that reaches it, like one the server turns away
+with `429`, leaves the entry approved with `reason_label`
+`rate-limited` and a `retry_after`, sets no health label, and stops the
+pass. Server admission still applies its own weekly account budget, which
+reports through `admission-limit-reached`.
 
 #### `witness_capacity`
 
@@ -923,7 +875,7 @@ the same pass that would need the witness is held until the same time
 without being sent, so a busy witness is asked once per pass, not once per
 session. There is no attempt limit: a busy witness never costs a session.
 
-It is beside `health` for the reason `daily_budget` is: the daemon also
+It is beside `health` because the daemon also
 sets `witness-saturated` in the health slot, set and retracted from the
 queue on every upload pass, but a higher-precedence label can mask it.
 Render the condition from this object. The words are
@@ -1261,8 +1213,8 @@ do not depend on history and still lead while history is stale.
 whenever any of these holds: `paused`; `consent_hold` is non-null; not
 `logged_in` (no live enrollment); suggestions switched off
 (`suggestions_enabled`, see `set_settings`). It is `unknown` while the daemon
-is unhealthy -- `health.last_error_label` is set or `daily_budget.blocked` is
-true -- because its view may not be current. **Decisions owed come first:**
+is unhealthy -- `health.last_error_label` is set -- because its view may not
+be current. **Decisions owed come first:**
 while `arming_suggestion` would return an offer, `review_backlog` is hidden
 (`none`), because "decide on these" beside "arm this folder" is two asks at
 once. The arming offer hides `idle_sessions` too.
@@ -1329,7 +1281,7 @@ decides where it draws, and it never replaces or hides a higher state.
 | `news` | Something new to look at, nothing to decide: a hollow ring in the badge's slot, below paused | `decisions_owed` is 0, every gate below is open, the history poll is fresh, and verdict news is waiting unacknowledged and its newest verdict is less than 72 hours old (DRAFT, owner decision 19) |
 | `ready` | Some of the decisions owed are idle sessions: a halo around the badge. The number is unchanged | `decisions_owed` is above 0, every gate below is open, `status.idle_sessions.count` is at least 1, `notify.idle_sessions` is on, and no in-app "Not now" for `idle_sessions` or `review_backlog` is in force |
 | `none` | Nothing is lit | otherwise, or a gate below is closed |
-| `unknown` | The daemon cannot say | the daemon is unhealthy (`health.last_error_label` set or `daily_budget.blocked`), or, with nothing owed, the history poll is stale (as for `state`) |
+| `unknown` | The daemon cannot say | the daemon is unhealthy (`health.last_error_label` set), or, with nothing owed, the history poll is stale (as for `state`) |
 
 - **Never both.** `news` needs `decisions_owed == 0` and `ready` needs it
   above 0, so the two cannot hold together. When a decision becomes owed the
@@ -2008,7 +1960,7 @@ with three waiting and one approved by hand loses three and still uploads
 one. A client MUST say so rather than let a contributor discover it.
 
 An unattended approval that was `uploading` at the moment of the change and
-did not complete -- the daily cap, a fail-closed precondition, a restart --
+did not complete -- a rate limit, a fail-closed precondition, a restart --
 returns to `approved`. It is not sent: the upload pass re-checks the
 project's mode before sending any unattended approval, refuses it as
 `"project-ignored"` if the project is now `ignore`, returns it to `pending`
@@ -2183,8 +2135,10 @@ trajectory's declaration).
 `project_id-invalid`; an id that resolves to no project the daemon knows --
 the usual known set plus every project a declared source lists now -- is
 `bad_params` / `project-id-unrecognized`. An unknown folder is refused, never
-answered with an empty list. `project_mode` is the folder's resolved rule
-(`notify_only`, `auto_upload` or `ignore`).
+answered with an empty list. `project_mode` is the folder's rule in force
+(`notify_only`, `auto_upload` or `ignore`), the same value as the folder's
+`list_projects` `mode`: under the include-existing grant a folder the grant
+will arm reads `auto_upload` (since 2026-10-29).
 
 Each row's `state`:
 
@@ -2920,6 +2874,24 @@ refused with `project-id-unrecognized`.
 clearing the override returns it to. They differ only while an override is
 in force. See "The contribution override" below.
 
+Under the include-existing grant both report what the daemon will apply
+(since 2026-10-29): a folder the grant will arm on its next pass -- one set
+to `notify_only` before the grant, or one with no rule yet (a discovered or
+found row) -- reads `auto_upload` in `mode` and `folder_mode`, though no
+`auto_upload` rule is stored for it yet. Its sessions are approved
+unattended, so `notify_only` would misstate it, and a shell that only sends
+a pick differing from `mode` could not offer Ask on it. Picking
+`notify_only` there makes the folder an exception to the grant. A folder set
+to `ignore`, one set to `notify_only` after the grant, and the unknown bucket
+read as their own mode. With no grant, or a grant without
+`include_existing`, nothing changes. `status.contribution_mode` rolls up the
+same value, so it reads `auto_upload`, not `mixed`, when every folder will
+upload. Such a row, configured, discovered or found, also carries
+`automatic_disclosure` (`patterns_only` until its sessions earn more) and
+`from_now: false`, as an armed row does; so does a discovered or found row an
+"Auto contribute" override arms. No field is added; a client reads `mode` as
+before.
+
 An armed row also carries `from_now`: `true` when it was armed from now
 (`include_backlog: false`), so its backlog waits for the contributor, and
 `false` when it was armed with its backlog -- the default since 2026-10-19,
@@ -2958,6 +2930,18 @@ for that project already carries.
 `mode` is always the mode in force, not the stored value: the
 `unknown-project` bucket reports `notify_only` even if a hand-edited policy
 file says `auto_upload`, because the daemon refuses to act on that.
+
+#### `offerable_modes`
+
+The modes `set_project_mode` accepts for this row, in display order. The
+unknown-project bucket (`is_unresolved_bucket`) carries
+`["notify_only", "ignore"]`, since it can never be armed. Every other row
+carries `["notify_only", "auto_upload", "ignore"]`, under the
+include-existing grant too (see `grant_automatic` below): there a folder set
+to `notify_only` is an exception to the grant, as one set to `ignore` is.
+Until 2026-10-29 a row under that grant carried only
+`["auto_upload", "ignore"]` and `set_project_mode` refused `notify_only` with
+`automatic-sharing-requires-ignore`; both are gone.
 
 #### `unpurposed_traces` (K7)
 
@@ -3796,10 +3780,54 @@ That is what makes a re-grant after logout safe. Logout wipes the policy,
 including a project set to `ignore`; a re-grant records the disk again, so that
 project asks rather than being armed as new.
 
+**The include-existing grant.** `grant_automatic_including_existing` (or
+`grant_automatic` with `include_existing: true`) widens the grant to every
+watched folder's existing history. It is a fresh global choice: it clears any
+contribution override, drops per-folder arm-from-now holds, and arms every
+folder whose mode is `notify_only` on the next session the watcher sees there,
+including folders set to `notify_only` before the grant. A folder set to
+`ignore` is never armed. Neither is a folder set to `notify_only` **after**
+the grant (owner decision 2026-10-29): it is an exception to the grant, so it
+resolves to Ask, its sessions wait as `pending`, and every other folder stays
+automatic. "After" is by identity, not by clock: each fresh global choice
+(`grant_automatic`, and widening it to include existing history) gets a new
+grant generation, and a folder's mode change records the generation in force.
+A `notify_only` recorded under the current generation is an exception, so a
+clock stepped backwards or an exact tie cannot arm it, and a later
+include-existing grant supersedes the exception in the same way. A policy
+file written before generations existed has them derived once on load from
+the earlier rule (a mode change later than `granted_at`), so an upgrade arms
+no folder that was asking. A folder the grant armed and a void then returned to
+`notify_only` keeps asking too. Setting the folder back to `auto_upload`
+arms it with its backlog (`include_backlog: false` is refused with
+`automatic-sharing-includes-existing` under this grant), so what it held as
+`pending` is approved on the next pass. Adopting the contributor's chosen
+data uses (`adopt_chosen_scopes`, #1739) keeps the grant and its exceptions.
+
+`keep_folder_asks` (optional, only with `include_existing`; owner, 2026-10-30)
+says what happens to folders already set to `notify_only`. `true` keeps every
+one as an exception to this grant, however long before it was set, so they
+keep asking and every other folder is armed. `false` clears them, so every
+folder except `ignore` is armed and a later grant that keeps Ask marks does
+not bring them back. Absent keeps the rule above. Anything else is refused with
+`keep-folder-asks-invalid`.
+
 Widened terms void the grant itself as well as the projects it armed, with an
 `automatic-grant-voided` entry. `withdraw_automatic_grant` returns
 `{"withdrawn": bool}` and leaves the projects the grant armed as they are;
-each is withdrawn with `set_project_mode`. `automatic_grant` returns
+each is withdrawn with `set_project_mode`. With `return_folders_to_ask: true`
+(Settings' "Ask each time", #1753) it also puts every project the grant armed
+back to no rule of its own, which reads `notify_only`; a project the
+contributor set to `auto_upload` themselves, and every `ignore` and
+`notify_only`, is left as it is. A non-boolean is refused with
+`return-folders-to-ask-invalid`.
+
+A policy file written before #1753's fix that holds a `notify_only`
+contribution override (the macOS setup's "Ask each time" wrote one) is
+migrated once on load: every folder whose own mode is `auto_upload` is set to
+`notify_only`, the grant is withdrawn and the override cleared, so every folder
+keeps showing Ask and a folder set to `auto_upload` afterwards sends. An
+`ignore` override, and a file a current build wrote, are left alone. `automatic_grant` returns
 `{"granted": false}` when none is in force. None of the three returns a path
 or a count of them.
 
@@ -5424,7 +5452,7 @@ it with the same parser, against a cloned in-memory snapshot. It returns:
   "schema_version": "trace_commons.settings_preview.v1",
   "applied": false,
   "changes": [
-    {"key": "max_uploads_per_day", "before": 50, "after": 12, "redacted": false}
+    {"key": "quiescence_secs", "before": 1800, "after": 600, "redacted": false}
   ]
 }
 ```
@@ -5915,9 +5943,10 @@ Takes a JSON object whose top-level keys must come from
 `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`,
 `menu_bar_mark_enabled`, `notify`,
 `verdicts_offer_pending`, `idle_offer_pending`,
-`max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`,
+`max_uploads_per_day` and `max_bytes_per_day` (retired: accepted and
+ignored, see below), `insights_ledger_feed`,
 `insights_context_threshold`, `insights_counter_pass`,
-`insights_recap_card_enabled`, `subscription_usage_codex_enabled`, `subscription_usage_claude_on`, `subscription_usage_claude_enabled`, `managed_terminal`, `managed_cli_options`, `managed_folder_settings` --
+`insights_recap_card_enabled`, `subscription_usage_codex_enabled`, `subscription_usage_claude_on`, `subscription_usage_claude_enabled`, `managed_terminal`, `managed_favorite_models`, `managed_cli_options`, `managed_folder_settings` --
 a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
@@ -5985,9 +6014,10 @@ defaults and refusals.
 
 `managed_terminal` (string) is the terminal app a managed session opens
 in, one of this platform's ids and nothing else: on macOS `terminal`
-(the default), `ghostty` or `iterm2`; on Windows `windows_terminal` (the
-default); on Linux `gnome_terminal` (the default), `konsole` or
-`ghostty`. Another platform's id is refused like any other. Any other
+(the default), `ghostty`, `iterm2`, `kitty`, `wezterm`, `alacritty`, `warp`
+or `rex`; on Windows `windows_terminal` (the default); on Linux
+`gnome_terminal` (the default), `konsole`, `ghostty`, `kitty`, `wezterm` or
+`alacritty`. Another platform's id is refused like any other. Any other
 value, `null` included, is `bad_params` / `settings-invalid-value`; no app name, path or command is ever accepted. A
 settings file holding a value this build does not know loads it as
 unrecognized: `managed_snapshot` then reports no `terminal_current` and no
@@ -5995,9 +6025,50 @@ unrecognized: `managed_snapshot` then reports no `terminal_current` and no
 the default. `set_managed_terminal` writes the same setting. The managed
 snapshot's `capabilities` carries `terminal_current` (the chosen id, or
 `null`), `terminal_choices` (`[{id, name}]` of the offered apps found on
-this computer; empty under Flatpak) and `terminal_destination` (the
-chosen app's name). A launch whose chosen app was not found is refused
-with `managed-terminal-not-found`.
+this computer; empty under Flatpak), `terminal_destination` (the
+chosen app's name: where tool setup opens, and what the install and update
+hints and the picker name) and `launch_destination` (where a session opens:
+the chosen app's name, or "herdr" while `managed_herdr` is on; `null`
+whenever `terminal_destination` is). A launch whose chosen app was not found
+is refused with `managed-terminal-not-found`. A shell fills `{destination}`
+and a launch refusal's `{terminal}` from `launch_destination`, and a tool
+setup refusal's `{terminal}` from `terminal_destination`; from a daemon
+that sends no `launch_destination`, `terminal_destination` serves for both.
+
+`managed_herdr` (boolean, default `false`) is "Group sessions in herdr":
+managed sessions open as tabs of herdr's "Near.ai" workspace, with
+`managed_terminal` hosting herdr when no herdr client is running (see
+`docs/managed-sessions.md`). Anything that is not a boolean is `bad_params`
+/ `settings-invalid-value`; `set_managed_herdr` writes the same setting. The
+managed snapshot's `capabilities` carries `herdr_available` (herdr was found
+and a terminal can host it) and `herdr_grouping` (the setting). With the
+setting on, `managed_terminal_launch` answers `destination: "herdr"`,
+`launch_destination` is "herdr" (so a launch refusal names herdr, while
+`terminal_destination` stays the chosen terminal), and a launch
+with no herdr found, or with herdr not answering within 10 s, is refused with
+`managed-terminal-not-found`. Something at herdr's socket path this account
+cannot trust is refused with `managed-herdr-socket-untrusted`. A herdr older
+than socket protocol 22 is refused with `managed-unsupported-version`.
+
+With `managed_terminal` set to `rex`, a launch whose Rex app does not connect
+within 10 s is refused with `managed-rex-not-ready`, and one whose `rex`
+call fails or gives nothing before the tab is opened with
+`managed-terminal-call-failed` (shells show the general failure line); a
+reply this build cannot read is `managed-unsupported-version`. Each of these
+comes before the ticket is sent and releases the launch.
+
+`managed_favorite_models` (object) stars or unstars NEAR AI models for the
+Launch sheet's model picker, merging like `notify`: `{"<model id>": true}`
+stars an id, `false` unstars it, and omitted ids stay. An id must be
+non-empty, at most 256 UTF-8 bytes, and free of whitespace and control
+characters; a value that is not a boolean, a bad id, or a patch that grows
+the list past 32 entries refuses the whole patch with `bad_params` /
+`settings-invalid-value`. A favorite NEAR AI stopped listing still counts
+toward the 32, but a removal is never refused for the bound.
+`set_settings` does not check that NEAR AI offers the id;
+`managed_model_favorite_set` does, and is what shells call. The settings
+answer carries the stored list as `managed_favorite_models` (`[string]`, in no
+particular order).
 
 `managed_cli_options` (object) updates saved CLI options for new managed coding
 sessions. Accepted keys are `claude`, `codex` and `opencode`, with string values.
@@ -6138,9 +6209,9 @@ shell's own command layer clamping before the call ever reached
 same label-only `settings-invalid-value` the other numeric fields already
 use.
 
-Every numeric field's exact bounds -- `quiescence_secs`, `approval_hold_secs`,
-`digest_interval_secs`, `max_uploads_per_day` and `max_bytes_per_day`, all in
-the unit `set_settings` itself stores and validates (seconds or bytes, never
+Every numeric field's exact bounds -- `quiescence_secs`, `approval_hold_secs`
+and `digest_interval_secs`, all in
+the unit `set_settings` itself stores and validates (seconds, never
 a shell's own minute/hour/megabyte control granularity) -- are available
 without guessing or hard-coding a second copy: the C ABI's
 `tc_settings_ranges_json` returns them as one JSON object, so a shell can
@@ -6330,7 +6401,9 @@ state, the harness rows and the credential row:
   `harness_plan_no_config_path`;
 - `credential_title`, `credential_what`, `credential_cost`;
 - `credential_obtain`, `credential_cancel`, `credential_forget`,
-  `credential_forget_explains`, `credential_migrate`,
+  `credential_forget_explains`, `credential_forget_not_revoked`,
+  `near_ai_still_signed_in`,
+  `credential_migrate`,
   `credential_migrate_explains`;
 - `credential_absent`, `credential_obtaining`, `credential_failed`,
   `credential_cancelled`, `credential_present`, `credential_unknown`,
@@ -6867,10 +6940,25 @@ never re-served.
 action, and it is the counterpart of `offer_exposure`: getting a key opens a
 browser, signs the contributor in to a company that is not this app, and
 mints a key this app then keeps. `credential_forget_explains` is its
-counterpart at the other end -- forgetting is LOCAL, the key stays valid at
-the service until the contributor removes it there, and this app cannot do it
-for them, which is why `near_ai_credential_forget` answers `revoked: false`
-rather than leaving "removed" to be read as "revoked".
+counterpart at the other end: forgetting removes the key and saved sign-in
+from this computer and revokes the key at NEAR AI with the sign-in being
+removed, best effort (owner decision 2026-11-02). `near_ai_credential_forget`
+answers `revoked: true` when the key is gone at NEAR AI, `false` when a key
+was stored and the revoke did not happen (including when its secret could not
+be read), and `null` when no key was stored. It also answers
+`cleanup_pending: true` when an OS entry is left to delete; it stays
+journaled, and `near_ai_credential_status` reports `cleanup_required` until a
+later credential operation deletes it. It is async-only: the sync dispatcher
+refuses it with `near-ai-credential-forget-requires-async`. A shell draws
+`credential_forget_not_revoked` only on `removed: true, revoked: false`.
+
+Unenroll and `account_sign_out` clear the same NEAR AI sign-in and revoke the
+same way. Each answers `near_ai_revoked` with the same three values, and
+`near_ai_cleared: false` when the NEAR AI sign-in could not be cleared here
+(the rest of the call has happened). After an unenroll, a shell says so
+with `near_ai_still_signed_in`: Forget in Private AI removes what is left.
+`account_sign_out` also answers `server_revoked`: whether the server accepted
+the account session's revoke, `null` when there was no session.
 
 No sentence on this surface renders a key, a key prefix, an id or an account
 name, and none of them carries a hole a shell could fill with one.
@@ -7093,30 +7181,13 @@ sentence says the check only counts what was removed and does not check that
 the scrubbing was right: it is not a model or quality check (the
 connect-and-forget design's R1).
 
-Each daily cap also accepts `null`: reset the saved value to the shared
-50-upload/200-MiB default for that dimension and follow server allowances
-again. A numeric write remains an explicit local choice, even when equal
-to the default. Resetting one cap preserves the other cap's choice. The
-saved provenance flags are internal and cannot be read or written through
-these IPC methods.
-
-`max_uploads_per_day` and `max_bytes_per_day` each take a positive integer,
-validated against a fixed ceiling (1,000 uploads; 5 GiB) rather than
-accepted as an open field. The cap exists to bound a runaway client -- an
-app that decided to upload everything should not be able to -- so making it
-freely settable to any value would give up exactly the protection it was
-added for. A value below the built-in default (50 uploads; 200 MiB) is
-accepted with no floor beyond non-zero: a contributor throttling their own
-uploads is legitimate and is not what the ceiling guards against. Zero is
-refused (`bad_params` / `settings-invalid-value`) rather than treated as
-"stop uploading" -- that state already exists and is spelled `pause`, which
-is visibly temporary in a way a cap of zero would not be. A value above
-either ceiling is refused the same way. Like the other numeric knobs, the
-new setting is read at each upload pass, so a change reaches an
-already-running daemon -- including one that reached its old cap with
-approved traces still waiting -- without a restart, and it is written to
-the persisted settings file in the same call, so the raised value survives
-one.
+`max_uploads_per_day` and `max_bytes_per_day` are retired with the daily
+upload limit. Either is accepted, whatever its value, and changes nothing,
+so a shell built while the limit existed can still save its other
+settings in the same call; an unknown key beside them is still refused.
+A request holding only these keys saves nothing and answers with the
+settings as they stand. `get_settings` no longer returns them, and a settings file that still
+holds them loads and drops them on the next save.
 
 ### History provenance (K7)
 
@@ -7524,8 +7595,7 @@ What is removed:
   remembered invite subject hash, and every stored approved envelope.
 
 What stays: receipts, history and the audit log, settings, folder rules,
-the queue, the NEAR AI notice marker, and the remembered passkeys (a passkey
-is not an enrollment).
+the queue, and the NEAR AI notice marker.
 
 Order: the credential references go first, with the credential generation
 advanced so an enrollment, sign-in or identity switch in flight cannot
@@ -7542,8 +7612,7 @@ Queued entries: every `approved`, unsent entry returns to `pending` with
 The sessions stay queued; no approval given under the old enrollment can be
 sent under a later one. A preview that finishes after `unenroll` pins
 nothing, because a pin now requires the envelope to name the enrollment in
-force. In-memory account-admission answers and passkey ceremonies are
-dropped.
+force. In-memory account-admission answers are dropped.
 
 Audit: appended first, label only: action `unenrolled`, `detail`
 `approvals_returned=<n>`. No tenant, account, key id or path. When nothing
@@ -8565,7 +8634,7 @@ error string into `error.message`.
 | `mission_catalogue` | `limit?`: 1–50, default 20; `before?`: UUID | `kind`, `catalogue`, `disclosure` | Public skill-evaluation catalogue/client exist; IPC new |
 | `invite_lookup` | `code`: full invite URL | protocol `InviteLookupResponse` | Issuer lookup/client exist; IPC new |
 | `first_run_estimate` | none | protocol `FirstRunEstimate`: `usd_micros_per_accepted_trace?` (`{min, max}`), `{}` when the commons publishes none or cannot be reached | Anonymous `GET /v1/public/first-run-estimate` on the configured commons, or the channel's account origin before enrollment; the shell passes the range to `tc_first_run_estimate_line` and shows its answer |
-| Native passkey/account methods | see below | token-free replies below | Server routes exist; daemon and native adapter new |
+| Native account methods | see below | token-free replies below | Server routes exist; daemon and native adapter new |
 | `history_rollup` | none | existing optional `community` | Already implemented; authoritative standing surface |
 
 ### `inference_summary`
@@ -8766,28 +8835,15 @@ settled**, never a payment promise. C1's provisional `CreditRange.unit` comment
 not daily mission credit. Perform lookup for an explicit action, not on every
 keystroke. Display-name/range bounds must be validated before presentation.
 
-### Native passkey and account identity
+### Native account identity
 
-The C1 names in the approved [native passkey design](superpowers/specs/2026-09-28-native-passkey-identity-design.md)
-are authoritative. That design remains on the #1120 branch at this contract
-baseline; its proposed screen copy is **not approved** by this contract.
-The native app uses only Apple's platform passkey provider, while one Rust
-encoder creates the WebAuthn JSON. All raw byte fields below use canonical,
-unpadded base64url. The app receives no native bearer, NEAR AI token, device
-key, tenant identity or secret-store reference.
+Passkeys were removed on 2026-10-31: an account signs in through NEAR AI.
+The former `passkey_*`, `account_bind` and `account_binding` methods are gone
+and get the ordinary unknown-method answer. The app receives no native
+bearer, NEAR AI token, device key, tenant identity or secret-store reference.
 
 | Method | Parameters | Token-free result |
 |---|---|---|
-| `passkey_create_begin` | `label?`, `ingest_url?` | registration options below |
-| `passkey_create_complete` | `ceremony`, `credential_id`, `raw_client_data_json`, `raw_attestation_object` | `{binding_state}` |
-| `passkey_login_begin` | `ingest_url?` | assertion options below |
-| `passkey_login_complete` | `ceremony`, `credential_id`, `raw_client_data_json`, `raw_authenticator_data`, `signature`, `user_handle` | `{binding_state}` |
-| `passkey_add_begin` | `label?` | registration options below |
-| `passkey_add_complete` | same fields as create complete | `{binding_state}` |
-| `passkey_cancel` | `ceremony` | `{cancelled:true}` |
-| `account_bind` | none | `{outcome,binding_state}` |
-| `account_binding` | none | `{binding_state}` |
-| `passkey_state` | none | `{state,passkey_count,remembered_name,signed_in_name,near_ai_connected}` |
 | `account_sign_in` | `ingest_url?` | `{signed_in:true,expires_at}` |
 | `account_session_status` | none | `{state,signed_in,expires_at,renewal,renewal_failure,sign_in}` |
 | `account_sign_out` | none | `{signed_out:true}` |
@@ -8810,128 +8866,15 @@ never signs that key in again, so no ceremony runs; sign-out keeps the key,
 and only `unenroll` and a new enrollment, with a new key, recover),
 `near_ai_sign_in_not_near_ai_account`, `near_ai_sign_in_not_enrolled`,
 `commons_credential_storage_unavailable`, or
-`near_ai_sign_in_unavailable`. `near_ai_account_enroll` and `account_bind` can
-refuse the same case as `near_ai_enroll_device_key_revoked`.
+`near_ai_sign_in_unavailable`. `near_ai_account_enroll` can refuse the same
+case as `near_ai_enroll_device_key_revoked`.
 
-`label` is optional, at most 64 characters. A no-config create/login may name
-an `ingest_url` only when its canonical origin equals the compiled production
-API origin `https://ingest.tracecommons.ai`; omitting it selects that origin.
-A retained unconfigured session must satisfy the same trust root. Explicit
-operator configuration retains its host policy. Once a config or pre-enrollment
-session pins an origin, a caller cannot substitute another one. The native
-Swift adapter exposes no caller-supplied ingest URL. Begin stores the server ceremony privately and returns
-an opaque local `ceremony` handle pinned to action, origin, expiry and current
-credential/config lifecycle. Adding a passkey reloads the current token and
-permits ordinary rotation only within the same lifecycle and account. Complete
-consumes the ceremony once; cancel invalidates it.
-Sign-out, wipe or identity/config replacement invalidates stale finishes.
-Complete accepts no origin, account or tenant parameters.
-
-SAMPLE create/add begin result:
-
-```json
-{
-  "ceremony": "SAMPLE-local-handle", "rp_id": "tracecommons.ai",
-  "challenge": "AQID", "user_id": "BAUG", "user_name": "SAMPLE passkey",
-  "user_display_name": "SAMPLE passkey", "attestation": "none",
-  "expires_in_secs": 180, "exclude_credentials": [],
-  "user_verification": "preferred", "authenticator_attachment": "platform",
-  "resident_key": "preferred", "algorithms": [-7]
-}
-```
-
-SAMPLE login begin result:
-
-```json
-{"ceremony":"SAMPLE-local-handle","rp_id":"tracecommons.ai","challenge":"AQID","expires_in_secs":180,"user_verification":"preferred","allowed_credentials":[]}
-```
-
-Verification/resident-key options are the validated server values
-`required|preferred|discouraged`, not permission for the app to downgrade them.
-`exclude_credentials` and login's `allowed_credentials` contain canonical
-credential IDs, with at most 128 entries per list. An empty login list selects
-a discoverable credential. `user_display_name` is the validated server display
-name, falling back to `user_name`; `attestation` preserves the validated server
-preference `none|direct|indirect`, defaulting to `none`. These three fields are
-additive to the original C3 begin options. Creation uses the platform provider
-and algorithms the adapter actually supports (ES256 `-7`).
-Refuse unsupported server options rather than silently weakening them.
-
-SAMPLE create/add complete request:
-
-```json
-{"ceremony":"SAMPLE-local-handle","credential_id":"AQID","raw_client_data_json":"BAUG","raw_attestation_object":"BwgJ"}
-```
-
-SAMPLE login complete request:
-
-```json
-{"ceremony":"SAMPLE-local-handle","credential_id":"AQID","raw_client_data_json":"BAUG","raw_authenticator_data":"BwgJ","signature":"CgsM","user_handle":"DQ4P"}
-```
-
-These bytes illustrate encoding only and are not valid credentials. SAMPLE
-complete result: `{"binding_state":"unbound"}`. Binding read values are
-`unbound|bound|closed|legacy`; `legacy` means no passkey-origin binding row,
-not proof of a NEAR AI connection. A signed-out binding read is unavailable,
-not `unbound`. `passkey_state.state` projects those labels, or `none` when
-signed out and `unknown` when unreadable. `near_ai_connected` is nullable
-unless an authenticated identity fact establishes it. Never infer connected
-status from a missing binding row.
-
-`passkey_count` and `remembered_name` are local facts, answered in every
-`state` including `none` and `unknown`: the passkeys **this Mac remembers**,
-not the account's passkeys on the server. The server cannot list an account's
-passkeys before authentication without telling anyone who asks whether the
-account exists, so the daemon keeps its own list (`remembered-passkeys.json`
-in the state directory, 0600): a record is written when a passkey is created,
-added, or used to sign in here, and holds the passkey's display name when this
-Mac learned one (the name it was given when created or added here, or the
-label the server returned for it at sign-in; see below), the SHA-256 of the account id (for matching a later sign-in;
-never sent over IPC), and when it was last used. No credential material, no
-token, no credential id. At most four records are kept, most recent first.
-`passkey_count` is how many; `0` means none remembered here, not that the
-account has none. `remembered_name` is the most recent record's name, or null
-when it has none (a passkey first used here by signing in whose login answer
-carried no label: it has none on the server, or the server predates
-`passkey_label`).
-
-A sign-in learns the passkey's name from the server. The commons'
-`POST /v1/account/native/passkey/login/finish` answer carries, beside the
-session, an optional `passkey_label`: the label the signed-in account gave the
-passkey that just authenticated, looked up by the tenant, account and
-credential id of the verified assertion (never from anything in the request),
-so it is only ever the authenticating account's own credential's label. It is
-absent, not null, when that passkey has no label or the label could not be
-read; an older server never sends it, and an older daemon ignores it. On a
-login the daemon records that label as the record's name, replacing any name
-it held; with no label (or one that fails the daemon's own name rules: blank,
-over 64 characters, or holding a control character) it keeps the name it
-already had. The label is not logged and is not forwarded over IPC except as
-`remembered_name`/`signed_in_name`. A login the daemon refuses (for example
-`account-enrollment-mismatch`, a session for another tenant or account than
-the one this Mac is enrolled under) records nothing, label included. Both are null when the list cannot be read. Signing out
-keeps the list, since a returning person after sign-out is who the first
-run's "Welcome back" greets; removing this Mac's contributor state (`wipe`,
-the CLI's `logout`) clears it. Added in v1.1 additively; older shells ignore
-`remembered_name`.
-
-`signed_in_name` is the name this Mac remembers for the **signed-in
-account's own record**, matched by the session's account id (hashed, as the
-record is), never the most recent record's: after a sign-in, the most recent
-record may belong to another account, and its name is not this one's. It is
-null when no account session is held or the session cannot be read, when
-this Mac has no record for that account, when that record has no name (a
-passkey first used here by signing in whose login answer carried no label), or when the list cannot be read. A
-local fact like the other two, it is answered in every `state`, including
-`unknown`. The first run reads it once a passkey sign-in has finished, to
-name the passkey on Join's card; it never reads `remembered_name` for that,
-since the person may have picked another account's passkey in the system
-sheet. Added in v1.1 additively; older shells ignore it, and a shell
-reading an older daemon finds it absent and shows no name.
-
-Native login is discoverable authentication: `user_handle` must contain the
-nonempty raw Apple user ID encoded as canonical base64url. A missing or empty
-handle is an incomplete credential and must not reach login completion.
+With no config, an `ingest_url` is accepted only when its canonical origin
+equals the compiled production API origin `https://ingest.tracecommons.ai`;
+omitting it selects that origin. A retained unconfigured session must satisfy
+the same trust root. Explicit operator configuration retains its host policy.
+Once a config or pre-enrollment session pins an origin, a caller cannot
+substitute another one.
 
 SAMPLE account status:
 
@@ -8945,62 +8888,13 @@ expiry. Raw account identifiers do not cross this status surface. It must not be
 a read. Status and sign-out support a pre-enrollment account without creating a
 fake config. `account_sign_in` reuses existing browser/PKCE machinery where
 its enrollment prerequisites hold; without real enrollment configuration it
-refuses with `unavailable` / `account-enrollment-required`. An unenrolled
-account uses the native passkey create/login path. Browser URL exposure is bounded to the live sign-in attempt and
-uses the existing URL validation/opening controls.
+refuses with `unavailable` / `account-enrollment-required`. Browser URL exposure is bounded to the live sign-in attempt and
+uses the existing URL validation/opening controls. Tokens, rotations and
+atomic device/config persistence stay in Rust/Keychain.
 
-`account_bind` reuses retained NEAR AI provisioning against the authenticated
-bind start/finish routes and the **bind-specific** proof preimage. SAMPLE
-result: `{"outcome":"bound","binding_state":"bound"}`. An
-`existing_account` outcome switches to the existing account and closes the
-unbound account; its passkey is not transferred (S6 fold is deferred).
-
-For a signed-in account whose `binding_state` is `bound` (another Mac bound
-it, and this Mac signed in with the same passkey), `account_bind` **enrolls
-this Mac into that account** through the same routes: SAMPLE result
-`{"outcome":"enrolled","binding_state":"bound"}`. The commons compares the
-near.ai login this Mac proves with the account the passkey session is signed
-in to -- the session's own account, never a request field -- inside the one
-transaction that would write the device key, and refuses before writing
-anything when they differ. That refusal is `unavailable` /
-`account-enrol-mismatch` (server: `409 {"error":"near_ai_account_mismatch"}`),
-one fixed label whether the login owns another account or none; the passkey
-session is left as it was, and the shell signs it out. A `bound` or
-`enrolled` result is persisted only if its tenant and account are the passkey
-session's (`account-enrollment-mismatch` otherwise). `legacy` (or any other
-state) is refused with `account-bind-refused` before the refresh token is
-spent.
-
-On a Mac that is **already enrolled**, `account_bind` sends no request and
-writes nothing. It answers `{"outcome":"already_enrolled","binding_state":"bound"}`
-when the enrollment it holds is the signed-in account's own: the session's
-tenant (decoded from its `tcn1_` token, as the sign-in's tenant check reads
-it) equals the enrollment config's `tenant_id`, **and** the session was signed
-in to a `bound` account (the `binding_state` stored with it at sign-in). This
-is the first run's Welcome back case: the enrollment is reported after P-7
-opened, and the person signs in with that account's passkey. Anything else
--- no session, another tenant, an `unbound` or `legacy` account, or a stored
-session without a `binding_state` -- is refused as before with
-`account-already-enrolled`. The config records a tenant and no account, so
-the check is a tenant match; it identifies one account because a binding row
-(and so a `bound` state) is only ever written for a passkey-origin account,
-each created alone in a freshly minted tenant, and it accepts nothing the
-sign-in's own tenant check had not already accepted when it kept the
-session. Recording the enrolled account at enrollment would make it
-account-precise; that is not done yet. Added in v1.1 additively: the macOS
-shell treats it exactly as `enrolled` (Verify for a `bound` account accepts
-either); a shell that does not know it reads an unknown outcome and fails
-closed (`account-bind-invalid`). Tokens,
-rotations and atomic device/config persistence stay in Rust/Keychain. Binding
-creates no folder/trace/body consent. Native login remains weak and native add
-keeps the existing first-strong-authenticator gate; adding another requires
-browser passkey step-up.
-
-The Associated Domains entitlement, approved profile bytes, deployed AASA and
-signed create/login origin check are **release gates**. Local/mock tests do
-not establish Apple origin behavior or satisfy the spec's S3 deployment gate.
-This contract approves no new screen copy, deployment, profile fabrication or
-relaxation of origin/CORS/CSP controls.
+A daemon from before the removal kept a list of the passkeys used on the Mac
+(`remembered-passkeys.json` in the state directory). A daemon after it
+deletes that file when it starts.
 
 ## Events
 
@@ -9009,7 +8903,7 @@ relaxation of origin/CORS/CSP controls.
 | `snapshot` | immediately after `subscribe` | `{pending[], status}` |
 | `queue_changed` | queue contents changed | `{}` |
 | `status_changed` | pause/resume, a lapsed timed pause, health changed, a suggestion stamp or switch changed, a history poll found verdict news, dropped waiting news that was taken back or moved to a Never folder, or made a stale `status.nudge` readable again (a routine poll publishes nothing), or a daemon tick found `status.nudge` or `status.idle_sessions` moved by time alone -- an idle threshold crossed, a "Not now" lapsed, the news mark aged out, or the history poll gone stale. The tick compares with the previous tick, so it publishes at most once per change, at most once per `poll_interval_secs`, and never when nothing moved; a change another path already announced may be announced once more | `{}` |
-| `digest_due` | batching interval elapsed with pending work, and the master and digest notification switches are on and no standalone re-engagement notification posted in the last hour | `{pending, contributed, contributed_projects, credit_pending, text, fold?}` -- `fold` is `{kind, text}` when the attention arbiter folded a re-engagement sentence in as the digest's third sentence; `text` already ends with it |
+| `digest_due` | batching interval elapsed with pending work, and the master and digest notification switches are on and no standalone re-engagement notification posted in the last hour | `{pending, contributed, contributed_projects, contribution, credit_final, credit_pending, text, fold?}` -- `contribution` is the contribution sentence as the core worded it (credit included, e.g. "2 traces contributed from api. 4.3 credit earned."), or `null` when nothing was contributed; it states every earned figure, and a shell that builds its own digest (Windows) posts it as the contribution half. `text` states the same sentence but, when the digest folds in verdict news, leaves out the credit of the traces that fold already states ("is now final"), so each earned figure appears once on each surface. The fold states a folded trace's credit as it was when the trace went final (a later revision is not stated again), and each part is rounded on its own, so the fold's figure plus `text`'s earned figure can differ from `contribution` by a rounding step; a fold that states no credit (its finals add to under 0.05) covers none. `credit_final` and `credit_pending` are rounded once to tenths and decimal-clean (0 when they round to nothing); `credit_final` is the final credit (a decided figure, 0 included) of those contributions and `credit_pending` the credit still being scored; the digest says the first as "earned" and the second as "pending", and a daemon that predates `credit_final` omits it (read as 0) -- `fold` is `{kind, text}` when the attention arbiter folded a re-engagement sentence in as the digest's third sentence; `text` already ends with it |
 | `resync_required` | this client fell behind the event buffer | `{}` |
 | `preview_ready` | a scheduled preview finished and was delivered | the same object `preview_request` returns for a cache hit -- see "Scheduled previews" |
 | `inference_call_added` | the poll tick read a call from IronWire's log that no earlier tick had (K14) | `{id, tool, model, proof}` -- see below |
@@ -9188,7 +9082,6 @@ nothing for an interval that is not whole hours.
 | `pii-filter-unavailable` | filter configured but unreachable | yes |
 | `claim-mint-failed` | issuer refused or failed | yes |
 | `ingest-unreachable` | upload failed after retries | yes |
-| `daily-cap-reached` | volume cap in force until the day rolls | yes |
 | `near-ai-notice-not-acknowledged` | first-use notice not delivered interactively | yes |
 | `privacy-filter-canary-failed` | canary self-test failed | yes |
 | `queue-full` | queue at its configured maximum | no |
@@ -9218,8 +9111,7 @@ listed highest first:
 8. `witness-saturated`
 9. `automatic-contribution-held`
 10. `admission-limit-reached`
-11. `daily-cap-reached`
-12. `session-too-large`
+11. `session-too-large`
 
 `session-too-large` sits last on purpose: every label above it describes the
 daemon, and this one describes a single file on disk. It must never mask an
@@ -9232,11 +9124,9 @@ permission or IO error -- does not raise it: that is expected to succeed on
 the next poll, and a flag a blip pins on a healthy daemon is one nobody will
 trust.
 
-Because `daily-cap-reached` is last, it is the label most often masked by
-another condition. That is why the daily caps are also reported in full on
-`status.daily_budget`, outside the precedence order described above. A client
-should render the budget condition from `daily_budget`, not by waiting for
-`daily-cap-reached` to reach the health slot.
+`daily-cap-reached` is retired with the daily upload limit: no daemon in
+this revision sets it, and the shells no longer map it. A shell attached to
+an older daemon that still sets it shows no message about the cap.
 
 Rationale: states the contributor can act on outrank states they can only
 wait out. An application should not attempt to infer or reconstruct this
@@ -9574,8 +9464,8 @@ ignore these fields; macOS renders them.
 Session views carry three additive booleans, computed on every read:
 
 - `can_focus`: the daemon opened the session itself through
-  `managed_terminal_launch`, in a terminal it can script, named the window it
-  opened (today a Terminal window id, printed by the launch script), and the
+  `managed_terminal_launch`, in a terminal it can script, named the tab it
+  opened (today a Terminal tty, printed by the launch script), and the
   session is a running coding session.
 - `can_stop`: the daemon opened the session itself, its launcher reports a
   running coding tool, and no stop has been asked for yet.
@@ -9607,6 +9497,71 @@ focusable or stoppable.
   folder, `managed-not-found` for a removed account, and
   `managed-near-ai-sign-in-required` for a sign-in session while signed out.
 
+`managed_terminal_launch {session_id, ticket}` opens a prepared session in a
+window of its own, in the chosen terminal. Every launch does, Start again and
+Resume included (owner, 2026-11-03); nothing is ever typed into an existing
+tab, whose prompt may hold input not yet run, and the daemon no longer asks
+macOS for the System Events and Accessibility permissions that a new tab
+needed. A launch still sends Apple Events to the terminal app it opens, so
+macOS may still ask once to let the app control that terminal; the bundle's
+`NSAppleEventsUsageDescription` for that prompt is "Near.ai opens Private AI
+sessions in Terminal." (owner, 2026-11-03; both channels).
+
+An older app may still send two fields, which are accepted so that app keeps
+launching, and ignored: `in_window_of` (the app built from #1839) and `beside`
+(the app built from #1852, a session id from the window list). Any other
+field is refused with `managed-invalid-request`. The same app also calls
+`managed_terminal_windows` and `managed_terminal_tab_access`, which the daemon
+no longer has: they are refused with `unknown_method` like any method it does
+not know, are not in `hello`'s `methods`, and run nothing. That app reads a
+refusal as "no windows to offer" and shows its launch dialog without a window
+list.
+
+A launch reads back its tab's tty and, on the next line, the id of Terminal's
+front window when that window's selected tab is the launch's, with no scan of
+other windows (#1853), and the row keeps both. Output that is not a tty,
+optionally followed by a line of digits only that is a window id, names no
+tab. When another window is in front by then, the row has its tab and no
+window id; that is normal. Nothing reads the window id or the row `again_of`
+records: the owner decided to keep both on the row (2026-11-03) although the
+window picker they were recorded for is gone.
+
+The terminal opens with the daemon's managed state unlocked and off the async
+worker: the launch is held first (a second `managed_terminal_launch` with the
+same ticket is refused with `managed-conflict`), and recorded after. A launch
+refused before anything ran (`managed-terminal-not-found`,
+`managed-invalid-request`, `managed-unsupported-version`) is released, and its ticket stands until it
+lapses. A launch that may have run (`managed-launch-unknown`: the script
+failed or was stopped after it started) stays held, so its ticket cannot open
+a second terminal.
+
+When `managed_launch_prepare` or `managed_session_start_again` passes the
+checks that come before preparing, other than the tool's version, and would
+prepare a new session on `near_ai_signin`, the daemon first reads the
+sign-in's NEAR AI balance, waiting at most 5 seconds in all. A sign-out, or a
+switch to another NEAR AI key, during the wait is refused with
+`managed-near-ai-sign-in-required`. Otherwise, when the balance is known to be
+under $0.10 and a fresh read agrees with the cached one, the request is
+refused with `managed-near-ai-balance-too-low` and nothing is prepared. Then
+the request is handled as usual, with all its checks run again. A request
+those checks refuse, or a replay of one already prepared, reads no balance,
+except that the version is checked only after the read: a tool too old to
+launch, on a low balance, is refused for the balance first and for its version
+once funded. `managed-folder-settings-save-failed`, which comes after
+preparing, can also follow a read. An unknown, unreachable or no-limit balance
+lets the launch through. A saved `near_ai` key is not checked: its account's
+balance is not readable here.
+
+A coding launch of Claude Code on `near_ai` or `near_ai_signin` is refused
+with `managed-project-chooses-model`, and nothing is prepared, when its
+project chooses a model other than through an alias: a model variable in a
+project settings `env` block, `fallbackModel`, `advisorModel` or
+`modelOverrides`, or a `model` in an agent, command, routine or skill, in any
+folder Claude Code reads them from or in a folder the launch's CLI options add
+with `--add-dir`. The launcher checks again before the tool starts. A project
+with Claude Code workflows is not refused; the launcher prints the shared
+`project_workflows` line in the session's terminal before the tool starts.
+
 `managed_session_report` answers `{accepted: true, stop: bool}`; an older
 launcher reads only `accepted`.
 
@@ -9615,16 +9570,67 @@ launcher reads only `accepted`.
 `managed_launch_prepare` also accepts `model` for Claude Code and Codex on
 `near_ai` and `near_ai_signin`, as the session's default model; on
 `subscription` and `api_key` it is still refused (`managed-invalid-request`).
-Absent means the tool's default (see `docs/managed-sessions.md`). A model NEAR
+Absent means the tool's default (see `docs/managed-sessions.md`). It also
+accepts `keep_saved_model: boolean` (absent is false): the shell
+fell back to the default because NEAR AI no longer lists the folder's saved
+model, so the launch remembers its other folder choices but keeps the saved
+model. If the saved model cannot be read (the folder went away, say), the
+launch is refused with `managed-folder-settings-save-failed` rather than
+written over. `managed_session_start_again` of such a launch keeps it too.
+The field is not additive: `managed_launch_prepare` refuses unknown fields,
+so a shell sends it only when the managed snapshot advertises
+`capabilities.keep_saved_model: true` (an older daemon omits it). The session
+registry stores it on the entry, outside the stored request, so an older
+daemon can still read the registry. A model NEAR
 AI does not list as a chat model is refused when the proxy starts, with
 `managed-model-unavailable`: at `managed_launch_redeem` on the sign-in, in the
 launcher on a saved key.
 
-- `managed_model_catalogue {tool}` (async only) answers
+- `managed_model_catalogue {tool, cache_only?}` (async only) answers
   `{models: [{id, name?}], default: string | null}`: NEAR AI's chat models in
   its order, and the model `tool` gets when a launch names none. The catalogue
   is public; no key is read or sent. `managed-model-unavailable` when NEAR AI
-  cannot be read; `managed-invalid-request` for other parameters.
+  cannot be read; `managed-invalid-request` for other parameters. The
+  catalogue comes from the daemon's one cache (`managed/catalogue_cache.rs`),
+  shared with the favorites check: a copy under 15 minutes old answers with
+  no read; an older one still answers at once while one refresh runs in the
+  background; only with no copy at all does the call wait on NEAR AI. The
+  last copy is kept in `managed-model-catalogue.json` in the config
+  directory (ids, names, tiers and token limits only, mode 0600), so a
+  restart or an offline start has it too. With `cache_only: true` (default
+  false) the call reads that cache and nothing else, never waits on or starts
+  a read, and fails with `managed-model-unavailable` when it holds nothing:
+  for a row that only wants display names. It also
+  carries `favorites` (`[string]`): the starred models NEAR AI offers `tool`,
+  in its order; and `unavailable_favorites` (`[string]`): the starred ids
+  NEAR AI no longer lists for any tool. A starred model it lists but `tool`
+  is never offered (Codex's refused models) is in neither. Nothing is pruned:
+  a model NEAR AI lists again is a favorite again. When NEAR AI cannot be
+  read the method fails, so nothing is ever marked unavailable for want of
+  a catalogue. An older daemon omits both fields, which read as none. Shells
+  list favorites after the default option and before the other models, do
+  not repeat them, never offer an unavailable favorite, and show each one
+  apart with a way to unstar it. A saved model the catalogue does not list
+  falls back to the default option, visibly, for that launch only: the
+  launch sends `keep_saved_model: true` and the folder keeps its saved
+  model. With no catalogue the model is kept; once the read has failed, the
+  launch is not held for it, and the daemon refuses an unlisted model as
+  above.
+- `managed_model_favorite_set {model, favorite}` (async only) stars
+  (`favorite: true`) or unstars one model and answers `{favorites: [string]}`,
+  the whole stored list in no particular order. Starring reads NEAR AI's chat
+  models first and refuses a model it does not list with
+  `managed-model-unavailable`, also the answer when NEAR AI cannot be read;
+  nothing is written. Unstarring reads nothing and accepts any string, so an
+  id an older or hand-edited settings file holds can always be removed.
+  Starring an empty or malformed id, a non-boolean `favorite`, any other
+  field, or starring a 33rd favorite is `managed-invalid-request`;
+  unstarring is never refused for the bound or the id's shape. A change to
+  the stored list publishes `status_changed` (unstarring an id that was not
+  stored publishes nothing), so every window re-reads `get_settings`
+  (`managed_favorite_models`). The list is
+  global, not per tool: one favorite shows in each tool's picker that offers
+  it. A developer dry run refuses it, as it does `managed_model_catalogue`.
 - Session views' `model` is the model the session starts on: the one named,
   or, once a NEAR AI proxy has started, the default it chose. The proxy is
   pinned to the NEAR AI backend only, so the tool may switch to any listed

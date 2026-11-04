@@ -50,10 +50,12 @@ final class AppModel: ObservableObject {
     /// NEAR AI's chat models for `tool`'s Launch sheet picker; nil when
     /// they could not be read, which leaves only the default to choose.
     /// No error is shown: launching on the default needs no catalogue.
-    func managedModelCatalogue(tool: String, done: @escaping @MainActor (ManagedModelCatalogue?) -> Void) {
+    /// With `cacheOnly` the daemon answers from its cache and never reads
+    /// NEAR AI: for a session row's display name.
+    func managedModelCatalogue(tool: String, cacheOnly: Bool = false, done: @escaping @MainActor (ManagedModelCatalogue?) -> Void) {
         guard let client else { return done(nil) }
         Task.detached(priority: .userInitiated) {
-            let catalogue = try? client.managedModelCatalogue(tool: tool)
+            let catalogue = try? client.managedModelCatalogue(tool: tool, cacheOnly: cacheOnly)
             await MainActor.run { done(catalogue) }
         }
     }
@@ -78,11 +80,56 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Star or unstar one model for the Launch sheet's picker. `done` gets
+    /// the daemon's stored list, or nil when it refused (a model NEAR AI no
+    /// longer lists, or NEAR AI could not be read).
+    func setFavoriteModel(_ model: String, favorite: Bool,
+                          done: @escaping @MainActor (_ favorites: [String]?, _ errorLabel: String?) -> Void) {
+        guard let client else { return done(nil, nil) }
+        let params = ManagedSurface.favoriteParams(model: model, favorite: favorite)
+        Task.detached(priority: .userInitiated) {
+            let (favorites, label): ([String]?, String?) = {
+                do {
+                    let answer = try client.managedAction("managed_model_favorite_set", params: params)
+                    return (answer["favorites"] as? [String] ?? [], nil)
+                } catch let failure as DaemonClient.Failure {
+                    return (nil, failure.message)
+                } catch {
+                    return (nil, nil)
+                }
+            }()
+            await MainActor.run {
+                // Every window's settings, the Settings card's list among
+                // them, follow the daemon's `status_changed`, which it
+                // publishes when the stored list moved.
+                done(favorites, label)
+            }
+        }
+    }
+
+    /// The model `options`, a session's CLI options for `tool`, name with
+    /// the tool's own model flag, as the core reads them
+    /// (`managed_cli_model`); none when they name none or the read fails.
+    func cliModel(tool: String, options: String, done: @escaping @MainActor (_ model: String?) -> Void) {
+        guard let client else { return done(nil) }
+        let params: [String: Any] = ["tool": tool, "cli_options": options]
+        Task.detached(priority: .userInitiated) {
+            let model = (try? client.managedAction("managed_cli_model", params: params))?["model"] as? String
+            await MainActor.run { done(model) }
+        }
+    }
+
     /// The terminal app managed sessions open in, by the id the daemon
     /// offered in `capabilities.terminal_choices`. The daemon refuses any
     /// other value; the snapshot is re-read after the write.
     func setManagedTerminal(_ id: String) {
         managedAction("set_managed_terminal", params: ["terminal": id])
+    }
+
+    /// "Group sessions in herdr" (`set_managed_herdr`); the snapshot is
+    /// re-read after the write.
+    func setManagedHerdrGrouping(_ on: Bool) {
+        managedAction("set_managed_herdr", params: ["on": on])
     }
 
     /// Only a named tool and setup action cross the RPC boundary. Setup needs
@@ -101,7 +148,11 @@ final class AppModel: ObservableObject {
         ])
     }
 
-    func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil) {
+    /// `terminal`, when set, is saved as the terminal choice before the
+    /// request, in the same task, so a launch dialog that asked for one
+    /// opens in it.
+    func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil,
+                       terminal: String? = nil) {
         guard let client, !managedBusy else { return }
         managedBusy = true
         managedErrorKey = nil
@@ -119,6 +170,9 @@ final class AppModel: ObservableObject {
             let result = Result {
                 guard let params = try JSONSerialization.jsonObject(with: encodedParams.get()) as? [String: Any] else {
                     throw CocoaError(.coderInvalidValue)
+                }
+                if let terminal {
+                    _ = try client.managedAction("set_managed_terminal", params: ["terminal": terminal])
                 }
                 var response = try client.managedAction(method, params: params)
                 if method == "managed_tool_setup", response["opened"] as? Bool != true {
@@ -140,7 +194,11 @@ final class AppModel: ObservableObject {
                           let ticket = response["ticket"] as? String else {
                         throw DaemonClient.Failure(code: "launch-unknown", message: "managed-launch-unknown")
                     }
-                    _ = try client.managedAction("managed_terminal_launch", params: ["session_id": session, "ticket": ticket])
+                    // Every launch opens a window of its own: placing it in
+                    // an open window needed macOS permission prompts, which
+                    // the owner does not want (2026-11-03).
+                    _ = try client.managedAction("managed_terminal_launch",
+                                                 params: ["session_id": session, "ticket": ticket])
                 }
                 return response["revision"] as? UInt64
             }
@@ -302,11 +360,29 @@ final class AppModel: ObservableObject {
                     .flatMap(legacyMigrationWording)
                     .flatMap(LegacyMigrationNotice.decode(fromJSON:))
             }
+            if status.accountAttention != oldValue.accountAttention {
+                accountAttention = status.accountAttention.wireJSON
+                    .flatMap(accountAttentionWording)
+                    .flatMap(AccountAttention.decode(fromJSON:))
+                // A refusal belongs to the block it was shown in: one that
+                // goes, comes back, or changes its reason starts without it.
+                setUpAgainFailed = false
+            }
         }
     }
     /// The notice after a legacy invite identity moved to a NEAR AI account,
     /// in the Rust's words, or nil when there is none or it cannot be read.
     @Published private(set) var legacyMigrationNotice: LegacyMigrationNotice?
+    /// The account section's status while this app's account needs
+    /// attention (#1836 F1), in the Rust's words, or nil.
+    @Published private(set) var accountAttention: AccountAttention?
+    /// Words the account-attention status keys. The ABI in the app; replaced
+    /// only by tests.
+    var accountAttentionWording: (String) -> String? = TCConsentCopy.accountAttentionJSON(forStatus:)
+    /// "Set up again" is running.
+    @Published private(set) var settingUpAgain = false
+    /// The daemon refused the last "Set up again"; cleared by the next one.
+    @Published private(set) var setUpAgainFailed = false
     /// Words `status.legacy_invite_migration.notice`. The ABI in the app;
     /// replaced only by tests.
     var legacyMigrationWording: (String) -> String? = TCConsentCopy.legacyMigrationNoticeJSON(
@@ -341,6 +417,10 @@ final class AppModel: ObservableObject {
     /// alongside `projects`, because every reason the project list changes
     /// is also a reason this answer might have.
     @Published private(set) var armingOffer: ArmingOffer?
+    /// The standing Automatic grant, for Settings' sharing choice (#1753
+    /// A2). Nil until `automatic_grant` has answered, which the choice draws
+    /// as nothing picked. Refreshed alongside `projects`.
+    @Published private(set) var automaticGrant: AutomaticGrant?
     @Published private(set) var consentScopes: [ConsentScope] = []
     /// Whether missions are shown anywhere (`missions_enabled`); off until
     /// the daemon says so, and off before its settings have arrived.
@@ -1034,11 +1114,14 @@ final class AppModel: ObservableObject {
     /// means the ceremony did not begin in a way this shell can carry
     /// through, and nothing is left half-started -- the daemon's own attempt
     /// times out on the browser.
-    func startNearAiCredential(provider: String? = nil) async -> URL? {
+    ///
+    /// It names no provider; the daemon's browser page offers the build's
+    /// logins (owner, 2026-11-02).
+    func startNearAiCredential() async -> URL? {
         guard let client, !credentialBusy else { return nil }
         credentialBusy = true
         let outcome = await Task.detached(priority: .userInitiated) {
-            Result { try client.nearAiCredentialStart(provider: provider) }
+            Result { try client.nearAiCredentialStart() }
         }.value
         credentialBusy = false
         guard case .success(let attempt) = outcome, let attempt else {
@@ -1066,8 +1149,14 @@ final class AppModel: ObservableObject {
     }
 
     /// Removes the stored key from this machine.
+    ///
+    /// The daemon also revokes the key at NEAR AI. When that did not happen,
+    /// the one sentence for it is shown where an action's failure is.
     func forgetNearAiCredential() {
-        submitNearAiCredential { try $0.nearAiCredentialForget() }
+        submitNearAiCredentialReporting { client in
+            try CredentialSurface.forgetLeftKeyAtService(
+                resultJSON: client.nearAiCredentialForget())
+        }
     }
 
     func migrateNearAiCredential() {
@@ -1085,6 +1174,17 @@ final class AppModel: ObservableObject {
     /// continuation on success only, which would leave a failed cancel with
     /// the button disabled and no way back.
     private func submitNearAiCredential(_ work: @escaping @Sendable (DaemonClient) throws -> Void) {
+        submitNearAiCredentialReporting { client in
+            try work(client)
+            return false
+        }
+    }
+
+    /// The same, for a forget: `true` from `work` is a key removed here but
+    /// not revoked at NEAR AI, and `credentialForgetNotRevoked` is shown.
+    private func submitNearAiCredentialReporting(
+        _ work: @escaping @Sendable (DaemonClient) throws -> Bool
+    ) {
         guard !credentialBusy else { return }
         guard let client else {
             lastActionError = privateInferenceCopy?.writeUnconfirmed
@@ -1095,8 +1195,13 @@ final class AppModel: ObservableObject {
             let outcome = Result { try work(client) }
             await MainActor.run {
                 self.credentialBusy = false
-                if case .failure = outcome {
+                switch outcome {
+                case .failure:
                     self.lastActionError = self.privateInferenceCopy?.writeUnconfirmed
+                case .success(true):
+                    self.lastActionError = self.privateInferenceCopy?.credentialForgetNotRevoked
+                case .success(false):
+                    break
                 }
                 self.refreshNearAiCredential()
                 self.refreshSettings()
@@ -1374,9 +1479,6 @@ final class AppModel: ObservableObject {
         return result
     }
 
-    /// The client the first run's passkey sheets complete their ceremony
-    /// with (`LivePasskeyAccount`). Nil while no daemon is running.
-    var passkeyClient: DaemonClient? { client }
     /// The one subscription and what it declares (`ReengageDeclaration`):
     /// `reengage_due` only while a notification can be posted.
     private var reengage: ReengageDeclaration<TCSubscription>?
@@ -1508,11 +1610,8 @@ final class AppModel: ObservableObject {
 
     var health: HealthCopy? {
         guard let label = status.health.lastErrorLabel else { return nil }
-        // The budget banner says the same thing with real numbers, so the
+        // The witness banner says the same thing with the count, so the
         // bare label is suppressed when it is going to be drawn.
-        if label == "daily-cap-reached" && status.dailyBudget.blocked { return nil }
-        // Likewise the witness banner, with the count -- only when it is
-        // actually going to be drawn.
         if label == "witness-saturated" && witnessCapacityHealth != nil { return nil }
         // And the held-folder notice, which names the folders and says why --
         // again only when it is going to be drawn.
@@ -1532,23 +1631,11 @@ final class AppModel: ObservableObject {
     }
 
     /// The banner for approved sessions held on a busy privacy witness, when
-    /// there are any. Independent of `health` for the reason `budgetHealth`
-    /// is: another label can hold the daemon's one health slot while these
-    /// sessions are still waiting.
+    /// there are any. Independent of `health` because another label can
+    /// hold the daemon's one health slot while these sessions are still
+    /// waiting.
     var witnessCapacityHealth: HealthCopy? {
         HealthCopy.forWitnessCapacity(status.witnessCapacity)
-    }
-
-    /// The spent-budget banner, when there is one.
-    ///
-    /// Deliberately independent of `health`. The daemon's health slot holds
-    /// one label at a time and `daily-cap-reached` is last in its
-    /// precedence order, so a full queue -- or any other condition -- hid
-    /// the cap completely. Rendering both means the contributor sees the
-    /// reason their approvals are not moving even while something else is
-    /// also wrong.
-    var budgetHealth: HealthCopy? {
-        HealthCopy.forBudget(status.dailyBudget)
     }
 
     // MARK: - Lifecycle
@@ -1932,6 +2019,7 @@ final class AppModel: ObservableObject {
     func refreshProjects() {
         perform("list_projects", work: { try $0.listProjects() }) { self.publishIfChanged(\.projects, $0) }
         refreshArmingOffer()
+        perform("automatic_grant", work: { try $0.automaticGrant() }) { self.publishIfChanged(\.automaticGrant, $0) }
     }
 
     /// The daemon decides whether there is an offer and what it says; this
@@ -2470,43 +2558,45 @@ final class AppModel: ObservableObject {
     @Published private(set) var legacyMigrationInviteNeeded = false
     /// The move could not be started at all (no daemon answer).
     @Published private(set) var legacyMigrationStartFailed = false
-    /// The move is waiting on the passkey step in the browser.
-    @Published private(set) var legacyMigrationAwaitingPasskey = false
-    /// The passkey step ended without finishing; nothing was moved.
-    @Published private(set) var legacyMigrationPasskeyFailed = false
-    /// The passkey step: the first run's browser step (`nearAILogin`), where
-    /// the person creates or uses their passkey and the daemon keeps the
+    /// The move is waiting on the NEAR AI login step in the browser.
+    @Published private(set) var legacyMigrationAwaitingNearAILogin = false
+    /// The NEAR AI login step ended without finishing; nothing was moved.
+    @Published private(set) var legacyMigrationNearAILoginFailed = false
+    /// The NEAR AI login step: the first run's browser step (`nearAILogin`),
+    /// where the person signs in to NEAR AI and the daemon keeps the
     /// session the move provisions the account with. True once it finished.
     /// Replaced only by tests.
-    var legacyMigrationPasskeyStep: (() async -> Bool)?
-    /// Ends the browser step the passkey step began (`cancelNearAILogin`).
+    var legacyMigrationNearAILoginStep: (() async -> NearAILoginOutcome)?
+    /// Ends the browser step the NEAR AI login step began (`cancelNearAILogin`).
     /// Replaced only by tests.
-    var legacyMigrationPasskeyCancel: (() async -> Void)?
-    /// The running passkey step, so Cancel can stop it.
-    private var legacyMigrationPasskeyTask: Task<Bool, Never>?
+    var legacyMigrationNearAILoginCancel: (() async -> Void)?
+    /// The running NEAR AI login step, so Cancel can stop it.
+    private var legacyMigrationNearAILoginTask: Task<NearAILoginOutcome, Never>?
 
-    /// Cancel while waiting on the passkey: stop waiting and end the
+    /// Cancel while waiting on the NEAR AI login: stop waiting and end the
     /// browser step. Nothing is moved, and the offer stays.
-    func cancelLegacyMigrationPasskey() {
-        guard let task = legacyMigrationPasskeyTask else { return }
+    func cancelLegacyMigrationNearAILogin() {
+        guard let task = legacyMigrationNearAILoginTask else { return }
         task.cancel()
-        let cancel = legacyMigrationPasskeyCancel ?? { [weak self] in _ = await self?.cancelNearAILogin() }
+        let cancel = legacyMigrationNearAILoginCancel ?? { [weak self] in _ = await self?.cancelNearAILogin() }
         Task { await cancel() }
     }
 
-    /// Runs the passkey step once, as its own task so Cancel can stop it.
+    /// Runs the NEAR AI login step once, as its own task so Cancel can stop it.
     /// True when it finished; false when it failed, ran out of time or was
-    /// cancelled (then `legacyMigrationPasskeyFailed` stays false).
-    private func runLegacyMigrationPasskeyStep() async -> Bool {
-        let step = legacyMigrationPasskeyStep ?? { [weak self] in await self?.nearAILogin() ?? false }
-        legacyMigrationAwaitingPasskey = true
+    /// cancelled (then `legacyMigrationNearAILoginFailed` stays false).
+    private func runLegacyMigrationNearAILoginStep() async -> Bool {
+        let step = legacyMigrationNearAILoginStep ?? { [weak self] in await self?.nearAILoginOutcome() ?? .failed }
+        legacyMigrationAwaitingNearAILogin = true
         let task = Task { await step() }
-        legacyMigrationPasskeyTask = task
-        let finished = await task.value
-        legacyMigrationPasskeyTask = nil
-        legacyMigrationAwaitingPasskey = false
-        if !finished && !task.isCancelled { legacyMigrationPasskeyFailed = true }
-        return finished && !task.isCancelled
+        legacyMigrationNearAILoginTask = task
+        let outcome = await task.value
+        legacyMigrationNearAILoginTask = nil
+        legacyMigrationAwaitingNearAILogin = false
+        // A cancel -- this card's own, or one the daemon reports -- is not
+        // the step failing: nothing is moved, and nothing is said.
+        if outcome == .failed && !task.isCancelled { legacyMigrationNearAILoginFailed = true }
+        return outcome == .signedIn && !task.isCancelled
     }
 
     /// Move: `legacy_invite_migrate`, which the contributor chose. A refusal
@@ -2514,9 +2604,9 @@ final class AppModel: ObservableObject {
     /// re-read, the daemon stops offering the move and its notice takes
     /// over. `invite` is sent only once the daemon asked for it.
     ///
-    /// The move leads with the passkey step (owner, 2026-10-11): when the
+    /// The move leads with the NEAR AI login step (owner, 2026-10-11): when the
     /// daemon has no session to provision the account with
-    /// (`legacy_migration_no_near_ai_session`), this runs the passkey step
+    /// (`legacy_migration_no_near_ai_session`), this runs the NEAR AI login step
     /// and then the move again, once, without a second press. A step that
     /// does not finish moves nothing.
     func migrateLegacyInvite(invite: String? = nil) async {
@@ -2526,7 +2616,7 @@ final class AppModel: ObservableObject {
         legacyMigrationBusy = true
         legacyMigrationRefusal = nil
         legacyMigrationStartFailed = false
-        legacyMigrationPasskeyFailed = false
+        legacyMigrationNearAILoginFailed = false
         let move = {
             await Task.detached(priority: .userInitiated) {
                 Result { try client.migrateLegacyInvite(invite: sent) }
@@ -2534,9 +2624,9 @@ final class AppModel: ObservableObject {
         }
         var outcome = await move()
         if case .failure(let failure as DaemonClient.Failure) = outcome,
-            failure.message == LegacyMigrationOffer.passkeyNeededLabel, self.client === client
+            failure.message == LegacyMigrationOffer.nearAILoginNeededLabel, self.client === client
         {
-            guard await runLegacyMigrationPasskeyStep(), self.client === client else {
+            guard await runLegacyMigrationNearAILoginStep(), self.client === client else {
                 legacyMigrationBusy = false
                 refreshStatus()
                 return
@@ -2973,6 +3063,7 @@ final class AppModel: ObservableObject {
         }
         objectWillChange.send()
         UserDefaults.standard.set(true, forKey: Self.onboardingCompleteKey(tenantID))
+        finishedFirstRunThisLaunch = true
     }
 
     #if DEBUG
@@ -3617,7 +3708,7 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var accountSession: AccountSessionRead = .unread
     /// The last status read's `sign_in`: `near_ai` when Sign in again is the
-    /// NEAR AI path (`near_ai_account_sign_in`), nil for a passkey account
+    /// NEAR AI path (`near_ai_account_sign_in`), nil for an `account_sign_in` account
     /// or before a read.
     @Published private(set) var accountSignInPath: String?
     @Published private(set) var accountSigningIn = false
@@ -3672,7 +3763,11 @@ final class AppModel: ObservableObject {
         var answer = await firstRunCall { try $0.nearAiAccountSignIn() }
         if case .failure(let failure as DaemonClient.Failure) = answer,
            failure.message == "near_ai_sign_in_required" {
-            guard await nearAILogin(fresh: true) else {
+            switch await nearAILoginOutcome(fresh: true) {
+            case .signedIn: break
+            // Cancelled (see `NearAILoginPoll.cancelled`): not a failure.
+            case .cancelled: return
+            case .failed:
                 accountSignInFailure = .failed
                 return
             }
@@ -3695,6 +3790,9 @@ final class AppModel: ObservableObject {
         }
         guard !nearAiSigningIn, !accountSigningIn else { return }
         nearAiSigningIn = true
+        // Kept for a cancel below: an earlier failure is what may be keeping
+        // Sign in on screen, and a cancel does not settle it.
+        let failedBefore = nearAiSignInFailed
         nearAiSignInFailed = false
         defer { nearAiSigningIn = false }
         if accountSignInPath == nil,
@@ -3702,7 +3800,15 @@ final class AppModel: ObservableObject {
             accountSignInPath = session.signIn
             accountRenewalFailure = session.renewalFailure
         }
-        guard await nearAILogin(fresh: true) else {
+        switch await nearAILoginOutcome(fresh: true) {
+        case .signedIn: break
+        // Cancelled (see `NearAILoginPoll.cancelled` for every source): not
+        // a failure, so no "Sign-in didn't finish". An earlier failure stays
+        // as it was, so the Sign in it kept on screen stays for a retry.
+        case .cancelled:
+            nearAiSignInFailed = failedBefore
+            return
+        case .failed:
             nearAiSignInFailed = true
             return
         }
@@ -3740,8 +3846,17 @@ final class AppModel: ObservableObject {
     /// again" (the payout section, Home's Credit tile) reads again.
     @Published private(set) var accountSessionGeneration = 0
 
+    /// First run was finished in this launch (`markOnboardingComplete`):
+    /// Home's Traces walkthrough stands in for the Traces cards for the rest
+    /// of it (owner, 2026-11-02: "on first launch"). Never read back from an
+    /// earlier launch's marker, so an install that set up long ago is not
+    /// shown it again. Not `@Published`: it changes only under the one
+    /// `objectWillChange` that `markOnboardingComplete` already sends, and a
+    /// second notification for the same press is one too many.
+    private(set) var finishedFirstRunThisLaunch = false
+
     /// Sign in again by whichever path this account has: the NEAR AI one
-    /// for a NEAR AI account, the passkey one otherwise. The path comes
+    /// for a NEAR AI account, `account_sign_in` otherwise. The path comes
     /// from a status read, taken first when none has been.
     func signInToAccount() async {
         if accountSignInPath == nil,
@@ -3755,7 +3870,7 @@ final class AppModel: ObservableObject {
     /// opens the browser), then reads the session again and trusts only
     /// that read, as Ron's History does.
     func signInToWithdraw() async {
-        // A NEAR AI account has no passkey to sign in with.
+        // A NEAR AI account signs in through NEAR AI.
         if accountSignInPath == "near_ai" { return await signInAgain() }
         guard !accountSigningIn else { return }
         accountSigningIn = true
@@ -4295,19 +4410,24 @@ extension AppModel: FirstRunDaemon {
     /// until it ends (`NearAILoginPoll`). Called directly rather than
     /// through `startNearAiCredential`, whose failure writes the Settings
     /// notice; the first run says its own (`folders.sign_in_failed`).
-    func nearAILogin() async -> Bool { await nearAILogin(fresh: false) }
+    func nearAILoginOutcome() async -> NearAILoginOutcome { await nearAILoginOutcome(fresh: false) }
 
     /// `fresh`: sign in even when a NEAR AI login is stored, because NEAR AI
-    /// refused it (Sign in again's `near_ai_sign_in_required`).
-    func nearAILogin(fresh: Bool) async -> Bool {
-        guard let client, !nearAiBrowserSignInWaiting else { return false }
+    /// refused it (Sign in again's `near_ai_sign_in_required`). It names no
+    /// provider; the daemon's browser page offers the build's logins.
+    ///
+    /// `.cancelled` is an attempt the daemon ended as cancelled
+    /// (`NearAILoginPoll.cancelled` lists where that comes from); no caller
+    /// reports it as a failure.
+    func nearAILoginOutcome(fresh: Bool) async -> NearAILoginOutcome {
+        guard let client, !nearAiBrowserSignInWaiting else { return .failed }
         if !fresh {
             let first = await Task.detached { try? client.nearAiCredentialStatus(attemptID: nil) }.value
-            if NearAILoginPoll.verdict(first) == .signedIn { return true }
+            if NearAILoginPoll.verdict(first) == .signedIn { return .signedIn }
         }
         // A Cancel before the browser opens: no attempt is begun, and none
         // that began meanwhile opens the browser.
-        if Task.isCancelled { return false }
+        if Task.isCancelled { return .failed }
         credentialSignInNotificationEpoch &+= 1
         credentialSignInNotifiesAccount = false
         nearAiBrowserGeneration &+= 1
@@ -4317,10 +4437,10 @@ extension AppModel: FirstRunDaemon {
             firstRunLoginAttemptID = nil
         }
         let started = await Task.detached { try? client.nearAiCredentialStart() }.value
-        guard let attempt = started, let url = URL(string: attempt.browserURL) else { return false }
+        guard let attempt = started, let url = URL(string: attempt.browserURL) else { return .failed }
         if Task.isCancelled || self.client !== client {
             _ = await Task.detached { try? client.nearAiCredentialCancel(attemptID: attempt.attemptID) }.value
-            return false
+            return .failed
         }
         firstRunLoginAttemptID = attempt.attemptID
         openBrowser(url)
@@ -4330,34 +4450,37 @@ extension AppModel: FirstRunDaemon {
             try? await Task.sleep(for: .seconds(1))
             // Cancelled (the first run's Cancel): stop at once, without
             // another poll that could report a sign-in.
-            if Task.isCancelled { return false }
-            guard self.client === client else { return false }
+            if Task.isCancelled { return .failed }
+            guard self.client === client else { return .failed }
             // Cancellation and replacement are one operation. In particular,
             // an old poll must not finish the flow while cancel is in flight.
             if nearAiBrowserRestarting { continue }
-            guard let attemptID = firstRunLoginAttemptID else { return false }
+            guard let attemptID = firstRunLoginAttemptID else { return .failed }
             if deadlineAttemptID != attemptID {
                 deadlineAttemptID = attemptID
                 deadline = Date().addingTimeInterval(NearAILoginPoll.limit)
             }
-            guard Date() < deadline else { return false }
+            guard Date() < deadline else { return .failed }
             let generation = nearAiBrowserGeneration
             let status = await Task.detached { try? client.nearAiCredentialStatus(attemptID: attemptID) }.value
-            guard !Task.isCancelled, self.client === client else { return false }
+            guard !Task.isCancelled, self.client === client else { return .failed }
             guard !nearAiBrowserRestarting, generation == nearAiBrowserGeneration,
                   firstRunLoginAttemptID == attemptID else { continue }
             switch fresh ? NearAILoginPoll.freshVerdict(status) : NearAILoginPoll.verdict(status) {
             case .signedIn:
                 refreshNearAiCredential()
-                return true
+                return .signedIn
+            case .cancelled:
+                refreshNearAiCredential()
+                return .cancelled
             case .ended:
                 refreshNearAiCredential()
-                return false
+                return .failed
             case .waiting:
                 continue
             }
         }
-        return false
+        return .failed
     }
 
     /// Cancel the named attempt before requesting a new one. The original
@@ -4430,6 +4553,7 @@ extension AppModel: FirstRunDaemon {
     func setAskEachTime() async -> Bool {
         guard case .success = await firstRunCall({ try $0.setAskEachTime() }) else { return false }
         refreshStatus()
+        refreshProjects()
         return true
     }
 
@@ -4483,10 +4607,18 @@ extension AppModel: FirstRunDaemon {
         return true
     }
 
+    /// The first run's grant: a folder set to Ask keeps asking (#1753's
+    /// ruling that a folder's own rule always wins).
     func grantAutomatic(witness: String?) async -> FirstRunGrantAnswer {
-        switch await firstRunCall({ try $0.grantAutomatic(witnessSigningAddress: witness) }) {
+        await grantAutomatic(witness: witness, keepFolderAsks: true)
+    }
+
+    /// The grant, from the first run or Settings' sharing choice.
+    func grantAutomatic(witness: String?, keepFolderAsks: Bool) async -> FirstRunGrantAnswer {
+        switch await firstRunCall({ try $0.grantAutomatic(witnessSigningAddress: witness, keepFolderAsks: keepFolderAsks) }) {
         case .success(let grant) where grant.granted:
             refreshStatus()
+            refreshProjects()
             return .granted
         case .failure(let failure as DaemonClient.Failure) where !failure.message.isEmpty:
             return .refused(label: failure.message)
@@ -4556,12 +4688,47 @@ extension AppModel: FirstRunDaemon {
 
     /// The daemon drops this Mac's enrollment (`unenroll`). Status is read
     /// again, so `status.loggedIn` is false before watch only is marked.
+    ///
+    /// The NEAR AI sign-in goes too. Where an action's failure is shown:
+    /// the failed-revoke sentence when its key could not be revoked at NEAR
+    /// AI, and `nearAiStillSignedIn` when it could not be cleared here (the
+    /// enrollment is gone either way, and Forget in Private AI removes it).
     func unenroll() async -> Bool {
-        guard case .success = await firstRunCall({ try $0.unenroll() }) else { return false }
+        guard case .success(let nearAi) = await firstRunCall({ try $0.unenroll() })
+        else { return false }
+        switch nearAi {
+        case .notRevoked:
+            lastActionError = privateInferenceCopy?.credentialForgetNotRevoked
+        case .notCleared:
+            lastActionError = privateInferenceCopy?.nearAiStillSignedIn
+        case .done:
+            break
+        }
         if case .success(let fresh) = await firstRunCall({ try $0.status() }) {
             publishIfChanged(\.status, fresh)
         }
+        // The daemon confirmed it: when the read after it failed (or answered
+        // from before), say so anyway, or `requiresOnboarding` stays false
+        // and the first run closes itself on appear.
+        if status.loggedIn {
+            publishIfChanged(\.status, status.unenrolled())
+        }
         return true
+    }
+
+    /// "Set up again" (#1836 F1), once confirmed: the daemon drops this Mac's
+    /// enrollment. True when it did; the caller then opens the first run
+    /// window itself, which does not depend on the status read after the
+    /// unenroll answering. A second call while one runs does nothing. The
+    /// daemon never does this on its own; only the confirmed button asks.
+    func setUpAgain() async -> Bool {
+        guard !settingUpAgain else { return false }
+        settingUpAgain = true
+        setUpAgainFailed = false
+        defer { settingUpAgain = false }
+        let done = await unenroll()
+        setUpAgainFailed = !done
+        return done
     }
 
     /// One blocking client call off the main actor. Nil without a daemon.

@@ -40,7 +40,7 @@
 //! # Single-instance limitation
 //!
 //! The pending-request and issued-code stores are the in-process
-//! [`crate::account_passkey::CeremonyStore`], with the same caveat: a flow
+//! [`crate::account_ceremony::CeremonyStore`], with the same caveat: a flow
 //! started on one process cannot be finished on another, and state is lost on
 //! restart. Both TTLs are minutes, and the pilot runs a single ingest process.
 //! A horizontally-scaled deployment MUST move these to a shared short-TTL
@@ -86,6 +86,11 @@ pub const NATIVE_SESSION_ROTATION_INTERVAL_SECS: i64 = 60 * 60;
 /// a credential never lives indefinitely. The 3-day idle cap shared with
 /// browser sessions still applies, though the 12-hour sliding lifetime is the
 /// tighter of the two for a native session.
+///
+/// The days are 24-hour days: the cap is `created_at` plus
+/// `NATIVE_SESSION_MAX_LIFETIME_DAYS * 24` hours, the same instant whatever
+/// time zone the database session or the process runs in. A count of
+/// calendar days would land an hour off across a daylight-saving change.
 pub const NATIVE_SESSION_MAX_LIFETIME_DAYS: i64 = 30;
 
 // The cadence has to be well inside the lifetime, or a native token can never

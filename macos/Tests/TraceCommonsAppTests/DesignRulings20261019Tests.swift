@@ -102,21 +102,20 @@ final class DesignRulings20261019Tests: XCTestCase {
         XCTAssertTrue(source.contains(".opacity(Self.graphicOpacity)"))
     }
 
-    /// Signed out, the Balance tile's "Sign in required" sits beside its
-    /// dash; an expired sign-in has no extra notice beside recovery controls.
-    func test_theSignedOutBalanceSitsBesideTheDash() throws {
+    /// With no figure, the Balance tile is its dash alone (owner,
+    /// 2026-11-02): "Sign in required" no longer sits beside it, and a
+    /// failed read's sentence no longer sits under it; a sign-in it waits
+    /// on is the Account heading's "No data - Sign in".
+    func test_aBalanceWithNoFigureIsItsDashAlone() throws {
         let model = AppModel()
         let copy = try XCTUnwrap(model.privateInferenceCopy)
-        let signedOut = HomeFormat.balance(
-            BalanceStatus.parse(fromJSON: #"{"state":"no_session"}"#), copy: copy, calls: model.balanceCalls)
-        XCTAssertEqual(signedOut.value, "—")
-        XCTAssertEqual(signedOut.beside, "Sign in required")
-        XCTAssertNil(signedOut.detail)
-        let expired = HomeFormat.balance(
-            BalanceStatus.parse(fromJSON: #"{"state":"session_expired"}"#), copy: copy, calls: model.balanceCalls)
-        XCTAssertEqual(expired.value, "—")
-        XCTAssertNil(expired.beside)
-        XCTAssertNil(expired.detail)
+        for state in ["no_session", "session_expired", "unavailable", "no_organization", "something_new", ""] {
+            let tile = HomeFormat.balance(
+                BalanceStatus.parse(fromJSON: #"{"state":"\#(state)"}"#), copy: copy, calls: model.balanceCalls)
+            XCTAssertEqual(tile.value, "—", state)
+            XCTAssertNil(tile.detail, state)
+            XCTAssertNil(tile.detailInk, state)
+        }
     }
 
     /// The tabs' own headings share one style (owner, 2026-10-19): the

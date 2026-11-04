@@ -130,11 +130,11 @@ final class MonitorShellTests: XCTestCase {
     func test_theTabRuleBleedsPastTheMainInset() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(
-            window.contains("bleed: GlassRuleTabs<MonitorWindowView.Tab>.toPaneEdge)"),
+            window.contains("bleed: GlassRuleTabs<MonitorWindowView.Tab>.toPaneEdge,"),
             "the tabs' bleed is not toPaneEdge")
         XCTAssertFalse(window.contains("bleed: GlassTokens.Space.panePadding"), "the tabs' bleed is the old 12pt inset")
         XCTAssertTrue(
-            window.contains("bleed: GlassRuleTabs<MonitorWindowView.Tab>.toPaneEdge)\n                    }\n                }\n                .padding(.horizontal, MonitorWindowView.mainInset)"),
+            window.contains("Tab.ordered(tabOrder)))\n                            })\n                    }\n                }\n                .padding(.horizontal, MonitorWindowView.mainInset)"),
             "the tabs are not the ones inset by mainInset")
         XCTAssertGreaterThanOrEqual(GlassRuleTabs<MonitorWindowView.Tab>.toPaneEdge, MonitorWindowView.mainInset)
     }

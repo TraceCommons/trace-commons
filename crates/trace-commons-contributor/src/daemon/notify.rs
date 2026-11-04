@@ -315,10 +315,9 @@ pub fn digest_text(pending: &[&QueueEntry]) -> String {
 ///
 /// Credit is stated only when there is some. A trailing "0 credit pending"
 /// reads as a failure rather than as a fresh start, and the first digest
-/// after arming a project is exactly when that would show. It is always
-/// named `pending`, never "earned" -- settlement is off on every deployment
-/// shipped so far (see `docs/operator/settlement-mode.md`), so a bare figure
-/// would be read as money that exists.
+/// after arming a project is exactly when that would show. Credit the server
+/// has decided is "earned" (approved 2026-11-01); credit still being scored
+/// is "pending", never "earned" (see [`credit_sentences`]).
 ///
 /// Approved 2026-10-06, the project clause too: K9 (#1118) rewords it to
 /// match the WYSIWYG design's Flow 2/3 evening-digest alerts exactly --
@@ -332,14 +331,19 @@ pub fn digest_text(pending: &[&QueueEntry]) -> String {
 /// the one-project rule is not expected to make this line silent about
 /// where things came from as often as it looks.
 ///
-/// The same sentence is built by the macOS shell
-/// (`DigestCopy.contributionLine`), the Windows shell
-/// (`DigestText.ContributionLine`) and the Linux shell
-/// (`notify::contribution_body`). All four use one rule -- a project is
+/// The daemon composes this sentence once. GTK and Tauri call it; macOS posts
+/// the daemon's `text` and Windows the `contribution` field, and their older
+/// pending-only fallbacks (`DigestCopy.contributionLine`,
+/// `DigestText.ContributionLine`) follow the same rule -- a project is
 /// named only when exactly one distinct, non-blank label is present, the
 /// clause always ends with a period, and credit follows as its own
 /// sentence -- and each pins the design's two examples verbatim.
-pub fn contribution_text(count: usize, projects: &BTreeSet<String>, credit_pending: f32) -> String {
+pub fn contribution_text(
+    count: usize,
+    projects: &BTreeSet<String>,
+    credit_final: f64,
+    credit_pending: f64,
+) -> String {
     let noun = if count == 1 { "trace" } else { "traces" };
     let mut line = format!("{count} {noun} contributed");
     let mut named = projects.iter().filter(|p| !p.trim().is_empty());
@@ -347,21 +351,50 @@ pub fn contribution_text(count: usize, projects: &BTreeSet<String>, credit_pendi
         line.push_str(&format!(" from {only}"));
     }
     line.push('.');
-    // One decimal place: credit is a score, not an amount, and trailing
-    // precision invites the reader to treat it as a balance.
-    //
-    // Rounded explicitly, half away from zero, rather than left to each
-    // language's default: Rust's `{:.1}` rounds half to even and .NET's
-    // "0.0" rounds half away from zero, so 4.25 rendered as 4.2 here and
-    // 4.3 on Windows -- the same contribution, a different figure depending
-    // which machine the contributor read it on. `f32::round` is
-    // half-away-from-zero, and the other two shells now round the same way
-    // before formatting.
-    if credit_pending > 0.0 {
-        let rounded = (credit_pending * 10.0).round() / 10.0;
-        line.push_str(&format!(" {rounded:.1} credit pending."));
-    }
+    line.push_str(&credit_sentences(credit_final, credit_pending));
     line
+}
+
+/// The digest's credit sentence for credit the server has decided. Owned by
+/// this module (the digest's copy table); the shells that link this crate
+/// call [`contribution_text`], and macOS and Windows post the sentence the
+/// daemon composes (`digest_due.contribution`). Approved by the owner
+/// 2026-11-01 ("we have finalized credits in the app"); the Home tile's
+/// "Credit earned" was approved 2026-10-29.
+pub const DIGEST_CREDIT_EARNED: &str = "{x} credit earned.";
+/// The digest's credit sentence for credit still being scored.
+pub const DIGEST_CREDIT_PENDING: &str = "{x} credit pending.";
+
+/// The digest's credit sentences, each with a leading space so they append to
+/// the contribution sentence, or an empty string when there is no credit:
+/// [`DIGEST_CREDIT_EARNED`] first, then [`DIGEST_CREDIT_PENDING`]. Each
+/// appears only when its figure is at least 0.1 *after* rounding, so
+/// "0.0 credit earned." is never said. "Earned" is only ever said of decided
+/// credit; a pending figure is never called earned.
+///
+/// One decimal place, rounded once (half away from zero, from the decimal
+/// the server wrote -- see [`wire_credit`]), so every shell shows the same
+/// figure: credit is a score, not an amount, and trailing precision invites
+/// the reader to treat it as a balance.
+pub fn credit_sentences(credit_final: f64, credit_pending: f64) -> String {
+    let mut out = String::new();
+    for (figure, template) in [
+        (credit_final, DIGEST_CREDIT_EARNED),
+        (credit_pending, DIGEST_CREDIT_PENDING),
+    ] {
+        if let Some(tenths) = super::nudge::tenths_of(figure) {
+            out.push(' ');
+            out.push_str(&template.replace("{x}", &crate::nudge_render::credit_text(tenths)));
+        }
+    }
+    out
+}
+
+/// A credit figure for the wire: rounded once to tenths and decimal-clean
+/// (0.4, never 0.3999999940395355), or 0 when it rounds to nothing. A shell
+/// that formats it to one decimal cannot disagree with another.
+pub fn wire_credit(credit: f64) -> f64 {
+    super::nudge::tenths_of(credit).map_or(0.0, |t| t as f64 / 10.0)
 }
 
 /// Best-effort local OS notification.
@@ -411,6 +444,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::daemon::test_support::at;
+
+    use crate::daemon::history::ContributedSince;
 
     fn labels(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|n| (*n).to_string()).collect()
@@ -501,7 +536,7 @@ mod tests {
 
     #[test]
     fn contribution_text_names_the_one_project_and_never_a_path() {
-        let text = contribution_text(3, &labels(&["orchard-api"]), 0.0);
+        let text = contribution_text(3, &labels(&["orchard-api"]), 0.0, 0.0);
         assert!(text.contains("3 traces contributed"), "{text}");
         assert!(text.contains("orchard-api"), "{text}");
         assert!(!text.contains('/'), "must not contain a path: {text}");
@@ -509,7 +544,7 @@ mod tests {
 
     #[test]
     fn contribution_text_is_singular_for_one_session() {
-        let text = contribution_text(1, &labels(&["proj"]), 0.0);
+        let text = contribution_text(1, &labels(&["proj"]), 0.0, 0.0);
         assert!(text.contains("1 trace contributed"), "{text}");
         assert!(!text.contains("traces"), "{text}");
     }
@@ -523,6 +558,7 @@ mod tests {
             9,
             &labels(&["orchard-api", "acme-billing", "portfolio"]),
             0.0,
+            0.0,
         );
         // The whole sentence, not a substring check: proves nothing beyond
         // the count and noun survives, no partial list and no "and N more".
@@ -532,12 +568,12 @@ mod tests {
     #[test]
     fn contribution_text_copes_with_missing_labels() {
         assert_eq!(
-            contribution_text(2, &labels(&[]), 0.0),
+            contribution_text(2, &labels(&[]), 0.0, 0.0),
             "2 traces contributed."
         );
         // A blank label beside a real one does not count as a second project.
         assert_eq!(
-            contribution_text(2, &labels(&["", "api"]), 0.0),
+            contribution_text(2, &labels(&["", "api"]), 0.0, 0.0),
             "2 traces contributed from api."
         );
     }
@@ -548,7 +584,7 @@ mod tests {
     #[test]
     fn contribution_text_matches_the_design_flow_2_example() {
         assert_eq!(
-            contribution_text(1, &labels(&["orchard-api"]), 6.0),
+            contribution_text(1, &labels(&["orchard-api"]), 0.0, 6.0),
             "1 trace contributed from orchard-api. 6.0 credit pending."
         );
     }
@@ -557,7 +593,7 @@ mod tests {
     #[test]
     fn contribution_text_matches_the_design_flow_3_example() {
         assert_eq!(
-            contribution_text(2, &labels(&["orchard-api", "portfolio"]), 10.5),
+            contribution_text(2, &labels(&["orchard-api", "portfolio"]), 0.0, 10.5),
             "2 traces contributed. 10.5 credit pending."
         );
     }
@@ -567,22 +603,107 @@ mod tests {
     /// "0 credit pending" reads as a failure rather than as a fresh start.
     #[test]
     fn contribution_text_states_credit_only_when_there_is_some() {
-        let with = contribution_text(2, &labels(&["proj"]), 4.25);
+        let with = contribution_text(2, &labels(&["proj"]), 0.0, 4.25);
         assert!(with.contains("4.3 credit pending"), "{with}");
-        let without = contribution_text(2, &labels(&["proj"]), 0.0);
+        let without = contribution_text(2, &labels(&["proj"]), 0.0, 0.0);
         assert!(!without.contains("credit"), "{without}");
     }
 
-    /// The figure is pending, and saying so is the difference between a
-    /// record and a promise. Settlement is off on every deployment shipped
-    /// so far, so a bare number would be read as money.
+    /// Pending credit is a record, not a promise, and saying so is the
+    /// difference. Only credit the server has decided may be called earned.
     #[test]
     fn contribution_text_never_calls_pending_credit_earned() {
-        let text = contribution_text(2, &labels(&["proj"]), 4.25);
+        let text = contribution_text(2, &labels(&["proj"]), 0.0, 4.25);
         assert!(text.contains("pending"), "{text}");
         for word in ["earned", "paid", "settled", "worth"] {
             assert!(!text.contains(word), "must not say {word}: {text}");
         }
+    }
+
+    /// Credit the server has decided is reported as earned, in the same
+    /// shape as pending, and never called pending.
+    #[test]
+    fn contribution_text_reports_final_credit_as_earned() {
+        assert_eq!(
+            contribution_text(2, &labels(&["api"]), 4.25, 0.0),
+            "2 traces contributed from api. 4.3 credit earned."
+        );
+        let text = contribution_text(2, &labels(&["api"]), 4.25, 0.0);
+        assert!(!text.contains("pending"), "{text}");
+    }
+
+    /// Both kinds in one digest: earned first, each only when above zero.
+    #[test]
+    fn contribution_text_states_earned_then_pending() {
+        assert_eq!(
+            contribution_text(3, &labels(&["api"]), 6.0, 1.5),
+            "3 traces contributed from api. 6.0 credit earned. 1.5 credit pending."
+        );
+        assert_eq!(
+            contribution_text(1, &labels(&[]), 0.0, 0.0),
+            "1 trace contributed."
+        );
+    }
+
+    /// The shared sentences, for the shells that link this crate.
+    #[test]
+    fn credit_sentences_are_empty_for_nothing() {
+        assert_eq!(credit_sentences(0.0, 0.0), "");
+        assert_eq!(credit_sentences(2.0, 0.0), " 2.0 credit earned.");
+        assert_eq!(credit_sentences(0.0, 2.0), " 2.0 credit pending.");
+    }
+
+    /// Rounded once, from the decimal the server wrote. 0.35 crosses the
+    /// wire as the f32 widened to f64, 0.3499999940395355, and every shell
+    /// must still read it as 0.4 (nudge's `decimal_credit` case).
+    #[test]
+    fn credit_is_rounded_once_from_the_decimal_not_the_binary_figure() {
+        let wire = f64::from(0.35_f32);
+        assert_eq!(credit_sentences(wire, 0.0), " 0.4 credit earned.");
+        assert_eq!(credit_sentences(0.0, wire), " 0.4 credit pending.");
+        assert_eq!(wire_credit(wire), 0.4);
+    }
+
+    /// A figure that rounds to zero is not a credit sentence: "0.0 credit
+    /// earned." is the "0 credit" line this copy never says.
+    #[test]
+    fn a_figure_that_rounds_to_zero_is_not_stated() {
+        assert_eq!(credit_sentences(0.04, 0.0), "");
+        assert_eq!(credit_sentences(0.0, 0.04), "");
+        assert_eq!(wire_credit(0.04), 0.0);
+        let text = contribution_text(1, &labels(&["api"]), 0.04, 0.049);
+        assert_eq!(text, "1 trace contributed from api.");
+    }
+
+    /// The same credit is stated once on each surface. The digest's `text`
+    /// carries the verdicts fold, whose "now final" sentence already states
+    /// the traces it covers, so the contribution sentence in `text` leaves
+    /// out only those traces' credit. A shell that does not show the fold is
+    /// given the sentence with all of it.
+    #[test]
+    fn a_fold_states_only_its_own_traces_credit() {
+        let mut stated = ContributedSince::default();
+        stated.credit_final_by_submission.insert("a".into(), 2.0);
+        stated.credit_final_by_submission.insert("b".into(), 1.5);
+        let folded: BTreeSet<String> = ["a".to_string()].into();
+        // `b` is not in the fold: its credit is not dropped from the text.
+        assert_eq!(stated.credit_final_not_in(&folded), 1.5);
+        assert_eq!(
+            contribution_text(
+                2,
+                &labels(&["api"]),
+                stated.credit_final_not_in(&folded),
+                0.0
+            ),
+            "2 traces contributed from api. 1.5 credit earned."
+        );
+        // A shell that cannot show the fold gets every earned figure.
+        assert_eq!(
+            contribution_text(2, &labels(&["api"]), stated.credit_final(), 0.0),
+            "2 traces contributed from api. 3.5 credit earned."
+        );
+        // Nothing folded: nothing is left out.
+        assert_eq!(stated.credit_final_not_in(&BTreeSet::new()), 3.5);
     }
 
     #[test]

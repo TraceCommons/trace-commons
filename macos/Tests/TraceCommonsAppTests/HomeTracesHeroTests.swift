@@ -5,38 +5,118 @@ import XCTest
 @testable import TraceCommonsApp
 
 /// Home's Traces hero (owner, 2026-10-28): the macOS MVP is "contribute
-/// traces, earn credit", so Home leads with one large card that says so
-/// and opens Traces.
+/// traces, earn credit", so Home has one card that says so and opens
+/// Traces. Condensed on 2026-11-02 (owner): shorter words, no line under
+/// the title, an X that closes it, and in place of the Traces cards only
+/// while no folder is watched or on the launch that finished first run.
+/// Later that day it took the Insights empty state's card (owner,
+/// `GetStartedCard`): a plain card, numbered steps, no pictures.
 @MainActor
 final class HomeTracesHeroTests: XCTestCase {
-    func test_theHeroSaysWhatContributingIsAndOpensTraces() throws {
-        let words = try XCTUnwrap(MonitorWords.table).homeHistory
-        XCTAssertEqual(words.tracesHeroTitle, "Contribute traces, earn credit, use Private AI")
-        XCTAssertEqual(
-            words.tracesHeroBody,
-            "Share the sessions from your AI coding tools with Trace Commons. Each accepted trace earns you credit.")
-        XCTAssertEqual(words.tracesHeroAction, "Start earning")
-        XCTAssertEqual(words.tracesHeroStepContribute, "Contribute traces")
-        XCTAssertEqual(words.tracesHeroStepContributeDetail, "Share the sessions from your AI coding tools")
-        XCTAssertEqual(words.tracesHeroStepEarn, "Earn credit")
-        XCTAssertEqual(words.tracesHeroStepEarnDetail, "Each accepted trace earns you credit")
-        XCTAssertEqual(words.tracesHeroStepUse, "Use Private AI")
-        XCTAssertEqual(words.tracesHeroStepUseDetail, "Spend your credit on Private AI")
-        let home = try String(
+    private static func home() throws -> String {
+        try String(
             contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent("Views/Monitor/HomeViews.swift"), encoding: .utf8)
-        let hero = try XCTUnwrap(home.range(of: "private var tracesHero: some View {"))
-        let body = home[hero.upperBound...].prefix(1400)
-        XCTAssertTrue(body.contains("GlassHeroCard("))
-        XCTAssertTrue(body.contains("actionTitle: words.tracesHeroAction, action: openTraces"))
-        // The three steps run across the whole card, under the graphic.
-        XCTAssertTrue(body.contains("contentSpansGraphic: true"))
-        XCTAssertTrue(body.contains("HomeHeroSteps(steps: ["))
-        // Contribute opens Traces and Use Private AI opens Private AI, each
-        // its own button, so the hero is a panel and only its pill is the
-        // hero's button; Earn credit opens nothing (owner, 2026-10-29).
-        XCTAssertTrue(body.contains("contentSpansGraphic: true, actionOnPill: true"))
-        XCTAssertTrue(body.contains("detail: words.tracesHeroStepContributeDetail,\n                          action: openTraces),"))
-        XCTAssertTrue(body.contains("detail: words.tracesHeroStepEarnDetail),"))
-        XCTAssertTrue(body.contains("detail: words.tracesHeroStepUseDetail,\n                          action: openPrivateAI),"))
+    }
+
+    private static func hero() throws -> Substring {
+        let home = try home()
+        let start = try XCTUnwrap(home.range(of: "private var tracesHero: some View {"))
+        let end = try XCTUnwrap(home.range(of: "/// Home's Private AI section", range: start.upperBound..<home.endIndex))
+        return home[start.upperBound..<end.lowerBound]
+    }
+
+    /// Each step's title and line read as one short sentence, and the
+    /// title says what the three of them add up to.
+    func test_theHeroSaysItInFewWords() throws {
+        let words = try XCTUnwrap(MonitorWords.table).homeHistory
+        XCTAssertEqual(words.tracesHeroTitle, "Your traces earn Private AI credit")
+        XCTAssertEqual(words.tracesHeroAction, "Start earning")
+        XCTAssertEqual(words.tracesHeroStepContribute, "Contribute")
+        XCTAssertEqual(words.tracesHeroStepContributeDetail, "Traces from tools")
+        XCTAssertEqual(words.tracesHeroStepEarn, "Earn credit")
+        XCTAssertEqual(words.tracesHeroStepEarnDetail, "For each trace")
+        XCTAssertEqual(words.tracesHeroStepUse, "Use Private AI")
+        XCTAssertEqual(words.tracesHeroStepUseDetail, "With your credit")
+        // The line under the title is gone from the core's table and the
+        // shell's copy alike.
+        let copy = try String(
+            contentsOf: GlassSurfaceRulesTests.root.deletingLastPathComponent()
+                .appendingPathComponent("TCShellCore/MonitorTracesCopy.swift"), encoding: .utf8)
+        XCTAssertFalse(copy.contains("tracesHeroBody"))
+        XCTAssertFalse(copy.contains("traces_hero_body"))
+    }
+
+    /// The walkthrough is the shared getting-started card: its title with
+    /// no line under it, the three steps in order, and Start earning as the
+    /// one action, a text link under Contribute that opens Traces.
+    func test_theHeroIsTheGetStartedCardAndStartEarningOpensTraces() throws {
+        let body = try Self.hero()
+        XCTAssertTrue(body.contains("GetStartedCard(\n                title: words.tracesHeroTitle,\n                steps: ["))
+        XCTAssertFalse(body.contains("lead:"), "no line under the title")
+        XCTAssertTrue(body.contains(
+            "detail: words.tracesHeroStepContributeDetail,\n"
+                + "                          link: GetStartedCard.Link(title: words.tracesHeroAction, action: openTraces)),"))
+        XCTAssertTrue(body.contains(".init(title: words.tracesHeroStepEarn, detail: words.tracesHeroStepEarnDetail),"))
+        XCTAssertTrue(body.contains(".init(title: words.tracesHeroStepUse, detail: words.tracesHeroStepUseDetail),"))
+        XCTAssertEqual(body.components(separatedBy: "link:").count - 1, 1, "one clear action")
+    }
+
+    /// The X closes the hero for good on this Mac, with the close word the
+    /// campaign's and Insights' X use.
+    func test_theXClosesTheHeroOnThisMac() throws {
+        let home = try Self.home()
+        XCTAssertTrue(home.contains(
+            "@AppStorage(HomeClosedCards.tracesHeroKey) private var tracesHeroClosed = false"))
+        let body = try Self.hero()
+        XCTAssertTrue(body.contains("if let words, !tracesHeroClosed {"))
+        XCTAssertTrue(body.contains("close: GetStartedCard.Close(label: MonitorWords.close) { tracesHeroClosed = true })"))
+    }
+
+    /// No gradient, ring or first-run pictures any more: the card is plain
+    /// (owner, 2026-11-02), and the views that drew them are gone.
+    func test_theHeroDrawsNoGradientOrPictures() throws {
+        let body = try Self.hero()
+        XCTAssertFalse(body.contains("GlassHeroCard("))
+        XCTAssertFalse(body.contains("heroMissions"))
+        let home = try Self.home()
+        for gone in ["struct HomeHeroSteps", "struct HomeHeroThread", "struct HomeHeroStepGraphic",
+                     "struct HomeHeroStepPanel", "struct HomeHeroRing"] {
+            XCTAssertFalse(home.contains(gone), gone)
+        }
+    }
+
+    /// In place of the Traces cards on the launch that finished first run,
+    /// or once the tree has loaded with no folder watched: none, or every
+    /// one set to Never. A tree still loading shows the cards.
+    func test_theWalkthroughStandsInForTheCardsUntilAFolderIsWatched() {
+        let rule = HomeFormat.showsTracesWalkthrough
+        let ask = TracesTree.FolderNode(id: "a", label: "a", mode: .ask, sessions: [])
+        let never = TracesTree.FolderNode(id: "n", label: "n", mode: .ignore, sessions: [])
+        let unruled = TracesTree.FolderNode(id: "u", label: "u", mode: nil, sessions: [])
+        XCTAssertTrue(rule([], true, false), "nothing set up")
+        XCTAssertTrue(rule([never], true, false), "nothing watched")
+        XCTAssertFalse(rule([never, ask], true, false))
+        XCTAssertFalse(rule([unruled], true, false), "a folder the queue names is watched")
+        XCTAssertFalse(rule([], false, false), "still loading")
+        XCTAssertTrue(rule([ask], true, true), "the launch that finished first run")
+        XCTAssertTrue(rule([], false, true))
+    }
+
+    /// The walkthrough takes the Traces cards' place under the Traces
+    /// heading, and the launch that finished first run is the model's,
+    /// set where first run is marked done.
+    func test_theWalkthroughTakesTheCardsPlace() throws {
+        let home = try Self.home()
+        XCTAssertTrue(home.contains(
+            "HomeSection(words?.sectionTraces) {\n                if showsTracesWalkthrough {\n"
+                + "                    tracesHero\n                } else {\n                    Grid("))
+        XCTAssertEqual(home.components(separatedBy: "                    tracesHero\n").count - 1, 1, "drawn once")
+        XCTAssertTrue(home.contains("!tracesHeroClosed && words != nil && HomeFormat.showsTracesWalkthrough("))
+        let model = try String(
+            contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent("AppModel.swift"), encoding: .utf8)
+        XCTAssertTrue(model.contains("    private(set) var finishedFirstRunThisLaunch = false"))
+        XCTAssertTrue(model.contains(
+            "UserDefaults.standard.set(true, forKey: Self.onboardingCompleteKey(tenantID))\n"
+                + "        finishedFirstRunThisLaunch = true"))
     }
 }

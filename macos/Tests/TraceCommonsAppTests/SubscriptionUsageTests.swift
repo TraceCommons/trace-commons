@@ -241,6 +241,52 @@ final class SubscriptionUsageTests: XCTestCase {
         await observing.value
     }
 
+    /// 2026-10-30 owner request: Insights shows Claude and Codex limits on
+    /// open, without a Refresh. The read is silent, one per login, and is not
+    /// repeated by the next poll.
+    @MainActor
+    func testOpeningInsightsReadsUncheckedLoginsSilentlyOncePerLogin() async {
+        let gate = UsageReaderGate(initial: Self.claudeSnapshot())
+        let model = SubscriptionUsageModel(reader: { refresh, interactive, provider, login in
+            try await gate.read(refresh: refresh, interactive: interactive, provider: provider, login: login)
+        }, activePollInterval: .milliseconds(1))
+        let observing = Task { await model.observe(readOnOpen: true) }
+        await waitForCalls(gate, 2)
+        let firstFlags = await gate.flags(1)
+        let firstScope = await gate.scope(1)
+        XCTAssertEqual(firstFlags, [true, false])
+        XCTAssertEqual(firstScope, ["claude", "claude-default"])
+        await gate.resolve(1, value: Self.claudeSnapshot())
+        await waitForCalls(gate, 3)
+        let secondFlags = await gate.flags(2)
+        let secondScope = await gate.scope(2)
+        XCTAssertEqual(secondFlags, [true, false])
+        XCTAssertEqual(secondScope, ["claude", "claude-work"])
+        await gate.resolve(2, value: Self.claudeSnapshot())
+        for _ in 0..<1_000 { await Task.yield() }
+        let count = await gate.count()
+        for index in 3..<max(3, count) { await gate.resolve(index, value: Self.claudeSnapshot()) }
+        XCTAssertEqual(count, 3)
+        observing.cancel()
+        await observing.value
+    }
+
+    @MainActor
+    func testOpeningInsightsDoesNotReadLoginsThatHaveCurrentFigures() async {
+        let gate = UsageReaderGate(initial: Self.snapshot())
+        let model = SubscriptionUsageModel(reader: { refresh, interactive, provider, login in
+            try await gate.read(refresh: refresh, interactive: interactive, provider: provider, login: login)
+        })
+        let observing = Task { await model.observe(readOnOpen: true) }
+        await waitForCalls(gate, 1)
+        for _ in 0..<1_000 { await Task.yield() }
+        let count = await gate.count()
+        for index in 1..<max(1, count) { await gate.resolve(index, value: Self.snapshot()) }
+        XCTAssertEqual(count, 1)
+        observing.cancel()
+        await observing.value
+    }
+
     @MainActor
     func testAllOffHasNoInsightsOfferButRetainsSettingsPermissionValue() async {
         let model = SubscriptionUsageModel(reader: { _, _, _, _ in Self.snapshot(enabled: false) }, writer: { _, _ in })

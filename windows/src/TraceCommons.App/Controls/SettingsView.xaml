@@ -78,6 +78,42 @@
                 </Border>
 
                 <!--
+                    This app's account needs attention: its record cannot be
+                    read, or the address it was set up with is refused. A
+                    status in the account section, never a banner. Every
+                    string is bound, from the Rust. Set up again asks first;
+                    only its confirmation unenrolls, then the first run
+                    starts. A refusal shows the failure line under the button.
+                -->
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind Settings.HasAccountAttention, Mode=OneWay}">
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="{x:Bind Settings.AccountAttentionTitle, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleCardTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.AccountAttentionBody, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.HasAccountAttentionBody, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind Settings.AccountAttentionPrivateAi, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.HasAccountAttentionPrivateAi, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <Button Content="{x:Bind Settings.AccountAttentionAction, Mode=OneWay}"
+                                IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
+                                Click="OnSetUpAgain" />
+                        <TextBlock Text="{x:Bind Settings.AccountAttentionFailedLine, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.HasAccountAttentionFailedLine, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <!--
                     Move a legacy invite identity to the contributor's NEAR AI
                     account. Shown only while the daemon offers it. The same
                     control the main window's notices card uses, here without

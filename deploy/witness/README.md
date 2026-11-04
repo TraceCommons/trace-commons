@@ -90,8 +90,8 @@ What reduces it, and none of these remove it:
 
 **And a sizing point that is part of the blast radius.** The witness binary
 links the whole `trace-commons-server` library. It uses a small slice of it,
-but the image carries the ingest dependency tree — webauthn, postgres, the
-HTTP stacks, `openssl-sys` through `webauthn-rs` — none of which the witness
+but the image carries the ingest dependency tree — postgres, the
+HTTP stacks, `openssl-sys` — none of which the witness
 calls. That is a much larger attack surface than the witness's own code, and it
 is the largest single reduction available to a future revision of this
 deployment.

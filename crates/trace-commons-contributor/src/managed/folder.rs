@@ -12,6 +12,11 @@ pub struct FolderSettings {
     pub cwd: PathBuf,
     #[serde(default)]
     pub model: Option<String>,
+    /// The background model chosen for this folder (`LaunchRequest::
+    /// background_model`); none for the tool's background default. Written
+    /// only when set, so settings without one read as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_model: Option<String>,
     #[serde(default)]
     pub collect_traces: bool,
     pub cli_options: String,
@@ -21,6 +26,8 @@ pub struct FolderSettings {
 pub struct FolderSnapshot {
     pub tool: ToolId,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_model: Option<String>,
     pub collect_traces: bool,
     pub cli_options: String,
     pub remembered: bool,
@@ -48,6 +55,7 @@ pub fn lookup(
         Some(entry) => FolderSnapshot {
             tool,
             model: entry.model.clone(),
+            background_model: entry.background_model.clone(),
             collect_traces: entry.collect_traces,
             cli_options: entry.cli_options.clone(),
             remembered: true,
@@ -55,6 +63,7 @@ pub fn lookup(
         None => FolderSnapshot {
             tool,
             model: None,
+            background_model: None,
             collect_traces: false,
             cli_options: settings
                 .managed_cli_options
@@ -80,6 +89,8 @@ pub fn apply_patch(
         #[serde(default)]
         model: Option<String>,
         #[serde(default)]
+        background_model: Option<String>,
+        #[serde(default)]
         collect_traces: bool,
         #[serde(default)]
         cli_options: String,
@@ -97,10 +108,11 @@ pub fn apply_patch(
         }
         super::options::parse(update.tool, &update.cli_options)
             .map_err(|_| "managed-cli-options-invalid")?;
-        if update
-            .model
-            .as_deref()
-            .is_some_and(|model| !super::opencode::valid_model(model))
+        if [&update.model, &update.background_model]
+            .into_iter()
+            .flatten()
+            .any(|model| !super::opencode::valid_model(model))
+            || (update.background_model.is_some() && update.tool == ToolId::Codex)
         {
             return Err("settings-invalid-value");
         }
@@ -110,6 +122,7 @@ pub fn apply_patch(
                 tool: update.tool,
                 cwd,
                 model: update.model,
+                background_model: update.background_model,
                 collect_traces: update.collect_traces,
                 cli_options: update.cli_options,
             });
@@ -145,6 +158,47 @@ pub fn with_default_cwd(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A folder's background model is saved with its other choices, and
+    /// settings written before it existed read as none. Codex takes none,
+    /// and an id that is not a model is refused.
+    #[test]
+    fn a_folders_background_model_is_saved_and_older_settings_still_read() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = canonical(home.path()).unwrap();
+        let mut settings = DaemonSettings::default();
+        apply_patch(
+            &mut settings,
+            &json!([{"tool":"claude","cwd":cwd,"model":"Qwen/Qwen3.8-27B",
+                "background_model":"z-ai/glm-5.3-flash","cli_options":""}]),
+        )
+        .unwrap();
+        let saved = &settings.managed_folder_settings[0];
+        assert_eq!(
+            saved.background_model.as_deref(),
+            Some("z-ai/glm-5.3-flash")
+        );
+        let older: FolderSettings = serde_json::from_value(
+            json!({"tool":"claude","cwd":cwd,"model":null,"collect_traces":false,"cli_options":""}),
+        )
+        .unwrap();
+        assert_eq!(older.background_model, None);
+        assert!(
+            serde_json::to_value(&older)
+                .unwrap()
+                .get("background_model")
+                .is_none()
+        );
+        for refused in [
+            json!([{"tool":"codex","cwd":cwd,"background_model":"z-ai/glm-5.3-flash","cli_options":""}]),
+            json!([{"tool":"claude","cwd":cwd,"background_model":"","cli_options":""}]),
+        ] {
+            assert_eq!(
+                apply_patch(&mut settings, &refused),
+                Err("settings-invalid-value")
+            );
+        }
+    }
 
     #[test]
     fn a_request_without_a_folder_gets_the_home_directory() {

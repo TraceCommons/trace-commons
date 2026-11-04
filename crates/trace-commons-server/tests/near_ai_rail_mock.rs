@@ -452,7 +452,7 @@ impl Mock {
 fn credentials() -> NearAiTransferCredentials {
     NearAiTransferCredentials {
         token: SecretString::from(TOKEN.to_string()),
-        credential_id: credential_id(),
+        credential_id: Some(credential_id()),
         sender_org: sender(),
         source: NearAiCreditSource::Grant,
     }
@@ -936,12 +936,10 @@ async fn each_reply_maps_to_its_refusal() {
         slow.send(&line).await.unwrap_err(),
         RailRefusal::Retry("near_ai_timeout")
     );
-    let closed = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
-        format!("http://{address}/v1")
-    };
+    // Port 1 is below every ephemeral range, so a server another test binds
+    // to port 0 can never be handed it, as a port bound and released could
+    // be (#1759), and the refusal is immediate on every platform.
+    let closed = "http://127.0.0.1:1/v1".to_string();
     let unreachable = NearAiRail::new(
         NearAiTransferClient::at_loopback(&closed, credentials(), Duration::from_secs(2)).unwrap(),
     );
@@ -1129,7 +1127,7 @@ async fn logs_carry_no_org_id_token_or_rate() {
     let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
     assert!(!logs.is_empty(), "the subscriber captured nothing");
     // Captured, and carrying the credential id's hash.
-    let credential_hash = NearAiTransferClient::credential_id_hash(credential_id());
+    let credential_hash = NearAiTransferClient::credential_label(Some(credential_id()));
     assert!(logs.contains(&credential_hash), "{logs}");
     assert!(logs.contains("near_ai"), "{logs}");
     let transfer_id = mock.transfers()[0].id.to_string();

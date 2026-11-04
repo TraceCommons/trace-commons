@@ -17,10 +17,12 @@ use super::*;
 
 use std::sync::Arc;
 
-use super::pipeline_activation_pg_tests::{RouteFixture, clean_envelope};
+use super::pipeline_activation_pg_tests::{
+    ROUTE_MAIN_GATE, RouteFixture, assemble_route_service_with_gate, clean_envelope,
+};
 use super::pipeline_http_pg_tests::{
-    account_owner_backend, route_request, route_trace, runtime_backend, tenant_tx,
-    wait_for_run_state, write_routing_as_operator,
+    TEST_PIPELINE_CREDIT_ISSUER, account_owner_backend, route_request, route_trace,
+    runtime_backend, tenant_tx, wait_for_run_state, write_routing_as_operator,
 };
 use crate::ingest::app::pipeline_default_routing::{
     DEFAULT_ROUTING_ACTOR_REF, DEFAULT_ROUTING_ATTESTATION_SUFFIX, DEFAULT_ROUTING_PACKAGE_FILE,
@@ -295,12 +297,21 @@ impl DefaultRoutingFixture {
         &self,
         attestations: &[trace_commons_server::versioned_pipeline_qualification::PipelineCheckAttestation],
     ) {
+        self.write_results_for(&self.route.a, attestations);
+    }
+
+    /// `write_results`, for the signed `package` instead of A.
+    fn write_results_for(
+        &self,
+        package: &trace_commons_gate_api::pipeline::BundlePackage,
+        attestations: &[trace_commons_server::versioned_pipeline_qualification::PipelineCheckAttestation],
+    ) {
         for entry in std::fs::read_dir(self.results.path()).unwrap() {
             std::fs::remove_file(entry.unwrap().path()).unwrap();
         }
         std::fs::write(
             self.results.path().join(DEFAULT_ROUTING_PACKAGE_FILE),
-            serde_json::to_vec(&self.route.signed(&self.route.a)).unwrap(),
+            serde_json::to_vec(&self.route.signed(package)).unwrap(),
         )
         .unwrap();
         for attestation in attestations {
@@ -863,6 +874,122 @@ async fn the_loop_requalifies_its_tenants_after_a_deploy() {
             &fixture.newcomer_contributor,
             "deployed_requalified",
         )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert!(is_pipeline_receipt(&receipt), "{receipt}");
+}
+
+/// Owner decision D6 (2026-11-03): once `main`'s award is raised (here to
+/// the graded rule at one point), a new boot accepts the tenants still on
+/// the old bundle that awards nothing, and its loop moves each tenant this
+/// mode routed to the armed bundle, keeping the routing row this mode's. A
+/// tenant activated by hand is left to the operator, and a second pass
+/// moves nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_loop_moves_its_tenants_off_a_bundle_that_awards_nothing() {
+    let Some(fixture) = DefaultRoutingFixture::new().await else {
+        return;
+    };
+    fixture.rearm().await;
+    let (_, receipt) = fixture.newcomer_upload("before_raise").await;
+    assert!(is_pipeline_receipt(&receipt), "{receipt}");
+    fixture.route.qualify(&fixture.route.a).await;
+    let (status, body) = fixture
+        .route
+        .admin_call(
+            "POST",
+            "/v1/admin/pipeline/activate",
+            Some(
+                fixture
+                    .route
+                    .activate_body(&fixture.route.a, "operator_activates")
+                    .await,
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before = fixture.view(&fixture.newcomer).await;
+    assert_eq!(
+        before.active_bundle_id.as_deref(),
+        Some(fixture.route.a.bundle_id.as_str())
+    );
+
+    // The owner raises the award; the new boot's default package holds it.
+    let raised_gate = MainGateConfig {
+        novelty_utility_microcredits: 1_000_000,
+        credit_rule:
+            trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::GradedPerplexityV1,
+        ..ROUTE_MAIN_GATE
+    };
+    let service = assemble_route_service_with_gate(
+        fixture.route.runtime.clone(),
+        &fixture.route.configured_store,
+        Some(TEST_PIPELINE_CREDIT_ISSUER),
+        raised_gate,
+    );
+    let raised = service.default_package().clone();
+    assert_ne!(raised.bundle_id, fixture.route.a.bundle_id);
+    let new_boot = fixture.process(|state| {
+        state.pipeline_service = Some(service.clone());
+        state.pipeline_main_gate = raised_gate;
+    });
+    fixture.write_results_for(&raised, &fixture.route.attestations(&raised));
+
+    let report = DefaultRoutingFixture::routing_of(&new_boot)
+        .run_pass(&new_boot)
+        .await;
+    assert_eq!(report.migrated, 1, "only the newcomer: {report:?}");
+    let after = fixture.view(&fixture.newcomer).await;
+    assert_eq!(
+        after.active_bundle_id.as_deref(),
+        Some(raised.bundle_id.as_str())
+    );
+    let routing = after.routing.as_ref().expect("the routing row");
+    assert_eq!(routing.routing_state, RoutingState::Pipeline);
+    assert_eq!(routing.actor_principal_ref, DEFAULT_ROUTING_ACTOR_REF);
+    assert_eq!(routing.reason_code, PIPELINE_DEFAULT_ROUTING_REASON_CODE);
+    assert_ne!(
+        Some(routing.activation_record_id),
+        before
+            .routing
+            .as_ref()
+            .map(|routing| routing.activation_record_id)
+    );
+    assert_eq!(
+        fixture
+            .view(&fixture.route.tenant)
+            .await
+            .active_bundle_id
+            .as_deref(),
+        Some(fixture.route.a.bundle_id.as_str()),
+        "a hand-activated tenant is the operator's to move"
+    );
+
+    // config-status shows the operator the rule this boot runs and what
+    // its last pass moved.
+    let status = fixture
+        .config_status(&new_boot, &fixture.newcomer_admin)
+        .await;
+    assert_eq!(
+        status["novelty_utility"]["credit_rule"],
+        "graded_perplexity_v1"
+    );
+    assert_eq!(status["pipeline_default_routing_last_pass"]["migrated"], 1);
+    assert_eq!(
+        fixture
+            .config_status(&fixture.state, &fixture.newcomer_admin)
+            .await["novelty_utility"]["credit_rule"],
+        "flat"
+    );
+
+    let again = DefaultRoutingFixture::routing_of(&new_boot)
+        .run_pass(&new_boot)
+        .await;
+    assert_eq!(again.migrated, 0, "{again:?}");
+    // The moved tenant's run on the old bundle is still in flight; the new
+    // boot serves the tenant, and its next upload binds the raised bundle.
+    let (status, receipt) = fixture
+        .upload_as(&new_boot, &fixture.newcomer_contributor, "after_raise")
         .await;
     assert_eq!(status, StatusCode::OK, "{receipt}");
     assert!(is_pipeline_receipt(&receipt), "{receipt}");

@@ -102,7 +102,9 @@ internal static class NativeMethods
     /// <summary>
     /// Stops the daemon loop. Idempotent, safe from any thread, safe with
     /// NULL. Does NOT free the handle, does NOT end subscriptions, and is NOT
-    /// a teardown barrier for a second concurrent caller.
+    /// a teardown barrier for a second concurrent caller. Waits at most 2
+    /// seconds for the daemon's current pass, then returns with the teardown
+    /// still finishing in the background.
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern void tc_daemon_stop(IntPtr handle);
@@ -110,7 +112,9 @@ internal static class NativeMethods
     /// <summary>
     /// The only function that reclaims what tc_daemon_start returned. Must run
     /// on a plain thread outside any tokio runtime context, and must not race
-    /// any other call still using the pointer.
+    /// any other call still using the pointer. Waits at most 1 second for
+    /// the runtime's blocking work (plus tc_daemon_stop's 2 if that was not
+    /// called first).
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern void tc_handle_free(IntPtr handle);
@@ -302,6 +306,18 @@ internal static class NativeMethods
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     internal static extern IntPtr tc_legacy_migration_notice(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? noticeJson);
+
+    /// <summary>
+    /// The account section's status while this app's account needs
+    /// attention, from the <c>status</c> object passed through as the daemon
+    /// sent it, as an owned JSON object (title, body, private_ai, action;
+    /// body and private_ai may be null). The sentence is chosen on the Rust
+    /// side. NULL while there is nothing to show, for an argument that is not
+    /// a JSON object, and on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_account_attention_copy_json(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? statusJson);
 
     /// <summary>
     /// The offer to move a legacy invite identity to a NEAR AI account, as an

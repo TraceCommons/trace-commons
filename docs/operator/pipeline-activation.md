@@ -1221,7 +1221,8 @@ From 24 hours before expiry, each pass logs
 - `pipeline_default_routing_label`: why it is not armed, or `null`;
 - `pipeline_default_routing_expires_in_seconds`;
 - `pipeline_default_routing_last_pass`: `activated`, `refused`, `skipped`,
-  `requalified`, and `duration_ms` of the last loop pass;
+  `requalified`, `migrated` (see "Raising the award"), and `duration_ms` of
+  the last loop pass;
 - `pipeline_default_routing_routed_tenant_count`;
 - `pipeline_worker_last_pass_tenant_count` and
   `pipeline_worker_last_pass_duration_ms`: the tenants the pipeline worker's
@@ -1345,6 +1346,23 @@ since (for example a `contain`), is not re-qualified by the loop. Qualify it
 through `POST /v1/admin/pipeline/qualifications` as before. A tenant whose
 active bundle is another bundle (after a rollback) is skipped with
 `pipeline_default_routing_requalify_bundle_differs`.
+
+### Raising the award
+
+After the delta or the credit rule is raised (a new package, armed as after
+a deploy), each pass also moves the tenants default routing routed that are
+still on a compatibility bundle that awards nothing (owner decision D6):
+for a tenant whose routing row this mode wrote and says `pipeline`, whose
+active bundle is not the armed one, and whose active bundle holds `main`'s
+scoring values with delta 0 and rule `flat`, the loop qualifies the armed
+bundle for the tenant and activates it, as its own actor and reason code,
+expecting the routing row it read. The row stays this mode's, so later
+deploys re-qualify the tenant as before. A run in flight keeps the old
+bundle. Each move logs `pipeline_default_routing_tenant_migrated`, and
+`pipeline_default_routing_last_pass.migrated` counts them. A `contained`
+tenant is never moved (activating it would reopen its uploads), and a tenant
+an operator activated by hand is the operator's to move with `POST
+/v1/admin/pipeline/activate`. The moves are paged like re-qualification.
 
 ### Disarm
 
@@ -3026,7 +3044,10 @@ below). With payout disabled, nothing is submitted to NEAR.
 - Payout takes only a `trace_credit` leg that is `complete` and has the
   `near` payout rail and a settlement batch. The state of the run does not
   matter. A compatibility bundle's
-  `NoveltyUtility` leg has no batch, so it is never paid. `main` settles
+  `NoveltyUtility` leg under the `flat` credit rule has no batch, so it is
+  never paid. Under the `graded_perplexity_v1` rule the leg is batched, and
+  the NEAR AI payout rail pays it from that batch (see "Compatibility
+  credit"); this NEP-141 outbox still never pays it. `main` settles
   the `NoveltyUtility` events its own gate writes, but not this leg: its
   settlement takes only the `novelty_utility:` `external_ref` its gate
   writes.
@@ -3075,7 +3096,7 @@ below). With payout disabled, nothing is submitted to NEAR.
   | `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_SUBMIT_LIMIT`, `..._SCHEDULER_CONFIRM_LIMIT` | not applied | They bound `main`'s rows for each tick. The pipeline pass takes at most 32 legs of a tenant and runs again when it processed 32. No setting bounds its submits or its confirmations. |
   | `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_DRY_RUN` | not applied | It is `main`'s preview. The pipeline's dry run is the mode `dry_run` of `TRACE_COMMONS_NEAR_SETTLEMENT_MODE`. |
   | `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH` | refuses an enabled payout on an adapter without a credential | As `main` refuses to start its NEAR adapters without their bearer tokens, whatever the mode: `near_payout_adapter_auth_missing`. The runtime must hold the same flag (`pipeline_runtime_near_payout_controls_mismatch`). |
-  | Credit holds (`credit_holds`) | applied at Settle, to settled legs only | A held principal's leg that settles into a batch (the minimal family's `accepted` event) is `held` and is not settled, as `main` leaves held accounts out of its batches and payouts. The `accepted` event is not one of `main`'s settlement-eligible event types (benchmark conversion, regression catch, training utility, ranking utility); the pipeline batches that leg itself. A compatibility run's `NoveltyUtility` leg ignores holds and writes its ledger row, as `main` writes `NoveltyUtility` credit regardless of holds; the pipeline's leg never settles or pays (`main` settles only the `NoveltyUtility` events its own gate writes, and leaves held accounts out of those batches). |
+  | Credit holds (`credit_holds`) | applied at Settle, to settled legs only | A held principal's leg that settles into a batch (the minimal family's `accepted` event) is `held` and is not settled, as `main` leaves held accounts out of its batches and payouts. The `accepted` event is not one of `main`'s settlement-eligible event types (benchmark conversion, regression catch, training utility, ranking utility); the pipeline batches that leg itself. A compatibility run's `NoveltyUtility` leg under the `flat` rule ignores holds and writes its ledger row, as `main` writes `NoveltyUtility` credit regardless of holds; that leg never settles or pays (`main` settles only the `NoveltyUtility` events its own gate writes, and leaves held accounts out of those batches). Under the `graded_perplexity_v1` rule the leg settles into a batch, so a hold holds it (owner decision D7). |
   | Ranking calibration gates (`TRACE_COMMONS_RANKING_*`) | not applicable | They apply only to `RankingUtility` events; a pipeline leg writes an `accepted` event. |
 
 - A contributor is paid as `main` pays them. A principal linked to an
@@ -3430,7 +3451,8 @@ upload must wait for a worker dispatch first.
 
 Its pending points are 0 when its Trace Credit leg will not be paid:
 forfeited, failed, withheld by one of `main`'s credit checks, or a
-compatibility `NoveltyUtility` leg, which nothing settles.
+compatibility `NoveltyUtility` leg under the `flat` rule, which nothing
+settles. A graded leg settles in its batch, so its points are final.
 
 `main`'s gate evaluate route (`POST /v1/workers/gate/evaluate`) refuses a
 submission that has a pipeline run with `409` `pipeline_run_owns_submission`,
@@ -3454,6 +3476,43 @@ ledger event. A different delta is a different package, with its own bundle
 id, and it applies only to runs bound to that package; to change it for a
 routed tenant, follow "Each tenant's bundles at startup".
 
+### The graded credit rule
+
+`TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_RULE` selects how a compatibility
+Score prices a trace that passes both floors (owner decisions D1-D7 of
+2026-11-03, `docs/superpowers/specs/2026-11-03-pilot-paying-bundle-design.md`).
+It is part of the gate configuration above: read only when a pipeline runtime
+is assembled, pinned in the signed package's configuration, and refused at
+startup when it differs (`pipeline_runtime_main_gate_config_mismatch`). A
+value other than the two below refuses the start with
+`novelty_utility_credit_rule_invalid`.
+
+- `flat` (unset or empty): everything above. The award is the delta, and the
+  leg is never batched or paid. A `flat` configuration serializes exactly as
+  before the variable existed, so its package keeps its bundle id and hash.
+- `graded_perplexity_v1`: the award is `floor(delta * f * a / 10^12)`, with
+  `f` the credit-quality perplexity term of the trace's representative
+  perplexity and `a` its anomaly term of peak over representative, each in
+  micros, under the calibration era in force at Score. The delta is the
+  per-trace ceiling. Score records the two factors as `award_adjustments`
+  (`perplexity_term`, then `anomaly_term`, each with its basis), so the award
+  is recomputed from the package's delta with integer arithmetic. The rule id
+  is `compatibility_graded_perplexity_v1`, and the ledger reason
+  `novelty_utility:compatibility_graded_perplexity_v1`.
+  - Settle applies `main`'s `NoveltyUtility` credit checks first, as for
+    `flat` (the table below): a submission without `model_training` is
+    withheld `policy_mismatch`.
+  - A leg that passes is written `pending` and composed into a finalized
+    batch under the account's settlement key, like a minimal-family leg. A
+    credit hold on the account holds it (`pipeline_credit_held`).
+  - `main`'s settlement never selects it: its `external_ref` is the
+    pipeline's ledger source key, so it is paid once, by the NEAR AI payout
+    rail, which prices every finalized batch.
+  - The contributor status reports the leg's batch state (`finalized`), not
+    `not_settlement_eligible`.
+
+`GET /v1/admin/config-status` reports the rule as `novelty_utility.credit_rule`.
+
 ### Each tenant's bundles at startup
 
 A tenant keeps its first active bundle when the default package changes
@@ -3468,7 +3527,7 @@ to start on the first failure:
 |---|---|
 | The runtime holds the scorer and embedder the package names. | `pipeline_tenant_bundle_dependency_missing` |
 | The package is a policy family the runtime runs. | `pipeline_tenant_bundle_not_runnable` |
-| A compatibility package holds `main`'s gate configuration (floors, top-k, chunk knobs, index-insert threshold, delta). | `pipeline_runtime_main_gate_config_mismatch` |
+| A compatibility package holds `main`'s gate configuration (floors, top-k, chunk knobs, index-insert threshold, delta, credit rule), or holds its scoring values and awards nothing (delta 0, rule `flat`; see below). | `pipeline_runtime_main_gate_config_mismatch` |
 | A compatibility package has the pipeline's issuer configured. | `pipeline_credit_issuer_principal_missing` |
 | The package passes the default package's qualification gate, unless `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set: every dependency it names is production-qualified (the runtime may hold one that is not, as long as its default package does not name it), and a compatibility package's configuration is qualifiable. | `pipeline_runtime_dependencies_not_production_qualified` |
 | The tenant's bundles can be read. | `pipeline_tenant_bundle_unreadable` |
@@ -3479,8 +3538,17 @@ of checks" in "Activate, roll back, contain, deactivate"). The gate holds no
 service. So the routes are what keeps these checks true for a bundle that is
 selected after start.
 
-To change a value the default package carries (a floor, the threshold, the
-delta, the scorer or the embedder), every routed or drained tenant must
+A bundle that holds `main`'s scoring values and awards nothing (delta 0,
+rule `flat`) passes these checks after the delta or the credit rule is
+raised (owner decision D6, 2026-11-03): it scores as `main` does and pays
+less, never more. The activation and rollback routes accept it the same way,
+so a tenant can be rolled back to it. The default package and an armed
+default-routing set never get this tolerance; they must hold `main`'s
+configuration exactly. The default-routing loop then moves each tenant it
+routed off such a bundle (see "Default routing", "Raising the award").
+
+To change any other value the default package carries (a floor, the
+threshold, the scorer or the embedder), every routed or drained tenant must
 leave its old bundle first, since startup refuses the new configuration
 while a tenant can still run the old one. For each such tenant:
 

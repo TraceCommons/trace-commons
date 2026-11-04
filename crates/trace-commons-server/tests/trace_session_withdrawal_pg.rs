@@ -1285,7 +1285,7 @@ async fn account_merge_carries_source_sessions_and_withdrawals_to_the_survivor()
             "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_z4_merge_runtime') THEN CREATE ROLE trace_z4_merge_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
              GRANT SELECT,INSERT,UPDATE ON trace_tenants TO trace_z4_merge_runtime;
              GRANT SELECT,UPDATE ON trace_accounts,trace_account_merge_proposals,trace_account_principals,
-                 trace_webauthn_credentials,trace_near_identities,trace_public_runs,trace_sessions TO trace_z4_merge_runtime;
+                 trace_near_identities,trace_public_runs,trace_sessions TO trace_z4_merge_runtime;
              GRANT INSERT ON trace_account_audit TO trace_z4_merge_runtime;
              GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_z4_merge_runtime;",
         ))

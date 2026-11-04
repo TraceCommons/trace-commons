@@ -23,6 +23,53 @@ pub const PROVISIONING_TTL_SECONDS: i64 = 300;
 #[error("near_provisioning_refused")]
 pub struct ProvisioningRefused;
 
+/// Why a wallet provisioning proof was not verified. Labels only.
+///
+/// `Refused` is every failure of the proof itself and every answer the NEAR
+/// RPC gave about the account. `Unavailable` is the NEAR RPC not answering
+/// (unreachable, timed out, a body that never arrived, a `5xx`, `429`, `408`,
+/// `421` or `425`), or this process unable to build a client to ask it: the
+/// same for every account at that moment. Both refuse provisioning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ProvisioningFailure {
+    #[error("near_provisioning_refused")]
+    Refused,
+    #[error("near_provisioning_rpc_unavailable")]
+    Unavailable,
+}
+
+/// How a failed NEAR RPC ownership check reads. An account that does not
+/// exist, or does not carry the key, is a well-formed answer (`Ok(false)`),
+/// never here, so this cannot tell "no such account" from "key not on it".
+/// An error here is the RPC not answering -- no response, a status that says
+/// the request was not handled, or a handler error about the node itself
+/// ([`crate::account_near::NearRpcNotAnswered`]) -- unless the RPC answered
+/// with a status about the request.
+pub fn ownership_check_failure(error: &anyhow::Error) -> ProvisioningFailure {
+    if error
+        .chain()
+        .any(|cause| cause.is::<crate::account_near::NearRpcNotAnswered>())
+    {
+        return ProvisioningFailure::Unavailable;
+    }
+    let Some(error) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
+    else {
+        return ProvisioningFailure::Refused;
+    };
+    match error.status() {
+        Some(status) if crate::near_ai_login::status_means_not_answered(status) => {
+            ProvisioningFailure::Unavailable
+        }
+        Some(_) => ProvisioningFailure::Refused,
+        // No status: the request was not answered (connect, timeout, a body
+        // that stopped arriving, which `json()` reports as a decode error), or
+        // no client could be built.
+        None => ProvisioningFailure::Unavailable,
+    }
+}
+
 /// Public wallet-signing payload. It contains identity and is deliberately not Debug.
 pub struct ProvisioningChallenge<'a> {
     pub message: &'a str,
@@ -156,75 +203,10 @@ pub struct NearAiLoginPending {
     pub expires_at: i64,
 }
 
-/// What a stored bind ceremony is for. One value, and it must be present: a
-/// provisioning row has no `purpose` field, so it can never parse as a bind
-/// row, and a bind row's extra fields make it fail [`NearAiLoginPending`]'s
-/// `deny_unknown_fields`. The storage layer refuses to mix the two ceremonies
-/// before the preimage domains ever get the chance to.
-///
-/// `Enrol` is the same ceremony run by a session whose account is already
-/// `bound` (a further Mac signing in with a synced passkey): finish attaches
-/// the device only if the login's anchor is that account's own. The purpose is
-/// fixed at start from the binding state then, and finish refuses if the state
-/// no longer matches it, so a ceremony started as one never finishes as the
-/// other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NearAiBindPurpose {
-    Bind,
-    Enrol,
-}
-
-/// A NEAR AI bind ceremony between `bind/start` and `bind/finish` (Z2 native
-/// passkey identity, slice S3).
-///
-/// The provisioning ceremony's commitments plus the `(tenant_id, account_id)`
-/// of the authenticated session that started it. `bind/finish` refuses unless
-/// its own session names the same pair, so a ceremony started by account A can
-/// never be finished by account B. Both come from the session, never from a
-/// request body.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NearAiBindPending {
-    pub purpose: NearAiBindPurpose,
-    pub tenant_id: String,
-    pub account_id: uuid::Uuid,
-    pub nonce_hex: String,
-    pub code_challenge: String,
-    pub device_public_key: String,
-    pub expires_at: i64,
-}
-
-/// What `bind/finish` did with a verified NEAR AI login.
-#[derive(Debug, Clone)]
-pub enum NearAiBindOutcome {
-    /// The anchor was unclaimed. It, the device and the principal now belong
-    /// to the passkey account, which is `bound`; `provisioned` is that account
-    /// and its fresh native session's context.
-    Bound(ProvisionedNearAccount),
-    /// The anchor already belonged to account X in another tenant. X was
-    /// provisioned exactly as the unauthenticated NEAR AI provisioning would
-    /// have done it, and the passkey account was closed in its own tenant.
-    /// Nothing crossed between the two tenants.
-    ExistingAccount {
-        provisioned: ProvisionedNearAccount,
-        /// X's binding state label (`legacy` or `bound`), for the response.
-        binding_state: crate::account_binding::AccountBindingState,
-    },
-}
-
-/// The label-only reason recorded when bind takes the existing-account branch.
-/// `anchor_claimed_strong`: X holds at least one strong authenticator, so the
-/// passkey could never be moved to it. `anchor_claimed`: X holds none, the case
-/// the deferred S6 fold would serve; until then it is refused too.
-pub const BIND_REFUSED_ANCHOR_CLAIMED_STRONG: &str = "anchor_claimed_strong";
-pub const BIND_REFUSED_ANCHOR_CLAIMED: &str = "anchor_claimed";
-
 /// The device key is already registered under a different tenant.
 ///
-/// `device_keys.device_key_id` is a global primary key, so provisioning (and
-/// bind, which enrolls the same daemon key) cannot place the key under this
-/// tenant, and the key would go on authenticating into the tenant that holds
+/// `device_keys.device_key_id` is a global primary key, so provisioning
+/// cannot place the key under this tenant, and the key would go on authenticating into the tenant that holds
 /// it. Named, so it is not one more `near_provisioning_refused`; label-only,
 /// because which tenant holds the key is exactly what must not be disclosed.
 /// Carried as `DatabaseError::Pool(DEVICE_KEY_REGISTERED_ELSEWHERE)`; test it
@@ -232,7 +214,7 @@ pub const BIND_REFUSED_ANCHOR_CLAIMED: &str = "anchor_claimed";
 pub const DEVICE_KEY_REGISTERED_ELSEWHERE: &str =
     "near_provisioning_device_key_registered_elsewhere";
 
-/// Whether a provisioning or bind error is the named
+/// Whether a provisioning error is the named
 /// [`DEVICE_KEY_REGISTERED_ELSEWHERE`] refusal.
 pub fn is_device_key_registered_elsewhere(error: &crate::error::DatabaseError) -> bool {
     matches!(error, crate::error::DatabaseError::Pool(label) if label == DEVICE_KEY_REGISTERED_ELSEWHERE)
@@ -247,26 +229,234 @@ pub fn is_device_key_registered_elsewhere(error: &crate::error::DatabaseError) -
 /// [`is_device_key_revoked`].
 pub const DEVICE_KEY_REVOKED: &str = "near_provisioning_device_key_revoked";
 
+/// Identity material that could not seal an account name or login subject
+/// (the account-name key or its wrapper failed). A fault of this deployment,
+/// the same for every request, never a refusal. Label-only.
+pub const SEAL_FAILED: &str = "near_provisioning_seal_failed";
+
+/// A stored ceremony this process cannot read back: a start on one build and
+/// a finish on another during a rollout, or a row of another ceremony kind
+/// (which only the holder of its secret id can name). Not a refusal: the
+/// client starts again. Label-only.
+pub const CEREMONY_UNREADABLE: &str = "near_provisioning_ceremony_unreadable";
+
+/// A ceremony this process cannot serialize to store. A fault. Label-only.
+pub const CEREMONY_UNWRITABLE: &str = "near_provisioning_ceremony_unwritable";
+
+/// The login signing in was retired by a change of account (F10): it no
+/// longer signs in to the account it left, and it never mints a fresh one.
+/// Shown by name, `near_ai_login_retired`, only to someone who just proved
+/// that login. Label-only.
+pub const NEAR_AI_LOGIN_RETIRED_REFUSAL: &str = "near_provisioning_login_retired";
+
+/// Whether `error` is the [`NEAR_AI_LOGIN_RETIRED_REFUSAL`] refusal.
+pub fn is_near_ai_login_retired(error: &crate::error::DatabaseError) -> bool {
+    matches!(error, crate::error::DatabaseError::Pool(label) if label == NEAR_AI_LOGIN_RETIRED_REFUSAL)
+}
+
 /// Whether `error` is the [`DEVICE_KEY_REVOKED`] refusal.
 pub fn is_device_key_revoked(error: &crate::error::DatabaseError) -> bool {
     matches!(error, crate::error::DatabaseError::Pool(label) if label == DEVICE_KEY_REVOKED)
 }
 
-/// An enrollment's login does not resolve to the session's own account.
+/// Whether a provisioning error is the database unable to answer rather than
+/// a refusal. `true` means the request was not decided, and the caller says
+/// "unavailable" (`503`); `false` means the uniform refusal.
 ///
-/// Decided inside the account's own tenant, under RLS, so the check never
-/// reads another tenant: an anchor held by some other account and no anchor
-/// at all are the same refusal. Label-only, and the same value whatever the
-/// login resolves to elsewhere, because which account (if any) holds the
-/// login is exactly what must not be disclosed. Carried as
-/// `DatabaseError::Pool(NEAR_AI_ENROL_ACCOUNT_MISMATCH)`; test it with
-/// [`is_near_ai_enrol_account_mismatch`].
-pub const NEAR_AI_ENROL_ACCOUNT_MISMATCH: &str = "near_ai_enrol_account_mismatch";
+/// Three kinds are unavailable:
+///
+/// - **Down**: no connection from the pool (it timed out, is closed, or could
+///   not connect), a connection lost mid-statement, or PostgreSQL saying it is
+///   shutting down, out of resources, timing an idle session out (`57P05`),
+///   or read-only after a failover (`25006`).
+/// - **Misconfigured**: a pool that could not be built or run; anything the
+///   pool met while *creating* a connection (credentials PostgreSQL rejects,
+///   TLS, configuration, a database that does not exist); a dropped database
+///   (`57P04`); a grant missing or revoked (`42501`), or a deploy whose
+///   migration has not run (`42P01` undefined table, `42703` undefined
+///   column); or a required pool the deployment did not configure (a
+///   `missing-control:` label). The same for every request. `42501` is also
+///   the code of a row-level-security violation; on these paths every row is
+///   written under the tenant the transaction is scoped to and nothing
+///   upserts with `DO UPDATE`, so a `42501` here can only be a missing grant
+///   or policy, not a fact about a row.
+/// - **Contended**: a deadlock (`40P01`), a serialization failure (`40001`),
+///   a lock that could not be had in time (`55P03`) or a cancelled statement
+///   (`57014`). On the provisioning paths the rows that can contend are the
+///   advisory lock on the login's anchor (reached only with a NEAR AI token
+///   for that login, introspected first), the device key's row (reached only
+///   with the device proof, verified first), and rows under the tenant those
+///   two decide. So only a requester already holding the key or the login can
+///   meet contention on them, and "unavailable" tells it nothing it did not
+///   hold. A `57014` from a query that is merely slow is not about any
+///   identity at all.
+///
+/// What stays a refusal:
+///
+/// - Every decided refusal: `DatabaseError::Pool(label)` (the refusal labels
+///   above and in `db::postgres_account_onboarding`), `Query`, `Constraint`,
+///   `Serialization`.
+/// - A client-side `tokio_postgres` error from a statement that is not a
+///   closed connection: a row count, a column, a type, an encode or parse
+///   failure. These follow the data.
+/// - Any other server error (an integrity violation, say).
+///
+/// Anything not positively recognised stays a refusal. Nothing here reads an
+/// error's `Display` text.
+pub fn is_database_unavailable(error: &crate::error::DatabaseError) -> bool {
+    use crate::error::DatabaseError;
+    match error {
+        DatabaseError::PoolBuild(_) => true,
+        // deadpool raises `Backend` only while creating a connection (a
+        // recycle failure is dropped and a new connection made), so every
+        // pool-runtime error is a connect-time fault: down or misconfigured,
+        // never an answer about a row.
+        DatabaseError::PoolRuntime(_) => true,
+        DatabaseError::Postgres(error) => {
+            error.is_closed()
+                || error
+                    .code()
+                    .is_some_and(|code| sqlstate_unavailable(code.code()))
+        }
+        DatabaseError::Pool(label) => {
+            label.starts_with("missing-control:")
+                || matches!(
+                    label.as_str(),
+                    SEAL_FAILED | CEREMONY_UNREADABLE | CEREMONY_UNWRITABLE
+                )
+        }
+        _ => false,
+    }
+}
 
-/// Whether an enrollment error is the named [`NEAR_AI_ENROL_ACCOUNT_MISMATCH`]
-/// refusal.
-pub fn is_near_ai_enrol_account_mismatch(error: &crate::error::DatabaseError) -> bool {
-    matches!(error, crate::error::DatabaseError::Pool(label) if label == NEAR_AI_ENROL_ACCOUNT_MISMATCH)
+/// The SQLSTATEs [`is_database_unavailable`] counts as the database unable to
+/// answer: class `28` (invalid authorization) and the codes listed there.
+fn sqlstate_unavailable(code: &str) -> bool {
+    code.starts_with("28")
+        || matches!(
+            code,
+            // Connection exceptions.
+            "08000" | "08001" | "08003" | "08004" | "08006"
+            // Out of resources: general, disk, memory, connections.
+            | "53000" | "53100" | "53200" | "53300"
+            // Admin and crash shutdown, cannot connect now, database
+            // dropped, idle session timeout.
+            | "57P01" | "57P02" | "57P03" | "57P04" | "57P05"
+            // Read-only after a failover.
+            | "25006"
+            // No such database; grant missing; migration not run.
+            | "3D000" | "42501" | "42P01" | "42703"
+            // Contention: deadlock, serialization, lock not available,
+            // statement cancelled.
+            | "40P01" | "40001" | "55P03" | "57014"
+        )
+}
+
+/// The I/O failures that mean the network path to PostgreSQL, rather than a
+/// credential, a certificate or a setting.
+fn io_means_unreachable(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        error.kind(),
+        ErrorKind::ConnectionRefused
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::NotConnected
+            | ErrorKind::BrokenPipe
+            | ErrorKind::TimedOut
+            | ErrorKind::UnexpectedEof
+            | ErrorKind::HostUnreachable
+            | ErrorKind::NetworkUnreachable
+            | ErrorKind::AddrNotAvailable
+    )
+}
+
+/// A label for a provisioning database error, safe for a log line: a fixed
+/// refusal label, a SQLSTATE, or a fixed name. Never the error's text, which
+/// can carry a connection string or a wrapped error message.
+///
+/// A connect-time failure is `postgres_unreachable` when the network did not
+/// answer and `postgres_connect_misconfigured` otherwise (authentication,
+/// TLS, configuration), so an operator looking at a rotated password or a
+/// broken root store is not sent looking for an outage. A server's own
+/// answer at connect is its SQLSTATE (`sqlstate_28P01`, `sqlstate_3D000`).
+pub fn database_error_label(error: &crate::error::DatabaseError) -> String {
+    use crate::error::DatabaseError;
+    use deadpool_postgres::PoolError;
+    match error {
+        DatabaseError::Pool(label) => {
+            let label_shaped = !label.is_empty()
+                && label.len() <= 64
+                && label.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-' | b':')
+                });
+            if label_shaped {
+                label.clone()
+            } else if label.starts_with("missing-control:") {
+                "missing_control".to_string()
+            } else {
+                "pool_unlabelled".to_string()
+            }
+        }
+        DatabaseError::Postgres(error) => match error.code() {
+            Some(code) => format!("sqlstate_{}", code.code()),
+            None if error.is_closed() => "postgres_connection_closed".to_string(),
+            None => "postgres_client_error".to_string(),
+        },
+        DatabaseError::PoolRuntime(PoolError::Backend(error)) => match error.code() {
+            Some(code) => format!("sqlstate_{}", code.code()),
+            None => {
+                let unreachable = std::error::Error::source(error)
+                    .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+                    .is_some_and(io_means_unreachable);
+                if unreachable {
+                    "postgres_unreachable".to_string()
+                } else {
+                    "postgres_connect_misconfigured".to_string()
+                }
+            }
+        },
+        DatabaseError::PoolRuntime(PoolError::Timeout(_)) => "pool_timeout".to_string(),
+        DatabaseError::PoolRuntime(PoolError::Closed) => "pool_closed".to_string(),
+        DatabaseError::PoolRuntime(_) => "pool_runtime".to_string(),
+        DatabaseError::PoolBuild(_) => "pool_build".to_string(),
+        DatabaseError::Query(_) => "query".to_string(),
+        DatabaseError::Constraint(_) => "constraint".to_string(),
+        DatabaseError::Serialization(_) => "serialization".to_string(),
+        DatabaseError::NotFound { .. } => "not_found".to_string(),
+        DatabaseError::Migration(_) => "migration".to_string(),
+        DatabaseError::UploadPrincipalAuthenticationDenied => {
+            "upload_principal_authentication_denied".to_string()
+        }
+    }
+}
+
+/// Whether `error` is a decided refusal: one of the provisioning code's own
+/// refusal labels, rather than a fault. A caller logs these quietly; any
+/// requester holding a device key can produce one per request.
+///
+/// An explicit list, not "any `Pool` label": a `Pool` can also carry a trait
+/// default that means this backend cannot provision at all
+/// (`near_provisioning_unconfigured`), or free text from a wrapped error,
+/// and those are faults an operator must see.
+pub fn is_decided_refusal(error: &crate::error::DatabaseError) -> bool {
+    use crate::error::DatabaseError;
+    match error {
+        // `near_provisioning_refused` is a decided refusal only: the faults
+        // that used to share it carry their own labels ([`SEAL_FAILED`],
+        // [`CEREMONY_UNREADABLE`], [`CEREMONY_UNWRITABLE`]).
+        DatabaseError::Pool(label) => matches!(
+            label.as_str(),
+            "near_provisioning_refused"
+                | "near_provisioning_wallet_key_registered_elsewhere"
+                | "near_provisioning_device_bound_to_other_account"
+                | DEVICE_KEY_REGISTERED_ELSEWHERE
+                | DEVICE_KEY_REVOKED
+                | NEAR_AI_LOGIN_RETIRED_REFUSAL
+        ),
+        DatabaseError::Query(label) => label == "near_provisioning_ambiguous",
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -431,6 +621,20 @@ impl PendingNearProvisioning {
         browser_binding: &[u8; 32],
         now: i64,
     ) -> Result<VerifiedNearProvisioning, ProvisioningRefused> {
+        self.verify_classified(cfg, assertion, browser_binding, now)
+            .await
+            .map_err(|_| ProvisioningRefused)
+    }
+
+    /// [`Self::verify`], saying whether a failure is the NEAR RPC not
+    /// answering ([`ProvisioningFailure::Unavailable`]) rather than a refusal.
+    pub async fn verify_classified(
+        self,
+        cfg: &NearConfig,
+        assertion: ProvisioningAssertion<'_>,
+        browser_binding: &[u8; 32],
+        now: i64,
+    ) -> Result<VerifiedNearProvisioning, ProvisioningFailure> {
         self.verify_using(cfg, assertion, browser_binding, now, |account, key| {
             near_account_has_full_access_key(cfg, account, key)
         })
@@ -444,7 +648,7 @@ impl PendingNearProvisioning {
         browser_binding: &[u8; 32],
         now: i64,
         ownership: F,
-    ) -> Result<VerifiedNearProvisioning, ProvisioningRefused>
+    ) -> Result<VerifiedNearProvisioning, ProvisioningFailure>
     where
         F: FnOnce(&'a str, &'a str) -> Fut,
         Fut: std::future::Future<Output = anyhow::Result<bool>>,
@@ -454,7 +658,7 @@ impl PendingNearProvisioning {
             || self.config_hash != config_hash(cfg)
             || &self.browser_binding != browser_binding
         {
-            return Err(ProvisioningRefused);
+            return Err(ProvisioningFailure::Refused);
         }
         verify_nep413(
             assertion.wallet_public_key,
@@ -464,18 +668,19 @@ impl PendingNearProvisioning {
             self.callback_url.as_deref(),
             assertion.wallet_signature,
         )
-        .map_err(|_| ProvisioningRefused)?;
+        .map_err(|_| ProvisioningFailure::Refused)?;
         let signature = base64::engine::general_purpose::STANDARD
             .decode(assertion.device_signature)
-            .map_err(|_| ProvisioningRefused)?;
+            .map_err(|_| ProvisioningFailure::Refused)?;
         ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, self.device_public_key)
             .verify(&self.device_signing_bytes(), &signature)
-            .map_err(|_| ProvisioningRefused)?;
+            .map_err(|_| ProvisioningFailure::Refused)?;
+        // Last, because it is the only check that leaves this machine.
         if !ownership(&self.account_id, assertion.wallet_public_key)
             .await
-            .map_err(|_| ProvisioningRefused)?
+            .map_err(|error| ownership_check_failure(&error))?
         {
-            return Err(ProvisioningRefused);
+            return Err(ProvisioningFailure::Refused);
         }
         Ok(VerifiedNearProvisioning {
             account_id: self.account_id.clone(),
@@ -532,6 +737,206 @@ mod tests {
     use super::*;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// No decided refusal reads as the database not answering. Each label the
+    /// provisioning code refuses with is listed, so a new one has to be
+    /// looked at here; pool and deployment failures are the unavailable ones.
+    #[test]
+    fn no_refusal_reads_as_the_database_unavailable() {
+        use crate::error::DatabaseError;
+        for label in [
+            DEVICE_KEY_REGISTERED_ELSEWHERE,
+            DEVICE_KEY_REVOKED,
+            "near_provisioning_refused",
+            "near_provisioning_wallet_key_registered_elsewhere",
+            "near_provisioning_device_bound_to_other_account",
+        ] {
+            assert!(
+                !is_database_unavailable(&DatabaseError::Pool(label.into())),
+                "{label}"
+            );
+        }
+        for refusal in [
+            DatabaseError::Query("near_provisioning_ambiguous".into()),
+            DatabaseError::Constraint("unique".into()),
+            DatabaseError::Serialization("payload".into()),
+            DatabaseError::NotFound {
+                entity: "ceremony".into(),
+                id: "x".into(),
+            },
+            DatabaseError::UploadPrincipalAuthenticationDenied,
+        ] {
+            assert!(!is_database_unavailable(&refusal), "{refusal:?}");
+        }
+        assert!(is_database_unavailable(&DatabaseError::PoolRuntime(
+            deadpool_postgres::PoolError::Closed
+        )));
+        assert!(is_database_unavailable(&DatabaseError::PoolRuntime(
+            deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait)
+        )));
+        // Deployment state, the same for every request: a pool that cannot
+        // run, or a required pool the deployment did not configure.
+        assert!(is_database_unavailable(&DatabaseError::PoolRuntime(
+            deadpool_postgres::PoolError::NoRuntimeSpecified
+        )));
+        assert!(is_database_unavailable(&DatabaseError::Pool(
+            "missing-control: login-resolver-pool-unconfigured".into()
+        )));
+        // Faults the provisioning code used to report as a refusal.
+        for fault in [SEAL_FAILED, CEREMONY_UNREADABLE, CEREMONY_UNWRITABLE] {
+            assert!(
+                is_database_unavailable(&DatabaseError::Pool(fault.into())),
+                "{fault}"
+            );
+        }
+        assert!(!is_database_unavailable(&DatabaseError::Pool(
+            "near_provisioning_refused".into()
+        )));
+    }
+
+    /// Only the provisioning code's own refusal labels log quietly; a trait
+    /// default or free text in a `Pool` is a fault.
+    #[test]
+    fn only_the_listed_refusals_are_decided() {
+        use crate::error::DatabaseError;
+        for label in [
+            "near_provisioning_refused",
+            "near_provisioning_wallet_key_registered_elsewhere",
+            "near_provisioning_device_bound_to_other_account",
+            DEVICE_KEY_REGISTERED_ELSEWHERE,
+            DEVICE_KEY_REVOKED,
+        ] {
+            assert!(
+                is_decided_refusal(&DatabaseError::Pool(label.into())),
+                "{label}"
+            );
+        }
+        assert!(is_decided_refusal(&DatabaseError::Query(
+            "near_provisioning_ambiguous".into()
+        )));
+        for fault in [
+            DatabaseError::Pool(SEAL_FAILED.into()),
+            DatabaseError::Pool(CEREMONY_UNREADABLE.into()),
+            DatabaseError::Pool(CEREMONY_UNWRITABLE.into()),
+            DatabaseError::Pool("near_provisioning_unconfigured".into()),
+            DatabaseError::Pool("near_ai_login_provisioning_unconfigured".into()),
+            DatabaseError::Pool("connection reset by peer".into()),
+            DatabaseError::Pool("missing-control: login-resolver-pool-unconfigured".into()),
+            DatabaseError::Query("other".into()),
+        ] {
+            assert!(!is_decided_refusal(&fault), "{fault:?}");
+        }
+    }
+
+    /// A log label never carries the error's text: a refusal label is kept,
+    /// anything else becomes a fixed name.
+    #[test]
+    fn a_database_error_label_is_label_only() {
+        use crate::error::DatabaseError;
+        assert_eq!(
+            database_error_label(&DatabaseError::Pool(DEVICE_KEY_REGISTERED_ELSEWHERE.into())),
+            DEVICE_KEY_REGISTERED_ELSEWHERE
+        );
+        for (error, label) in [
+            (
+                DatabaseError::Pool("connect to postgres://user:secret@host/db failed".into()),
+                "pool_unlabelled",
+            ),
+            (
+                DatabaseError::Pool("missing-control: login-resolver-pool-unconfigured".into()),
+                "missing_control",
+            ),
+            (
+                DatabaseError::Query("near_provisioning_ambiguous".into()),
+                "query",
+            ),
+            (DatabaseError::Constraint("detail".into()), "constraint"),
+            (
+                DatabaseError::PoolRuntime(deadpool_postgres::PoolError::Closed),
+                "pool_closed",
+            ),
+        ] {
+            assert_eq!(database_error_label(&error), label, "{error:?}");
+        }
+    }
+
+    /// A failed NEAR RPC ownership check is unavailable only when the RPC did
+    /// not answer; an answer about the request, or a failure with no HTTP
+    /// error in it, stays the refusal.
+    #[tokio::test]
+    async fn only_the_near_rpc_not_answering_reads_as_unavailable() {
+        let cfg_at = |rpc_url: String| NearConfig {
+            rpc_url,
+            network: "mainnet".into(),
+            recipient: "app.tracecommons.test".into(),
+        };
+        let closed = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            drop(listener);
+            url
+        };
+        let error = near_account_has_full_access_key(&cfg_at(closed), "alice.near", "ed25519:x")
+            .await
+            .expect_err("nothing listens");
+        assert_eq!(
+            ownership_check_failure(&error),
+            ProvisioningFailure::Unavailable
+        );
+        for (status, expected) in [
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                ProvisioningFailure::Unavailable,
+            ),
+            (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                ProvisioningFailure::Unavailable,
+            ),
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                ProvisioningFailure::Refused,
+            ),
+        ] {
+            let router =
+                axum::Router::new().route("/", axum::routing::post(move || async move { status }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let error = near_account_has_full_access_key(&cfg_at(url), "alice.near", "ed25519:x")
+                .await
+                .expect_err("a non-success status");
+            assert_eq!(ownership_check_failure(&error), expected, "{status}");
+        }
+        assert_eq!(
+            ownership_check_failure(&anyhow::anyhow!("not an HTTP failure")),
+            ProvisioningFailure::Refused
+        );
+
+        // A node that is not ready answers `200` with a handler error about
+        // itself: not answered. One that answers about the account decides.
+        for (cause, expected) in [
+            ("NO_SYNCED_BLOCKS", Err(ProvisioningFailure::Unavailable)),
+            ("UNAVAILABLE_SHARD", Err(ProvisioningFailure::Unavailable)),
+            ("UNKNOWN_ACCOUNT", Ok(false)),
+        ] {
+            let router = axum::Router::new().route(
+                "/",
+                axum::routing::post(move || async move {
+                    axum::Json(serde_json::json!({"jsonrpc": "2.0", "id": "tc", "error": {
+                        "name": "HANDLER_ERROR", "cause": {"name": cause, "info": {}},
+                        "code": -32000, "message": "Server error"
+                    }}))
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let outcome = near_account_has_full_access_key(&cfg_at(url), "alice.near", "ed25519:x")
+                .await
+                .map_err(|error| ownership_check_failure(&error));
+            assert_eq!(outcome, expected, "{cause}");
+        }
+    }
 
     fn cfg() -> NearConfig {
         NearConfig {
@@ -781,39 +1186,21 @@ mod tests {
         }
     }
 
-    /// A stored bind ceremony never parses as a provisioning one, nor the
-    /// reverse, so a ceremony id from one surface finishes nothing on the other
-    /// even before the preimage domains are compared.
+    /// A ceremony row left by the removed passkey bind routes (it carries a
+    /// `purpose`, a tenant and an account) never parses as a NEAR AI login or
+    /// provisioning ceremony, so a leftover row finishes nothing.
     #[test]
-    fn bind_and_provisioning_ceremony_rows_do_not_parse_as_each_other() {
-        let login = serde_json::to_value(NearAiLoginPending {
-            nonce_hex: "00".repeat(32),
-            code_challenge: "c".into(),
-            device_public_key: "d".into(),
-            expires_at: 1,
-        })
-        .unwrap();
-        let bind = serde_json::to_value(NearAiBindPending {
-            purpose: NearAiBindPurpose::Bind,
-            tenant_id: "nearai-t".into(),
-            account_id: uuid::Uuid::nil(),
-            nonce_hex: "00".repeat(32),
-            code_challenge: "c".into(),
-            device_public_key: "d".into(),
-            expires_at: 1,
-        })
-        .unwrap();
-        assert_eq!(bind["purpose"], "bind");
+    fn a_leftover_bind_ceremony_row_does_not_parse_as_a_login_ceremony() {
+        let bind = serde_json::json!({
+            "purpose": "bind",
+            "tenant_id": "nearai-t",
+            "account_id": uuid::Uuid::nil(),
+            "nonce_hex": "00".repeat(32),
+            "code_challenge": "c",
+            "device_public_key": "d",
+            "expires_at": 1,
+        });
         assert!(serde_json::from_value::<NearAiLoginPending>(bind.clone()).is_err());
-        assert!(serde_json::from_value::<NearAiBindPending>(login.clone()).is_err());
-        assert!(serde_json::from_value::<NativeProvisioningPending>(bind.clone()).is_err());
-        // A provisioning row with a purpose smuggled in is still not a bind
-        // row: it has no account to bind.
-        let mut smuggled = login;
-        smuggled["purpose"] = serde_json::json!("bind");
-        assert!(serde_json::from_value::<NearAiBindPending>(smuggled).is_err());
-        let mut wrong_purpose = bind;
-        wrong_purpose["purpose"] = serde_json::json!("provision");
-        assert!(serde_json::from_value::<NearAiBindPending>(wrong_purpose).is_err());
+        assert!(serde_json::from_value::<NativeProvisioningPending>(bind).is_err());
     }
 }

@@ -27,36 +27,12 @@ struct HealthCopy: Equatable {
     let actionTitle: String?
     var reviewsQueue = false
 
-    /// The banner for a spent daily budget, built from the numbers the
-    /// daemon actually reported.
-    ///
-    /// Separate from `core(label:maxQueueEntries:)` because the daemon reports this separately:
-    /// `daily-cap-reached` is last in the precedence order, so on the
-    /// machine this was written for the single health slot was held by
-    /// `queue-full` and the real reason nothing was uploading never reached
-    /// a screen. A shell that waits for the label to arrive will keep
-    /// missing it.
-    ///
-    /// `.waiting`, not an error: nothing is broken and nothing was lost.
-    static func forBudget(_ budget: DailyBudget) -> HealthCopy? {
-        guard budget.blocked else { return nil }
-        return HealthCopy(
-            title: DailyBudgetCopy.title,
-            detail: DailyBudgetCopy.detail(
-                blockedEntries: budget.blockedEntries,
-                resetsAt: budget.resetsAt
-            ),
-            severity: .waiting,
-            actionTitle: nil
-        )
-    }
-
     /// The banner for approved sessions held because the privacy witness is
     /// busy, built from `status.witness_capacity` in the Rust's words
     /// (`tc_witness_capacity_notice`): the title, the counted body, and the
     /// next try in local time when the daemon gave one.
     ///
-    /// Separate from `core(label:maxQueueEntries:)` for the reason `forBudget` is: the health
+    /// Separate from `core(label:maxQueueEntries:)` because the health
     /// slot can be held by a higher label, and the sessions are still
     /// waiting. Nil when nothing is waiting or the notice cannot be read --
     /// the label, if it holds the slot, then falls back to the core's
@@ -82,7 +58,7 @@ struct HealthCopy: Equatable {
 }
 
 /// The core's words for one health line. In an extension so the struct keeps
-/// its memberwise initialiser, which `forBudget` and `forWitnessCapacity` use.
+/// its memberwise initialiser, which `forWitnessCapacity` uses.
 extension HealthCopy {
     init(line: HealthLineCopy) {
         self.init(

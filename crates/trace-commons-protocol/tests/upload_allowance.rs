@@ -1,3 +1,7 @@
+// The daily-cap items are deprecated with the retired limit; these tests
+// keep their behaviour pinned until they are removed.
+#![allow(deprecated)]
+
 use trace_commons_protocol::upload_allowance::{DailyUploadAllowance, UploadAllowanceResponse};
 
 #[test]

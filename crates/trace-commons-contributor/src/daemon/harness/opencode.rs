@@ -322,7 +322,7 @@ impl OpenCodeEdit {
                     crate::channel::OTHER_STATE_DIR_NAME
                 ));
                 if !absent(&other_receipt) {
-                    edit.occupied.push(("OpenCode connection".into(), "Another Trace Commons channel already has a saved connection; disconnect it first".into()));
+                    edit.occupied.push(("OpenCode connection".into(), "Another channel of this app already has a saved connection; disconnect it first".into()));
                     edit.contents = edit.existing.clone().unwrap_or_default();
                     return Ok(edit);
                 }
@@ -438,7 +438,7 @@ impl OpenCodeEdit {
                     &mut value,
                     &mut saved,
                     path(&[table, PROVIDER, "name"]),
-                    json!("Trace Commons"),
+                    json!(crate::brand::APP_NAME),
                 )?;
                 add(
                     &mut value,
@@ -514,9 +514,9 @@ impl OpenCodeEdit {
                             put(&mut value, container, None)?;
                         }
                     }
-                    edit.changes.push("Remove Trace Commons routing settings and restore previous model selections; keep other-provider selections and unrelated edits".into());
+                    edit.changes.push("Remove this app's routing settings and restore previous model selections; keep other-provider selections and unrelated edits".into());
                     if !additional.is_empty() {
-                        edit.changes.push(format!("Remove {} additional agent model overrides using Trace Commons; inherit the restored default", additional.len()));
+                        edit.changes.push(format!("Remove {} additional agent model overrides using this app; inherit the restored default", additional.len()));
                     }
                 } else if routed(&value, None) {
                     edit.occupied.push((
@@ -672,19 +672,23 @@ fn private_create(path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
     }
 }
 
+/// Replace `path` with `bytes` through the shared owner-only atomic write
+/// (UUID temporary name, sync, and the Windows rename retry), then sync the
+/// directory. The error keeps its OS code and kind but no path.
 fn atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut file = tempfile::NamedTempFile::new_in(
-        path.parent()
-            .ok_or_else(|| std::io::Error::other("no parent"))?,
-    )?;
-    file.write_all(bytes)?;
-    file.as_file().sync_all()?;
-    file.persist(path).map_err(|e| e.error)?;
-    sync_directory(
-        path.parent()
-            .ok_or_else(|| std::io::Error::other("no parent"))?,
-    )?;
-    Ok(())
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("no parent"))?;
+    crate::config::write_atomic_0600(dir, path, bytes).map_err(|error| {
+        match error.root_cause().downcast_ref::<std::io::Error>() {
+            Some(io) => io
+                .raw_os_error()
+                .map(std::io::Error::from_raw_os_error)
+                .unwrap_or_else(|| io.kind().into()),
+            None => std::io::Error::other("atomic write failed"),
+        }
+    })?;
+    sync_directory(dir)
 }
 
 fn sync_directory(directory: &Path) -> std::io::Result<()> {
@@ -854,10 +858,14 @@ mod tests {
                 ChatModel {
                     id: "anthropic/fixture-chat".into(),
                     name: Some("Fixture chat".into()),
+                    tier: None,
+                    ..Default::default()
                 },
                 ChatModel {
                     id: "openai/fixture-chat".into(),
                     name: None,
+                    tier: None,
+                    ..Default::default()
                 },
             ],
         }
@@ -1566,6 +1574,8 @@ mod tests {
             .map(|i| ChatModel {
                 id: format!("vendor/model-{i}"),
                 name: None,
+                tier: None,
+                ..Default::default()
             })
             .collect();
         let catalogue =
@@ -1630,7 +1640,9 @@ mod tests {
             live_models(port).await.unwrap(),
             vec![ChatModel {
                 id: "fixture/chat".into(),
-                name: None
+                name: None,
+                tier: Some(crate::managed::models::ModelTier::Incognito),
+                ..Default::default()
             }]
         );
         server.abort();

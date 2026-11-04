@@ -405,11 +405,6 @@ async fn exercise_narrow_upload_trust_role(check_privileges: bool) {
         "events.v2+simhash.v2",
     );
     let independent = Arc::new(upload_allowance::ClientUploadTrustPolicy {
-        bounded: trace_commons_server::account_trust::parse_bounded_policy(
-            &template,
-            &[version.as_str()],
-        )
-        .unwrap(),
         growth: trace_commons_server::account_trust_rule::parse_growth_policy(
             &template,
             &[version.as_str()],
@@ -431,7 +426,6 @@ async fn exercise_narrow_upload_trust_role(check_privileges: bool) {
     state_mut.require_postgres_trace_rls_ready = false;
     state_mut.client_upload_trust_database = Some(runtime.clone() as Arc<dyn Database>);
     state_mut.account_trust_applied_policy = Some(Arc::new(independent.growth.clone()));
-    state_mut.client_upload_trust_policy = Some(independent);
     let config = account_trust_growth_routes::AccountTrustSchedulerConfig::new(
         "account-trust-worker-token-a".to_owned(),
         300,
@@ -486,8 +480,11 @@ async fn exercise_narrow_upload_trust_role(check_privileges: bool) {
         .await
         .unwrap();
     let allowance: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(allowance["allowance"]["max_uploads_per_day"], 100);
-    assert_eq!(allowance["allowance"]["max_bytes_per_day"], 419_430_400u64);
+    assert_eq!(
+        allowance,
+        serde_json::json!({"allowance": null}),
+        "no client daily limit is advertised"
+    );
     assert!(state.admission.is_none());
     assert!(state.account_admission.is_none());
     assert!(state.account_trust_shadow_policy.is_none());

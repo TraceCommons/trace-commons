@@ -179,12 +179,17 @@ public struct GlassPaneLayout: Equatable, Sendable {
         return max(minimumWindowWidth(showsMap: new.map, showsInspector: new.inspector), width)
     }
 
-    /// The window's frame at `width`: the top edge and the leading edge stay
-    /// where they are and the window grows or shrinks on its right. A window
-    /// that would run off the screen's visible frame moves left only as far
-    /// as it must; one wider than the screen is held to the screen, and the
-    /// map takes the difference, then a main pane wider than its default.
-    public static func windowFrame(_ frame: CGRect, width: CGFloat, visible: CGRect) -> CGRect {
+    /// The window's frame at `width`, kept on the screen, for a pane change
+    /// and at launch alike (the macOS convention; owner, 2026-10-30): the
+    /// top edge and the leading edge stay where they are and the window
+    /// grows or shrinks on its right. A window that would run off the
+    /// screen's visible frame moves left only as far as it must, so a pane
+    /// opening near the edge slides the window left by that pane and its
+    /// right edge sits on the screen's edge; closing a pane shrinks the
+    /// window from its right and leaves its leading edge where it is. One
+    /// wider than the screen is held to the screen, and the map takes the
+    /// difference, then a main pane wider than its default.
+    public static func windowFrame(onScreen frame: CGRect, width: CGFloat, visible: CGRect) -> CGRect {
         let width = min(width, visible.width)
         var x = frame.minX
         if x + width > visible.maxX { x = visible.maxX - width }
@@ -409,7 +414,8 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
     /// Sizes a window that has just opened to its panes, the map at its
     /// kept width (owner, 2026-10-19): the system puts a window back at the
     /// size it last had, and the map would take all of any difference. The
-    /// top and leading edges stay; a full-screen window is left alone.
+    /// window is kept on screen (`windowFrame(onScreen:)`); a full-screen
+    /// window is left alone.
     private func openAtKeptWidth(_ window: NSWindow) {
         defer { host.opened = true }
         if let mainWidth { host.main = max(GlassPaneLayout.mainWidth, CGFloat(mainWidth.wrappedValue)) }
@@ -418,7 +424,7 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
             showsMap: presented.map, showsInspector: presented.inspector, mapWidth: keptMapWidth,
             main: presented.map ? host.main : GlassPaneLayout.mainWidth)
         let visible = window.screen?.visibleFrame ?? CGRect(x: -1e6, y: -1e6, width: 2e6, height: 2e6)
-        let frame = GlassPaneLayout.windowFrame(window.frame, width: width, visible: visible)
+        let frame = GlassPaneLayout.windowFrame(onScreen: window.frame, width: width, visible: visible)
         if frame != window.frame { window.setFrame(frame, display: true) }
     }
 
@@ -521,7 +527,7 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
         let width = GlassPaneLayout.windowWidth(
             current: current, from: old, to: new, main: host.main, mapWidth: keptMapWidth)
         let visible = window.screen?.visibleFrame ?? CGRect(x: -1e6, y: -1e6, width: 2e6, height: 2e6)
-        let frame = GlassPaneLayout.windowFrame(window.frame, width: width, visible: visible)
+        let frame = GlassPaneLayout.windowFrame(onScreen: window.frame, width: width, visible: visible)
         // A window held to the screen squeezes the main pane to make room
         // for the map; the move animates only a main pane that keeps its
         // width, so a squeezed one changes at once.

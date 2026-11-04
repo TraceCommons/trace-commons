@@ -128,9 +128,9 @@ final class InsightsModel {
     }
 }
 
-/// The Overview tab's state: one saved week (feed S) and, when asked, what
-/// makes up one card's figure. Every figure is the core's; a failed read
-/// clears the figures rather than keep stale ones.
+/// The Overview tab's state: one saved week (feed S) and its Sessions
+/// breakdown. Every figure is the core's; a failed read clears the figures
+/// rather than keep stale ones.
 @Observable @MainActor
 final class InsightsOverviewModel {
     private let service: InsightsModel.Service
@@ -143,8 +143,6 @@ final class InsightsOverviewModel {
     /// The daemon's week (feed T), in the same shape. While it is set it is
     /// the only week shown; the saved week is never mixed in.
     private(set) var counter: InsightsWeekOverview?
-    /// The open figure's drill-down: tokens or cache share.
-    private(set) var inputs: InsightsCardInputs?
     /// The Sessions figure's breakdown under feed S, read with every week
     /// and always shown under the Sessions card (owner, 2026-10-22: never
     /// behind a chevron). Nil while unread, after a failed read, and under
@@ -167,43 +165,23 @@ final class InsightsOverviewModel {
     var shown: InsightsWeekOverview? { counter ?? overview }
 
     /// Show the daemon's week and its counted sessions, or `nil` to go back
-    /// to the saved week. Any open drill-down closes either way.
+    /// to the saved week.
     func showCounter(_ week: InsightsWeekOverview?, sessions: InsightsCounterSessions? = nil) {
         counter = week; counterSessions = week == nil ? nil : sessions
-        inputs = nil
     }
-
-    /// Whether the tokens or cache share figure opens a drill-down in the
-    /// week on screen. Feed T rows carry no session reference the core
-    /// could look up, so under feed T neither does.
-    func drills(_ card: String) -> Bool { counter == nil && card != "sessions" }
-
-    /// The figure whose drill-down is open.
-    var openCard: String? { inputs?.card }
 
     func open() { active = true; load() }
     func close() {
         active = false; token = UUID(); task?.cancel(); task = nil; busy = false
         sessionsTask?.cancel(); sessionsTask = nil
-        inputs = nil; sessionsInputs = nil
+        sessionsInputs = nil
     }
     func reload() { load() }
     func selectWeek(_ weekStart: String) { requestedWeek = weekStart; load() }
 
-    /// Read the drill-down for `card` (`tokens` or `cache_share`) in the
-    /// saved week on screen.
-    func showInputs(_ card: String) {
-        guard active, counter == nil, card != "sessions", let week = overview?.week_start else { return }
-        run(.init("card_inputs", weekStart: week, tz: Self.offset, card: card)) { model, response in
-            guard let inputs = response.inputs, inputs.card == card else { throw InsightsError.invalidResponse }
-            model.inputs = inputs
-        }
-    }
-    func hideInputs() { inputs = nil }
-
     private func load() {
         guard active else { return }
-        inputs = nil; sessionsInputs = nil
+        sessionsInputs = nil
         sessionsTask?.cancel(); sessionsTask = nil
         run(.init("week_overview", weekStart: requestedWeek, tz: Self.offset)) { model, response in
             guard let overview = response.overview else { throw InsightsError.invalidResponse }
@@ -231,7 +209,7 @@ final class InsightsOverviewModel {
         task?.cancel()
         token = UUID(); let current = token
         busy = true
-        if operation.type != "card_inputs" { failed = false }
+        failed = false
         let service = service
         task = Task { [weak self] in
             do {
@@ -242,10 +220,8 @@ final class InsightsOverviewModel {
                 self.busy = false
             } catch {
                 guard let self, self.active, self.token == current, !Task.isCancelled else { return }
-                // A failed drill-down closes only itself; a failed week read
-                // never keeps the old figures.
-                if operation.type != "card_inputs" { self.overview = nil; self.failed = true }
-                self.inputs = nil; self.busy = false
+                // A failed week read never keeps the old figures.
+                self.overview = nil; self.failed = true; self.busy = false
             }
         }
     }
@@ -484,6 +460,15 @@ enum InsightsRouteWords {
         case .noLedger: return text("analytics_route_no_ledger", copy)
         case .shown, .hidden: return nil
         }
+    }
+
+    /// Whether a row draws its Private AI line: not when the proxy saw none
+    /// of the session's calls (no route, or `unobserved`), which on a week
+    /// of direct calls said "No record" on every row (owner, 2026-10-29).
+    /// A category this build does not know still draws, as the dash.
+    static func drawsLine(_ routing: DaemonData.InsightsWeekRouting?) -> Bool {
+        guard let category = routing?.category else { return false }
+        return category != "unobserved"
     }
 
     /// The category's word; the dash for a missing route or a category this

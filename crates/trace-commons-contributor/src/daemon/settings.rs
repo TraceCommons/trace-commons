@@ -41,28 +41,6 @@ const DEFAULT_GROWTH_MIN_NEW_BYTES: u64 = 65_536;
 /// repeatedly over the same text and dilute the contributor's own credit
 /// through server-side duplicate clustering.
 const DEFAULT_MAX_REUPLOADS: u32 = 3;
-const DEFAULT_MAX_UPLOADS_PER_DAY: u32 =
-    trace_commons_protocol::upload_allowance::DEFAULT_MAX_UPLOADS_PER_DAY;
-const DEFAULT_MAX_BYTES_PER_DAY: u64 =
-    trace_commons_protocol::upload_allowance::DEFAULT_MAX_BYTES_PER_DAY;
-/// The upper bound `set_settings` (and the C ABI's pre-start override) will
-/// accept for `max_uploads_per_day`. The cap exists to bound a runaway
-/// client -- an app that decides to upload everything should not be able
-/// to -- so it must stay a validated ceiling, not an open field. 20x the
-/// default comfortably covers a contributor running several agents across
-/// a very active day (a real machine needed 200/day, four times the
-/// default) while still being a real bound: a client that hit this would
-/// still be stopped well short of "everything, all day".
-const MAX_UPLOADS_PER_DAY_CEILING: u32 = 1_000;
-/// The upper bound for `max_bytes_per_day`, in bytes. Sized from real
-/// corpus data, not a guess: a machine with 81 Claude sessions (0.9 GB
-/// total, largest 93.6 MB) and 3,069 Codex sessions (10.8 GB total) still
-/// only produces a few GB of *accepted* envelopes on its most active day,
-/// since a single accepted envelope commonly runs several MB. 5 GiB is
-/// comfortably above that (and above the 2 GiB a contributor had already
-/// raised their own machine to by hand) while remaining a real ceiling on
-/// a client that decided to send everything at once.
-const MAX_BYTES_PER_DAY_CEILING: u64 = 5 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_QUEUE_ENTRIES: usize = 500;
 const DEFAULT_HISTORY_POLL_SECS: u64 = 1800;
 /// How often the public community roster is fetched. The server serves a
@@ -162,14 +140,6 @@ pub const APPROVAL_HOLD_SECS_MAX: u64 = 300;
 /// Mirrors a shell's hour-granularity control (1..=24 hours).
 pub const DIGEST_INTERVAL_SECS_MIN: u64 = 3_600;
 pub const DIGEST_INTERVAL_SECS_MAX: u64 = 86_400;
-/// The floor for `max_bytes_per_day`: non-zero, same as `max_uploads_per_day`
-/// -- a contributor throttling their own uploads down to almost nothing is
-/// self-throttling, not the runaway-client case the ceiling exists for, and
-/// is deliberately allowed (`a_cap_below_the_default_is_allowed_as_self_throttling`).
-/// Only `MAX_BYTES_PER_DAY_CEILING` is a real safety bound; a shell's own
-/// megabyte-granularity control is free to offer a coarser minimum than this.
-pub const MAX_BYTES_PER_DAY_MIN: u64 = 1;
-
 /// A validated numeric setting's bounds, in the unit `set_settings` itself
 /// stores and checks -- seconds or bytes, never the minutes, hours or
 /// megabytes a shell's control is scaled in. One definition, read by every
@@ -210,8 +180,36 @@ pub struct SettingsRanges {
     pub quiescence_secs: SettingRange,
     pub approval_hold_secs: SettingRange,
     pub digest_interval_secs: SettingRange,
-    pub max_uploads_per_day: SettingRange,
-    pub max_bytes_per_day: SettingRange,
+}
+
+impl SettingsRanges {
+    /// Each range with its key and its agent-facing description. Destructured
+    /// without `..`, so a range added to the struct does not compile until it
+    /// is listed here with its text.
+    pub(crate) fn described(&self) -> [(&'static str, SettingRange, &'static str); 3] {
+        let Self {
+            quiescence_secs,
+            approval_hold_secs,
+            digest_interval_secs,
+        } = *self;
+        [
+            (
+                "quiescence_secs",
+                quiescence_secs,
+                "Seconds without writes before a trace is considered finished.",
+            ),
+            (
+                "approval_hold_secs",
+                approval_hold_secs,
+                "Seconds before an approved upload can start; zero removes the undo hold.",
+            ),
+            (
+                "digest_interval_secs",
+                digest_interval_secs,
+                "Seconds between interval notifications.",
+            ),
+        ]
+    }
 }
 
 /// The ranges [`apply_settings_object`] validates every numeric setting
@@ -222,8 +220,6 @@ pub fn settings_ranges() -> SettingsRanges {
         quiescence_secs: SettingRange::new(QUIESCENCE_SECS_MIN, QUIESCENCE_SECS_MAX),
         approval_hold_secs: SettingRange::new(APPROVAL_HOLD_SECS_MIN, APPROVAL_HOLD_SECS_MAX),
         digest_interval_secs: SettingRange::new(DIGEST_INTERVAL_SECS_MIN, DIGEST_INTERVAL_SECS_MAX),
-        max_uploads_per_day: SettingRange::new(1, MAX_UPLOADS_PER_DAY_CEILING as u64),
-        max_bytes_per_day: SettingRange::new(MAX_BYTES_PER_DAY_MIN, MAX_BYTES_PER_DAY_CEILING),
     }
 }
 
@@ -435,14 +431,6 @@ pub struct DaemonSettings {
     pub growth_factor: f64,
     pub growth_min_new_bytes: u64,
     pub max_reuploads: u32,
-    pub max_uploads_per_day: u32,
-    pub max_bytes_per_day: u64,
-    /// A local choice is preserved even when it equals the default. Missing
-    /// provenance belongs to an older settings file and is inferred per cap.
-    #[serde(default)]
-    pub max_uploads_per_day_explicit: Option<bool>,
-    #[serde(default)]
-    pub max_bytes_per_day_explicit: Option<bool>,
     pub max_queue_entries: usize,
     pub history_poll_secs: u64,
     /// How often the public community roster is fetched. `#[serde(default)]`
@@ -496,7 +484,7 @@ pub struct DaemonSettings {
     /// different questions: `near_ai` is the privacy-filter credential,
     /// `near_ai_inference` is the key inference calls carry, and this is the
     /// session that management reads need. Forgetting the credential clears
-    /// this too -- see `nearai_credential::ceremony::forget` -- because a
+    /// this too -- see `nearai_credential::disconnect` -- because a
     /// contributor who believes they revoked the daemon's access and left a
     /// session behind has been told something false.
     ///
@@ -762,6 +750,28 @@ pub struct DaemonSettings {
     /// the default (see `managed::terminal::TerminalSetting`).
     #[serde(default)]
     pub managed_terminal: crate::managed::terminal::TerminalSetting,
+
+    /// Whether the person has chosen `managed_terminal` themselves. False
+    /// until a write names a terminal, which sets it; nothing clears it. A
+    /// shell asks for a terminal in the launch dialog while this is false
+    /// and more than one is installed. Not writable on its own.
+    #[serde(default)]
+    pub managed_terminal_chosen: bool,
+
+    /// "Group sessions in herdr" (owner decision D4, 2026-11-03): managed
+    /// sessions open as tabs of herdr's "Near.ai" workspace, with
+    /// `managed_terminal` hosting herdr when no herdr client is running.
+    /// Off by default and in a file written before the key existed.
+    #[serde(default)]
+    pub managed_herdr: bool,
+
+    /// NEAR AI model ids the person starred, which the Launch sheet's model
+    /// picker lists first (`managed_model_catalogue`'s `favorites`). Order
+    /// is not meaningful: shells show them in NEAR AI's order. Written only
+    /// through [`apply_settings_object`], which checks each id and bounds
+    /// the list ([`MAX_FAVORITE_MODELS`], [`MAX_FAVORITE_MODEL_ID_BYTES`]).
+    #[serde(default)]
+    pub managed_favorite_models: Vec<String>,
 
     /// Per-agent argv text for new managed coding sessions. Omitted tools
     /// keep their existing values during partial configuration updates.
@@ -1375,10 +1385,6 @@ impl Default for DaemonSettings {
             growth_factor: DEFAULT_GROWTH_FACTOR,
             growth_min_new_bytes: DEFAULT_GROWTH_MIN_NEW_BYTES,
             max_reuploads: DEFAULT_MAX_REUPLOADS,
-            max_uploads_per_day: DEFAULT_MAX_UPLOADS_PER_DAY,
-            max_bytes_per_day: DEFAULT_MAX_BYTES_PER_DAY,
-            max_uploads_per_day_explicit: Some(false),
-            max_bytes_per_day_explicit: Some(false),
             max_queue_entries: DEFAULT_MAX_QUEUE_ENTRIES,
             history_poll_secs: DEFAULT_HISTORY_POLL_SECS,
             community_poll_secs: DEFAULT_COMMUNITY_POLL_SECS,
@@ -1419,6 +1425,9 @@ impl Default for DaemonSettings {
             notifications_enabled: DEFAULT_NOTIFICATIONS_ENABLED,
             menu_bar_mark_enabled: DEFAULT_MENU_BAR_MARK_ENABLED,
             managed_terminal: Default::default(),
+            managed_terminal_chosen: false,
+            managed_herdr: false,
+            managed_favorite_models: Vec::new(),
             managed_cli_options: Default::default(),
             managed_folder_settings: Default::default(),
             notify: NotifyKinds::default(),
@@ -1431,17 +1440,6 @@ impl Default for DaemonSettings {
 }
 
 impl DaemonSettings {
-    /// Legacy files could only record a choice by differing from the default.
-    pub(super) fn upload_count_is_explicit(&self) -> bool {
-        self.max_uploads_per_day_explicit
-            .unwrap_or(self.max_uploads_per_day != DEFAULT_MAX_UPLOADS_PER_DAY)
-    }
-
-    pub(super) fn upload_bytes_is_explicit(&self) -> bool {
-        self.max_bytes_per_day_explicit
-            .unwrap_or(self.max_bytes_per_day != DEFAULT_MAX_BYTES_PER_DAY)
-    }
-
     /// May prompt for OS storage. Call on a blocking worker before starting
     /// Cloud consumers.
     pub fn load_with_cloud_credentials(store: &ConfigStore) -> Result<Self> {
@@ -1519,10 +1517,6 @@ impl DaemonSettings {
             .context("parsing daemon settings")
             .context(crate::daemon::StartFailure::SettingsUnreadable)?;
         let stored: serde_json::Value = serde_json::from_slice(&body)?;
-        // Freeze the legacy inference before any later setting write. A
-        // chosen default was indistinguishable from an untouched legacy cap.
-        settings.max_uploads_per_day_explicit = Some(settings.upload_count_is_explicit());
-        settings.max_bytes_per_day_explicit = Some(settings.upload_bytes_is_explicit());
         settings.scrub_check_defaulted_on_upgrade |= stored
             .get("scrub_check")
             .is_none_or(serde_json::Value::is_null);
@@ -1845,15 +1839,28 @@ pub const ERR_SETTINGS_NOT_OBJECT: &str = "settings-not-object";
 /// recognize.
 pub const ERR_SETTINGS_UNKNOWN_FIELD: &str = "settings-unknown-field";
 /// A recognized key held a value of the wrong JSON type (or, for
-/// `claude_root`/`codex_root`, a JSON type other than string/null), or --
-/// for `max_uploads_per_day`/`max_bytes_per_day` -- a value of the right
-/// type but out of the accepted range (zero, or above the validated
-/// ceiling; see `MAX_UPLOADS_PER_DAY_CEILING` and
-/// `MAX_BYTES_PER_DAY_CEILING`). One fixed label covers both failure
+/// `claude_root`/`codex_root`, a JSON type other than string/null), or a
+/// value of the right type but outside its [`SettingRange`]. One fixed label
+/// covers both failure
 /// shapes deliberately: the point of the label is that it never carries
 /// the caller's value, and "wrong type" vs. "right type, wrong range" is
 /// not a distinction a fail-closed caller needs to branch on.
 pub const ERR_SETTINGS_INVALID_VALUE: &str = "settings-invalid-value";
+
+/// The most favorite models one settings file keeps.
+pub const MAX_FAVORITE_MODELS: usize = 32;
+/// The longest favorite model id, in UTF-8 bytes. NEAR AI's ids are a
+/// fraction of this.
+pub const MAX_FAVORITE_MODEL_ID_BYTES: usize = 256;
+
+/// Whether `id` can be a favorite model id: non-empty, bounded, and free of
+/// whitespace and control characters. Says nothing about whether NEAR AI
+/// offers it; `managed_model_favorite_set` checks that against the catalogue.
+pub fn valid_favorite_model_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_FAVORITE_MODEL_ID_BYTES
+        && !id.chars().any(|c| c.is_whitespace() || c.is_control())
+}
 /// A `notify` object named a kind this build does not know. A fixed label:
 /// the caller's key never enters it.
 pub const ERR_SETTINGS_UNKNOWN_NOTIFY_KIND: &str = "settings-unknown-notify-kind";
@@ -1917,6 +1924,11 @@ pub fn gemini_declared(settings: &DaemonSettings) -> bool {
     settings.gemini_source.is_some()
 }
 
+/// A settings key retired with the daily upload limit.
+fn is_retired_key(key: &str) -> bool {
+    matches!(key, "max_uploads_per_day" | "max_bytes_per_day")
+}
+
 /// Apply a partial settings object -- the shape `tc_call(handle,
 /// "set_settings", ...)` takes over the socket, and the shape
 /// `tc_daemon_start_with_settings` takes over the C ABI before the daemon's
@@ -1939,25 +1951,21 @@ pub fn gemini_declared(settings: &DaemonSettings) -> bool {
 /// caller-supplied text. The values themselves (which is where a
 /// filesystem path lives) never cross into an error string.
 ///
-/// Returns whether anything was applied. An empty object (or one holding
-/// only keys whose values happen to match the current setting) still
-/// reports `true` for any key present and accepted -- this always applies
-/// every key it accepts, so `Ok(false)` only ever means "the object had no
-/// keys at all". Callers that require at least one recognized field (as
-/// `set_settings` does, to catch an empty or accidental call) check that
-/// themselves; `tc_daemon_start_with_settings` does not, since "nothing to
-/// override" is its documented no-op case.
+/// Returns whether anything was applied. A key whose value happens to match
+/// the current setting still reports `true` -- this always applies every
+/// live key it accepts. `Ok(false)` means no live key was present, which is
+/// one of two cases:
 ///
-/// `max_uploads_per_day` and `max_bytes_per_day` are validated against a
-/// fixed ceiling (`MAX_UPLOADS_PER_DAY_CEILING`, `MAX_BYTES_PER_DAY_CEILING`)
-/// rather than accepted as an open field: the cap exists to bound a runaway
-/// client, and an unbounded setter would give that protection up entirely.
-/// A value below the current default is accepted with no floor beyond
-/// non-zero -- throttling one's own uploads is not a safety concern -- but
-/// zero and anything above the ceiling are refused with the same
-/// `ERR_SETTINGS_INVALID_VALUE` label the other typed fields use. JSON null
-/// resets only that cap to the shared default and server-following mode;
-/// internal persisted provenance flags are not accepted as input.
+/// - the object had no keys at all, which `set_settings` and the agent
+///   preview refuse as `no-known-setting-supplied` (an empty or accidental
+///   call), and `tc_daemon_start_with_settings` treats as its documented
+///   "nothing to override" no-op;
+/// - every key was a retired one (below), which every caller treats as
+///   accepted with nothing to change: no save, no error.
+///
+/// `max_uploads_per_day` and `max_bytes_per_day` are retired: accepted,
+/// whatever the value, and ignored. The daemon has no daily upload limit,
+/// and a shell built while it had one may still send them.
 pub fn apply_settings_object(
     settings: &mut DaemonSettings,
     params: &serde_json::Value,
@@ -1965,6 +1973,13 @@ pub fn apply_settings_object(
     let obj = params.as_object().ok_or(ERR_SETTINGS_NOT_OBJECT)?;
     let mut changed = false;
     for (key, value) in obj {
+        // Retired with the daily upload limit. Accepted, whatever the value,
+        // and ignored, so a shell built while the limit existed can still
+        // save its other settings. Outside the marked region below: the
+        // agent schema and the IPC doc's key lists name settable keys only.
+        if is_retired_key(key) {
+            continue;
+        }
         // SET-SETTINGS-KEYS-BEGIN
         //
         // `docs/contributor-daemon-ipc-v1_1.md` lists these keys twice, and
@@ -2000,37 +2015,6 @@ pub fn apply_settings_object(
             }
             "local_notifications" => {
                 settings.local_notifications = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
-            }
-            // Both caps take a validated ceiling, not an open field: the
-            // cap exists to bound a runaway client, and a freely settable
-            // value would give up exactly the protection it was added for.
-            // A value below the default IS allowed -- a contributor
-            // throttling their own uploads is a legitimate thing to want
-            // and is not a safety concern -- but zero is refused rather
-            // than accepted as "no uploads": that state already exists and
-            // is spelled `pause`, which (unlike a cap of zero) is visibly
-            // temporary and does not fight the health-label machinery that
-            // treats a reached cap as a `CapReached`/health-label
-            // condition on every single upload attempt. Null resets this
-            // dimension to the shared default and opts back into server
-            // allowances; provenance itself is not a writable IPC field.
-            "max_uploads_per_day" => {
-                if value.is_null() {
-                    settings.max_uploads_per_day = DEFAULT_MAX_UPLOADS_PER_DAY;
-                    settings.max_uploads_per_day_explicit = Some(false);
-                } else {
-                    settings.max_uploads_per_day = parse_max_uploads_per_day(value)?;
-                    settings.max_uploads_per_day_explicit = Some(true);
-                }
-            }
-            "max_bytes_per_day" => {
-                if value.is_null() {
-                    settings.max_bytes_per_day = DEFAULT_MAX_BYTES_PER_DAY;
-                    settings.max_bytes_per_day_explicit = Some(false);
-                } else {
-                    settings.max_bytes_per_day = parse_max_bytes_per_day(value)?;
-                    settings.max_bytes_per_day_explicit = Some(true);
-                }
             }
             // The path spellings. A string declares "watch this"; null
             // clears the declaration back to never-asked, which is what the
@@ -2150,13 +2134,53 @@ pub fn apply_settings_object(
             // The terminal app managed sessions open in. One of this
             // platform's fixed ids; anything else, `null` included, is refused,
             // never read as an app name or a command. Also reachable as
-            // `set_managed_terminal`, which writes through here.
+            // `set_managed_terminal`, which writes through here. A write is
+            // the person's choice, so it also marks the terminal chosen.
             "managed_terminal" => {
                 settings.managed_terminal = value
                     .as_str()
                     .and_then(crate::managed::terminal::TerminalApp::parse)
                     .ok_or(ERR_SETTINGS_INVALID_VALUE)?
                     .into();
+                settings.managed_terminal_chosen = true;
+            }
+            // "Group sessions in herdr". Also reachable as
+            // `set_managed_herdr`, which writes through here.
+            "managed_herdr" => {
+                settings.managed_herdr = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // Favorite models merge like `notify`: `{"<id>": true}` stars an
+            // id, `false` unstars it, omitted ids stay. One bad entry, or a
+            // patch that grows the list past the bound, refuses the whole
+            // patch. A removal is never refused for the bound, so a person
+            // can always tidy a full list, nor for the id's shape: removing
+            // an exact stored string is always safe, and an older or
+            // hand-edited file may hold one the star check refuses. Also
+            // reachable as
+            // `managed_model_favorite_set`, which writes through here.
+            "managed_favorite_models" => {
+                let entries = value.as_object().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                let mut candidate = settings.managed_favorite_models.clone();
+                for (id, on) in entries {
+                    let on = on.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                    if on && !valid_favorite_model_id(id) {
+                        return Err(ERR_SETTINGS_INVALID_VALUE);
+                    }
+                    if !on {
+                        candidate.retain(|kept| kept != id);
+                    }
+                }
+                for (id, on) in entries {
+                    if on.as_bool() == Some(true) && !candidate.contains(id) {
+                        candidate.push(id.clone());
+                    }
+                }
+                if candidate.len() > MAX_FAVORITE_MODELS
+                    && candidate.len() > settings.managed_favorite_models.len()
+                {
+                    return Err(ERR_SETTINGS_INVALID_VALUE);
+                }
+                settings.managed_favorite_models = candidate;
             }
             "managed_folder_settings" => {
                 crate::managed::folder::apply_patch(settings, value)?;
@@ -2306,23 +2330,6 @@ fn parse_ranged_u64(
     }
 }
 
-/// `max_uploads_per_day`: a `u32` in `settings_ranges().max_uploads_per_day`.
-/// Zero is refused -- see the call site's doc for why a cap of zero is not
-/// this method's way to stop uploads.
-fn parse_max_uploads_per_day(value: &serde_json::Value) -> std::result::Result<u32, &'static str> {
-    let range = SettingRange::new(1, MAX_UPLOADS_PER_DAY_CEILING as u64);
-    Ok(parse_ranged_u64(value, range)? as u32)
-}
-
-/// `max_bytes_per_day`: a `u64` in `settings_ranges().max_bytes_per_day` --
-/// at least `MAX_BYTES_PER_DAY_MIN` (the smallest amount a shell's
-/// megabyte-granularity control can express) and at most
-/// `MAX_BYTES_PER_DAY_CEILING`.
-fn parse_max_bytes_per_day(value: &serde_json::Value) -> std::result::Result<u64, &'static str> {
-    let range = SettingRange::new(MAX_BYTES_PER_DAY_MIN, MAX_BYTES_PER_DAY_CEILING);
-    parse_ranged_u64(value, range)
-}
-
 /// `null` clears the override (falls back to the conventional per-user
 /// location); a string sets it; anything else is a type error. Never
 /// formats `value` into the error -- see `apply_settings_object`'s doc.
@@ -2470,117 +2477,81 @@ mod tests {
     use super::*;
     use crate::config::tests_support::temp_store;
 
+    /// A settings file from a build that had a daily upload limit still
+    /// loads, and the next save drops the limit's keys: nothing reads them.
     #[test]
-    fn daily_limit_choices_record_each_dimension_and_survive_reload() {
+    fn a_settings_file_with_the_retired_daily_limits_loads_and_drops_them() {
         let (_dir, store) = temp_store();
-        let mut settings = DaemonSettings::default();
-        let defaults = serde_json::to_value(&settings).unwrap();
-        assert_eq!(defaults["max_uploads_per_day_explicit"], false);
-        assert_eq!(defaults["max_bytes_per_day_explicit"], false);
-
-        apply_settings_object(
-            &mut settings,
-            &serde_json::json!({
-                "max_uploads_per_day": DEFAULT_MAX_UPLOADS_PER_DAY,
-            }),
+        let mut legacy = serde_json::to_value(DaemonSettings::default()).unwrap();
+        legacy["max_uploads_per_day"] = 7.into();
+        legacy["max_bytes_per_day"] = 1_024.into();
+        legacy["max_uploads_per_day_explicit"] = true.into();
+        legacy["max_bytes_per_day_explicit"] = serde_json::Value::Null;
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&legacy).unwrap())
+            .unwrap();
+        let settings = DaemonSettings::load(&store).expect("a legacy settings file loads");
+        settings.save(&store).unwrap();
+        let stored: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(store.daemon_path(DAEMON_SETTINGS_FILE)).unwrap(),
         )
         .unwrap();
-        settings.save(&store).unwrap();
-        let loaded = DaemonSettings::load(&store).unwrap();
-        let stored = serde_json::to_value(&loaded).unwrap();
-        assert_eq!(stored["max_uploads_per_day_explicit"], true);
-        assert_eq!(stored["max_bytes_per_day_explicit"], false);
-
-        apply_settings_object(
-            &mut settings,
-            &serde_json::json!({
-                "max_bytes_per_day": DEFAULT_MAX_BYTES_PER_DAY,
-            }),
-        )
-        .unwrap();
-        settings.save(&store).unwrap();
-        let stored = serde_json::to_value(DaemonSettings::load(&store).unwrap()).unwrap();
-        assert_eq!(stored["max_uploads_per_day_explicit"], true);
-        assert_eq!(stored["max_bytes_per_day_explicit"], true);
-    }
-
-    #[test]
-    fn daily_limit_legacy_nondefaults_become_explicit_independently() {
-        for (count, bytes, count_explicit, bytes_explicit) in [
-            (7, DEFAULT_MAX_BYTES_PER_DAY, true, false),
-            (DEFAULT_MAX_UPLOADS_PER_DAY, 1_024, false, true),
-            (
-                DEFAULT_MAX_UPLOADS_PER_DAY,
-                DEFAULT_MAX_BYTES_PER_DAY,
-                false,
-                false,
-            ),
+        for key in [
+            "max_uploads_per_day",
+            "max_bytes_per_day",
+            "max_uploads_per_day_explicit",
+            "max_bytes_per_day_explicit",
         ] {
-            let (_dir, store) = temp_store();
-            let mut legacy = serde_json::to_value(DaemonSettings::default()).unwrap();
-            legacy
-                .as_object_mut()
-                .unwrap()
-                .remove("max_uploads_per_day_explicit");
-            legacy
-                .as_object_mut()
-                .unwrap()
-                .remove("max_bytes_per_day_explicit");
-            legacy["max_uploads_per_day"] = count.into();
-            legacy["max_bytes_per_day"] = bytes.into();
-            store
-                .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&legacy).unwrap())
-                .unwrap();
-            let settings = DaemonSettings::load(&store).unwrap();
-            settings.save(&store).unwrap();
-            let stored = serde_json::to_value(DaemonSettings::load(&store).unwrap()).unwrap();
-            assert_eq!(stored["max_uploads_per_day_explicit"], count_explicit);
-            assert_eq!(stored["max_bytes_per_day_explicit"], bytes_explicit);
-            assert_eq!(stored["max_uploads_per_day"], count);
-            assert_eq!(stored["max_bytes_per_day"], bytes);
+            assert!(stored.get(key).is_none(), "{key}: {stored}");
         }
     }
 
+    /// A shell built while the daily limit existed may still send its two
+    /// keys. They are accepted, whatever the value, and change nothing, so
+    /// the rest of that shell's save still lands. Alone they apply nothing,
+    /// so nothing is saved for them.
     #[test]
-    fn daily_limit_null_resets_only_its_own_choice_and_survives_reload() {
-        let (_dir, store) = temp_store();
-        let mut settings = DaemonSettings::default();
-        apply_settings_object(
-            &mut settings,
-            &serde_json::json!({
-                "max_uploads_per_day": 7, "max_bytes_per_day": 1_024
-            }),
-        )
-        .unwrap();
-        apply_settings_object(
-            &mut settings,
-            &serde_json::json!({
-                "max_uploads_per_day": null
-            }),
-        )
-        .unwrap();
-        settings.save(&store).unwrap();
-        let mut loaded = DaemonSettings::load(&store).unwrap();
-        assert_eq!(loaded.max_uploads_per_day, DEFAULT_MAX_UPLOADS_PER_DAY);
-        assert!(!loaded.upload_count_is_explicit());
-        assert_eq!(loaded.max_bytes_per_day, 1_024);
-        assert!(loaded.upload_bytes_is_explicit());
-        apply_settings_object(
-            &mut loaded,
-            &serde_json::json!({
-                "max_bytes_per_day": null
-            }),
-        )
-        .unwrap();
-        loaded.save(&store).unwrap();
-        let loaded = DaemonSettings::load(&store).unwrap();
-        assert_eq!(loaded.max_bytes_per_day, DEFAULT_MAX_BYTES_PER_DAY);
-        assert!(!loaded.upload_bytes_is_explicit());
+    fn the_retired_daily_limit_keys_are_accepted_and_ignored() {
+        let mut s = DaemonSettings::default();
+        let before = serde_json::to_value(&s).unwrap();
+        for params in [
+            serde_json::json!({"max_uploads_per_day": 200}),
+            serde_json::json!({"max_bytes_per_day": 0}),
+            serde_json::json!({"max_bytes_per_day": "lots"}),
+            serde_json::json!({"max_uploads_per_day": null, "max_bytes_per_day": null}),
+        ] {
+            assert_eq!(
+                apply_settings_object(&mut s, &params),
+                Ok(false),
+                "{params}"
+            );
+        }
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({})),
+            Ok(false)
+        );
+        assert_eq!(serde_json::to_value(&s).unwrap(), before);
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"max_uploads_per_day": 100, "quiescence_secs": 60}),
+            ),
+            Ok(true)
+        );
+        assert_eq!(s.quiescence_secs, 60);
+        // An unknown key beside a retired one is still refused outright.
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"max_uploads_per_day": 100, "nonsense": 1}),
+            ),
+            Err(ERR_SETTINGS_UNKNOWN_FIELD)
+        );
         for key in ["max_uploads_per_day_explicit", "max_bytes_per_day_explicit"] {
             let mut params = serde_json::Map::new();
             params.insert(key.to_owned(), false.into());
             assert_eq!(
-                apply_settings_object(&mut settings, &params.into()),
+                apply_settings_object(&mut s, &params.into()),
                 Err(ERR_SETTINGS_UNKNOWN_FIELD)
             );
         }
@@ -3401,12 +3372,21 @@ mod tests {
         use crate::managed::terminal::{TerminalApp, TerminalSetting};
         let mut s = DaemonSettings::default();
         assert_eq!(s.managed_terminal, TerminalSetting::default());
+        assert!(!s.managed_terminal_chosen);
+        for bad in [
+            serde_json::json!({"managed_terminal_chosen": true}),
+            serde_json::json!({"managed_terminal": "Ghostty"}),
+        ] {
+            assert!(apply_settings_object(&mut s, &bad).is_err(), "{bad}");
+            assert!(!s.managed_terminal_chosen, "{bad}");
+        }
         for app in TerminalApp::offered().iter().rev() {
             assert_eq!(
                 apply_settings_object(&mut s, &serde_json::json!({"managed_terminal": app.id()})),
                 Ok(true)
             );
             assert_eq!(s.managed_terminal, TerminalSetting::from(*app));
+            assert!(s.managed_terminal_chosen);
         }
         let mut bad = vec![
             serde_json::json!({"managed_terminal": "Ghostty"}),
@@ -3438,7 +3418,8 @@ mod tests {
             stored["managed_terminal"],
             TerminalSetting::default().app().unwrap().id()
         );
-        stored["managed_terminal"] = serde_json::json!("wezterm");
+        assert_eq!(stored["managed_terminal_chosen"], false);
+        stored["managed_terminal"] = serde_json::json!("hyper");
         store
             .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&stored).unwrap())
             .unwrap();
@@ -3448,6 +3429,178 @@ mod tests {
         assert_eq!(
             DaemonSettings::load(&store).unwrap().managed_terminal,
             TerminalSetting::Unrecognized
+        );
+    }
+
+    /// A stored id that would fail the star check (from an older or
+    /// hand-edited file) is still removed by `false`: removing an exact
+    /// stored string is always safe, and the entry must not hold one of the
+    /// 32 places for good (#1754 review). Starring it stays refused.
+    #[test]
+    fn a_malformed_stored_favorite_can_be_unstarred() {
+        let long = "m".repeat(MAX_FAVORITE_MODEL_ID_BYTES + 1);
+        for bad in ["a one", "a/\u{0007}", "", long.as_str()] {
+            let mut s = DaemonSettings {
+                managed_favorite_models: vec!["a/one".into(), bad.into()],
+                ..DaemonSettings::default()
+            };
+            assert_eq!(
+                apply_settings_object(
+                    &mut s,
+                    &serde_json::json!({"managed_favorite_models": { bad: true }})
+                ),
+                Err(ERR_SETTINGS_INVALID_VALUE),
+                "{bad:?}"
+            );
+            assert_eq!(
+                apply_settings_object(
+                    &mut s,
+                    &serde_json::json!({"managed_favorite_models": { bad: false }})
+                ),
+                Ok(true),
+                "{bad:?}"
+            );
+            assert_eq!(s.managed_favorite_models, ["a/one"], "{bad:?}");
+        }
+    }
+
+    /// Favorite models merge like `notify`: `true` stars an id, `false`
+    /// unstars it, omitted ids stay. Every id is checked, the whole patch is
+    /// refused on one bad entry, and the list is bounded. A file written
+    /// before the key existed loads with none.
+    #[test]
+    fn favorite_models_merge_and_refuse_bad_ids() {
+        let mut s = DaemonSettings::default();
+        assert!(s.managed_favorite_models.is_empty());
+        let patch =
+            |entries: serde_json::Value| serde_json::json!({ "managed_favorite_models": entries });
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &patch(serde_json::json!({"b/two": true, "a/one": true}))
+            ),
+            Ok(true)
+        );
+        // Starring again and unstarring an absent id change nothing.
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &patch(serde_json::json!({"a/one": true, "c/three": false}))
+            ),
+            Ok(true)
+        );
+        let mut starred = s.managed_favorite_models.clone();
+        starred.sort();
+        assert_eq!(starred, ["a/one", "b/two"]);
+        assert_eq!(
+            apply_settings_object(&mut s, &patch(serde_json::json!({"b/two": false}))),
+            Ok(true)
+        );
+        assert_eq!(s.managed_favorite_models, ["a/one"]);
+
+        let long = "m".repeat(MAX_FAVORITE_MODEL_ID_BYTES + 1);
+        for bad in [
+            serde_json::json!(["a/one"]),
+            serde_json::json!("a/one"),
+            serde_json::json!(null),
+            serde_json::json!({"a/one": 1}),
+            serde_json::json!({"a/one": null}),
+            serde_json::json!({"": true}),
+            serde_json::json!({" a/one": true}),
+            serde_json::json!({"a one": true}),
+            serde_json::json!({"a/one\n": true}),
+            serde_json::json!({"a/\u{0007}": true}),
+            serde_json::json!({ long.clone(): true }),
+            // One bad entry refuses the good one beside it.
+            serde_json::json!({"z/ok": true, "": true}),
+        ] {
+            let mut candidate = s.clone();
+            assert_eq!(
+                apply_settings_object(&mut candidate, &patch(bad.clone())),
+                Err(ERR_SETTINGS_INVALID_VALUE),
+                "{bad}"
+            );
+            assert_eq!(candidate.managed_favorite_models, ["a/one"], "{bad}");
+        }
+
+        let mut full = DaemonSettings::default();
+        let many: serde_json::Map<_, _> = (0..MAX_FAVORITE_MODELS)
+            .map(|n| (format!("m/{n}"), serde_json::json!(true)))
+            .collect();
+        assert_eq!(
+            apply_settings_object(&mut full, &patch(serde_json::Value::Object(many))),
+            Ok(true)
+        );
+        assert_eq!(full.managed_favorite_models.len(), MAX_FAVORITE_MODELS);
+        assert_eq!(
+            apply_settings_object(
+                &mut full.clone(),
+                &patch(serde_json::json!({"m/extra": true}))
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        // At the bound, one out and one in within the same patch is fine.
+        assert_eq!(
+            apply_settings_object(
+                &mut full,
+                &patch(serde_json::json!({"m/0": false, "m/extra": true}))
+            ),
+            Ok(true)
+        );
+        assert_eq!(full.managed_favorite_models.len(), MAX_FAVORITE_MODELS);
+
+        // A list already past the bound (only a hand-edited file holds one)
+        // can always shrink, never grow.
+        let mut over = DaemonSettings {
+            managed_favorite_models: (0..MAX_FAVORITE_MODELS + 8)
+                .map(|n| format!("m/{n}"))
+                .collect(),
+            ..DaemonSettings::default()
+        };
+        assert_eq!(
+            apply_settings_object(&mut over, &patch(serde_json::json!({"m/0": false}))),
+            Ok(true)
+        );
+        assert_eq!(over.managed_favorite_models.len(), MAX_FAVORITE_MODELS + 7);
+        assert_eq!(
+            apply_settings_object(
+                &mut over.clone(),
+                &patch(serde_json::json!({"m/1": false, "m/new": true, "m/newer": true}))
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        // Swapping one for one keeps it the same length: allowed.
+        assert_eq!(
+            apply_settings_object(
+                &mut over,
+                &patch(serde_json::json!({"m/1": false, "m/new": true}))
+            ),
+            Ok(true)
+        );
+        assert_eq!(over.managed_favorite_models.len(), MAX_FAVORITE_MODELS + 7);
+
+        let home = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut stored = serde_json::to_value(DaemonSettings::default()).unwrap();
+        stored
+            .as_object_mut()
+            .unwrap()
+            .remove("managed_favorite_models");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&stored).unwrap())
+            .unwrap();
+        assert!(
+            DaemonSettings::load(&store)
+                .unwrap()
+                .managed_favorite_models
+                .is_empty()
+        );
+        s.save(&store).unwrap();
+        assert_eq!(
+            DaemonSettings::load(&store)
+                .unwrap()
+                .managed_favorite_models,
+            ["a/one"]
         );
     }
 
@@ -5116,9 +5269,7 @@ mod tests {
 
     /// The exported ranges are not a second, hand-maintained copy of the
     /// bounds `apply_settings_object` enforces -- they are read from the
-    /// same constants, so this just pins the shape and the two upload/byte
-    /// caps' floors at 1 (self-throttling is allowed; see
-    /// `a_cap_below_the_default_is_allowed_as_self_throttling`).
+    /// same constants, so this just pins the shape.
     #[test]
     fn exported_ranges_match_the_constants_set_settings_enforces() {
         let ranges = settings_ranges();
@@ -5127,11 +5278,6 @@ mod tests {
         assert_eq!(
             ranges.digest_interval_secs,
             SettingRange::new(3_600, 86_400)
-        );
-        assert_eq!(ranges.max_uploads_per_day, SettingRange::new(1, 1_000));
-        assert_eq!(
-            ranges.max_bytes_per_day,
-            SettingRange::new(1, 5 * 1024 * 1024 * 1024)
         );
     }
 
@@ -5353,149 +5499,6 @@ mod tests {
         }
     }
 
-    // --- Runtime-settable daily caps (issue #371) --------------------------
-
-    #[test]
-    fn a_valid_cap_change_is_accepted_persisted_and_observed_by_the_next_cap_check() {
-        use crate::daemon::state::DaemonState;
-        use crate::daemon::uploader::cap_check;
-
-        let (_d, store) = temp_store();
-        let mut s = DaemonSettings::default();
-        assert_eq!(s.max_uploads_per_day, DEFAULT_MAX_UPLOADS_PER_DAY);
-        assert_eq!(s.max_bytes_per_day, DEFAULT_MAX_BYTES_PER_DAY);
-
-        // A state that has already exhausted the *default* budget: the
-        // real-world trigger for this feature was exactly this shape --
-        // approved traces waiting with nothing left in the old budget.
-        let mut st = DaemonState::new();
-        st.uploads_today = DEFAULT_MAX_UPLOADS_PER_DAY;
-        st.bytes_today = DEFAULT_MAX_BYTES_PER_DAY;
-        assert!(
-            !cap_check(&st, 1, &s),
-            "sanity: the default budget really is exhausted"
-        );
-
-        assert_eq!(
-            apply_settings_object(
-                &mut s,
-                &serde_json::json!({
-                    "max_uploads_per_day": 200,
-                    "max_bytes_per_day": 2_147_483_648u64,
-                }),
-            ),
-            Ok(true)
-        );
-        assert_eq!(s.max_uploads_per_day, 200);
-        assert_eq!(s.max_bytes_per_day, 2_147_483_648);
-
-        // Persisted: a restart must not revert what was just raised.
-        s.save(&store).unwrap();
-        let reloaded = DaemonSettings::load(&store).unwrap();
-        assert_eq!(reloaded.max_uploads_per_day, 200);
-        assert_eq!(reloaded.max_bytes_per_day, 2_147_483_648);
-
-        // Observed: the same state, held against the *reloaded* settings
-        // (standing in for the live `Mutex<DaemonSettings>` a running
-        // uploader reads each tick), now has room again.
-        assert!(
-            cap_check(&st, 1, &reloaded),
-            "raising the cap must be visible to the very next cap check, \
-             with no restart required"
-        );
-    }
-
-    #[test]
-    fn max_uploads_per_day_above_the_ceiling_is_rejected() {
-        let mut s = DaemonSettings::default();
-        assert_eq!(
-            apply_settings_object(
-                &mut s,
-                &serde_json::json!({"max_uploads_per_day": MAX_UPLOADS_PER_DAY_CEILING + 1}),
-            ),
-            Err(ERR_SETTINGS_INVALID_VALUE)
-        );
-        assert_eq!(
-            s.max_uploads_per_day, DEFAULT_MAX_UPLOADS_PER_DAY,
-            "a rejected value changes nothing"
-        );
-        // The ceiling itself is accepted -- it is a ceiling, not an
-        // exclusive bound.
-        assert_eq!(
-            apply_settings_object(
-                &mut s,
-                &serde_json::json!({"max_uploads_per_day": MAX_UPLOADS_PER_DAY_CEILING}),
-            ),
-            Ok(true)
-        );
-        assert_eq!(s.max_uploads_per_day, MAX_UPLOADS_PER_DAY_CEILING);
-    }
-
-    #[test]
-    fn max_bytes_per_day_above_the_ceiling_is_rejected() {
-        let mut s = DaemonSettings::default();
-        assert_eq!(
-            apply_settings_object(
-                &mut s,
-                &serde_json::json!({"max_bytes_per_day": MAX_BYTES_PER_DAY_CEILING + 1}),
-            ),
-            Err(ERR_SETTINGS_INVALID_VALUE)
-        );
-        assert_eq!(s.max_bytes_per_day, DEFAULT_MAX_BYTES_PER_DAY);
-        assert_eq!(
-            apply_settings_object(
-                &mut s,
-                &serde_json::json!({"max_bytes_per_day": MAX_BYTES_PER_DAY_CEILING}),
-            ),
-            Ok(true)
-        );
-        assert_eq!(s.max_bytes_per_day, MAX_BYTES_PER_DAY_CEILING);
-    }
-
-    #[test]
-    fn a_daily_cap_of_zero_is_rejected_not_treated_as_pause() {
-        // Zero would silently overlap with `pause`, which is a different,
-        // visibly-temporary state. It is refused like any other
-        // out-of-range value.
-        let mut s = DaemonSettings::default();
-        assert_eq!(
-            apply_settings_object(&mut s, &serde_json::json!({"max_uploads_per_day": 0})),
-            Err(ERR_SETTINGS_INVALID_VALUE)
-        );
-        assert_eq!(
-            apply_settings_object(&mut s, &serde_json::json!({"max_bytes_per_day": 0})),
-            Err(ERR_SETTINGS_INVALID_VALUE)
-        );
-    }
-
-    #[test]
-    fn a_cap_below_the_default_is_allowed_as_self_throttling() {
-        // A contributor throttling their own uploads is legitimate and is
-        // not the safety concern the ceiling exists for.
-        let mut s = DaemonSettings::default();
-        assert_eq!(
-            apply_settings_object(
-                &mut s,
-                &serde_json::json!({"max_uploads_per_day": 1, "max_bytes_per_day": 1}),
-            ),
-            Ok(true)
-        );
-        assert_eq!(s.max_uploads_per_day, 1);
-        assert_eq!(s.max_bytes_per_day, 1);
-    }
-
-    #[test]
-    fn an_unknown_key_alongside_a_valid_cap_is_still_rejected_outright() {
-        let mut s = DaemonSettings::default();
-        assert_eq!(
-            apply_settings_object(
-                &mut s,
-                &serde_json::json!({"max_uploads_per_day": 100, "nonsense": 1}),
-            ),
-            Err(ERR_SETTINGS_UNKNOWN_FIELD)
-        );
-    }
-
     #[test]
     fn digest_schedule_defaults_to_interval() {
         assert_eq!(
@@ -5598,16 +5601,6 @@ mod tests {
             apply_settings_object(&mut s, &serde_json::json!({"digest_schedule": "evening"})),
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
-    }
-
-    #[test]
-    fn wrong_type_for_a_cap_is_rejected_and_changes_nothing() {
-        let mut s = DaemonSettings::default();
-        assert_eq!(
-            apply_settings_object(&mut s, &serde_json::json!({"max_bytes_per_day": "lots"})),
-            Err(ERR_SETTINGS_INVALID_VALUE)
-        );
-        assert_eq!(s.max_bytes_per_day, DEFAULT_MAX_BYTES_PER_DAY);
     }
 
     /// Every key `apply_settings_object` accepts is documented, in both

@@ -35,7 +35,6 @@ public class HealthCopyTests
         "near-ai-notice-not-acknowledged",
         "claim-mint-failed",
         "ingest-unreachable",
-        "daily-cap-reached",
         "queue-full",
         "a-label-nobody-has-written-yet",
     };

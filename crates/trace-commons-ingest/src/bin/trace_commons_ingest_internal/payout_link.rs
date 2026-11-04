@@ -8,15 +8,23 @@
 //! - `POST /v1/account/payout-rails/{rail_id}/link-requests` starts a link
 //!   or an unlink. Local refusals come first (session kind, rail, body,
 //!   account standing, the "changed since shown" version); only then does a
-//!   `link` spend the person's NEAR AI token on the rail's recipient-proof
-//!   verifier (`/users/me`, then a zero-target probe). The verified org is
+//!   `link` go to the rail's recipient-proof verifier. That refuses an
+//!   account with no recorded NEAR AI login anchor before the token is
+//!   spent, and otherwise spends it (`/users/me`, then a zero-target probe):
+//!   the login must be one of the account's recorded NEAR AI login anchors,
+//!   on every deployment. A NEAR wallet anchor proves nothing. The verified
+//!   org is
 //!   sealed and stored on a request that changes nothing yet, with a 5
 //!   minute expiry and a handle.
 //! - `POST /v1/account/payout-rails/{rail_id}/link-requests/{handle}/confirm`
 //!   takes the request from the same account and, in one transaction, writes
 //!   the `waiting` link (or the unlink mark) and its audit rows, refusing if
 //!   the link changed since the request, a newer request superseded it, or
-//!   it expired. A confirmed change wakes the rail.
+//!   it expired, or (for a link) the account has no NEAR AI login anchor
+//!   any more. A confirmed change wakes the rail. The confirm re-reads the
+//!   anchors because a request can outlive the start's check: one started
+//!   by an older service across a deploy (V147 revokes what exists then),
+//!   or before the account lost its login.
 //! - `GET /v1/account/payout-rails` lists each rail that is not `disabled`:
 //!   link state, version and recipient ref, never a recipient or a name.
 //!
@@ -35,6 +43,7 @@
 //! subject.
 
 use super::*;
+use trace_commons_gate_api::PayoutRail;
 use trace_commons_protocol::payout_link::{
     PAYOUT_LINK_CONTRACT_VERSION, PayoutLinkAction as WireAction, PayoutLinkConfirmed,
     PayoutLinkOutcome, PayoutLinkProof, PayoutLinkRequest as WireRequest, PayoutLinkStarted,
@@ -42,13 +51,13 @@ use trace_commons_protocol::payout_link::{
     near_ai_recipient_ref,
 };
 use trace_commons_server::db::{
-    PayoutLinkAction, PayoutLinkConfirm, PayoutLinkConfirmWrite, PayoutLinkRequestInsert,
-    PayoutLinkRequestWrite, PayoutLinkState, PayoutStore, PayoutStream,
+    CarryPrograms, PayoutLinkAction, PayoutLinkConfirm, PayoutLinkConfirmWrite,
+    PayoutLinkRequestInsert, PayoutLinkRequestWrite, PayoutLinkState, PayoutStore, PayoutStream,
 };
 use trace_commons_server::payout_pass::{stream_status_hold_label, stream_waiting};
 use trace_commons_server::payout_rate::PayoutMode;
 use trace_commons_server::payout_recipient_proof::{
-    NEAR_AI_USERS_ME_TIMEOUT, NearAiOrgVerifier, RecipientProof, RecipientProofRefusal,
+    NEAR_AI_USERS_ME_TIMEOUT, NearAiOrgVerifier, ProofKind, RecipientProof, RecipientProofRefusal,
     RecipientProofVerifier,
 };
 use trace_commons_server::payout_recipient_seal::{payout_link_handle, seal_payout_recipient};
@@ -139,6 +148,69 @@ fn enabled_rail<'a>(state: &'a AppState, rail_id: &str) -> ApiResult<&'a Arc<Pay
         ));
     }
     Ok(entry)
+}
+
+/// The rail's program for a carried link's own id (V146).
+fn carry_programs(rail: &Arc<dyn PayoutRail>) -> CarryPrograms {
+    let rail = Arc::clone(rail);
+    CarryPrograms(Arc::new(move |link_id| rail.program_for_link(link_id)))
+}
+
+/// The carries an account opened in a legacy tenant takes in its own
+/// transaction (V148, #1873): one per enabled rail, with that rail's
+/// program for the carried link's id. Empty without a payout store.
+pub(super) fn enabled_carry_rails(
+    state: &AppState,
+) -> Vec<(trace_commons_gate_api::RailId, CarryPrograms)> {
+    if state.payout_store.is_none() {
+        return Vec::new();
+    }
+    state
+        .payout_rails
+        .entries()
+        .filter(|entry| entry.mode() != PayoutMode::Disabled)
+        .filter_map(|entry| {
+            entry
+                .rail()
+                .map(|rail| (entry.rail_id().clone(), carry_programs(rail)))
+        })
+        .collect()
+}
+
+/// After a new tenant link (V81), carry the account's live payout link on
+/// every enabled rail to the legacy accounts it now covers (V146). A
+/// confirm carries in its own transaction; this covers the order "payout
+/// link first, tenant link second". Best effort and idempotent: a failure
+/// carries nothing (no credit is paid to anyone it should not be), is
+/// logged by label, and the next confirm carries again.
+pub(super) async fn carry_after_tenant_link(state: &AppState, ctx: &AccountCtx) {
+    let Some(store) = state.payout_store.as_ref() else {
+        return;
+    };
+    for entry in state.payout_rails.entries() {
+        if entry.mode() == PayoutMode::Disabled {
+            continue;
+        }
+        let Some(rail) = entry.rail() else { continue };
+        match store
+            .carry_legacy_payout_links(
+                &ctx.tenant_id,
+                ctx.account_id.as_uuid(),
+                entry.rail_id(),
+                &carry_programs(rail),
+                &account_actor_hash(ctx),
+            )
+            .await
+        {
+            Ok(_) => state.payout_rails.notifier().notify_all(),
+            Err(error) => tracing::warn!(
+                rail = %entry.rail_id(),
+                label = "legacy_payout_carry_failed",
+                error_class = trace_commons_server::account_onboarding::database_error_label(&error),
+                "legacy payout carry after a tenant link failed"
+            ),
+        }
+    }
 }
 
 fn payout_store(state: &AppState) -> ApiResult<&Arc<dyn PayoutStore>> {
@@ -272,14 +344,16 @@ pub(super) async fn start_handler(
     let expected_version = body.expected_version();
     let idempotency_key = body.idempotency_key;
     let wire_action = body.action;
-    let (action, recipient, recipient_ref) = match body.proof {
-        None => (PayoutLinkAction::Unlink, None, None),
+    let (action, recipient, recipient_ref, proof_kind) = match body.proof {
+        None => (PayoutLinkAction::Unlink, None, None, None),
         Some(proof) => {
             let organization_id = match &proof {
                 PayoutLinkProof::NearAi {
                     organization_id, ..
                 } => *organization_id,
             };
+            // What the proving login must match: one of the account's
+            // recorded NEAR AI login anchors, and nothing else.
             let anchors = store
                 .payout_account_login_anchors(tenant, account)
                 .await
@@ -298,6 +372,7 @@ pub(super) async fn start_handler(
                     tracing::info!(
                         rail = %rail_id,
                         outcome = refusal.label(),
+                        reason = refusal.log_reason(),
                         "payout link refused"
                     );
                     return Err(proof_refusal(refusal));
@@ -321,6 +396,7 @@ pub(super) async fn start_handler(
                 PayoutLinkAction::Link,
                 Some((rail.descriptor().recipient_kind.clone(), sealed)),
                 Some(recipient_ref),
+                Some(verified.proof),
             )
         }
     };
@@ -339,6 +415,7 @@ pub(super) async fn start_handler(
                 recipient,
                 expires_at,
                 actor_ref_hash: account_actor_hash(&ctx),
+                proof_label: proof_kind.map(ProofKind::label),
             },
         )
         .await
@@ -353,6 +430,7 @@ pub(super) async fn start_handler(
         rail = %rail_id,
         action = action.as_str(),
         replayed = inserted == PayoutLinkRequestInsert::Replayed,
+        proof = proof_kind.map(ProofKind::label).unwrap_or("none"),
         "payout link requested"
     );
     Ok((
@@ -405,6 +483,7 @@ pub(super) async fn confirm_handler(
                 link_id,
                 program: rail.program_for_link(link_id),
                 actor_ref_hash: account_actor_hash(&ctx),
+                carry_programs: Some(carry_programs(&rail)),
             },
         )
         .await
@@ -443,10 +522,19 @@ pub(super) async fn confirm_handler(
             PayoutLinkOutcome::PayoutLinkChangePending,
         ),
         PayoutLinkConfirm::NotLinked => (StatusCode::CONFLICT, PayoutLinkOutcome::PayoutNotLinked),
+        // The generic refusal shipped apps already show, as at the start.
+        PayoutLinkConfirm::NoLoginAnchor => {
+            (StatusCode::FORBIDDEN, PayoutLinkOutcome::SubjectMismatch)
+        }
+    };
+    let reason = match outcome {
+        PayoutLinkConfirm::NoLoginAnchor => "no_near_ai_login",
+        _ => refusal.1.as_str(),
     };
     tracing::info!(
         rail = %entry.rail_id(),
         outcome = refusal.1.as_str(),
+        reason,
         "payout link confirm refused"
     );
     Err(refuse(refusal.0, refusal.1))

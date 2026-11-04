@@ -105,7 +105,7 @@ fn stored_headers(bundle: &StoredTokenBundle) -> ApiResult<HeaderMap> {
 pub(super) async fn begin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: Bytes,
+    UploadBytes(body): UploadBytes,
 ) -> ApiResult<Json<serde_json::Value>> {
     let (_, server_id) = gate(&state)?;
     let tenant =
@@ -163,7 +163,7 @@ pub(super) async fn put(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath((submission, revision, artifact)): AxumPath<(Uuid, String, String)>,
-    body: Bytes,
+    UploadBytes(body): UploadBytes,
 ) -> ApiResult<Json<serde_json::Value>> {
     let (store, _) = gate(&state)?;
     let tenant =
@@ -230,14 +230,87 @@ pub(super) async fn put(
     .map_err(internal_error)?;
     Ok(Json(serde_json::json!({"ready":true})))
 }
+/// Bundle finalize, between `authenticate_large_body_request` and
+/// `admit_submit_before_body`: refuse a finalize whose bundle cannot be
+/// finalized before it takes a submit slot or a unit of the submit rate
+/// (decision 3 on #1794). Bundles disabled on this deployment (503), an
+/// unknown bundle (404) and a revoked one (410) are answered here with the
+/// labels `finalize` gives, before the body is read, and cost the
+/// principal's submit window nothing. The bundle lookup itself is bounded by
+/// a separate per-minute counter at the submit rate
+/// ([`finalize_precheck_rate_limit_key`]); past it, `429 submit_rate_limited`.
+///
+/// `finalize` reads the bundle again after the body: the upload can take
+/// minutes, and what it acts on (revocation, a receipt from a concurrent
+/// finalize, the ready attachments) must be read then, not here.
+///
+/// A replay of a finalized bundle passes and still counts: its receipt is
+/// answered only after the body's digest is checked, which needs the body.
+/// The large-body slot and byte share are taken before this runs, since this
+/// needs the authenticated context that gate establishes.
+pub(super) async fn finalize_precheck(
+    State(state): State<Arc<AppState>>,
+    AxumPath((submission, revision)): AxumPath<(Uuid, String)>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(PreBodyAuthenticated(tenant)) = request.extensions().get().cloned() else {
+        return next.run(request).await;
+    };
+    let finalizable = async {
+        // No database read: environment and configuration only.
+        gate(&state)?;
+        // The bundle lookup is bounded by its own per-minute counter, at the
+        // submit rate, so a principal looping on an unknown bundle cannot
+        // issue lookups without limit; it never spends the submit window.
+        let key = finalize_precheck_rate_limit_key(&tenant);
+        let (rate, _) = submit_rate_limits(&key, state.submit_principal_limits);
+        if !ACCOUNT_RATE_LIMITER.check_principal(&key, rate) {
+            return Err(submit_rate_limited(
+                ACCOUNT_RATE_LIMITER.principal_retry_after_seconds(&key),
+            ));
+        }
+        let bundle = owned(&state, &tenant, submission, &revision).await?;
+        if bundle.state == "revoked" {
+            return Err(api_error(StatusCode::GONE, "token_bundle_revoked"));
+        }
+        Ok(())
+    };
+    if let Err(refusal) = finalizable.await {
+        return api_error_response_with_retry_after(refusal);
+    }
+    next.run(request).await
+}
+
+/// The per-minute counter [`finalize_precheck`] takes before its bundle
+/// lookup: the principal's submit key under its own prefix, so it is a
+/// separate window from the submit rate.
+fn finalize_precheck_rate_limit_key(tenant: &TenantCtx) -> String {
+    format!(
+        "finalize-precheck:{}",
+        submit_principal_rate_limit_key(
+            tenant.tenant_id(),
+            tenant.safe_auth_method(),
+            tenant.principal_ref(),
+        )
+    )
+}
 pub(super) async fn finalize(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath((submission, revision)): AxumPath<(Uuid, String)>,
+    admitted: Option<axum::Extension<SubmitAdmittedBeforeBody>>,
     body: SubmitBody,
 ) -> ApiResult<Json<DurableBundleReceipt>> {
     let (store, server_id) = gate(&state)?;
-    let tenant = authenticate_ctx(&state, &headers)?;
+    let admitted = admitted.map(|axum::Extension(admitted)| admitted);
+    // The context authenticated before the body was read, as for
+    // `POST /v1/traces`: a claim that expired while the body uploaded is
+    // still the claim this request began with.
+    let tenant = match &admitted {
+        Some(SubmitAdmittedBeforeBody(tenant)) => tenant.clone(),
+        None => authenticate_ctx(&state, &headers)?,
+    };
     let bundle = owned(&state, &tenant, submission, &revision).await?;
     if bundle.state == "revoked" {
         return Err(api_error(StatusCode::GONE, "token_bundle_revoked"));
@@ -311,7 +384,9 @@ pub(super) async fn finalize(
     }
     // Existing admission, tenant scope, witness, PII and consent checks all run.
     // A normal upload status is not the bundle's durable receipt.
-    let _ = submit_trace_handler(State(state.clone()), headers, body).await?;
+    // Counted by `admit_submit_before_body` when it ran on this route.
+    let _ =
+        submit_trace_handler_authenticated(State(state.clone()), headers, body, admitted).await?;
     let record = tenant
         .read_submission_record(&state.root, submission)
         .map_err(internal_error)?

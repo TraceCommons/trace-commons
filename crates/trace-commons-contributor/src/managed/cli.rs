@@ -87,6 +87,12 @@ pub enum AccountCommand {
 #[derive(Subcommand)]
 pub enum SessionCommand {
     List,
+    /// Continue an ended session's conversation in this terminal, as a new
+    /// session with the same account, folder and options.
+    Resume {
+        /// The session's id, as `sessions list` shows it.
+        session_id: Uuid,
+    },
 }
 
 #[derive(Deserialize)]
@@ -107,11 +113,23 @@ pub fn call<T: DeserializeOwned>(
     let response =
         client::try_call(store, method, &params)?.ok_or(ManagedError::DaemonUnavailable)?;
     if let Some(error) = response.error {
-        anyhow::bail!("{}", error.code);
+        return Err(refusal(&error.code));
     }
     Ok(serde_json::from_value(
         response.result.ok_or(ManagedError::InvalidRequest)?,
     )?)
+}
+
+/// The error for a daemon refusal labelled `code`: its label, except for a
+/// refusal whose sentence tells the person what to change.
+fn refusal(code: &str) -> anyhow::Error {
+    if code == super::PROJECT_CHOOSES_MODEL_LABEL {
+        return ManagedError::ProjectChoosesModel.into();
+    }
+    if code == super::PROJECT_SETS_AUTO_MODE_SERVER_LABEL {
+        return ManagedError::ProjectSetsAutoModeServer.into();
+    }
+    anyhow::anyhow!("{code}")
 }
 
 /// Whether `--connection asked` admits an account on `connection`. The
@@ -321,6 +339,9 @@ pub async fn launch(store: &ConfigStore, args: LaunchArgs) -> anyhow::Result<i32
         cwd,
         expected_generation,
         save_default: false,
+        keep_saved_model: false,
+        resume_of: None,
+        background_model: None,
     };
     let prepared: PreparedLaunch = call(store, "managed_launch_prepare", json!(request))?;
     super::supervisor::redeem_and_run(store, prepared).await
@@ -461,17 +482,50 @@ async fn login(
     print_value(result, json_output)
 }
 
-pub fn sessions(
-    store: &ConfigStore,
-    _command: SessionCommand,
-    json_output: bool,
-) -> anyhow::Result<()> {
+/// `sessions list`. `sessions resume` runs a tool, so it is [`resume`].
+pub fn list_sessions(store: &ConfigStore, json_output: bool) -> anyhow::Result<()> {
     let snapshot: Value = call(store, "managed_snapshot", json!({}))?;
     print_value(snapshot["sessions"].clone(), json_output)
 }
 
+/// Continue the conversation of the ended session `session_id` in this
+/// terminal: the daemon prepares a new session that resumes it, with the
+/// checks Start again makes, and this process runs the tool as `launch`
+/// does. Returns the tool's exit code.
+pub async fn resume(store: &ConfigStore, session_id: Uuid) -> anyhow::Result<i32> {
+    let prepared: PreparedLaunch = call(
+        store,
+        "managed_session_resume",
+        json!({"session_id":session_id,"request_id":Uuid::new_v4()}),
+    )?;
+    super::supervisor::redeem_and_run(store, prepared).await
+}
+
 #[cfg(test)]
 mod tests {
+    /// A refusal the person can act on reads as its sentence in the
+    /// terminal, not as its label (owner, 2026-11-01); any other refusal
+    /// keeps its label.
+    #[test]
+    fn a_project_auto_mode_server_refusal_prints_why() {
+        assert_eq!(
+            refusal(crate::managed::PROJECT_SETS_AUTO_MODE_SERVER_LABEL).to_string(),
+            "Remove CLAUDE_CODE_AUTO_MODE_SERVER from this project's settings."
+        );
+    }
+
+    #[test]
+    fn a_project_model_refusal_prints_why() {
+        assert_eq!(
+            refusal(crate::managed::PROJECT_CHOOSES_MODEL_LABEL).to_string(),
+            crate::managed::ManagedError::ProjectChoosesModel.to_string()
+        );
+        assert_eq!(
+            refusal("managed-model-unavailable").to_string(),
+            "managed-model-unavailable"
+        );
+    }
+
     use super::*;
     use crate::managed::{AccountId, AuthState, signin};
 

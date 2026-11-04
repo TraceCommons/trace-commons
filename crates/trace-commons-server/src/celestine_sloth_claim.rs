@@ -482,7 +482,7 @@ pub async fn cosmos_account_holds_sloth_token(
 }
 
 /// A pending claim challenge. Held single-use and TTL-bounded in a
-/// [`crate::account_passkey::CeremonyStore`].
+/// [`crate::account_ceremony::CeremonyStore`].
 ///
 /// `address` is bound at issue time so a challenge minted for one address
 /// cannot be redeemed against another. The signature check alone would already
@@ -504,7 +504,7 @@ pub struct CelestineSlothClaimState {
     pub sink: Arc<dyn InviteGrantSink>,
     pub registry: Option<Arc<crate::trace_invite_registry::DbInviteRegistry>>,
     pub sloths: Arc<CelestineSlothConfig>,
-    pub challenges: Arc<crate::account_passkey::CeremonyStore<CelestineSlothChallenge>>,
+    pub challenges: Arc<crate::account_ceremony::CeremonyStore<CelestineSlothChallenge>>,
     pub token_checker_override: Option<Arc<dyn CelestineSlothTokenChecker>>,
 }
 
@@ -571,7 +571,7 @@ impl CelestineSlothClaimState {
             sink: backend,
             registry,
             sloths: Arc::new(sloths),
-            challenges: Arc::new(crate::account_passkey::CeremonyStore::new()),
+            challenges: Arc::new(crate::account_ceremony::CeremonyStore::new()),
             token_checker_override: None,
         })
     }
@@ -601,7 +601,7 @@ async fn challenge_handler(
     let mut nonce = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let nonce_hex = hex::encode(nonce);
-    let challenge_id = crate::account_passkey::new_ceremony_id();
+    let challenge_id = crate::account_ceremony::new_ceremony_id();
     let message = claim_sign_message(&nonce_hex);
     let sign_doc = adr036_sign_doc(&address, &message);
 
@@ -1236,7 +1236,7 @@ mod router_tests {
                 max_uses: 3,
                 grant_ttl_days: 30,
             }),
-            challenges: Arc::new(crate::account_passkey::CeremonyStore::new()),
+            challenges: Arc::new(crate::account_ceremony::CeremonyStore::new()),
             token_checker_override: Some(Arc::new(FakeTokenChecker(token))),
         };
         Harness { state, sink }

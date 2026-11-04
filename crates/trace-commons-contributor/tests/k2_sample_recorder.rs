@@ -38,7 +38,7 @@
 //!
 //! The network methods (C3, #1187: `inference_summary`,
 //! `inference_call_proof`, `model_spend`, `private_ai`, `mission_catalogue`,
-//! `invite_lookup`, `passkey_state`, `account_session_status`,
+//! `invite_lookup`, `account_session_status`,
 //! `activity_missions_catalogue`) are not recorded here: they answer from
 //! the network, and this recorder's temp store has none behind it. They stay
 //! hand-written in `SampleDaemonData.swift` in the shapes the daemon
@@ -493,6 +493,7 @@ fn enroll(store: &ConfigStore) {
         inference_receipt_endpoint: None,
         consent_scopes_chosen: Some(true),
         witness_origin: None,
+        account_identity: None,
         inference_receipt_check_attestation: false,
         schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
         issuer_url: "http://issuer.invalid".into(),
@@ -1157,12 +1158,9 @@ fn override_touched_keys(key: &str) -> Option<&'static [&'static str]> {
             "idle_sessions",
             "_sample",
         ]),
-        "normalDay/status" | "busyQueue/status" => Some(&[
-            "private_inference_state",
-            "routing",
-            "daily_budget",
-            "_sample",
-        ]),
+        "normalDay/status" | "busyQueue/status" => {
+            Some(&["private_inference_state", "routing", "_sample"])
+        }
         "normalDay/harness_list" | "busyQueue/harness_list" => Some(&[
             "harnesses",
             "activity",
@@ -1233,29 +1231,9 @@ fn apply_hand_written_overrides(all: &mut BTreeMap<String, Value>) {
                 json!({"state": "rows_seen", "derived": true,
                        "last_refresh_at": VOLATILE_TIMESTAMP_PLACEHOLDER, "unreadable_rows": 0}),
             );
-            if let Some(Value::Object(budget)) = status.get_mut("daily_budget") {
-                let max_bytes = budget
-                    .get("max_bytes_per_day")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                let max_uploads = budget
-                    .get("max_uploads_per_day")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                budget.insert("bytes_today".into(), json!(1_048_576));
-                budget.insert(
-                    "bytes_remaining".into(),
-                    json!(max_bytes.saturating_sub(1_048_576)),
-                );
-                budget.insert("uploads_today".into(), json!(4));
-                budget.insert(
-                    "uploads_remaining".into(),
-                    json!(max_uploads.saturating_sub(4)),
-                );
-            }
             status.insert(
                 "_sample".into(),
-                json!("private AI, routing and budget need a live IronWire"),
+                json!("private AI and routing need a live IronWire"),
             );
         }
         if let Some(Value::Object(list)) = all.get_mut(&format!("{set}/harness_list")) {

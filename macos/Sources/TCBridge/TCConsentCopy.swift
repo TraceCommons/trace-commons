@@ -58,6 +58,15 @@ public enum TCConsentCopy {
         return String(cString: raw)
     }
 
+    /// The words for changing the NEAR AI login an account uses (F10), as a
+    /// JSON object, or nil on a caught panic. Every string is owner-approved.
+    /// Decoded by `TCShellCore.AccountChangeCopy`.
+    public static func accountChangeCopyJSON() -> String? {
+        guard let raw = tc_account_change_copy_json() else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
     /// The words for adding Train coding models to sent traces, as a JSON
     /// object, or nil on a caught panic. Every string is a draft awaiting
     /// owner approval. Decoded by `TCShellCore.SentTracesTrainingCopy`.
@@ -124,6 +133,20 @@ public enum TCConsentCopy {
     /// panic. Which folders sentence to show is the ABI's choice.
     public static func legacyMigrationNoticeJSON(forNotice wireJSON: String) -> String? {
         let raw = wireJSON.withCString { tc_legacy_migration_notice($0) }
+        guard let raw else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// The account section's status while this app's account needs
+    /// attention (#1836 F1), as a JSON object, from the status keys
+    /// (`AccountAttentionWire.wireJSON`). Decoded by
+    /// `TCShellCore.AccountAttention`.
+    ///
+    /// Nil while there is nothing to show, for an unreadable argument, or on
+    /// a caught panic. Which sentence to show is the ABI's choice.
+    public static func accountAttentionJSON(forStatus wireJSON: String) -> String? {
+        let raw = wireJSON.withCString { tc_account_attention_copy_json($0) }
         guard let raw else { return nil }
         defer { tc_string_free(raw) }
         return String(cString: raw)

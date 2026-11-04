@@ -73,6 +73,7 @@ fn enrolled_config() -> trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
         consent_scopes_chosen: Some(true),
         witness_origin: None,
+        account_identity: None,
         inference_receipt_check_attestation: false,
         schema_version: "trace_commons.contributor_config.v1".to_string(),
         issuer_url: "https://issuer.example".to_string(),
@@ -106,6 +107,7 @@ fn unenrolled_preview_config() -> trace_commons_contributor::config::Contributor
         inference_receipt_endpoint: None,
         consent_scopes_chosen: Some(true),
         witness_origin: None,
+        account_identity: None,
         inference_receipt_check_attestation: false,
         schema_version: "trace_commons.contributor_config.v1".to_string(),
         issuer_url: "https://unenrolled-preview.invalid".to_string(),
@@ -513,8 +515,16 @@ async fn canonical_size_boundary_agrees_before_and_after_enrollment() {
     );
     assert_eq!(preview_size, enrolled_size);
     assert_eq!(
-        trace_commons_contributor::envelope::envelope_size_ok(&preview).is_ok(),
-        trace_commons_contributor::envelope::envelope_size_ok(&enrolled).is_ok(),
+        trace_commons_contributor::envelope::envelope_size_ok(
+            &preview,
+            trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES
+        )
+        .is_ok(),
+        trace_commons_contributor::envelope::envelope_size_ok(
+            &enrolled,
+            trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES
+        )
+        .is_ok(),
     );
 }
 

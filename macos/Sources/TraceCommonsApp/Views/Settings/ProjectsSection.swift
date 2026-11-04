@@ -39,6 +39,9 @@ struct ProjectsSection: View {
         // The container is always present, so the dialog is attached
         // whether or not any project is drawn.
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            // Setup's sharing choice, changeable here (#1753 A2), over the
+            // folders it is the default for.
+            SharingChoiceCard()
             GlassEyebrowCard(SettingsWords.projects) {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     // The list defaults to empty, and a failed

@@ -1,0 +1,34 @@
+name: Free disk space on a Linux runner
+description: >-
+  Deletes large preinstalled toolchains this workflow never uses (.NET, the
+  Android SDK, Haskell and the CodeQL bundle), so a job that restores a big
+  cargo cache and then compiles several feature sets does not run out of
+  disk. Run it before the cache restore. A no-op off Linux.
+#
+# Why this exists. On 2026-11-01 the `staging channel tests` job failed on
+# a PR with "No space left on device" while compiling the contributor's lib
+# tests: no test failed, and a rerun on the same commit passed. That job
+# restores the whole `cargo test (default features)` cache as its fallback
+# and then builds five package and feature selections on top of it, which
+# leaves the standard runner's disk close to full.
+#
+# What goes. Only directories no job in ci.yml reads: no job builds .NET,
+# Android or Haskell code, and none runs CodeQL. The Windows and macOS
+# clients are built in clients.yml on their own runners, which this action
+# never touches. Docker images are left alone, because the pipeline
+# qualification job pulls a digest-pinned PostgreSQL container.
+#
+# The deletions run in parallel, and the step prints the free space before
+# and after, so a job log shows what was reclaimed.
+runs:
+  using: composite
+  steps:
+    - if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        df -h / | tail -1 | awk '{print "free before: " $4}'
+        for d in /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL; do
+          [ -d "$d" ] && sudo rm -rf "$d" &
+        done
+        wait
+        df -h / | tail -1 | awk '{print "free after: " $4}'
