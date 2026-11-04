@@ -1960,7 +1960,7 @@ enum HomeFormat {
     }
 
     static func points(_ value: Double?) -> String {
-        value.map { $0.formatted(.number.precision(.fractionLength(1))) } ?? "—"
+        value.map { $0.formatted(.number.precision(.fractionLength(0...1))) } ?? "—"
     }
 
     /// Home's pending-credit tile: the figure only with the commons'

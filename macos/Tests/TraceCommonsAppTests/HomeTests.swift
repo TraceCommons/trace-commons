@@ -93,6 +93,14 @@ final class HomeTests: XCTestCase {
         XCTAssertEqual(HomeFormat.points(nil), "—")
     }
 
+    /// Credit is a whole number where it is whole, and keeps one decimal
+    /// where it is not: "0", not "0.0", beside whole-number counts.
+    func test_pointsAreWholeWhereWhole() {
+        XCTAssertEqual(HomeFormat.points(0), "0")
+        XCTAssertEqual(HomeFormat.points(48), "48")
+        XCTAssertEqual(HomeFormat.points(12.5), "12.5")
+    }
+
     /// A recorded reply, decoded after `edit` is applied to its JSON object
     /// (the K2 recordings carry an unknown commons posture).
     private func recorded<T: Decodable>(
