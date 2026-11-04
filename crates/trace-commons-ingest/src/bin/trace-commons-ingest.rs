@@ -27,6 +27,8 @@ mod admission;
 mod credit_estimate;
 #[path = "trace_commons_ingest_internal/file_witness.rs"]
 mod file_witness;
+#[path = "trace_commons_ingest_internal/first_run_copy.rs"]
+mod first_run_copy;
 #[path = "trace_commons_ingest_internal/inference_connection.rs"]
 mod inference_connection_routes;
 #[path = "trace_commons_ingest_internal/legacy_invite_link.rs"]
@@ -1785,6 +1787,12 @@ struct AppState {
     /// serves: from the operator's two settings, validated at boot, or
     /// empty when neither is set.
     first_run_estimate: Arc<trace_commons_protocol::first_run_estimate::FirstRunEstimate>,
+    /// What `POST /v1/public/first-run-copy` answers: the default lines, or
+    /// the operator's dollar line, validated at boot.
+    first_run_copy: Arc<first_run_copy::FirstRunCopyConfig>,
+    /// Where each first-run estimate request is recorded and the operator's
+    /// statistics are read (V153). `None` without a database.
+    first_run_stats: Option<Arc<dyn trace_commons_server::db::first_run_stats::FirstRunStatsStore>>,
     inference_connection_catalog:
         Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
@@ -5259,6 +5267,11 @@ impl AppState {
             referral_config,
             referral_network_mark_key,
             first_run_estimate: credit_estimate::first_run_estimate_from_env()?,
+            first_run_copy: first_run_copy::config_from_env()?,
+            first_run_stats: db_connections.as_ref().map(|connections| {
+                connections.postgres.clone()
+                    as Arc<dyn trace_commons_server::db::first_run_stats::FirstRunStatsStore>
+            }),
             attestation_signing,
             legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -8829,6 +8842,16 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/public/first-run-estimate",
             get(credit_estimate::first_run_estimate_handler),
         )
+        // Same reason: the first run asks what to say under the traces it
+        // found before an account or any consent exists. A POST, so the
+        // coarsened figures never sit in a URL a proxy logs; a small body
+        // bound.
+        .route(
+            "/v1/public/first-run-copy",
+            post(first_run_copy::first_run_copy_handler).layer(DefaultBodyLimit::max(
+                trace_commons_protocol::first_run_copy::FIRST_RUN_COPY_MAX_REQUEST_BYTES,
+            )),
+        )
         // Same reason: the settlement table is public, non-personal data.
         // 404 when the operator installed none.
         .route(
@@ -9312,6 +9335,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/credit-estimate-eval",
             post(credit_estimate::eval_handler),
+        )
+        .route(
+            "/v1/admin/first-run-estimate-stats",
+            get(first_run_copy::stats_handler),
         )
         .route(
             "/v1/admin/pii-backstop-requeue-quarantined",

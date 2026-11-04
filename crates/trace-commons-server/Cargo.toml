@@ -294,6 +294,9 @@ path = "tests/payout_pass_pg.rs"
 name = "payout_rails_pg"
 path = "tests/payout_rails_pg.rs"
 [[test]]
+name = "first_run_stats_pg"
+path = "tests/first_run_stats_pg.rs"
+[[test]]
 name = "referral_bonus_pg"
 path = "tests/referral_bonus_pg.rs"
 [[test]]

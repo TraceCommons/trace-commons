@@ -14,6 +14,7 @@ use crate::trace_corpus_storage::{
 };
 use crate::trace_invite_registry::InviteTenantMode;
 
+pub mod first_run_stats;
 pub mod postgres;
 pub mod postgres_inference_connection;
 mod postgres_legacy_payout_carry;

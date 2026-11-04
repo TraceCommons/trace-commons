@@ -4377,6 +4377,13 @@ extension AppModel: FirstRunDaemon {
         return true
     }
 
+    func firstRunCopy(traceCount: UInt64, totalBytes: UInt64) async -> DaemonData.FirstRunCopyLines? {
+        guard case .success(let lines) = await firstRunCall({
+            try $0.firstRunCopy(traceCount: traceCount, totalBytes: totalBytes)
+        }) else { return nil }
+        return lines
+    }
+
     func firstRunEstimate() async -> DaemonData.FirstRunEstimate? {
         guard case .success(let estimate) = await firstRunCall({ try $0.firstRunEstimate() }) else { return nil }
         return estimate

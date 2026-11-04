@@ -47,6 +47,10 @@ public struct SourceCandidate: Equatable, Sendable {
     /// A fixed label the Rust side ships with, never something checked
     /// against the copy of the tool actually installed on this machine.
     public let answersAt: String?
+    /// The counted session files' total size, or nil when not measured (an
+    /// OpenCode database, a store that is not there, or an older core).
+    /// Summed for the first run's `first_run_copy` ask, which coarsens it.
+    public let totalBytes: UInt64?
 
     public init(
         source: SourceKind,
@@ -55,7 +59,8 @@ public struct SourceCandidate: Equatable, Sendable {
         sessionCount: UInt64,
         mostRecent: Date?,
         relocatedByEnv: Bool,
-        answersAt: String? = nil
+        answersAt: String? = nil,
+        totalBytes: UInt64? = nil
     ) {
         self.source = source
         self.path = path
@@ -64,6 +69,7 @@ public struct SourceCandidate: Equatable, Sendable {
         self.mostRecent = mostRecent
         self.relocatedByEnv = relocatedByEnv
         self.answersAt = answersAt
+        self.totalBytes = totalBytes
     }
 
     /// The one line under the path that says what agreeing would mean, in
@@ -135,6 +141,8 @@ public struct SourceCandidate: Equatable, Sendable {
         /// row, the same way an unrecognized `source` is dropped rather than
         /// thrown.
         let answersAt: String?
+        /// Absent from an older core's rows: nil, as `answersAt`.
+        let totalBytes: UInt64?
 
         enum CodingKeys: String, CodingKey {
             case source
@@ -144,6 +152,7 @@ public struct SourceCandidate: Equatable, Sendable {
             case mostRecent = "most_recent"
             case relocatedByEnv = "relocated_by_env"
             case answersAt = "answers_at"
+            case totalBytes = "total_bytes"
         }
 
         var candidate: SourceCandidate? {
@@ -155,7 +164,8 @@ public struct SourceCandidate: Equatable, Sendable {
                 sessionCount: sessionCount,
                 mostRecent: mostRecent.flatMap(Wire.parseTimestamp),
                 relocatedByEnv: relocatedByEnv,
-                answersAt: answersAt
+                answersAt: answersAt,
+                totalBytes: totalBytes
             )
         }
 

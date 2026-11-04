@@ -31,6 +31,14 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
         record(.startDaemon(settingsJSON: settingsJSON))
     }
 
+    /// What `first_run_copy` answers, and the figures each ask sent.
+    var traceLines: DaemonData.FirstRunCopyLines?
+    private(set) var traceLinesAsks: [[UInt64]] = []
+    func firstRunCopy(traceCount: UInt64, totalBytes: UInt64) async -> DaemonData.FirstRunCopyLines? {
+        traceLinesAsks.append([traceCount, totalBytes])
+        return traceLines
+    }
+
     /// What `first_run_estimate` answers, and how often it was asked.
     var estimate: DaemonData.FirstRunEstimate?
     private(set) var estimateAsks = 0
@@ -190,6 +198,30 @@ final class FirstRunRunnerTests: XCTestCase {
         await runner.loadDollarEstimate()
         XCTAssertEqual(daemon.estimateAsks, 1, "asked once")
         XCTAssertEqual(runner.dollarEstimate, daemon.estimate)
+    }
+
+    /// Traces asks the started daemon for its lines once, with the count
+    /// and size discovery found, and keeps the answer; it asks nothing
+    /// before the daemon runs or while nothing is counted.
+    func test_theTraceLinesAreAskedOnceTheDaemonRunsAndTracesAreCounted() async {
+        let daemon = RecordingFirstRunDaemon()
+        daemon.traceLines = DaemonData.FirstRunCopyLines(
+            foundCredit: "SAMPLE line.", foundCouldCredit: "SAMPLE could line.",
+            creditDepends: nil, source: "commons")
+        let runner = FirstRunRunner(state: FirstRunState(step: .traces), daemon: daemon)
+        await runner.loadTraceLines(traceCount: 4123, totalBytes: 987_654_321)
+        XCTAssertTrue(daemon.traceLinesAsks.isEmpty, "no daemon, no ask")
+
+        runner.state.daemonStarted = true
+        await runner.loadTraceLines(traceCount: nil, totalBytes: 0)
+        await runner.loadTraceLines(traceCount: 0, totalBytes: 0)
+        XCTAssertTrue(daemon.traceLinesAsks.isEmpty, "nothing counted, no ask")
+        XCTAssertNil(runner.traceLines)
+
+        await runner.loadTraceLines(traceCount: 4123, totalBytes: 987_654_321)
+        await runner.loadTraceLines(traceCount: 4123, totalBytes: 987_654_321)
+        XCTAssertEqual(daemon.traceLinesAsks, [[4123, 987_654_321]], "asked once, the shell's own figures")
+        XCTAssertEqual(runner.traceLines, daemon.traceLines)
     }
 
     func test_aFailedStartKeepsTheInviteAndJoinsNothing() async {

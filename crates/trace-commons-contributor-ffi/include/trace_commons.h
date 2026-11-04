@@ -487,6 +487,9 @@ tc_handle*  tc_daemon_attach(const char* config_dir, char** err);
  *   exists            whether that store is there right now
  *   session_count     how many sessions were discovered
  *   most_recent       RFC 3339 timestamp, or null
+ *   total_bytes       the counted session files' total size, or null
+ *                     when not measured (an OpenCode database, or a
+ *                     store that is not there)
  *   relocated_by_env  whether an environment override moved it
  *   answers_at        the vendor this tool's own calls answer at by
  *                     default (e.g. "Anthropic"), or null for a tool with
@@ -2157,13 +2160,12 @@ char*       tc_onboarding_copy(void);
  */
 char*       tc_first_run_copy_json(void);
 
-/* The first run's Traces estimate, one line, worded and formatted by the
- * core (first_run_copy::traces_estimate_line). `request` is a JSON object:
- * {"traces": <found>, "usd_micros_per_accepted_trace": {min,max},
- * "credit_range": <an invite lookup's>}, each optional. A dollar total when
- * the commons published a range, else points. Returns an OWNED string; free
- * with tc_string_free. NULL draws no line: nothing found or counted yet, a
- * total past range, or a NULL or unreadable request.
+/* The first run's Traces line under the count, worded by the core
+ * (first_run_copy::traces_estimate_line). `request` is a JSON object:
+ * {"traces": <found>, "earns_credit": <bool>}, each optional; older shells'
+ * "usd_micros_per_accepted_trace" and "credit_range" are ignored. Names no
+ * amount. Returns an OWNED string; free with tc_string_free. NULL draws no
+ * line: nothing found or counted yet, or a NULL or unreadable request.
  */
 char*       tc_first_run_estimate_line(const char* request);
 

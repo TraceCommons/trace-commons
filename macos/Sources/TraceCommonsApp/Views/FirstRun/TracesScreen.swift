@@ -4,11 +4,12 @@ import TCDesign
 import TCShellCore
 
 /// What Traces shows, apart from the view so it can be tested: the watched
-/// tools' traces counted, and what they could earn, one estimated total in
-/// the core's words (owner, 2026-10-23). The core multiplies and formats it
-/// (`tc_first_run_estimate_line`): dollars of NEAR AI credit when the
-/// commons publishes a range per accepted trace, else points from an
-/// invite's range or the core's default (3 to 8, owner, 2026-10-22).
+/// tools' traces counted, and the lines under the count. The commons words
+/// them (owner, 2026-11-04): the daemon asks it with the count and size,
+/// coarsened, and answers with its lines or the protocol's default lines
+/// (`first_run_copy`). Without that answer, the core's own line
+/// (`tc_first_run_estimate_line`), which names no amount either, with its
+/// final-credit note.
 enum TracesScreenLayout {
     /// A watched tool and its traces on this Mac.
     struct Row: Equatable {
@@ -23,6 +24,35 @@ enum TracesScreenLayout {
         }
     }
 
+    /// The watched tools' session files' total size, the figure the
+    /// `first_run_copy` ask sends beside the count. A store not measured
+    /// adds nothing.
+    static func totalBytes(_ state: FirstRunState, discovered: [SourceCandidate]?) -> UInt64 {
+        ToolsScreenLayout.watchedKinds(state).reduce(0) { sum, kind in
+            let row = discovered?.first { $0.source == kind && $0.exists }
+            return sum &+ (row?.totalBytes ?? 0)
+        }
+    }
+
+    /// The headline under the count and the smaller note under it, or nil
+    /// for none (nothing found or counted yet). The daemon's lines when it
+    /// answered `first_run_copy`, else the core's line and its final-credit
+    /// note. Either way, while the use that earns credit is off the headline
+    /// is the could-earn one and there is no note: the no-credit note sits
+    /// there instead (owner, 2026-11-04).
+    static func lines(
+        found: UInt64?, served: DaemonData.FirstRunCopyLines?, coreLine: String?, coreNote: String,
+        earnsCredit: Bool
+    ) -> (headline: String, note: String?)? {
+        guard let found, found > 0 else { return nil }
+        if let served {
+            return earnsCredit
+                ? (served.foundCredit, served.creditDepends)
+                : (served.foundCouldCredit, nil)
+        }
+        return coreLine.map { ($0, earnsCredit ? coreNote : nil) }
+    }
+
     static func total(_ rows: [Row]) -> UInt64 {
         rows.reduce(0) { $0 + $1.traces }
     }
@@ -34,10 +64,10 @@ enum TracesScreenLayout {
         return total(rows(state, discovered: discovered))
     }
 
-    /// The one estimate line, as the core words it, or nil for none
-    /// (nothing found or counted yet). The core picks dollars or points,
-    /// and, while the use that earns credit is off (`earnsCredit` false),
-    /// words it as what the traces could earn (Zaki's review of #1690).
+    /// The one line, as the core words it, or nil for none (nothing found
+    /// or counted yet). While the use that earns credit is off
+    /// (`earnsCredit` false) it says what the traces could earn (Zaki's
+    /// review of #1690).
     static func estimate(
         found: UInt64?, lookup: DaemonData.InviteLookup?, dollars: DaemonData.FirstRunEstimate?,
         earnsCredit: Bool = true
@@ -134,6 +164,11 @@ struct TracesScreen: View {
             openedAt = memory.tracesCounted ? .distantPast : Date()
         }
         .task { await runner.loadDollarEstimate() }
+        .task(id: TracesScreenLayout.found(runner.state, discovered: memory.discovered)) {
+            await runner.loadTraceLines(
+                traceCount: TracesScreenLayout.found(runner.state, discovered: memory.discovered),
+                totalBytes: TracesScreenLayout.totalBytes(runner.state, discovered: memory.discovered))
+        }
     }
 
     private func graphic(rows: [TracesScreenLayout.Row], total: UInt64) -> some View {
@@ -250,22 +285,35 @@ struct TracesScreen: View {
         .frame(maxWidth: 460)
     }
 
-    /// The one estimated total, or nothing at all when there is none.
+    /// The headline under the count, with its note when there is one, or
+    /// nothing at all when there is none.
     @ViewBuilder
     private func estimate(found: UInt64?) -> some View {
         let done = memory.tracesCounted || reduceMotion
-        if let line = TracesScreenLayout.estimate(
-            found: found, lookup: runner.lookup, dollars: runner.dollarEstimate,
-            earnsCredit: !TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses)) {
-            Text(line)
-                .glassType(GlassTokens.TypeScale.heading)
-                .foregroundStyle(GlassColor.textPrimary)
-                .multilineTextAlignment(.center)
-                .firstRunCard(padding: EdgeInsets(top: 12, leading: 24, bottom: 12, trailing: 24))
-                .fixedSize()
-                .opacity(done ? 1 : 0)
-                .offset(y: done ? 0 : 8)
-                .animation(GlassMotion.spatial(reduceMotion, duration: 0.64), value: done)
+        let earnsCredit = !TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses)
+        if let lines = TracesScreenLayout.lines(
+            found: found, served: runner.traceLines,
+            coreLine: TracesScreenLayout.estimate(
+                found: found, lookup: runner.lookup, dollars: runner.dollarEstimate,
+                earnsCredit: earnsCredit),
+            coreNote: copy.traces.creditDepends,
+            earnsCredit: earnsCredit) {
+            VStack(spacing: GlassTokens.Space.s1) {
+                Text(lines.headline)
+                    .glassType(GlassTokens.TypeScale.heading)
+                    .foregroundStyle(GlassColor.textPrimary)
+                if let note = lines.note {
+                    Text(note)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                }
+            }
+            .multilineTextAlignment(.center)
+            .firstRunCard(padding: EdgeInsets(top: 12, leading: 24, bottom: 12, trailing: 24))
+            .fixedSize()
+            .opacity(done ? 1 : 0)
+            .offset(y: done ? 0 : 8)
+            .animation(GlassMotion.spatial(reduceMotion, duration: 0.64), value: done)
         }
     }
 }

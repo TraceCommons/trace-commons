@@ -2092,6 +2092,15 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "payout_link_request_proving_anchor",
         include_str!("../../../../migrations/V151__payout_link_request_proving_anchor.sql"),
     ),
+    // V153: the first run's estimate requests, one row per request, for
+    // operator statistics. No tenant: forced RLS with an insert-only writer
+    // role and a read-only reader role. V152 is taken by open PR #1920; the
+    // runner allows the gap and applies V152 later if it lands later.
+    (
+        153,
+        "first_run_estimate_requests",
+        include_str!("../../../../migrations/V153__first_run_estimate_requests.sql"),
+    ),
 ];
 
 /// The body of `create_or_reuse_account`, inside a transaction already under

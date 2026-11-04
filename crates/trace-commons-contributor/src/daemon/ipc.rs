@@ -478,6 +478,7 @@ pub const METHODS: &[&str] = &[
     "set_private_ai",
     "invite_lookup",
     "first_run_estimate",
+    "first_run_copy",
     "tool_destinations",
     "list_audit",
     "list_history",
@@ -3773,6 +3774,7 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("set_private_ai", "private-ai-requires-async"),
     ("invite_lookup", "invite-lookup-requires-async"),
     ("first_run_estimate", "first-run-estimate-requires-async"),
+    ("first_run_copy", "first-run-copy-requires-async"),
     ("account_session_status", "identity-requires-async"),
     ("account_sign_in", "identity-requires-async"),
     ("account_sign_out", "identity-requires-async"),
@@ -6983,6 +6985,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "set_private_ai" => super::network_data::handle_set_private_ai(shared, req).await,
         "invite_lookup" => super::network_data::handle_invite_lookup(shared, req).await,
         "first_run_estimate" => super::network_data::handle_first_run_estimate(shared, req).await,
+        "first_run_copy" => super::network_data::handle_first_run_copy(shared, req).await,
         "account_session_status" => super::native_identity::handle(shared, req).await,
         "account_sign_in" => super::native_identity::handle(shared, req).await,
         "account_sign_out" => super::native_identity::handle(shared, req).await,
@@ -18980,7 +18983,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 77);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 78);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -19464,7 +19467,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 108, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 83, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 84, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

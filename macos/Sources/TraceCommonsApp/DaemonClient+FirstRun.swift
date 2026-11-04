@@ -71,6 +71,15 @@ extension DaemonClient {
         try call("first_run_estimate", as: DaemonData.FirstRunEstimate.self)
     }
 
+    /// `first_run_copy`: the lines Traces shows under the traces found. The
+    /// daemon coarsens both figures before asking the commons, and always
+    /// answers, with its own default lines when the commons cannot.
+    func firstRunCopy(traceCount: UInt64, totalBytes: UInt64) throws -> DaemonData.FirstRunCopyLines {
+        try call(
+            "first_run_copy", params: ["trace_count": traceCount, "total_bytes": totalBytes],
+            as: DaemonData.FirstRunCopyLines.self)
+    }
+
     /// `invite_lookup`: the issuer and pay range an invite names. The whole
     /// invite goes as `code`; the daemon parses it.
     func inviteLookup(_ invite: String) throws -> DaemonData.InviteLookup {
