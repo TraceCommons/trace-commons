@@ -2,12 +2,46 @@
 
 This document records the operational steps and invariants for cutting a
 signed, distributable release of the Trace Commons contributor apps (the
-macOS app bundle, the CLI, and the Linux flatpak). It is the companion to
+macOS app bundle and the CLI). It is the companion to
 `crates/trace-commons-contributor/tests/release_pipeline.rs`, which pins the
 properties this runbook describes wherever they are visible in text (env
 contracts, mandatory flags, deliberate exclusions). What the tests cannot
 prove — that signing, notarization, or a flatpak build actually succeed
 against real credentials — is covered by the manual gates below.
+
+## What an `app-v*` tag releases: macOS only
+
+Native macOS is the lead client, and the Windows, Linux (GTK flatpak) and
+Tauri shells are frozen. Since `app-v0.23.0`, an `app-v*` tag push in
+`release-apps.yml` builds and publishes the macOS DMG alone: the GitHub
+Release, the cask bump, `updates/latest.json` and the Sparkle appcast.
+
+- The `windows` (signed zips), `windows-app` (MSIX) and `linux-flatpak`
+  jobs run only on a `workflow_dispatch` with `platform` set to `all`,
+  `windows` or `linux`. A dispatch builds and signs but never publishes, so
+  there is no path from these jobs to a release, a bucket or a feed.
+- `app-v0.23.0` is the last release with Windows and Linux app assets. The
+  MSIX `.appinstaller` feed and the flatpak OSTree repo in the
+  `tracecommons-flatpak` bucket are written only by those jobs, so they
+  stay on that build: installed MSIX and flatpak apps see no update and
+  are not pointed at anything missing.
+- `updates/latest.json` carries no `windows-x86_64` desktop entry from a
+  macOS-only release. Nothing installed reads that slug (the CLI
+  self-updater reads only the `-cli` slugs), and an absent slug means
+  "no update for this platform".
+- The tag pre-flight (`release-config`) no longer requires the
+  `AZURE_SIGNING_*` values. The `version` job still checks the tag against
+  `crates/trace-commons-contributor-gtk/Cargo.toml`, so keep bumping that
+  crate in the release-prep commit.
+- The Tauri app is not built for release by any workflow.
+- The CLI is unaffected: `release-contributor.yml` still builds and
+  publishes it for macOS, Linux and Windows on `contributor-v*` tags, and
+  still bumps the Homebrew formula and winget. `scripts/install.ps1`
+  resolves `contributor-v*` releases, never `app-v*` ones.
+
+To put a platform back on tags, restore `github.event_name == 'push' ||`
+in its job's `if:` (and its credentials in `release-config`). `publish`
+and `publish-updates` already branch on each platform's result.
 
 ## Homebrew
 
@@ -161,7 +195,8 @@ other credential in this pipeline; rotating it does not require touching
 the workflow files, only the secret's value.
 
 In `release-apps.yml`, the `publish` job carries `if: always() && ...` so
-a Linux flatpak failure does not withhold a verified macOS DMG — but
+a failed or skipped platform does not withhold a verified macOS DMG (on a
+tag push the Windows and Linux jobs are always skipped; see above) — but
 `always()` alone would also let the job run when *every* platform failed,
 with nothing to publish. The condition additionally requires
 `needs.macos.result == 'success' || needs.windows.result == 'success' ||

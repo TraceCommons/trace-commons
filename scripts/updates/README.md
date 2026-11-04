@@ -51,14 +51,14 @@ Two families:
 | Slug | Artifact | Consumed by |
 |---|---|---|
 | `macos-universal` | `Near.ai-<v>.dmg` | Sparkle (via the appcast, not this file) |
-| `windows-x86_64` | `trace-commons-windows-x86_64-<v>.zip` | winget |
-| `linux-x86_64` | flatpak repo | flatpak portal |
+| `windows-x86_64` | `trace-commons-windows-x86_64-<v>.zip` | nothing installed; written only when the `windows` job ran, which an `app-v*` tag push no longer does |
+| `linux-x86_64` | flatpak repo | never written; the flatpak portal follows the OSTree repo |
 | `windows-x86_64-cli` | `trace-commons-contributor-x86_64-pc-windows-msvc.exe` | the CLI self-updater |
 | `linux-x86_64-cli` | `trace-commons-contributor-x86_64-unknown-linux-gnu` | the CLI self-updater |
 | `macos-aarch64-cli` | `trace-commons-contributor-aarch64-apple-darwin` | the CLI self-updater |
 | `macos-x86_64-cli` | `trace-commons-contributor-x86_64-apple-darwin` | the CLI self-updater |
 
 The CLI slugs carry a bare binary, never an archive: the CLI has no archive
-extractor and no new dependency may be added to give it one. The desktop
-`windows-x86_64` zip is the winget payload, and the CLI defers to winget
-rather than consuming it.
+extractor and no new dependency may be added to give it one. A
+winget-installed CLI defers to winget rather than consuming the manifest;
+`release-contributor.yml` bumps winget from the `contributor-v*` release.

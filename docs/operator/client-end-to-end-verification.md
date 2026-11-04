@@ -22,6 +22,11 @@ For each of macOS, Linux and Windows: install the released artifact, and drive
 it from first launch to an accepted submission and back out again. Produce a
 committed pass record.
 
+An `app-v*` tag now releases macOS only (see `docs/release-runbook.md`), so a
+new tag needs the macOS pass. The Linux and Windows passes apply to
+`app-v0.23.0`, the last release that shipped those apps, and to any release
+that puts them back on tags.
+
 The campaign verifies:
 
 - The installed bundle launches from the platform's own launcher.

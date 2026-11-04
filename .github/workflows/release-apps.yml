@@ -1,6 +1,18 @@
 # Signed releases of the contributor apps. Tag-driven: push a tag like
 # `app-v0.2.0`.
 #
+# A tag push builds and publishes macOS ONLY. Native macOS is the lead
+# client, and the Windows, Linux (GTK flatpak) and Tauri shells are frozen,
+# so the `windows`, `windows-app` and `linux-flatpak` jobs run only on a
+# workflow_dispatch that names them (platform=all, windows or linux). A
+# dispatch never publishes: every publication step below is guarded on
+# `github.event_name == 'push'`, so those jobs' own publish steps are now
+# unreachable, and the GitHub Release, the MSIX .appinstaller feed and the
+# flatpak repo stay at the last release that built them (app-v0.23.0).
+# `publish` and `publish-updates` still branch on each platform's result,
+# so turning a platform back on for tags is a change to its `if:` alone.
+# The Tauri app is not built here or anywhere else for release.
+#
 # Three independent jobs rather than a matrix. The packaging steps share
 # essentially nothing -- SwiftPM plus notarytool, cargo plus Azure Trusted
 # Signing, flatpak-builder plus OSTree -- so matrix legs would be a stack of
@@ -44,7 +56,7 @@ permissions:
   attestations: write
 
 jobs:
-  # Every credential this workflow spends is checked here, before a single
+  # Every credential a tag push spends is checked here, before a single
   # byte is signed or uploaded. Without it the first thing a missing
   # HOMEBREW_TAP_TOKEN stops is the cask bump -- which runs in `publish`,
   # after two signed artifacts exist and both GCS buckets have already
@@ -59,10 +71,12 @@ jobs:
   # fail releases over configuration nothing in this file consumes.
   #
   # `environment: release` is load-bearing and not just symmetry with the
-  # signing jobs: the AZURE_SIGNING_* values are environment variables on
-  # `release`, so a job without the environment reads them as empty and this
-  # pre-flight would refuse every release. The environment carries no
-  # protection rules, so declaring it adds no approval step.
+  # signing jobs: values scoped to `release` (the AZURE_SIGNING_* variables
+  # are) read as empty in a job without the environment, so this pre-flight
+  # would refuse every release that checks one. A tag push no longer checks
+  # the Azure values, but the declaration stays so that putting Windows back
+  # on tags needs no change here. The environment carries no protection
+  # rules, so declaring it adds no approval step.
   release-config:
     name: verify release configuration
     runs-on: ubuntu-latest
@@ -72,6 +86,11 @@ jobs:
       # Dispatch runs build and sign but never publish (every publication
       # step in this file is guarded on `github.event_name == 'push'`), so
       # they are not held to the publishing credentials.
+      #
+      # A tag push builds macOS only, so the Azure Trusted Signing values
+      # the Windows jobs spend are not required here. Those jobs run only on
+      # a dispatch, which this step does not check. The two GCP values stay:
+      # `publish-updates` uploads latest.json and the appcast with them.
       - name: Confirm tag-release credentials are configured
         if: github.event_name == 'push'
         env:
@@ -84,16 +103,10 @@ jobs:
           MACOS_NOTARY_ASC_KEY_ID: ${{ secrets.MACOS_NOTARY_ASC_KEY_ID }}
           MACOS_NOTARY_ASC_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ASC_ISSUER_ID }}
           SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
-          # Windows: Azure Trusted Signing, used by both the `windows` and
-          # `windows-app` jobs.
-          AZURE_SIGNING_CLIENT_ID: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
-          AZURE_SIGNING_TENANT_ID: ${{ vars.AZURE_SIGNING_TENANT_ID }}
-          AZURE_SIGNING_SUBSCRIPTION_ID: ${{ vars.AZURE_SIGNING_SUBSCRIPTION_ID }}
-          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
-          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
-          # GCS: the flatpak repo, the Windows .appinstaller feed, and the
-          # appcast all authenticate with these.
+          # GCS: the update manifest and the appcast (publish-updates)
+          # authenticate with these. The flatpak repo and the Windows
+          # .appinstaller feed use them too, but only from the dispatch-only
+          # jobs, which never publish.
           GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
           GCP_FLATPAK_PUBLISHER_SA: ${{ secrets.GCP_FLATPAK_PUBLISHER_SA }}
           # Cross-repository: the cask bump in `publish`.
@@ -109,12 +122,6 @@ jobs:
             MACOS_NOTARY_ASC_KEY_ID \
             MACOS_NOTARY_ASC_ISSUER_ID \
             SPARKLE_PUBLIC_ED_KEY \
-            AZURE_SIGNING_CLIENT_ID \
-            AZURE_SIGNING_TENANT_ID \
-            AZURE_SIGNING_SUBSCRIPTION_ID \
-            AZURE_SIGNING_ENDPOINT \
-            AZURE_SIGNING_ACCOUNT \
-            AZURE_SIGNING_PROFILE \
             GCP_WIF_PROVIDER \
             GCP_FLATPAK_PUBLISHER_SA \
             HOMEBREW_TAP_TOKEN
@@ -127,7 +134,7 @@ jobs:
             printf 'refusing to release: missing configuration: %s\n' "${missing[*]}" >&2
             exit 1
           fi
-          echo "all 16 release credentials are present"
+          echo "all 10 release credentials are present"
 
   version:
     name: resolve version
@@ -172,6 +179,10 @@ jobs:
       # its artifacts from the tag. Keep those two user-visible versions from
       # drifting. Dispatches remain free to exercise an arbitrary future
       # version without publishing it.
+      #
+      # A tag push no longer builds the Linux shell, so this check now only
+      # holds the GTK crate's version in step with the release tag; the
+      # release-prep commit bumps it with the others.
       - name: Confirm the tag matches the Linux app package version
         if: github.event_name == 'push'
         env:
@@ -299,9 +310,10 @@ jobs:
   windows:
     name: Windows signed binaries
     needs: [version, release-config]
+    # Dispatch only: a tag push releases macOS alone (see the header).
     if: >-
-      github.event_name == 'push' ||
-      inputs.platform == 'all' || inputs.platform == 'windows'
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.platform == 'all' || inputs.platform == 'windows')
     runs-on: windows-latest
     # The federated credential's subject is
     # repo:...:environment:release, so this job must declare the environment
@@ -714,9 +726,10 @@ jobs:
   windows-app:
     name: Windows signed MSIX
     needs: [version, release-config]
+    # Dispatch only: a tag push releases macOS alone (see the header).
     if: >-
-      github.event_name == 'push' ||
-      inputs.platform == 'all' || inputs.platform == 'windows'
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.platform == 'all' || inputs.platform == 'windows')
     runs-on: windows-latest
     # Same reason as the `windows` job above: the federated credential's
     # subject is repo:...:environment:release, so this job must declare the
@@ -1055,9 +1068,10 @@ jobs:
   linux-flatpak:
     name: Linux flatpak
     needs: [version, release-config]
+    # Dispatch only: a tag push releases macOS alone (see the header).
     if: >-
-      github.event_name == 'push' ||
-      inputs.platform == 'all' || inputs.platform == 'linux'
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.platform == 'all' || inputs.platform == 'linux')
     runs-on: ubuntu-latest
     # Signing authority, so it declares the environment like the other two:
     # this job imports the OSTree repo's GPG private key from Secret Manager
@@ -1224,6 +1238,10 @@ jobs:
   publish:
     name: publish release
     needs: [version, macos, windows, windows-app, linux-flatpak]
+    # On a tag push the Windows and Linux jobs are skipped (dispatch only),
+    # so their results read `skipped`, their paragraphs below are left out,
+    # and only the macOS DMG is attached. This job is push-only, so a
+    # dispatch that builds Windows or Linux never publishes them.
     # Publish whatever succeeded: the three build jobs are independent
     # precisely so a Linux failure does not withhold a verified macOS DMG.
     # But always() alone would let this job run even when EVERY platform
@@ -1528,6 +1546,14 @@ jobs:
             ARGS+=(--platform "macos-universal=$BASE/Near.ai-$V.dmg=$SHA=$SIZE")
           fi
 
+          # Never true on a tag push now that `windows` is dispatch-only,
+          # and this job is push-only, so a release's latest.json carries no
+          # `windows-x86_64` entry. Nothing installed reads that desktop
+          # slug: the CLI self-updater reads only the `-cli` slugs below,
+          # the MSIX app follows its .appinstaller feed, and the flatpak
+          # follows its OSTree repo. An old URL must not be carried forward
+          # either: under this release's `version` it would offer clients
+          # an update that is the build they already have.
           if [ "$WINDOWS_RESULT" = success ]; then
             F="dist/windows-zip/trace-commons-windows-x86_64-$V.zip"
             SHA="$(shasum -a 256 "$F" | awk '{print $1}')"
