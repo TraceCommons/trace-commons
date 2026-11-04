@@ -969,6 +969,16 @@ pub struct DaemonShared {
     /// exactly the lifetime an update swap needs: after the swap there is a
     /// new process and nothing left to un-quiesce.
     pub quiesced: AtomicBool,
+    /// Uploads are held while `unenroll` waits for one in flight to settle
+    /// (`unenroll::settle_uploads`). In-memory only, like `quiesced`, and
+    /// cleared when that call returns: the contributor's own pause is never
+    /// rewritten. Checked under the queue lock where an entry is claimed.
+    pub uploads_held: AtomicBool,
+    /// Raised to stop an upload in flight now: the upload pass races each
+    /// entry's upload against a change here, drops it, and returns the entry
+    /// to `Approved`. A count in a watch channel, so a raise between the
+    /// pass subscribing and awaiting is never lost.
+    pub upload_interrupt: tokio::sync::watch::Sender<u64>,
     pub shutdown: AtomicBool,
     /// Wakes the supervisor immediately on a shutdown request. Without it the
     /// daemon would not notice until its next poll, which is a minute away --
@@ -1544,6 +1554,8 @@ impl DaemonShared {
             dev_dry_run: false,
             paused: AtomicBool::new(paused),
             quiesced: AtomicBool::new(false),
+            uploads_held: AtomicBool::new(false),
+            upload_interrupt: tokio::sync::watch::Sender::new(0),
             shutdown: AtomicBool::new(false),
             shutdown_signal: Arc::new(Notify::new()),
             events,
