@@ -99,6 +99,7 @@ pub(crate) mod test_credential_store;
 pub(crate) mod os_secret_store {
     pub(crate) use trace_commons_contributor_platform::os_secret_store::*;
 }
+mod pass_supervisor;
 pub mod past_sessions;
 pub mod payout_link;
 pub mod policy;
@@ -582,7 +583,21 @@ pub(crate) fn run_blocking<R>(f: impl FnOnce() -> R) -> R {
 async fn supervise(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> {
     shared.reconcile_private_inference().await;
     repair_stale_status_line(&shared, dry_run);
-    let result = supervise_passes(&shared, dry_run).await;
+    // A panic in a pass restarts the loop after a backoff rather than ending
+    // it for the life of the process; see `pass_supervisor`. The catch is
+    // inline, so `run`'s cancel-safety (its doc) holds.
+    let mut signal = signal_stream();
+    let passes_shared = Arc::clone(&shared);
+    let result = pass_supervisor::run_restarting(
+        &shared,
+        &mut signal,
+        pass_supervisor::Backoff::daemon(),
+        move |signal| {
+            let shared = Arc::clone(&passes_shared);
+            Box::pin(async move { supervise_passes(&shared, dry_run, signal).await })
+        },
+    )
+    .await;
     // However the loop ended (a signal included, which sets nothing else),
     // so work running off the loop stops at its next check: the Insights
     // counter pass between files, the settlement scan between traces.
@@ -602,7 +617,11 @@ fn repair_stale_status_line(shared: &ipc::DaemonShared, dry_run: bool) {
 
 /// The periodic work: watch, expire, and decide about digests, until asked to
 /// stop.
-async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> {
+async fn supervise_passes(
+    shared: &Arc<ipc::DaemonShared>,
+    dry_run: bool,
+    sigterm: &mut pass_supervisor::StopSignal,
+) -> Result<()> {
     // K2 (#1173): a dev dry run is a dry run: no upload, history or
     // community pass, and no account admission refresh.
     let dry_run = dry_run || shared.dev_dry_run;
@@ -632,7 +651,6 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
     // with a config, then every `MISSION_SLOT_REFRESH`. A local of this loop
     // too.
     let mut mission_slot_schedule = activity_missions::MissionSlotSchedule::default();
-    let mut sigterm = signal_stream();
     let shutdown_signal = Arc::clone(&shared.shutdown_signal);
     // A person's approval asks for an upload pass when its hold ends
     // (`DaemonShared::request_upload_at`), so a trace they just sent goes
@@ -801,7 +819,7 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 // `!dry_run` block, since the clock moves in a dry run too.
                 shared.publish_time_driven_status(now);
             }
-            _ = &mut sigterm => {
+            _ = sigterm.as_mut() => {
                 tracing::info!("daemon stopping on signal");
                 return Ok(());
             }

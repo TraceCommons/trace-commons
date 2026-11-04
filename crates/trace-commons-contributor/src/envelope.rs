@@ -263,8 +263,21 @@ pub(crate) struct TransientRedactionFailure;
 /// daemon's periodic passes run in one task, so a panic unwinding out of a
 /// pass ends every later pass (watch, upload, expiry) until the app is
 /// relaunched, and the first pass after the relaunch meets the same trace.
-struct CatchUnwind<F: std::future::Future> {
+///
+/// The daemon's pass supervisor (`daemon::pass_supervisor`) uses it too,
+/// through [`catch_unwind_future`], for a panic anywhere else in a pass.
+pub(crate) struct CatchUnwind<F: std::future::Future> {
     inner: std::pin::Pin<Box<F>>,
+}
+
+/// Wrap `future` so a panic while polling it resolves to `Err(())` instead
+/// of unwinding into the caller. Never reads the panic payload, which can
+/// carry trace content or a path. The caller asserts unwind safety: it must
+/// not keep using state the panicking frames could have left half-updated.
+pub(crate) fn catch_unwind_future<F: std::future::Future>(future: F) -> CatchUnwind<F> {
+    CatchUnwind {
+        inner: Box::pin(future),
+    }
 }
 
 impl<F: std::future::Future> std::future::Future for CatchUnwind<F> {

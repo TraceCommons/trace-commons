@@ -167,7 +167,10 @@ fn forget_accounts_login(shared: &DaemonShared) {
 pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static str, &'static str)> {
     // Pass lock, then policy before queue, as everywhere: the same order
     // the watcher and the upload pass's claim take them in.
-    let _pass = shared.pass_lock.lock().expect("pass lock");
+    let _pass = shared
+        .pass_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _policy = shared.policy.lock().expect("policy lock");
     let mut queue = shared.queue.lock().expect("queue lock");
     if queue.all().iter().any(|e| e.state == QueueState::Uploading) {
