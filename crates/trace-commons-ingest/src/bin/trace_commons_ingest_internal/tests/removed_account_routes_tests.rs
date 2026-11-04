@@ -1,25 +1,26 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Passkeys are removed (owner decision 2026-10-31). Every route that served
-//! them is unregistered, so an older client that still calls one gets the
+//! The account routes removed by V144 (owner decision 2026-10-31) are
+//! unregistered, so an older client that still calls one gets the
 //! router's plain 404 and nothing else: no handler runs, no session is read,
 //! nothing is written. These tests pin that, for the unauthenticated routes
-//! and the authenticated ones alike, and pin that no passkey route is left on
+//! and the authenticated ones alike, and pin that none of them is left on
 //! the recorded account surface.
 
 use super::*;
 use axum::body::Body;
 use tower::ServiceExt;
 
-/// Every route the passkey surface served, as `(method, concrete path)`.
+/// Every removed route, as `(method, concrete path)`. The paths are what
+/// older clients still call, so they keep their names.
 const REMOVED_ROUTES: &[(&str, &str)] = &[
-    // Browser passkey sign-in and the step-up page.
+    // Browser sign-in and the step-up page.
     ("POST", "/account/passkey/login/start"),
     ("POST", "/account/passkey/login/finish"),
     ("GET", "/account/step-up"),
     ("GET", "/account/step-up?return=payout"),
-    // Passkey management on a signed-in account.
+    // Credential management on a signed-in account.
     ("GET", "/v1/account/passkeys"),
     ("POST", "/v1/account/passkeys/register/start"),
     ("POST", "/v1/account/passkeys/register/finish"),
@@ -27,12 +28,12 @@ const REMOVED_ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/account/passkeys/native/register/finish"),
     ("PATCH", "/v1/account/passkeys/AAAA"),
     ("DELETE", "/v1/account/passkeys/AAAA"),
-    // Native passkey account creation and sign-in.
+    // Native account creation and sign-in.
     ("POST", "/v1/account/native/passkey/create/start"),
     ("POST", "/v1/account/native/passkey/create/finish"),
     ("POST", "/v1/account/native/passkey/login/start"),
     ("POST", "/v1/account/native/passkey/login/finish"),
-    // Binding state and binding a passkey account to NEAR AI.
+    // Binding state and binding an account to NEAR AI.
     ("GET", "/v1/account/binding"),
     ("POST", "/v1/account/near-ai/provision/bind/start"),
     ("POST", "/v1/account/near-ai/provision/bind/finish"),
@@ -65,7 +66,7 @@ async fn status_of(
 /// session credential, and the request reaches no handler: the in-memory
 /// database records no account audit row.
 #[tokio::test]
-async fn every_removed_passkey_route_answers_404() {
+async fn every_removed_account_route_answers_404() {
     let temp = tempfile::tempdir().expect("temp dir");
     let db = Arc::new(NativeAuthTestDb::default());
     let state = test_state_with_db(temp.path().to_path_buf(), db.clone() as Arc<dyn Database>);
@@ -104,9 +105,9 @@ async fn the_routes_that_stay_are_still_served() {
     );
 }
 
-/// No passkey, binding or bind route is left on the recorded account surface.
+/// No removed, binding or bind route is left on the recorded account surface.
 #[test]
-fn the_account_surface_holds_no_passkey_route() {
+fn the_account_surface_holds_no_removed_route() {
     let temp = tempfile::tempdir().expect("temp dir");
     let state = test_state(temp.path().to_path_buf());
     let surface = authenticated_account_surface(state);
@@ -126,11 +127,11 @@ fn the_account_surface_holds_no_passkey_route() {
     );
 }
 
-/// The environment variables the passkey surface read are ignored, never a
+/// The environment variables the removed routes read are ignored, never a
 /// startup failure: nothing in the service reads them any more, so a pilot or
 /// staging env file that still sets them boots unchanged.
 #[test]
-fn the_retired_passkey_variables_are_read_nowhere() {
+fn the_retired_account_variables_are_read_nowhere() {
     let sources = [
         include_str!("../../trace-commons-ingest.rs"),
         include_str!("../near_provisioning.rs"),

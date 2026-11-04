@@ -8617,8 +8617,7 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
         .merge(legacy_invite_link_routes::routes())
         .merge(inference_connection_routes::routes())
         // Payout recipient links (payout spec section 5): start, confirm and
-        // status on the signed-in account session; no passkey (owner,
-        // 2026-10-23).
+        // status on the signed-in account session (owner, 2026-10-23).
         .merge(payout_link_routes::routes())
         // Referral codes and applying one (referral spec section 6), on the
         // signed-in account session as the payout links are.
@@ -23467,7 +23466,7 @@ const ACCOUNT_CEREMONY_COOKIE_MAX_AGE_SECS: i64 = 3 * 60;
 /// Adding or removing an authenticator (a NEAR key) is only freely allowed
 /// from a STRONG session — one minted by a NEAR wallet assertion. From a WEAK
 /// session (a device-link `'web'` cookie, a native token, or a `'passkey'`
-/// session minted before passkeys were removed) the change is REFUSED *once the
+/// session minted before V144) the change is REFUSED *once the
 /// account already holds at least one strong authenticator*, so a leaked
 /// session or a phished device-link link cannot silently swap the account's
 /// real second factor.
@@ -23858,7 +23857,7 @@ async fn account_near_identities_list_handler(
         .map(|i| {
             // True only when THIS NEAR identity authenticated the current session.
             // NEAR login set `auth_credential_id` to the public key; a session
-            // minted by a pre-removal passkey login carries a credential id;
+            // minted by a sign-in before V144 may carry a credential id;
             // device-link is None — none of which can false-positive against a
             // NEAR public key.
             let this_session = ctx
