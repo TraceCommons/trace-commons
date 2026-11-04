@@ -615,7 +615,7 @@ See [legacy invite migration](./legacy-invite-migration.md).
 
 | Var | R? | Default | Description |
 |---|---|---|---|
-| `TRACE_COMMONS_USAGE_REGION_MMDB` | optional | (unset) | Path to a MaxMind-format country database (`.mmdb`, for example GeoLite2 Country) that `GET /v1/public/usage-region` reads to tell a client whether it may send anonymous usage counts (United States only). Unset, or a file that does not open, answers `{"analytics_allowed": false}` to everyone and logs `control=usage_region_mmdb` once; it never fails startup. The address is looked up and dropped: nothing about it is stored or logged. Refresh the file monthly. |
+| `TRACE_COMMONS_USAGE_REGION_MMDB` | optional | (unset) | Path to a MaxMind-format country database (`.mmdb`, for example GeoLite2 Country) that `GET /v1/public/usage-region` reads to tell a client whether it may send anonymous usage counts (United States only). Unset, or a file that does not open, answers `{"analytics_allowed": false}` to everyone and logs `control=usage_region_mmdb` once; it never fails startup. The address is looked up and dropped: nothing about it is stored or logged. Refresh the file monthly. `POST /v1/usage-events` (the weekly totals, each with an anonymous random install id) needs no variable: it stores into V152's `trace_usage_event_weeks` through the guard-owned `trace_usage_events_record()`, and answers 503 without a database. |
 
 See the [usage analytics design](../superpowers/specs/2026-11-04-us-only-usage-analytics.md).
 

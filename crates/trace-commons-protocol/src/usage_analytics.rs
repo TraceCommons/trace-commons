@@ -6,13 +6,16 @@
 //! - `GET /v1/public/usage-region` answers [`UsageRegion`]: whether this
 //!   request's address is in the United States. The server looks the address
 //!   up and keeps nothing about it. Anything it cannot answer is `false`.
-//! - `POST /v1/usage-events` takes a [`UsageEventBatch`] of weekly totals.
-//!   (Server side not built yet: a follow-up.)
+//! - `POST /v1/usage-events` takes a [`UsageEventBatch`] of weekly totals
+//!   and stores them as aggregate rows.
 //!
 //! What a client may send is fixed here, in [`USAGE_EVENTS`]: how often a
-//! screen was opened or a control was used, per ISO week. There is no device,
-//! account, tenant or session identifier in any request, and no content: no
-//! paths, prompts, file names, model names or trace data.
+//! screen was opened or a control was used, per ISO week, with one anonymous
+//! install id. The install id is a random UUIDv4 made on the computer the
+//! first time counting turns on; it is not derived from, and never sent with,
+//! any device key, account, enrollment, path or hardware id, and turning the
+//! setting off deletes it. There is no other identifier in any request, and
+//! no content: no paths, prompts, file names, model names or trace data.
 
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +31,9 @@ pub const USAGE_REGION_MAX_BYTES: usize = 1024;
 
 /// The most rows one batch may carry: every event for a few weeks.
 pub const USAGE_BATCH_MAX_ROWS: usize = 256;
+
+/// The largest batch body the server reads. A full batch is about 20 KiB.
+pub const USAGE_BATCH_MAX_BYTES: usize = 64 * 1024;
 
 /// The largest count one row may carry: a bound on a bug, not a policy.
 pub const USAGE_COUNT_MAX: u64 = 100_000;
@@ -77,9 +83,11 @@ pub struct UsageEventRow {
 }
 
 /// `POST /v1/usage-events` body.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageEventBatch {
+    /// The anonymous install id: a random UUIDv4, nothing else.
+    pub install_id: uuid::Uuid,
     pub rows: Vec<UsageEventRow>,
 }
 
@@ -88,6 +96,8 @@ pub struct UsageEventBatch {
 pub enum UsageBatchError {
     #[error("usage-batch-too-large")]
     TooLarge,
+    #[error("usage-install-id-invalid")]
+    InstallIdInvalid,
     #[error("usage-event-unknown")]
     UnknownEvent,
     #[error("usage-count-invalid")]
@@ -103,6 +113,11 @@ impl UsageEventBatch {
         if self.rows.len() > USAGE_BATCH_MAX_ROWS {
             return Err(UsageBatchError::TooLarge);
         }
+        // Random, version 4: anything else was not made by
+        // `new_install_id` and may carry meaning.
+        if self.install_id.get_version_num() != 4 {
+            return Err(UsageBatchError::InstallIdInvalid);
+        }
         for row in &self.rows {
             if !is_usage_event(&row.event) {
                 return Err(UsageBatchError::UnknownEvent);
@@ -116,6 +131,13 @@ impl UsageEventBatch {
         }
         Ok(())
     }
+}
+
+/// A fresh anonymous install id: random, version 4, from nothing on the
+/// computer.
+#[must_use]
+pub fn new_install_id() -> uuid::Uuid {
+    uuid::Uuid::new_v4()
 }
 
 /// `YYYY-Www`, week 01 to 53.
@@ -163,6 +185,7 @@ mod tests {
     #[test]
     fn a_batch_with_an_unlisted_event_is_refused_whole() {
         let batch = UsageEventBatch {
+            install_id: new_install_id(),
             rows: vec![
                 row("tab_insights_opened", 3, "2026-W45"),
                 row("clicked_something_else", 1, "2026-W45"),
@@ -186,6 +209,7 @@ mod tests {
             (1, "2026-W45", Ok(())),
         ] {
             let batch = UsageEventBatch {
+                install_id: new_install_id(),
                 rows: vec![row("setup_finished", count, week)],
             };
             assert_eq!(batch.validate(), expected, "{count} {week}");
@@ -193,19 +217,52 @@ mod tests {
     }
 
     #[test]
+    fn only_a_random_install_id_is_taken() {
+        let mut batch = UsageEventBatch {
+            install_id: new_install_id(),
+            rows: vec![row("setup_finished", 1, "2026-W45")],
+        };
+        assert_eq!(batch.install_id.get_version_num(), 4);
+        assert_eq!(batch.validate(), Ok(()));
+        for not_random in [
+            uuid::Uuid::nil(),
+            // A name-based (v5) id, as one derived from a device key would be.
+            uuid::Uuid::parse_str("2ed6657d-e927-568b-95e1-2665a8aea6a2").unwrap(),
+        ] {
+            batch.install_id = not_random;
+            assert_eq!(batch.validate(), Err(UsageBatchError::InstallIdInvalid));
+        }
+        assert_ne!(new_install_id(), new_install_id());
+    }
+
+    #[test]
     fn an_oversized_batch_is_refused() {
         let batch = UsageEventBatch {
+            install_id: new_install_id(),
             rows: vec![row("setup_finished", 1, "2026-W45"); USAGE_BATCH_MAX_ROWS + 1],
         };
         assert_eq!(batch.validate(), Err(UsageBatchError::TooLarge));
     }
 
     #[test]
-    fn a_batch_carries_no_field_but_the_rows() {
-        let refused = serde_json::from_value::<UsageEventBatch>(serde_json::json!({
-            "rows": [], "device_id": "abc"
-        }));
-        assert!(refused.is_err());
+    fn a_batch_carries_no_field_but_the_install_id_and_the_rows() {
+        let id = new_install_id();
+        let taken = serde_json::from_value::<UsageEventBatch>(serde_json::json!({
+            "install_id": id, "rows": []
+        }))
+        .unwrap();
+        assert_eq!(taken.install_id, id);
+        for refused in [
+            serde_json::json!({"install_id": id, "rows": [], "device_id": "abc"}),
+            serde_json::json!({"install_id": id, "rows": [], "account_id": "abc"}),
+            serde_json::json!({"rows": []}),
+            serde_json::json!({"install_id": "not-a-uuid", "rows": []}),
+        ] {
+            assert!(
+                serde_json::from_value::<UsageEventBatch>(refused.clone()).is_err(),
+                "{refused}"
+            );
+        }
         let refused_row = serde_json::from_value::<UsageEventRow>(serde_json::json!({
             "event": "setup_finished", "count": 1, "week": "2026-W45", "path": "/x"
         }));

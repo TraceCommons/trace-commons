@@ -3,22 +3,27 @@
 //! A shell reports that a screen was opened or a control used
 //! (`record_usage_event {event}`); the daemon adds one to that event's total
 //! for the current ISO week, and sends finished weeks' totals to the commons
-//! (`POST /v1/usage-events`). Only names on
+//! (`POST /v1/usage-events`) with one anonymous install id. Only names on
 //! [`trace_commons_protocol::usage_analytics::USAGE_EVENTS`] are counted.
-//! Nothing else is ever stored or sent: no device, account or session id, no
-//! paths, prompts, file names or trace content.
 //!
-//! Counting is on only when all three hold:
+//! Counting is on only when both hold:
 //!
 //! 1. the `share_usage_data` setting is on (the default);
-//! 2. this computer's region setting says United States;
-//! 3. the commons answered `GET /v1/public/usage-region` with
-//!    `analytics_allowed: true` within [`REGION_VALID_FOR`].
+//! 2. the commons answered `GET /v1/public/usage-region` with
+//!    `analytics_allowed: true` within [`REGION_VALID_FOR`]. The server
+//!    decides from the request's IP address, US only, and fails closed.
 //!
 //! Otherwise a report is dropped, and the totals on disk are deleted. The
-//! region is asked again every [`REGION_RECHECK`] (sooner after a failed
-//! ask), and only while the setting is on and the region setting says US, so
-//! a computer outside the US never makes the request.
+//! region is asked again every [`REGION_RECHECK`] (sooner after a failed ask)
+//! while the setting is on.
+//!
+//! The install id is a random UUIDv4 made here the first time counting turns
+//! on and kept in this module's file. It is not derived from, stored with or
+//! sent beside any device key, account, enrollment, path or hardware id: its
+//! only use is telling one install's weeks from another's, so returning
+//! users can be counted. Turning the setting off deletes the file, install id
+//! included; turning it back on makes a new one. Nothing else is ever stored
+//! or sent: no paths, prompts, file names, model names or trace content.
 
 use std::collections::BTreeMap;
 
@@ -29,11 +34,14 @@ use trace_commons_operator_client::host_allowlist::HostAllowlist;
 use trace_commons_protocol::usage_analytics::{
     USAGE_BATCH_MAX_ROWS, USAGE_COUNT_MAX, USAGE_EVENTS_PATH, USAGE_REGION_MAX_BYTES,
     USAGE_REGION_PATH, UsageEventBatch, UsageEventRow, UsageRegion, is_usage_event, iso_week_of,
+    new_install_id,
 };
+use uuid::Uuid;
 
 use crate::config::{ConfigStore, allowlist_for};
 
-/// The daemon file holding the region answer and the weekly totals.
+/// The daemon file holding the region answer, the install id and the
+/// weekly totals.
 pub const USAGE_ANALYTICS_FILE: &str = "usage-analytics.json";
 
 /// How often the region is asked again after an answer.
@@ -59,7 +67,7 @@ pub const ERR_USAGE_EVENT_UNKNOWN: &str = "usage-event-unknown";
 /// The last region answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegionCheck {
-    /// Both the region setting and the commons said US.
+    /// The commons said US.
     pub allowed: bool,
     /// When to ask again.
     pub next_check: DateTime<Utc>,
@@ -72,6 +80,9 @@ pub struct RegionCheck {
 pub struct UsageState {
     #[serde(default)]
     pub region: Option<RegionCheck>,
+    /// The anonymous install id; made the first time counting turns on.
+    #[serde(default)]
+    pub install_id: Option<Uuid>,
     /// ISO week -> event -> count.
     #[serde(default)]
     pub weeks: BTreeMap<String, BTreeMap<String, u64>>,
@@ -93,6 +104,11 @@ impl UsageState {
         self.region.is_none_or(|region| now >= region.next_check)
     }
 
+    /// The install id, made now if there is none.
+    pub fn install_id(&mut self) -> Uuid {
+        *self.install_id.get_or_insert_with(new_install_id)
+    }
+
     /// Add one to `event` for the week holding `now`.
     pub fn count(&mut self, event: &str, now: DateTime<Utc>) {
         let week = iso_week_of(now.date_naive());
@@ -106,9 +122,10 @@ impl UsageState {
     }
 
     /// The finished weeks (every week but the one holding `now`), oldest
-    /// first, as one batch. `None` when there are none.
+    /// first, as one batch. `None` when there are none or no install id.
     #[must_use]
     pub fn finished_batch(&self, now: DateTime<Utc>) -> Option<(Vec<String>, UsageEventBatch)> {
+        let install_id = self.install_id?;
         let current = iso_week_of(now.date_naive());
         let mut weeks = Vec::new();
         let mut rows = Vec::new();
@@ -116,8 +133,7 @@ impl UsageState {
             if *week == current {
                 continue;
             }
-            let fits = rows.len() + events.len() <= USAGE_BATCH_MAX_ROWS;
-            if !fits {
+            if rows.len() + events.len() > USAGE_BATCH_MAX_ROWS {
                 break;
             }
             weeks.push(week.clone());
@@ -132,7 +148,7 @@ impl UsageState {
                     }),
             );
         }
-        (!weeks.is_empty()).then_some((weeks, UsageEventBatch { rows }))
+        (!weeks.is_empty()).then_some((weeks, UsageEventBatch { install_id, rows }))
     }
 
     /// Keep at most [`RETAIN_WEEKS`] finished weeks, newest kept.
@@ -167,6 +183,8 @@ fn save(store: &ConfigStore, state: &UsageState) -> anyhow::Result<()> {
     store.write_daemon_file(USAGE_ANALYTICS_FILE, &serde_json::to_vec(state)?)
 }
 
+/// Delete the file: the counts not yet sent, the region answer and the
+/// install id.
 fn clear(store: &ConfigStore) {
     if matches!(store.read_daemon_file(USAGE_ANALYTICS_FILE), Ok(Some(_))) {
         let _ = store.remove_daemon_file(USAGE_ANALYTICS_FILE);
@@ -197,66 +215,10 @@ pub fn record(
     if !state.counting(share_usage_data, now) {
         return Ok(false);
     }
+    state.install_id();
     state.count(event, now);
     save(store, &state).map_err(|_| RecordError::Unavailable)?;
     Ok(true)
-}
-
-/// Whether this computer's region setting says United States.
-///
-/// macOS: the region in the global `AppleLocale` preference (`en_US`).
-/// Elsewhere: the region of `LC_ALL`, `LC_MESSAGES` or `LANG`, first set.
-/// Anything unreadable is not US.
-#[must_use]
-pub fn os_region_is_us() -> bool {
-    os_locale().as_deref().and_then(locale_region).as_deref() == Some("US")
-}
-
-fn os_locale() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        let output = std::process::Command::new("/usr/bin/defaults")
-            .args(["read", "-g", "AppleLocale"])
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        Some(String::from_utf8(output.stdout).ok()?.trim().to_owned())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        ["LC_ALL", "LC_MESSAGES", "LANG"]
-            .into_iter()
-            .filter_map(|name| std::env::var(name).ok())
-            .find(|value| !value.is_empty())
-    }
-}
-
-/// The region of a locale name: `en_US`, `en-US`, `en_US.UTF-8`,
-/// `en_US@rg=gbzzzz` (an explicit region override wins) -> its two-letter
-/// region, upper case.
-#[must_use]
-pub fn locale_region(locale: &str) -> Option<String> {
-    // macOS writes a region chosen apart from the language as `@rg=xxzzzz`.
-    if let Some((_, modifiers)) = locale.split_once('@') {
-        for modifier in modifiers.split(';') {
-            if let Some(rg) = modifier.strip_prefix("rg=") {
-                let region = rg.get(..2)?;
-                return region
-                    .chars()
-                    .all(|c| c.is_ascii_alphabetic())
-                    .then(|| region.to_ascii_uppercase());
-            }
-        }
-    }
-    let name = locale.split(['@', '.']).next()?;
-    name.split(['_', '-'])
-        .skip(1)
-        .find(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_alphabetic()))
-        .map(str::to_ascii_uppercase)
 }
 
 /// Fixed outcomes of a request.
@@ -359,13 +321,12 @@ impl UsageClient {
     }
 }
 
-/// One pass: forget everything when off, ask the region when due, send
-/// finished weeks. `os_region_is_us` is passed in so tests can choose it.
-/// Logs nothing: its whole effect is the file.
+/// One pass: forget everything when off, ask the region when due, make the
+/// install id when counting turns on, send finished weeks. Logs nothing: its
+/// whole effect is the file.
 pub async fn tick_with(
     store: &ConfigStore,
     share_usage_data: bool,
-    os_region_is_us: impl FnOnce() -> bool,
     client: Option<&UsageClient>,
     now: DateTime<Utc>,
 ) {
@@ -376,13 +337,9 @@ pub async fn tick_with(
     let mut state = load(store);
     let before = state.clone();
     if state.region_due(now) {
-        let allowed = if os_region_is_us() {
-            match client {
-                Some(client) => client.region().await.ok(),
-                None => None,
-            }
-        } else {
-            Some(false)
+        let allowed = match client {
+            Some(client) => client.region().await.ok(),
+            None => None,
         };
         state.region = Some(match allowed {
             Some(allowed) => RegionCheck {
@@ -390,8 +347,8 @@ pub async fn tick_with(
                 next_check: now + REGION_RECHECK,
                 valid_until: now + REGION_VALID_FOR,
             },
-            // The ask failed: count nothing new on the old answer past its
-            // validity, and ask again sooner.
+            // The ask failed: the old answer still runs out when it did, and
+            // the region is asked again sooner.
             None => RegionCheck {
                 allowed: state
                     .region
@@ -401,10 +358,8 @@ pub async fn tick_with(
             },
         });
     }
-    if !state.region.is_some_and(|r| r.allowed) {
-        // Not allowed: nothing is kept, so nothing can be sent later.
-        state.weeks.clear();
-    } else {
+    if state.counting(share_usage_data, now) {
+        state.install_id();
         state.prune(now);
         if let (Some(client), Some((weeks, batch))) = (client, state.finished_batch(now)) {
             if client.send(&batch).await.is_ok() {
@@ -413,6 +368,9 @@ pub async fn tick_with(
                 }
             }
         }
+    } else {
+        // Not counting: nothing is kept, so nothing can be sent later.
+        state.weeks.clear();
     }
     if state != before {
         let _ = save(store, &state);
@@ -428,12 +386,19 @@ pub async fn tick(shared: &super::ipc::DaemonShared, now: DateTime<Utc>) {
         .lock()
         .map(|s| s.share_usage_data)
         .unwrap_or(false);
+    if !share_usage_data {
+        tick_with(&shared.store, false, None, now).await;
+        return;
+    }
+    // Most ticks: no region due, no finished week, and the file already as
+    // the pass would leave it.
     let state = load(&shared.store);
-    let nothing_to_do = share_usage_data
-        && !state.region_due(now)
-        && state.finished_batch(now).is_none()
-        && (state.region.is_some_and(|r| r.allowed) || state.weeks.is_empty());
-    if nothing_to_do {
+    let settled = if state.counting(true, now) {
+        state.install_id.is_some()
+    } else {
+        state.weeks.is_empty()
+    };
+    if !state.region_due(now) && state.finished_batch(now).is_none() && settled {
         return;
     }
     let client = match shared.store.load_config() {
@@ -444,14 +409,7 @@ pub async fn tick(shared: &super::ipc::DaemonShared, now: DateTime<Utc>) {
             }),
         _ => None,
     };
-    tick_with(
-        &shared.store,
-        share_usage_data,
-        os_region_is_us,
-        client.as_ref(),
-        now,
-    )
-    .await;
+    tick_with(&shared.store, true, client.as_ref(), now).await;
 }
 
 #[cfg(test)]
@@ -479,6 +437,7 @@ mod tests {
                 next_check: now + REGION_RECHECK,
                 valid_until: now + REGION_VALID_FOR,
             }),
+            install_id: None,
             weeks: BTreeMap::new(),
         }
     }
@@ -507,41 +466,26 @@ mod tests {
             record(&store, true, "opened_secret_file", now),
             Err(RecordError::UnknownEvent)
         );
-        // Never asked the region: dropped.
+        // Never asked the region: dropped, and no install id made.
         assert_eq!(record(&store, true, "tab_insights_opened", now), Ok(false));
+        assert!(load(&store).install_id.is_none());
         save(&store, &allowed_until(now)).unwrap();
         assert_eq!(record(&store, true, "tab_insights_opened", now), Ok(true));
         assert_eq!(record(&store, true, "tab_insights_opened", now), Ok(true));
         assert_eq!(record(&store, false, "tab_insights_opened", now), Ok(false));
-        assert_eq!(load(&store).weeks["2026-W45"]["tab_insights_opened"], 2);
-    }
-
-    #[test]
-    fn locale_regions_read_like_the_os_writes_them() {
-        for (locale, region) in [
-            ("en_US", Some("US")),
-            ("en-US", Some("US")),
-            ("en_US.UTF-8", Some("US")),
-            ("en_GB", Some("GB")),
-            ("de_DE@euro", Some("DE")),
-            ("en_US@rg=dezzzz", Some("DE")),
-            ("en_GB@rg=uszzzz", Some("US")),
-            ("zh-Hans_US", Some("US")),
-            ("en", None),
-            ("C", None),
-            ("", None),
-        ] {
-            assert_eq!(locale_region(locale).as_deref(), region, "{locale}");
-        }
+        let state = load(&store);
+        assert_eq!(state.weeks["2026-W45"]["tab_insights_opened"], 2);
+        assert_eq!(state.install_id.unwrap().get_version_num(), 4);
     }
 
     #[test]
     fn only_finished_weeks_are_sent_and_old_ones_dropped() {
         let now = at("2026-11-04T12:00:00Z"); // 2026-W45
         let mut state = allowed_until(now);
+        state.install_id();
         state.count("setup_finished", now);
-        for days in 1..=12 {
-            state.count("tab_home_opened", now - Duration::weeks(days));
+        for weeks_ago in 1..=12 {
+            state.count("tab_home_opened", now - Duration::weeks(weeks_ago));
         }
         state.prune(now);
         assert_eq!(
@@ -552,8 +496,17 @@ mod tests {
         let (weeks, batch) = state.finished_batch(now).unwrap();
         assert!(!weeks.contains(&"2026-W45".to_owned()));
         assert_eq!(weeks.len(), RETAIN_WEEKS);
+        assert_eq!(batch.install_id, state.install_id.unwrap());
         assert!(batch.validate().is_ok());
         assert!(batch.rows.iter().all(|r| r.week != "2026-W45"));
+    }
+
+    #[test]
+    fn no_install_id_means_no_batch() {
+        let now = at("2026-11-04T12:00:00Z");
+        let mut state = allowed_until(now);
+        state.count("setup_finished", now - Duration::weeks(1));
+        assert!(state.finished_batch(now).is_none());
     }
 
     /// A commons that answers the region with `allowed` and records batches.
@@ -594,39 +547,31 @@ mod tests {
         let (origin, sent) = commons(true, StatusCode::NO_CONTENT).await;
         let client = UsageClient::new(&origin, None).unwrap();
         let monday = at("2026-11-02T09:00:00Z"); // 2026-W45
-        tick_with(&store, true, || true, Some(&client), monday).await;
-        assert!(load(&store).counting(true, monday));
+        tick_with(&store, true, Some(&client), monday).await;
+        let state = load(&store);
+        assert!(state.counting(true, monday));
+        let install_id = state.install_id.expect("made when counting turned on");
         record(&store, true, "tab_insights_opened", monday).unwrap();
         record(&store, true, "insights_refresh_clicked", monday).unwrap();
 
         // Same week: nothing sent.
-        tick_with(
-            &store,
-            true,
-            || true,
-            Some(&client),
-            monday + Duration::hours(1),
-        )
-        .await;
+        tick_with(&store, true, Some(&client), monday + Duration::hours(1)).await;
         assert!(sent.lock().unwrap().is_empty());
 
-        // Next week: last week's totals go once, and leave the file.
+        // Next week: last week's totals go once, with the same install id,
+        // and leave the file.
         let next = at("2026-11-09T09:00:00Z");
-        tick_with(&store, true, || true, Some(&client), next).await;
-        tick_with(
-            &store,
-            true,
-            || true,
-            Some(&client),
-            next + Duration::hours(1),
-        )
-        .await;
+        tick_with(&store, true, Some(&client), next).await;
+        tick_with(&store, true, Some(&client), next + Duration::hours(1)).await;
         let batches = sent.lock().unwrap().clone();
         assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].install_id, install_id);
         let rows = &batches[0].rows;
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.week == "2026-W45" && r.count == 1));
-        assert!(load(&store).weeks.is_empty());
+        let state = load(&store);
+        assert!(state.weeks.is_empty());
+        assert_eq!(state.install_id, Some(install_id), "kept across weeks");
     }
 
     #[tokio::test]
@@ -635,55 +580,51 @@ mod tests {
         let (origin, sent) = commons(true, StatusCode::SERVICE_UNAVAILABLE).await;
         let client = UsageClient::new(&origin, None).unwrap();
         let monday = at("2026-11-02T09:00:00Z");
-        tick_with(&store, true, || true, Some(&client), monday).await;
+        tick_with(&store, true, Some(&client), monday).await;
         record(&store, true, "setup_finished", monday).unwrap();
-        tick_with(
-            &store,
-            true,
-            || true,
-            Some(&client),
-            at("2026-11-09T09:00:00Z"),
-        )
-        .await;
+        tick_with(&store, true, Some(&client), at("2026-11-09T09:00:00Z")).await;
         assert_eq!(sent.lock().unwrap().len(), 1);
         assert_eq!(load(&store).weeks["2026-W45"]["setup_finished"], 1);
     }
 
     #[tokio::test]
-    async fn outside_the_us_nothing_is_asked_counted_or_sent() {
+    async fn a_non_us_answer_counts_nothing_and_makes_no_install_id() {
         let (_d, store) = temp_store();
-        let (origin, sent) = commons(true, StatusCode::NO_CONTENT).await;
+        let (origin, sent) = commons(false, StatusCode::NO_CONTENT).await;
         let client = UsageClient::new(&origin, None).unwrap();
         let now = at("2026-11-04T12:00:00Z");
-        // Region setting not US: the commons is never asked.
-        tick_with(&store, true, || false, Some(&client), now).await;
-        assert!(!load(&store).counting(true, now));
+        tick_with(&store, true, Some(&client), now).await;
+        let state = load(&store);
+        assert!(!state.counting(true, now));
+        assert!(state.install_id.is_none());
         assert_eq!(record(&store, true, "tab_home_opened", now), Ok(false));
-
-        // Region setting US, commons says no.
-        let (_d2, store2) = temp_store();
-        let (origin2, _) = commons(false, StatusCode::NO_CONTENT).await;
-        let client2 = UsageClient::new(&origin2, None).unwrap();
-        tick_with(&store2, true, || true, Some(&client2), now).await;
-        assert!(!load(&store2).counting(true, now));
-        assert_eq!(record(&store2, true, "tab_home_opened", now), Ok(false));
+        tick_with(&store, true, Some(&client), at("2026-11-16T12:00:00Z")).await;
         assert!(sent.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn turning_the_setting_off_deletes_the_totals() {
+    async fn turning_the_setting_off_deletes_counts_and_install_id_and_on_makes_a_new_one() {
         let (_d, store) = temp_store();
+        let (origin, _sent) = commons(true, StatusCode::NO_CONTENT).await;
+        let client = UsageClient::new(&origin, None).unwrap();
         let now = at("2026-11-04T12:00:00Z");
-        let mut state = allowed_until(now);
-        state.count("tab_traces_opened", now);
-        save(&store, &state).unwrap();
-        tick_with(&store, false, || true, None, now).await;
+        tick_with(&store, true, Some(&client), now).await;
+        record(&store, true, "tab_traces_opened", now).unwrap();
+        let first = load(&store).install_id.unwrap();
+
+        tick_with(&store, false, Some(&client), now).await;
         assert!(
             store
                 .read_daemon_file(USAGE_ANALYTICS_FILE)
                 .unwrap()
                 .is_none()
         );
+
+        tick_with(&store, true, Some(&client), now + Duration::minutes(1)).await;
+        let state = load(&store);
+        let second = state.install_id.unwrap();
+        assert_ne!(first, second, "a new install id after off and on");
+        assert!(state.weeks.is_empty(), "the old counts are gone");
     }
 
     #[tokio::test]
@@ -691,9 +632,10 @@ mod tests {
         let (_d, store) = temp_store();
         let now = at("2026-11-04T12:00:00Z");
         // No client (no config): the ask fails, nothing is allowed.
-        tick_with(&store, true, || true, None, now).await;
+        tick_with(&store, true, None, now).await;
         let state = load(&store);
         assert!(!state.counting(true, now));
+        assert!(state.install_id.is_none());
         assert_eq!(state.region.unwrap().next_check, now + REGION_RETRY);
     }
 }

@@ -330,6 +330,9 @@ path = "tests/trace_invite_registry_pg.rs"
 name = "trace_session_withdrawal_pg"
 path = "tests/trace_session_withdrawal_pg.rs"
 [[test]]
+name = "usage_events_pg"
+path = "tests/usage_events_pg.rs"
+[[test]]
 name = "upload_principal_ownership_pg"
 path = "tests/upload_principal_ownership_pg.rs"
 [[test]]

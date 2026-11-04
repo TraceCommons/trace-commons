@@ -8839,6 +8839,16 @@ fn app(state: Arc<AppState>) -> Router {
             trace_commons_protocol::usage_analytics::USAGE_REGION_PATH,
             get(usage_region::usage_region_handler),
         )
+        // Same reason: anonymous weekly usage totals, sent with no
+        // credential by a client that got a US answer above. Validated whole
+        // against the protocol's allow-list; stored in V152's non-tenant
+        // table through its guard-owned function.
+        .route(
+            trace_commons_protocol::usage_analytics::USAGE_EVENTS_PATH,
+            post(usage_region::usage_events_handler).layer(DefaultBodyLimit::max(
+                trace_commons_protocol::usage_analytics::USAGE_BATCH_MAX_BYTES,
+            )),
+        )
         // Same reason: the settlement table is public, non-personal data.
         // 404 when the operator installed none.
         .route(

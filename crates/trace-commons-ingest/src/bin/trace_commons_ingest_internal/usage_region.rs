@@ -19,17 +19,29 @@
 //! address the edge did not attribute, a lookup error or a country that is not
 //! `US`: every one answers `{"analytics_allowed": false}`, and a client sends
 //! nothing.
+//!
+//! `POST /v1/usage-events` takes a client's weekly totals
+//! ([`UsageEventBatch`]): unauthenticated and outside tenant context for the
+//! same reason. The batch is refused whole unless the protocol's own
+//! validation takes it, then stored through `Database::record_usage_events`
+//! (V152: a non-tenant table only a guard-owned function writes). It does
+//! not ask the region again (owner, 2026-11-04: too early); the client only
+//! sends after a US answer. Logs carry fixed labels only, never the install
+//! id, the address or a row.
 
 use std::net::IpAddr;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use axum::Json;
+use axum::body::Bytes;
+use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use trace_commons_protocol::usage_analytics::UsageRegion;
+use trace_commons_protocol::usage_analytics::{UsageEventBatch, UsageRegion};
 
 use super::{
-    ACCOUNT_RATE_LIMITER, api_error, client_ip_for_rate_limit, client_ip_for_referral_mark,
+    ACCOUNT_RATE_LIMITER, AppState, api_error, client_ip_for_rate_limit,
+    client_ip_for_referral_mark,
 };
 
 /// Path to a MaxMind-format (`.mmdb`) country database, such as GeoLite2
@@ -100,10 +112,76 @@ pub(super) fn analytics_allowed(
     matches!(lookup.country(address), Ok(Some(country)) if country == ALLOWED_COUNTRY)
 }
 
-/// Whether the request in `headers` may send usage counts. Shared with the
-/// events route, which checks again before it takes a batch.
-pub(super) fn request_is_allowed(headers: &HeaderMap) -> bool {
+/// Whether the request in `headers` may send usage counts.
+fn request_is_allowed(headers: &HeaderMap) -> bool {
     analytics_allowed(COUNTRIES.as_deref(), client_ip_for_referral_mark(headers))
+}
+
+/// Batches per minute from one address. A client sends about once a week.
+const USAGE_EVENTS_PER_IP_LIMIT: u32 = 30;
+
+/// Batches per minute from everyone.
+const USAGE_EVENTS_GLOBAL_LIMIT: u32 = 1200;
+
+/// `POST /v1/usage-events`: 204 when stored, 400 with a fixed label when the
+/// batch is refused, 503 when there is no database or the write failed.
+pub(super) async fn usage_events_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    let client_ip = client_ip_for_rate_limit(&headers);
+    if !ACCOUNT_RATE_LIMITER.check(
+        &format!("usage-events-ip:{client_ip}"),
+        USAGE_EVENTS_PER_IP_LIMIT,
+    ) || !ACCOUNT_RATE_LIMITER.check_global("usage-events-global", USAGE_EVENTS_GLOBAL_LIMIT)
+    {
+        return api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
+    }
+    let batch = match parse_batch(&body) {
+        Ok(batch) => batch,
+        Err(label) => return api_error(StatusCode::BAD_REQUEST, label).into_response(),
+    };
+    let Some(db) = state.db_mirror.as_ref() else {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "usage_events_unavailable")
+            .into_response();
+    };
+    match db.record_usage_events(&batch).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => {
+            tracing::warn!(
+                reason = "usage_events_store_failed",
+                "usage events not stored"
+            );
+            api_error(StatusCode::SERVICE_UNAVAILABLE, "usage_events_unavailable").into_response()
+        }
+    }
+}
+
+/// The batch, or the fixed label it was refused with. Unknown fields,
+/// a non-random install id, an unlisted event or a bound broken: refused
+/// whole.
+pub(super) fn parse_batch(body: &[u8]) -> Result<UsageEventBatch, &'static str> {
+    let batch: UsageEventBatch =
+        serde_json::from_slice(body).map_err(|_| "usage-batch-malformed")?;
+    batch.validate().map_err(|e| match e {
+        trace_commons_protocol::usage_analytics::UsageBatchError::TooLarge => {
+            "usage-batch-too-large"
+        }
+        trace_commons_protocol::usage_analytics::UsageBatchError::InstallIdInvalid => {
+            "usage-install-id-invalid"
+        }
+        trace_commons_protocol::usage_analytics::UsageBatchError::UnknownEvent => {
+            "usage-event-unknown"
+        }
+        trace_commons_protocol::usage_analytics::UsageBatchError::CountInvalid => {
+            "usage-count-invalid"
+        }
+        trace_commons_protocol::usage_analytics::UsageBatchError::WeekInvalid => {
+            "usage-week-invalid"
+        }
+    })?;
+    Ok(batch)
 }
 
 /// `GET /v1/public/usage-region`.
@@ -179,6 +257,52 @@ mod tests {
         let junk = dir.path().join("junk.mmdb");
         std::fs::write(&junk, b"not a maxmind database").unwrap();
         assert!(open_countries(&junk).is_none());
+    }
+
+    #[test]
+    fn a_batch_is_taken_whole_or_refused_with_a_label() {
+        let id = uuid::Uuid::new_v4();
+        let good = serde_json::json!({
+            "install_id": id,
+            "rows": [{"event": "tab_insights_opened", "count": 3, "week": "2026-W45"}]
+        });
+        assert_eq!(
+            parse_batch(good.to_string().as_bytes()).unwrap().install_id,
+            id
+        );
+        for (body, label) in [
+            (
+                serde_json::json!({"install_id": id, "rows": [], "ip": "1.2.3.4"}),
+                "usage-batch-malformed",
+            ),
+            (serde_json::json!({"rows": []}), "usage-batch-malformed"),
+            (
+                serde_json::json!({"install_id": uuid::Uuid::nil(), "rows": []}),
+                "usage-install-id-invalid",
+            ),
+            (
+                serde_json::json!({"install_id": id, "rows": [{"event": "read_file", "count": 1, "week": "2026-W45"}]}),
+                "usage-event-unknown",
+            ),
+            (
+                serde_json::json!({"install_id": id, "rows": [{"event": "setup_finished", "count": 0, "week": "2026-W45"}]}),
+                "usage-count-invalid",
+            ),
+            (
+                serde_json::json!({"install_id": id, "rows": [{"event": "setup_finished", "count": 1, "week": "45"}]}),
+                "usage-week-invalid",
+            ),
+        ] {
+            assert_eq!(
+                parse_batch(body.to_string().as_bytes()).unwrap_err(),
+                label,
+                "{body}"
+            );
+        }
+        assert_eq!(
+            parse_batch(b"not json").unwrap_err(),
+            "usage-batch-malformed"
+        );
     }
 
     #[tokio::test]

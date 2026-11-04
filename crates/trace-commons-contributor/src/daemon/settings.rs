@@ -90,7 +90,8 @@ pub const DEFAULT_NOTIFICATIONS_ENABLED: bool = true;
 pub const DEFAULT_MENU_BAR_MARK_ENABLED: bool = true;
 /// Anonymous usage counts (`daemon::usage_analytics`) for a settings file
 /// that never chose. DRAFT, NEEDS APPROVAL (2026-11-04): on, and effective
-/// only where the region setting and the commons both say United States.
+/// only while the commons places this computer's IP address in the United
+/// States.
 pub const DEFAULT_SHARE_USAGE_DATA: bool = true;
 /// `notify.digest`. DRAFT. Not an owner decision: on is today's behaviour.
 pub const DEFAULT_NOTIFY_DIGEST: bool = true;
@@ -747,9 +748,10 @@ pub struct DaemonSettings {
     pub menu_bar_mark_enabled: bool,
 
     /// "Share anonymous usage data": weekly counts of screens opened and
-    /// controls used, sent only from the United States
-    /// (`daemon::usage_analytics`). Defaults to [`DEFAULT_SHARE_USAGE_DATA`].
-    /// Turning it off deletes the counts not yet sent.
+    /// controls used, with an anonymous random install id, sent only from
+    /// the United States (`daemon::usage_analytics`). Defaults to
+    /// [`DEFAULT_SHARE_USAGE_DATA`]. Turning it off deletes the counts not yet
+    /// sent and the install id.
     #[serde(default = "default_share_usage_data")]
     pub share_usage_data: bool,
 
