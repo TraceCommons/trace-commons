@@ -233,6 +233,9 @@ enum BrowserSignIn {
         listener: std::net::TcpListener,
         state: String,
         account_login: Option<&'static str>,
+        /// The logins the page offers: this build's, or (a change of login
+        /// proving the current one, F10) only the remembered one.
+        offered: &'static [&'static str],
     },
 }
 
@@ -307,6 +310,7 @@ impl BrowserSignIn {
                         listener: listener.into_std()?,
                         state,
                         account_login,
+                        offered: crate::channel::NEAR_AI_SIGN_IN_PROVIDERS,
                     },
                 ));
             }
@@ -324,23 +328,46 @@ impl BrowserSignIn {
 
     /// Serve the chooser until a login is picked, then send the browser to
     /// that login on the same listener. A known login is returned as is.
+    /// The chooser page for a change of login (F10): `offered` and, marked
+    /// "You used this login last time", `marked`. A build with one login
+    /// sends the browser straight to it, as [`Self::prepare`] does.
+    async fn prepare_offered(
+        api: &CloudApi,
+        offered: &'static [&'static str],
+        marked: Option<&'static str>,
+    ) -> Result<(String, Self)> {
+        if offered.is_empty() {
+            bail!("near_ai_credential_provider_unknown")
+        }
+        if offered.len() == 1 && crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.len() == 1 {
+            return Self::prepare(api, Some(offered[0]), marked).await;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let state = loopback::random_state()?;
+        let url = chooser::page_url(listener.local_addr()?.port(), &state);
+        Ok((
+            url,
+            Self::Choose {
+                listener: listener.into_std()?,
+                state,
+                account_login: marked,
+                offered,
+            },
+        ))
+    }
+
     async fn chosen(self, api: &CloudApi) -> Result<Ready> {
-        let (listener, state, account_login) = match self {
+        let (listener, state, account_login, offered) = match self {
             Self::Ready(ready) => return Ok(ready),
             Self::Choose {
                 listener,
                 state,
                 account_login,
-            } => (listener, state, account_login),
+                offered,
+            } => (listener, state, account_login, offered),
         };
         let listener = tokio::net::TcpListener::from_std(listener)?;
-        let choice = chooser::receive_choice(
-            &listener,
-            &state,
-            crate::channel::NEAR_AI_SIGN_IN_PROVIDERS,
-            account_login,
-        )
-        .await?;
+        let choice = chooser::receive_choice(&listener, &state, offered, account_login).await?;
         let next = listener
             .into_std()
             .map_err(anyhow::Error::from)
@@ -789,8 +816,14 @@ impl UnstoredKey {
         self.revoke = None;
     }
 
+    /// A guard with nothing to revoke, for a test that holds a login.
+    #[cfg(test)]
+    pub(crate) fn disarmed_for_test() -> Self {
+        Self { revoke: None }
+    }
+
     /// Revoke now, and wait for the answer.
-    async fn revoke_now(mut self) {
+    pub(crate) async fn revoke_now(mut self) {
         if let Some(revoke) = self.revoke.take() {
             revoke.run().await;
         }
@@ -868,7 +901,23 @@ pub(crate) async fn settle(
         }
         FreshLogin::Accepted(accepted) => Some(accepted),
         FreshLogin::Refused => {
-            unstored.revoke_now().await;
+            // F10: a refused login is held aside, unstored, for "Use a
+            // different account", so the person does not sign in with it
+            // twice. Held only in memory, and its key is revoked when the
+            // hold ends (a cancel, its expiry, or another login held).
+            // Where the change is not offered it is revoked now, as before.
+            let held = crate::daemon::account_login_change::HeldLogin {
+                tokens: session,
+                expires_at,
+                user_agent,
+                provider: progress.provider(),
+                minted,
+                identity: identities.new,
+                unstored,
+            };
+            if let Some(unheld) = crate::daemon::account_login_change::hold_aside(dir, held) {
+                unheld.unstored.revoke_now().await;
+            }
             return Err(refused(DIFFERENT_ACCOUNT));
         }
         FreshLogin::Unavailable => {
@@ -1129,6 +1178,140 @@ async fn begin_with(store: &ConfigStore, named: Option<&'static str>) -> Result<
     }))
 }
 
+/// A browser sign-in for a change of login (F10): `offered` on the chooser,
+/// `marked` as the login used last time, and the session handed to
+/// `on_session` with its login, instead of being minted and stored. Runs on
+/// the ceremony runtime, so it outlives the IPC call that began it; answers
+/// the browser URL and the leg's abort handle. `on_session` is told
+/// `Err(label)` when the leg ends without a session (cancelled, timed out,
+/// or failed), so the change can say so.
+pub(crate) async fn begin_change_leg<F, Fut>(
+    offered: &'static [&'static str],
+    marked: Option<&'static str>,
+    on_session: F,
+) -> Result<(String, tokio::task::AbortHandle)>
+where
+    F: FnOnce(
+            CloudApi,
+            std::result::Result<
+                (
+                    loopback::SessionTokens,
+                    Option<DateTime<Utc>>,
+                    String,
+                    &'static str,
+                ),
+                &'static str,
+            >,
+        ) -> Fut
+        + Send
+        + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let api = CloudApi::live()?;
+    let (browser_url, sign_in) = BrowserSignIn::prepare_offered(&api, offered, marked).await?;
+    let task = ceremony_runtime()?.spawn(async move {
+        let Ok(api) = CloudApi::live() else {
+            return;
+        };
+        let progress = Progress::new();
+        let captured: std::sync::Arc<
+            Mutex<Option<(loopback::SessionTokens, Option<DateTime<Utc>>, String)>>,
+        > = Default::default();
+        let sink = std::sync::Arc::clone(&captured);
+        let finished = tokio::time::timeout(
+            BROWSER_TIMEOUT,
+            sign_in.finish(&api, &progress, move |session, expires_at, user_agent| {
+                let sink = std::sync::Arc::clone(&sink);
+                async move {
+                    if let Ok(mut slot) = sink.lock() {
+                        *slot = Some((session, expires_at, user_agent));
+                    }
+                    Ok(())
+                }
+            }),
+        )
+        .await;
+        let session = captured.lock().ok().and_then(|mut slot| slot.take());
+        let outcome = match (finished, session) {
+            (Ok(Ok(())), Some((session, expires_at, user_agent))) => Ok((
+                session,
+                expires_at,
+                user_agent,
+                progress.provider().unwrap_or(PROVIDER_NOT_CHOSEN),
+            )),
+            (Ok(Err(error)), _) if ended_by_person(&error) => {
+                Err(crate::daemon::account_login_change::LEG_CANCELLED)
+            }
+            (Err(_), _) => Err("timed_out"),
+            _ => Err("failed"),
+        };
+        on_session(api, outcome).await;
+    });
+    Ok((browser_url, task.abort_handle()))
+}
+
+/// Mint this device's key in the NEAR AI account a change of login moves to
+/// (F10 step 2), held, not stored: the guard revokes it unless the change
+/// stores it. The new login's identity is read beside it.
+pub(crate) async fn mint_for_change(
+    api: &CloudApi,
+    store: &ConfigStore,
+    session: &loopback::SessionTokens,
+) -> Result<(super::api::MintedKey, Option<String>, UnstoredKey)> {
+    let name = key_name(&loopback::random_state()?);
+    let (minted, _) = api
+        .mint_inference_key_listing(session, &name, super::api::OrganizationChoice::FirstActive)
+        .await?;
+    let unstored = UnstoredKey::new(api, session, &minted);
+    let identity = super::spend_org::read_identity(store, api, session).await;
+    Ok((minted, identity, unstored))
+}
+
+/// Store a login a change of login moved the account to (F10) as this
+/// device's NEAR AI credential, in place of the old one, under the same
+/// commit as any sign-in, and only while `accept` holds. Records its login
+/// and identity. Blocking: credential storage.
+pub(crate) fn persist_change(
+    store: &ConfigStore,
+    held: crate::daemon::account_login_change::HeldLogin,
+    accept: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let crate::daemon::account_login_change::HeldLogin {
+        tokens,
+        expires_at,
+        user_agent,
+        provider,
+        minted,
+        identity,
+        unstored,
+    } = held;
+    let previous_identity = super::spend_org::last_identity(store);
+    let preferred = super::spend_org::chosen_organization(store);
+    let key_id = minted.key_id.clone();
+    persist_checked(
+        store.dir(),
+        minted,
+        tokens.refresh_token,
+        expires_at,
+        user_agent,
+        provider,
+        accept,
+    )?;
+    unstored.stored();
+    super::spend_org::forget_other_account(
+        store,
+        preferred.as_deref(),
+        false,
+        previous_identity.as_deref(),
+        identity.as_deref(),
+    );
+    if let Some(identity) = identity.as_deref() {
+        super::spend_org::record_identity(store, &key_id, identity);
+    }
+    super::login_record::enrolled_with(store, provider);
+    Ok(())
+}
+
 /// Write the minted key, and the session that reads the balance, into the
 /// daemon's own settings.
 ///
@@ -1365,6 +1548,9 @@ pub(crate) fn forget(store: &ConfigStore) -> Result<bool> {
 
 pub(super) fn forget_locked(store: &ConfigStore) -> Result<bool> {
     cancel_locked(store.dir(), None);
+    // A change of login (F10) in flight, and a login held aside for one,
+    // never outlive the NEAR AI login they were for.
+    crate::daemon::account_login_change::forget(store.dir());
     let had = crate::daemon::cloud_credential_lifecycle::forget_locked(store)?;
     // The spending-organization record goes with the session it needs.
     super::spend_org::clear_locked(store);

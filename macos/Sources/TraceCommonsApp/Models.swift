@@ -287,6 +287,11 @@ struct DaemonStatus: Decodable, Equatable {
     /// Whether this app's account needs attention (#1836 F1). A daemon that
     /// predates the keys has nothing to show.
     let accountAttention: AccountAttentionWire
+    /// Changing the NEAR AI login the account uses (F10, spec 2.4): whether
+    /// it is offered, whether a wallet-origin account's payouts need a NEAR
+    /// AI login, and whether a refused login is held aside for it. A daemon
+    /// that predates the keys offers nothing.
+    let loginChange: AccountLoginChangeStatus
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -309,6 +314,9 @@ struct DaemonStatus: Decodable, Equatable {
         case accountState = "account_state"
         case accountStateReason = "account_state_reason"
         case nearAILoginUnconfirmed = "near_ai_login_unconfirmed"
+        case loginChangeAvailable = "login_change_available"
+        case payoutsNeedLogin = "payouts_need_login"
+        case loginChangeHeld = "login_change_held"
     }
 
     init(
@@ -329,7 +337,8 @@ struct DaemonStatus: Decodable, Equatable {
         armingRewordings: [ArmingRewordingWire] = [],
         gateHeld: GateHeld = .none,
         legacyInviteMigration: LegacyMigrationWire = .none,
-        accountAttention: AccountAttentionWire = .none
+        accountAttention: AccountAttentionWire = .none,
+        loginChange: AccountLoginChangeStatus = .none
     ) {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
@@ -349,6 +358,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.gateHeld = gateHeld
         self.legacyInviteMigration = legacyInviteMigration
         self.accountAttention = accountAttention
+        self.loginChange = loginChange
     }
 
     init(from decoder: Decoder) throws {
@@ -384,6 +394,13 @@ struct DaemonStatus: Decodable, Equatable {
             reason: (try? c.decodeIfPresent(String.self, forKey: .accountStateReason)).flatMap { $0 },
             nearAILoginUnconfirmed:
                 (try? c.decodeIfPresent(Bool.self, forKey: .nearAILoginUnconfirmed)).flatMap { $0 } ?? false)
+        // Each key alone; a wrong type reads as false.
+        func flag(_ key: CodingKeys) -> Bool {
+            (try? c.decodeIfPresent(Bool.self, forKey: key)).flatMap { $0 } ?? false
+        }
+        loginChange = AccountLoginChangeStatus(
+            available: flag(.loginChangeAvailable), payoutsNeedLogin: flag(.payoutsNeedLogin),
+            held: flag(.loginChangeHeld))
     }
 
     /// This status as the daemon reports it straight after `unenroll`: not

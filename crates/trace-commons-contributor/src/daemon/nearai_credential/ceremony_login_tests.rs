@@ -44,6 +44,7 @@ async fn a_real_pick_reaches_the_attempts_progress() {
         listener: listener.into_std().unwrap(),
         state: state.clone(),
         account_login: None,
+        offered: crate::channel::NEAR_AI_SIGN_IN_PROVIDERS,
     };
     let api = CloudApi::live().unwrap();
     let progress = Progress::new();

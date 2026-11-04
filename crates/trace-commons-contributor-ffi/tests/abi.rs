@@ -2533,6 +2533,7 @@ fn write_enrolled_config(
         inference_receipt_endpoint: None,
         consent_scopes_chosen: Some(true),
         witness_origin: None,
+        account_identity: None,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION
             .to_string(),
@@ -5703,6 +5704,17 @@ fn the_account_devices_copy_crosses_the_abi() {
     let copy = json_owned(tc_account_devices_copy_json());
     assert_eq!(copy, serde_json::to_value(account_devices_copy()).unwrap());
     assert!(copy["code_command"].as_str().unwrap().contains("{code}"));
+    assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
+}
+
+#[test]
+fn the_account_change_copy_crosses_the_abi() {
+    use trace_commons_contributor::account_change_copy::account_change_copy;
+    use trace_commons_contributor_ffi::tc_account_change_copy_json;
+    let copy = json_owned(tc_account_change_copy_json());
+    assert_eq!(copy, serde_json::to_value(account_change_copy()).unwrap());
+    assert!(copy["body"].as_str().unwrap().contains("{new_provider}"));
+    assert_eq!(copy["mismatch_change"], "Use a different account");
     assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
 }
 

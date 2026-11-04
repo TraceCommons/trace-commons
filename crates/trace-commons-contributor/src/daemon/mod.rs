@@ -24,6 +24,7 @@ pub mod account_admission;
 pub(crate) mod account_attention;
 #[cfg(test)]
 mod account_attention_tests;
+pub(crate) mod account_login_change;
 pub mod account_onboarding;
 pub(crate) mod account_session_renewal;
 pub mod activity_missions;
@@ -386,6 +387,15 @@ fn isolate_dev_dry_run_store(real: &ConfigStore, dir: std::path::PathBuf) -> Res
 /// false to every other reader. The one exception is a start that lost the
 /// `try_lock`: that file belongs to the daemon holding it, and this function
 /// must not touch it.
+/// Record the account's identity kind on a config that predates it (F10
+/// decision 4). `true` when it wrote. A recorded kind is never changed here.
+pub(crate) fn record_identity_once(store: &ConfigStore) -> bool {
+    let Ok(Some(mut cfg)) = store.load_config() else {
+        return false;
+    };
+    cfg.record_identity_from_namespace() && store.save_config(&cfg).is_ok()
+}
+
 pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
     // K2 (#1173): a dev dry run never opens the real state directory for
     // writing -- not even its lock file.
@@ -440,6 +450,12 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
     // a zero-byte `daemon.lock` from a failed start was read as proof the
     // daemon had started, and produced a confident wrong diagnosis.
     let started = async {
+        // F10 decision 4: a config written before the identity kind was
+        // recorded gets it once, from its tenant namespace, so nothing later
+        // reads the prefix to decide how this account signs in. Best effort:
+        // without it the namespace still decides.
+        let migrate = store.clone();
+        let _ = tokio::task::spawn_blocking(move || record_identity_once(&migrate)).await;
         let mut shared =
             Arc::new(tokio::task::spawn_blocking(move || ipc::DaemonShared::load(store)).await??);
         // K2 (#1173): the one place `dev_dry_run` is ever set to `true`.
@@ -3080,6 +3096,7 @@ mod tests {
                     inference_receipt_endpoint: None,
                     consent_scopes_chosen: Some(true),
                     witness_origin: None,
+                    account_identity: None,
                     inference_receipt_check_attestation: false,
                     schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
                     issuer_url: issuer,
@@ -5200,6 +5217,7 @@ mod tests {
                 inference_receipt_endpoint: None,
                 consent_scopes_chosen: Some(true),
                 witness_origin: None,
+                account_identity: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "http://127.0.0.1:9".to_string(),
@@ -5403,6 +5421,7 @@ mod tests {
                 inference_receipt_endpoint: None,
                 consent_scopes_chosen: Some(true),
                 witness_origin: None,
+                account_identity: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
                 issuer_url: ingest.to_string(),

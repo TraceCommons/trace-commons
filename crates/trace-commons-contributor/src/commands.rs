@@ -80,6 +80,7 @@ pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
         inference_receipt_endpoint: None,
         consent_scopes_chosen: Some(false),
         witness_origin: None,
+        account_identity: None,
         inference_receipt_check_attestation: false,
     }
 }
@@ -206,6 +207,7 @@ pub(crate) async fn enroll_core(
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
         consent_scopes_chosen: Some(consent_chosen),
         witness_origin: crate::config::environment_witness_origin(env_witness.as_ref()),
+        account_identity: None,
         inference_receipt_check_attestation:
             crate::config::inference_receipt_check_attestation_from_env(),
     };
@@ -2696,6 +2698,7 @@ mod tests {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: Some(true),
             witness_origin: None,
+            account_identity: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.original.invalid".to_string(),
@@ -2851,6 +2854,7 @@ mod tests {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: Some(true),
             witness_origin: None,
+            account_identity: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.original.invalid".to_string(),
@@ -3169,6 +3173,7 @@ mod login_route_tests {
                 inference_receipt_endpoint: None,
                 consent_scopes_chosen: Some(false),
                 witness_origin: None,
+                account_identity: None,
                 inference_receipt_check_attestation: false,
             })
             .unwrap();
@@ -3740,6 +3745,7 @@ async fn enroll_with_invite_core(
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
         consent_scopes_chosen: Some(consent_chosen),
         witness_origin: crate::config::environment_witness_origin(env_witness.as_ref()),
+        account_identity: None,
         inference_receipt_check_attestation:
             crate::config::inference_receipt_check_attestation_from_env(),
     };

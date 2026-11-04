@@ -516,6 +516,14 @@ extension DaemonData {
         /// A NEAR AI login is stored while the account needs attention, so
         /// no Commons check ran for it. The core's words read it.
         public let nearAILoginUnconfirmed: Bool?
+        /// F10 (spec 2.4): this device may offer "Use a different account".
+        /// Read through `AccountLoginChangeStatus`.
+        public let loginChangeAvailable: Bool?
+        /// F10: a wallet-origin account, whose payouts need a NEAR AI login.
+        public let payoutsNeedLogin: Bool?
+        /// F10: a login the commons refused as another account is held aside
+        /// for the change.
+        public let loginChangeHeld: Bool?
         /// K2 (#1173): `true` while a debug daemon runs a developer dry
         /// run. A release daemon never sends it. The app's notice reads it
         /// rather than the environment.
@@ -553,6 +561,9 @@ extension DaemonData {
             case accountState = "account_state"
             case accountStateReason = "account_state_reason"
             case nearAILoginUnconfirmed = "near_ai_login_unconfirmed"
+            case loginChangeAvailable = "login_change_available"
+            case payoutsNeedLogin = "payouts_need_login"
+            case loginChangeHeld = "login_change_held"
             case devDryRun = "dev_dry_run"
         }
     }

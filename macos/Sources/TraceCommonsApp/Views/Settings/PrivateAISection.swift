@@ -36,6 +36,9 @@ struct PrivateAISection: View {
             // goes to. Hides itself unless the commons lists the rail as
             // enabled.
             PayoutLinkView()
+            // A wallet-origin account's payouts need a NEAR AI login (F10):
+            // the line and its button, where the link status would be.
+            PayoutsNeedLoginLine()
             // Count Private AI tokens (Ron's #1287 review: moved here from
             // Tools). This section is open before first run (R-38), so the
             // switch waits for it (R-43): no Insights write is reachable

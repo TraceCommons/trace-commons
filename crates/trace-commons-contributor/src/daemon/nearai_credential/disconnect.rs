@@ -255,6 +255,44 @@ impl Revocation {
     }
 }
 
+impl Revocation {
+    /// [`Self::run`] for a change of login (F10): the old key is revoked with
+    /// the old session, and a key that could not be revoked is parked in the
+    /// spending-organization record, tagged with the old identity, so that
+    /// identity's next sign-in revokes it (one-connected-account spec 3.2,
+    /// step 5). Pending entries are left in the record as they are.
+    pub(crate) async fn run_for_change(self, api: Option<&CloudApi>) -> Option<bool> {
+        let store = self.store.clone();
+        let identity = self.identity.clone();
+        let active = self.active.clone();
+        let outcome = self.run(api).await;
+        if outcome == Some(false) {
+            if let Some((workspace_id, key_id)) = active {
+                let mut entry = PendingRevocation::new(&workspace_id, &key_id);
+                entry.identity = identity;
+                put_back(&store, vec![entry], None);
+            }
+        }
+        outcome
+    }
+}
+
+/// What revoking the stored key needs, copied before a change of login (F10)
+/// replaces it, with no pending entries: those stay in the record. `None`
+/// when no key is stored. Reads the secret, so blocking: call it off an
+/// async runtime.
+pub(crate) fn capture_for_change(store: &ConfigStore) -> Option<Revocation> {
+    let disk = DaemonSettings::load(store).ok()?;
+    let current = resolve_stored(store);
+    let current = current.as_ref().filter(|current| {
+        crate::daemon::cloud_credential_lifecycle::ensure_current(&disk, current).is_ok()
+    });
+    let (revocation, _kept) = Revocation::capture(store, &disk, current);
+    let mut revocation = revocation?;
+    revocation.pending.clear();
+    revocation.stored.then_some(revocation)
+}
+
 /// Delete `pending` side by side within [`PENDING_BUDGET`]. Answers the
 /// entries not settled.
 async fn tidy(

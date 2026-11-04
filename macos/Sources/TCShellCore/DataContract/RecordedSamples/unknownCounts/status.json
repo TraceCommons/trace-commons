@@ -16,8 +16,8 @@
   "queue_capacity_used": 3,
   "queue_at_capacity": false,
   "dev_dry_run": false,
-  "contribution_mode": "notify_only",
-  "contribution_mode_partial": false,
+  "payouts_need_login": false,
+  "login_change_held": false,
   "next_digest_at": null,
   "health": {
     "last_error_label": null,
@@ -49,5 +49,8 @@
     "projects": []
   },
   "contribution_override": null,
+  "contribution_mode": "notify_only",
+  "contribution_mode_partial": false,
+  "login_change_available": false,
   "_sample": "absent on purpose: older daemon"
 }

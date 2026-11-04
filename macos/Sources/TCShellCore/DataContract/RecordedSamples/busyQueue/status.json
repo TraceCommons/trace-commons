@@ -78,6 +78,9 @@
   "contribution_override": null,
   "contribution_mode": "notify_only",
   "contribution_mode_partial": false,
+  "login_change_available": false,
+  "payouts_need_login": false,
+  "login_change_held": false,
   "idle_sessions": {
     "count": 14,
     "tools": [

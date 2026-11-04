@@ -438,6 +438,9 @@ struct MonitorWindowView: View {
         // The sheet for sent traces without Train coding models, when the
         // Insights line's Review or the first run raised it.
         .modifier(SentTracesTrainingPresenter(site: .monitor))
+        // The change of login's sheet (F10), raised from Settings'
+        // Connection and Private AI sections, once for the window.
+        .modifier(AccountLoginChangePresenter())
         // Modals and confirmations raised anywhere in the window cover all
         // of it, Settings' sections' own included: the Settings modal sits
         // inside this host.

@@ -452,6 +452,8 @@ pub const METHODS: &[&str] = &[
     "payout_link_start",
     "payout_link_confirm",
     "payout_link_unlink",
+    "account_login_change",
+    "account_login_change_cancel",
     "referral_codes_list",
     "referral_codes_create",
     "referral_codes_disable",
@@ -1670,7 +1672,7 @@ impl DaemonShared {
     /// The observed count is stored only once the change has been applied. A
     /// settings document that will not load leaves it where it was, so the
     /// next pass tries again rather than dropping the credential forever.
-    async fn absorb_near_ai_credential_change(&self) {
+    pub(crate) async fn absorb_near_ai_credential_change(&self) {
         let observed = super::nearai_credential::ceremony::change_count(self.store.dir());
         if observed == self.near_ai_credential_changes.load(Ordering::Acquire) {
             return;
@@ -2984,6 +2986,18 @@ impl DaemonShared {
             // `ContributionModeCopy.auto_partial` under its label.
             "contribution_mode_partial": contribution_mode_partial,
         });
+        // Additive (F10, spec 2.4): `login_change_available` (this device may
+        // offer "Use a different account"), `payouts_need_login` (a
+        // wallet-origin account, whose payouts need a NEAR AI login), and
+        // `login_change_held` (a login the commons refused as another account
+        // is held aside, so the change skips signing in with it again). All
+        // three always present. No network and no credential store.
+        if let (Some(object), serde_json::Value::Object(fields)) = (
+            status.as_object_mut(),
+            super::account_login_change::status_fields(&self.store, cfg.as_ref()),
+        ) {
+            object.extend(fields);
+        }
         // Additive (nudge U4). `{count, tools, threshold_days}`: how many
         // waiting Ask-me sessions nobody has written to for the idle
         // threshold, the display names of the tools they came from, and the
@@ -3834,6 +3848,14 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("payout_link_start", "payout-link-requires-async"),
     ("payout_link_confirm", "payout-link-requires-async"),
     ("payout_link_unlink", "payout-link-requires-async"),
+    (
+        "account_login_change",
+        "account-login-change-requires-async",
+    ),
+    (
+        "account_login_change_cancel",
+        "account-login-change-requires-async",
+    ),
     ("referral_codes_list", "referral-requires-async"),
     ("referral_codes_create", "referral-requires-async"),
     ("referral_codes_disable", "referral-requires-async"),
@@ -7025,6 +7047,8 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "payout_link_start" => super::payout_link::handle_start(shared, req).await,
         "payout_link_confirm" => super::payout_link::handle_confirm(shared, req).await,
         "payout_link_unlink" => super::payout_link::handle_unlink(shared, req).await,
+        "account_login_change" => super::account_login_change::handle(shared, req).await,
+        "account_login_change_cancel" => super::account_login_change::handle_cancel(shared, req),
         "referral_codes_list" => super::referral::handle_list(shared, req).await,
         "referral_codes_create" => super::referral::handle_create(shared, req).await,
         "referral_codes_disable" => super::referral::handle_disable(shared, req).await,
@@ -12239,6 +12263,7 @@ mod tests {
                 inference_receipt_endpoint: None,
                 consent_scopes_chosen: Some(true),
                 witness_origin: None,
+                account_identity: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "https://issuer.invalid".to_string(),
@@ -18592,6 +18617,7 @@ mod tests {
                 inference_receipt_endpoint: None,
                 consent_scopes_chosen: Some(true),
                 witness_origin: None,
+                account_identity: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "https://issuer.invalid".to_string(),
@@ -18913,7 +18939,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 75);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 77);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -19397,7 +19423,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 108, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 81, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 83, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

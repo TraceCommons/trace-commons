@@ -236,6 +236,9 @@ async fn spawn(device_public_key: String) -> Stub {
                             "tenant_id": state.tenant.lock().unwrap().clone(),
                             "device_key_id": device_key_id,
                             "anchor_hash": format!("sha256:{}", "cd".repeat(32)),
+                            // What every F10 commons answers: the account
+                            // signs in with a NEAR AI login.
+                            "identity": "near_ai_login",
                         })),
                     )
                         .into_response()
@@ -2047,7 +2050,23 @@ mod settle_tests {
         assert_eq!(fields[0].1, "commons");
         assert_eq!(fields[1].1, different_account_label());
         assert_eq!((stored(&fx), fx.account_record(), fx.config()), before);
-        assert_eq!(revokes(&fx), 1, "the key minted for it is revoked");
+        // F10: held aside, unstored, for "Use a different account", and
+        // revoked when the hold ends without a change.
+        assert_eq!(revokes(&fx), 0, "held aside for a change of login");
+        assert_hold_ends_in_a_revoke(&fx).await;
+    }
+
+    /// The held login's key is revoked once its hold ends (here, the
+    /// NEAR AI forget every sign-out runs).
+    async fn assert_hold_ends_in_a_revoke(fx: &Fixture) {
+        crate::daemon::account_login_change::forget(fx.shared.store.dir());
+        for _ in 0..50 {
+            if revokes(fx) == 1 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(revokes(fx), 1, "the held key is revoked when the hold ends");
     }
 
     /// The revokes of the minted key the stub saw.
@@ -2213,7 +2232,8 @@ mod settle_tests {
         let error = run(&fx, check).await.unwrap_err();
         assert_eq!(error.root_cause().to_string(), different_account_label());
         assert_eq!((stored(&fx), fx.account_record(), fx.config()), before);
-        assert_eq!(revokes(&fx), 1);
+        assert_eq!(revokes(&fx), 0, "held aside for a change of login");
+        assert_hold_ends_in_a_revoke(&fx).await;
     }
 
     /// Not bound (a first run): stored as it always was.
@@ -2242,4 +2262,187 @@ mod settle_tests {
         assert_eq!(fields[1].1, "near_ai_credential_commons_unavailable");
         assert_eq!(stored(&fx), before);
     }
+}
+
+// ---- F10 decision 4: the recorded identity kind, not the tenant prefix ----
+
+fn wallet_tenant() -> String {
+    format!("near-{}", "ab".repeat(32))
+}
+
+/// A wallet-origin account (`near-` tenant) whose config records `kind`,
+/// with the commons answering for that tenant.
+async fn wallet_origin(
+    session: Session,
+    kind: Option<trace_commons_protocol::account_login_change::IdentityKind>,
+) -> Fixture {
+    let fx = Fixture::with_tenant(session, &wallet_tenant()).await;
+    *fx.stub.state.tenant.lock().unwrap() = wallet_tenant();
+    let mut cfg = fx.shared.store.load_config().unwrap().unwrap();
+    cfg.account_identity = kind;
+    fx.shared.store.save_config(&cfg).unwrap();
+    fx
+}
+
+#[tokio::test]
+async fn a_near_tenant_that_changed_to_a_near_ai_login_renews_by_it() {
+    use trace_commons_protocol::account_login_change::IdentityKind;
+    let fx = wallet_origin(Session::Expired, Some(IdentityKind::NearAiLogin)).await;
+
+    let response = fx.payout_status().await;
+
+    assert_eq!(refusal(&response), None, "payout_rails_status refused");
+    assert_eq!(fx.ceremonies(), (1, 1));
+    let loaded = crate::account_auth::try_load_session_with_snapshot(&fx.shared.store)
+        .unwrap()
+        .expect("a usable session is stored");
+    assert_eq!(loaded.session.access_token, renewed_token());
+}
+
+#[tokio::test]
+async fn a_near_tenant_with_no_recorded_kind_is_not_renewed_by_a_near_ai_login() {
+    let fx = wallet_origin(Session::Expired, None).await;
+
+    let response = fx.payout_status().await;
+
+    assert_eq!(refusal(&response), Some("account-session-required"));
+    assert_eq!(fx.ceremonies(), (0, 0), "the prefix decides, as before");
+}
+
+#[tokio::test]
+async fn a_near_tenant_that_records_a_wallet_is_not_renewed_by_a_near_ai_login() {
+    use trace_commons_protocol::account_login_change::IdentityKind;
+    let fx = wallet_origin(Session::Expired, Some(IdentityKind::Wallet)).await;
+
+    assert_eq!(
+        refusal(&fx.payout_status().await),
+        Some("account-session-required")
+    );
+    assert_eq!(fx.ceremonies(), (0, 0));
+    assert_eq!(
+        refusal(&sign_in_again(&fx).await),
+        Some("near_ai_sign_in_not_near_ai_account")
+    );
+}
+
+#[tokio::test]
+async fn sign_in_again_signs_in_a_near_tenant_that_changed_to_a_near_ai_login() {
+    use trace_commons_protocol::account_login_change::IdentityKind;
+    let fx = wallet_origin(Session::Absent, Some(IdentityKind::NearAiLogin)).await;
+    assert_eq!(fx.status().await["sign_in"], "near_ai");
+
+    let response = sign_in_again(&fx).await;
+
+    assert_eq!(refusal(&response), None);
+    assert_eq!(fx.ceremonies(), (1, 1));
+}
+
+#[tokio::test]
+async fn a_fresh_login_is_checked_for_a_near_tenant_that_changed_to_a_near_ai_login() {
+    use trace_commons_protocol::account_login_change::IdentityKind;
+    let changed = wallet_origin(Session::Expired, Some(IdentityKind::NearAiLogin)).await;
+    let cfg = changed.shared.store.load_config().unwrap().unwrap();
+    assert!(checks_near_ai_login(&changed.shared.store, &cfg));
+
+    let unchanged = wallet_origin(Session::Expired, None).await;
+    let cfg = unchanged.shared.store.load_config().unwrap().unwrap();
+    assert!(
+        !checks_near_ai_login(&unchanged.shared.store, &cfg),
+        "a wallet account's NEAR AI sign-in for Private AI is not checked"
+    );
+}
+
+/// A sign-in answer that says how the account signs in is recorded once
+/// the session is stored, for the enrolled tenant only (F10 section 2.5).
+#[test]
+fn the_identity_a_commons_answers_is_recorded_for_the_enrolled_tenant_only() {
+    use trace_commons_protocol::account_login_change::IdentityKind;
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let mut cfg = crate::commands::unenrolled_preview_config();
+    cfg.tenant_id = wallet_tenant();
+    store.save_config(&cfg).unwrap();
+
+    assert!(
+        !super::super::nearai_onboarding::record_account_identity(
+            &store,
+            &tenant(),
+            IdentityKind::NearAiLogin
+        )
+        .unwrap(),
+        "another tenant's answer is not this account's"
+    );
+    assert_eq!(store.load_config().unwrap().unwrap().account_identity, None);
+    assert!(
+        super::super::nearai_onboarding::record_account_identity(
+            &store,
+            &wallet_tenant(),
+            IdentityKind::NearAiLogin
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        store.load_config().unwrap().unwrap().account_identity,
+        Some(IdentityKind::NearAiLogin)
+    );
+    assert!(
+        !super::super::nearai_onboarding::record_account_identity(
+            &store,
+            &wallet_tenant(),
+            IdentityKind::NearAiLogin
+        )
+        .unwrap(),
+        "an unchanged kind writes nothing"
+    );
+}
+
+/// F10 section 2.5: another device moved this wallet-origin account to a
+/// NEAR AI login. This device still records `wallet`; a fresh NEAR AI
+/// sign-in that the commons accepts as this account's is the account's,
+/// and its answer records the new kind, so the device renews by it.
+#[tokio::test]
+async fn a_wallet_device_learns_its_account_moved_from_an_accepted_sign_in() {
+    use trace_commons_protocol::account_login_change::IdentityKind;
+    let fx = wallet_origin(Session::Expired, None).await;
+
+    let check = check_fresh_login(&fx.shared.store, &fx.via(), "near-access-fresh").await;
+
+    let FreshLogin::Accepted(accepted) = check else {
+        panic!("the commons accepted the login for this account");
+    };
+    commit_fresh_login(&fx.shared.store, *accepted)
+        .await
+        .unwrap();
+    let cfg = fx.shared.store.load_config().unwrap().unwrap();
+    assert_eq!(cfg.account_identity, Some(IdentityKind::NearAiLogin));
+    assert!(cfg.signs_in_with_near_ai());
+}
+
+/// An unchanged wallet account's sign-in for Private AI is stored as it
+/// always was: the commons' refusal is not this account's business.
+#[tokio::test]
+async fn a_wallet_accounts_refused_sign_in_is_not_bound() {
+    let fx = wallet_origin(Session::Expired, None).await;
+    *fx.stub.state.refuse.lock().unwrap() = true;
+    let config_before = fx.config();
+
+    let check = check_fresh_login(&fx.shared.store, &fx.via(), "near-access-fresh").await;
+
+    assert!(matches!(check, FreshLogin::NotBound));
+    assert_eq!(fx.config(), config_before);
+}
+
+/// After a change on another device, this device's old login is retired:
+/// the commons answers `near_ai_login_retired`, which reads as another
+/// account (spec 2.5: the existing mismatch block), never as a pass.
+#[tokio::test]
+async fn a_retired_login_is_refused_as_another_account() {
+    let fx = Fixture::new(Session::Expired).await;
+    *fx.stub.state.refuse.lock().unwrap() = true;
+    *fx.stub.state.refuse_status.lock().unwrap() = 409;
+    *fx.stub.state.refuse_label.lock().unwrap() =
+        trace_commons_protocol::account_login_change::NEAR_AI_LOGIN_RETIRED.into();
+
+    let check = check_fresh_login(&fx.shared.store, &fx.via(), "near-access-fresh").await;
+
+    assert!(matches!(check, FreshLogin::Refused));
 }
