@@ -58,9 +58,11 @@ pub fn handle(
     // Bounded, so a stalled hook of the same session never holds the
     // agent at the end of a turn; giving up drops this event.
     let _lock = store.lock_session(session_id, SESSION_LOCK_WAIT).ok()?;
-    // Only `SessionStart` makes session state from nothing. A later event
-    // of a session with no file (one that ended, or was pruned while idle)
-    // does nothing, so a hook that ran late never leaves an orphan behind.
+    // Only `SessionStart` and `UserPromptSubmit` make session state from
+    // nothing; the prompt does so to restart a session pruned while idle.
+    // Any other event of a session with no file (one that ended, or was
+    // pruned) does nothing. A prompt that arrives after `SessionEnd` leaves
+    // a file nothing folds, which the idle prune removes in time.
     // A file that exists but does not read (an upgrade changed its schema)
     // starts over, so a live session is never switched off.
     //
