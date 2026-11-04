@@ -375,8 +375,16 @@ fn bundle_award_states(package: &BundlePackage) -> Result<BTreeMap<String, Strin
     if package.manifest.score.implementation_id == COMPATIBILITY_SCORE_IMPLEMENTATION {
         let config: CompatibilityBundleConfig =
             serde_json::from_slice(config).map_err(|_| "corpus_package_configuration_invalid")?;
+        // The credit rule the package pins decides where a credited leg
+        // ends: `flat` never batches it (Ruling S10), the graded rule
+        // settles it into a finalized batch (owner decision D2, 2026-11-03).
+        let state = if config.credit_rule.trace_credit_event().settles_into_batch() {
+            "finalized"
+        } else {
+            "not_settlement_eligible"
+        };
         Ok(if config.novelty_utility_microcredits > 0 {
-            BTreeMap::from([(trace_credit, "not_settlement_eligible".to_string())])
+            BTreeMap::from([(trace_credit, state.to_string())])
         } else {
             BTreeMap::new()
         })
@@ -2846,6 +2854,22 @@ fn fixture_expectations_default_from_the_outcome_count() {
     let embedder = ReferenceEmbedder::new();
     let no_delta = compatibility_reference_package(0, &scorer, &embedder).unwrap();
     assert_eq!(bundle_award_states(&no_delta), Ok(BTreeMap::new()));
+    // A graded package's credited leg is batched: the corpus expects a
+    // finalized batch, not `not_settlement_eligible` (stage 2, 2026-11-03).
+    assert_eq!(
+        bundle_award_states(&production_test_package_with(
+            1_000_000,
+            trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::GradedPerplexityV1,
+        )),
+        Ok(BTreeMap::from([(
+            "trace_credit".to_string(),
+            "finalized".to_string(),
+        )]))
+    );
+    assert_eq!(
+        bundle_award_states(&production_test_package_awarding(1_000_000)),
+        Ok(credited.clone())
+    );
 
     let fixture = |label: &str| {
         corpus
@@ -3351,6 +3375,19 @@ pub(super) fn production_test_package() -> BundlePackage {
 /// [`production_test_package`] with `main`'s `NoveltyUtility` delta set to
 /// `microcredits`: `0` is the pilot's, under which Score awards nothing.
 pub(super) fn production_test_package_awarding(microcredits: u64) -> BundlePackage {
+    production_test_package_with(
+        microcredits,
+        trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
+    )
+}
+
+/// [`production_test_package_awarding`] under the credit rule `credit_rule`:
+/// `GradedPerplexityV1` is the package stage 2 of the paying bundle signs
+/// (spec 2026-11-03-pilot-paying-bundle-design).
+pub(super) fn production_test_package_with(
+    microcredits: u64,
+    credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule,
+) -> BundlePackage {
     use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
     use trace_commons_server::versioned_pipeline_production::{
         FastEmbedDescriptor, NearAiScorerDescriptor, production_compatibility_package,
@@ -3378,11 +3415,175 @@ pub(super) fn production_test_package_awarding(microcredits: u64) -> BundlePacka
             chunk_cap: 16,
             chunk_min_tokens: 64,
             novelty_utility_microcredits: microcredits,
-            credit_rule:
-                trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
+            credit_rule,
         },
     )
     .expect("the production test package builds")
+}
+
+/// Stage 2 of the paying bundle (2026-11-03) failed Phase A here:
+/// `promote package-checks` signed a graded package (delta 1 point, rule
+/// `graded_perplexity_v1`), and the corpus harness assembled its service
+/// with a gate configuration that dropped the package's rule, so the
+/// production assembly built a flat default package and refused with
+/// `harness_production_package_mismatch`. The harness must hold the
+/// package's own configuration, rule included, for every package-bearing
+/// check: the corpus run (this assembly) and the restore drill
+/// (`assemble_production_harness_service`). No database: assembly opens no
+/// connection.
+#[tokio::test]
+async fn a_production_harness_serves_a_graded_package() {
+    use trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule;
+    let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let runtime = Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(
+            &format!("postgres://nobody@127.0.0.1:{unused_port}/none"),
+            1,
+        ))
+        .await
+        .unwrap(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = test_artifact_store_with_key(
+        dir.path(),
+        &trace_commons_server::secrets::keychain::generate_master_key_hex(),
+    );
+    let doubles = || {
+        let index = IsolatedPipelineIndex::new();
+        CorpusDependencies::Production(HarnessDependencies::Doubles(
+            trace_commons_server::versioned_pipeline_harness::HarnessDoubles {
+                scorer: Arc::new(ReferencePerplexityScorer::new()),
+                embedder: Arc::new(ReferenceEmbedder::new()),
+                index_reader: index.clone(),
+                index_writer: index,
+            },
+        ))
+    };
+    for package in [
+        production_test_package_with(1_000_000, CompatibilityCreditRule::GradedPerplexityV1),
+        production_test_package_with(0, CompatibilityCreditRule::Flat),
+    ] {
+        let rule = package_compatibility_config(&package).unwrap().credit_rule;
+        let service = assemble_corpus_service(
+            runtime.clone(),
+            artifacts.clone(),
+            doubles(),
+            package.clone(),
+        );
+        assert!(
+            *service.default_package() == package,
+            "the corpus harness serves the {rule:?} package itself"
+        );
+        let restore = assemble_production_harness_service(
+            runtime.clone(),
+            &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+            &package,
+            match doubles() {
+                CorpusDependencies::Production(dependencies) => dependencies,
+                CorpusDependencies::Reference(_) => unreachable!(),
+            },
+            None,
+        );
+        assert!(
+            *restore.default_package() == package,
+            "the restore drill serves the {rule:?} package itself"
+        );
+    }
+}
+
+/// The regression for stage 2's failed Phase A, end to end: main's corpus
+/// through the `pipeline_http_corpus_compatibility` harness in production
+/// mode, over doubles, serving a graded production package (delta 1 point,
+/// rule `graded_perplexity_v1`), as `pipeline.py promote package-checks`
+/// serves the signed one on the operator host. Before the fix the assembly
+/// refused (`harness_production_package_mismatch`). Production mode does
+/// not compare credit states (O-B3), so `bundle_award_states`' graded case
+/// is pinned by `fixture_expectations_default_from_the_outcome_count`
+/// instead. Ignored: it writes the corpus tenant's
+/// fixed fixtures into the suite's pilot-shaped database, so it runs alone
+/// on its own database (CI: the database suites job, "corpus check on a
+/// graded production package"):
+/// `cargo test -p trace-commons-ingest --lib a_graded_production_package_passes_the_corpus_check -- --ignored --test-threads=1`
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "runs main's corpus on the suite's database: run alone (CI database suites job)"]
+async fn a_graded_production_package_passes_the_corpus_check() {
+    use trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule;
+    if std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").is_err() {
+        return;
+    }
+    let package =
+        production_test_package_with(1_000_000, CompatibilityCreditRule::GradedPerplexityV1);
+    let reports = tempfile::tempdir().unwrap();
+    let config = CorpusRunConfig {
+        partitions: vec![("corpus", main_corpus_path())],
+        check_id: "pipeline_http_corpus_compatibility".to_string(),
+        // `require_production_corpus_config` needs a signed source; the
+        // package itself is handed to the run below, already verified.
+        source: CorpusPackageSource::Signed {
+            package: reports.path().join("unused-signed-package.json"),
+            trusted_key: reports.path().join("unused-trusted-key.json"),
+        },
+        report_path: reports.path().join("report.json"),
+        artifact_root: None,
+        master_key_hex: None,
+    };
+    let index = IsolatedPipelineIndex::new();
+    run_corpus(
+        &config,
+        package,
+        CorpusDependencies::Production(HarnessDependencies::Doubles(
+            trace_commons_server::versioned_pipeline_harness::HarnessDoubles {
+                scorer: Arc::new(ReferencePerplexityScorer::new()),
+                embedder: Arc::new(ReferenceEmbedder::new()),
+                index_reader: index.clone(),
+                index_writer: index,
+            },
+        )),
+    )
+    .await;
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config.report_path).unwrap()).unwrap();
+    assert_eq!(report["failure_count"], 0, "{report}");
+    assert!(
+        report["completed_fixture_count"].as_u64().unwrap_or(0) > 0,
+        "{report}"
+    );
+}
+
+/// `pipeline.py package --bundle production` with the graded rule in the
+/// env file builds the package the harness then reads back: the rule and
+/// the delta round-trip through `production_package_pins`.
+#[test]
+fn a_graded_production_package_builds_from_env_and_pins_its_rule() {
+    use trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule;
+    let env = BTreeMap::from([
+        ("TRACE_COMMONS_NEAR_AI_MODEL", "Qwen/Qwen3.6-35B-A3B-FP8"),
+        ("TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF", "-8.0"),
+        ("TRACE_COMMONS_EMBEDDER_MODEL_ID", "BAAI/bge-large-en-v1.5"),
+        ("TRACE_COMMONS_VECTOR_INDEX_DIM", "1024"),
+    ]);
+    let lookup = |var: &str| env.get(var).map(|value| value.to_string());
+    let package =
+        production_test_package_with(1_000_000, CompatibilityCreditRule::GradedPerplexityV1);
+    let pins = production_package_pins(&package).expect("a graded package's pins prove it");
+    assert_eq!(
+        pins.main_gate.credit_rule,
+        CompatibilityCreditRule::GradedPerplexityV1
+    );
+    assert_eq!(pins.main_gate.novelty_utility_microcredits, 1_000_000);
+    assert_eq!(
+        production_bundle_package(&lookup, &pins.main_gate).unwrap(),
+        package
+    );
+    assert_ne!(
+        package.bundle_id,
+        production_test_package_awarding(1_000_000).bundle_id,
+        "the rule is pinned in the package"
+    );
 }
 
 /// Spec B-D5, plan B6: `pipeline.py package --bundle production` builds the

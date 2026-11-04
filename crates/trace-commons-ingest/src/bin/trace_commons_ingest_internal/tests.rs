@@ -14480,19 +14480,10 @@ const TEST_MAIN_GATE: trace_commons_server::versioned_pipeline_compat::MainGateC
 fn main_gate_of(
     config: &trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig,
 ) -> trace_commons_server::versioned_pipeline_compat::MainGateConfig {
-    trace_commons_server::versioned_pipeline_compat::MainGateConfig {
-        perplexity_floor_micros: Some(config.perplexity_floor_micros),
-        tail_fraction_floor_micros: Some(config.tail_fraction_floor_micros),
-        novelty_floor_micros: Some(config.novelty_floor_micros),
-        embed_insert_novelty_micros: config.embed_insert_novelty_micros,
-        top_k: config.top_k,
-        chunk_target_tokens: config.chunk_target_tokens,
-        chunk_max_tokens: config.chunk_max_tokens,
-        chunk_cap: config.chunk_cap,
-        chunk_min_tokens: config.chunk_min_tokens,
-        novelty_utility_microcredits: config.novelty_utility_microcredits,
-        credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
-    }
+    // The configuration's own inverse, every field included: a hand-copied
+    // field list here dropped the credit rule once, and the production
+    // corpus harness then refused a graded package (stage 2, 2026-11-03).
+    config.main_gate()
 }
 
 /// `main`'s NEAR payout controls the pipeline tests assemble with: the
