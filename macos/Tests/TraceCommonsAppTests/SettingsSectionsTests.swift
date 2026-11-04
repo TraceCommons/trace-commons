@@ -166,16 +166,19 @@ final class SettingsSectionsTests: XCTestCase {
             loggedIn: true, accountSignedIn: false, accountLogin: "github", needsAttention: false, copy: copy)
         XCTAssertEqual(signedOut, MonitorWords.signedOut)
         XCTAssertFalse(signedOut.isEmpty)
+        XCTAssertEqual(MonitorWords.table?.signIn, "Sign in", "the notice's approved word")
+        XCTAssertEqual(MonitorWindowView.openFirstRun, MonitorWords.table?.signIn, "one key for both")
         XCTAssertFalse(AccountSection.Head.signedOut.showsChip, "a signed-out account wears no Ready chip")
         XCTAssertTrue(AccountSection.Head.connected.showsChip)
         XCTAssertTrue(AccountSection.Head.notEnrolled.showsChip)
 
         let account = try SettingsParityTests.text("Views/Settings/AccountSection.swift")
         for needle in [
-            // The core's "Sign in", as Home's Account heading says it, and
-            // the account's own way back in (NEAR AI or native, the daemon's
-            // choice), as the payout card's Sign in again runs it.
-            "Button(model.managedText(\"sign_in_near_ai\")) { Task { await model.signInToAccount() } }",
+            // The core's "Sign in", the signed-out notice's own key (#1918),
+            // and the account's own way back in (NEAR AI or native, the
+            // daemon's choice), as the payout card's Sign in again runs it.
+            "if let signIn = MonitorWords.table?.signIn, !signIn.isEmpty {",
+            "Button(signIn) { Task { await model.signInToAccount() } }",
             ".disabled(model.accountSigningIn)",
             // One Sign in in the section: the NEAR AI login card and the
             // devices card, whose own Sign in again would be a second, wait

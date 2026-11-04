@@ -63,14 +63,16 @@ struct AccountSection: View {
                         .foregroundStyle(GlassColor.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 } else if head == .signedOut {
-                    // Signed out, still enrolled: the core's "Sign in", as
-                    // Home's Account heading says it, signs the account back
-                    // in the way the account signs in (NEAR AI or native),
-                    // as the payout card's Sign in again does.
-                    Button(model.managedText("sign_in_near_ai")) { Task { await model.signInToAccount() } }
-                        .buttonStyle(GlassButtonStyle(.primary, small: true))
-                        .disabled(model.accountSigningIn)
-                        .fixedSize()
+                    // Signed out, still enrolled: the core's "Sign in", the
+                    // signed-out notice's own key (#1918), signs the account
+                    // back in the way the account signs in (NEAR AI or
+                    // native), as the payout card's Sign in again does.
+                    if let signIn = MonitorWords.table?.signIn, !signIn.isEmpty {
+                        Button(signIn) { Task { await model.signInToAccount() } }
+                            .buttonStyle(GlassButtonStyle(.primary, small: true))
+                            .disabled(model.accountSigningIn)
+                            .fixedSize()
+                    }
                 }
                 // Change the NEAR AI login this account uses (F10), beside
                 // the connected line.
