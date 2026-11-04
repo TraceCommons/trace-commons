@@ -799,7 +799,7 @@ jobs:
       # base role exactly as V30 creates it (NOLOGIN NOBYPASSRLS -- V30 creates
       # it only if absent, so creating it first changes nothing), plus a
       # separate LOGIN role that is a member of it. Without the resolver URL,
-      # about 74 account, passkey and login tests fail with
+      # about 74 account and login tests fail with
       # `redeem succeeds: left 400 right 303`, because the redeem path fails
       # closed when its resolver pool cannot connect.
       - name: Create the database and the login-resolver roles

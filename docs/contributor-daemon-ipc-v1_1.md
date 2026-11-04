@@ -8837,8 +8837,8 @@ keystroke. Display-name/range bounds must be validated before presentation.
 
 ### Native account identity
 
-Passkeys were removed on 2026-10-31: an account signs in through NEAR AI.
-The former `passkey_*`, `account_bind` and `account_binding` methods are gone
+An account signs in through NEAR AI (since 2026-10-31). The former
+`passkey_*`, `account_bind` and `account_binding` methods are gone
 and get the ordinary unknown-method answer. The app receives no native
 bearer, NEAR AI token, device key, tenant identity or secret-store reference.
 
@@ -8892,8 +8892,8 @@ refuses with `unavailable` / `account-enrollment-required`. Browser URL exposure
 uses the existing URL validation/opening controls. Tokens, rotations and
 atomic device/config persistence stay in Rust/Keychain.
 
-A daemon from before the removal kept a list of the passkeys used on the Mac
-(`remembered-passkeys.json` in the state directory). A daemon after it
+A daemon from before 2026-10-31 kept a list of sign-in credentials used on
+the Mac (`remembered-passkeys.json` in the state directory). A later daemon
 deletes that file when it starts.
 
 ## Events
