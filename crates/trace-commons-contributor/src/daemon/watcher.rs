@@ -184,7 +184,10 @@ fn tick_over(
 ) -> Result<TickReport> {
     // The whole pass, from the config read to the epilogue, under the pass
     // lock: see `DaemonShared::pass_lock`.
-    let _pass = shared.pass_lock.lock().expect("pass lock");
+    let _pass = shared
+        .pass_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     release_stale_holds(shared, now);
     let ctx = PassContext::read(shared, now, max_queue_entries, source_identities);
     // Before any session is visited, so a project whose grant was just
@@ -833,7 +836,10 @@ fn tick_over_paths(
 ) -> Result<TickReport> {
     // The whole pass, from the config read to the epilogue, under the pass
     // lock: see `DaemonShared::pass_lock`.
-    let _pass = shared.pass_lock.lock().expect("pass lock");
+    let _pass = shared
+        .pass_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     release_stale_holds(shared, now);
     let ctx = PassContext::read(shared, now, max_queue_entries, source_identities);
     // Before any session is visited, so a project whose grant was just
@@ -906,7 +912,10 @@ pub(crate) fn offer_for_a_person(
             owner.entry(r.path.clone()).or_insert((i, r));
         }
     }
-    let _pass = shared.pass_lock.lock().expect("pass lock");
+    let _pass = shared
+        .pass_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // No cap: see the doc. The rest of the context is the pass's own.
     let ctx = PassContext::read(shared, now, usize::MAX, source_roots.source_identities());
     let quiescence_secs = shared

@@ -1084,6 +1084,11 @@ pub struct DaemonShared {
     /// the reverse: the sweep sees the old identity with the old terms, or
     /// the new identity with the new ones, never a mix. A `std` mutex, never
     /// held across an await.
+    ///
+    /// Taken with `unwrap_or_else(PoisonError::into_inner)`, never `expect`:
+    /// it guards no data, so a pass that panicked while holding it leaves
+    /// nothing half-written behind it, and an `expect` would make every
+    /// later pass panic on the poison (see `pass_supervisor`).
     pub(crate) pass_lock: Mutex<()>,
     /// The credential-change count this daemon has already absorbed.
     ///
@@ -1440,6 +1445,62 @@ pub const ROUTING_TOKEN_UNREADABLE: &str = "token_unreadable";
 pub const ROUTING_UNKNOWN: &str = "unknown";
 
 impl DaemonShared {
+    /// The first of this struct's own data-bearing `std` locks that a panic
+    /// left poisoned, by a fixed label, or `None`. The pass supervisor reads
+    /// it after a pass panicked: a poisoned lock here means the panic may
+    /// have left that state half-updated, so the passes are not restarted
+    /// over it (see `pass_supervisor`). The unit locks (`pass_lock`,
+    /// `inference_connection_lock`) guard no data and are not listed; locks
+    /// inside nested services are not listed either, because every one of
+    /// them that a pass takes with `expect` panics again before reading
+    /// anything, which the supervisor's backoff absorbs.
+    pub(crate) fn poisoned_state_lock(&self) -> Option<&'static str> {
+        let locks: [(&'static str, bool); 24] = [
+            ("managed", self.managed.is_poisoned()),
+            ("queue", self.queue.is_poisoned()),
+            ("policy", self.policy.is_poisoned()),
+            ("state", self.state.is_poisoned()),
+            ("settings", self.settings.is_poisoned()),
+            ("health", self.health.is_poisoned()),
+            ("time_driven_status", self.time_driven_status.is_poisoned()),
+            ("estimate_in_force", self.estimate_in_force.is_poisoned()),
+            ("routing", self.routing.is_poisoned()),
+            ("managed_history", self.managed_history.is_poisoned()),
+            (
+                "managed_history_observed_at",
+                self.managed_history_observed_at.is_poisoned(),
+            ),
+            (
+                "managed_history_checked_at",
+                self.managed_history_checked_at.is_poisoned(),
+            ),
+            (
+                "private_inference_endpoint",
+                self.private_inference_endpoint.is_poisoned(),
+            ),
+            ("gate_held_logged", self.gate_held_logged.is_poisoned()),
+            ("gate_held", self.gate_held.is_poisoned()),
+            ("payout_link", self.payout_link.is_poisoned()),
+            ("upload_due", self.upload_due.is_poisoned()),
+            (
+                "private_inference_stop_task",
+                self.private_inference_stop_task.is_poisoned(),
+            ),
+            (
+                "private_inference_state",
+                self.private_inference_state.is_poisoned(),
+            ),
+            ("skill_loop", self.skill_loop.is_poisoned()),
+            ("mission_catalogue", self.mission_catalogue.is_poisoned()),
+            ("estimate_table", self.estimate_table.is_poisoned()),
+            ("settlement", self.settlement.is_poisoned()),
+            ("backfill_tried", self.backfill_tried.is_poisoned()),
+        ];
+        locks
+            .into_iter()
+            .find_map(|(label, poisoned)| poisoned.then_some(label))
+    }
+
     pub fn load(store: ConfigStore) -> Result<Self> {
         // Never stops a start: the file is unread, so a leftover is harmless.
         if store.remove_retired_files().is_err() {

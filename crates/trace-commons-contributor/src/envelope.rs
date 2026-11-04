@@ -260,11 +260,28 @@ pub(crate) struct TransientRedactionFailure;
 /// Polls a future and turns a panic inside it into `Err(())`.
 ///
 /// A panic while redacting one trace must cost that trace alone. The
-/// daemon's periodic passes run in one task, so a panic unwinding out of a
-/// pass ends every later pass (watch, upload, expiry) until the app is
-/// relaunched, and the first pass after the relaunch meets the same trace.
-struct CatchUnwind<F: std::future::Future> {
+/// daemon's periodic passes run in one loop; a panic unwinding out of a pass
+/// used to end every later pass (watch, upload, expiry) until the app was
+/// relaunched, and the first pass after the relaunch met the same trace.
+/// The daemon's pass supervisor (`daemon::pass_supervisor`) now restarts the
+/// loop after a panic, using this same wrapper through
+/// [`catch_unwind_future`], but a panic caught here still costs one trace
+/// rather than a backoff for every pass.
+///
+/// Each caller states why asserting unwind safety is sound for what it
+/// wraps.
+pub(crate) struct CatchUnwind<F: std::future::Future> {
     inner: std::pin::Pin<Box<F>>,
+}
+
+/// Wrap `future` so a panic while polling it resolves to `Err(())` instead
+/// of unwinding into the caller. Never reads the panic payload, which can
+/// carry trace content or a path. The caller asserts unwind safety: it must
+/// not keep using state the panicking frames could have left half-updated.
+pub(crate) fn catch_unwind_future<F: std::future::Future>(future: F) -> CatchUnwind<F> {
+    CatchUnwind {
+        inner: Box::pin(future),
+    }
 }
 
 impl<F: std::future::Future> std::future::Future for CatchUnwind<F> {
@@ -274,10 +291,7 @@ impl<F: std::future::Future> std::future::Future for CatchUnwind<F> {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        // The frames this unwinds hold a shared `&DeterministicTraceRedactor`,
-        // which has no interior mutability, and the owned raw contribution,
-        // which is dropped with the future. Nothing the caller keeps can be
-        // left half-updated, so asserting unwind safety is sound here.
+        // Unwind safety is the caller's assertion; see the type's doc.
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.inner.as_mut().poll(cx)
         })) {
@@ -309,10 +323,11 @@ pub async fn redact_to_envelope(
     redactor: &DeterministicTraceRedactor,
     raw: RawTraceContribution,
 ) -> Result<TraceContributionEnvelope> {
-    let redacted = CatchUnwind {
-        inner: Box::pin(redactor.redact_trace(raw)),
-    }
-    .await;
+    // The frames this unwinds hold a shared `&DeterministicTraceRedactor`,
+    // which has no interior mutability, and the owned raw contribution,
+    // which is dropped with the future. Nothing the caller keeps can be
+    // left half-updated, so asserting unwind safety is sound here.
+    let redacted = catch_unwind_future(redactor.redact_trace(raw)).await;
     let Ok(redacted) = redacted else {
         return Err(anyhow::anyhow!("trace-redaction-failed"));
     };
