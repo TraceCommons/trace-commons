@@ -173,6 +173,38 @@ public struct AccountLoginChangeStatus: Equatable, Sendable {
     public var showsPayoutsLine: Bool { available && payoutsNeedLogin }
 }
 
+/// Which "Use a different account" button a surface draws (F10, spec 2.1).
+public enum AccountLoginChangeEntry: Equatable, Sendable {
+    /// Entry point 2, deliberately: no refused login is held aside.
+    case change
+    /// Entry point 1's button: a login the commons refused as another
+    /// account is held aside for the change.
+    case mismatchChange
+}
+
+extension AccountLoginChangeStatus {
+    /// The entry point a surface draws, by one rule wherever it is drawn
+    /// (the account section, Private AI): the mismatch's button while a
+    /// refused login is held for the change; otherwise the deliberate one
+    /// on an enrolled app where the change is offered, unless a wallet-origin
+    /// account's payouts line already offers it. Nil draws nothing.
+    public func entry(loggedIn: Bool) -> AccountLoginChangeEntry? {
+        if offersChange { return .mismatchChange }
+        if loggedIn, available, !held, !payoutsNeedLogin { return .change }
+        return nil
+    }
+}
+
+extension AccountChangeCopy {
+    /// The approved label for an entry point's button.
+    public func label(for entry: AccountLoginChangeEntry) -> String {
+        switch entry {
+        case .change: return change
+        case .mismatchChange: return mismatchChange
+        }
+    }
+}
+
 /// One answer of `account_login_change`: the ceremony as the daemon holds it.
 public struct AccountLoginChangeState: Decodable, Equatable, Sendable {
     public enum Step: String, Decodable, Sendable {

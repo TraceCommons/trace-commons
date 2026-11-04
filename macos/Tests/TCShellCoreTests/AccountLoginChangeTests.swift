@@ -154,6 +154,30 @@ final class AccountLoginChangeSurfaceTests: XCTestCase {
         XCTAssertEqual(decoded.newProvider, "github")
         XCTAssertEqual(decoded.browserURL, "http://127.0.0.1:1/x")
     }
+
+    /// One rule for "Use a different account" wherever it is drawn: the
+    /// mismatch's button while a refused login is held for the change,
+    /// otherwise the deliberate one on an enrolled app where it is offered
+    /// and no payouts line offers it already.
+    func testTheEntryPointFollowsOneRuleOnEverySurface() {
+        let offered = AccountLoginChangeStatus(available: true, payoutsNeedLogin: false, held: false)
+        XCTAssertEqual(offered.entry(loggedIn: true), .change)
+        XCTAssertNil(offered.entry(loggedIn: false), "not set up: nothing to change")
+        XCTAssertNil(AccountLoginChangeStatus.none.entry(loggedIn: true))
+        XCTAssertNil(
+            AccountLoginChangeStatus(available: true, payoutsNeedLogin: true, held: false)
+                .entry(loggedIn: true),
+            "the payouts line offers it")
+        let held = AccountLoginChangeStatus(available: true, payoutsNeedLogin: false, held: true)
+        XCTAssertEqual(held.entry(loggedIn: true), .mismatchChange)
+        XCTAssertEqual(held.entry(loggedIn: false), .mismatchChange)
+        XCTAssertNil(
+            AccountLoginChangeStatus(available: false, payoutsNeedLogin: false, held: false, mismatch: true)
+                .entry(loggedIn: true),
+            "a mismatch where the change is not offered draws no change button")
+        XCTAssertEqual(copy.label(for: .change), "T:change")
+        XCTAssertEqual(copy.label(for: .mismatchChange), "T:mismatch_change")
+    }
 }
 
 /// The two IPC methods: the names and parameters the daemon reads.

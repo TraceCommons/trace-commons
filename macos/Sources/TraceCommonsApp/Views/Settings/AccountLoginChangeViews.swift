@@ -133,26 +133,42 @@ struct AccountLoginMismatchBlock: View {
     }
 }
 
-/// Entry point 2 (spec 2.1): deliberately, from the account section. Drawn
-/// while the change is offered and no refused login is held (the mismatch
-/// block offers it then).
+/// Entry point 2 (spec 2.1): deliberately, from the account section and
+/// from the Private AI section under its connection card, by one rule
+/// (`AccountLoginChangeStatus.entry`). Drawn while the change is offered
+/// and no refused login is held; with one held, the account section's
+/// mismatch block offers it, and Private AI, which has no such block, draws
+/// the mismatch's button here instead (`offersMismatchChange`).
 struct AccountLoginChangeButton: View {
     @EnvironmentObject private var app: AppModel
     @ObservedObject private var model = AccountLoginChangeModel.shared
+    /// Also draw the mismatch's "Use a different account" while a refused
+    /// login is held. Only where no mismatch block is drawn.
+    var offersMismatchChange = false
+    /// Drawn as its own card, where it stands between cards.
+    var carded = false
 
     var body: some View {
-        if app.status.loggedIn, app.status.loginChange.available, !app.status.loginChange.held,
-            !app.status.loginChange.payoutsNeedLogin, let copy = model.copy
+        if let entry = app.status.loginChange.entry(loggedIn: app.status.loggedIn),
+            offersMismatchChange || entry == .change, let copy = model.copy
         {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                Button(copy.change) { Task { await model.begin() } }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                    .disabled(model.calling)
-                if model.startFailed {
-                    Text(copy.errorUnavailable)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                }
+            if carded {
+                GlassCard { control(entry, copy: copy) }
+            } else {
+                control(entry, copy: copy)
+            }
+        }
+    }
+
+    private func control(_ entry: AccountLoginChangeEntry, copy: AccountChangeCopy) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            Button(copy.label(for: entry)) { Task { await model.begin() } }
+                .buttonStyle(GlassButtonStyle(.glass))
+                .disabled(model.calling)
+            if model.startFailed {
+                Text(copy.errorUnavailable)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
             }
         }
     }

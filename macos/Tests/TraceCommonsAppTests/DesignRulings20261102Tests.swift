@@ -130,7 +130,8 @@ final class DesignRulings20261102Tests: XCTestCase {
     func test_everyNoticeCallToActionIsPrimary() throws {
         let notices = try Self.text("Views/Monitor/MonitorNotices.swift")
         XCTAssertFalse(notices.contains("GlassButtonStyle(.glass)"), "a notice's call to action is glass again")
-        XCTAssertEqual(notices.components(separatedBy: "GlassButtonStyle(.primary)").count - 1, 12)
+        // 13 since the Traces tab's Resume (owner, 2026-11-04).
+        XCTAssertEqual(notices.components(separatedBy: "GlassButtonStyle(.primary)").count - 1, 13)
         XCTAssertTrue(notices.contains("GlassButtonStyle(.link)"), "secondary actions stay links")
         XCTAssertEqual(NudgeGlassCard.style(.seeHistory), .primary)
         XCTAssertEqual(NudgeGlassCard.style(.notNow(.idleSessions)), .link)

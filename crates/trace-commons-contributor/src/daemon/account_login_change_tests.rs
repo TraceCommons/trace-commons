@@ -37,6 +37,8 @@ struct Commons {
     bearers: Mutex<Vec<String>>,
     /// `(status, label)` the finish refuses with, when set.
     refuse: Mutex<Option<(u16, &'static str)>>,
+    /// `(status, label)` the start refuses with, when set.
+    refuse_start: Mutex<Option<(u16, &'static str)>>,
     /// The start answers this kind.
     kind: Mutex<Option<IdentityKind>>,
     tenant: Mutex<String>,
@@ -69,6 +71,18 @@ async fn spawn(commons: Arc<Commons>) -> String {
                 move |headers: HeaderMap, Json(body): Json<Value>| async move {
                     commons.bearers.lock().unwrap().push(bearer(&headers));
                     commons.starts.lock().unwrap().push(body);
+                    if let Some((status, label)) = *commons.refuse_start.lock().unwrap() {
+                        // No label: the bare status a commons without the
+                        // routes answers.
+                        if label.is_empty() {
+                            return StatusCode::from_u16(status).unwrap().into_response();
+                        }
+                        return (
+                            StatusCode::from_u16(status).unwrap(),
+                            Json(json!({ "error": label })),
+                        )
+                            .into_response();
+                    }
                     let kind = commons
                         .kind
                         .lock()
@@ -881,4 +895,331 @@ async fn a_held_login_reports_the_mismatch() {
     let fx = Fixture::new(&near_ai_tenant(), None).await;
     assert!(hold_aside(fx.dir(), held("github", None)).is_none());
     assert_eq!(fx.status()["login_mismatch"], true);
+}
+
+/// Setting up again (`unenroll`) clears every part of the change of login
+/// on this device: the ceremony, the login held aside (its key revoked as
+/// it drops), and the last NEAR AI sign-in refused as another account.
+/// Afterwards the status offers, holds and reports nothing.
+#[tokio::test]
+async fn unenroll_clears_the_change_and_the_mismatch() {
+    let fx = Fixture::new(&near_ai_tenant(), None).await;
+    let id = started(&fx).await;
+    assert!(hold_aside(fx.dir(), held("github", None)).is_none());
+    super::super::nearai_credential::ceremony::mark_finished_for_test(
+        fx.dir(),
+        "attempt-1",
+        super::super::nearai_credential::ceremony::STATUS_DIFFERENT_ACCOUNT,
+    );
+    let before = fx.call("status", json!({})).await;
+    let before = result(&before);
+    assert_eq!(before["login_change_available"], true);
+    assert_eq!(before["login_change_held"], true);
+    assert_eq!(before["login_mismatch"], true);
+
+    let unenrolled = fx.call("unenroll", json!({})).await;
+    assert_eq!(result(&unenrolled)["removed"], true);
+
+    let after = fx.call("status", json!({})).await;
+    let after = result(&after);
+    assert_eq!(after["logged_in"], false);
+    assert_eq!(after["login_change_available"], false);
+    assert_eq!(after["login_change_held"], false);
+    assert_eq!(after["login_mismatch"], false);
+    assert_eq!(
+        super::super::nearai_credential::ceremony::attempt_status(fx.dir()),
+        None
+    );
+    with_slot(fx.dir(), |slot| {
+        assert!(slot.held.is_none(), "no login is held aside");
+        assert!(slot.ceremony.is_none(), "no change is running");
+    });
+    assert_eq!(
+        refusal(&fx.step("status", json!({ "change_id": id })).await),
+        Some(ERR_NO_CEREMONY)
+    );
+}
+
+// ---- Diagnostics: every failed step records a label-only line ----
+
+/// What this fixture's steps recorded, as `(step, reason, refusal)`.
+fn failures(fx: &Fixture) -> Vec<(&'static str, &'static str, Option<&'static str>)> {
+    failures_for_test(fx.dir())
+}
+
+/// Every reason, step and refusal value is label-shaped, so none is
+/// written as `invalid` and none can carry a token, URL or account.
+#[test]
+fn every_failure_label_is_label_shaped() {
+    use crate::daemon::diagnostics_log::label_value;
+    let mut labels: Vec<&str> = reason::ALL.to_vec();
+    labels.extend([
+        FAILED_EVENT,
+        STEP_START,
+        STEP_PROVE_CURRENT,
+        STEP_SIGN_IN_NEW,
+        STEP_CONFIRM,
+        wire::REBIND_IN_USE,
+        wire::REBIND_TOO_SOON,
+        wire::REBIND_PAYOUT_REVIEW_REQUIRED,
+        wire::REBIND_WALLET_ACCOUNT_REQUIRED,
+        "commons_unanswered",
+        "commons_refused",
+    ]);
+    for label in [
+        ERR_ACCOUNT_SESSION_REQUIRED,
+        ERR_NOT_AVAILABLE,
+        ERR_NO_CEREMONY,
+        ERR_OUT_OF_ORDER,
+        ERR_COMMONS_UNREACHABLE,
+        ERR_WALLET_ACCOUNT_REQUIRED,
+        STEP_ERROR_UNAVAILABLE,
+        STEP_ERROR_IN_USE,
+        STEP_ERROR_TOO_SOON,
+        STEP_ERROR_WALLET,
+        STEP_ERROR_CURRENT_LOGIN,
+    ] {
+        labels.push(label_field(label));
+    }
+    for label in labels {
+        assert_eq!(label_value(label), label, "{label} is not label-shaped");
+    }
+    let mut unique = reason::ALL.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        reason::ALL.len(),
+        "each reason says one thing"
+    );
+}
+
+#[tokio::test]
+async fn a_start_that_is_not_offered_or_not_ready_says_why() {
+    let fx = Fixture::new(&near_ai_tenant(), None).await;
+    set_paths_ready_for_test(fx.dir(), false);
+    assert_eq!(
+        refusal(&fx.step("start", json!({})).await),
+        Some(ERR_NOT_AVAILABLE)
+    );
+    // Not ready is remembered, so the next start is not offered at all.
+    assert_eq!(
+        refusal(&fx.step("start", json!({})).await),
+        Some(ERR_NOT_AVAILABLE)
+    );
+    assert_eq!(
+        failures(&fx),
+        vec![
+            (STEP_START, reason::PATHS_NOT_READY, None),
+            (STEP_START, reason::NOT_OFFERED, None),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn steps_refused_out_of_order_say_which_refusal() {
+    let fx = Fixture::new(&near_ai_tenant(), None).await;
+    let id = started(&fx).await;
+    fx.step("sign_in_new", json!({ "change_id": id })).await;
+    fx.step("prove_current", json!({ "change_id": "another" }))
+        .await;
+    fx.step("confirm", json!({ "change_id": id, "confirmed": true }))
+        .await;
+    assert_eq!(
+        failures(&fx),
+        vec![
+            (STEP_SIGN_IN_NEW, reason::OUT_OF_ORDER, None),
+            (STEP_PROVE_CURRENT, reason::NO_CEREMONY, None),
+            (STEP_CONFIRM, reason::OUT_OF_ORDER, None),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_wallet_proof_without_the_account_name_says_so() {
+    let fx = Fixture::new(&wallet_tenant(), None).await;
+    let id = started(&fx).await;
+    fx.step("prove_current", json!({ "change_id": id })).await;
+    assert_eq!(
+        failures(&fx),
+        vec![(STEP_PROVE_CURRENT, reason::WALLET_ACCOUNT_MISSING, None)]
+    );
+}
+
+/// Each browser leg that ends without its proof records why; one the
+/// person closed records nothing.
+#[tokio::test]
+async fn browser_legs_that_fail_say_why_and_a_cancel_says_nothing() {
+    let fx = Fixture::new(&near_ai_tenant(), None).await;
+    super::super::nearai_credential::spend_org::record_identity(
+        &fx.shared.store,
+        "key-old",
+        "sha256:old",
+    );
+    let id = started(&fx).await;
+    claim(fx.dir(), Some(&id), Step::Current).unwrap();
+    record_current_near_ai(fx.dir(), &id, Err(LEG_CANCELLED));
+    claim(fx.dir(), Some(&id), Step::Current).unwrap();
+    record_current_near_ai(fx.dir(), &id, Err("timed_out"));
+    prove_near_ai(&fx, &id, Some("sha256:someone-else"));
+    prove_near_ai(&fx, &id, Some("sha256:old"));
+    claim(fx.dir(), Some(&id), Step::New).unwrap();
+    record_new_login(fx.dir(), &id, Err(LEG_CANCELLED));
+    claim(fx.dir(), Some(&id), Step::New).unwrap();
+    record_new_login(fx.dir(), &id, Err("failed"));
+    claim(fx.dir(), Some(&id), Step::New).unwrap();
+    record_new_login(fx.dir(), &id, Ok(Err(())));
+    sign_in_new_login(&fx, &id, held("google", Some("sha256:old")));
+    assert_eq!(
+        failures(&fx),
+        vec![
+            (STEP_PROVE_CURRENT, reason::BROWSER_LEG_FAILED, None),
+            (STEP_PROVE_CURRENT, reason::CURRENT_LOGIN_MISMATCH, None),
+            (STEP_SIGN_IN_NEW, reason::BROWSER_LEG_FAILED, None),
+            (STEP_SIGN_IN_NEW, reason::KEY_MINT_FAILED, None),
+            (STEP_SIGN_IN_NEW, reason::NEW_LOGIN_IS_CURRENT, None),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn wallet_legs_that_fail_say_why() {
+    let fx = Fixture::new(&wallet_tenant(), None).await;
+    let id = started(&fx).await;
+    let pending = || WalletPending {
+        account_id: "alice.testnet".into(),
+        commons: CommonsCeremony {
+            ceremony_id: "c".into(),
+            nonce: NONCE,
+            expires_at: Utc::now().timestamp() + 600,
+            verifier: "v".into(),
+            challenge: "c".into(),
+        },
+    };
+    for proof in [
+        Ok(("bob.testnet".into(), "ed25519:k".into(), "sig".into())),
+        Err("failed"),
+        Err(LEG_CANCELLED),
+    ] {
+        claim(fx.dir(), Some(&id), Step::Current).unwrap();
+        with_slot(fx.dir(), |slot| {
+            slot.ceremony.as_mut().unwrap().wallet_pending = Some(pending());
+        });
+        record_current_wallet(fx.dir(), &id, proof);
+    }
+    // A callback with no challenge waiting for it.
+    claim(fx.dir(), Some(&id), Step::Current).unwrap();
+    record_current_wallet(fx.dir(), &id, Err("failed"));
+    assert_eq!(
+        failures(&fx),
+        vec![
+            (STEP_PROVE_CURRENT, reason::WALLET_ACCOUNT_MISMATCH, None),
+            (STEP_PROVE_CURRENT, reason::WALLET_LEG_FAILED, None),
+            (STEP_PROVE_CURRENT, reason::WALLET_PENDING_MISSING, None),
+        ]
+    );
+}
+
+/// A ceremony at step 3 with both proofs held.
+async fn at_confirm(tenant: &str) -> (Fixture, String) {
+    let fx = Fixture::new(tenant, None).await;
+    let id = started(&fx).await;
+    prove_near_ai(&fx, &id, None);
+    sign_in_new_login(&fx, &id, held("github", Some("sha256:new")));
+    (fx, id)
+}
+
+#[tokio::test]
+async fn confirm_without_the_persons_confirmation_says_so() {
+    let (fx, id) = at_confirm(&near_ai_tenant()).await;
+    fx.step("confirm", json!({ "change_id": id })).await;
+    assert_eq!(
+        failures(&fx),
+        vec![(STEP_CONFIRM, reason::NOT_CONFIRMED, None)]
+    );
+}
+
+#[tokio::test]
+async fn a_signed_out_account_session_says_so() {
+    let (fx, id) = at_confirm(&near_ai_tenant()).await;
+    std::fs::remove_file(
+        fx.shared
+            .store
+            .daemon_path(crate::config::ACCOUNT_SESSION_FILE),
+    )
+    .unwrap();
+    let view = fx.confirm(&id).await;
+    assert_eq!(view["error"], STEP_ERROR_UNAVAILABLE);
+    assert_eq!(
+        failures(&fx),
+        vec![(STEP_CONFIRM, reason::ACCOUNT_SESSION_UNAVAILABLE, None)]
+    );
+}
+
+#[tokio::test]
+async fn a_start_the_commons_refuses_says_how() {
+    let (fx, id) = at_confirm(&near_ai_tenant()).await;
+    *fx.commons.refuse_start.lock().unwrap() = Some((409, wire::REBIND_TOO_SOON));
+    let view = fx.confirm(&id).await;
+    assert_eq!(view["error"], STEP_ERROR_TOO_SOON);
+    *fx.commons.refuse_start.lock().unwrap() = Some((403, "denied"));
+    fx.confirm(&id).await;
+    assert_eq!(
+        failures(&fx),
+        vec![
+            (
+                STEP_CONFIRM,
+                reason::COMMONS_START_FAILED,
+                Some(wire::REBIND_TOO_SOON)
+            ),
+            (
+                STEP_CONFIRM,
+                reason::COMMONS_START_FAILED,
+                Some("commons_refused")
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_commons_without_the_routes_says_so() {
+    let (fx, id) = at_confirm(&near_ai_tenant()).await;
+    *fx.commons.refuse_start.lock().unwrap() = Some((404, ""));
+    fx.confirm(&id).await;
+    assert_eq!(
+        failures(&fx),
+        vec![(STEP_CONFIRM, reason::COMMONS_ROUTES_MISSING, None)]
+    );
+}
+
+#[tokio::test]
+async fn an_answer_for_another_tenant_says_so() {
+    let (fx, id) = at_confirm(&near_ai_tenant()).await;
+    *fx.commons.tenant.lock().unwrap() = format!("nearai-{}", "99".repeat(32));
+    fx.confirm(&id).await;
+    assert_eq!(
+        failures(&fx),
+        vec![(STEP_CONFIRM, reason::COMMONS_ANSWER_MISMATCH, None)]
+    );
+}
+
+#[tokio::test]
+async fn a_wallet_ceremony_about_to_run_out_says_so() {
+    let fx = Fixture::new(&wallet_tenant(), None).await;
+    let id = started(&fx).await;
+    hold_wallet_proof_for_test(
+        fx.dir(),
+        &id,
+        "alice.testnet",
+        "ceremony-wallet",
+        NONCE,
+        Utc::now().timestamp() + 5,
+        &"v".repeat(43),
+    );
+    sign_in_new_login(&fx, &id, held("google", Some("sha256:new")));
+    fx.confirm(&id).await;
+    assert_eq!(
+        failures(&fx),
+        vec![(STEP_CONFIRM, reason::WALLET_CEREMONY_EXPIRING, None)]
+    );
 }

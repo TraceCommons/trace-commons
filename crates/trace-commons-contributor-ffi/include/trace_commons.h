@@ -2756,6 +2756,14 @@ char*       tc_account_devices_copy_json(void);
  */
 char*       tc_account_change_copy_json(void);
 
+/* The account section's own Set up again, for an enrolled app whatever its
+ * account's state (consent_copy::set_up_again_copy): action, confirm_title,
+ * confirm_body, confirm_action, confirm_cancel and failed, the same approved
+ * words as tc_account_attention_copy_json's. Only confirm_action calls
+ * unenroll, then opens the first run. NULL only on a caught panic.
+ */
+char*       tc_set_up_again_copy_json(void);
+
 /* The words for adding Train coding models to traces already sent
  * (consent_copy::sent_traces_training_copy), every one a draft for owner
  * review. Count templates carry {count}. NULL only on a caught panic.

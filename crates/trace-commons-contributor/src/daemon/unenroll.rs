@@ -20,6 +20,11 @@
 //! record, with the key revoked at NEAR AI, best effort (owner decision
 //! 2026-11-02, `nearai_credential::disconnect`).
 //!
+//! So does the change of login (F10): a ceremony in progress and a login
+//! held aside for one (each held key revoked as it drops), and the last
+//! NEAR AI sign-in's outcome, so `login_change_available`,
+//! `login_change_held` and `login_mismatch` all read false afterwards.
+//!
 //! What stays: receipts, history and the audit log (the local record of what
 //! this device did -- the audit log also records this call), settings, folder
 //! rules, the queue, and the NEAR AI notice marker, which are not an
@@ -78,14 +83,20 @@
 //!
 //! # Write in flight
 //!
-//! Refused while an upload is in flight (`upload-in-flight`): those bytes are
-//! already going under the old enrollment, and pulling its key out from under
-//! them helps nobody. The pass lock is held throughout, so no watcher pass or
+//! An upload in flight is settled first (`settle_uploads`): nothing new is
+//! claimed, the one in flight gets a few seconds to finish, then is stopped
+//! at an await point and its entry returned to `Approved` by the upload
+//! pass. Only an entry that still will not leave `Uploading` refuses the
+//! call (`upload-in-flight`): those bytes may be going under the old
+//! enrollment, and pulling its key out from under them helps nobody. The pass lock is held throughout, so no watcher pass or
 //! identity switch interleaves, and the policy and queue locks, so the upload
 //! pass cannot claim an entry between the check and the return.
 //!
 //! The audit row goes down first, label-only: `unenrolled`, with the count of
 //! approvals returned. No tenant, account, key id or path.
+
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use serde_json::json;
@@ -142,6 +153,9 @@ fn holds_enrollment(store: &ConfigStore) -> bool {
 /// fails, the next unenroll call (enrolled or not) tries again.
 fn forget_accounts_login(shared: &DaemonShared) {
     crate::daemon::account_login_change::forget(shared.store.dir());
+    // And the last NEAR AI sign-in's outcome: one refused as another
+    // account is this account's mismatch, not the next one's.
+    super::nearai_credential::ceremony::forget_attempt(shared.store.dir());
     if super::nearai_credential::login_record::forget_commons_login_or_remove(&shared.store)
         .is_err()
     {
@@ -303,6 +317,68 @@ fn turn_off_insights_readers(shared: &DaemonShared) -> Result<(), (&'static str,
     Ok(())
 }
 
+/// How long an upload in flight is given to finish on its own before it is
+/// stopped.
+#[cfg(not(test))]
+const SETTLE_GRACE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const SETTLE_GRACE: Duration = Duration::from_millis(200);
+
+/// How long a stopped upload is given to return its entry to `Approved`.
+/// It is dropped at its next await point; blocking work in progress (a
+/// session read, a redaction) finishes first.
+#[cfg(not(test))]
+const SETTLE_AFTER_INTERRUPT: Duration = Duration::from_secs(20);
+#[cfg(test)]
+const SETTLE_AFTER_INTERRUPT: Duration = Duration::from_secs(5);
+
+const SETTLE_POLL: Duration = Duration::from_millis(50);
+
+/// The diagnostics event when this call stopped an upload in flight.
+pub const UPLOAD_INTERRUPTED_EVENT: &str = "unenroll_interrupted_upload";
+
+fn upload_in_flight(shared: &DaemonShared) -> bool {
+    shared
+        .queue
+        .lock()
+        .expect("queue lock")
+        .all()
+        .iter()
+        .any(|e| e.state == QueueState::Uploading)
+}
+
+async fn wait_for_no_upload(shared: &DaemonShared, within: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        if !upload_in_flight(shared) {
+            return true;
+        }
+        if started.elapsed() >= within {
+            return false;
+        }
+        tokio::time::sleep(SETTLE_POLL).await;
+    }
+}
+
+/// With uploads held (`DaemonShared::uploads_held`), let an upload in flight
+/// finish for [`SETTLE_GRACE`], then stop it (`upload_interrupt`) and wait
+/// up to [`SETTLE_AFTER_INTERRUPT`] for the upload pass to return its entry
+/// to `Approved`. The blocking body still refuses `upload-in-flight` if one
+/// is left, so this never races a live upload's write: it only stops one
+/// at an await point, where nothing it began is half-written.
+async fn settle_uploads(shared: &DaemonShared) {
+    if wait_for_no_upload(shared, SETTLE_GRACE).await {
+        return;
+    }
+    crate::daemon::diagnostics_log::record_labels(
+        tracing::Level::WARN,
+        UPLOAD_INTERRUPTED_EVENT,
+        &[("reason", "unenroll")],
+    );
+    shared.upload_interrupt.send_modify(|count| *count += 1);
+    let _ = wait_for_no_upload(shared, SETTLE_AFTER_INTERRUPT).await;
+}
+
 /// The socket entry point. Async-only: it waits on the pass lock, which a
 /// full scan holds for seconds, and the credential store cleanup can block
 /// on the OS keychain.
@@ -324,7 +400,13 @@ fn turn_off_insights_readers(shared: &DaemonShared) -> Result<(), (&'static str,
 /// `status_changed` is published once, after both halves, so a shell that
 /// rebuilds on it never reads a status that still shows the NEAR AI key.
 pub(super) async fn handle_unenroll(shared: &DaemonShared, req: &Request) -> Response {
-    let done = match super::run_blocking(|| unenroll(shared)) {
+    // Nothing new goes in flight from here to the end of this call, and an
+    // upload already in flight is given a moment, then stopped.
+    shared.uploads_held.store(true, Ordering::SeqCst);
+    settle_uploads(shared).await;
+    let removed = super::run_blocking(|| unenroll(shared));
+    shared.uploads_held.store(false, Ordering::SeqCst);
+    let done = match removed {
         Ok(done) => done,
         Err((code, label)) => {
             if label == ERR_UNENROLL_FAILED {
