@@ -1259,10 +1259,32 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      # One download per artifact, each into its own dist/<name>/. A single
+      # download with `pattern:` puts files in dist/<name>/ only when two or
+      # more artifacts match; with exactly one match (a tag push builds only
+      # macOS) it extracts straight into dist/, and the dist/*/* upload glob
+      # and the dist/<name>/ paths below match nothing. A named download
+      # always lands in the directory given, whatever else was built.
+      - name: Download macOS DMG
+        if: needs.macos.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          path: dist
-          pattern: "{macos-dmg,windows-zip,windows-msix}"
+          name: macos-dmg
+          path: dist/macos-dmg
+
+      - name: Download Windows zip
+        if: needs.windows.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: windows-zip
+          path: dist/windows-zip
+
+      - name: Download Windows MSIX
+        if: needs.windows-app.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: windows-msix
+          path: dist/windows-msix
 
       # The build jobs are independent so that one platform failing does not
       # withhold the others (see the job comment above), which means this
@@ -1501,10 +1523,25 @@ jobs:
           echo "using $VERSION_STRING at $OPENSSL_DIR/openssl"
           echo "$OPENSSL_DIR" >> "$GITHUB_PATH"
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      # One download per artifact, each into its own dist/<name>/. A single
+      # download with `pattern:` puts files in dist/<name>/ only when two or
+      # more artifacts match; with exactly one match (a tag push builds only
+      # macOS) it extracts straight into dist/, and the dist/*/* upload glob
+      # and the dist/<name>/ paths below match nothing. A named download
+      # always lands in the directory given, whatever else was built.
+      - name: Download macOS DMG
+        if: needs.macos.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          path: dist
-          pattern: "{macos-dmg,windows-zip}"
+          name: macos-dmg
+          path: dist/macos-dmg
+
+      - name: Download Windows zip
+        if: needs.windows.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: windows-zip
+          path: dist/windows-zip
 
       - name: Authenticate to GCP (workload identity federation; no key on the runner)
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
