@@ -1392,6 +1392,10 @@ pub struct MonitorHomeHistoryCopy {
     pub traces_hero_step_earn_detail: &'static str,
     pub traces_hero_step_use: &'static str,
     pub traces_hero_step_use_detail: &'static str,
+    /// The third step's link, to the Private AI tab, as "Start earning"
+    /// is the first step's to Traces (owner, 2026-11-04: the card's links
+    /// to the tabs are why it stays on Home). DRAFT, NEEDS APPROVAL.
+    pub traces_hero_use_action: &'static str,
     /// Home's Credit earned tile: the account's whole total under this
     /// Mac's figure, `{amount}` the commons' lifetime points (product
     /// owner, 2026-10-29: show the account-wide total, and leave the change
@@ -1739,6 +1743,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             traces_hero_step_earn_detail: "For each trace",
             traces_hero_step_use: "Use Private AI",
             traces_hero_step_use_detail: "With your credit",
+            traces_hero_use_action: "Open Private AI",
             credit_account_total: "{amount} across your account",
             insights_today: "{total} tokens today",
             insights_teaser: "See where your agents spend their tokens.",

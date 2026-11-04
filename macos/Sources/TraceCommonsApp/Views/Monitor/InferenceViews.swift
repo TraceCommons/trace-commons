@@ -63,8 +63,8 @@ struct InferenceTabView: View {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 // The owner's order (2026-10-09, 2026-10-10, 2026-10-19),
                 // with the inspector closed on this tab: the Private AI
-                // step-by-step card leads until it is closed (product
-                // owner, 2026-10-28), then the status (a static dot and the
+                // step-by-step card leads, with no X (product owner,
+                // 2026-10-28, 2026-11-04), then the status (a static dot and the
                 // core's sentence; the owner set aside a switch here on
                 // 2026-10-19), then the managed cards, whose tool buttons
                 // are how Private AI runs, then the calls, then the NEAR AI
@@ -379,13 +379,11 @@ struct InferenceTabView: View {
 /// `inference-inspector.tsx` draws it, and the inspector now stays closed
 /// there). No title of its own: the tab names it (owner, 2026-10-10).
 /// How Private AI works, step by step (product owner, 2026-10-28): first on
-/// the tab, in the managed copy's words, until it is closed with its X.
-/// Closed, it stays closed on this Mac. Drawn as the Insights empty state's
+/// the tab, in the managed copy's words, every time and with no X (owner,
+/// 2026-11-04; from 2026-10-28 an X closed it for good). Drawn as the Insights empty state's
 /// card is (product owner, 2026-11-02, `GetStartedCard`): a plain card, no
 /// gradient or graphic, each step a title over one line.
 struct PrivateAIGuideCard: View {
-    static let closedKey = "privateAI.guideClosed"
-    @AppStorage(Self.closedKey) private var closed = false
     @EnvironmentObject private var model: AppModel
 
     /// Each step's title, then its line.
@@ -396,17 +394,14 @@ struct PrivateAIGuideCard: View {
     ]
 
     var body: some View {
-        if !closed {
-            // The card explains; no step has a link.
-            GetStartedCard(
-                title: model.managedText("guide_title"), lead: model.managedText("guide_body"),
-                steps: Self.steps.map { keys in
-                    GetStartedCard.Step(title: model.managedText(keys.title), detail: model.managedText(keys.line))
-                },
-                close: GetStartedCard.Close(label: MonitorWords.close) { closed = true },
-                // Tried here first (owner, 2026-11-02).
-                pixelField: true)
-        }
+        // The card explains; no step has a link.
+        GetStartedCard(
+            title: model.managedText("guide_title"), lead: model.managedText("guide_body"),
+            steps: Self.steps.map { keys in
+                GetStartedCard.Step(title: model.managedText(keys.title), detail: model.managedText(keys.line))
+            },
+            // Tried here first (owner, 2026-11-02).
+            pixelField: true)
     }
 }
 

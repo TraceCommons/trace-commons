@@ -773,7 +773,9 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(card.contains("link:"), "no step links anywhere")
         XCTAssertTrue(card.contains("GetStartedCard("))
         XCTAssertFalse(card.contains("GlassHeroCard("))
-        XCTAssertTrue(card.contains("close: GetStartedCard.Close(label: MonitorWords.close) { closed = true },"))
+        // Every time, with no X (owner, 2026-11-04).
+        XCTAssertFalse(card.contains("close:"))
+        XCTAssertFalse(card.contains("@AppStorage"))
         XCTAssertEqual(PrivateAIGuideCard.steps.map { $0.title },
                        ["guide_step_earn_title", "guide_step_start_title", "guide_step_use_title"])
         XCTAssertEqual(PrivateAIGuideCard.steps.map { $0.line }, ["guide_step_earn", "guide_step_start", "guide_step_use"])

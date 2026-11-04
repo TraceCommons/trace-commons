@@ -756,6 +756,8 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let tracesHeroStepEarnDetail: String
     public let tracesHeroStepUse: String
     public let tracesHeroStepUseDetail: String
+    /// The third step's link, to the Private AI tab (owner, 2026-11-04).
+    public let tracesHeroUseAction: String
     /// Home's Credit earned tile: the account's whole total, `{amount}`
     /// (product owner, 2026-10-29).
     public let creditAccountTotal: String
@@ -820,6 +822,7 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case tracesHeroStepEarnDetail = "traces_hero_step_earn_detail"
         case tracesHeroStepUse = "traces_hero_step_use"
         case tracesHeroStepUseDetail = "traces_hero_step_use_detail"
+        case tracesHeroUseAction = "traces_hero_use_action"
         case creditAccountTotal = "credit_account_total"
         case insightsToday = "insights_today"
         case insightsTeaser = "insights_teaser"

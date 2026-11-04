@@ -57,19 +57,21 @@ final class HomeTracesHeroTests: XCTestCase {
             "detail: words.tracesHeroStepContributeDetail,\n"
                 + "                          link: GetStartedCard.Link(title: words.tracesHeroAction, action: openTraces)),"))
         XCTAssertTrue(body.contains(".init(title: words.tracesHeroStepEarn, detail: words.tracesHeroStepEarnDetail),"))
-        XCTAssertTrue(body.contains(".init(title: words.tracesHeroStepUse, detail: words.tracesHeroStepUseDetail),"))
-        XCTAssertEqual(body.components(separatedBy: "link:").count - 1, 1, "one clear action")
+        XCTAssertTrue(body.contains(
+            ".init(title: words.tracesHeroStepUse, detail: words.tracesHeroStepUseDetail,\n"
+                + "                          link: GetStartedCard.Link(title: words.tracesHeroUseAction, action: openPrivateAI)),"))
+        XCTAssertEqual(body.components(separatedBy: "link:").count - 1, 2, "a link to Traces and one to Private AI")
     }
 
-    /// The X closes the hero for good on this Mac, with the close word the
-    /// campaign's and Insights' X use.
-    func test_theXClosesTheHeroOnThisMac() throws {
+    /// The walkthrough shows to everyone, every time, with no X (owner,
+    /// 2026-11-04): its links to the tabs are why it stays on Home.
+    func test_theHeroHasNoX() throws {
         let home = try Self.home()
-        XCTAssertTrue(home.contains(
-            "@AppStorage(HomeClosedCards.tracesHeroKey) private var tracesHeroClosed = false"))
+        XCTAssertFalse(home.contains("tracesHeroClosed"))
+        XCTAssertFalse(home.contains("tracesHeroKey"))
         let body = try Self.hero()
-        XCTAssertTrue(body.contains("if let words, !tracesHeroClosed {"))
-        XCTAssertTrue(body.contains("close: GetStartedCard.Close(label: MonitorWords.close) { tracesHeroClosed = true })"))
+        XCTAssertTrue(body.contains("if let words {"))
+        XCTAssertFalse(body.contains("close:"))
     }
 
     /// No gradient, ring or first-run pictures any more: the card is plain
@@ -85,41 +87,15 @@ final class HomeTracesHeroTests: XCTestCase {
         }
     }
 
-    /// In place of the Traces cards on the launch that finished first run,
-    /// or once the tree has loaded with no folder watched: none, or every
-    /// one set to Never. A tree still loading shows the cards.
-    func test_theWalkthroughStandsInForTheCardsUntilAFolderIsWatched() {
-        let rule = HomeFormat.showsTracesWalkthrough
-        let ask = TracesTree.FolderNode(id: "a", label: "a", mode: .ask, sessions: [])
-        let never = TracesTree.FolderNode(id: "n", label: "n", mode: .ignore, sessions: [])
-        let unruled = TracesTree.FolderNode(id: "u", label: "u", mode: nil, sessions: [])
-        XCTAssertTrue(rule([], true, false), "nothing set up")
-        XCTAssertTrue(rule([never], true, false), "nothing watched")
-        XCTAssertFalse(rule([never, ask], true, false))
-        XCTAssertFalse(rule([unruled], true, false), "a folder the queue names is watched")
-        XCTAssertFalse(rule([], false, false), "still loading")
-        XCTAssertTrue(rule([ask], true, true), "the launch that finished first run")
-        XCTAssertTrue(rule([], false, true))
-    }
-
-    /// The walkthrough takes the Traces cards' place under the Traces
-    /// heading, and the launch that finished first run is the model's,
-    /// set where first run is marked done.
-    func test_theWalkthroughTakesTheCardsPlace() throws {
+    /// The walkthrough leads the Traces section, over the Traces cards,
+    /// whatever folders are watched (owner, 2026-11-04).
+    func test_theWalkthroughLeadsTheTracesCards() throws {
         let home = try Self.home()
         XCTAssertTrue(home.contains(
-            "HomeSection(words?.sectionTraces) {\n                if showsTracesWalkthrough {\n"
-                + "                    tracesHero\n                } else {\n                    Grid("))
+            "HomeSection(words?.sectionTraces) {\n"
+                + "                VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n"
+                + "                    tracesHero\n                    Grid("))
         XCTAssertEqual(home.components(separatedBy: "                    tracesHero\n").count - 1, 1, "drawn once")
-        XCTAssertTrue(home.contains("!tracesHeroClosed && words != nil && HomeFormat.showsTracesWalkthrough("))
-        // Every folder, not the tree the idle filter narrowed (#1888 review).
-        XCTAssertTrue(home.contains("folders: traces.everyFolder, loaded: traces.phase == .loaded,"))
-        XCTAssertFalse(home.contains("folders: traces.tree.folders"))
-        let model = try String(
-            contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent("AppModel.swift"), encoding: .utf8)
-        XCTAssertTrue(model.contains("    private(set) var finishedFirstRunThisLaunch = false"))
-        XCTAssertTrue(model.contains(
-            "UserDefaults.standard.set(true, forKey: Self.onboardingCompleteKey(tenantID))\n"
-                + "        finishedFirstRunThisLaunch = true"))
+        XCTAssertFalse(home.contains("showsTracesWalkthrough"))
     }
 }
