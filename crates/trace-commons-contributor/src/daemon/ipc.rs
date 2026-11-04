@@ -3010,6 +3010,30 @@ impl DaemonShared {
         ) {
             object.extend(fields);
         }
+        // Additive (the account section after Sign out). `account_signed_in`:
+        // whether this enrolled account's own session record is held (files
+        // only, no credential-store read, so an expired session that the
+        // daemon renews still counts). Present only for an enrolled account
+        // that signs in (a NEAR AI or wallet account) and only when the
+        // record could be checked; an account that never signs in has no
+        // session to be signed out of. A boolean, never an id. Sign out
+        // (`account_sign_out`) clears the record but not the enrollment, so
+        // this is how a shell tells the two apart. While it is false the
+        // account's login is not named: no "Connected with {provider}" for a
+        // signed-out account.
+        let account_signed_in = cfg
+            .as_ref()
+            .filter(|cfg| logged_in && cfg.signs_in_with().is_some())
+            .and(account_snapshot.as_ref())
+            .map(super::commons_credentials::Snapshot::holds_record);
+        if let Some(signed_in) = account_signed_in {
+            status["account_signed_in"] = serde_json::Value::Bool(signed_in);
+            if !signed_in {
+                if let Some(object) = status.as_object_mut() {
+                    object.remove("account_login");
+                }
+            }
+        }
         // Additive (nudge U4). `{count, tools, threshold_days}`: how many
         // waiting Ask-me sessions nobody has written to for the idle
         // threshold, the display names of the tools they came from, and the

@@ -296,6 +296,11 @@ struct DaemonStatus: Decodable, Equatable {
     /// `google`), for "Connected with {provider}" (Settings IA D6). Nil when
     /// the daemon does not know it, or predates the key.
     let accountLogin: String?
+    /// Whether this enrolled account's own session is held
+    /// (`account_signed_in`): false after Sign out, which keeps the
+    /// enrollment. Nil when the daemon does not say (an account that never
+    /// signs in, or an older daemon), never a guess.
+    let accountSignedIn: Bool?
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -323,6 +328,7 @@ struct DaemonStatus: Decodable, Equatable {
         case loginChangeHeld = "login_change_held"
         case loginMismatch = "login_mismatch"
         case accountLogin = "account_login"
+        case accountSignedIn = "account_signed_in"
     }
 
     init(
@@ -345,7 +351,8 @@ struct DaemonStatus: Decodable, Equatable {
         legacyInviteMigration: LegacyMigrationWire = .none,
         accountAttention: AccountAttentionWire = .none,
         loginChange: AccountLoginChangeStatus = .none,
-        accountLogin: String? = nil
+        accountLogin: String? = nil,
+        accountSignedIn: Bool? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
@@ -367,6 +374,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.accountAttention = accountAttention
         self.loginChange = loginChange
         self.accountLogin = accountLogin
+        self.accountSignedIn = accountSignedIn
     }
 
     init(from decoder: Decoder) throws {
@@ -410,6 +418,7 @@ struct DaemonStatus: Decodable, Equatable {
             available: flag(.loginChangeAvailable), payoutsNeedLogin: flag(.payoutsNeedLogin),
             held: flag(.loginChangeHeld), mismatch: flag(.loginMismatch))
         accountLogin = (try? c.decodeIfPresent(String.self, forKey: .accountLogin)).flatMap { $0 }
+        accountSignedIn = (try? c.decodeIfPresent(Bool.self, forKey: .accountSignedIn)).flatMap { $0 }
     }
 
     /// This status as the daemon reports it straight after `unenroll`: not

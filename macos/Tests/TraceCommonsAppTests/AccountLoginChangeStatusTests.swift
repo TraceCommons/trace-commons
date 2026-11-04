@@ -38,6 +38,17 @@ final class AccountLoginChangeStatusTests: XCTestCase {
         XCTAssertFalse(refused.offersChange)
     }
 
+    /// `account_signed_in` (the account section after Sign out): read as
+    /// given, and nil when absent (an account that never signs in, or an
+    /// older daemon) or of the wrong type, never a guess.
+    func testTheAccountSessionKeyIsReadOnlyAsGiven() throws {
+        XCTAssertNil(try status("").accountSignedIn)
+        XCTAssertEqual(try status(#","account_signed_in":true"#).accountSignedIn, true)
+        XCTAssertEqual(try status(#","account_signed_in":false"#).accountSignedIn, false)
+        XCTAssertNil(try status(#","account_signed_in":"no""#).accountSignedIn)
+        XCTAssertEqual(try status(#","account_login":"github""#).accountLogin, "github")
+    }
+
     /// A sign-in refused as another account says so in the approved words,
     /// not the generic failure line.
     func testARefusedSignInSaysWhyNotJustFailed() throws {
