@@ -1686,6 +1686,7 @@ mod tests {
             approved_verdict: None,
             revoked_at: None,
             uploaded_bytes: None,
+            previous_account: false,
         }
     }
 

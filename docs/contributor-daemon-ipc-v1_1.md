@@ -147,6 +147,14 @@ old behaviour, because no application has shipped against `v1` yet. See
   label when the trace was decided without one. A row with any final
   figure is decided; `history_rollup.credit_pending` no longer counts it.
   See ["Credit outcome on history rows"](#credit-outcome-on-history-rows).
+- **History kept across a change of account.** `list_history` rows now
+  carry `previous_account` (boolean, `false` when absent): the submission
+  belongs to an account this device was enrolled under before the current
+  one. Such a row keeps what the server last said about it instead of being
+  reset to its upload receipt, `withdraw` refuses it with
+  `previous-account`, `withdraw_bulk` leaves it out, and its credit is left
+  out of `history_rollup`'s and `insights_submitted`'s credit totals. See
+  ["History from a previous account"](#history-from-a-previous-account).
 - **K15 (the native View menu's Group by and Sort by).** No field is added
   for this. Every Group by and Sort by option the native Traces tab needs
   is already answerable from `list_pending`'s entry fields, `list_projects`,
@@ -664,7 +672,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208) and with `consent-scopes-not-chosen` while the enrollment's scopes were never chosen; see "The contribution override" below |
 | `clear_contribution_override` | — | `cleared`, `returned: <count>` | every folder back on its own mode; see "The contribution override" below |
 | `mission_matches` | `catalogue` (a contribution mission catalogue; PROVISIONAL, shape owned by Z7/Z8) | `matches[]` of mission ids, `read: {tools, folders}` (counts) | K16 (#1173): which contribution missions this Mac's work fits, worked out on this Mac only; read-only; refused with `catalogue-required`, `catalogue-invalid` or `catalogue-schema-unsupported`; see "`mission_matches`" below |
-| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `uploaded_bytes`, `revoked_at`, and `credit_outcome_reason` | see "History provenance (K7)", "Sizes in history, and the would-send size (K10)", "Withdrawal dates on revoked rows (K12)" and "Credit outcome on history rows" below |
+| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `uploaded_bytes`, `revoked_at`, `credit_outcome_reason`, and `previous_account` | see "History provenance (K7)", "Sizes in history, and the would-send size (K10)", "Withdrawal dates on revoked rows (K12)", "Credit outcome on history rows" and "History from a previous account" below |
 | `history_rollup` | — | see below | now also carries `taken_back`, and a `withdrawn` bucket in each window |
 | `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `points_unknown_reason` (`account-session-required` when no account session could be used or renewed, else null), `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
 | `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, publication state, and an opaque local owner-scope digest | one account-authenticated request; each excerpt capped at 700 characters; native clients use the digest only to evict account-owned caches after sign-in changes |
@@ -723,7 +731,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_notify_kind` | `kind` (**required**: `digest`, `idle_sessions`, `verdicts_landed`, `weekly_recap` or `insights_tip`), `on` (**required**, boolean) | `kind`, `on` | one notification kind's switch; writes `notify.<kind>` through `set_settings`; answering `verdicts_landed` or `idle_sessions` ends that kind's one-time offer; publishes `status_changed` when it changes; see "Notification settings" below |
 | `subscribe` | `accepts[]` (optional: opt-in event names) | `subscribed: true`, plus `accepts[]` when the request carried `accepts`; then a `snapshot` event | see "Opt-in events" below |
 | `shutdown` | — | `stopping: true` | |
-| `withdraw` | `submission_id` | `withdrawn: true`, `distribution_reach` | performs real network I/O; see "Withdrawal" below |
+| `withdraw` | `submission_id` | `withdrawn: true`, `distribution_reach` | performs real network I/O; `unavailable` / `previous-account`, with no call made, for a `previous_account` row; see "Withdrawal" below |
 | `withdraw_bulk` | `status` (`submitted` \| `quarantined` \| `accepted`) | `withdrawn: <count>`, `failed: <count>` | performs real network I/O; see "Withdrawal" below |
 | `model_training_consent_status` | — | `eligible_count`, `submission_ids[]` | performs real network I/O; see "Adding model training to sent traces" below |
 | `model_training_consent_grant` | `all_eligible: true`, or `submission_ids[]` (1 to 500) | `results[]` of `{submission_id, outcome, granted_at?, award, award_withheld_reason?}`, `remaining_eligible` | performs real network I/O; see "Adding model training to sent traces" below |
@@ -7336,6 +7344,59 @@ timestamp, so a `revoked` row had no date to show at all.
 cached row written before this field existed still loads, reading `null`
 until the next poll re-observes the revocation and dates it.
 
+### History from a previous account
+
+The history cache is rebuilt on every successful submission-status poll
+from the local receipts plus the server's answer. The server answers only
+for submissions the current account can see, so after the device enrols
+under a different account, the earlier submissions get no row back. Before
+this field, such a row was rebuilt from its receipt alone: its status fell
+back to the upload-time one and its credit, scopes, explanations and
+`last_refreshed_at` were cleared, wiping what the server had said.
+
+`list_history` rows (`HistoryRecord`) carry one more field:
+
+```json
+{
+  "submission_id": "…",
+  "...": "…existing fields unchanged…",
+  "previous_account": true
+}
+```
+
+- **`previous_account`** -- `true` when a successful poll returned no row
+  for this submission and one of these holds: the cache already marked it;
+  the cache had refreshed it from the server before (`last_refreshed_at`
+  set); or it was uploaded more than 24 hours before the poll. The server
+  writes a submission's row inside the upload request, so under the
+  current account a receipt always has a row by the next poll; the 24
+  hours only keep a just-uploaded row from ever being marked. A failed
+  poll changes nothing. A later poll that does return a row clears the
+  mark and refreshes the row as usual.
+
+A marked row keeps the server's last word from the cache -- `status`,
+`consent_scopes`, `credit_points_pending`, `credit_points_final`,
+`credit_outcome_reason`, `explanations`, and `last_refreshed_at` as it was
+(it is not advanced, since nothing was refreshed). A marked row the server
+never refreshed shows its receipt's upload-time status.
+
+The current account cannot act on a marked row, and its numbers are not
+this account's:
+
+- `withdraw` answers `unavailable` / `previous-account` for it before any
+  other check, and makes no call; `withdraw_bulk` leaves it out.
+- `history_rollup` still counts it in `week`, `month`, `all_time`,
+  `quarantined` and `taken_back`, since it is this device's history, but
+  leaves it out of `credit_pending`, `credit_final` and
+  `last_refreshed_at`. `insights_submitted` counts it the same way: in the
+  submitted and status counts, not in `credit_final` or `credit_pending`.
+  The digest's contribution line leaves out its credit too.
+- Its verdicts are never verdict news (`verdicts_landed`), and its mark
+  still advances, so it is not replayed if a row comes back later.
+
+`#[serde(default)]` on the wire, so a cached row written before this field
+existed loads as `false`.
+
 ### Credit outcome on history rows
 
 Before this, the server's status read-back never set `credit_points_final`
@@ -8370,6 +8431,13 @@ individual traces with `withdraw` if some did not go through.
 Both update the local history cache immediately (the record's `status`
 becomes `withdrawn`) so a contributor sees the effect without needing a
 `refresh_history` round trip first.
+
+Neither acts on a row marked `previous_account` (see ["History from a
+previous account"](#history-from-a-previous-account)): the current account
+cannot withdraw it. `withdraw` answers `unavailable` / `previous-account`
+for one, ahead of the account-session check and with no call made, and
+`withdraw_bulk` leaves such rows out of its targets and its counts. A
+client should not offer Withdraw on such a row.
 
 **Both methods answer `unavailable` / `account-session-required` today,
 always**, before ever attempting the call. Withdrawal is authenticated by an

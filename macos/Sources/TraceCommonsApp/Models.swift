@@ -619,6 +619,10 @@ struct HistoryRecord: Decodable, Identifiable, Equatable {
     let creditPointsFinal: Double?
     let explanations: [String]
     let lastRefreshedAt: Date?
+    /// The submission belongs to an account this Mac was enrolled under
+    /// before the current one. The current account cannot withdraw it, so
+    /// Withdraw is never offered on it. `false` when the daemon omits it.
+    var previousAccount: Bool = false
 
     var id: String { submissionID }
 
@@ -634,6 +638,7 @@ struct HistoryRecord: Decodable, Identifiable, Equatable {
         case creditPointsFinal = "credit_points_final"
         case explanations
         case lastRefreshedAt = "last_refreshed_at"
+        case previousAccount = "previous_account"
     }
 }
 
@@ -1123,7 +1128,8 @@ extension HistoryRecord {
             creditPointsPending: try c.decode(Double.self, forKey: .creditPointsPending),
             creditPointsFinal: try c.decodeIfPresent(Double.self, forKey: .creditPointsFinal),
             explanations: try c.decode([String].self, forKey: .explanations),
-            lastRefreshedAt: try c.decodeIfPresent(Date.self, forKey: .lastRefreshedAt)
+            lastRefreshedAt: try c.decodeIfPresent(Date.self, forKey: .lastRefreshedAt),
+            previousAccount: try c.decodeIfPresent(Bool.self, forKey: .previousAccount) ?? false
         )
     }
 }

@@ -264,8 +264,10 @@ impl Tally {
         }
         // A final figure, 0 included, means decided: whatever pending
         // figure the server still reports beside it is not pending (the
-        // History rollup's rule).
+        // History rollup's rule). A previous account's credit is not this
+        // account's to total (the rollup's rule too); the trace still counts.
         match record.credit_points_final {
+            _ if record.previous_account => {}
             Some(points) => self.credit_final += f64::from(points),
             None => self.credit_pending += f64::from(record.credit_points_pending),
         }
@@ -889,6 +891,7 @@ mod tests {
             approved_unattended: Some(false),
             approved_verdict: None,
             uploaded_bytes: Some(1_000),
+            previous_account: false,
         }
     }
 
@@ -1368,6 +1371,26 @@ mod tests {
                 "setup"
             ]
         );
+    }
+
+    /// A previous account's trace still counts as submitted, but its
+    /// credit is not in this account's totals.
+    #[test]
+    fn a_previous_accounts_credit_is_left_out_of_the_totals() {
+        let mut f = Fixture::standard();
+        let mut old = record(9, day(9, 20), STATUS_ACCEPTED, (4.0, Some(7.0)), None);
+        old.previous_account = true;
+        let mut old_pending = record(10, day(9, 20), STATUS_QUARANTINED, (6.0, None), None);
+        old_pending.previous_account = true;
+        f.history.push(old);
+        f.history.push(old_pending);
+        let v = f.answer(&NeverFolders::NONE, None);
+        let totals = &v["totals"];
+        assert_eq!(totals["submitted"], 10);
+        // As `statuses_credit_and_outcome_reasons_follow_history`: the
+        // previous account's 7 final and 6 pending are not added.
+        assert_eq!(totals["credit_final"], 9.0);
+        assert_eq!(totals["credit_pending"], 4.0);
     }
 
     #[test]

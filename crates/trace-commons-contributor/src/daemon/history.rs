@@ -209,7 +209,33 @@ pub struct HistoryRecord {
     /// still parses.
     #[serde(default)]
     pub uploaded_bytes: Option<u64>,
+    /// Whether this submission belongs to an account this device was
+    /// enrolled under before the current one: a successful status read-back
+    /// returned no row for it, and [`join`]'s rule says that is not because
+    /// it was only just uploaded. See [`join`] for the rule.
+    ///
+    /// Such a row keeps whatever the server last said about it (status,
+    /// scopes, credit, explanations, `last_refreshed_at`), so a change of
+    /// account does not wipe the device's history. The current account
+    /// cannot act on it: withdrawal is refused for it, its credit is left
+    /// out of every current-account total, and its verdicts are never news.
+    /// Cleared again if a later read-back returns a row for it.
+    ///
+    /// `#[serde(default)]` so a cache line written before this field existed
+    /// still parses, as `false`.
+    #[serde(default)]
+    pub previous_account: bool,
 }
+
+/// How long after upload a receipt with no server row is still taken for a
+/// submission the server has simply not answered for yet, rather than one
+/// from a previous account. See [`join`].
+///
+/// The submission row is written inside the upload request itself, before
+/// the receipt exists, so under the current account a receipt has a row by
+/// the next poll. A day is far wider than that window needs; it only has to
+/// be wide enough that no fresh upload is ever marked.
+pub const PREVIOUS_ACCOUNT_GRACE_HOURS: i64 = 24;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HistoryCounts {
@@ -293,6 +319,32 @@ pub type ProjectAttribution = BTreeMap<Uuid, (String, String)>;
 /// server's read-back know nothing of it until the server reports
 /// `revoked` -- so its `withdrawn_at` is carried across, or one refresh
 /// would silently undo "taken back".
+///
+/// `updates` must be the answer of a status read-back that SUCCEEDED: an id
+/// it holds no row for is then one the current account cannot see. Callers
+/// never call this after a failed read-back, and must not.
+///
+/// # Previous-account rows
+///
+/// A receipt with no row is marked [`HistoryRecord::previous_account`] when
+/// any of these holds:
+///
+/// - the cache being replaced already marked it (the mark is sticky until a
+///   row comes back);
+/// - the cache being replaced had refreshed it from the server
+///   (`last_refreshed_at` set): the server knew it and no longer shows it to
+///   this account;
+/// - it was uploaded more than [`PREVIOUS_ACCOUNT_GRACE_HOURS`] before this
+///   read-back. Under the current account its row is written inside the
+///   upload request, so an older receipt with no row is one the current
+///   account's principals cannot see.
+///
+/// A marked row keeps the server's last word from the cache being replaced
+/// (status, scopes, credit, outcome reason, explanations and
+/// `last_refreshed_at`) instead of falling back to the receipt alone, so a
+/// change of account does not wipe what the server had said. A fresh upload
+/// with no row yet matches none of the three and keeps the receipt's own
+/// status, unmarked, as before. A row that comes back clears the mark.
 pub fn join(
     receipts: &[Receipt],
     updates: &[TraceSubmissionStatusUpdate],
@@ -323,10 +375,50 @@ pub fn join(
         .map(|p| p.submission_id)
         .collect();
 
+    let prior: BTreeMap<Uuid, &HistoryRecord> =
+        previous.iter().map(|p| (p.submission_id, p)).collect();
+    let grace_cutoff = refreshed_at - Duration::hours(PREVIOUS_ACCOUNT_GRACE_HOURS);
+
     let mut records: Vec<HistoryRecord> = receipts
         .iter()
         .map(|r| {
             let update = by_id.get(&r.submission_id);
+            let prior = prior.get(&r.submission_id).copied();
+            let previous_account = update.is_none()
+                && (prior.is_some_and(|p| p.previous_account || p.last_refreshed_at.is_some())
+                    || r.submitted_at < grace_cutoff);
+            // The server's last word, kept for a previous-account row the
+            // cache had refreshed; see this function's doc.
+            let kept = prior.filter(|p| previous_account && p.last_refreshed_at.is_some());
+            if let Some(p) = kept {
+                return HistoryRecord {
+                    submission_id: r.submission_id,
+                    submitted_at: r.submitted_at,
+                    project_id: labels
+                        .get(&r.submission_id)
+                        .map(|(id, _)| id.clone())
+                        .unwrap_or_else(|| p.project_id.clone()),
+                    project_label: labels
+                        .get(&r.submission_id)
+                        .map(|(_, label)| label.clone())
+                        .unwrap_or_else(|| p.project_label.clone()),
+                    source: r.source.clone(),
+                    session_hash: r.session_hash.clone(),
+                    status: p.status.clone(),
+                    consent_scopes: p.consent_scopes.clone(),
+                    credit_points_pending: p.credit_points_pending,
+                    credit_points_final: p.credit_points_final,
+                    credit_outcome_reason: p.credit_outcome_reason.clone(),
+                    explanations: p.explanations.clone(),
+                    last_refreshed_at: p.last_refreshed_at,
+                    approved_unattended: r.approved_unattended,
+                    approved_verdict: r.approved_verdict.clone(),
+                    uploaded_bytes: r.uploaded_bytes,
+                    withdrawn_at: withdrawn.get(&r.submission_id).copied(),
+                    revoked_at: None,
+                    previous_account: true,
+                };
+            }
             HistoryRecord {
                 submission_id: r.submission_id,
                 submitted_at: r.submitted_at,
@@ -372,6 +464,7 @@ pub fn join(
                 // when it arrives via the fallback `r.status` path, and the
                 // carry-forward has to run after that regardless.
                 revoked_at: None,
+                previous_account,
             }
         })
         .map(|mut rec| {
@@ -474,6 +567,8 @@ pub fn merge_new_receipts(
             approved_unattended: r.approved_unattended,
             approved_verdict: r.approved_verdict.clone(),
             uploaded_bytes: r.uploaded_bytes,
+            // No read-back ran, so nothing says otherwise; see `join`.
+            previous_account: false,
         });
         added = true;
     }
@@ -528,6 +623,12 @@ pub fn rollup(records: &[HistoryRecord], now: DateTime<Utc>) -> HistoryRollup {
         }
         if is_taken_back(rec) {
             r.taken_back += 1;
+        }
+        // A previous account's row stays in the counts (it is this device's
+        // history) but not in the current account's credit, and its kept
+        // `last_refreshed_at` is not this account's freshness.
+        if rec.previous_account {
+            continue;
         }
         // A final figure, 0 included, means the trace is decided: whatever
         // pending figure the server still reports beside it is not pending.
@@ -612,6 +713,10 @@ pub fn contributed_since(
         out.count += 1;
         if !rec.project_label.is_empty() {
             out.project_labels.insert(rec.project_label.clone());
+        }
+        // Counted as sent, but its credit is a previous account's.
+        if rec.previous_account {
+            continue;
         }
         match rec.credit_points_final {
             Some(f) => {
@@ -751,6 +856,7 @@ mod tests {
             approved_unattended: None,
             approved_verdict: None,
             uploaded_bytes: None,
+            previous_account: false,
         }
     }
 
@@ -1013,6 +1119,220 @@ mod tests {
         );
     }
 
+    /// The cache a successful read-back left: `id` accepted with credit and
+    /// an explanation, refreshed at `refreshed`.
+    fn refreshed_row(id: Uuid, when: &str, refreshed: &str) -> HistoryRecord {
+        HistoryRecord {
+            submission_id: id,
+            status: STATUS_ACCEPTED.into(),
+            consent_scopes: vec!["debugging_evaluation".into()],
+            credit_points_pending: 0.5,
+            credit_points_final: Some(2.0),
+            credit_outcome_reason: Some("some_reason".into()),
+            explanations: vec!["accepted into the commons".into()],
+            last_refreshed_at: Some(at(refreshed)),
+            ..record("accepted", when)
+        }
+    }
+
+    /// The account changed: the server answers, but with no row for a
+    /// submission it had read back before. What it said is kept, and the
+    /// row is marked as a previous account's.
+    #[test]
+    fn a_refreshed_row_the_server_no_longer_returns_is_kept_and_marked() {
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-08T10:00:00Z",
+        )];
+        let previous = vec![refreshed_row(
+            id,
+            "2026-08-08T10:00:00Z",
+            "2026-08-08T11:00:00Z",
+        )];
+        // An hour after upload: inside the grace, so only the cache's own
+        // read-back can mark it.
+        let recs = join(
+            &receipts,
+            &[],
+            &labels(id),
+            &previous,
+            at("2026-08-08T12:00:00Z"),
+        );
+        let r = &recs[0];
+        assert!(r.previous_account);
+        assert_eq!(r.status, STATUS_ACCEPTED);
+        assert_eq!(r.consent_scopes, vec!["debugging_evaluation"]);
+        assert_eq!(r.credit_points_pending, 0.5);
+        assert_eq!(r.credit_points_final, Some(2.0));
+        assert_eq!(r.credit_outcome_reason.as_deref(), Some("some_reason"));
+        assert_eq!(r.explanations, vec!["accepted into the commons"]);
+        // As it was, not this poll's: nothing was refreshed.
+        assert_eq!(r.last_refreshed_at, Some(at("2026-08-08T11:00:00Z")));
+
+        // And the next poll keeps it the same way.
+        let again = join(
+            &receipts,
+            &[],
+            &labels(id),
+            &recs,
+            at("2026-08-09T12:00:00Z"),
+        );
+        assert_eq!(again, recs);
+    }
+
+    /// A submission the server still returns a row for is refreshed as
+    /// before and is not marked, and a row that comes back clears the mark.
+    #[test]
+    fn a_row_the_server_returns_is_refreshed_and_unmarked() {
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-01T10:00:00Z",
+        )];
+        let mut previous = refreshed_row(id, "2026-08-01T10:00:00Z", "2026-08-01T11:00:00Z");
+        previous.previous_account = true;
+        let recs = join(
+            &receipts,
+            &[update(id, STATUS_QUARANTINED, 1.0, None)],
+            &labels(id),
+            &[previous],
+            at("2026-08-08T12:00:00Z"),
+        );
+        let r = &recs[0];
+        assert!(!r.previous_account);
+        assert_eq!(r.status, STATUS_QUARANTINED);
+        assert_eq!(r.credit_points_final, None);
+        assert_eq!(r.last_refreshed_at, Some(at("2026-08-08T12:00:00Z")));
+    }
+
+    /// Just uploaded, no row yet, nothing cached: the receipt's status,
+    /// unmarked.
+    #[test]
+    fn a_just_uploaded_submission_with_no_row_is_not_marked() {
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "processing",
+            "2026-08-08T11:59:00Z",
+        )];
+        let mut cache = Vec::new();
+        merge_new_receipts(&mut cache, &receipts, &labels(id));
+        let recs = join(
+            &receipts,
+            &[],
+            &labels(id),
+            &cache,
+            at("2026-08-08T12:00:00Z"),
+        );
+        assert!(!recs[0].previous_account);
+        assert_eq!(recs[0].status, STATUS_PROCESSING);
+        assert_eq!(recs[0].last_refreshed_at, None);
+        // Still unmarked at the edge of the grace.
+        let edge = at("2026-08-08T11:59:00Z") + Duration::hours(PREVIOUS_ACCOUNT_GRACE_HOURS);
+        let recs = join(&receipts, &[], &labels(id), &recs, edge);
+        assert!(!recs[0].previous_account);
+    }
+
+    /// A row the server never refreshed and has no row for, uploaded long
+    /// before this read-back (a cache an earlier build already reset): kept
+    /// with the receipt's upload-time status, and marked.
+    #[test]
+    fn an_old_never_refreshed_row_with_no_server_row_is_marked() {
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-01T10:00:00Z",
+        )];
+        let mut previous = record("submitted", "2026-08-01T10:00:00Z");
+        previous.submission_id = id;
+        previous.last_refreshed_at = None;
+        let recs = join(
+            &receipts,
+            &[],
+            &labels(id),
+            &[previous],
+            at("2026-08-08T12:00:00Z"),
+        );
+        assert!(recs[0].previous_account);
+        assert_eq!(recs[0].status, STATUS_SUBMITTED);
+        assert_eq!(recs[0].credit_points_final, None);
+        assert_eq!(recs[0].last_refreshed_at, None);
+    }
+
+    /// A local withdrawal of a previous account's row stays withdrawn.
+    #[test]
+    fn a_withdrawn_previous_account_row_stays_withdrawn() {
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-01T10:00:00Z",
+        )];
+        let mut previous = vec![refreshed_row(
+            id,
+            "2026-08-01T10:00:00Z",
+            "2026-08-01T11:00:00Z",
+        )];
+        mark_withdrawn(&mut previous, id, at("2026-08-02T10:00:00Z"));
+        let recs = join(
+            &receipts,
+            &[],
+            &labels(id),
+            &previous,
+            at("2026-08-08T12:00:00Z"),
+        );
+        assert!(recs[0].previous_account);
+        assert_eq!(recs[0].status, STATUS_WITHDRAWN);
+        assert_eq!(recs[0].withdrawn_at, Some(at("2026-08-02T10:00:00Z")));
+    }
+
+    /// A cache line written before the field existed loads, unmarked.
+    #[test]
+    fn a_cache_line_without_the_field_loads_unmarked() {
+        let mut value = serde_json::to_value(record("accepted", "2026-08-08T10:00:00Z")).unwrap();
+        value.as_object_mut().unwrap().remove("previous_account");
+        let parsed: HistoryRecord = serde_json::from_value(value).unwrap();
+        assert!(!parsed.previous_account);
+    }
+
+    /// A previous account's rows stay in the counts but add nothing to the
+    /// current account's credit, pending or final, nor to its freshness.
+    #[test]
+    fn previous_account_credit_is_left_out_of_the_rollup_and_digest() {
+        let mut current = record("accepted", "2026-08-08T10:00:00Z");
+        current.credit_points_final = Some(1.0);
+        current.last_refreshed_at = Some(at("2026-08-08T11:00:00Z"));
+        let mut old_final = record("accepted", "2026-08-07T10:00:00Z");
+        old_final.credit_points_final = Some(5.0);
+        old_final.last_refreshed_at = Some(at("2026-08-08T11:30:00Z"));
+        old_final.previous_account = true;
+        let mut old_pending = record("submitted", "2026-08-07T10:00:00Z");
+        old_pending.credit_points_pending = 3.0;
+        old_pending.previous_account = true;
+        let records = [current, old_final, old_pending];
+
+        let r = rollup(&records, at("2026-08-08T12:00:00Z"));
+        assert_eq!(r.all_time.total(), 3);
+        assert_eq!(r.all_time.accepted, 2);
+        assert_eq!(r.credit_final, 1.0);
+        assert_eq!(r.credit_pending, 0.0);
+        assert_eq!(r.last_refreshed_at, Some(at("2026-08-08T11:00:00Z")));
+
+        let since = contributed_since(&records, None);
+        assert_eq!(since.count, 3);
+        assert_eq!(since.credit_final(), 1.0);
+        assert_eq!(since.credit_pending, 0.0);
+    }
+
     #[test]
     fn join_orders_newest_first() {
         let a = Uuid::new_v4();
@@ -1260,6 +1580,7 @@ mod tests {
             approved_unattended: None,
             approved_verdict: None,
             uploaded_bytes: None,
+            previous_account: false,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.contains("proj_"), "expected an opaque id: {json}");

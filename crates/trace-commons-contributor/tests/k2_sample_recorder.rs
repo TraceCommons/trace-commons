@@ -366,6 +366,8 @@ fn sample_history_records() -> Vec<HistoryRecord> {
         uploaded_bytes: Some(12_000 + (n as u64) * 2_048),
         // K12: no row here was withdrawn on the web.
         revoked_at: None,
+        // Every row is the current account's.
+        previous_account: false,
     };
     vec![
         row(

@@ -226,6 +226,25 @@ final class HomeTests: XCTestCase {
         XCTAssertEqual(HomeFormat.rowMeta(bare), "\u{2014}")
     }
 
+    /// A previous account's row says so after its tool and day; a row
+    /// from an older daemon, without the field, is the current account's.
+    func test_aPreviousAccountsRowSaysSo() throws {
+        let decoder = DaemonDataDecoding.decoder()
+        let row = try decoder.decode(DaemonData.HistoryRow.self, from: Data(
+            #"{"submission_id":"a","submitted_at":"2026-03-14T15:00:00Z","source":"claude-code","previous_account":true}"#.utf8))
+        XCTAssertTrue(row.isPreviousAccount)
+        let day = try XCTUnwrap(row.submittedAt).formatted(.dateTime.month(.abbreviated).day())
+        XCTAssertEqual(HomeFormat.rowMeta(row),
+                       InferenceTabView.toolName("claude-code") + " \u{00B7} " + day + " \u{00B7} " + HomeFormat.previousAccount)
+        let current = try decoder.decode(DaemonData.HistoryRow.self, from: Data(
+            #"{"submission_id":"b","previous_account":false}"#.utf8))
+        XCTAssertFalse(current.isPreviousAccount)
+        let legacy = try decoder.decode(DaemonData.HistoryRow.self, from: Data(#"{"submission_id":"c"}"#.utf8))
+        XCTAssertNil(legacy.previousAccount)
+        XCTAssertFalse(legacy.isPreviousAccount)
+        XCTAssertEqual(HomeFormat.rowMeta(legacy), "\u{2014}")
+    }
+
     /// Ron's filter wraps onto a second line when the pane is too narrow
     /// for all five, rather than scrolling the rest out of sight.
     func test_theFilterWrapsOntoASecondLine() {
