@@ -708,8 +708,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             turn_bytes: "bytes {start}\u{2013}{end}",
             close: "Close",
             native_review: "NATIVE REVIEW",
-            native_review_caption: "Optional daemon-backed checks stay local until you \
-                explicitly confirm.",
+            // DRAFT, NEEDS APPROVAL (2026-11-04).
+            native_review_caption: "Optional checks stay local until you explicitly confirm.",
             prepare_admission: "Prepare admission",
             request_witness_review: "Request review",
             witness_confirm_line: "I understand and want to send this trace for review.",
@@ -1542,7 +1542,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             eyebrow: "RUNTIME",
             heading: "Contribution safeguards",
             inference_routing: "Inference routing",
-            daemon_owned: "daemon-owned",
+            // DRAFT, NEEDS APPROVAL (2026-11-04).
+            daemon_owned: "set by the app",
             rows_unavailable_one: "1 row unavailable",
             rows_unavailable: "{count} rows unavailable",
             capacity_unreadable: "Some approved traces may be waiting and have not been sent, \

@@ -18,7 +18,8 @@ public sealed class PendingInviteActivation
         if (!daemonAvailable)
         {
             Clear();
-            return new(null, "This window cannot reach the daemon. Open the running app or restart, then open your invite again.");
+            // DRAFT, NEEDS APPROVAL (2026-11-04).
+            return new(null, "This window cannot reach the running app. Open the running app or restart, then open your invite again.");
         }
         if (onboardingOpen) return new(null, "Finish or close the current onboarding before opening the latest invite.");
         var invite = _latest;

@@ -420,13 +420,13 @@ pub const CONTRIBUTE: &str = "Contribute";
 /// Shown where the transcript would be when the shell is attached to a
 /// daemon it does not host. The contract serves the full redacted body
 /// in-process only; saying so plainly beats an empty box.
+/// DRAFT, NEEDS APPROVAL (2026-11-04).
 pub const BODY_NOT_AVAILABLE_HERE: &str = concat!(
     "The full text can only be shown by the copy of ",
     app_name!(),
     " that is doing the watching. \
      A background watcher is running separately on this machine, so this window can show what \
-     would be sent and what was scrubbed, but not the text itself. \
-     `trace-commons-contributor daemon preview` shows the same summary from a terminal."
+     would be sent and what was scrubbed, but not the text itself."
 );
 
 pub const PERMISSIONS_INTRO: &str =
@@ -795,9 +795,13 @@ pub fn withdraw_failure_sentence(label: &str) -> String {
     if WITHDRAW_NOT_FOUND_LABELS.contains(&label) {
         return WITHDRAW_NOT_FOUND.to_string();
     }
+    // A shell-made label such as "daemon-not-running" is shown without its
+    // process prefix; the label itself is unchanged.
+    // DRAFT, NEEDS APPROVAL (2026-11-04).
+    let shown = label.strip_prefix("daemon-").unwrap_or(label);
     format!(
         "Nothing was withdrawn and nothing was deleted. The request did not go through \
-         ({label}). You can try again."
+         ({shown}). You can try again."
     )
 }
 
@@ -2860,6 +2864,18 @@ mod tests {
                 "a failure sentence does not say nothing happened: {sentence}"
             );
         }
+    }
+
+    #[test]
+    fn a_failed_withdrawal_never_names_the_background_process() {
+        let sentence = withdraw_failure_sentence("daemon-not-running");
+        assert!(sentence.contains("(not-running)"), "{sentence}");
+        assert!(!sentence.to_lowercase().contains("daemon"), "{sentence}");
+    }
+
+    #[test]
+    fn the_unhosted_body_line_never_names_the_background_process() {
+        assert!(!BODY_NOT_AVAILABLE_HERE.to_lowercase().contains("daemon"));
     }
 
     #[test]

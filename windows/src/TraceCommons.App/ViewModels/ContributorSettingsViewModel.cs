@@ -1329,8 +1329,9 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     public string QueueExpiryText =>
         $"Undecided traces are dropped after {_queueTtlDays} days. Dropped means never sent.";
 
+    // DRAFT, NEEDS APPROVAL (2026-11-04).
     public string NotificationOwnerText => _localNotifications
-        ? "Notifications are rendered by the background daemon."
+        ? "Notifications are shown by the background service."
         : "Notifications are rendered by this app.";
 
     public async Task LoadAsync()

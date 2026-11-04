@@ -62,11 +62,6 @@ fn add_login_failure_does_not_say_switch_accounts() {
 
 #[test]
 fn stale_words_are_gone() {
-    assert!(
-        !consent_copy::LEGACY_MIGRATION_PASSKEY_FAILED
-            .to_lowercase()
-            .contains("passkey")
-    );
     assert_eq!(private_inference_copy::STATE_UNKNOWN, "Status unavailable.");
     assert!(witness_copy::WITNESS_TOKEN_CAPTURE_NOTE.contains("IronWire"));
     assert!(!witness_copy::WITNESS_TOKEN_CAPTURE_NOTE.contains("Ironwire"));

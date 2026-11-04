@@ -115,7 +115,7 @@ export function QueueStatusPanel({
           !saturatedShownByNotice &&
           !heldShownByNotice && (
           <div className="text-destructive">
-            <strong>Daemon needs attention</strong>
+            <strong>Needs attention</strong>
             <span>
               Processing reported a recoverable issue. Refresh after checking
               Settings.
@@ -130,7 +130,7 @@ export function QueueStatusPanel({
             <strong>Inference routing</strong>
             <span>
               {routingLabel(routing.state)}
-              {routing.derived ? " · daemon-owned" : ""}
+              {routing.derived ? " · from this app" : ""}
             </span>
             {routing.unreadable_rows > 0 && (
               <small>

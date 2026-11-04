@@ -1536,8 +1536,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _decisionsOwed = status.IsError ? null : status.ResultAs<DaemonStatus>()?.DecisionsOwed;
             RaiseShield();
 
+            // DRAFT, NEEDS APPROVAL (2026-11-04).
             StatusText = status.IsError
-                ? "Daemon unavailable"
+                ? "Status unavailable"
                 : DescribeQueue(Pending.Count);
 
             // The banner comes out of the status read this method already

@@ -178,7 +178,8 @@ impl AppState {
             .as_ref()
             .and_then(|runtime| runtime.connection.clone())
             .filter(|connection| connection.is_alive())
-            .ok_or_else(|| "Rust core daemon is not started; choose source roots".to_owned())
+            // DRAFT, NEEDS APPROVAL (2026-11-04).
+            .ok_or_else(|| "Rust core is not started; choose source roots".to_owned())
     }
 
     pub(crate) fn optional_daemon(&self) -> Result<Option<DaemonConnection>, String> {

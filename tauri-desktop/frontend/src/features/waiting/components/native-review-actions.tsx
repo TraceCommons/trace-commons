@@ -34,7 +34,7 @@ export function NativeReviewActions({
         NATIVE REVIEW
       </span>
       <p className="m-0 text-[11px] leading-[1.5] text-muted-foreground">
-        Optional daemon-backed checks stay local until you explicitly confirm.
+        Optional checks stay local until you explicitly confirm.
       </p>
       <div className="flex flex-wrap gap-2.5">
         {actions.admissionRequired && (

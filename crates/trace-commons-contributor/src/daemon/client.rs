@@ -82,22 +82,27 @@ pub fn try_call(
         "method": method,
         "params": params,
     }))
-    .context("serializing the daemon request")?;
+    // DRAFT, NEEDS APPROVAL (2026-11-04).
+    .context("preparing the request for the app")?;
     line.push('\n');
     stream
         .write_all(line.as_bytes())
-        .context("sending the request to the running daemon")?;
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        .context("sending the request to the running app")?;
     stream.flush().ok();
 
     let mut reply = String::new();
     BufReader::new(&stream)
         .read_line(&mut reply)
-        .context("reading the running daemon's response")?;
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        .context("reading the running app's response")?;
     if reply.trim().is_empty() {
-        bail!("the running daemon closed the connection without answering");
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        bail!("the running app closed the connection without answering");
     }
+    // DRAFT, NEEDS APPROVAL (2026-11-04).
     let response: Response =
-        serde_json::from_str(reply.trim()).context("parsing the running daemon's response")?;
+        serde_json::from_str(reply.trim()).context("parsing the running app's response")?;
     Ok(Some(response))
 }
 

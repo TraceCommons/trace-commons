@@ -208,7 +208,9 @@ struct AccountAttentionBlock: View {
     }
 
     var body: some View {
-        GlassEyebrowCard(attention.title, title: attention.title) {
+        // The section's name over the card's own title, as the Connection
+        // card above it: the title once, not as eyebrow and heading both.
+        GlassEyebrowCard(SettingsWords.connection, title: attention.title) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 ForEach(Self.lines(attention, failed: failed), id: \.self) { line in
                     Text(line)

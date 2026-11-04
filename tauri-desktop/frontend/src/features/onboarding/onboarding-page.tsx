@@ -100,8 +100,7 @@ export function OnboardingPage({
       </div>
       {onboarding.step !== "welcome" && onboarding.step !== "done" && (
         <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
-          This flow is resumable. A failed daemon call does not advance the
-          step.
+          This flow is resumable. A failed step does not advance.
         </p>
       )}
       <ScrubDisclosure

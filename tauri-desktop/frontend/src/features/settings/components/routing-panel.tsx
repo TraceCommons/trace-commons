@@ -72,7 +72,7 @@ export function RoutingPanel({
         </Button>
       </div>
       <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
-        Routing is opt-in. The daemon reads only a declared local proxy and
+        Routing is opt-in. The app reads only a declared local proxy and
         never sends its token to the UI. A declaration does not prove that any
         agent is connected.
       </p>
@@ -87,7 +87,7 @@ export function RoutingPanel({
         </strong>
         <span>
           {status?.daemon.routing?.derived
-            ? "Derived from daemon-owned routing rows."
+            ? "Derived from the app's routing rows."
             : "No live routing rows available."}
         </span>
       </div>
