@@ -69,8 +69,8 @@ final class DesignRulings20261020Tests: XCTestCase {
     /// Home's groups are titled, in the owner's words. The order is the
     /// Private AI first again (owner, 2026-11-02; the 2026-10-28 ruling put
     /// it under Traces and Account), then Traces, then Account. The Traces
-    /// hero, when it shows, takes the Traces cards' place under the heading
-    /// (owner, 2026-11-02; it sat above the heading from 2026-10-29).
+    /// hero leads the Traces section, over the Traces cards, every time
+    /// (owner, 2026-11-04; from 2026-11-02 it took the cards' place).
     func test_homesSectionsAreTitledInOrder() throws {
         let words = try XCTUnwrap(MonitorWords.table).homeHistory
         XCTAssertEqual(words.sectionPrivateAI, "Private AI")
@@ -78,7 +78,7 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertEqual(words.sectionAccount, "Account")
         XCTAssertEqual(words.privateAISignIn, "Sign in to NEAR AI to get started.")
         let home = try Self.text("Views/Monitor/HomeViews.swift")
-        let hero = try XCTUnwrap(home.range(of: "                    tracesHero\n                } else {\n                    Grid("))
+        let hero = try XCTUnwrap(home.range(of: "                    tracesHero\n                    Grid("))
         let traces = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionTraces) {"))
         let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))
         let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount, accessory: accountSignIn) {"))
