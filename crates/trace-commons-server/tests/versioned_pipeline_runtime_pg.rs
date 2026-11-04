@@ -29458,19 +29458,9 @@ async fn a_novelty_utility_award_with_no_configured_issuer_is_withheld() {
 fn main_gate_of(
     config: &CompatibilityBundleConfig,
 ) -> trace_commons_server::versioned_pipeline_compat::MainGateConfig {
-    trace_commons_server::versioned_pipeline_compat::MainGateConfig {
-        perplexity_floor_micros: Some(config.perplexity_floor_micros),
-        tail_fraction_floor_micros: Some(config.tail_fraction_floor_micros),
-        novelty_floor_micros: Some(config.novelty_floor_micros),
-        embed_insert_novelty_micros: config.embed_insert_novelty_micros,
-        top_k: config.top_k,
-        chunk_target_tokens: config.chunk_target_tokens,
-        chunk_max_tokens: config.chunk_max_tokens,
-        chunk_cap: config.chunk_cap,
-        chunk_min_tokens: config.chunk_min_tokens,
-        novelty_utility_microcredits: config.novelty_utility_microcredits,
-        credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
-    }
+    // The configuration's own inverse, every field included (the credit
+    // rule was once dropped by a hand-copied field list here).
+    config.main_gate()
 }
 
 /// Multi-lens review L5-2 and Zaki review 3, Z3-2: startup checks every

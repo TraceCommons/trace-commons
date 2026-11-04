@@ -129,6 +129,7 @@ jobs:
     env:
       PG_SUITE_DATABASES: >-
         admission_test_onboarding
+        admission_test_graded_corpus
         admission_test_ledger
         admission_test_account_ledger
         admission_test_account_trust_external
@@ -319,6 +320,16 @@ jobs:
         run: cargo test -p trace-commons-ingest --lib client_upload_trust_scheduler_pg_tests -- --ignored --test-threads=1
         env:
           TRACE_COMMONS_CLIENT_UPLOAD_TRUST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_upload_trust_scheduler_ci
+      # Stage 2 of the paying bundle failed Phase A on a graded package
+      # (2026-11-03): the corpus harness's production assembly dropped the
+      # package's credit rule. This runs main's corpus through that harness,
+      # in production mode over doubles, on a graded package. Ignored in the
+      # whole-bin job because it writes the corpus tenant's fixed fixtures,
+      # so it runs alone here, on its own database.
+      - name: corpus check on a graded production package
+        run: cargo test -p trace-commons-ingest --lib a_graded_production_package_passes_the_corpus_check -- --ignored --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_graded_corpus
       # NEAR AI starter advance, first slice (V131): write-once plausibility
       # features, the account read's filters, the ingest runtime's grants,
       # and the dry-run report over the earned-trust enumeration seam.
