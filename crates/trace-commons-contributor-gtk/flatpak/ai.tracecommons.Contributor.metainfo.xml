@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.24.1" date="2026-11-04">
+      <description>
+        <p>Fixes uploads that stopped on some traces.</p>
+      </description>
+    </release>
     <release version="0.24.0" date="2026-11-04">
       <description>
         <p>Lets first run finish with Private AI only, adds Set up again and Use a different account to more places in Settings, regroups Settings, and shortens its text.</p>
