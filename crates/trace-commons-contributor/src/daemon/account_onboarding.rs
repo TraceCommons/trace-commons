@@ -354,6 +354,34 @@ impl Path {
     }
 }
 
+/// Whether the commons says the sign-in paths a change of login needs are
+/// ready (F10): the NEAR AI login path, and for a wallet-origin account the
+/// wallet path too. The commons publishes the change routes whatever their
+/// readiness, and refuses a start while either is not ready. Reads the
+/// readiness flags only.
+// A test build answers readiness itself (`account_login_change::paths_ready`).
+#[cfg_attr(test, allow(dead_code))]
+pub(super) async fn change_paths_ready(
+    url: &str,
+    wallet: bool,
+) -> std::result::Result<bool, SignupRefusal> {
+    let capability: Capability = origin_only_client(url)?
+        .call_json(
+            reqwest::Method::GET,
+            "/v1/account/near/provision/capabilities",
+            &[],
+            None::<&serde_json::Value>,
+        )
+        .await
+        .map_err(|_| SignupRefusal::Unreachable)?;
+    Ok(change_ready_for(&capability, wallet))
+}
+
+/// [`change_paths_ready`]'s decision on a capability document.
+fn change_ready_for(capability: &Capability, wallet: bool) -> bool {
+    Path::NearAiLogin.ready_for(capability) && (!wallet || Path::Wallet.ready_for(capability))
+}
+
 pub(super) async fn validated_capability(
     url: &str,
     path: Path,
@@ -1360,6 +1388,24 @@ mod tests {
             Path::for_config(&enrolled("tenant-whatever", Some("near_ai_login"))),
             Path::Wallet
         );
+    }
+
+    /// F10: a change needs the NEAR AI login path ready, and for a
+    /// wallet-origin account the wallet path too.
+    #[test]
+    fn a_change_needs_its_sign_in_paths_ready() {
+        let doc = |ready: bool, login: Option<bool>| -> Capability {
+            serde_json::from_value(serde_json::json!({
+                "ready": ready, "near_ai_login_ready": login, "witness": null,
+                "issuer_url": null, "audience": null, "inference_receipt_endpoint": null,
+            }))
+            .unwrap()
+        };
+        assert!(change_ready_for(&doc(false, Some(true)), false));
+        assert!(!change_ready_for(&doc(false, Some(true)), true));
+        assert!(change_ready_for(&doc(true, Some(true)), true));
+        assert!(!change_ready_for(&doc(true, Some(false)), false));
+        assert!(change_ready_for(&doc(true, None), false));
     }
 
     /// F10 decision 4: a wallet-origin account that changed to a NEAR AI

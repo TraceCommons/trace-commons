@@ -3,6 +3,14 @@ import SwiftUI
 import TCBridge
 import TCShellCore
 
+extension AppModel {
+    /// #1836's approved mismatch body while the last NEAR AI sign-in was
+    /// refused as another account (`status.login_mismatch`, F10), else nil.
+    var loginMismatchLine: String? {
+        status.loginChange.mismatch ? AccountLoginChangeModel.shared.copy?.mismatchBody : nil
+    }
+}
+
 /// The change of login (F10)'s sheet state. The daemon runs the ceremony and
 /// every network call (`account_login_change`); this opens the browser for
 /// the two browser legs and asks how they went until they end. Every

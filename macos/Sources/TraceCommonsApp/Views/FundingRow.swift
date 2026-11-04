@@ -207,7 +207,8 @@ struct FundingRow: View {
             systemImage: "creditcard", title: copy.fundingTitle,
             subtitle: [
                 NearAiSignInOffer.progressLine(
-                    copy, signingIn: model.nearAiSigningIn, failed: model.nearAiSignInFailed)
+                    copy, signingIn: model.nearAiSigningIn, failed: model.nearAiSignInFailed,
+                    mismatch: model.loginMismatchLine)
                     ?? status?.view.message ?? copy.fundingUnavailable
             ],
             // What the button opens, behind the info icon (owner, 2026-10-10).

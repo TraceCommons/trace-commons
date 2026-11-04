@@ -81,6 +81,7 @@
   "login_change_available": false,
   "payouts_need_login": false,
   "login_change_held": false,
+  "login_mismatch": false,
   "idle_sessions": {
     "count": 2,
     "tools": [

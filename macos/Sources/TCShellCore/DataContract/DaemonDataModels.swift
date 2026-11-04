@@ -524,6 +524,8 @@ extension DaemonData {
         /// F10: a login the commons refused as another account is held aside
         /// for the change.
         public let loginChangeHeld: Bool?
+        /// F10: the last NEAR AI sign-in was refused as another account.
+        public let loginMismatch: Bool?
         /// K2 (#1173): `true` while a debug daemon runs a developer dry
         /// run. A release daemon never sends it. The app's notice reads it
         /// rather than the environment.
@@ -564,6 +566,7 @@ extension DaemonData {
             case loginChangeAvailable = "login_change_available"
             case payoutsNeedLogin = "payouts_need_login"
             case loginChangeHeld = "login_change_held"
+            case loginMismatch = "login_mismatch"
             case devDryRun = "dev_dry_run"
         }
     }

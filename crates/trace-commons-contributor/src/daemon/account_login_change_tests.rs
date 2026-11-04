@@ -683,6 +683,7 @@ async fn the_daemon_status_carries_the_change_fields() {
     assert_eq!(status["login_change_available"], true);
     assert_eq!(status["payouts_need_login"], true);
     assert_eq!(status["login_change_held"], false);
+    assert_eq!(status["login_mismatch"], false);
 }
 
 /// A browser leg that ends without what it was for says so, unless the
@@ -837,4 +838,47 @@ async fn an_old_key_that_could_not_be_revoked_waits_for_the_old_identity() {
     let parked = parked.expect("the old key is parked for a later revoke");
     assert_eq!(parked.workspace_id, "ws-1");
     assert_eq!(parked.identity.as_deref(), Some("sha256:old"));
+}
+
+/// The commons publishes the change routes whatever their readiness: a
+/// start asks, and a commons whose paths are not ready hides the change.
+#[tokio::test]
+async fn a_commons_whose_paths_are_not_ready_hides_the_change() {
+    let fx = Fixture::new(&wallet_tenant(), None).await;
+    set_paths_ready_for_test(fx.dir(), false);
+    assert_eq!(
+        refusal(&fx.step("start", json!({})).await),
+        Some(ERR_NOT_AVAILABLE)
+    );
+    assert_eq!(fx.status()["login_change_available"], false);
+    assert_eq!(fx.status()["payouts_need_login"], true);
+}
+
+/// The mismatch body follows the last sign-in refused as another account,
+/// whether or not the change is offered here (a code-joined device).
+#[tokio::test]
+async fn the_mismatch_is_reported_even_where_the_change_is_not_offered() {
+    let fx = Fixture::new(&near_ai_tenant(), None).await;
+    fx.shared
+        .store
+        .write_daemon_file(crate::config::JOINED_BY_CODE_FILE, b"1\n")
+        .unwrap();
+    assert_eq!(fx.status()["login_mismatch"], false);
+    super::super::nearai_credential::ceremony::mark_finished_for_test(
+        fx.dir(),
+        "attempt-1",
+        super::super::nearai_credential::ceremony::STATUS_DIFFERENT_ACCOUNT,
+    );
+    let status = fx.status();
+    assert_eq!(status["login_mismatch"], true);
+    assert_eq!(status["login_change_available"], false);
+    assert_eq!(status["login_change_held"], false);
+}
+
+/// A held login is a mismatch too: it is how one is held.
+#[tokio::test]
+async fn a_held_login_reports_the_mismatch() {
+    let fx = Fixture::new(&near_ai_tenant(), None).await;
+    assert!(hold_aside(fx.dir(), held("github", None)).is_none());
+    assert_eq!(fx.status()["login_mismatch"], true);
 }

@@ -226,7 +226,8 @@ struct PrivateAIBalanceCard: View {
             GlassIconCard(
                 systemImage: "dollarsign.circle", title: copy.balanceTitle,
                 subtitle: [line, NearAiSignInOffer.progressLine(
-                    copy, signingIn: model.nearAiSigningIn, failed: model.nearAiSignInFailed) ?? ""],
+                    copy, signingIn: model.nearAiSigningIn, failed: model.nearAiSignInFailed,
+                    mismatch: model.loginMismatchLine) ?? ""],
                 trailing: { NearAiSignInHeadButton(copy: copy) })
         } else {
             GlassIconCard(

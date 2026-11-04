@@ -93,16 +93,16 @@ struct AccountLoginChangeSheet: View {
 }
 
 /// Entry point 1 (spec 2.1): after a NEAR AI sign-in the account refused as
-/// another account, with that login held aside. The approved mismatch body,
-/// Sign in (with the account's own login), and Use a different account
-/// (an approved notice, spec 2.6). A status in the account section, never a
-/// banner or notification.
+/// another account. The approved mismatch body and Sign in (with the
+/// account's own login), and -- only while that login is held aside for a
+/// change -- Use a different account (an approved notice, spec 2.6). A
+/// status in the account section, never a banner or notification.
 struct AccountLoginMismatchBlock: View {
     @EnvironmentObject private var app: AppModel
     @ObservedObject private var model = AccountLoginChangeModel.shared
 
     var body: some View {
-        if app.status.loginChange.held, let copy = model.copy {
+        if app.status.loginChange.mismatch, let copy = model.copy {
             GlassCard {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                     Text(copy.mismatchBody)
@@ -116,9 +116,11 @@ struct AccountLoginMismatchBlock: View {
                             }
                         }
                         .buttonStyle(GlassButtonStyle(.glass))
-                        Button(copy.mismatchChange) { Task { await model.begin() } }
-                            .buttonStyle(GlassButtonStyle(.glass))
-                            .disabled(model.calling)
+                        if app.status.loginChange.offersChange {
+                            Button(copy.mismatchChange) { Task { await model.begin() } }
+                                .buttonStyle(GlassButtonStyle(.glass))
+                                .disabled(model.calling)
+                        }
                     }
                     if model.startFailed {
                         Text(copy.errorUnavailable)

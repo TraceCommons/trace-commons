@@ -1,3 +1,4 @@
+import TCBridge
 import XCTest
 
 import TCShellCore
@@ -32,5 +33,21 @@ final class AccountLoginChangeStatusTests: XCTestCase {
         let held = try status(#","login_change_available":true,"login_change_held":true"#).loginChange
         XCTAssertTrue(held.held)
         XCTAssertFalse(held.payoutsNeedLogin)
+        let refused = try status(#","login_mismatch":true"#).loginChange
+        XCTAssertTrue(refused.mismatch)
+        XCTAssertFalse(refused.offersChange)
+    }
+
+    /// A sign-in refused as another account says so in the approved words,
+    /// not the generic failure line.
+    func testARefusedSignInSaysWhyNotJustFailed() throws {
+        let copy = try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? ""))
+        XCTAssertEqual(
+            NearAiSignInOffer.progressLine(copy, signingIn: false, failed: true, mismatch: "M"), "M")
+        XCTAssertEqual(
+            NearAiSignInOffer.progressLine(copy, signingIn: false, failed: true), copy.credentialFailed)
+        XCTAssertEqual(
+            NearAiSignInOffer.progressLine(copy, signingIn: true, failed: true, mismatch: "M"),
+            copy.credentialObtaining)
     }
 }

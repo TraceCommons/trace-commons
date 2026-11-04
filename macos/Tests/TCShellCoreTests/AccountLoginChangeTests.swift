@@ -133,6 +133,16 @@ final class AccountLoginChangeSurfaceTests: XCTestCase {
         XCTAssertFalse(AccountLoginChangeStatus.none.showsPayoutsLine)
     }
 
+    func testTheMismatchShowsAloneAndTheChangeOnlyWithAHeldLogin() {
+        let refused = AccountLoginChangeStatus(
+            available: false, payoutsNeedLogin: false, held: false, mismatch: true)
+        XCTAssertTrue(refused.mismatch)
+        XCTAssertFalse(refused.offersChange, "no held login: the body without the button")
+        let held = AccountLoginChangeStatus(available: true, payoutsNeedLogin: false, held: true)
+        XCTAssertTrue(held.mismatch, "a held login is a mismatch")
+        XCTAssertTrue(held.offersChange)
+    }
+
     func testAStateDecodesFromTheDaemonsAnswer() throws {
         let json = #"{"change_id":"c9","step":"confirm","current_kind":"wallet","old_provider":null,"new_provider":"github","busy":false,"error":null,"browser_url":"http://127.0.0.1:1/x","future":1}"#
         let decoded = try JSONDecoder().decode(AccountLoginChangeState.self, from: Data(json.utf8))
