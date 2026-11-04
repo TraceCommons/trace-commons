@@ -37,6 +37,7 @@ fn the_client_pilot_price_is_the_servers_derivation_of_the_pilot_pricing() {
     let derived = derive_first_run_usd_range(FirstRunUsdInputs {
         settlement_table: Some(&table),
         near_ai_rail_enabled: true,
+        pipeline_runtime_assembled: true,
         credit_rule: CompatibilityCreditRule::GradedPerplexityV1,
         delta_microcredits: 1_000_000,
         constants: constants_at(chrono::Utc::now().timestamp()),

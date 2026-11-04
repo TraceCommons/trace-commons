@@ -18,7 +18,11 @@
 //!   credit estimate table carries no dollar rate and is not used.
 //! - **Credit per accepted trace**: `main`'s `NoveltyUtility` delta and
 //!   credit rule, as the running gate holds them (`MainGateConfig`). Under
-//!   `flat` every passing trace earns the delta, so both ends are the delta.
+//!   `flat` every passing trace earns the delta, so both ends are the delta,
+//!   but only on `main`'s legacy gate path, whose `NoveltyUtility` events
+//!   settle: with a pipeline runtime assembled, a `flat` compatibility leg is
+//!   never batched (Ruling S10) and the rail pays only from batches, so
+//!   nothing is published (2026-11-03 paying-bundle design, section 3).
 //!   Under `graded_perplexity_v1` the award is `delta * f * a`
 //!   ([`graded_perplexity_award`]): the top is a trace at or above the
 //!   perplexity ceiling (`f = 1`, `a = 1`), which is the delta; the bottom is
@@ -54,6 +58,9 @@ pub enum FirstRunUsdUnderived {
     RailDisabled,
     /// The `NoveltyUtility` delta is 0: no trace earns credit.
     NoDelta,
+    /// The `flat` rule with a pipeline runtime assembled: its leg is never
+    /// batched, so the rail never pays it.
+    RuleUnpaid,
     /// The derived range is not one the protocol publishes (an end below a
     /// cent, or above the protocol's bound).
     OutOfRange,
@@ -66,6 +73,7 @@ impl FirstRunUsdUnderived {
             Self::NoRate => "first_run_usd_no_rate",
             Self::RailDisabled => "first_run_usd_rail_disabled",
             Self::NoDelta => "first_run_usd_no_delta",
+            Self::RuleUnpaid => "first_run_usd_rule_unpaid",
             Self::OutOfRange => "first_run_usd_out_of_range",
         }
     }
@@ -77,6 +85,8 @@ pub struct FirstRunUsdInputs<'a> {
     pub settlement_table: Option<&'a SettlementEstimateTable>,
     /// Whether the NEAR AI payout rail is anything but `disabled`.
     pub near_ai_rail_enabled: bool,
+    /// Whether ingest assembled a versioned pipeline runtime.
+    pub pipeline_runtime_assembled: bool,
     pub credit_rule: CompatibilityCreditRule,
     /// `main`'s `NoveltyUtility` delta in trace-credit microcredits (the
     /// settlement table's atomic units).
@@ -106,6 +116,9 @@ pub fn derive_first_run_usd_range(
         return Err(FirstRunUsdUnderived::NoDelta);
     }
     let (min_units, max_units) = match inputs.credit_rule {
+        CompatibilityCreditRule::Flat if inputs.pipeline_runtime_assembled => {
+            return Err(FirstRunUsdUnderived::RuleUnpaid);
+        }
         CompatibilityCreditRule::Flat => (inputs.delta_microcredits, inputs.delta_microcredits),
         CompatibilityCreditRule::GradedPerplexityV1 => {
             let k = inputs.constants;
@@ -173,6 +186,9 @@ mod tests {
         FirstRunUsdInputs {
             settlement_table: table,
             near_ai_rail_enabled: true,
+            // The graded rule is only ever read with a pipeline; `flat`
+            // pays on the legacy path, without one.
+            pipeline_runtime_assembled: rule == CompatibilityCreditRule::GradedPerplexityV1,
             credit_rule: rule,
             delta_microcredits,
             constants: &CREDIT_QUALITY_CONSTANTS_V3,
@@ -259,6 +275,10 @@ mod tests {
         let mut disabled = inputs(Some(&rated), graded, 1_000_000);
         disabled.near_ai_rail_enabled = false;
         assert_eq!(err(disabled), FirstRunUsdUnderived::RailDisabled);
+        // `flat` under a pipeline runtime: the leg is never batched or paid.
+        let mut flat_on_pipeline = inputs(Some(&rated), CompatibilityCreditRule::Flat, 1_000_000);
+        flat_on_pipeline.pipeline_runtime_assembled = true;
+        assert_eq!(err(flat_on_pipeline), FirstRunUsdUnderived::RuleUnpaid);
     }
 
     #[test]

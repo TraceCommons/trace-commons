@@ -189,10 +189,12 @@ pub(super) fn derive_first_run_usd(
     main_gate: &MainGateConfig,
     settlement_table: Option<&SettlementEstimateTable>,
     near_ai_rail_enabled: bool,
+    pipeline_runtime_assembled: bool,
 ) -> Result<UsdMicrosRange, FirstRunUsdUnderived> {
     derive_first_run_usd_range(FirstRunUsdInputs {
         settlement_table,
         near_ai_rail_enabled,
+        pipeline_runtime_assembled,
         credit_rule: main_gate.credit_rule,
         delta_microcredits: main_gate.novelty_utility_microcredits,
         constants: trace_commons_server::credit_quality::constants_at(Utc::now().timestamp()),
@@ -212,20 +214,18 @@ pub(super) fn first_run_estimate_resolved(
         tracing::info!(source = "operator_setting", "first-run estimate configured");
         return Ok(explicit);
     }
-    match derived {
-        Ok(range) if range.is_valid() => {
+    match derived.and_then(|range| {
+        if range.is_valid() {
+            Ok(range)
+        } else {
+            Err(FirstRunUsdUnderived::OutOfRange)
+        }
+    }) {
+        Ok(range) => {
             tracing::info!(source = "derived", "first-run estimate configured");
             Ok(FirstRunEstimate {
                 usd_micros_per_accepted_trace: Some(range),
             })
-        }
-        Ok(_) => {
-            tracing::info!(
-                source = "none",
-                label = FirstRunUsdUnderived::OutOfRange.as_label(),
-                "first-run estimate not published"
-            );
-            Ok(FirstRunEstimate::default())
         }
         Err(why) => {
             tracing::info!(

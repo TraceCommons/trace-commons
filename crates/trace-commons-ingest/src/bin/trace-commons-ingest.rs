@@ -5039,6 +5039,7 @@ impl AppState {
                 entry.rail_id().as_str() == trace_commons_gate_api::NEAR_AI_RAIL_ID
                     && entry.mode() != trace_commons_server::payout_rate::PayoutMode::Disabled
             }),
+            pipeline_runtime_assembler.is_some(),
         );
         // Referral codes (referral spec section 3): the settings refuse boot
         // when malformed, naming the setting, never its value.

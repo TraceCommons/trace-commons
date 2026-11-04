@@ -103334,8 +103334,12 @@ mod first_run_estimate_tests {
     #[test]
     fn the_pilots_pricing_derives_the_served_range() {
         let table = pilot_shaped_table();
-        let derived =
-            credit_estimate::derive_first_run_usd(&graded_gate(1_000_000), Some(&table), true);
+        let derived = credit_estimate::derive_first_run_usd(
+            &graded_gate(1_000_000),
+            Some(&table),
+            true,
+            true,
+        );
         let pilot = UsdMicrosRange {
             min: 60_000,
             max: 250_000,
@@ -103353,8 +103357,12 @@ mod first_run_estimate_tests {
     #[test]
     fn the_settings_override_the_derived_range() {
         let table = pilot_shaped_table();
-        let derived =
-            credit_estimate::derive_first_run_usd(&graded_gate(1_000_000), Some(&table), true);
+        let derived = credit_estimate::derive_first_run_usd(
+            &graded_gate(1_000_000),
+            Some(&table),
+            true,
+            true,
+        );
         assert_eq!(
             credit_estimate::first_run_estimate_resolved(Some(MIN), Some(MAX), derived)
                 .unwrap()
@@ -103373,19 +103381,25 @@ mod first_run_estimate_tests {
         );
     }
 
-    /// Fail closed: no table, no rate, the rail disabled, or a delta of 0
-    /// serves `{}`, never a guess.
+    /// Fail closed: no table, no rate, the rail disabled, a delta of 0, or
+    /// a rule the rail never pays serves `{}`, never a guess.
     #[test]
     fn missing_pricing_serves_an_empty_document() {
         let table = pilot_shaped_table();
         let mut unrated = pilot_shaped_table();
         unrated.usd_micros_per_credit = None;
         let gate = graded_gate(1_000_000);
+        let flat_gate = MainGateConfig {
+            credit_rule: CompatibilityCreditRule::Flat,
+            ..gate
+        };
         for derived in [
-            credit_estimate::derive_first_run_usd(&gate, None, true),
-            credit_estimate::derive_first_run_usd(&gate, Some(&unrated), true),
-            credit_estimate::derive_first_run_usd(&gate, Some(&table), false),
-            credit_estimate::derive_first_run_usd(&graded_gate(0), Some(&table), true),
+            credit_estimate::derive_first_run_usd(&gate, None, true, true),
+            credit_estimate::derive_first_run_usd(&gate, Some(&unrated), true, true),
+            credit_estimate::derive_first_run_usd(&gate, Some(&table), false, true),
+            credit_estimate::derive_first_run_usd(&graded_gate(0), Some(&table), true, true),
+            // `flat` under a pipeline runtime is never paid.
+            credit_estimate::derive_first_run_usd(&flat_gate, Some(&table), true, true),
         ] {
             assert!(derived.is_err(), "{derived:?}");
             assert_eq!(
