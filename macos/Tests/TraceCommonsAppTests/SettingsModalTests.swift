@@ -107,6 +107,30 @@ final class SettingsModalTests: XCTestCase {
         XCTAssertFalse(modal.contains("List(selection:"), "the list selects a view instead of scrolling")
     }
 
+    /// Every row the list can draw jumps to a section the body draws, in
+    /// the same order, and the body stacks its sections without laziness so
+    /// a jump lands on the section's own top (a lazy stack guessed the
+    /// height of sections not yet drawn, and Public profile landed in
+    /// Projects).
+    func test_everyListRowJumpsToItsOwnSectionInOrder() throws {
+        for shown in [false, true] {
+            let rows = SettingsModal.rows(payoutsShown: shown)
+            var last = -1
+            for row in rows {
+                let at = try XCTUnwrap(SettingsModal.sections.firstIndex(of: row), "\(row) has no section")
+                XCTAssertGreaterThan(at, last, "\(row) is out of order")
+                last = at
+            }
+            XCTAssertEqual(Set(rows).count, rows.count)
+        }
+        XCTAssertEqual(SettingsModal.rows(payoutsShown: true), SettingsSection.listed)
+        let modal = try Self.text("Views/Monitor/SettingsModal.swift")
+        let body = try XCTUnwrap(modal.components(separatedBy: "ForEach(Self.sections)").first?
+            .components(separatedBy: "rule(.vertical)").last)
+        XCTAssertFalse(body.contains("LazyVStack"), "a lazy body mis-lands scrollTo")
+        XCTAssertFalse(modal.contains("LazyVStack"))
+    }
+
     /// #1146's header and list (P26, P27): the title 15/700 at the modal's
     /// header insets over the 0.5pt modal rule; the list's rows 12pt
     /// secondary text with a faint hover, never the blue menu selection,

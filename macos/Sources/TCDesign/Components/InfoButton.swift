@@ -47,12 +47,7 @@ public struct GlassInfoButton: View {
         .buttonStyle(GlassPressStyle())
         .onHover { hovering = $0 }
         .popover(isPresented: shown, arrowEdge: .bottom) {
-            Text(text)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(width: Self.popoverWidth, alignment: .leading)
-                .padding(GlassTokens.Space.s5)
+            Text(text).glassPopoverText()
         }
         .accessibilityLabel(label)
         .accessibilityValue(text)
@@ -67,5 +62,22 @@ public struct GlassInfoButton: View {
                 hovering = false
                 pinned = false
             })
+    }
+}
+
+public extension View {
+    /// A popover's text: the caption in the secondary ink, wrapped at the
+    /// popover width, on the popover token's own fill. The system popover's
+    /// material follows the window and the text colour follows the token,
+    /// so on their own the two could resolve apart and read grey on grey
+    /// (the first-run info bubbles); painting the fill here makes the pair
+    /// the one `popoverFill` / `textSecondary` the contrast tests measure.
+    func glassPopoverText() -> some View {
+        glassType(GlassTokens.TypeScale.caption)
+            .foregroundStyle(GlassColor.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: GlassInfoButton.popoverWidth, alignment: .leading)
+            .padding(GlassTokens.Space.s5)
+            .background(GlassTokens.Color.popoverFill.color)
     }
 }

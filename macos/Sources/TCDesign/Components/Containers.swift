@@ -394,12 +394,7 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
     private static var infoGlyph: Text { Text(Image(systemName: "info.circle")) }
 
     private func infoPopover(_ info: String) -> some View {
-        Text(info)
-            .glassType(GlassTokens.TypeScale.caption)
-            .foregroundStyle(GlassColor.textSecondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(width: 260, alignment: .leading)
-            .padding(GlassTokens.Space.s5)
+        Text(info).glassPopoverText()
     }
 }
 
