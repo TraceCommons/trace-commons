@@ -1,6 +1,13 @@
 # Qualify the new revision before the install: design
 
-Status: draft for owner review. No code yet. Part of #1907.
+Status: approved 2026-11-04. The owner accepted all nine recommendations in
+section 8 (D1-D9), recorded on PR #1910, and the implementation is in the same
+PR: `crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal/prequalify.rs`,
+`run_ingest_mode` and `serve_ingest` in `trace-commons-ingest.rs`, and
+`results_dir_for_revision` in `pipeline_default_routing.rs`. Section 11 lists
+where the build differs from the text above it. The operator procedure is
+`docs/operator/pipeline-activation.md`, "Prequalify the new revision".
+Part of #1907.
 Date: 2026-11-04. Code read at `main` e44b9710e.
 
 ## 1. Summary
@@ -361,9 +368,11 @@ backstop, and so does the admin route.
   stopped.
 - **The issuer restart** in P7 is unchanged by this design.
 
-## 8. Owner decisions needed
+## 8. Owner decisions (approved 2026-11-04)
 
-| # | Decision | Recommendation |
+The owner approved every recommendation below on 2026-11-04.
+
+| # | Decision | Recommendation (approved) |
 |---|---|---|
 | D1 | Side boot as a dedicated `--prequalify` mode (6.2), or the runbook's side serving process with a list of variables removed (alternative A) | **The mode.** The variable list is open-ended, and a mistake runs a second payout or settlement pass against production. |
 | D2 | Which audit actor records the prequalification, and does the mode also qualify hand-activated tenants | **A new system principal**, derived from the label `trace_commons.system.pipeline_prequalify` the way default routing's is. **Yes, qualify hand-activated tenants too.** A qualification changes no routing row, and the evidence is the same signed set an operator would post. The alternative, a loopback listener for the admin route, needs every hand-activated tenant's admin credential at deploy time and a restricted router. |
@@ -411,3 +420,61 @@ backstop, and so does the admin route.
   rate-limited enough to matter for two extra boots per deploy.
 - The duration of P4 at a large tenant count. Each qualification verifies the
   22 attestations and the package again.
+
+## 11. As built
+
+- **Structure.** `run_ingest` now ends in `run_ingest_mode`, which calls
+  `finish_ingest_startup` and then either returns into
+  `prequalify::run_prequalify` or calls `serve_ingest`. `serve_ingest` holds
+  everything a serving process starts: `spawn_ingest_background_tasks` (the
+  key refresh, every scheduler and driver, the payout rail workers),
+  `run_pipeline_app` (default bundle registration, arming, the worker, the
+  loop, the listener) and the shutdown flush. The mode's early return is the
+  shape of the code, not a flag inside each spawn.
+- **Scratch roots.** No environment variable is set at run time. The three
+  root variables are resolved through `prequalify::IndexRoots`, which
+  `AppState::from_env_with_pipeline_runtime_assembler` now takes and passes to
+  the production gate builder (`PipelineGateComponents::from_lookup`, the
+  novelty root of `near_ai_gate_parts`) and to the dedup index builder. The
+  mode refuses before `AppState` is built unless the boot assembles the
+  production pipeline, the only path that resolves roots this way.
+- **Subdirectory name (D3).** The revision's hex digest without `sha256:`,
+  so `<dir>/<64 hex>/`. `--results-dir` accepts that directory or its parent,
+  through the same resolution.
+- **Counts.** Besides section 6.2's, the report counts `no_active_bundle` (a
+  routed tenant with no active bundle) and `audit_failed` (a qualification
+  recorded whose audit row failed). Both `refused` and `audit_failed` make
+  the exit non-zero (D5). `bundle_differs` does not.
+- **A shared resource the spec missed.** A qualification appends an audit
+  event to the tenant's file log under `TRACE_COMMONS_DATA_DIR`, and the
+  append lock is per process (`audit_append_lock`). With the database mirror
+  required, the row is written first and the database refuses a stale
+  previous hash, so a collision with the running service's append for the
+  same tenant fails the mode's audit, not the chain. It shows as
+  `audit_failed`; the qualification is recorded, and a re-run finds it.
+- **Tests** (all in the ingest library; the first ten were run against stubs
+  of today's behaviour and failed before the code):
+  - T1 `prequalify_pg_tests::the_mode_returns_before_any_background_work`:
+    `run_ingest_mode` returns (a process in `serve_ingest` would not); the
+    runtime's alive-task count does not rise across a run, and does when the
+    pipeline worker is started (the probe's control); no default bundle is
+    registered for a receipts-list tenant; default routing neither arms nor
+    routes; the gate's flush is never called.
+  - T2 `prequalify::unit_tests::the_mode_never_writes_under_the_configured_index_roots`
+    (`near-ai-scorer`) and `the_mode_resolves_every_index_root_inside_its_scratch_directory`:
+    the live roots, holding an uncompacted pipeline manifest and novelty and
+    dedup indexes, are byte-identical after every index is opened, written
+    and dropped through the mode's resolution; the same open through the
+    environment's resolution changes them.
+  - T3 `the_new_revision_is_qualified_beside_the_running_one`, T4
+    `the_mode_counts_what_it_did_and_a_rerun_does_nothing`, T5
+    `a_set_that_does_not_verify_records_nothing`, T7
+    `arming_reads_the_subdirectory_of_its_own_revision`, T8
+    `a_serving_process_of_the_build_activates_on_the_modes_qualification`.
+  - T6 `prequalify::unit_tests::only_a_plain_boot_and_the_mode_read_the_runtime_selection`,
+    plus argument parsing, the actor pin and the report rule.
+- **Not tested end to end.** No test boots the binary with a production
+  environment (it needs NEAR AI, GCS and KMS). T1 runs the mode from
+  `run_ingest_mode` on a production-qualified test state; T2 runs the root
+  resolution the startup uses. The first real run is on the host, and section
+  10 still applies.

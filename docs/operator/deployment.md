@@ -447,10 +447,33 @@ The start log says so, as WARN lines:
 `pipeline_active_bundle_not_qualified` for each listed tenant, and
 `pipeline default routing is not armed`. Treat either as an unfinished deploy.
 
-The procedure is
-[`pipeline-activation.md`](pipeline-activation.md), "After a deploy: the
-qualification is read again for each new upload", and the "Default routing"
-re-arm. In order, on the deployed commit:
+**Do it before the install, so there is no window (#1907).** Run the staged
+binary of the new revision with `--prequalify` beside the running service:
+it writes `pipeline_production_adapters` without restarting anything, and
+then records the new revision's qualification for every routed tenant. The
+new set goes in its revision's subdirectory of the default-routing results
+directory, so the new process starts armed. The procedure is
+[`pipeline-activation.md`](pipeline-activation.md), "Prequalify the new
+revision". In order, on the commit to ship:
+
+1. the promote cycle's phase A on the host: `pipeline.py qualify`, then
+   `promote init`, `package-checks`, `hf-canary`, `remote-restore`;
+2. apply the build's migrations as the migrator (the section above);
+3. fetch the binaries without installing them (`TC_FETCH_ONLY_DIR`);
+4. the staged ingest with `--prequalify` and the adapters-check variables,
+   then `promote adapters`, `promote sign`, and `promote assemble --output
+   <results>/<revision hex>`;
+5. the staged ingest with `--prequalify --results-dir <results>/<revision
+   hex>`, expecting `refused=0 audit_failed=0`, and again just before the
+   install;
+6. install.
+
+**The fallback (R1 to R4), after the install.** When the mode cannot be used
+(a build from before it, or a host where a second process does not fit), the
+procedure is [`pipeline-activation.md`](pipeline-activation.md), "After a
+deploy: the qualification is read again for each new upload", and the
+"Default routing" re-arm. Every pipeline-routed tenant is refused from the
+install until its step below. In order, on the deployed commit:
 
 1. the promote cycle's phase A on the host: `pipeline.py qualify`, then
    `promote init`, `package-checks`, `hf-canary`, `remote-restore`;
@@ -461,14 +484,12 @@ re-arm. In order, on the deployed commit:
    signed set (no restart), and qualify each hand-activated tenant's bundle
    with `POST /v1/admin/pipeline/qualifications`.
 
-Then check that the start WARN lines are gone on the next pass and that `GET
+Either way, check that the start WARN lines are gone and that `GET
 /v1/admin/pipeline/routing` answers `active_bundle_qualified_on_revision`
 `true`.
 
 A deploy that keeps the revision -- only documents, client shells, CI or
-`deploy/` changed -- needs none of this. To keep the closed window short, run
-phase A on the commit you are about to ship before installing it, as the
-procedure says.
+`deploy/` changed -- needs none of this.
 
 On 2026-10-12 four ingest deploys (17:02 to 22:09 UTC) skipped this, and every
 pipeline-routed tenant was refused new uploads from the first of them until

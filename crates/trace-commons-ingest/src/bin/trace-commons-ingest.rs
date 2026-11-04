@@ -1310,6 +1310,17 @@ SUBCOMMANDS:
                                       first handshake. Requires no
                                       configuration. Run it against a build
                                       before deploying.
+    --prequalify [--results-dir DIR]...
+                                      Boot this binary beside the running
+                                      service with its configuration, on
+                                      scratch index roots and a loopback port,
+                                      then exit: writes
+                                      pipeline_production_adapters when the
+                                      check variables are set, and with
+                                      --results-dir qualifies every routed
+                                      tenant on that set's bundle for this
+                                      revision. Starts no worker, loop,
+                                      scheduler or payout pass.
     -V, --version                     Print the version, the commit this binary
                                       was built from, and the build time. The
                                       same identity is on GET /health.
