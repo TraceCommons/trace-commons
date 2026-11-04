@@ -1014,6 +1014,26 @@ pub(crate) fn different_account_label() -> &'static str {
     DIFFERENT_ACCOUNT
 }
 
+/// Record `attempt_id` as this directory's finished attempt, ended with
+/// `status`, as a ceremony's task does.
+#[cfg(test)]
+pub(crate) fn mark_finished_for_test(
+    dir: &std::path::Path,
+    attempt_id: &str,
+    status: &'static str,
+) {
+    attempts().lock().expect("ceremony state lock").insert(
+        dir.to_path_buf(),
+        Attempt {
+            state: Status {
+                attempt_id: attempt_id.into(),
+                status,
+            },
+            abort: None,
+        },
+    );
+}
+
 /// Register `attempt_id` as this directory's waiting ceremony, as `begin`
 /// does, so a test can drive [`complete`] without a browser.
 #[cfg(test)]

@@ -140,15 +140,24 @@ public struct AccountLoginChangeStatus: Equatable, Sendable {
     /// A login the commons refused as another account is held aside: the
     /// account section shows the mismatch block with the change button.
     public let held: Bool
+    /// The last NEAR AI sign-in was refused as another account: the account
+    /// section shows the approved mismatch body, whether or not the change
+    /// is offered (it is offered only with `held`).
+    public let mismatch: Bool
 
     public static let none = AccountLoginChangeStatus(
-        available: false, payoutsNeedLogin: false, held: false)
+        available: false, payoutsNeedLogin: false, held: false, mismatch: false)
 
-    public init(available: Bool, payoutsNeedLogin: Bool, held: Bool) {
+    public init(available: Bool, payoutsNeedLogin: Bool, held: Bool, mismatch: Bool = false) {
         self.available = available
         self.payoutsNeedLogin = payoutsNeedLogin
         self.held = held
+        self.mismatch = mismatch || held
     }
+
+    /// Whether the mismatch block offers "Use a different account": only
+    /// with a refused login held aside for it.
+    public var offersChange: Bool { available && held }
 
     /// Whether the payouts section shows "Add a NEAR AI login".
     public var showsPayoutsLine: Bool { available && payoutsNeedLogin }

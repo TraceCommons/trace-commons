@@ -317,6 +317,7 @@ struct DaemonStatus: Decodable, Equatable {
         case loginChangeAvailable = "login_change_available"
         case payoutsNeedLogin = "payouts_need_login"
         case loginChangeHeld = "login_change_held"
+        case loginMismatch = "login_mismatch"
     }
 
     init(
@@ -400,7 +401,7 @@ struct DaemonStatus: Decodable, Equatable {
         }
         loginChange = AccountLoginChangeStatus(
             available: flag(.loginChangeAvailable), payoutsNeedLogin: flag(.payoutsNeedLogin),
-            held: flag(.loginChangeHeld))
+            held: flag(.loginChangeHeld), mismatch: flag(.loginMismatch))
     }
 
     /// This status as the daemon reports it straight after `unenroll`: not

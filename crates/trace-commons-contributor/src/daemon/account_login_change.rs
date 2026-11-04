@@ -116,6 +116,8 @@ pub const ERR_NO_CEREMONY: &str = "account_login_change_no_ceremony";
 /// The step asked for is not the one the ceremony is at, or a browser leg
 /// or a commons call is already running.
 pub const ERR_OUT_OF_ORDER: &str = "account_login_change_out_of_order";
+/// The commons did not answer whether the change's paths are ready.
+pub const ERR_COMMONS_UNREACHABLE: &str = "account_login_change_commons_unreachable";
 /// A wallet-origin account's proof needs the NEAR account name, typed in
 /// the sheet as at sign-up.
 pub const ERR_WALLET_ACCOUNT_REQUIRED: &str = "account_login_change_wallet_account_required";
@@ -320,10 +322,15 @@ pub(crate) fn status_fields(
     let payouts_need_login =
         cfg.is_some_and(|cfg| cfg.signs_in_with() == Some(IdentityKind::Wallet));
     let held = with_slot(store.dir(), |slot| slot.held.is_some());
+    // The last NEAR AI sign-in was refused as another account (#1836's
+    // approved mismatch body), whether or not the change is offered here.
+    let mismatch = super::nearai_credential::ceremony::attempt_status(store.dir())
+        == Some(super::nearai_credential::ceremony::STATUS_DIFFERENT_ACCOUNT);
     serde_json::json!({
         "login_change_available": available,
         "payouts_need_login": payouts_need_login,
         "login_change_held": available && held,
+        "login_mismatch": mismatch || (available && held),
     })
 }
 
@@ -366,7 +373,7 @@ pub(super) async fn handle(shared: &DaemonShared, req: &Request) -> Response {
         .and_then(serde_json::Value::as_str);
     match step {
         Some("status") => status(shared, req, change_id),
-        Some("start") => start(shared, req),
+        Some("start") => start(shared, req).await,
         Some("prove_current") => prove_current(shared, req, change_id).await,
         Some("sign_in_new") => sign_in_new(shared, req, change_id).await,
         Some("confirm") => match CloudApi::live() {
@@ -412,7 +419,7 @@ fn status(shared: &DaemonShared, req: &Request, change_id: Option<&str>) -> Resp
 
 /// Start a change. A login held aside moves into the ceremony, so step 2 is
 /// skipped. A ceremony already running is answered as it stands.
-fn start(shared: &DaemonShared, req: &Request) -> Response {
+async fn start(shared: &DaemonShared, req: &Request) -> Response {
     let store = &shared.store;
     let Ok(Some(cfg)) = store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, ERR_NOT_AVAILABLE);
@@ -423,6 +430,24 @@ fn start(shared: &DaemonShared, req: &Request) -> Response {
     let Some(kind) = cfg.signs_in_with() else {
         return Response::err(req.id, ERR_UNAVAILABLE, ERR_NOT_AVAILABLE);
     };
+    // The commons publishes the change routes whatever their readiness:
+    // ask whether the paths they need are ready before offering a ceremony.
+    // Not ready hides the entry points until the daemon restarts.
+    let running = with_slot(store.dir(), |slot| {
+        slot.ceremony.as_ref().is_some_and(|c| !c.done)
+    });
+    if !running {
+        match paths_ready(store, &cfg, kind).await {
+            Ok(true) => {}
+            Ok(false) => {
+                note_routes(store.dir(), false);
+                return Response::err(req.id, ERR_UNAVAILABLE, ERR_NOT_AVAILABLE);
+            }
+            Err(()) => {
+                return Response::err(req.id, ERR_UNAVAILABLE, ERR_COMMONS_UNREACHABLE);
+            }
+        }
+    }
     let old_provider = super::nearai_credential::login_record::commons_login(store);
     let old_identity = super::nearai_credential::spend_org::last_identity(store);
     let Ok(id) = super::account_onboarding::random() else {
@@ -451,6 +476,47 @@ fn start(shared: &DaemonShared, req: &Request) -> Response {
         view
     });
     Response::ok(req.id, view)
+}
+
+/// Whether the commons' NEAR AI login path, and for a wallet-origin account
+/// its wallet path, are ready. `Err` when it did not answer.
+#[cfg(not(test))]
+async fn paths_ready(
+    _store: &ConfigStore,
+    cfg: &ContributorConfig,
+    kind: IdentityKind,
+) -> std::result::Result<bool, ()> {
+    super::account_onboarding::change_paths_ready(&cfg.ingest_url, kind == IdentityKind::Wallet)
+        .await
+        .map_err(|_| ())
+}
+
+/// A test's answer for [`paths_ready`], per state directory (ready when
+/// unset): the stub commons serves no capabilities document.
+#[cfg(test)]
+async fn paths_ready(
+    store: &ConfigStore,
+    _cfg: &ContributorConfig,
+    _kind: IdentityKind,
+) -> std::result::Result<bool, ()> {
+    Ok(TEST_READY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .and_then(|map| map.get(store.dir()).copied())
+        .unwrap_or(true))
+}
+
+#[cfg(test)]
+static TEST_READY: Mutex<Option<HashMap<PathBuf, bool>>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_paths_ready_for_test(dir: &Path, ready: bool) {
+    TEST_READY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get_or_insert_with(HashMap::new)
+        .insert(dir.to_path_buf(), ready);
 }
 
 /// Mark the named ceremony busy for a step, if it is at `expected` and not

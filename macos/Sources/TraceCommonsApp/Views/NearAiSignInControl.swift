@@ -36,9 +36,14 @@ enum NearAiSignInOffer {
     }
 
     /// The core's waiting line while the browser sign-in runs, the core's
-    /// failure line after one that did not finish, else nil.
-    static func progressLine(_ copy: PrivateInferenceCopy, signingIn: Bool, failed: Bool) -> String? {
+    /// failure line after one that did not finish, else nil. A sign-in the
+    /// account refused as another NEAR AI account says so in #1836's
+    /// approved words (`mismatch`, F10), not the generic failure.
+    static func progressLine(
+        _ copy: PrivateInferenceCopy, signingIn: Bool, failed: Bool, mismatch: String? = nil
+    ) -> String? {
         if signingIn { return copy.credentialObtaining }
+        if let mismatch { return mismatch }
         if failed { return copy.credentialFailed }
         return nil
     }
@@ -102,7 +107,8 @@ struct NearAiSignInControl: View {
             state: model.balanceStatus.state, renewalFailure: model.accountRenewalFailure,
             failed: model.nearAiSignInFailed, signingIn: model.nearAiSigningIn),
             let line = NearAiSignInOffer.progressLine(
-                copy, signingIn: model.nearAiSigningIn, failed: model.nearAiSignInFailed)
+                copy, signingIn: model.nearAiSigningIn, failed: model.nearAiSignInFailed,
+                mismatch: model.loginMismatchLine)
         {
             Text(line)
                 .glassType(GlassTokens.TypeScale.caption)
