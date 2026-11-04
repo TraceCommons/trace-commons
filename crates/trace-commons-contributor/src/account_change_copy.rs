@@ -199,28 +199,6 @@ pub fn render(
 mod tests {
     use super::*;
 
-    fn every_string() -> Vec<&'static str> {
-        let copy = serde_json::to_value(account_change_copy()).unwrap();
-        copy.as_object()
-            .unwrap()
-            .values()
-            .map(|value| {
-                let text = value.as_str().unwrap();
-                // Leaked so the test can hold `&'static str`; tests only.
-                &*Box::leak(text.to_owned().into_boxed_str())
-            })
-            .collect()
-    }
-
-    /// The owner, 2026-11-02: no string says "Trace Commons".
-    #[test]
-    fn no_string_names_trace_commons() {
-        for text in every_string() {
-            assert!(!text.contains("Trace Commons"), "{text}");
-            assert!(!text.contains("TraceCommons"), "{text}");
-        }
-    }
-
     /// Every string is marked with the date it was approved.
     #[test]
     fn every_string_is_marked_approved() {

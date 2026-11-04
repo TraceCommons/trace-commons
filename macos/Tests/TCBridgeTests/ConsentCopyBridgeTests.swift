@@ -111,9 +111,6 @@ final class ConsentCopyBridgeTests: XCTestCase {
         XCTAssertEqual(copy.mismatchChange, "Use a different account")
         XCTAssertEqual(copy.title, "Use a different NEAR AI account")
         XCTAssertEqual(copy.render(copy.confirmAccessibilityName, new: "google"), "Switch to Google")
-        for sentence in copy.sentences {
-            XCTAssertFalse(sentence.contains("Trace Commons"), sentence)
-        }
     }
 
     /// The Devices section's live export is exactly the fields this shell

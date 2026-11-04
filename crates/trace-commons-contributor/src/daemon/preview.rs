@@ -2586,6 +2586,9 @@ mod tests {
         // list below -- is that it does.
         let (_sd, store) = crate::config::tests_support::temp_store();
         let mut cfg = sample_cfg(&store);
+        // With a recorded identity kind (F10), so it is serialized too.
+        cfg.account_identity =
+            Some(trace_commons_protocol::account_login_change::IdentityKind::NearAiLogin);
         // With a witness, so the optional origin record is serialized too.
         cfg.set_witness(
             crate::config::WitnessSettings {
@@ -2607,6 +2610,9 @@ mod tests {
         assert_eq!(
             all,
             vec![
+                // Not fingerprinted: see NON_ENVELOPE_CONFIG_FIELDS. How the
+                // account signs in (F10) is not an input to any envelope.
+                "account_identity",
                 "allowed_hosts",
                 "audience",
                 "consent_scopes",
