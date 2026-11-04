@@ -589,7 +589,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             trajectory_label: "Exported traces",
             neither: "Neither",
             one_folder_per_tool: "{tool} can watch only one folder. Answer “Not used” on one of its rows.",
-            private_ai_only: "Private AI only",
+            private_ai_only: "Use Private AI only",
         },
         rules: RulesCopy {
             title_light: "Set your ",
@@ -1229,12 +1229,12 @@ mod tests {
         assert!(line.contains("try again"), "{line}");
     }
 
-    /// Private AI only is a short label of its own, naming the destination
-    /// the way the rest of the app does ("Private AI").
+    /// Private AI only is an action (copy guide rule 1) naming the
+    /// destination the way the rest of the app does ("Private AI").
     #[test]
     fn private_ai_only_is_named_by_its_destination() {
         let copy = first_run_copy();
-        assert_eq!(copy.tools.private_ai_only, "Private AI only");
+        assert_eq!(copy.tools.private_ai_only, "Use Private AI only");
         assert_ne!(copy.tools.private_ai_only, copy.frame.continue_button);
     }
 
