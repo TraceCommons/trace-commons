@@ -414,6 +414,11 @@ pub struct UsesCopy {
     /// Start finished on Ask because the Automatic grant was refused.
     pub sharing_refused: &'static str,
     pub sharing_save_failed: &'static str,
+    /// Settings > Projects' own lines for the same two failures: setup's
+    /// name setup and its Start sharing button, which Settings does not
+    /// show (copy-guide rule 7). DRAFT, NEEDS APPROVAL (2026-11-04).
+    pub settings_sharing_refused: &'static str,
+    pub settings_sharing_save_failed: &'static str,
     /// Start stopped before anything it sends was saved: the data uses.
     pub scopes_failed: &'static str,
     /// Start stopped on a folder rule or a past-session include; the data
@@ -618,7 +623,9 @@ pub fn first_run_copy() -> FirstRunCopy {
             required: crate::consent_copy::SCOPE_TAG_REQUIRED,
             all_optional: "All optional uses",
             reward_opportunities: crate::consent_copy::DATA_USE_REWARD_OPPORTUNITIES,
-            automatic_scope: "Upload older traces first, then new traces, from all watched folders. Traces must be unchanged for 24 hours. Ignore a folder to exclude it.",
+            // "Set a folder to Never" was "Ignore a folder": the mode is
+            // named Never. DRAFT, NEEDS APPROVAL (2026-11-04).
+            automatic_scope: "Upload older traces first, then new traces, from all watched folders. Traces must be unchanged for 24 hours. Set a folder to Never to exclude it.",
             ask_each_time: "Ask each time",
             // DRAFT, NEEDS APPROVAL (2026-10-30).
             settings_sharing_note: "A folder set to Ask keeps asking, even when Automatic is on. A folder set to Never is never shared.",
@@ -636,6 +643,9 @@ pub fn first_run_copy() -> FirstRunCopy {
             start: "Start sharing",
             sharing_refused: "Setup finished, but Automatic wasn't turned on. Sharing is on Ask.",
             sharing_save_failed: "Sharing couldn't be saved. Setup hasn't finished; try Start sharing again.",
+            // DRAFT, NEEDS APPROVAL (2026-11-04).
+            settings_sharing_refused: "Automatic wasn't turned on. Sharing is on Ask.",
+            settings_sharing_save_failed: "Sharing couldn't be saved. Choose again.",
             scopes_failed: "How your traces may be used couldn't be saved. Setup hasn't finished; try Start sharing again.",
             rules_failed: "A folder rule or past-trace choice couldn't be saved. Setup hasn't finished; try Start sharing again.",
             private_ai_failed: "The Private AI setting couldn't be saved. Setup hasn't finished; try Start sharing again.",

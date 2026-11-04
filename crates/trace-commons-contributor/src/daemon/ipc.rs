@@ -4374,6 +4374,11 @@ fn decorate_token_storage(value: &mut serde_json::Value, enabled: Option<bool>) 
     } else {
         "Enable capture"
     });
+    // The confirmation's title and confirm button, apart from the switch's
+    // button (copy-guide rule 4). Only shown when turning capture on.
+    // DRAFT, NEEDS APPROVAL (2026-11-04).
+    value["capture_confirm_title"] = serde_json::json!("Enable token capture?");
+    value["capture_confirm_label"] = serde_json::json!("Enable capture");
     value["capture_confirmation"] = serde_json::json!(
         "Token capture stores raw request and response data on this device. It requires configured, supported model targets and restarts the hosted proxy. Contribution and witness sharing remain separate choices."
     );

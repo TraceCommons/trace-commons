@@ -68,8 +68,16 @@ pub const ACCOUNT_CHANGE_STEP_CURRENT: &str = "Confirm it's you";
 /// Owner-approved 2026-11-03. Step 1, for an account that joined with a
 /// NEAR wallet.
 pub const ACCOUNT_CHANGE_STEP_CURRENT_WALLET: &str = "Approve the request in your NEAR wallet.";
-/// Owner-approved 2026-11-03. Step 2's heading and button.
+/// Owner-approved 2026-11-03. Step 2's heading (its button is
+/// [`ACCOUNT_CHANGE_STEP_NEW_BUTTON`] since 2026-11-04).
 pub const ACCOUNT_CHANGE_STEP_NEW: &str = "Sign in with the new account";
+/// Step 1's and step 2's buttons, apart from their headings (copy-guide
+/// rule 4: a title identifies the step, a button performs it). The
+/// headings stay [`ACCOUNT_CHANGE_STEP_CURRENT`] and
+/// [`ACCOUNT_CHANGE_STEP_NEW`]; each button's accessible name stays the
+/// longer one below. DRAFT, NEEDS APPROVAL (2026-11-04).
+pub const ACCOUNT_CHANGE_STEP_CURRENT_BUTTON: &str = "Confirm";
+pub const ACCOUNT_CHANGE_STEP_NEW_BUTTON: &str = "Sign in";
 /// Owner-approved 2026-11-03. Step 1's sign-in was another login.
 pub const ACCOUNT_CHANGE_ERROR_CURRENT_LOGIN: &str =
     "Sign in with {old_provider} first to confirm it's you.";
@@ -83,6 +91,10 @@ pub const ACCOUNT_CHANGE_ERROR_TOO_SOON: &str =
     "This account changed its login recently. Try again later.";
 /// Owner-approved 2026-11-03. Anything else.
 pub const ACCOUNT_CHANGE_ERROR_UNAVAILABLE: &str = "Couldn't switch accounts. Try again.";
+/// Under "Add a NEAR AI login" when it could not start: it adds a login,
+/// so it does not say "switch accounts" (copy-guide rule 7). DRAFT, NEEDS
+/// APPROVAL (2026-11-04).
+pub const PAYOUTS_NEEDS_LOGIN_ADD_FAILED: &str = "Couldn't add a NEAR AI login. Try again.";
 /// Owner-approved 2026-11-03. An ordinary sign-in with a login a change
 /// retired, not in the sheet.
 pub const ACCOUNT_CHANGE_ERROR_RETIRED: &str =
@@ -108,6 +120,7 @@ pub struct AccountChangeCopy {
     pub change: &'static str,
     pub payouts_needs_login_body: &'static str,
     pub payouts_needs_login_add: &'static str,
+    pub payouts_needs_login_add_failed: &'static str,
     pub title: &'static str,
     pub body: &'static str,
     pub body_old_unknown: &'static str,
@@ -118,6 +131,8 @@ pub struct AccountChangeCopy {
     pub step_current: &'static str,
     pub step_current_wallet: &'static str,
     pub step_new: &'static str,
+    pub step_current_button: &'static str,
+    pub step_new_button: &'static str,
     pub error_current_login: &'static str,
     pub error_wallet: &'static str,
     pub error_in_use: &'static str,
@@ -144,6 +159,7 @@ pub fn account_change_copy() -> AccountChangeCopy {
         change: ACCOUNT_LOGIN_CHANGE,
         payouts_needs_login_body: PAYOUTS_NEEDS_LOGIN_BODY,
         payouts_needs_login_add: PAYOUTS_NEEDS_LOGIN_ADD,
+        payouts_needs_login_add_failed: PAYOUTS_NEEDS_LOGIN_ADD_FAILED,
         title: ACCOUNT_CHANGE_TITLE,
         body: ACCOUNT_CHANGE_BODY,
         body_old_unknown: ACCOUNT_CHANGE_BODY_OLD_UNKNOWN,
@@ -154,6 +170,8 @@ pub fn account_change_copy() -> AccountChangeCopy {
         step_current: ACCOUNT_CHANGE_STEP_CURRENT,
         step_current_wallet: ACCOUNT_CHANGE_STEP_CURRENT_WALLET,
         step_new: ACCOUNT_CHANGE_STEP_NEW,
+        step_current_button: ACCOUNT_CHANGE_STEP_CURRENT_BUTTON,
+        step_new_button: ACCOUNT_CHANGE_STEP_NEW_BUTTON,
         error_current_login: ACCOUNT_CHANGE_ERROR_CURRENT_LOGIN,
         error_wallet: ACCOUNT_CHANGE_ERROR_WALLET,
         error_in_use: ACCOUNT_CHANGE_ERROR_IN_USE,

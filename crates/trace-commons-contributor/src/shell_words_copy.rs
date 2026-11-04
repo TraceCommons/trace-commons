@@ -191,12 +191,20 @@ pub struct PublicProfileWords {
     pub update_profile: &'static str,
     /// Takes the handle off the roster.
     pub withdraw: &'static str,
+    /// Withdraw's accessible name, naming what it withdraws, apart from a
+    /// trace's Withdraw (copy-guide rule 5). DRAFT, NEEDS APPROVAL
+    /// (2026-11-04).
+    pub withdraw_accessibility_name: &'static str,
     /// `{date}`: when the handle went public.
     pub on_roster_since: &'static str,
     pub go_public_headline: &'static str,
     /// Approved 2026-10-07.
     pub go_public_description: &'static str,
+    /// The dialog's confirm button.
     pub go_public: &'static str,
+    /// The card's button that opens the dialog: the same words as the
+    /// confirm button, its own key (copy-guide rule 4).
+    pub go_public_open: &'static str,
     pub going_public: &'static str,
     pub not_now: &'static str,
     pub published_heading: &'static str,
@@ -246,6 +254,7 @@ pub fn public_profile_words() -> PublicProfileWords {
         bio: "Bio",
         update_profile: "Update profile",
         withdraw: "Withdraw",
+        withdraw_accessibility_name: "Withdraw public profile",
         on_roster_since: "On the roster since {date}",
         go_public_headline: "Put your handle on the public roster?",
         go_public_description: concat!(
@@ -253,6 +262,7 @@ pub fn public_profile_words() -> PublicProfileWords {
             "trace data."
         ),
         go_public: "Go public",
+        go_public_open: "Go public",
         going_public: "Going public\u{2026}",
         not_now: "Not now",
         published_heading: "What gets published",

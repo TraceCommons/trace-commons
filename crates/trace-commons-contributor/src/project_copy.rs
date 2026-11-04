@@ -7,8 +7,10 @@ pub const KEEP_PROJECT: &str = "Keep project";
 pub const IGNORE_PROJECT_TOOLTIP: &str = "Stops this project being offered and clears what it has waiting. \
      Anything already submitted is unaffected, and you can undo this in Settings.";
 
+/// The mode is named Never, so the title says so (it was "Ignore
+/// {project}?"). DRAFT, NEEDS APPROVAL (2026-11-04).
 pub fn ignore_project_title(project: &str) -> String {
-    format!("Ignore {project}?")
+    format!("Set {project} to Never?")
 }
 
 pub fn ignore_project_body(pending: usize) -> String {
