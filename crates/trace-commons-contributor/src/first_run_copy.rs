@@ -199,7 +199,9 @@ pub struct WelcomeCopy {
     pub title: &'static str,
     /// Ron's words (2026-10-21).
     pub body: &'static str,
-    /// DRAFT, NEEDS APPROVAL.
+    /// DRAFT, NEEDS APPROVAL. Also Join's primary button on the Private AI
+    /// only path, where nothing is shared so "Start sharing" would be
+    /// false: DRAFT, NEEDS APPROVAL (2026-11-04) for that reuse.
     pub start: &'static str,
 }
 

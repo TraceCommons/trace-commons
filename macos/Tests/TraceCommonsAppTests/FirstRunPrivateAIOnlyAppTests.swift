@@ -127,6 +127,12 @@ final class FirstRunPrivateAIOnlyAppTests: XCTestCase {
             state, organizationReady: true, attempted: false, starting: false, uses: copy.uses,
             requiredScope: nil, grant: nil, isCommitting: false, completed: false))
         XCTAssertEqual(UsesScreenLayout.startRoute(state), .commit, "no disclosure: nothing is shared")
+        // Even with the Private AI switch set by some caller, the auto-start
+        // commits rather than opening a disclosure, and sends no switch.
+        var switched = state
+        switched.privateAI = true
+        XCTAssertEqual(UsesScreenLayout.startRoute(switched), .commit)
+        XCTAssertEqual(FirstRunPlan.calls(for: switched, at: .start), [.markComplete])
         XCTAssertEqual(FirstRunPlan.calls(for: JoinScreenLayout.startState(state, required: nil), at: .start),
                        [.markComplete])
     }

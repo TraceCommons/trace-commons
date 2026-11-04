@@ -140,7 +140,10 @@ enum UsesScreenLayout {
     /// Automatic, on an account that can choose it, goes through both
     /// disclosures; Private AI turned on otherwise goes through the witness
     /// disclosure (spec rule 10); everything else commits directly.
+    /// Private AI only shares nothing and sends no Private AI switch
+    /// (`FirstRunPlan`), so it has nothing to disclose and always commits.
     static func startRoute(_ state: FirstRunState) -> StartRoute {
+        if state.privateAIOnly { return .commit }
         if SharingDisclosureFlow.isNeeded(for: state) { return .disclose }
         if SharingDisclosureFlow.isWitnessOnlyNeeded(for: state) { return .discloseWitness }
         return .commit
