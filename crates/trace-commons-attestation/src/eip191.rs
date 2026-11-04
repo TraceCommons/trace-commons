@@ -109,6 +109,59 @@ pub(crate) fn address_of(key: &VerifyingKey) -> [u8; 20] {
     address
 }
 
+/// Why a signed response did not recover to the pinned signer.
+///
+/// `Debug` delegates to `Display`, as on [`Eip191Error`], so no form of the
+/// error carries the signature, the message or either address.
+#[derive(Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum PinnedSignerError {
+    /// The pinned address is not `0x` plus 40 hex characters. Nothing is
+    /// admitted: a verifier that cannot read its own pin cannot tell whose
+    /// signature this is.
+    #[error("the pinned signing address is malformed")]
+    PinMalformed,
+    /// The signature is malformed or recovers to no key.
+    #[error("no signer recovers from the signature")]
+    Unrecoverable,
+    /// The signature recovers, to an address other than the pinned one.
+    #[error("the signature recovers to an address other than the pinned one")]
+    Mismatch,
+}
+
+impl std::fmt::Debug for PinnedSignerError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, formatter)
+    }
+}
+
+/// Recover the EIP-191 signer of `message` and require it to be
+/// `pinned_address`.
+///
+/// This is the response check every attested Trace Commons service shares:
+/// the redaction witness's certificate and the Insights judgement service's
+/// signed response are both accepted only when they recover to the address
+/// the verified quote named. The comparison is against the **pinned**
+/// address, never an address the service reported alongside its signature --
+/// a service that could name the address its signature recovers to could
+/// sign with any key at all.
+///
+/// The pin is decoded first, so a malformed pin refuses before any curve
+/// work and regardless of the signature.
+pub fn recover_pinned_signer(
+    message: &[u8],
+    signature_hex: &str,
+    pinned_address: &str,
+) -> Result<[u8; 20], PinnedSignerError> {
+    let expected =
+        crate::address::decode_address(pinned_address).ok_or(PinnedSignerError::PinMalformed)?;
+    let recovered = recover_eip191_signer(message, signature_hex)
+        .map_err(|_| PinnedSignerError::Unrecoverable)?;
+    if recovered != expected {
+        return Err(PinnedSignerError::Mismatch);
+    }
+    Ok(recovered)
+}
+
 pub(crate) fn strip_0x(s: &str) -> &str {
     s.strip_prefix("0x")
         .or_else(|| s.strip_prefix("0X"))
@@ -127,7 +180,7 @@ mod tests {
             .expect("the seed is a valid scalar")
     }
 
-    fn sign(message: &[u8], recovery_offset: u8) -> String {
+    pub(super) fn sign(message: &[u8], recovery_offset: u8) -> String {
         let key = signing_key();
         let digest = eip191_digest(message);
         let (signature, recovery_id) = key
@@ -138,7 +191,7 @@ mod tests {
         format!("0x{}", hex::encode(raw))
     }
 
-    fn expected_address() -> [u8; 20] {
+    pub(super) fn expected_address() -> [u8; 20] {
         address_of(signing_key().verifying_key())
     }
 
@@ -221,6 +274,88 @@ mod tests {
         let err = recover_eip191_signer(MARKER.as_bytes(), MARKER).unwrap_err();
         for rendering in [format!("{err}"), format!("{err:?}")] {
             assert!(!rendering.contains(MARKER));
+        }
+    }
+}
+
+#[cfg(test)]
+mod pinned_signer_tests {
+    use super::tests::{expected_address, sign};
+    use super::*;
+
+    fn pinned() -> String {
+        format!("0x{}", hex::encode(expected_address()))
+    }
+
+    #[test]
+    fn a_signature_by_the_pinned_address_passes() {
+        let message = b"trace_commons.insights_judgement.v1\n";
+        assert_eq!(
+            recover_pinned_signer(message, &sign(message, 27), &pinned()),
+            Ok(expected_address())
+        );
+        // The pin is compared as bytes, so its case does not matter.
+        assert_eq!(
+            recover_pinned_signer(
+                message,
+                &sign(message, 0),
+                &pinned().to_uppercase().replacen("0X", "0x", 1)
+            ),
+            Ok(expected_address())
+        );
+    }
+
+    #[test]
+    fn a_signature_over_other_bytes_does_not_match_the_pin() {
+        // A valid signature over other bytes recovers to some other address,
+        // so this is a mismatch. `sign` is deterministic, so if this fixture
+        // ever recovered nothing the test would say so rather than pass on
+        // the other variant.
+        let signature = sign(b"one message", 27);
+        assert_eq!(
+            recover_pinned_signer(b"another message", &signature, &pinned()),
+            Err(PinnedSignerError::Mismatch)
+        );
+    }
+
+    #[test]
+    fn another_pinned_address_is_a_mismatch() {
+        let message = b"anything";
+        assert_eq!(
+            recover_pinned_signer(
+                message,
+                &sign(message, 27),
+                "0x2222222222222222222222222222222222222222"
+            ),
+            Err(PinnedSignerError::Mismatch)
+        );
+    }
+
+    #[test]
+    fn a_malformed_pin_admits_nothing_and_is_named() {
+        let message = b"anything";
+        assert_eq!(
+            recover_pinned_signer(message, &sign(message, 27), "not-an-address"),
+            Err(PinnedSignerError::PinMalformed)
+        );
+    }
+
+    #[test]
+    fn a_malformed_signature_is_unrecoverable() {
+        assert_eq!(
+            recover_pinned_signer(b"anything", "0xabcd", &pinned()),
+            Err(PinnedSignerError::Unrecoverable)
+        );
+    }
+
+    #[test]
+    fn pinned_signer_errors_render_labels_only() {
+        for err in [
+            PinnedSignerError::PinMalformed,
+            PinnedSignerError::Unrecoverable,
+            PinnedSignerError::Mismatch,
+        ] {
+            assert_eq!(format!("{err:?}"), format!("{err}"));
         }
     }
 }

@@ -70,6 +70,11 @@ impl WitnessNonce {
         &self.0
     }
 
+    /// The nonce at its fixed length, for the shared report-data check.
+    pub(super) fn as_array(&self) -> &[u8; WITNESS_NONCE_LEN] {
+        &self.0
+    }
+
     /// Bare lowercase hex, no `0x` prefix -- the encoding
     /// `/v1/attestation?nonce=` accepts and the only one it accepts.
     pub fn to_hex(self) -> String {
@@ -629,16 +634,12 @@ pub fn verify_certificate(
     // recovers to could sign with any key at all.
     let signing_bytes = certificate_signing_bytes(&certificate)
         .ok_or(WitnessTrustError::WitnessResponseMalformed)?;
-    let recovered = trace_commons_attestation::eip191::recover_eip191_signer(
+    trace_commons_attestation::eip191::recover_pinned_signer(
         &signing_bytes,
         &response.signature_hex,
+        pinned_address,
     )
     .map_err(|_| WitnessTrustError::WitnessCertificateUnverified)?;
-    let expected = trace_commons_attestation::address::decode_address(pinned_address)
-        .ok_or(WitnessTrustError::WitnessCertificateUnverified)?;
-    if recovered != expected {
-        return Err(WitnessTrustError::WitnessCertificateUnverified);
-    }
     if let Some(headers) = &response.admission {
         let evidence: trace_commons_protocol::admission::AdmissionEvidence =
             serde_json::from_str(&headers.evidence_json)
@@ -658,14 +659,12 @@ pub fn verify_certificate(
         {
             return Err(WitnessTrustError::WitnessCertificateMismatched);
         }
-        let signer = trace_commons_attestation::eip191::recover_eip191_signer(
+        trace_commons_attestation::eip191::recover_pinned_signer(
             &signing_bytes,
             &headers.signature_hex,
+            pinned_address,
         )
         .map_err(|_| WitnessTrustError::WitnessCertificateUnverified)?;
-        if signer != expected {
-            return Err(WitnessTrustError::WitnessCertificateUnverified);
-        }
     }
     Ok(())
 }
