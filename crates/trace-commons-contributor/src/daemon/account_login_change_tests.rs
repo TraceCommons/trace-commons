@@ -302,7 +302,7 @@ async fn a_refused_login_is_held_aside_and_skips_signing_in_again() {
     );
 
     let id = view["change_id"].as_str().unwrap().to_owned();
-    record_current_near_ai(fx.dir(), &id, Some((OLD_ACCESS.into(), None)));
+    record_current_near_ai(fx.dir(), &id, Ok((OLD_ACCESS.into(), None)));
     // Still at current: the step was not claimed. Claim it the way the IPC
     // call does, then record.
     assert_eq!(
@@ -324,13 +324,13 @@ fn prove_near_ai(fx: &Fixture, id: &str, identity: Option<&str>) {
     record_current_near_ai(
         fx.dir(),
         id,
-        Some((OLD_ACCESS.into(), identity.map(str::to_owned))),
+        Ok((OLD_ACCESS.into(), identity.map(str::to_owned))),
     );
 }
 
 fn sign_in_new_login(fx: &Fixture, id: &str, login: HeldLogin) {
     claim(fx.dir(), Some(id), Step::New).unwrap();
-    record_new_login(fx.dir(), id, Some(Ok(login)));
+    record_new_login(fx.dir(), id, Ok(Ok(login)));
 }
 
 async fn started(fx: &Fixture) -> String {
@@ -683,4 +683,158 @@ async fn the_daemon_status_carries_the_change_fields() {
     assert_eq!(status["login_change_available"], true);
     assert_eq!(status["payouts_need_login"], true);
     assert_eq!(status["login_change_held"], false);
+}
+
+/// A browser leg that ends without what it was for says so, unless the
+/// person closed it.
+#[tokio::test]
+async fn a_leg_that_ends_without_a_session_says_so_unless_cancelled() {
+    let fx = Fixture::new(&near_ai_tenant(), None).await;
+    let id = started(&fx).await;
+    let error = |fx: &Fixture, id: &str| {
+        with_slot(fx.dir(), |slot| {
+            let ceremony = slot.ceremony.as_ref().unwrap();
+            assert_eq!(ceremony.id, id);
+            ceremony.error
+        })
+    };
+
+    claim(fx.dir(), Some(&id), Step::Current).unwrap();
+    record_current_near_ai(fx.dir(), &id, Err(LEG_CANCELLED));
+    assert_eq!(error(&fx, &id), None);
+
+    claim(fx.dir(), Some(&id), Step::Current).unwrap();
+    record_current_near_ai(fx.dir(), &id, Err("timed_out"));
+    assert_eq!(error(&fx, &id), Some(STEP_ERROR_UNAVAILABLE));
+
+    prove_near_ai(&fx, &id, None);
+    claim(fx.dir(), Some(&id), Step::New).unwrap();
+    record_new_login(fx.dir(), &id, Err("failed"));
+    assert_eq!(error(&fx, &id), Some(STEP_ERROR_UNAVAILABLE));
+    assert!(!with_slot(fx.dir(), |slot| slot
+        .ceremony
+        .as_ref()
+        .unwrap()
+        .busy));
+}
+
+/// The wallet leg that times out is the wallet's refusal.
+#[tokio::test]
+async fn a_wallet_leg_that_ends_without_a_signature_is_the_wallet_error() {
+    let fx = Fixture::new(&wallet_tenant(), None).await;
+    let id = started(&fx).await;
+    claim(fx.dir(), Some(&id), Step::Current).unwrap();
+    with_slot(fx.dir(), |slot| {
+        slot.ceremony.as_mut().unwrap().wallet_pending = Some(WalletPending {
+            account_id: "alice.testnet".into(),
+            commons: CommonsCeremony {
+                ceremony_id: "c".into(),
+                nonce: NONCE,
+                expires_at: Utc::now().timestamp() + 600,
+                verifier: "v".into(),
+                challenge: "c".into(),
+            },
+        });
+    });
+    record_current_wallet(fx.dir(), &id, Err("failed"));
+    let view = result(&fx.step("status", json!({ "change_id": id })).await).clone();
+    assert_eq!(view["error"], STEP_ERROR_WALLET);
+    assert_eq!(view["step"], "current");
+}
+
+/// Step 3 with an old NEAR AI login stored: the new one replaces it, and
+/// the old key is revoked with the old session (one-connected-account 3.2,
+/// step 5). `revoke` is what NEAR AI answers the delete with.
+async fn change_with_a_stored_login(
+    revoke: axum::http::StatusCode,
+) -> (
+    Fixture,
+    super::super::nearai_credential::disconnect::test_support::Seen,
+) {
+    use super::super::nearai_credential::disconnect::test_support;
+    let fx = Fixture::new(&near_ai_tenant(), None).await;
+    test_support::seed(&fx.shared.store);
+    super::super::nearai_credential::spend_org::record_identity(
+        &fx.shared.store,
+        "key-1",
+        "sha256:old",
+    );
+    let (near_ai, seen) = test_support::stub(axum::http::StatusCode::OK, revoke).await;
+    let id = started(&fx).await;
+    prove_near_ai(&fx, &id, Some("sha256:old"));
+    sign_in_new_login(&fx, &id, held("github", Some("sha256:new")));
+    let req = Request {
+        id: 8,
+        method: "account_login_change".into(),
+        params: json!({ "step": "confirm", "change_id": id, "confirmed": true }),
+    };
+    let api = CloudApi::for_test(&near_ai).unwrap();
+    let view = result(&confirm(&fx.shared, &req, Some(&id), &api).await).clone();
+    assert_eq!(view["step"], "done", "{view}");
+    // The revoke runs after the change, off the call: wait for its delete.
+    for _ in 0..100 {
+        if seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("DELETE"))
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    (fx, seen)
+}
+
+#[tokio::test]
+async fn the_old_key_is_revoked_with_the_old_session_after_a_change() {
+    use super::super::nearai_credential::disconnect::test_support::{ACCESS, REFRESH};
+    let (fx, seen) = change_with_a_stored_login(axum::http::StatusCode::NO_CONTENT).await;
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.first().map(String::as_str),
+        Some(format!("POST /v1/users/me/access-tokens Bearer {REFRESH}").as_str()),
+        "{seen:?}"
+    );
+    assert!(
+        seen.contains(&format!(
+            "DELETE /v1/workspaces/ws-1/api-keys/key-1 Bearer {ACCESS}"
+        )),
+        "{seen:?}"
+    );
+    let stored =
+        crate::daemon::settings::DaemonSettings::load_with_cloud_credentials(&fx.shared.store)
+            .unwrap();
+    assert_eq!(
+        stored
+            .near_ai_inference
+            .as_ref()
+            .map(|key| key.key_id.as_str()),
+        Some("key-new")
+    );
+    assert_eq!(
+        super::super::nearai_credential::spend_org::last_identity(&fx.shared.store).as_deref(),
+        Some("sha256:new")
+    );
+}
+
+#[tokio::test]
+async fn an_old_key_that_could_not_be_revoked_waits_for_the_old_identity() {
+    let (fx, _seen) =
+        change_with_a_stored_login(axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
+    let mut parked = None;
+    for _ in 0..100 {
+        let record = super::super::nearai_credential::spend_org::load(&fx.shared.store).unwrap();
+        parked = record
+            .pending_revocations
+            .into_iter()
+            .find(|entry| entry.key_id == "key-1");
+        if parked.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let parked = parked.expect("the old key is parked for a later revoke");
+    assert_eq!(parked.workspace_id, "ws-1");
+    assert_eq!(parked.identity.as_deref(), Some("sha256:old"));
 }

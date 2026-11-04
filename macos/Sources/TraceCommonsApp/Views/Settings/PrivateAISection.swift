@@ -82,8 +82,6 @@ struct PrivateAISection: View {
                 }
             }
         }
-        // The change of login the payouts line starts (F10).
-        .modifier(AccountLoginChangePresenter())
         .onAppear { model.refreshRouteDisclosure() }
         // The managed snapshot the terminal picker reads.
         .task { model.refreshManagedSessions() }

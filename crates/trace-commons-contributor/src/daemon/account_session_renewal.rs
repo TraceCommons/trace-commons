@@ -733,12 +733,46 @@ pub(super) async fn check_fresh_login(
     via: &RenewVia<'_>,
     access_token: &str,
 ) -> FreshLogin {
+    // F10 section 2.5: a wallet-origin account another device moved to a
+    // NEAR AI login still records `wallet` here. Its NEAR AI sign-in is
+    // asked about too, and only the commons accepting it as this account's
+    // changes anything: the session is stored and the answer's `identity`
+    // recorded, so this device renews by the login from then on. Anything
+    // else is not bound, exactly as before: a wallet account's sign-in for
+    // Private AI is stored as it always was.
+    let probe = matches!(store.load_config(), Ok(Some(cfg)) if wallet_origin_probe(store, &cfg));
+    let outcome = check_fresh_login_checked(store, via, access_token, probe).await;
+    match outcome {
+        FreshLogin::Accepted(accepted) => FreshLogin::Accepted(accepted),
+        _ if probe => FreshLogin::NotBound,
+        other => other,
+    }
+}
+
+/// A wallet-origin account (recorded or by namespace `wallet`) whose NEAR AI
+/// sign-in [`check_fresh_login`] asks about without binding it: a device key
+/// not revoked, and a device that did not join by code.
+fn wallet_origin_probe(
+    store: &crate::config::ConfigStore,
+    cfg: &crate::config::ContributorConfig,
+) -> bool {
+    cfg.signs_in_with() == Some(trace_commons_protocol::account_login_change::IdentityKind::Wallet)
+        && !key_revoked_for(store, cfg)
+        && !super::device_codes::joined_by_code(store)
+}
+
+async fn check_fresh_login_checked(
+    store: &crate::config::ConfigStore,
+    via: &RenewVia<'_>,
+    access_token: &str,
+    probe: bool,
+) -> FreshLogin {
     let cfg = match store.load_config() {
         Ok(Some(cfg)) => cfg,
         Ok(None) => return FreshLogin::NotBound,
         Err(_) => return FreshLogin::Unavailable,
     };
-    if !checks_near_ai_login(store, &cfg) {
+    if !checks_near_ai_login(store, &cfg) && !probe {
         return FreshLogin::NotBound;
     }
     let identity = match DeviceIdentity::load(store) {

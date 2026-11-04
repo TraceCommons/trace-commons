@@ -517,6 +517,16 @@ fn offered_only(provider: &str) -> Option<&'static [&'static str]> {
         .map(|index| &all[index..=index])
 }
 
+/// What a browser leg reports when the person closed it: nothing to say.
+pub(crate) const LEG_CANCELLED: &str = "cancelled";
+
+/// The step error for a browser leg that ended without what it was for:
+/// none when the person cancelled it, otherwise `error`, so the sheet says
+/// something rather than just stop.
+fn leg_error(label: &'static str, error: &'static str) -> Option<&'static str> {
+    (label != LEG_CANCELLED).then_some(error)
+}
+
 /// Step 1: prove the current identity. Begins a browser leg and answers its
 /// URL with the ceremony's state.
 async fn prove_current(shared: &DaemonShared, req: &Request, change_id: Option<&str>) -> Response {
@@ -582,9 +592,9 @@ async fn begin_current_near_ai(
                         &leg_store, &api, &tokens,
                     )
                     .await;
-                    Some((tokens.access_token, identity))
+                    Ok((tokens.access_token, identity))
                 }
-                Err(_) => None,
+                Err(label) => Err(label),
             };
             record_current_near_ai(&dir, &id_owned, proof);
         },
@@ -593,8 +603,9 @@ async fn begin_current_near_ai(
     .map_err(|_| ERR_NOT_AVAILABLE)
 }
 
-/// Record the outcome of the NEAR AI current-identity leg. `None`: the leg
-/// ended without a session (cancelled, timed out, failed). A session whose
+/// Record the outcome of the NEAR AI current-identity leg. `Err`: the leg
+/// ended without a session, with [`LEG_CANCELLED`] (nothing to say) or
+/// another label (`unavailable`, so the sheet does not just stop). A session whose
 /// identity is known to differ from the stored login's is refused
 /// `current_login`; an identity that cannot be read on either side is left
 /// to the commons, which refuses a token that does not anchor to the
@@ -602,11 +613,11 @@ async fn begin_current_near_ai(
 pub(crate) fn record_current_near_ai(
     dir: &Path,
     id: &str,
-    proof: Option<(String, Option<String>)>,
+    proof: std::result::Result<(String, Option<String>), &'static str>,
 ) {
     settle(dir, id, |ceremony| match proof {
-        None => {}
-        Some((access_token, identity)) => {
+        Err(label) => ceremony.error = leg_error(label, STEP_ERROR_UNAVAILABLE),
+        Ok((access_token, identity)) => {
             let mismatch = matches!(
                 (&ceremony.old_identity, &identity),
                 (Some(old), Some(new)) if old != new
@@ -698,27 +709,34 @@ async fn begin_current_wallet(
                 .map_err(|_| anyhow!("near_signup_expired"))?
             }
             .await;
-            let proof = received.ok().map(|result| {
-                (
-                    result.account_id,
-                    result.wallet_public_key,
-                    result.wallet_signature,
-                )
-            });
+            let proof = received
+                .map(|result| {
+                    (
+                        result.account_id,
+                        result.wallet_public_key,
+                        result.wallet_signature,
+                    )
+                })
+                .map_err(|_| "failed");
             record_current_wallet(&dir, &id_owned, proof);
         });
     Ok((browser_url, task.abort_handle()))
 }
 
 /// Record the wallet's signed callback. A callback for another account name
-/// than the one the challenge was for is refused `wallet`.
-pub(crate) fn record_current_wallet(dir: &Path, id: &str, proof: Option<(String, String, String)>) {
+/// than the one the challenge was for, and a wallet leg that ended without
+/// one (timed out), is refused `wallet`.
+pub(crate) fn record_current_wallet(
+    dir: &Path,
+    id: &str,
+    proof: std::result::Result<(String, String, String), &'static str>,
+) {
     settle(dir, id, |ceremony| {
         let Some(pending) = ceremony.wallet_pending.take() else {
             return;
         };
         match proof {
-            Some((account_id, wallet_public_key, wallet_signature))
+            Ok((account_id, wallet_public_key, wallet_signature))
                 if account_id == pending.account_id =>
             {
                 ceremony.current = Some(CurrentProofHeld::Wallet {
@@ -728,8 +746,8 @@ pub(crate) fn record_current_wallet(dir: &Path, id: &str, proof: Option<(String,
                     commons: pending.commons,
                 });
             }
-            Some(_) => ceremony.error = Some(STEP_ERROR_WALLET),
-            None => {}
+            Ok(_) => ceremony.error = Some(STEP_ERROR_WALLET),
+            Err(label) => ceremony.error = leg_error(label, STEP_ERROR_WALLET),
         }
     });
 }
@@ -756,7 +774,7 @@ async fn sign_in_new(shared: &DaemonShared, req: &Request, change_id: Option<&st
                     )
                     .await
                     {
-                        Ok((minted, identity, unstored)) => Some(Ok(HeldLogin {
+                        Ok((minted, identity, unstored)) => Ok(Ok(HeldLogin {
                             tokens,
                             expires_at,
                             user_agent,
@@ -768,10 +786,10 @@ async fn sign_in_new(shared: &DaemonShared, req: &Request, change_id: Option<&st
                             identity,
                             unstored,
                         })),
-                        Err(_) => Some(Err(())),
+                        Err(_) => Ok(Err(())),
                     }
                 }
-                Err(_) => None,
+                Err(label) => Err(label),
             };
             record_new_login(&leg_dir, &leg_id, held);
         },
@@ -793,19 +811,20 @@ async fn sign_in_new(shared: &DaemonShared, req: &Request, change_id: Option<&st
     }
 }
 
-/// Record the new login. `None`: the leg ended without a session.
-/// `Some(Err)`: signed in, but no key could be minted. A login that is the
-/// current identity again is not a new one, and is refused `in_use`.
+/// Record the new login. `Err(label)`: the leg ended without a session
+/// (as [`record_current_near_ai`]). `Ok(Err)`: signed in, but no key could
+/// be minted. A login that is the current identity again is not a new one,
+/// and is refused `in_use`.
 pub(crate) fn record_new_login(
     dir: &Path,
     id: &str,
-    held: Option<std::result::Result<HeldLogin, ()>>,
+    held: std::result::Result<std::result::Result<HeldLogin, ()>, &'static str>,
 ) {
     let mut refused = None;
     settle(dir, id, |ceremony| match held {
-        None => {}
-        Some(Err(())) => ceremony.error = Some(STEP_ERROR_UNAVAILABLE),
-        Some(Ok(login)) => {
+        Err(label) => ceremony.error = leg_error(label, STEP_ERROR_UNAVAILABLE),
+        Ok(Err(())) => ceremony.error = Some(STEP_ERROR_UNAVAILABLE),
+        Ok(Ok(login)) => {
             let same = matches!(
                 (&ceremony.old_identity, &login.identity),
                 (Some(old), Some(new)) if old == new
@@ -1202,6 +1221,15 @@ async fn rebind(
     let dir = store.dir().to_path_buf();
     let id_owned = id.to_owned();
     let persisted = tokio::task::spawn_blocking(move || {
+        // First: the commons moved the account, so it signs in with a NEAR
+        // AI login now whatever happens below. Recorded before the
+        // credential, so a failed store still leaves a device whose next
+        // NEAR AI sign-in is checked, and renews, as this account's.
+        let _ = super::nearai_onboarding::record_account_identity(
+            &store,
+            &cfg.tenant_id,
+            IdentityKind::NearAiLogin,
+        );
         // What the old key's revoke needs, copied before it is replaced.
         let revocation = super::nearai_credential::disconnect::capture_for_change(&store);
         super::nearai_credential::ceremony::persist_change(&store, new_login, || {
@@ -1215,11 +1243,6 @@ async fn rebind(
                 Err(anyhow!("account_login_change_cancelled"))
             }
         })?;
-        let _ = super::nearai_onboarding::record_account_identity(
-            &store,
-            &cfg.tenant_id,
-            IdentityKind::NearAiLogin,
-        );
         Ok::<_, anyhow::Error>(revocation)
     })
     .await;

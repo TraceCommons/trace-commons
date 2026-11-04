@@ -20,7 +20,6 @@ struct ConnectionSection: View {
             AccountDevicesView()
             LegacyMigrationSettingsCard()
         }
-        .modifier(AccountLoginChangePresenter())
     }
 
     private var connection: some View {

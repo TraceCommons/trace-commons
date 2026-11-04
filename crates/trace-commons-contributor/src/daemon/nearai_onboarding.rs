@@ -779,15 +779,19 @@ async fn finish_ceremony(
     referral_code: Option<&str>,
     caller: CeremonyFor,
 ) -> Result<Finished> {
-    // The commons refuses a finish in exactly two ways: its uniform `400`
-    // deny, and the revoked-key `409`. For a fresh sign-in's check, only
-    // those are a refusal; any other answer says nothing about the login.
+    // The commons refuses a finish in three ways: its uniform `400` deny,
+    // the revoked-key `409`, and (F10) the `409` for a login a change of
+    // login retired. For a fresh sign-in's check, only those are a refusal;
+    // any other answer says nothing about the login. A retired login is
+    // another account's to this device (spec 2.5): the mismatch block.
     let refusal = |(error, status): (
         trace_commons_operator_client::Error,
         Option<reqwest::StatusCode>,
     )| {
-        let refused =
-            is_uniform_finish_deny(&error) || error.server_label() == Some(DEVICE_KEY_REVOKED_WIRE);
+        let refused = is_uniform_finish_deny(&error)
+            || error.server_label() == Some(DEVICE_KEY_REVOKED_WIRE)
+            || error.server_label()
+                == Some(trace_commons_protocol::account_login_change::NEAR_AI_LOGIN_RETIRED);
         if caller == CeremonyFor::FreshLogin && !refused {
             anyhow::Error::new(fresh_failure(&error, status, CeremonyStage::Finish))
         } else {

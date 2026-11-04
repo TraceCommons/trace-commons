@@ -2394,3 +2394,55 @@ fn the_identity_a_commons_answers_is_recorded_for_the_enrolled_tenant_only() {
         "an unchanged kind writes nothing"
     );
 }
+
+/// F10 section 2.5: another device moved this wallet-origin account to a
+/// NEAR AI login. This device still records `wallet`; a fresh NEAR AI
+/// sign-in that the commons accepts as this account's is the account's,
+/// and its answer records the new kind, so the device renews by it.
+#[tokio::test]
+async fn a_wallet_device_learns_its_account_moved_from_an_accepted_sign_in() {
+    use trace_commons_protocol::account_login_change::IdentityKind;
+    let fx = wallet_origin(Session::Expired, None).await;
+
+    let check = check_fresh_login(&fx.shared.store, &fx.via(), "near-access-fresh").await;
+
+    let FreshLogin::Accepted(accepted) = check else {
+        panic!("the commons accepted the login for this account");
+    };
+    commit_fresh_login(&fx.shared.store, *accepted)
+        .await
+        .unwrap();
+    let cfg = fx.shared.store.load_config().unwrap().unwrap();
+    assert_eq!(cfg.account_identity, Some(IdentityKind::NearAiLogin));
+    assert!(cfg.signs_in_with_near_ai());
+}
+
+/// An unchanged wallet account's sign-in for Private AI is stored as it
+/// always was: the commons' refusal is not this account's business.
+#[tokio::test]
+async fn a_wallet_accounts_refused_sign_in_is_not_bound() {
+    let fx = wallet_origin(Session::Expired, None).await;
+    *fx.stub.state.refuse.lock().unwrap() = true;
+    let config_before = fx.config();
+
+    let check = check_fresh_login(&fx.shared.store, &fx.via(), "near-access-fresh").await;
+
+    assert!(matches!(check, FreshLogin::NotBound));
+    assert_eq!(fx.config(), config_before);
+}
+
+/// After a change on another device, this device's old login is retired:
+/// the commons answers `near_ai_login_retired`, which reads as another
+/// account (spec 2.5: the existing mismatch block), never as a pass.
+#[tokio::test]
+async fn a_retired_login_is_refused_as_another_account() {
+    let fx = Fixture::new(Session::Expired).await;
+    *fx.stub.state.refuse.lock().unwrap() = true;
+    *fx.stub.state.refuse_status.lock().unwrap() = 409;
+    *fx.stub.state.refuse_label.lock().unwrap() =
+        trace_commons_protocol::account_login_change::NEAR_AI_LOGIN_RETIRED.into();
+
+    let check = check_fresh_login(&fx.shared.store, &fx.via(), "near-access-fresh").await;
+
+    assert!(matches!(check, FreshLogin::Refused));
+}

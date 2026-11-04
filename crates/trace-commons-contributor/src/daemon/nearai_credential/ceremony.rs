@@ -1239,7 +1239,9 @@ where
                 user_agent,
                 progress.provider().unwrap_or(PROVIDER_NOT_CHOSEN),
             )),
-            (Ok(Err(error)), _) if ended_by_person(&error) => Err("cancelled"),
+            (Ok(Err(error)), _) if ended_by_person(&error) => {
+                Err(crate::daemon::account_login_change::LEG_CANCELLED)
+            }
             (Err(_), _) => Err("timed_out"),
             _ => Err("failed"),
         };
