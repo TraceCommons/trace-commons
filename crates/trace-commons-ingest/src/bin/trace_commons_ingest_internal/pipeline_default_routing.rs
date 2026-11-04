@@ -438,10 +438,22 @@ pub(crate) fn verify_armed_set(
     })
 }
 
+/// The set a process of `revision` reads under `dir` (spec 2026-11-04,
+/// decision D3): `<dir>/<revision hex>/` when that directory exists, so the
+/// sets of two revisions sit side by side and each binary arms with its own;
+/// otherwise the top level of `dir`, as before.
+pub(crate) fn results_dir_for_revision(dir: &Path, revision: Option<&str>) -> PathBuf {
+    revision
+        .and_then(|revision| revision.strip_prefix("sha256:"))
+        .map(|hex| dir.join(hex))
+        .filter(|candidate| candidate.is_dir())
+        .unwrap_or_else(|| dir.to_path_buf())
+}
+
 /// `read_results_dir` then `verify_armed_set`: the arming of this process
 /// from `dir` at `now`.
 pub(crate) async fn load_arming(state: &AppState, dir: &Path, now: DateTime<Utc>) -> Arming {
-    let dir = dir.to_path_buf();
+    let dir = results_dir_for_revision(dir, state.pipeline_code_revision_hash.as_deref());
     let read = tokio::task::spawn_blocking(move || read_results_dir(&dir))
         .await
         .unwrap_or(Err(PIPELINE_DEFAULT_ROUTING_RESULTS_MISSING_LABEL));

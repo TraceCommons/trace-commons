@@ -234,7 +234,7 @@ pub fn ensure_descriptors_match_gate(
 /// The novelty and dedup roots the legacy gate opens, resolved exactly as
 /// the ingest binary's `build_dedup_vector_index_from_env` resolves the
 /// dedup default.
-fn legacy_index_roots(lookup: &dyn Fn(&str) -> Option<String>) -> (PathBuf, PathBuf) {
+pub fn legacy_index_roots(lookup: &dyn Fn(&str) -> Option<String>) -> (PathBuf, PathBuf) {
     let novelty = lookup(TRACE_COMMONS_VECTOR_INDEX_ROOT)
         .unwrap_or_else(|| TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT.to_string());
     let dedup = lookup(TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT)

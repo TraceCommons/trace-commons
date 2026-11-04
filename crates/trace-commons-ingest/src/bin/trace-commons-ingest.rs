@@ -1314,6 +1314,17 @@ SUBCOMMANDS:
                                       first handshake. Requires no
                                       configuration. Run it against a build
                                       before deploying.
+    --prequalify [--results-dir DIR]...
+                                      Boot this binary beside the running
+                                      service with its configuration, on
+                                      scratch index roots and a loopback port,
+                                      then exit: writes
+                                      pipeline_production_adapters when the
+                                      check variables are set, and with
+                                      --results-dir qualifies every routed
+                                      tenant on that set's bundle for this
+                                      revision. Starts no worker, loop,
+                                      scheduler or payout pass.
     -V, --version                     Print the version, the commit this binary
                                       was built from, and the build time. The
                                       same identity is on GET /health.
@@ -1325,11 +1336,12 @@ SUBCOMMANDS:
 /// with `options` (`trace_commons_ingest::run`).
 pub(crate) async fn run_ingest_main(options: super::IngestOptions) -> anyhow::Result<()> {
     // A subcommand (help, version, keypair, TLS self-check) reads no
-    // configuration, so it never sees the pipeline runtime selection.
-    let selection = if std::env::args().nth(1).is_some() {
-        PipelineRuntimeSelection::None
-    } else {
+    // configuration, so it never sees the pipeline runtime selection. The
+    // `--prequalify` mode is a boot and reads it (#1907).
+    let selection = if prequalify::reads_runtime_selection(std::env::args().nth(1).as_deref()) {
         production_assembly::pipeline_runtime_selection_from_env()?
+    } else {
+        PipelineRuntimeSelection::None
     };
     run_ingest(selection.assembler(), options).await
 }
@@ -1388,8 +1400,12 @@ pub async fn run_ingest(
     // Argument handling precedes any env/config load so the keypair generator
     // works on an unconfigured host.
     let mut args = std::env::args().skip(1);
+    let mut mode = prequalify::IngestMode::Serve;
     match args.next().as_deref() {
         None => {}
+        Some(prequalify::PREQUALIFY_FLAG) => {
+            mode = prequalify::IngestMode::Prequalify(prequalify::PrequalifyArgs::parse(args)?);
+        }
         Some("--generate-attestation-keypair") => return generate_attestation_keypair_and_print(),
         // Assert that a rustls crypto provider is installed.
         //
@@ -1461,21 +1477,105 @@ pub async fn run_ingest(
         policy = PiiClassifyPolicy::from_env().as_label(),
         "Trace Commons PII classify policy"
     );
+    // The mode opens three scratch index roots of its own and binds a
+    // loopback port the kernel picks; it refuses, before anything is built,
+    // a boot that does not assemble the production pipeline (#1907).
+    let scratch = match &mode {
+        prequalify::IngestMode::Prequalify(_) => {
+            prequalify::require_production_runtime(pipeline_runtime_assembler)?;
+            Some(prequalify::ScratchIndexRoots::create()?)
+        }
+        prequalify::IngestMode::Serve => None,
+    };
+    let index_roots = match scratch.as_ref() {
+        Some(scratch) => prequalify::IndexRoots::scratch(scratch),
+        None => prequalify::IndexRoots::environment(),
+    };
     let (state, pipeline_gate_components) = AppState::from_env_with_pipeline_runtime_assembler(
         pipeline_runtime_assembler,
         options.score_policies().clone(),
+        &index_roots,
     )
     .await?;
     let state = Arc::new(state);
-    let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
-    let listener = finish_ingest_startup(
-        &state,
-        pipeline_gate_components.as_deref(),
+    let bind = match &mode {
+        prequalify::IngestMode::Prequalify(_) => prequalify::PREQUALIFY_BIND.to_string(),
+        prequalify::IngestMode::Serve => {
+            std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string())
+        }
+    };
+    let result = run_ingest_mode(
+        mode,
+        state,
+        pipeline_gate_components,
         &bind,
         production_assembly::pipeline_check_vars_from_env(),
         DEPLOYED_CODE_REVISION_HASH,
     )
+    .await;
+    // The state (and every index it opened) is dropped inside
+    // `run_ingest_mode`, so a drop-time flush lands in the scratch roots
+    // before they are removed here.
+    drop(scratch);
+    result
+}
+
+/// The startup's last step and what follows it. `finish_ingest_startup`
+/// runs every startup refusal and writes `pipeline_production_adapters` when
+/// its variables are set. The `--prequalify` mode returns right after it
+/// (#1907): the background tasks, the pipeline app and the shutdown flush are
+/// all inside `serve_ingest`, which the mode never reaches.
+async fn run_ingest_mode(
+    mode: prequalify::IngestMode,
+    state: Arc<AppState>,
+    pipeline_gate_components: Option<Arc<production_assembly::PipelineGateComponents>>,
+    bind: &str,
+    check_vars: production_assembly::PipelineCheckVars,
+    deployed_code_revision: Option<&str>,
+) -> anyhow::Result<()> {
+    let listener = finish_ingest_startup(
+        &state,
+        pipeline_gate_components.as_deref(),
+        bind,
+        check_vars,
+        deployed_code_revision,
+    )
     .await?;
+    match mode {
+        prequalify::IngestMode::Prequalify(args) => {
+            drop(listener);
+            prequalify::run_prequalify(&state, &args).await
+        }
+        prequalify::IngestMode::Serve => serve_ingest(state, listener).await,
+    }
+}
+
+/// Everything a serving process starts after its startup: the background
+/// tasks, the pipeline app (worker, default-routing loop, listener) and, on
+/// the way out, the vector-index flush.
+async fn serve_ingest(state: Arc<AppState>, listener: TcpListener) -> anyhow::Result<()> {
+    let _payout_rail_workers = spawn_ingest_background_tasks(&state)?;
+    tracing::info!(
+        addr = %listener.local_addr()?,
+        "Trace Commons ingestion service listening"
+    );
+    let shutdown_state = Arc::clone(&state);
+    let result = run_pipeline_app(state, listener, wait_for_shutdown_signal()).await;
+    // Runs on the way out of BOTH a clean drain and an aborted one: the
+    // novelty corpus is the gate's memory of what "duplicate" means, and a
+    // restart that drops it silently re-scores every subsequent trace against
+    // an emptier corpus.
+    flush_vector_indexes_on_shutdown(&shutdown_state);
+    result
+}
+
+/// The background tasks of a serving process: the key refresh, every
+/// scheduler and driver, and the payout rail workers (returned, so the
+/// caller holds them).
+fn spawn_ingest_background_tasks(
+    state: &Arc<AppState>,
+) -> anyhow::Result<Vec<tokio::task::JoinHandle<()>>> {
+    let state = state.clone();
     spawn_managed_eddsa_keyset_refresh_task(&state);
     // Say it out loud at boot. Publishing aggregates without a mechanism is
     // a deliberate choice, and an operator reading the log should not have to
@@ -1532,19 +1632,7 @@ pub async fn run_ingest(
     // enabled rail with no recipient key refuses the start: every link it
     // found would be unreadable.
     payout_rails::require_payout_recipient_key(&state)?;
-    let _payout_rail_workers = payout_rails::spawn_payout_rail_workers(&state);
-    tracing::info!(
-        addr = %listener.local_addr()?,
-        "Trace Commons ingestion service listening"
-    );
-    let shutdown_state = Arc::clone(&state);
-    let result = run_pipeline_app(state, listener, wait_for_shutdown_signal()).await;
-    // Runs on the way out of BOTH a clean drain and an aborted one: the
-    // novelty corpus is the gate's memory of what "duplicate" means, and a
-    // restart that drops it silently re-scores every subsequent trace against
-    // an emptier corpus.
-    flush_vector_indexes_on_shutdown(&shutdown_state);
-    result
+    Ok(payout_rails::spawn_payout_rail_workers(&state))
 }
 
 /// Everything that can refuse a start after `AppState` is built: the
@@ -4072,6 +4160,7 @@ impl AppState {
     async fn from_env_with_pipeline_runtime_assembler(
         pipeline_runtime_assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
         score_policies: ScorePolicyRegistry,
+        index_roots: &prequalify::IndexRoots<'_>,
     ) -> anyhow::Result<(
         Self,
         Option<Arc<production_assembly::PipelineGateComponents>>,
@@ -4374,6 +4463,7 @@ impl AppState {
                 let rollout = tenant_rollout_gates.clone();
                 let (gate_service, components) =
                     production_assembly::build_near_ai_gate_service_with_pipeline_components(
+                        &|name: &str| index_roots.var(name),
                         production_assembly::PipelineComponentInputs {
                             tenant_policies: production_assembly::tenant_policy_allowlists(
                                 &tenant_policies,
@@ -5277,7 +5367,7 @@ impl AppState {
             attestation_signing,
             legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
-            dedup_vector_index: build_dedup_vector_index_from_env(),
+            dedup_vector_index: build_dedup_vector_index_from_env(index_roots),
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
             dedup_vector_index_id_map: Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
@@ -6742,8 +6832,11 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
 {
     let wrapper = near_ai_gate_key_wrapper_from_env().await?;
     let shared = NearAiGateSharedComponents::from_env().await?;
+    let novelty_root = prequalify::novelty_index_root(&|name: &str| std::env::var(name).ok());
     Ok(near_ai_gate_service_from_parts(near_ai_gate_parts(
-        wrapper, shared,
+        wrapper,
+        shared,
+        &novelty_root,
     )?))
 }
 
@@ -6802,6 +6895,7 @@ pub(crate) async fn near_ai_gate_key_wrapper_from_env() -> anyhow::Result<Arc<dy
 pub(crate) fn near_ai_gate_parts(
     wrapper: Arc<dyn KmsKeyWrapper>,
     shared: NearAiGateSharedComponents,
+    vector_index_root: &str,
 ) -> anyhow::Result<NearAiGateParts> {
     use trace_commons_gate_enclave::EnclaveGateOrchestratorConfig;
     use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
@@ -6811,12 +6905,10 @@ pub(crate) fn near_ai_gate_parts(
         embedder,
         pins,
     } = shared;
-    let vector_index_root = std::env::var(TRACE_COMMONS_VECTOR_INDEX_ROOT)
-        .unwrap_or_else(|_| TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT.to_string());
     let mut vector_index_config = usearch_index_config_from_env()?;
     vector_index_config.flush_interval = vector_index_flush_interval_from_env()?;
     let vector_index_dim = vector_index_config.dim;
-    let vector_index = UsearchVectorIndex::try_new(&vector_index_root, vector_index_config)
+    let vector_index = UsearchVectorIndex::try_new(vector_index_root, vector_index_config)
         .with_context(|| {
             format!(
                 "failed to initialize UsearchVectorIndex (root={vector_index_root}, dim={vector_index_dim})"
@@ -6925,15 +7017,14 @@ pub(crate) fn near_ai_gate_parts(
 /// `dedup_index_insert` already no-op on `None`, so the simhash-only dedup
 /// signal keeps working.
 #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
-fn build_dedup_vector_index_from_env() -> Option<Arc<dyn trace_commons_gate_enclave::VectorIndex>> {
+fn build_dedup_vector_index_from_env(
+    index_roots: &prequalify::IndexRoots<'_>,
+) -> Option<Arc<dyn trace_commons_gate_enclave::VectorIndex>> {
     use trace_commons_gate_enclave::vector_index_usearch::{
         UsearchVectorIndex, UsearchVectorIndexConfig,
     };
 
-    let novelty_root = std::env::var(TRACE_COMMONS_VECTOR_INDEX_ROOT)
-        .unwrap_or_else(|_| TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT.to_string());
-    let dedup_root = std::env::var(TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT)
-        .unwrap_or_else(|_| format!("{novelty_root}/../dedup-index"));
+    let dedup_root = prequalify::dedup_index_root(&|name: &str| index_roots.var(name));
 
     let result = (|| -> anyhow::Result<UsearchVectorIndex> {
         let dim = parse_usize_env(
@@ -21901,6 +21992,8 @@ use production_assembly::PipelineRuntimeSelection;
 mod pipeline_activation;
 #[path = "trace_commons_ingest_internal/pipeline_default_routing.rs"]
 mod pipeline_default_routing;
+#[path = "trace_commons_ingest_internal/prequalify.rs"]
+mod prequalify;
 use pipeline_activation::{
     pipeline_activate_handler, pipeline_admin_body_limit, pipeline_contain_handler,
     pipeline_deactivate_handler, pipeline_legacy_drain_handler,

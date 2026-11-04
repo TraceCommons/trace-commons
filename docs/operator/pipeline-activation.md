@@ -1001,14 +1001,26 @@ each deploy of a new revision B, and for each tenant whose row says `pipeline`:
    (`qualification_evidence_mixed_run`; an assembled production set is two
    runs by design, one per group, see step 4 of "The order of checks" above).
    Sign the set shortly before you use it.
-3. Start one process of build B with a runtime, both trust stores, and the
-   production settings, outside client traffic. Leave both scope lists unset
+3. Run `trace-commons-ingest --prequalify --results-dir <set>` from build B,
+   with the service's environment file, on the host ("Prequalify the new
+   revision" below). It records step 4's qualification for every routed
+   tenant whose active bundle is the set's bundle, under its own system
+   actor, and needs no admin credential. Then skip to step 5.
+
+   The fallback, without the mode: start one process of build B with a
+   runtime, both trust stores, and the production settings, outside client
+   traffic. Leave both scope lists unset
    on it (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` and
    `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`): `qualifications` and `GET
    routing` check no list, and with no list the worker of this process drains
    no tenant. With the fleet's lists its worker would process the listed
    tenants' runs on build B before the roll (the worker reads no
-   qualification).
+   qualification). Such a process also starts every scheduler, driver and
+   payout rail worker its environment enables, against the production
+   database, and opens the live vector-index roots, which it can rewrite at
+   open and at exit. Give it its own empty index roots and an environment
+   with every scheduler, driver, payout rail and default routing turned off,
+   or use the mode.
 4. Send one `POST /v1/admin/pipeline/qualifications` for each tenant and for
    its active bundle to that process, with that tenant's admin credential.
    Make sure that `metadata.code_revision_hash` in the answer is the revision
@@ -1143,6 +1155,93 @@ A fix-forward is an activation of a new bundle (steps 2 and 3 for that bundle).
 It needs the readiness. It is refused while a suspended policy holds a run of
 the tenant in `retry`: see "Suspend a policy".
 
+## Prequalify the new revision
+
+`trace-commons-ingest --prequalify [--results-dir DIR]...` boots the binary of
+a new revision beside the running service, records what the new revision
+needs before it is installed, and exits. Design:
+`docs/superpowers/specs/2026-11-04-qualify-before-install-design.md`.
+
+What it does:
+
+- It reads the same environment as the service (run it with the service's
+  environment file, as the service's user), and refuses to start
+  (`pipeline_prequalify_requires_production_runtime`) unless that environment
+  assembles the production pipeline (`TRACE_COMMONS_PIPELINE_RUNTIME=production`).
+- It opens three empty vector-index roots of its own under a temporary
+  directory instead of `TRACE_COMMONS_VECTOR_INDEX_ROOT`,
+  `TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT` and
+  `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT`, and removes them when it exits.
+  The live roots are never opened: an open can complete logged removals and
+  compact a manifest in place, and closing an index saves it.
+- It binds `127.0.0.1:0` instead of `TRACE_COMMONS_BIND`, and serves nothing.
+- It runs the service's startup to its end, with every startup refusal. With
+  the three `TRACE_COMMONS_PIPELINE_CHECK_*` variables set, that writes
+  `pipeline_production_adapters` (see "The production assembly").
+- With `--results-dir` (repeatable, one set per package), it verifies each set
+  as default-routing arming does, on its own revision. A set for another
+  revision, a stale set or a package mismatch stops it with the arming label
+  (for example `pipeline_default_routing_revision_mismatch`) before any
+  tenant is qualified. The directory can be a revision's subdirectory or its
+  parent, as for arming.
+- It then reads every tenant whose routing row says `pipeline` or
+  `contained`, whoever routed it, and for each one whose active bundle is a
+  given set's bundle and has no qualification on this revision, records one
+  through the same code as `POST /v1/admin/pipeline/qualifications`. The
+  actor is a fixed system principal,
+  `principal_sha256:a4d8219bd22f530b6eb5ff3399ee88d18e01b00a2eb4563ee897ed076e3c8388`
+  (from the label `trace_commons.system.pipeline_prequalify`), so the audit
+  log shows which qualifications it recorded. No routing row changes.
+- It prints one line of counts and nothing else about tenants:
+  `PipelinePrequalify: sets= qualified= already_qualified= bundle_differs= no_active_bundle= refused= audit_failed=`.
+  A tenant whose qualification was refused (`refused`, logged with its label
+  and the tenant's storage reference) or recorded without its audit row
+  (`audit_failed`) makes it exit non-zero. A tenant on another bundle
+  (`bundle_differs`) is reported, not failed: give a set for that bundle to
+  cover it. A re-run is safe; tenants already qualified are counted and left
+  alone.
+- It starts no worker, no default-routing loop, no scheduler, driver or payout
+  rail, and registers no default bundle: it returns before the code that
+  starts them, and skips the shutdown flush.
+
+It shares the database with the running service, so apply a build's
+migrations as the migrator first ([deployment.md](deployment.md), "First:
+does this build carry a migration"). Its audit rows go to the same tenant
+logs the running service appends to. The database refuses an append whose
+previous hash is stale, so a collision with the running service's own append
+for the same tenant shows as `audit_failed` (the qualification itself is
+recorded); run the mode again.
+
+The deploy order with the mode, on the host, from the commit to ship:
+
+1. Phase A of the promote cycle: `pipeline.py qualify` (run M), then `promote
+   init` (run R), `package-checks`, `hf-canary`, `remote-restore`.
+2. Apply the build's migrations as the migrator.
+3. Fetch the new binaries without installing them
+   (`TC_FETCH_ONLY_DIR=<dir> deploy/pilot-gcp/pull-and-install.sh both <tag>`).
+4. Run the staged ingest with `--prequalify` and the three
+   `TRACE_COMMONS_PIPELINE_CHECK_*` variables (run R's results directory, its
+   run id, the revision). Copy the result into run R, then `promote adapters`,
+   `promote sign`, and `promote assemble --output <results>/<revision hex>`.
+5. Run the staged ingest with `--prequalify --results-dir
+   <results>/<revision hex>`. Expect `refused=0 audit_failed=0`; resolve any
+   `bundle_differs` with a set for that bundle, or accept their window.
+6. Run step 5 again just before the install, for tenants routed since.
+7. Install the issuer, then ingest.
+8. Check: `GET /v1/admin/config-status` shows default routing armed; the start
+   log has no `pipeline_active_bundle_not_qualified`; `GET
+   /v1/admin/pipeline/routing` answers `active_bundle_qualified_on_revision`
+   `true` for a hand-activated tenant.
+
+Nothing before step 7 changes what the running service does: the new rows
+name the new revision, and a set in a revision's subdirectory arms only that
+revision. If the deploy is abandoned, the new rows are inert. If the new
+build is rolled back, the old build finds its own rows and its own set.
+
+What still waits for the new process: a tenant routed between step 6 and the
+install (its loop requalifies it on its first pass), and a tenant whose
+active bundle is not a given set's bundle.
+
 ## Default routing
 
 Default routing routes every tenant that has no routing row to the pipeline,
@@ -1160,7 +1259,7 @@ scope of a process is its receipts list.
 | Variable | Values | Default |
 |---|---|---|
 | `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING` | `off`, `all` | `off` (unset or empty is `off`) |
-| `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_RESULTS_DIR` | directory with `signed-package.json` and one `<check_id>.attestation.json` per check | required with `all` |
+| `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_RESULTS_DIR` | directory with `signed-package.json` and one `<check_id>.attestation.json` per check, at its top level or in a subdirectory named for a revision (see "After a deploy") | required with `all` |
 | `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_INTERVAL_SECONDS` | 5 to 3600 | 60 |
 | `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_BATCH` | 1 to 1000 | 50 |
 
@@ -1332,12 +1431,33 @@ flight, add it to the drain list.
 
 ### After a deploy
 
-A new build has a new revision, so the set on the host names the old one:
-the new process starts unarmed with `pipeline_default_routing_revision_mismatch`.
-Until it is re-armed, new tenants stay on the legacy path and routed tenants
-answer `503 pipeline_bundle_not_qualified`.
+A new build has a new revision, so a set that names the old one does not arm
+it: the new process starts unarmed with
+`pipeline_default_routing_revision_mismatch`. Until it is armed, new tenants
+stay on the legacy path, and routed tenants whose active bundle has no
+qualification on the new revision answer `503 pipeline_bundle_not_qualified`.
 
-Re-arm by running the qualification and the promote cycle on the new
+**Before the install (#1907).** Both can be done before the new binary is
+installed, so it starts armed and finds every routed tenant qualified:
+
+1. **One set per revision.** Arming reads `<dir>/<revision hex>/` when that
+   directory exists, where `<dir>` is
+   `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_RESULTS_DIR` and `<revision hex>`
+   is the build's revision without its `sha256:` prefix. Otherwise it reads
+   the top level of `<dir>`, as before. Assemble the new revision's set
+   (`promote assemble --output <dir>/<revision hex>`). The running process
+   keeps arming from its own set (its own subdirectory, or the top level), and
+   the new process arms from the new one at its start. A binary rollback
+   re-arms the old build with no change to the directory.
+2. **Prequalify.** Run the staged binary with
+   `trace-commons-ingest --prequalify --results-dir <dir>/<revision hex>`
+   (see "Prequalify the new revision" above). It records the new revision's
+   qualification for every routed tenant on that set's bundle, beside the rows
+   the running build reads.
+
+The new process's loop then finds those tenants qualified and skips them.
+
+**Without the mode (the fallback).** Re-arm by running the qualification and the promote cycle on the new
 revision (`pipeline.py qualify`, then `pipeline.py promote` up to
 `assemble`) and replacing the directory's contents. `promote assemble`
 refuses an existing output, so assemble into a sibling directory (same
@@ -1867,6 +1987,12 @@ the gate was built with refuses (`pipeline_scorer_descriptor_mismatch`,
 `pipeline_embedder_descriptor_mismatch`).
 
 ### `pipeline_production_adapters`
+
+Prefer emitting it with `trace-commons-ingest --prequalify` on the staged
+binary, before the install (see "Prequalify the new revision"): the same
+three variables, the same startup, the same result, and no restart of the
+running service. The boot of the installed service described here is the
+fallback.
 
 Only the deployed host can pass this check: its infrastructure profile must
 be production (GCS store, Cloud KMS key wrapper, managed EdDSA tokens, no

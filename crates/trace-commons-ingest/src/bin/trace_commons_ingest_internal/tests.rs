@@ -92774,7 +92774,8 @@ fn dedup_vector_index_builder_returns_a_trait_object() {
     use std::sync::Arc;
     use trace_commons_gate_enclave::VectorIndex;
 
-    let _: Option<Arc<dyn VectorIndex>> = build_dedup_vector_index_from_env();
+    let _: Option<Arc<dyn VectorIndex>> =
+        build_dedup_vector_index_from_env(&prequalify::IndexRoots::environment());
 }
 
 // --- Loopback native-app sign-in -------------------------------------------
@@ -99931,6 +99932,13 @@ mod pipeline_activation_pg_tests;
 /// reuses.
 #[path = "pipeline_default_routing_pg_tests.rs"]
 mod pipeline_default_routing_pg_tests;
+
+/// `trace-commons-ingest --prequalify` (spec 2026-11-04, #1907): the new
+/// revision's qualifications recorded beside the running one, with no
+/// background work. Nested here beside `pipeline_activation_pg_tests`, whose
+/// `pub(super)` route fixture it reuses.
+#[path = "prequalify_pg_tests.rs"]
+mod prequalify_pg_tests;
 
 /// `TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY`: the worker's concurrent
 /// supervisor and tenant lanes. Nested here beside `pipeline_http_pg_tests`,
