@@ -55,8 +55,21 @@ struct CredentialSection: View {
         let balanceAction = requiresSession ? CredentialAction.none : BalanceSurface.actionToDraw(
             balance: BalanceSurface.action(model.balanceStatus, calls: model.balanceCalls),
             credential: action)
-        if placement == .account || Self.draws(action, in: placement) || Self.draws(balanceAction, in: placement) {
+        if Self.shows(action: action, balanceAction: balanceAction, in: placement) {
             card(status: status, tone: tone, action: action, balanceAction: balanceAction)
+        }
+    }
+
+    /// Whether the card is drawn. The account section always draws it.
+    /// Private AI's shortcut steps aside only while a NEAR AI login is held
+    /// (Forget or the keychain move would be the card's button), unless the
+    /// balance still asks for a sign-in: before a login, and while the state
+    /// is unread, it says what signing in is for (D8).
+    static func shows(action: CredentialAction, balanceAction: CredentialAction, in placement: Placement) -> Bool {
+        switch placement {
+        case .account: true
+        case .signInShortcut:
+            draws(balanceAction, in: placement) || (action != .forget && action != .migrate)
         }
     }
 

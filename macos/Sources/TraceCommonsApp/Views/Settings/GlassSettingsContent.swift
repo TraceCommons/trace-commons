@@ -21,9 +21,7 @@ struct GlassSettingsContent: View {
             case .tools: ToolsSection()
             // The Insights switches, their own section since the Settings IA
             // review (D13); it waits for first run (R-43), as Tools did.
-            case .insights:
-                InsightsSettingsCard()
-                SubscriptionUsageSettingsSection()
+            case .insights: InsightsSection()
             case .projects: ProjectsSection()
             case .consent: ConsentSection()
             case .publicProfile: PublicProfileSection()
