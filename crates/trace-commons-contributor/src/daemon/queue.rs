@@ -170,7 +170,9 @@ pub fn title_of(transcript: &crate::source::SessionTranscript) -> Option<String>
                 .and_then(crate::daemon::preview::task_prompt)
         })?;
     let redactor = crate::envelope::build_deterministic_preview_redactor(transcript.cwd.as_deref());
-    let (redacted, _report) = redactor.redact_text(opening);
+    // No title rather than an unredacted one, and no panic into the
+    // watcher's pass.
+    let (redacted, _report) = crate::envelope::guard_panic(|| redactor.redact_text(opening))?;
     crate::daemon::preview::title_of(&redacted)
 }
 
