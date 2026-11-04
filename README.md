@@ -280,11 +280,13 @@ it on every run. Put the invite in `TRACE_COMMONS_INVITE` rather than on the
 command line, where it would land in your shell history and in `ps`.
 
 The desktop app ships as a universal notarized DMG
-(`brew install --cask trace-commons`), as a GPG-signed flatpak, and on Windows
-as a self-contained Authenticode-signed zip — unpack it and run
-`TraceCommons.exe`; the .NET runtime and Windows App SDK are inside, so there is
-nothing to install first. https://docs.tracecommons.ai/cli/quickstart/ is the
-fuller guide.
+(`brew install --cask trace-commons`). New `app-v*` releases are macOS only:
+the Windows and Linux apps are frozen, and `app-v0.23.0` is the last release
+with a GPG-signed flatpak and a self-contained Authenticode-signed Windows zip
+(unpack it and run `TraceCommons.exe`; the .NET runtime and Windows App SDK
+are inside, so there is nothing to install first). The CLI above still ships
+for macOS, Linux and Windows. https://docs.tracecommons.ai/cli/quickstart/ is
+the fuller guide.
 
 To build it from this checkout instead — necessary on any platform without a
 published binary, Linux on arm64 for instance:

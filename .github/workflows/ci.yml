@@ -1581,8 +1581,9 @@ jobs:
         run: scripts/ci/msrv-floor.sh audit crates/trace-commons-contributor-gtk/Cargo.toml
       # The flatpak build is network-sandboxed and bundles a pinned rust
       # tarball, so it cannot rustup its way out of a stale pin.
-      # release-apps.yml checks this too -- on a tag push, which is the whole
-      # problem. Its copy is deliberately left in place: that job installs no
+      # release-apps.yml checks this too, in its linux-flatpak job, which
+      # runs only on a workflow_dispatch now that a tag push releases macOS
+      # alone. Its copy is deliberately left in place: that job installs no
       # rust toolchain, so pointing it at this script would make a release
       # depend on the runner image shipping cargo. Two implementations of one
       # rule, but this one runs first and the release one is the backstop.
