@@ -2748,6 +2748,14 @@ char*       tc_referral_code_display(const char* typed);
  */
 char*       tc_account_devices_copy_json(void);
 
+/* The words for changing the NEAR AI login an account uses (F10,
+ * account_change_copy::account_change_copy), every one owner-approved.
+ * Templates carry {provider}, {old_provider} or {new_provider}, a login's
+ * title. The daemon methods are account_login_change and
+ * account_login_change_cancel, through tc_call. NULL only on a caught panic.
+ */
+char*       tc_account_change_copy_json(void);
+
 /* The words for adding Train coding models to traces already sent
  * (consent_copy::sent_traces_training_copy), every one a draft for owner
  * review. Count templates carry {count}. NULL only on a caught panic.

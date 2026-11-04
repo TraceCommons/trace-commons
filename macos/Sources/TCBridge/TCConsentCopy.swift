@@ -58,6 +58,15 @@ public enum TCConsentCopy {
         return String(cString: raw)
     }
 
+    /// The words for changing the NEAR AI login an account uses (F10), as a
+    /// JSON object, or nil on a caught panic. Every string is owner-approved.
+    /// Decoded by `TCShellCore.AccountChangeCopy`.
+    public static func accountChangeCopyJSON() -> String? {
+        guard let raw = tc_account_change_copy_json() else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
     /// The words for adding Train coding models to sent traces, as a JSON
     /// object, or nil on a caught panic. Every string is a draft awaiting
     /// owner approval. Decoded by `TCShellCore.SentTracesTrainingCopy`.

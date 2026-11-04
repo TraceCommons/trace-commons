@@ -6347,6 +6347,22 @@ pub extern "C" fn tc_account_devices_copy_json() -> *mut c_char {
     })
 }
 
+/// The words for changing the NEAR AI login an account uses (F10,
+/// `account_change_copy::account_change_copy`), as a JSON object of
+/// `AccountChangeCopy`'s fields. Every string is owner-approved
+/// (2026-11-03; the mismatch body 2026-11-02). Templates carry
+/// `{provider}`, `{old_provider}` or `{new_provider}`, a login's title.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_account_change_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::account_change_copy::account_change_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
 /// The words for adding Train coding models to traces already sent
 /// (`consent_copy::sent_traces_training_copy`), as a JSON object of
 /// `SentTracesTrainingCopy`'s fields. Every string is a draft for owner

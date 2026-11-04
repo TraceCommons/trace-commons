@@ -5708,6 +5708,17 @@ fn the_account_devices_copy_crosses_the_abi() {
 }
 
 #[test]
+fn the_account_change_copy_crosses_the_abi() {
+    use trace_commons_contributor::account_change_copy::account_change_copy;
+    use trace_commons_contributor_ffi::tc_account_change_copy_json;
+    let copy = json_owned(tc_account_change_copy_json());
+    assert_eq!(copy, serde_json::to_value(account_change_copy()).unwrap());
+    assert!(copy["body"].as_str().unwrap().contains("{new_provider}"));
+    assert_eq!(copy["mismatch_change"], "Use a different account");
+    assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
+}
+
+#[test]
 fn the_sent_traces_training_copy_crosses_the_abi() {
     use trace_commons_contributor::consent_copy::sent_traces_training_copy;
     use trace_commons_contributor_ffi::tc_sent_traces_training_copy_json;

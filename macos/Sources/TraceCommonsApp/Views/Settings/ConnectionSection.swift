@@ -11,12 +11,16 @@ struct ConnectionSection: View {
             // Where the account's state is said: a status here, never a
             // banner or notification (#1836 F1).
             AccountAttentionCard()
+            // A NEAR AI sign-in the account refused as another account,
+            // held aside for a change of login (F10).
+            AccountLoginMismatchBlock()
             connection
             ContributionAccountCard()
             // The devices linked to this account, and Link a server.
             AccountDevicesView()
             LegacyMigrationSettingsCard()
         }
+        .modifier(AccountLoginChangePresenter())
     }
 
     private var connection: some View {
@@ -51,6 +55,8 @@ struct ConnectionSection: View {
                     SettingsStateRow(title: SettingsLegacyWords.extraScanConfigured,
                                      isOn: settings.nearAIConfigured)
                 }
+                // Change the NEAR AI login this account uses (F10).
+                AccountLoginChangeButton()
             }
         }
     }

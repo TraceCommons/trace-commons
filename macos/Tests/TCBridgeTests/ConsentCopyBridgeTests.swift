@@ -96,6 +96,26 @@ final class ConsentCopyBridgeTests: XCTestCase {
         XCTAssertNil(TCConsentCopy.referralCodeDisplay(""))
     }
 
+    /// The change of login's live export (F10) is exactly the fields this
+    /// shell consumes and decodes whole, with the approved words.
+    func testTheAccountChangeCopyDecodesFromTheLiveExport() {
+        guard let json = TCConsentCopy.accountChangeCopyJSON(),
+            let data = json.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let copy = AccountChangeCopy.decode(fromJSON: json)
+        else {
+            XCTFail("the live change payload must decode")
+            return
+        }
+        XCTAssertEqual(object.keys.sorted(), AccountChangeCopy.consumedFields.sorted())
+        XCTAssertEqual(copy.mismatchChange, "Use a different account")
+        XCTAssertEqual(copy.title, "Use a different NEAR AI account")
+        XCTAssertEqual(copy.render(copy.confirmAccessibilityName, new: "google"), "Switch to Google")
+        for sentence in copy.sentences {
+            XCTAssertFalse(sentence.contains("Trace Commons"), sentence)
+        }
+    }
+
     /// The Devices section's live export is exactly the fields this shell
     /// consumes and decodes whole.
     func testTheAccountDevicesCopyDecodesFromTheLiveExport() {
