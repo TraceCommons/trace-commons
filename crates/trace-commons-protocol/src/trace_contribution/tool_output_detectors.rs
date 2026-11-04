@@ -1635,6 +1635,12 @@ mod tests {
 
     #[test]
     fn a_host_cue_after_a_multibyte_character_still_redacts_the_host() {
+        // The arrow is the separator the word boundary is found from, so this
+        // fails if the word starts anywhere but after the arrow's last byte.
+        // `build` has no digit or hyphen: the cue is the only way in.
+        let (out, report) = redact("\u{2192}host: build.corp");
+        assert_eq!(out, "\u{2192}host: <PRIVATE_HOSTNAME_1>");
+        assert_eq!(count(&report, PRIVATE_HOSTNAME), 1);
         let (out, report) = redact("\u{2192} ssh build.corp");
         assert_eq!(out, "\u{2192} ssh <PRIVATE_HOSTNAME_1>");
         assert_eq!(count(&report, PRIVATE_HOSTNAME), 1);
