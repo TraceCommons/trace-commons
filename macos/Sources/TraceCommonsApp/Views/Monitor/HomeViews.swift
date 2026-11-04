@@ -399,7 +399,7 @@ private struct HomeOverview: View {
     /// (`HomeFormat.showsTracesWalkthrough`), unless its X closed it.
     private var showsTracesWalkthrough: Bool {
         !tracesHeroClosed && words != nil && HomeFormat.showsTracesWalkthrough(
-            folders: traces.tree.folders, loaded: traces.phase == .loaded,
+            folders: traces.everyFolder, loaded: traces.phase == .loaded,
             finishedFirstRunThisLaunch: model.finishedFirstRunThisLaunch)
     }
 
@@ -428,10 +428,12 @@ private struct HomeOverview: View {
     }
 
     /// Beside the Account heading while its figures wait on a sign-in
-    /// (owner, 2026-11-02): the core's "No data", then Sign in as a link,
-    /// which begins the NEAR AI sign-in as the Private AI section's Sign in
-    /// does, offering the same logins. The Account cards carry no sign-in
-    /// words of their own. Nil, and nothing drawn, otherwise.
+    /// (owner, 2026-11-02): the core's "No data", then Sign in as a link.
+    /// It signs in to what is missing (`HomeFormat.accountSignInRoute`):
+    /// the account session by this account's own path when the Credit
+    /// figures wait on it, else NEAR AI, as the Private AI section's Sign in
+    /// does. The Account cards carry no sign-in words of their own. Nil, and
+    /// nothing drawn, otherwise.
     private var accountSignIn: AnyView? {
         guard let noData = HomeFormat.cardHeading(words?.accountNoData),
               let signIn = HomeFormat.cardHeading(model.managedText("sign_in_near_ai")),
@@ -439,11 +441,15 @@ private struct HomeOverview: View {
                   credit: freshCredit, balanceState: model.balanceStatus.state,
                   renewalFailure: model.accountRenewalFailure, signInFailed: model.nearAiSignInFailed)
         else { return nil }
+        let route = HomeFormat.accountSignInRoute(credit: freshCredit)
         return AnyView(HomeAccountSignIn(
             noData: noData, signIn: signIn, signInName: model.managedText("sign_in_near_ai_accessibility"),
-            busy: model.credentialBusy
+            busy: model.credentialBusy || model.accountSigningIn
         ) {
-            NearAiSignIn.begin(model, openURL: openURL)
+            switch route {
+            case .account: Task { await model.signInToAccount() }
+            case .nearAi: NearAiSignIn.begin(model, openURL: openURL)
+            }
         })
     }
 
@@ -1927,6 +1933,16 @@ enum HomeFormat {
     /// balance would offer a sign-in (`NearAiSignInOffer.balanceOffers`:
     /// signed out, expired, or a sign-in that failed). A read that failed
     /// while signed in is not one: signing in again would not fix it.
+    /// What the Account heading's Sign in signs in to (#1888 review): the
+    /// account session when the Credit figures wait on it, by the
+    /// account's own path (`AppModel.signInToAccount`, which is NEAR AI's
+    /// sign-in for a NEAR AI account); otherwise NEAR AI, for the balance.
+    enum AccountSignInRoute: Equatable { case account, nearAi }
+
+    static func accountSignInRoute(credit: DaemonData.CommonsCreditSummary?) -> AccountSignInRoute {
+        credit?.accountSessionRequired == true ? .account : .nearAi
+    }
+
     static func accountNeedsSignIn(
         credit: DaemonData.CommonsCreditSummary?, balanceState: String, renewalFailure: String?, signInFailed: Bool
     ) -> Bool {

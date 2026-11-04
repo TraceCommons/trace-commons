@@ -112,6 +112,9 @@ final class HomeTracesHeroTests: XCTestCase {
                 + "                    tracesHero\n                } else {\n                    Grid("))
         XCTAssertEqual(home.components(separatedBy: "                    tracesHero\n").count - 1, 1, "drawn once")
         XCTAssertTrue(home.contains("!tracesHeroClosed && words != nil && HomeFormat.showsTracesWalkthrough("))
+        // Every folder, not the tree the idle filter narrowed (#1888 review).
+        XCTAssertTrue(home.contains("folders: traces.everyFolder, loaded: traces.phase == .loaded,"))
+        XCTAssertFalse(home.contains("folders: traces.tree.folders"))
         let model = try String(
             contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent("AppModel.swift"), encoding: .utf8)
         XCTAssertTrue(model.contains("    private(set) var finishedFirstRunThisLaunch = false"))

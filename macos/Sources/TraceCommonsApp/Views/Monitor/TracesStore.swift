@@ -21,6 +21,11 @@ final class TracesStore {
     private(set) var tree = TracesTree(tools: [], unplaced: []) {
         didSet { narrow() }
     }
+    /// Every folder of the last read, whatever the idle filter and "Show
+    /// ignored folders" leave in `tree`. Home asks it whether any folder is
+    /// watched (#1888 review): the filtered tree can be empty while folders
+    /// are watched.
+    private(set) var everyFolder: [TracesTree.FolderNode] = []
     /// Whether the tree draws folders set to ignore (the View menu's "Show
     /// ignored folders"; shown by default, as #1146). Changing it redraws
     /// the tree from the last read, without asking the core again.
@@ -449,6 +454,7 @@ final class TracesStore {
         attachment += 1
         phase = .loading
         tree = TracesTree(tools: [], unplaced: [])
+        everyFolder = []
         lastRead = nil
         status = nil
         destinations = nil
@@ -701,10 +707,11 @@ final class TracesStore {
             async let destinations = try? client.toolDestinations()
             let read: Read = (entries: try await entries, projects: try await projects.projects, settings: await settings)
             let options = (showsIgnored: showsIgnored, keepsOrder: keepsOrder, idleOnly: idleOnly, copy: inferenceCopy)
-            let derived = await Task.detached(priority: .userInitiated) {
-                Self.derive(
+            let (derived, every) = await Task.detached(priority: .userInitiated) {
+                (Self.derive(
                     read, showsIgnored: options.showsIgnored, keepsOrder: options.keepsOrder,
-                    idleOnly: options.idleOnly, copy: options.copy)
+                    idleOnly: options.idleOnly, copy: options.copy),
+                 Self.build(read, showsIgnored: true, keepsOrder: false, idleOnly: false).folders)
             }.value
             let statusRead = await status
             let routes = await destinations
@@ -717,6 +724,7 @@ final class TracesStore {
             rowTags = derived.tags
             rowLines = derived.lines
             offers = derived.offers
+            everyFolder = every
             lastRead = read
             self.status = statusRead
             self.destinations = routes
