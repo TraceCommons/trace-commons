@@ -2085,6 +2085,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "near_ai_login_change",
         include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
     ),
+    // V151: a payout link request records the login anchor that proved it,
+    // and the confirm requires that anchor to be live (#1882).
+    (
+        151,
+        "payout_link_request_proving_anchor",
+        include_str!("../../../../migrations/V151__payout_link_request_proving_anchor.sql"),
+    ),
 ];
 
 /// The body of `create_or_reuse_account`, inside a transaction already under

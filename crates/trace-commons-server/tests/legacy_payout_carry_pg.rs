@@ -526,6 +526,20 @@ impl Fixture {
         action: PayoutLinkAction,
         seed: &str,
     ) -> PayoutLinkConfirm {
+        let handle_hash = self.request(tenant, account, action, seed).await;
+        self.confirm_request(tenant, account, &handle_hash).await
+    }
+
+    /// The start's half of [`Self::confirm`]: the request, as the payout
+    /// runtime, a link proved by the account's fixture login anchor.
+    /// Returns its handle hash.
+    async fn request(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        action: PayoutLinkAction,
+        seed: &str,
+    ) -> String {
         let db = self.payout_runtime.as_ref();
         let version = db
             .payout_account_link_view(tenant, account, &rail())
@@ -546,6 +560,9 @@ impl Fixture {
             expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
             actor_ref_hash: ACTOR.into(),
             proof_label: matches!(action, PayoutLinkAction::Link).then_some("near_ai_login"),
+            // The fixture account's own login anchor (`near_ai_account`).
+            proving_anchor_hash: matches!(action, PayoutLinkAction::Link)
+                .then(|| hash(&format!("anchor:{account}"))),
         };
         assert_eq!(
             db.insert_payout_link_request(tenant, &request)
@@ -553,21 +570,32 @@ impl Fixture {
                 .unwrap(),
             PayoutLinkRequestInsert::Inserted
         );
+        handle_hash
+    }
+
+    /// The confirm's half of [`Self::confirm`], carrying as ingest does.
+    async fn confirm_request(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        handle_hash: &str,
+    ) -> PayoutLinkConfirm {
         let link_id = Uuid::new_v4();
-        db.confirm_payout_link_request(
-            tenant,
-            account,
-            &rail(),
-            &handle_hash,
-            &PayoutLinkConfirmWrite {
-                link_id,
-                program: (programs().0)(link_id),
-                actor_ref_hash: ACTOR.into(),
-                carry_programs: Some(programs()),
-            },
-        )
-        .await
-        .unwrap()
+        self.payout_runtime
+            .confirm_payout_link_request(
+                tenant,
+                account,
+                &rail(),
+                handle_hash,
+                &PayoutLinkConfirmWrite {
+                    link_id,
+                    program: (programs().0)(link_id),
+                    actor_ref_hash: ACTOR.into(),
+                    carry_programs: Some(programs()),
+                },
+            )
+            .await
+            .unwrap()
     }
 
     /// The pass's first move: the account's waiting link goes active.
@@ -910,6 +938,72 @@ async fn an_account_without_a_login_anchor_carries_nothing() {
     let report = fx.carry(&near, account).await;
     assert_eq!(report.carried, 0);
     assert_eq!(report.released, 1);
+}
+
+/// #1882: a link confirms only against the login anchor that proved its
+/// request at the start, and only while that anchor is live. An account
+/// that changed its NEAR AI login (F10: the old anchor retired, a new one
+/// live) between start and confirm does not land a link the old login
+/// proved, even though the account still holds a live login.
+#[tokio::test]
+async fn a_link_confirms_only_against_the_anchor_that_proved_it() {
+    let Some(fx) = fixture().await else { return };
+    const RETIRE: &str = "UPDATE trace_near_account_anchors SET retired_at = now()
+                           WHERE tenant_id = $1 AND retired_at IS NULL";
+
+    // The proving anchor still live: the link lands.
+    let (near, account) = fx.near_ai_account().await;
+    let handle = fx
+        .request(&near, account, PayoutLinkAction::Link, "org-live")
+        .await;
+    assert!(matches!(
+        fx.confirm_request(&near, account, &handle).await,
+        PayoutLinkConfirm::Confirmed { .. }
+    ));
+
+    // The proving anchor retired and another login live (an F10 change
+    // after the start): refused, and nothing is written.
+    let (near, account) = fx.near_ai_account().await;
+    let handle = fx
+        .request(&near, account, PayoutLinkAction::Link, "org-changed")
+        .await;
+    fx.exec(RETIRE, &[&near]).await;
+    fx.exec(
+        "INSERT INTO trace_near_account_anchors
+            (tenant_id, account_id, anchor_hash, sealed_account_name,
+             index_pepper_ref, account_name_key_ref, identity_source, auth_provider)
+         VALUES ($1, $2, $3, $4, 'fixture-pepper', 'fixture-key', 'near_ai_login', 'github')",
+        &[
+            &near,
+            &account,
+            &hash(&format!("anchor:changed:{account}")),
+            &serde_json::json!({"test_fixture": true}),
+        ],
+    )
+    .await;
+    assert_eq!(
+        fx.confirm_request(&near, account, &handle).await,
+        PayoutLinkConfirm::NoLoginAnchor
+    );
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_payout_links WHERE tenant_id = $1",
+            &[&near],
+        )
+        .await,
+        0
+    );
+
+    // The proving anchor retired and nothing live: refused.
+    let (near, account) = fx.near_ai_account().await;
+    let handle = fx
+        .request(&near, account, PayoutLinkAction::Link, "org-retired")
+        .await;
+    fx.exec(RETIRE, &[&near]).await;
+    assert_eq!(
+        fx.confirm_request(&near, account, &handle).await,
+        PayoutLinkConfirm::NoLoginAnchor
+    );
 }
 
 /// "Payout link first, tenant link second": the post-link carry ingest

@@ -3279,6 +3279,12 @@ pub struct PayoutLinkRequestWrite {
     /// `label` of the request's audit row, so links proved one way can be
     /// found later. `None` for an unlink.
     pub proof_label: Option<&'static str>,
+    /// For a link, the `anchor_hash` of the `near_ai_login` anchor its proof
+    /// matched ([`crate::payout_recipient_proof::VerifiedRecipient::anchor_hash`]).
+    /// The confirm lands the link only while that exact anchor is live
+    /// (V151, #1882). `None` for an unlink; the database refuses a link
+    /// without one.
+    pub proving_anchor_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3361,9 +3367,12 @@ pub enum PayoutLinkConfirm {
     ChangePending,
     /// An unlink with no active link.
     NotLinked,
-    /// A link on an account that has no NEAR AI login anchor at confirm:
-    /// only a recorded NEAR AI login proves a link, so it links nothing.
-    /// Unlinks are never refused this way.
+    /// A link whose proving NEAR AI login anchor is no longer live on the
+    /// account at confirm (retired by a login change, gone in a merge, or
+    /// never recorded on a request a pre-V151 service wrote): only the
+    /// login that proved the request can land it, so it links nothing, even
+    /// when the account holds another live login (#1882). Unlinks are never
+    /// refused this way.
     NoLoginAnchor,
 }
 
@@ -3871,8 +3880,10 @@ pub trait PayoutStore: Send + Sync {
     /// carrying the request's sealed recipient, or the unlink mark on the
     /// active link, each with its audit rows. Serialized per account and
     /// rail. Refuses (consuming the request) when it expired, a newer
-    /// request superseded it, or the account's link version is no longer
-    /// the request's `expected_current_version`.
+    /// request superseded it, the account's link version is no longer the
+    /// request's `expected_current_version`, or (for a link) the anchor that
+    /// proved the request is no longer one of the account's live
+    /// `near_ai_login` anchors.
     async fn confirm_payout_link_request(
         &self,
         tenant: &str,
@@ -4835,6 +4846,7 @@ mod payout_debug_tests {
                 expires_at: expires,
                 actor_ref_hash: ACCOUNT_HASH.into(),
                 proof_label: Some("near_ai_login"),
+                proving_anchor_hash: Some(HANDLE_HASH.into()),
             }
         ));
         assert_redacted(format!(
