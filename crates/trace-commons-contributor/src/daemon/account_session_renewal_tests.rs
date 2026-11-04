@@ -581,7 +581,11 @@ async fn status_says_an_enrolled_account_is_signed_out_only_once_its_session_is_
     // be signed out of: the field is absent, never false.
     let other = Fixture::with_tenant(Session::Expired, "tenant-other").await;
     assert!(
-        other.shared.status_value().get("account_signed_in").is_none(),
+        other
+            .shared
+            .status_value()
+            .get("account_signed_in")
+            .is_none(),
         "an account that never signs in is not signed out"
     );
 }
