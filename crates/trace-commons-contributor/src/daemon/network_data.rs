@@ -220,7 +220,9 @@ pub(crate) async fn handle_invite_lookup(shared: &DaemonShared, req: &Request) -
 /// asked on demand once the first run has started the daemon. It always
 /// answers: the protocol document with the range, or `{}` when the commons
 /// publishes none, cannot be reached, or sends one this build would not
-/// show -- and the first run then words its estimate in points.
+/// show. The daemon never fills in a range the commons did not send: on
+/// `{}` the core's estimate line falls back to its built-in pilot price
+/// (`first_run_copy::PILOT_USD_MICROS_PER_ACCEPTED_TRACE`).
 ///
 /// The request is anonymous, like the estimate tables'. It goes to the
 /// configured commons, or before any configuration to the channel's account
@@ -1046,7 +1048,7 @@ mod tests {
 
     /// The commons' range comes back as the protocol names it; no range,
     /// an unreachable route or one this build would not show is `{}`, and
-    /// the first run words its estimate in points. Synthetic values.
+    /// the core's line falls back to the pilot price. Synthetic values.
     #[tokio::test]
     async fn first_run_estimate_relays_the_range_or_nothing() {
         let range =

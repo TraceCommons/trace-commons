@@ -2160,8 +2160,9 @@ char*       tc_first_run_copy_json(void);
 /* The first run's Traces estimate, one line, worded and formatted by the
  * core (first_run_copy::traces_estimate_line). `request` is a JSON object:
  * {"traces": <found>, "usd_micros_per_accepted_trace": {min,max},
- * "credit_range": <an invite lookup's>}, each optional. A dollar total when
- * the commons published a range, else points. Returns an OWNED string; free
+ * "credit_range": <an invite lookup's>}, each optional. A dollar total from
+ * the commons' range, else points from an invite's range, else a dollar
+ * total at the core's built-in pilot price. Returns an OWNED string; free
  * with tc_string_free. NULL draws no line: nothing found or counted yet, a
  * total past range, or a NULL or unreadable request.
  */

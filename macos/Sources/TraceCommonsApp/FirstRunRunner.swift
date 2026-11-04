@@ -77,7 +77,8 @@ protocol FirstRunDaemon: AnyObject {
 }
 
 extension FirstRunDaemon {
-    /// A daemon that cannot say: Traces words its estimate in points.
+    /// A daemon that cannot say: Traces words its estimate at the core's
+    /// pilot price, or an invite's points.
     func firstRunEstimate() async -> DaemonData.FirstRunEstimate? { nil }
 }
 
@@ -124,7 +125,8 @@ final class FirstRunRunner: ObservableObject {
     /// The last invite the daemon looked up and found valid.
     @Published private(set) var lookup: DaemonData.InviteLookup?
     /// The commons' dollar estimate for Traces, once the started daemon
-    /// answered `first_run_estimate`; nil before, and Traces words points.
+    /// answered `first_run_estimate`; nil before, and Traces words the
+    /// core's pilot price (or an invite's points).
     @Published private(set) var dollarEstimate: DaemonData.FirstRunEstimate?
     private var dollarEstimateAsked = false
     @Published private(set) var isCommitting = false

@@ -6,8 +6,10 @@
 //! `/v1/credit-estimate/table`: it is public, non-personal configuration, and
 //! the first run reads it before the contributor has an account. The
 //! operator sets the range with `TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_MIN`
-//! and `..._MAX`; with neither set the document carries no range, and a
-//! client words its first-run estimate in points, as before.
+//! and `..._MAX`; with neither set the server derives it from the pricing it
+//! pays with (the settlement table's dollar rate and the credit rule), and
+//! with nothing to derive from the document carries no range. A client
+//! without a range falls back to its built-in pilot price.
 //!
 //! The range is an estimate, not a promise and not a rate. It is shown once,
 //! on the first run, multiplied by the traces found on the machine and worded

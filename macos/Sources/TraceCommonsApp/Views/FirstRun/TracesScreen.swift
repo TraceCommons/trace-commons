@@ -8,7 +8,8 @@ import TCShellCore
 /// the core's words (owner, 2026-10-23). The core multiplies and formats it
 /// (`tc_first_run_estimate_line`): dollars of NEAR AI credit when the
 /// commons publishes a range per accepted trace, else points from an
-/// invite's range or the core's default (3 to 8, owner, 2026-10-22).
+/// invite's range, else dollars at the core's pilot price (owner,
+/// 2026-11-04).
 enum TracesScreenLayout {
     /// A watched tool and its traces on this Mac.
     struct Row: Equatable {

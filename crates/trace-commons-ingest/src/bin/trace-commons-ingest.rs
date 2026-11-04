@@ -5027,6 +5027,19 @@ impl AppState {
         // switch would be unreachable.
         let payout_control_token_hash =
             payout_rails::payout_control_token_hash_from_env(&payout_rails)?;
+        // The first run's dollar range, unless the operator sets one: the
+        // settlement table's rate (the rate the NEAR AI rail pays at) times
+        // what `main`'s credit rule awards an accepted trace. Derived here,
+        // where the table, the rails and the gate configuration are all in
+        // hand; served as `{}` when any is missing.
+        let first_run_usd_derived = credit_estimate::derive_first_run_usd(
+            &pipeline_main_gate,
+            credit_settlement_table.as_deref(),
+            payout_rails.entries().any(|entry| {
+                entry.rail_id().as_str() == trace_commons_gate_api::NEAR_AI_RAIL_ID
+                    && entry.mode() != trace_commons_server::payout_rate::PayoutMode::Disabled
+            }),
+        );
         // Referral codes (referral spec section 3): the settings refuse boot
         // when malformed, naming the setting, never its value.
         let referral_config = Arc::new(
@@ -5258,7 +5271,9 @@ impl AppState {
             referral_store,
             referral_config,
             referral_network_mark_key,
-            first_run_estimate: credit_estimate::first_run_estimate_from_env()?,
+            first_run_estimate: credit_estimate::first_run_estimate_from_env(
+                first_run_usd_derived,
+            )?,
             attestation_signing,
             legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]

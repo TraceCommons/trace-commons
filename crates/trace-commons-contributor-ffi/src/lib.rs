@@ -5794,8 +5794,9 @@ pub extern "C" fn tc_first_run_copy_json() -> *mut c_char {
 /// (`first_run_copy::traces_estimate_line`): `request` is a JSON object with
 /// `traces` (the traces found), the daemon's `first_run_estimate` range
 /// `usd_micros_per_accepted_trace`, and an invite lookup's `credit_range`,
-/// each optional. The core does the arithmetic and the formatting, so the
-/// shell shows the string as it is.
+/// each optional. With neither range the core words the total at its
+/// built-in pilot price, in dollars. The core does the arithmetic and the
+/// formatting, so the shell shows the string as it is.
 ///
 /// Returns an owned string; free it with [`tc_string_free`]. NULL draws no
 /// line: nothing found or counted yet, a total past range, a NULL or

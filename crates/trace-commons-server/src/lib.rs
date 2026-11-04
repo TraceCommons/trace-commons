@@ -30,6 +30,7 @@ pub mod dedup_assign;
 pub mod dedup_simhash;
 pub mod driver_liveness;
 pub mod error;
+pub mod first_run_usd_estimate;
 pub mod inference_connection;
 pub mod inference_funding;
 pub mod instance_enroll_guard;

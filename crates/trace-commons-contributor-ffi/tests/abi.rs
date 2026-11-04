@@ -6345,8 +6345,9 @@ fn the_regrant_void_notice_crosses_the_abi_only_on_the_grants_notice() {
 }
 
 /// Traces' estimate line crosses the ABI as the core words it: a dollar
-/// total when the request carries the commons' range, points otherwise, and
-/// NULL for no line (nothing found, unreadable input). Synthetic values.
+/// total from the commons' range, points from an invite's range, a dollar
+/// total at the pilot price with neither, and NULL for no line (nothing
+/// found, unreadable input). Synthetic values, apart from the pilot price.
 #[test]
 fn the_first_run_estimate_line_crosses_the_abi() {
     use trace_commons_contributor_ffi::tc_first_run_estimate_line;
@@ -6370,7 +6371,14 @@ fn the_first_run_estimate_line_crosses_the_abi() {
     );
     assert_eq!(
         line(r#"{"traces":1365}"#).as_deref(),
-        Some("An estimated 4,095–10,920 points")
+        Some("An estimated $81.90–$341.25 in NEAR AI credit")
+    );
+    assert_eq!(
+        line(
+            r#"{"traces":10,"credit_range":{"min":4,"max":4,"unit":"points_per_accepted_trace"}}"#
+        )
+        .as_deref(),
+        Some("An estimated 40 points")
     );
     assert_eq!(line(r#"{"traces":0}"#), None);
     assert_eq!(line("not json"), None);

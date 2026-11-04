@@ -103274,14 +103274,125 @@ mod first_run_estimate_tests {
         );
     }
 
-    /// Neither setting is no range: the document is empty, and clients
-    /// word the first run in points as before.
+    /// Neither setting is no explicit range: the document is empty unless
+    /// one is derived.
     #[test]
     fn neither_setting_is_an_empty_document() {
         assert_eq!(
             credit_estimate::first_run_estimate_from_values(None, None).unwrap(),
             FirstRunEstimate::default()
         );
+    }
+
+    /// A pilot-shaped settlement table: $0.25 a credit, 1,000,000 atomic
+    /// units a credit. Built from the protocol fixture's shape.
+    fn pilot_shaped_table() -> trace_commons_protocol::settlement_estimate::SettlementEstimateTable
+    {
+        let mut table: trace_commons_protocol::settlement_estimate::SettlementEstimateTable =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 2,
+                "features_version": "lef1",
+                "version": "s-test",
+                "instrument_id": "trace_credit",
+                "atomic_units_per_credit": 1_000_000,
+                "published_at": "2026-10-16T00:00:00Z",
+                "bytes_per_token": 4,
+                "chunk_target_tokens": 2048,
+                "chunk_cap": 16,
+                "tiers": [
+                    {"mean_atomic_units": 1_000_000, "withheld_share_micros": 300_000},
+                    {"mean_atomic_units": 4_000_000, "withheld_share_micros": 100_000}
+                ],
+                "cut_offs": [5.0],
+                "aggregate_band": {"low_ratio_micros": 600_000, "high_ratio_micros": 1_500_000},
+                "fit_rows": 40
+            }))
+            .expect("synthetic table");
+        table.usd_micros_per_credit = Some(250_000);
+        table
+    }
+
+    fn graded_gate(delta_microcredits: u64) -> MainGateConfig {
+        MainGateConfig {
+            perplexity_floor_micros: Some(1_500_000),
+            tail_fraction_floor_micros: Some(0),
+            novelty_floor_micros: Some(100_000),
+            embed_insert_novelty_micros: 50_000,
+            top_k: 8,
+            chunk_target_tokens: 2048,
+            chunk_max_tokens: 3072,
+            chunk_cap: 16,
+            chunk_min_tokens: 64,
+            novelty_utility_microcredits: delta_microcredits,
+            credit_rule: CompatibilityCreditRule::GradedPerplexityV1,
+        }
+    }
+
+    /// The pilot's pricing (graded rule, delta 1 point, $0.25 a credit, the
+    /// rail on) derives $0.06 to $0.25 per accepted trace, and with neither
+    /// setting that is what the route serves.
+    #[test]
+    fn the_pilots_pricing_derives_the_served_range() {
+        let table = pilot_shaped_table();
+        let derived =
+            credit_estimate::derive_first_run_usd(&graded_gate(1_000_000), Some(&table), true);
+        let pilot = UsdMicrosRange {
+            min: 60_000,
+            max: 250_000,
+        };
+        assert_eq!(derived, Ok(pilot));
+        assert_eq!(
+            credit_estimate::first_run_estimate_resolved(None, None, derived).unwrap(),
+            FirstRunEstimate {
+                usd_micros_per_accepted_trace: Some(pilot),
+            }
+        );
+    }
+
+    /// The operator's settings win over a derived range.
+    #[test]
+    fn the_settings_override_the_derived_range() {
+        let table = pilot_shaped_table();
+        let derived =
+            credit_estimate::derive_first_run_usd(&graded_gate(1_000_000), Some(&table), true);
+        assert_eq!(
+            credit_estimate::first_run_estimate_resolved(Some(MIN), Some(MAX), derived)
+                .unwrap()
+                .usd_micros_per_accepted_trace,
+            Some(UsdMicrosRange {
+                min: 120_000,
+                max: 340_000
+            })
+        );
+        // A bad setting still refuses boot, derived range or not.
+        assert_eq!(
+            credit_estimate::first_run_estimate_resolved(Some(MIN), None, derived)
+                .expect_err("refused")
+                .to_string(),
+            "first_run_usd_estimate_invalid"
+        );
+    }
+
+    /// Fail closed: no table, no rate, the rail disabled, or a delta of 0
+    /// serves `{}`, never a guess.
+    #[test]
+    fn missing_pricing_serves_an_empty_document() {
+        let table = pilot_shaped_table();
+        let mut unrated = pilot_shaped_table();
+        unrated.usd_micros_per_credit = None;
+        let gate = graded_gate(1_000_000);
+        for derived in [
+            credit_estimate::derive_first_run_usd(&gate, None, true),
+            credit_estimate::derive_first_run_usd(&gate, Some(&unrated), true),
+            credit_estimate::derive_first_run_usd(&gate, Some(&table), false),
+            credit_estimate::derive_first_run_usd(&graded_gate(0), Some(&table), true),
+        ] {
+            assert!(derived.is_err(), "{derived:?}");
+            assert_eq!(
+                credit_estimate::first_run_estimate_resolved(None, None, derived).unwrap(),
+                FirstRunEstimate::default()
+            );
+        }
     }
 
     #[test]

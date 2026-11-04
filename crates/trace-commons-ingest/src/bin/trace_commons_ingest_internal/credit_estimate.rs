@@ -21,7 +21,8 @@
 //! tenant context for the same reason. It serves the first run's dollar
 //! estimate per accepted trace, from two operator settings
 //! ([`FIRST_RUN_USD_MIN_ENV`], [`FIRST_RUN_USD_MAX_ENV`]) parsed fail-closed
-//! at boot, or `{}` when neither is set.
+//! at boot; when neither is set, from the pricing the server pays with
+//! ([`derive_first_run_usd`]); and `{}` when that cannot be derived.
 //!
 //! `POST /v1/admin/credit-estimate-eval` returns one label-only row per
 //! labelled decision: the `lef1` features of the stored envelope, the
@@ -55,7 +56,11 @@ use trace_commons_server::credit_estimate_fit::{
     EstimateEvalRow, EstimateFitInput, EstimateFitReport, SettlementEvalRow, SettlementFitInput,
     SettlementFitReport, displayed_credit, eval_label, fit_estimate_table, fit_settlement_table,
 };
+use trace_commons_server::first_run_usd_estimate::{
+    FirstRunUsdInputs, FirstRunUsdUnderived, derive_first_run_usd_range,
+};
 use trace_commons_server::trace_corpus_storage::SettlementLabel;
+use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
 
 use super::*;
 
@@ -156,8 +161,10 @@ pub(super) async fn settlement_table_handler(
 }
 
 /// The first run's dollar estimate per accepted trace, in micro-dollars
-/// (`GET /v1/public/first-run-estimate`). Set both or neither. Unset, the
-/// route serves `{}` and clients word the first run in points.
+/// (`GET /v1/public/first-run-estimate`). Set both or neither. Set, they
+/// win. Unset, the route serves the range derived from the pricing the
+/// server pays with ([`derive_first_run_usd`]), or `{}` when that cannot be
+/// derived, and clients fall back to their built-in pilot price.
 pub(super) const FIRST_RUN_USD_MIN_ENV: &str = "TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_MIN";
 pub(super) const FIRST_RUN_USD_MAX_ENV: &str = "TRACE_COMMONS_FIRST_RUN_USD_ESTIMATE_MICROS_MAX";
 
@@ -166,10 +173,69 @@ pub(super) const FIRST_RUN_USD_MAX_ENV: &str = "TRACE_COMMONS_FIRST_RUN_USD_ESTI
 /// it never carries the value.
 const FIRST_RUN_USD_INVALID: &str = "first_run_usd_estimate_invalid";
 
-pub(super) fn first_run_estimate_from_env() -> anyhow::Result<Arc<FirstRunEstimate>> {
+pub(super) fn first_run_estimate_from_env(
+    derived: Result<UsdMicrosRange, FirstRunUsdUnderived>,
+) -> anyhow::Result<Arc<FirstRunEstimate>> {
     let min = std::env::var(FIRST_RUN_USD_MIN_ENV).ok();
     let max = std::env::var(FIRST_RUN_USD_MAX_ENV).ok();
-    first_run_estimate_from_values(min.as_deref(), max.as_deref()).map(Arc::new)
+    first_run_estimate_resolved(min.as_deref(), max.as_deref(), derived).map(Arc::new)
+}
+
+/// The derived range for the pricing this boot holds: the installed
+/// settlement table's dollar rate, whether the NEAR AI rail pays, and
+/// `main`'s `NoveltyUtility` delta and credit rule, under the calibration
+/// in force now. See `trace_commons_server::first_run_usd_estimate`.
+pub(super) fn derive_first_run_usd(
+    main_gate: &MainGateConfig,
+    settlement_table: Option<&SettlementEstimateTable>,
+    near_ai_rail_enabled: bool,
+) -> Result<UsdMicrosRange, FirstRunUsdUnderived> {
+    derive_first_run_usd_range(FirstRunUsdInputs {
+        settlement_table,
+        near_ai_rail_enabled,
+        credit_rule: main_gate.credit_rule,
+        delta_microcredits: main_gate.novelty_utility_microcredits,
+        constants: trace_commons_server::credit_quality::constants_at(Utc::now().timestamp()),
+    })
+}
+
+/// Both settings win when set (and refuse boot when bad, as before).
+/// Neither set serves `derived`, or `{}` when it is not a range. The boot
+/// log names which, by label only: never a rate, a delta or a figure.
+pub(super) fn first_run_estimate_resolved(
+    min: Option<&str>,
+    max: Option<&str>,
+    derived: Result<UsdMicrosRange, FirstRunUsdUnderived>,
+) -> anyhow::Result<FirstRunEstimate> {
+    let explicit = first_run_estimate_from_values(min, max)?;
+    if explicit.usd_micros_per_accepted_trace.is_some() {
+        tracing::info!(source = "operator_setting", "first-run estimate configured");
+        return Ok(explicit);
+    }
+    match derived {
+        Ok(range) if range.is_valid() => {
+            tracing::info!(source = "derived", "first-run estimate configured");
+            Ok(FirstRunEstimate {
+                usd_micros_per_accepted_trace: Some(range),
+            })
+        }
+        Ok(_) => {
+            tracing::info!(
+                source = "none",
+                label = FirstRunUsdUnderived::OutOfRange.as_label(),
+                "first-run estimate not published"
+            );
+            Ok(FirstRunEstimate::default())
+        }
+        Err(why) => {
+            tracing::info!(
+                source = "none",
+                label = why.as_label(),
+                "first-run estimate not published"
+            );
+            Ok(FirstRunEstimate::default())
+        }
+    }
 }
 
 /// Both unset is no range. Both set must each be plain ASCII digits and

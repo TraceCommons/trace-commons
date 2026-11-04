@@ -54,10 +54,11 @@
 //!   labels and `automatic_after_sign_in`; and the Private AI screen's title
 //!   and tool count. Sign-in moves last, so Join's words are unchanged.
 //! - Traces words one estimate for the traces found, never a per-trace rate
-//!   (owner, 2026-10-23): `traces.estimate_points` from points, or, when the
-//!   commons publishes a dollar range per accepted trace
-//!   (`GET /v1/public/first-run-estimate`), `traces.estimate_usd` in
-//!   dollars of NEAR AI credit instead. [`traces_estimate_line`] does the
+//!   (owner, 2026-10-23): `traces.estimate_usd` in dollars of NEAR AI
+//!   credit, from the commons' dollar range per accepted trace
+//!   (`GET /v1/public/first-run-estimate`) or, without one, the pilot's
+//!   price (owner, 2026-11-04); `traces.estimate_points` only for an
+//!   invite's own range in points. [`traces_estimate_line`] does the
 //!   arithmetic and the formatting, so a shell only shows the string.
 //! - near.ai needs no invite (owner, Ron's review of #1235), so there is no
 //!   line asking for one.
@@ -239,10 +240,11 @@ pub struct TracesCopy {
     pub could_estimate_points_one: &'static str,
     pub could_estimate_usd: &'static str,
     pub could_estimate_usd_one: &'static str,
-    /// The per-trace range Traces multiplies before an invite's lookup
-    /// gives one, in points per accepted trace (owner, 2026-10-22: 3 to 8,
-    /// marked as an estimate). An invite's own range replaces it; a server
-    /// dollar range replaces both. The owner's figure.
+    /// The per-trace points range Traces multiplied before an invite's
+    /// lookup gave one (owner, 2026-10-22: 3 to 8). Unread by the estimate
+    /// line since 2026-11-04: without a server or invite range it words the
+    /// pilot's dollar price instead ([`PILOT_USD_MICROS_PER_ACCEPTED_TRACE`]).
+    /// Kept so the wire table is unchanged.
     pub estimate: EstimateRange,
     /// Under the conditional estimate while the use that earns credit
     /// (`uses.credit_scope`) is not ticked, with `back_to_uses`, a link to
@@ -680,6 +682,25 @@ pub fn first_run_copy() -> FirstRunCopy {
     }
 }
 
+/// The first run's built-in dollar range per accepted trace, used when the
+/// commons publishes none (`{}` from `GET /v1/public/first-run-estimate`),
+/// cannot be reached, or sends one this build would not show, and no
+/// invite gives a range in points (owner, 2026-11-04: show dollars, from
+/// the server when it can, else the pilot pricing).
+///
+/// It is the pilot's pricing on 2026-11-03, as the server derives it
+/// (`trace_commons_server::first_run_usd_estimate`, which pins the same
+/// figure): the settlement table pays $0.25 a credit; the graded rule
+/// (`graded_perplexity_v1`) awards an accepted trace `delta * f * a` with a
+/// delta of 1 point; so the top is $0.25 (`f = a = 1`) and the bottom is the
+/// perplexity term's graded floor, 0.25, of it, $0.0625, cut to whole cents,
+/// $0.06. Source: docs/superpowers/specs/2026-11-03-pilot-paying-bundle-design.md,
+/// sections 2 and 6. Change it when the pilot's rate, delta or rule changes.
+pub const PILOT_USD_MICROS_PER_ACCEPTED_TRACE: UsdMicrosRange = UsdMicrosRange {
+    min: 60_000,
+    max: 250_000,
+};
+
 /// One dollar figure from whole micro-dollars: "$0.40", "$1", "$1.50",
 /// "$1,234.56". Whole dollars drop the cents; anything else shows two places.
 /// A sub-cent remainder is cut, never rounded up, though none reaches here:
@@ -724,14 +745,16 @@ fn fill_range(range: &str, one: &str, min: String, max: String) -> String {
 ///
 /// A server dollar range (`usd`, from `GET /v1/public/first-run-estimate`)
 /// that this build would show words the total in dollars of NEAR AI credit,
-/// whatever an invite says. Without one, points as before: the invite's
-/// range when it is in `points_per_accepted_trace` and one the daemon
-/// accepts, else the owner's default ([`TracesCopy::estimate`]). Never both.
+/// whatever an invite says. Without one, an invite's range in
+/// `points_per_accepted_trace` that the daemon accepts words it in points,
+/// the invite's own terms. Without either, the built-in pilot price
+/// ([`PILOT_USD_MICROS_PER_ACCEPTED_TRACE`]) words it in dollars. Never two
+/// lines.
 ///
 /// The dollar line is the one narrow exception to "the app never shows a
 /// dollar figure it cannot verify" (`crate::commons_credit`): it is
 /// labelled an estimate, shown only on the first run, from the operator's
-/// published configuration, and is never a balance.
+/// published pricing or the pilot's, and is never a balance.
 #[must_use]
 pub fn traces_estimate_line(
     copy: &TracesCopy,
@@ -778,20 +801,25 @@ fn estimate_line(
         )
     };
     let traces = traces.filter(|n| *n > 0)?;
-    if let Some(usd) = usd.filter(UsdMicrosRange::is_valid) {
+    let dollars = |usd: UsdMicrosRange| {
         let min = traces.checked_mul(usd.min)?;
         let max = traces.checked_mul(usd.max)?;
-        return Some(fill_range(
+        Some(fill_range(
             usd_range,
             usd_one,
             usd_figure(min),
             usd_figure(max),
-        ));
+        ))
+    };
+    if let Some(usd) = usd.filter(UsdMicrosRange::is_valid) {
+        return dollars(usd);
     }
-    let (per_min, per_max) = points
+    let invite = points
         .filter(|r| r.unit == CREDIT_RANGE_UNIT_POINTS && valid_credit_range(r.min, r.max))
-        .and_then(|r| Some((u64::try_from(r.min).ok()?, u64::try_from(r.max).ok()?)))
-        .unwrap_or((u64::from(copy.estimate.min), u64::from(copy.estimate.max)));
+        .and_then(|r| Some((u64::try_from(r.min).ok()?, u64::try_from(r.max).ok()?)));
+    let Some((per_min, per_max)) = invite else {
+        return dollars(PILOT_USD_MICROS_PER_ACCEPTED_TRACE);
+    };
     let min = traces.checked_mul(per_min)?;
     let max = traces.checked_mul(per_max)?;
     Some(fill_range(points_range, points_one, group(min), group(max)))
@@ -1031,15 +1059,15 @@ mod tests {
         let json = |v: serde_json::Value| traces_estimate_line_json(&v.to_string());
         assert_eq!(
             json(serde_json::json!({"traces": 10, "earns_credit": false})).as_deref(),
-            Some("You could earn an estimated 30–80 points")
+            Some("You could earn an estimated $0.60–$2.50 in NEAR AI credit")
         );
         assert_eq!(
             json(serde_json::json!({"traces": 10, "earns_credit": true})).as_deref(),
-            Some("An estimated 30–80 points")
+            Some("An estimated $0.60–$2.50 in NEAR AI credit")
         );
         assert_eq!(
             json(serde_json::json!({"traces": 10})).as_deref(),
-            Some("An estimated 30–80 points")
+            Some("An estimated $0.60–$2.50 in NEAR AI credit")
         );
     }
 
@@ -1288,7 +1316,9 @@ mod tests {
             copy.traces.estimate_usd_one,
             "An estimated {min} in NEAR AI credit"
         );
-        // The owner's per-trace default before an invite (2026-10-22).
+        // The owner's per-trace points default before an invite
+        // (2026-10-22). Unread by the estimate line since the pilot dollar
+        // fallback (2026-11-04); kept so the wire table is unchanged.
         assert_eq!(copy.traces.estimate, EstimateRange { min: 3, max: 8 });
         assert!(copy.traces.estimate.min <= copy.traces.estimate.max);
         for line in [copy.private_ai.can_connect, copy.private_ai.can_connect_one] {
@@ -1410,24 +1440,49 @@ mod tests {
         );
     }
 
-    /// No server range: today's points, as one total, from the invite's
-    /// range or the owner's default.
+    /// The pilot price the fallback carries is what the server derives
+    /// from the pilot's pricing on 2026-11-03 ($0.25 a credit, the graded
+    /// rule, a delta of 1 point): $0.06 to $0.25 per accepted trace. The
+    /// server side of the same figure is pinned in
+    /// `trace_commons_server::first_run_usd_estimate` and ingest's
+    /// `the_pilots_pricing_derives_the_served_range`.
     #[test]
-    fn without_a_server_range_the_total_is_points() {
+    fn the_pilot_price_is_six_to_twenty_five_cents() {
+        assert_eq!(
+            PILOT_USD_MICROS_PER_ACCEPTED_TRACE,
+            UsdMicrosRange {
+                min: 60_000,
+                max: 250_000
+            }
+        );
+        assert!(PILOT_USD_MICROS_PER_ACCEPTED_TRACE.is_valid());
+    }
+
+    /// No server range (the commons published `{}`, could not be reached,
+    /// or sent one this build would not show) and no invite range: the
+    /// pilot price, in dollars, never points. The owner's 4,123 traces read
+    /// $247.38 to $1,030.75.
+    #[test]
+    fn without_a_server_range_the_pilot_price_is_dollars() {
         let copy = first_run_copy().traces;
         assert_eq!(
+            traces_estimate_line(&copy, Some(4123), None, None).as_deref(),
+            Some("An estimated $247.38–$1,030.75 in NEAR AI credit")
+        );
+        assert_eq!(
             traces_estimate_line(&copy, Some(1365), None, None).as_deref(),
-            Some("An estimated 4,095–10,920 points")
+            Some("An estimated $81.90–$341.25 in NEAR AI credit")
         );
         assert_eq!(
-            traces_estimate_line(&copy, Some(1365), None, points(2, 6)).as_deref(),
-            Some("An estimated 2,730–8,190 points")
+            traces_estimate_line(&copy, Some(1), None, None).as_deref(),
+            Some("An estimated $0.06–$0.25 in NEAR AI credit")
         );
+        // A server range this build would not show is no range.
         assert_eq!(
-            traces_estimate_line(&copy, Some(10), None, points(4, 4)).as_deref(),
-            Some("An estimated 40 points")
+            traces_estimate_line(&copy, Some(1), usd(10_001, 20_000), None).as_deref(),
+            Some("An estimated $0.06–$0.25 in NEAR AI credit")
         );
-        // A range in another unit is not points: the default stands.
+        // A range in another unit is not points: the pilot price stands.
         let foreign = CreditRange {
             min: 1,
             max: 2,
@@ -1435,17 +1490,31 @@ mod tests {
         };
         assert_eq!(
             traces_estimate_line(&copy, Some(1), None, Some(foreign)).as_deref(),
-            Some("An estimated 3–8 points")
+            Some("An estimated $0.06–$0.25 in NEAR AI credit")
         );
         // A range the daemon would refuse is not used either.
         assert_eq!(
             traces_estimate_line(&copy, Some(1), None, points(-1, 5)).as_deref(),
-            Some("An estimated 3–8 points")
+            Some("An estimated $0.06–$0.25 in NEAR AI credit")
         );
-        // A server range this build would not show is no range.
         assert_eq!(
-            traces_estimate_line(&copy, Some(1), usd(10_001, 20_000), None).as_deref(),
-            Some("An estimated 3–8 points")
+            traces_estimate_line_json(r#"{"traces": 4123}"#).as_deref(),
+            Some("An estimated $247.38–$1,030.75 in NEAR AI credit")
+        );
+    }
+
+    /// No server range but an invite range in points: the invite's own
+    /// terms, in points, as before.
+    #[test]
+    fn without_a_server_range_an_invite_range_is_points() {
+        let copy = first_run_copy().traces;
+        assert_eq!(
+            traces_estimate_line(&copy, Some(1365), None, points(2, 6)).as_deref(),
+            Some("An estimated 2,730–8,190 points")
+        );
+        assert_eq!(
+            traces_estimate_line(&copy, Some(10), None, points(4, 4)).as_deref(),
+            Some("An estimated 40 points")
         );
     }
 
