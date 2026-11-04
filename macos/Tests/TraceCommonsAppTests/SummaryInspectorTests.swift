@@ -92,6 +92,14 @@ final class SummaryInspectorTests: XCTestCase {
         }
         XCTAssertEqual(SummaryFacts.contributed(submittedOnly), "5", "waiting to be scored is contributed")
 
+        // Home's tile, History's card and the Traces summary read one
+        // definition: 56 accepted and 1 waiting is 57 on all three.
+        let mixed = try recorded(DaemonData.HistoryRollup.self, "history_rollup") {
+            $0["all_time"] = ["submitted": 1, "accepted": 56, "quarantined": 0, "withdrawn": 0, "other": 0]
+        }
+        XCTAssertEqual(HomeFormat.contributed(mixed), "57")
+        XCTAssertEqual(SummaryFacts.contributed(mixed), HomeFormat.contributed(mixed))
+
         // The header's tool count is said only when the core said which
         // tools it reads; an unread one is left out, never "— of —".
         let words = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))

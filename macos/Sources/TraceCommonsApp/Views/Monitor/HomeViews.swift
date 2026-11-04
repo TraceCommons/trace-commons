@@ -8,7 +8,7 @@ import TCShellCore
 /// (spec, "Screens": History is Home, then History).
 ///
 /// Counts come from the core: waiting is `decisions_owed` (a dash when the
-/// core did not say), contributed is the rollup's accepted count. Pending
+/// core did not say), contributed is `HomeFormat.contributed`. Pending
 /// credit is shown only beside the commons' own statement of what it waits
 /// on (D6), and never as earned.
 ///
@@ -316,8 +316,8 @@ private struct HomeOverview: View {
     }
 
     /// Waiting, contributed and pending credit (#1146 `home-view.tsx`), each
-    /// from the core: waiting is decisions owed, contributed the rollup's
-    /// accepted count. Pending credit is a figure only beside the commons'
+    /// from the core: waiting is decisions owed, contributed
+    /// `HomeFormat.contributed`. Pending credit is a figure only beside the commons'
     /// statement of what it waits on (D6), drawn under the tiles; without
     /// that statement it is a dash, never a bare number that reads as owed.
     ///
@@ -349,7 +349,7 @@ private struct HomeOverview: View {
                         GridRow {
                             HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
                                          systemImage: HomeStatIcons.waiting, action: openTraces)
-                            HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted),
+                            HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(freshRollup),
                                          systemImage: HomeStatIcons.contributed, action: openHistory)
                         }
                         if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) {
@@ -1462,7 +1462,7 @@ private struct HistoryStats: View {
                                                        credit: credit)
                 HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value,
                              detail: creditTile.detail)
-                HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(rollup?.allTime?.accepted))
+                HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(rollup))
                 HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined))
             }
             .fixedSize(horizontal: false, vertical: true)
@@ -1925,6 +1925,16 @@ enum HomeFormat {
     static func cardHeading(_ word: String?) -> String? {
         guard let word, !word.isEmpty else { return nil }
         return word
+    }
+
+    /// Contributed, all time, as Ron's `isContributed` counts it: accepted,
+    /// waiting to be scored and held for privacy review. The one definition
+    /// behind Home's tile, History's card and the Traces summary. A part the
+    /// core did not give is a dash.
+    static func contributed(_ rollup: DaemonData.HistoryRollup?) -> String {
+        let all = rollup?.allTime
+        let parts = [all?.accepted, all?.submitted, all?.quarantined]
+        return count(parts.contains(nil) ? nil : parts.compactMap { $0 }.reduce(0, +))
     }
 
     /// A count, or a dash when the core did not say. Zero is a number.
