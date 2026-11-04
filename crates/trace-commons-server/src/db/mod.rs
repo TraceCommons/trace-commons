@@ -234,6 +234,16 @@ impl Drop for CreditSettlementAdvisoryLock {
 
 #[async_trait]
 pub trait Database: TraceCorpusStore + Send + Sync {
+    /// Store one anonymous usage batch (V152): each row replaces that
+    /// install's count for the week and event. The caller has validated it
+    /// (`UsageEventBatch::validate`). All rows or none. Returns rows written.
+    async fn record_usage_events(
+        &self,
+        _batch: &trace_commons_protocol::usage_analytics::UsageEventBatch,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Pool("usage_events_unavailable".into()))
+    }
+
     async fn select_inference_connection(
         &self,
         _tenant: &str,

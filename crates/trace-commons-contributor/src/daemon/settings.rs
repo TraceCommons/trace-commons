@@ -88,6 +88,11 @@ pub const DEFAULT_NOTIFICATIONS_ENABLED: bool = true;
 /// chose. DRAFT, owner decision 19 in the nudge decisions list ("the
 /// default (spec: on, with its own Settings switch)").
 pub const DEFAULT_MENU_BAR_MARK_ENABLED: bool = true;
+/// Anonymous usage counts (`daemon::usage_analytics`) for a settings file
+/// that never chose. DRAFT, NEEDS APPROVAL (2026-11-04): on, and effective
+/// only while the commons places this computer's IP address in the United
+/// States.
+pub const DEFAULT_SHARE_USAGE_DATA: bool = true;
 /// `notify.digest`. DRAFT. Not an owner decision: on is today's behaviour.
 pub const DEFAULT_NOTIFY_DIGEST: bool = true;
 /// `notify.idle_sessions` (N1) on a NEW install. DRAFT, owner decision 7.
@@ -742,6 +747,14 @@ pub struct DaemonSettings {
     #[serde(default = "default_menu_bar_mark_enabled")]
     pub menu_bar_mark_enabled: bool,
 
+    /// "Share anonymous usage data": weekly counts of screens opened and
+    /// controls used, with an anonymous random install id, sent only from
+    /// the United States (`daemon::usage_analytics`). Defaults to
+    /// [`DEFAULT_SHARE_USAGE_DATA`]. Turning it off deletes the counts not yet
+    /// sent and the install id.
+    #[serde(default = "default_share_usage_data")]
+    pub share_usage_data: bool,
+
     /// The terminal app managed sessions open in, one of this platform's
     /// (`managed::terminal::TerminalApp::offered`). A file written before
     /// this key existed loads as the platform's default, the shipped
@@ -966,6 +979,10 @@ fn default_notifications_enabled() -> bool {
 
 fn default_menu_bar_mark_enabled() -> bool {
     DEFAULT_MENU_BAR_MARK_ENABLED
+}
+
+fn default_share_usage_data() -> bool {
+    DEFAULT_SHARE_USAGE_DATA
 }
 
 /// When the digest fires: the interval behaviour that shipped first, or once
@@ -1424,6 +1441,7 @@ impl Default for DaemonSettings {
             missions_enabled: false,
             notifications_enabled: DEFAULT_NOTIFICATIONS_ENABLED,
             menu_bar_mark_enabled: DEFAULT_MENU_BAR_MARK_ENABLED,
+            share_usage_data: DEFAULT_SHARE_USAGE_DATA,
             managed_terminal: Default::default(),
             managed_terminal_chosen: false,
             managed_herdr: false,
@@ -2130,6 +2148,11 @@ pub fn apply_settings_object(
             "menu_bar_mark_enabled" => {
                 settings.menu_bar_mark_enabled =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // Anonymous usage counts, US only. Off deletes the unsent
+            // counts at the next daemon pass (`usage_analytics::tick`).
+            "share_usage_data" => {
+                settings.share_usage_data = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
             // The terminal app managed sessions open in. One of this
             // platform's fixed ids; anything else, `null` included, is refused,
@@ -3602,6 +3625,31 @@ mod tests {
                 .managed_favorite_models,
             ["a/one"]
         );
+    }
+
+    /// Anonymous usage counts: on in a file that never chose, a boolean
+    /// only on write.
+    #[test]
+    fn share_usage_data_defaults_on_and_takes_only_a_boolean() {
+        assert!(DaemonSettings::default().share_usage_data);
+        let old: DaemonSettings = serde_json::from_value({
+            let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+            v.as_object_mut().unwrap().remove("share_usage_data");
+            v
+        })
+        .unwrap();
+        assert!(old.share_usage_data, "a file from before the key reads on");
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"share_usage_data": false})),
+            Ok(true)
+        );
+        assert!(!s.share_usage_data);
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"share_usage_data": "no"})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(!s.share_usage_data, "a refused write changes nothing");
     }
 
     /// `set_settings` takes the master, the mark, partial `notify` objects

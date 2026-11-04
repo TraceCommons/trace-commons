@@ -409,6 +409,7 @@ pub const METHODS: &[&str] = &[
     "set_notify_kind",
     "set_managed_terminal",
     "set_managed_herdr",
+    "record_usage_event",
     "enroll",
     "prepare_admission_session",
     "near_account_capabilities",
@@ -610,6 +611,8 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     // Writes only the settings file, through `set_settings`.
     "set_managed_terminal",
     "set_managed_herdr",
+    // Writes only the daemon's usage-count file; sending is the tick's.
+    "record_usage_event",
     // `auto_upload` is refused inside these two; the other modes only stop
     // sends.
     "set_project_mode",
@@ -4085,6 +4088,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "set_notify_kind" => handle_set_notify_kind(shared, req),
         "set_managed_terminal" => handle_set_managed_terminal(shared, req),
         "set_managed_herdr" => handle_set_managed_herdr(shared, req),
+        "record_usage_event" => handle_record_usage_event(shared, req),
         "set_project_mode" => handle_set_project_mode(shared, req),
         "set_contribution_override" => handle_set_contribution_override(shared, req),
         "clear_contribution_override" => handle_clear_contribution_override(shared, req),
@@ -6591,6 +6595,33 @@ fn handle_set_suggestions_enabled(shared: &DaemonShared, req: &Request) -> Respo
 /// through `set_settings` exactly as `handle_set_suggestions_enabled` does,
 /// so the file is saved by the one path that keeps stored credentials intact
 /// and that path publishes `status_changed` when the value changes.
+/// `record_usage_event {event}`: one anonymous count, US only
+/// (`usage_analytics`). An event off the allow-list is refused; with counting
+/// off (the setting, the region, or no answer yet) the report is dropped and
+/// answers `{recorded: false}`, which a shell ignores. Writes nothing but the
+/// usage-count file, and publishes nothing.
+fn handle_record_usage_event(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(event) = req.params.get("event").and_then(|v| v.as_str()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "event-required");
+    };
+    let share_usage_data = shared
+        .settings
+        .lock()
+        .map(|s| s.share_usage_data)
+        .unwrap_or(false);
+    match super::usage_analytics::record(&shared.store, share_usage_data, event, Utc::now()) {
+        Ok(recorded) => Response::ok(req.id, serde_json::json!({ "recorded": recorded })),
+        Err(super::usage_analytics::RecordError::UnknownEvent) => Response::err(
+            req.id,
+            ERR_BAD_PARAMS,
+            super::usage_analytics::ERR_USAGE_EVENT_UNKNOWN,
+        ),
+        Err(super::usage_analytics::RecordError::Unavailable) => {
+            Response::err(req.id, ERR_UNAVAILABLE, "usage-counts-unavailable")
+        }
+    }
+}
+
 fn handle_set_bool_setting(shared: &DaemonShared, req: &Request, key: &'static str) -> Response {
     let Some(on) = req.params.get("on").and_then(|v| v.as_bool()) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "on-required");
@@ -19466,7 +19497,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 108, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 109, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 84, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

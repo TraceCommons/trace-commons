@@ -2092,10 +2092,16 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "payout_link_request_proving_anchor",
         include_str!("../../../../migrations/V151__payout_link_request_proving_anchor.sql"),
     ),
+    // V152: anonymous weekly usage counts (US only), a non-tenant table the
+    // runtime writes only through a guard-owned function.
+    (
+        152,
+        "usage_event_weeks",
+        include_str!("../../../../migrations/V152__usage_event_weeks.sql"),
+    ),
     // V153: the first run's estimate requests, one row per request, for
     // operator statistics. No tenant: forced RLS with an insert-only writer
-    // role and a read-only reader role. V152 is taken by open PR #1920; the
-    // runner allows the gap and applies V152 later if it lands later.
+    // role and a read-only reader role.
     (
         153,
         "first_run_estimate_requests",
@@ -2350,6 +2356,36 @@ impl Database for PgBackend {
     ) -> Result<crate::db::postgres_inference_connection::InferenceSelectionOutcome, DatabaseError>
     {
         PgBackend::select_inference_connection(self, tenant, account, request, catalog).await
+    }
+
+    async fn record_usage_events(
+        &self,
+        batch: &trace_commons_protocol::usage_analytics::UsageEventBatch,
+    ) -> Result<u64, DatabaseError> {
+        let (weeks, (events, counts)): (Vec<&str>, (Vec<&str>, Vec<i64>)) = batch
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.week.as_str(),
+                    (
+                        row.event.as_str(),
+                        i64::try_from(row.count).unwrap_or(i64::MAX),
+                    ),
+                )
+            })
+            .unzip();
+        let client = self.trace_pool().get().await?;
+        // No tenant context: V152's table belongs to no tenant, and the
+        // runtime reaches it only through the guard-owned function.
+        let row = client
+            .query_one(
+                "SELECT trace_usage_events_record($1, $2::text[], $3::text[], $4::bigint[])",
+                &[&batch.install_id, &weeks, &events, &counts],
+            )
+            .await?;
+        let written: i32 = row.get(0);
+        Ok(u64::try_from(written).unwrap_or(0))
     }
 
     async fn current_inference_connection(

@@ -51,6 +51,8 @@ mod rewards;
 mod token_bundles;
 #[path = "trace_commons_ingest_internal/upload_allowance.rs"]
 mod upload_allowance;
+#[path = "trace_commons_ingest_internal/usage_region.rs"]
+mod usage_region;
 
 #[cfg(test)]
 use public_run::validate_public_run_provenance;
@@ -8841,6 +8843,23 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/public/first-run-estimate",
             get(credit_estimate::first_run_estimate_handler),
+        )
+        // Same reason: whether this request may send anonymous usage
+        // counts (US only). Keeps nothing about the address; false when it
+        // cannot tell.
+        .route(
+            trace_commons_protocol::usage_analytics::USAGE_REGION_PATH,
+            get(usage_region::usage_region_handler),
+        )
+        // Same reason: anonymous weekly usage totals, sent with no
+        // credential by a client that got a US answer above. Validated whole
+        // against the protocol's allow-list; stored in V152's non-tenant
+        // table through its guard-owned function.
+        .route(
+            trace_commons_protocol::usage_analytics::USAGE_EVENTS_PATH,
+            post(usage_region::usage_events_handler).layer(DefaultBodyLimit::max(
+                trace_commons_protocol::usage_analytics::USAGE_BATCH_MAX_BYTES,
+            )),
         )
         // Same reason: the first run asks what to say under the traces it
         // found before an account or any consent exists. A POST, so the
