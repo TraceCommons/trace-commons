@@ -576,7 +576,8 @@ pub(crate) fn run_blocking<R>(f: impl FnOnce() -> R) -> R {
 /// The retained drain task continues while the daemon runtime lives; the budget
 /// includes waiting for any in-progress startup. Expiry does not claim Off.
 ///
-/// A panic or dropped run future skips this awaited path. Closing or dropping
+/// A panic in a pass restarts the passes (`pass_supervisor`) rather than
+/// skipping this path; a dropped run future still skips it. Closing or dropping
 /// EmbeddedDaemon requests terminal cleanup as a backstop. Runtime/process
 /// destruction can interrupt pending streams; neither path promises complete
 /// drainage after the host runtime has gone away.
@@ -659,6 +660,15 @@ async fn supervise_passes(
     let upload_wake = tokio::time::sleep(std::time::Duration::ZERO);
     tokio::pin!(upload_wake);
     let mut upload_wake_armed = false;
+    // An upload asked for before a restart after a panic
+    // (`pass_supervisor`) is still due; arm it here, as the notification
+    // that asked for it went to the loop that ended.
+    if let Some(at) = shared.upload_due() {
+        upload_wake
+            .as_mut()
+            .reset(upload_wake_deadline(at, Utc::now()));
+        upload_wake_armed = true;
+    }
 
     loop {
         // Checked at the top as well as after the select, so a request that

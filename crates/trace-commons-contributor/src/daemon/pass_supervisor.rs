@@ -243,6 +243,19 @@ mod tests {
         let runs = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&runs);
         let pass_shared = Arc::clone(&shared);
+        // Undeclared Claude Code and Codex roots fall back to the real
+        // `~/.claude` and `~/.codex`; declare every source off so the pass
+        // reads nothing from this machine.
+        {
+            use crate::daemon::settings::SourceDeclaration;
+            let mut settings = shared.settings.lock().unwrap();
+            settings.claude_source = Some(SourceDeclaration::Off);
+            settings.codex_source = Some(SourceDeclaration::Off);
+            settings.gemini_source = Some(SourceDeclaration::Off);
+            settings.cline_source = Some(SourceDeclaration::Off);
+            settings.opencode_source = Some(SourceDeclaration::Off);
+            settings.trajectory_source = Some(SourceDeclaration::Off);
+        }
         let mut signal = never();
         let outcome = tokio::time::timeout(
             Duration::from_secs(600),
@@ -267,6 +280,7 @@ mod tests {
             "the watch pass after the panic ran to completion"
         );
         assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert!(shared.queue.lock().unwrap().all().is_empty());
     }
 
     /// A loop that always panics is not spun: over ten virtual minutes it
