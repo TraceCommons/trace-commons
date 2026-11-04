@@ -119,6 +119,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let neither: String
         /// `{tool}`: a tool watched in two rows.
         public let oneFolderPerTool: String
+        /// Beside Continue: finish setup for Private AI alone.
+        public let privateAiOnly: String
     }
 
     public struct Rules: Decodable, Equatable, Sendable {

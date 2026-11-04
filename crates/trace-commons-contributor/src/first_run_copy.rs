@@ -37,7 +37,7 @@
 //!   was mocked: `discovery_failed` and `retry` for a discovery that returns
 //!   nothing readable, and `enroll_refused` for an enroll refused after the
 //!   invite was accepted. It also carries `lookup_unavailable` and
-//!   `sign_in_failed` (the core's existing sign-in line), so leaving Folders
+//!   `sign_in_failed` (the core's existing Private AI sign-in line), so leaving Folders
 //!   or Tools never stops in silence, and `settings_failed` for a changed
 //!   folder declaration the running daemon refused.
 //! - Rules adds `unavailable` and `retry` for folders the daemon could not
@@ -199,7 +199,9 @@ pub struct WelcomeCopy {
     pub title: &'static str,
     /// Ron's words (2026-10-21).
     pub body: &'static str,
-    /// DRAFT, NEEDS APPROVAL.
+    /// DRAFT, NEEDS APPROVAL. Also Join's primary button on the Private AI
+    /// only path, where nothing is shared so "Start sharing" would be
+    /// false: DRAFT, NEEDS APPROVAL (2026-11-04) for that reuse.
     pub start: &'static str,
 }
 
@@ -291,8 +293,12 @@ pub struct FoldersCopy {
     /// The invite could not be looked up just now (no answer from the
     /// issuer); nothing is said about the invite itself.
     pub lookup_unavailable: &'static str,
-    /// The near.ai sign-in did not finish: the core's existing sign-in line
-    /// (`consent_copy::INFERENCE_SIGN_IN_FAILED`), not a second wording.
+    /// The near.ai sign-in did not finish: the core's existing Private AI
+    /// sign-in line (`private_inference_copy::CREDENTIAL_FAILED`), not a
+    /// second wording. It names only Sign in, which Join shows; the
+    /// inference step's line it read before offered a Skip that Join does
+    /// not have (tester report, 2026-11-04). DRAFT, NEEDS APPROVAL
+    /// (2026-11-04): the reassignment.
     pub sign_in_failed: &'static str,
     /// The daemon is running and refused a changed folder declaration on a
     /// later Continue (`set_settings`). Watching goes on with the folders it
@@ -325,6 +331,10 @@ pub struct ToolsCopy {
     /// one of them to say "I don't use it"; this says so beside the added
     /// folder. Approved 2026-10-06.
     pub one_folder_per_tool: &'static str,
+    /// The secondary action beside Continue: finish setup for Private AI
+    /// alone, watching no tool and sharing nothing (tester report,
+    /// owner-approved path 2026-11-04). DRAFT, NEEDS APPROVAL (2026-11-04).
+    pub private_ai_only: &'static str,
 }
 
 /// Rules and the past-session picker (`rules-screen.tsx`).
@@ -566,7 +576,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             retry: "Look again",
             enroll_refused: "Your invite was found, but joining with it did not go through. Press Continue to try again.",
             lookup_unavailable: "Your invite couldn't be checked just now. Press Continue to try again.",
-            sign_in_failed: crate::consent_copy::INFERENCE_SIGN_IN_FAILED,
+            sign_in_failed: crate::private_inference_copy::CREDENTIAL_FAILED,
             settings_failed: "Your folder changes couldn't be saved. Watching goes on with the folders you chose before. Press Continue to try again.",
         },
         tools: ToolsCopy {
@@ -581,6 +591,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             trajectory_label: "Exported traces",
             neither: "Neither",
             one_folder_per_tool: "{tool} can watch only one folder. Answer “Not used” on one of its rows.",
+            private_ai_only: "Use Private AI only",
         },
         rules: RulesCopy {
             title_light: "Set your ",
@@ -1209,15 +1220,36 @@ mod tests {
         assert!(!uses.complete_failed.contains("Setup finished"));
     }
 
+    /// Join's sign-in failure names only controls Join shows (copy guide
+    /// rule 7): Join has Sign in and no Skip (owner, 2026-10-12), so the
+    /// line must not offer to skip (tester report, 2026-11-04).
+    #[test]
+    fn the_sign_in_failure_offers_no_skip() {
+        let copy = first_run_copy();
+        let line = copy.folders.sign_in_failed.to_lowercase();
+        assert!(!line.contains("skip"), "{line}");
+        assert!(line.contains("try again"), "{line}");
+    }
+
+    /// Private AI only is an action (copy guide rule 1) naming the
+    /// destination the way the rest of the app does ("Private AI").
+    #[test]
+    fn private_ai_only_is_named_by_its_destination() {
+        let copy = first_run_copy();
+        assert_eq!(copy.tools.private_ai_only, "Use Private AI only");
+        assert_ne!(copy.tools.private_ai_only, copy.frame.continue_button);
+    }
+
     /// Every way leaving Folders or Tools can stop has a sentence, so
     /// Continue never does nothing in silence. A sign-in that did not finish
-    /// reads the core's existing sign-in line rather than a second wording.
+    /// reads the core's existing Private AI sign-in line rather than a
+    /// second wording.
     #[test]
     fn leaving_the_roots_says_why_it_stopped() {
         let copy = first_run_copy();
         assert_eq!(
             copy.folders.sign_in_failed,
-            crate::consent_copy::INFERENCE_SIGN_IN_FAILED
+            crate::private_inference_copy::CREDENTIAL_FAILED
         );
         // Lookup never reached an answer: nothing is said about the invite.
         assert_ne!(copy.folders.lookup_unavailable, copy.join.invite_error);

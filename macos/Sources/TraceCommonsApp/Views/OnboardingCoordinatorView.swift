@@ -112,10 +112,13 @@ private struct FirstRunSteps: View {
             ZStack(alignment: .top) {
                 FirstRunBackdrop()
                 screen
-                if let index = FirstRunStageLayout.threadIndex(of: runner.state.step) {
-                    FirstRunStepThread(labels: copy.threadLabels, current: index, enabled: !runner.isCommitting) { picked in
-                        runner.state = FirstRunNavigation.back(
-                            to: FirstRunNavigation.threadSteps[picked], from: runner.state)
+                if let index = FirstRunStageLayout.threadIndex(of: runner.state.step, in: runner.state) {
+                    FirstRunStepThread(
+                        labels: copy.threadLabels(for: runner.state), current: index, enabled: !runner.isCommitting
+                    ) { picked in
+                        let steps = FirstRunNavigation.threadSteps(for: runner.state)
+                        guard steps.indices.contains(picked) else { return }
+                        runner.state = FirstRunNavigation.back(to: steps[picked], from: runner.state)
                     }
                     .padding(.top, 14)
                     .transition(.opacity.combined(with: .offset(y: -10)))
