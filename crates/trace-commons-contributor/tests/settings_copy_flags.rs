@@ -168,17 +168,7 @@ fn repeated_buttons_have_distinct_accessible_names() {
 #[test]
 fn settings_words_formerly_spelled_in_the_shell_are_in_the_core() {
     let screens = preview_copy::monitor_screens_copy();
-    assert_eq!(screens.settings_nav.general, "General");
-    assert_eq!(
-        [
-            screens.shell.appearance,
-            screens.shell.appearance_light,
-            screens.shell.appearance_dark,
-            screens.shell.appearance_system,
-            screens.shell.updates_eyebrow,
-        ],
-        ["Appearance", "Light", "Dark", "System", "Updates"]
-    );
+    assert_eq!(screens.shell.updates_eyebrow, "Updates");
     let evidence = source_copy::source_settings_copy().evidence;
     assert_eq!(evidence.missing, "Not found on this machine");
     assert_eq!(evidence.count, "{count} traces");

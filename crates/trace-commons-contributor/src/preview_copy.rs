@@ -1189,9 +1189,6 @@ pub struct MonitorFlowMapCopy {
 /// under that section's name.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct MonitorSettingsNavCopy {
-    /// The first section: appearance and the desktop. It was spelled in
-    /// the macOS shell (copy-guide rule 8).
-    pub general: &'static str,
     pub connection: &'static str,
     pub startup: &'static str,
     pub watching: &'static str,
@@ -1289,13 +1286,9 @@ pub struct MonitorShellCopy {
     pub settings_refresh_desktop: &'static str,
     pub settings_refresh_discovery: &'static str,
     pub settings_refresh_uses: &'static str,
-    /// General's appearance card: its eyebrow, which also names the
-    /// choice, and the three choices; and Startup's updates card's eyebrow.
-    /// These were spelled in the macOS shell (copy-guide rule 8).
-    pub appearance: &'static str,
-    pub appearance_light: &'static str,
-    pub appearance_dark: &'static str,
-    pub appearance_system: &'static str,
+    /// Startup's updates card's eyebrow. It was spelled in the macOS shell
+    /// (copy-guide rule 8). General's words stay the shell's: General never
+    /// waits on the core (owner decision D20, 2026-11-04).
     pub updates_eyebrow: &'static str,
     pub consent_eyebrow: &'static str,
     pub desktop_eyebrow: &'static str,
@@ -1622,10 +1615,6 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             settings_refresh_desktop: "Refresh system integrations",
             settings_refresh_discovery: "Refresh trace discovery",
             settings_refresh_uses: "Refresh data uses",
-            appearance: "Appearance",
-            appearance_light: "Light",
-            appearance_dark: "Dark",
-            appearance_system: "System",
             updates_eyebrow: "Updates",
             consent_eyebrow: "Consent",
             desktop_eyebrow: "Desktop",
@@ -1777,7 +1766,6 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             not_synced: "Not synced yet",
         },
         settings_nav: MonitorSettingsNavCopy {
-            general: "General",
             connection: "Connection",
             startup: "Startup & notifications",
             watching: "Watching",
@@ -2106,10 +2094,7 @@ mod tests {
         let screens = monitor_screens_copy();
         let nav = &screens.settings_nav;
         let names: Vec<String> = words_of(nav).into_iter().map(|(_, word)| word).collect();
-        // #1146's twelve, and General, the first, whose name moved here
-        // from the macOS shell (2026-11-04).
-        assert_eq!(names.len(), 13, "#1146's twelve and General: {names:?}");
-        assert_eq!(nav.general, "General");
+        assert_eq!(names.len(), 12, "#1146 lists twelve sections: {names:?}");
         assert_eq!(nav.startup, "Startup & notifications");
         assert_eq!(nav.uses, "Data uses");
         assert_eq!(nav.profile, "Public profile");

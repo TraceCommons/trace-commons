@@ -614,11 +614,7 @@ public struct MonitorShellCopy: MonitorWordTable {
     public let settingsRefreshDesktop: String
     public let settingsRefreshDiscovery: String
     public let settingsRefreshUses: String
-    /// General's appearance card and Startup's updates card.
-    public let appearance: String
-    public let appearanceLight: String
-    public let appearanceDark: String
-    public let appearanceSystem: String
+    /// Startup's updates card.
     public let updatesEyebrow: String
     public let consentEyebrow: String
     public let desktopEyebrow: String
@@ -681,10 +677,6 @@ public struct MonitorShellCopy: MonitorWordTable {
         case settingsRefreshDesktop = "settings_refresh_desktop"
         case settingsRefreshDiscovery = "settings_refresh_discovery"
         case settingsRefreshUses = "settings_refresh_uses"
-        case appearance
-        case appearanceLight = "appearance_light"
-        case appearanceDark = "appearance_dark"
-        case appearanceSystem = "appearance_system"
         case updatesEyebrow = "updates_eyebrow"
         case consentEyebrow = "consent_eyebrow"
         case desktopEyebrow = "desktop_eyebrow"
