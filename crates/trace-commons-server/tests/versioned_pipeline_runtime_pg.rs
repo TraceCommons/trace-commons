@@ -37395,6 +37395,130 @@ async fn no_synchronous_dependency_runs_on_a_runtime_worker() {
     );
 }
 
+/// Refuses every input as the fastembed embedder refuses whitespace-only
+/// text (`EmbedderInputRejected`), and counts its calls.
+struct InputRejectingEmbedder {
+    calls: AtomicUsize,
+}
+
+impl Embedder for InputRejectingEmbedder {
+    fn embed(&self, _plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(trace_commons_gate_enclave::embedder::EmbedderInputRejected::EmptyInput.into())
+    }
+}
+
+impl IdentifiedEmbedder for InputRejectingEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "input_rejecting_embedder_test_only"
+    }
+    fn model_id(&self) -> &str {
+        "input-rejecting-embedder-v1"
+    }
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"input-rejecting-embedder-test-only.v1".to_vec()
+    }
+}
+
+/// A compatibility Score whose embedder refuses the trace's own input fails
+/// the same way on every attempt. Before this fix the refusal was reported
+/// as the transient `embedder_unavailable`: the run stayed in `retry` for
+/// good, never charged an attempt, and its retryable error refused every
+/// activation of the tenant. It now fails terminally on its first Score,
+/// through `mark_failed`, under `pipeline_score_input_unembeddable`; the
+/// embedder is not called again, and the tenant's readiness no longer
+/// counts it.
+#[tokio::test]
+async fn an_embedder_input_rejection_fails_the_run_and_leaves_readiness_clear() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(InputRejectingEmbedder {
+        calls: AtomicUsize::new(0),
+    });
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+    let package =
+        MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
+            .expect("build compatibility bundle package");
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let registry = SettlementAdapterRegistry::new(vec![trace_credit as Arc<dyn SettlementAdapter>])
+        .expect("build settlement adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([(
+            InstrumentId::trace_credit().as_str().to_string(),
+            AtomicUnits::from_raw(u128::MAX),
+        )]),
+    };
+    let service = PipelineServiceBuilder::new(
+        backend.clone(),
+        artifact_store(&dir),
+        package,
+        index.clone(),
+        index.clone(),
+        registry,
+        caps,
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder.clone())
+    .with_authority(allow_all_authority())
+    .with_privacy(default_privacy_boundary())
+    .with_unqualified_routing(true)
+    .with_novelty_utility_checks(issuing_checks())
+    .build()
+    .expect("build pipeline service");
+    let tenant = format!("embedder-input-rejected-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:embedder-input-rejected";
+    let envelope = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let run_id = receive_envelope(&service, &tenant, principal, &envelope).await;
+    process_until_idle(&service, &tenant).await;
+
+    let run = service
+        .store()
+        .get_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    assert_eq!(run.state, PipelineRunState::Failed, "{run:?}");
+    assert_eq!(run.next_phase, Some(Phase::Score));
+    assert_eq!(
+        run.last_error_label.as_deref(),
+        Some(trace_commons_server::versioned_pipeline::PIPELINE_SCORE_INPUT_UNEMBEDDABLE_LABEL)
+    );
+    assert!(
+        run.attempt_count < run.max_attempts,
+        "failed on its first Score, not by exhausting its attempts: {run:?}"
+    );
+    assert_eq!(
+        embedder.calls.load(Ordering::SeqCst),
+        1,
+        "the embedder is asked once; the run is not retried"
+    );
+    // The same terminal path as any run failed at Score: Review already
+    // moved the submission from `received` to `accepted`, and #1346's move
+    // rejects only a `received` one, so it stays as Review left it.
+    let (status, _, _, rejected_by_run, _) = failed_run_submission_rows(&tenant, run_id).await;
+    assert_eq!(status, "accepted");
+    assert!(!rejected_by_run);
+
+    let summary = PipelineProductStore::new(backend.clone())
+        .operational_summary(&tenant)
+        .await
+        .expect("the summary reads");
+    assert_eq!(summary.retryable_error_count, 0);
+    let readiness = ActivationReadiness::from_operational_summary(&summary);
+    assert_eq!(readiness.max_work_age_seconds, 0);
+    evaluate_activation_readiness(&readiness, chrono::Utc::now())
+        .expect("a failed run does not hold the tenant's activation");
+}
+
 /// Owner ruling on Zaki review 1, round 2, N-7: the index holds only
 /// revisions of runs that completed. A Settle that crashes after its index
 /// write on the run's last attempt leaves the write `pending` and the run

@@ -186,6 +186,12 @@ pub const PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL: &str =
 /// (`ScoreInput::operator_review`). The run fails closed under this label
 /// rather than going back to the review queue, so a hold cannot loop.
 pub const PIPELINE_SCORE_HOLD_REPEATED_LABEL: &str = "pipeline_score_hold_repeated";
+/// A compatibility Score's embedder refused the trace's own text (for
+/// example a chunk with no text in it, only whitespace). The same input
+/// fails the same way on every attempt, so the run fails terminally under
+/// this label on its first Score instead of retrying. An embedder outage
+/// stays the transient `embedder_unavailable`.
+pub const PIPELINE_SCORE_INPUT_UNEMBEDDABLE_LABEL: &str = "pipeline_score_input_unembeddable";
 /// Settle refuses to commit when the submission already has a pipeline gate
 /// decision row written by another run (V116 allows one per submission).
 pub const PIPELINE_GATE_DECISION_CONFLICT_LABEL: &str = "pipeline_gate_decision_conflict";
@@ -13475,6 +13481,24 @@ impl PipelineService {
                 // than retrying it (below); a permanent policy failure is
                 // charged like any other labeled retry.
                 if let Some(policy) = error.downcast_ref::<PolicyError>() {
+                    // A Score whose embedder refused the trace's own input
+                    // would fail the same way on every attempt: the run
+                    // fails terminally on the attempt the claim charged,
+                    // like a repeated hold above, rather than spending its
+                    // budget and ending `attempts_exhausted` under a label
+                    // that no longer says why. Nothing of the Score was
+                    // committed.
+                    if !policy.is_transient()
+                        && policy.label() == PIPELINE_SCORE_INPUT_UNEMBEDDABLE_LABEL
+                        && run.next_phase == Some(Phase::Score)
+                    {
+                        return self
+                            .mark_failed_or_record_lease_expired(
+                                &run,
+                                PIPELINE_SCORE_INPUT_UNEMBEDDABLE_LABEL,
+                            )
+                            .await;
+                    }
                     return if policy.is_transient() {
                         // A Review quarantine
                         // waiting on a human assessment parks the run
