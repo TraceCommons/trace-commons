@@ -32,6 +32,39 @@ public sealed partial class PrivateInferenceView : UserControl
         Loaded += OnFirstLoaded;
         Loaded += OnFundingLoaded;
         Unloaded += (_, _) => ViewModel.Funding.Deactivate();
+
+        // F10: the mismatch line follows status, as the account section's
+        // block does. Never unsubscribed: this page lives as long as the
+        // window, like SettingsView.
+        _host = host;
+        _host.StatusChanged += ReadLoginMismatch;
+        Loaded += (_, _) => ReadLoginMismatch();
+    }
+
+    private readonly DaemonHost _host;
+
+    /// <summary>The change words (F10), read once; null hides the mismatch line.</summary>
+    private static readonly AccountChangeCopy? LoginChangeCopy = AccountChangeCopy.Copy();
+
+    /// <summary>
+    /// Reads <c>status.login_mismatch</c> and hands the page the approved
+    /// mismatch body, or nothing. An error frame leaves the line as it was.
+    /// </summary>
+    private async void ReadLoginMismatch()
+    {
+        try
+        {
+            DaemonResponse response = await _host.CallAsync(DaemonProtocol.Methods.Status);
+            if (!response.IsError && response.Result is { } result)
+            {
+                ViewModel.ShowLoginMismatch(AccountLoginChangeSurface.MismatchLine(
+                    AccountLoginChangeStatus.From(result), LoginChangeCopy));
+            }
+        }
+        catch
+        {
+            System.Diagnostics.Trace.TraceWarning(nameof(ReadLoginMismatch));
+        }
     }
 
     public PrivateInferenceViewModel ViewModel { get; }

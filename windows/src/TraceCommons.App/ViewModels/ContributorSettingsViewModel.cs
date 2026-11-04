@@ -131,6 +131,16 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         // Never unsubscribed, matching MainViewModel. SettingsView is built
         // once with `??=` and lives as long as the window.
         _host.StatusChanged += OnDaemonStatusChanged;
+
+        // F10: one driver for the three entry points, so they can never
+        // disagree about whether a change is running. The daemon runs the
+        // ceremony; the driver opens the browser for each leg.
+        LoginChange = new AccountLoginChangeFlow(
+            (method, parameters) => _host.CallAsync(method, parameters),
+            async uri => await Windows.System.Launcher.LaunchUriAsync(uri),
+            AccountChangeCopy.Copy());
+        LoginChange.Changed += (_, _) => RaiseLoginChange();
+        LoginChange.Finished += async (_, _) => await RereadAccountAsync().ConfigureAwait(true);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -925,6 +935,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 Raise(nameof(ConnectionText));
                 Raise(nameof(ConnectionDetail));
                 Raise(nameof(HasConnectionDetail));
+                RaiseLoginChange();
             }
         }
     }
@@ -1018,6 +1029,173 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
     public bool HasAccountAttentionFailedLine => !string.IsNullOrEmpty(AccountAttentionFailedLine);
 
+    // ---------------------------------------------------------------------
+    // Changing the NEAR AI login an account uses (F10, spec section 2).
+    //
+    // Three entry points, as on macOS: the mismatch block after a sign-in
+    // the account refused as another account, the account section's own
+    // button, and the payouts line for a wallet-origin account. Every
+    // sentence is the core's (AccountChangeCopy); the status keys are the
+    // daemon's. A status in the account section, never a banner.
+    // ---------------------------------------------------------------------
+
+    private AccountLoginChangeStatus _loginChangeStatus = AccountLoginChangeStatus.None;
+
+    /// <summary>The change dialog's driver, shared by every entry point.</summary>
+    public AccountLoginChangeFlow LoginChange { get; }
+
+    private AccountChangeCopy? LoginChangeCopy => LoginChange.Copy;
+
+    /// <summary>The wallet join's own account-name label, for step 1 of a wallet-origin account.</summary>
+    public string? WalletAccountLabel => _witnessCopy?.Wallet?.Account;
+
+    /// <summary>The last NEAR AI sign-in was refused as another account.</summary>
+    public bool HasLoginMismatch => _loginChangeStatus.Mismatch && LoginChangeCopy is not null;
+
+    public string LoginMismatchBody => LoginChangeCopy?.MismatchBody ?? string.Empty;
+
+    public string LoginMismatchSignIn => LoginChangeCopy?.MismatchSignIn ?? string.Empty;
+
+    public string LoginMismatchChange => LoginChangeCopy?.MismatchChange ?? string.Empty;
+
+    /// <summary>"Use a different account" in the mismatch block: only while a refused login is held.</summary>
+    public bool ShowsLoginMismatchChange => _loginChangeStatus.OffersChange && LoginChangeCopy is not null;
+
+    /// <summary>The account section's own "Use a different account".</summary>
+    public bool ShowsLoginChangeButton =>
+        Connected && _loginChangeStatus.ShowsChangeButton && LoginChangeCopy is not null;
+
+    public string LoginChangeLabel => LoginChangeCopy?.Change ?? string.Empty;
+
+    /// <summary>A wallet-origin account's "Payouts need a NEAR AI login" line.</summary>
+    public bool ShowsPayoutsNeedLogin => _loginChangeStatus.ShowsPayoutsLine && LoginChangeCopy is not null;
+
+    public string PayoutsNeedsLoginBody => LoginChangeCopy?.PayoutsNeedsLoginBody ?? string.Empty;
+
+    public string PayoutsNeedsLoginAdd => LoginChangeCopy?.PayoutsNeedsLoginAdd ?? string.Empty;
+
+    /// <summary>The generic line under an entry point after the daemon refused to start.</summary>
+    public string LoginChangeStartFailedLine => LoginChange.StartFailedLine ?? string.Empty;
+
+    public bool HasLoginChangeStartFailedLine => LoginChangeStartFailedLine.Length > 0;
+
+    /// <summary>An entry point may be pressed: no change call is running.</summary>
+    public bool LoginChangeIdle => !LoginChange.Calling;
+
+    private bool _mismatchSignInBusy;
+
+    /// <summary>The mismatch block's Sign in may be pressed.</summary>
+    public bool MismatchSignInEnabled => !_mismatchSignInBusy;
+
+    private void RaiseLoginChange()
+    {
+        Raise(nameof(HasLoginMismatch));
+        Raise(nameof(LoginMismatchBody));
+        Raise(nameof(LoginMismatchSignIn));
+        Raise(nameof(LoginMismatchChange));
+        Raise(nameof(ShowsLoginMismatchChange));
+        Raise(nameof(ShowsLoginChangeButton));
+        Raise(nameof(LoginChangeLabel));
+        Raise(nameof(ShowsPayoutsNeedLogin));
+        Raise(nameof(PayoutsNeedsLoginBody));
+        Raise(nameof(PayoutsNeedsLoginAdd));
+        Raise(nameof(LoginChangeStartFailedLine));
+        Raise(nameof(HasLoginChangeStartFailedLine));
+        Raise(nameof(LoginChangeIdle));
+    }
+
+    /// <summary>
+    /// Reads the change keys from a status reply. An error frame leaves them
+    /// as they were: a daemon that could not answer has not said the
+    /// mismatch is over.
+    /// </summary>
+    private void FillLoginChange(DaemonResponse statusResponse)
+    {
+        if (statusResponse.IsError || statusResponse.Result is not { } result)
+        {
+            return;
+        }
+
+        AccountLoginChangeStatus next = AccountLoginChangeStatus.From(result);
+        if (next == _loginChangeStatus)
+        {
+            return;
+        }
+
+        _loginChangeStatus = next;
+        RaiseLoginChange();
+    }
+
+    /// <summary>
+    /// After a confirmed change: the account section says which login is
+    /// connected now (spec 2.2), so it is read again at once rather than on
+    /// the next event.
+    /// </summary>
+    private async Task RereadAccountAsync()
+    {
+        try
+        {
+            DaemonResponse status = await _host
+                .CallAsync(DaemonProtocol.Methods.Status)
+                .ConfigureAwait(true);
+            if (!status.IsError)
+            {
+                Connected = status.ResultAs<DaemonStatus>()?.LoggedIn ?? Connected;
+            }
+
+            FillAccountAttention(status);
+            FillLoginChange(status);
+        }
+        catch
+        {
+            // The next status event reads it instead.
+            System.Diagnostics.Trace.TraceWarning(nameof(RereadAccountAsync));
+        }
+    }
+
+    /// <summary>
+    /// The mismatch block's Sign in: a NEAR AI sign-in with the account's own
+    /// login, through the same ceremony Private AI uses. The daemon's browser
+    /// page lists the logins; the status event that follows clears the block.
+    /// </summary>
+    public async Task MismatchSignInAsync()
+    {
+        if (_mismatchSignInBusy)
+        {
+            return;
+        }
+
+        _mismatchSignInBusy = true;
+        Raise(nameof(MismatchSignInEnabled));
+        try
+        {
+            DaemonResponse response = await _host
+                .CallAsync(DaemonProtocol.Methods.NearAiCredentialStart, NearAiCredentialSurface.StartRequest)
+                .ConfigureAwait(true);
+            NearAiCredentialAttempt? attempt = response.IsError || response.Result is null
+                ? null
+                : NearAiCredentialSurface.ParseStart(response.Result.Value.GetRawText());
+            await CredentialBrowser.ContinueAsync(
+                    attempt,
+                    async uri => await Windows.System.Launcher.LaunchUriAsync(uri),
+                    () => _host.CallAsync(
+                        DaemonProtocol.Methods.NearAiCredentialCancel,
+                        NearAiCredentialSurface.SerializeCancel(attempt?.AttemptId)),
+                    () => Task.CompletedTask,
+                    () => Task.CompletedTask)
+                .ConfigureAwait(true);
+        }
+        catch
+        {
+            System.Diagnostics.Trace.TraceWarning(nameof(MismatchSignInAsync));
+        }
+        finally
+        {
+            _mismatchSignInBusy = false;
+            Raise(nameof(MismatchSignInEnabled));
+        }
+    }
+
     /// <summary>
     /// The three status keys last handed to the ABI, so an event that did
     /// not change them words nothing.
@@ -1091,6 +1269,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 .ConfigureAwait(true);
             Connected = status.ResultAs<DaemonStatus>()?.LoggedIn ?? false;
             FillAccountAttention(status);
+            FillLoginChange(status);
             return true;
         }
         finally
@@ -1165,6 +1344,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             DaemonStatus? status = statusResponse.ResultAs<DaemonStatus>();
             Connected = status?.LoggedIn ?? false;
             FillAccountAttention(statusResponse);
+            FillLoginChange(statusResponse);
 
             DaemonResponse settingsResponse = await _host
                 .CallAsync(DaemonProtocol.Methods.GetSettings)
@@ -1988,6 +2168,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         // breaks or is set up again elsewhere must not leave this section
         // saying the old thing.
         FillAccountAttention(statusResponse);
+        FillLoginChange(statusResponse);
         DaemonSettingsSnapshot? snapshot = settingsResponse.ResultAs<DaemonSettingsSnapshot>();
         FillRouting(
             snapshot,

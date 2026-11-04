@@ -743,8 +743,33 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         await LoadCredentialAsync().ConfigureAwait(true);
     }
 
+    // F10: a NEAR AI sign-in the account refused as another account says so
+    // in #1836's approved words (status.login_mismatch), where this card
+    // shows the sign-in's result. Fed by the view from status, so the
+    // credential reads here keep their own call sequence.
+    private string _loginMismatchLine = string.Empty;
+
+    /// <summary>
+    /// The approved mismatch body, or the empty string. Not while a sign-in
+    /// is waiting on the browser: that one has not been refused yet.
+    /// </summary>
+    public string LoginMismatchLine =>
+        NearAiCredentialSurface.AwaitingBrowser(_credential) ? string.Empty : _loginMismatchLine;
+
+    public bool HasLoginMismatchLine => LoginMismatchLine.Length > 0;
+
+    /// <summary>Sets the mismatch line from the latest status (null clears it).</summary>
+    public void ShowLoginMismatch(string? line)
+    {
+        _loginMismatchLine = line ?? string.Empty;
+        Raise(nameof(LoginMismatchLine));
+        Raise(nameof(HasLoginMismatchLine));
+    }
+
     private void RaiseCredential()
     {
+        Raise(nameof(LoginMismatchLine));
+        Raise(nameof(HasLoginMismatchLine));
         Raise(nameof(HasCloudSession));
         Raise(nameof(CredentialStateText));
         Raise(nameof(CredentialIsNeutral));
