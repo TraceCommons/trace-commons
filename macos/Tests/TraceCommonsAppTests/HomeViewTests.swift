@@ -220,6 +220,22 @@ final class HomeViewTests: XCTestCase {
         XCTAssertFalse(needs(nil, "", nil, false))
     }
 
+    /// The heading's Sign in signs in to what is missing (#1888 review):
+    /// the account session, by the account's own path, when the Credit
+    /// figures wait on it; NEAR AI otherwise. A non-NEAR AI account whose
+    /// session lapsed is never sent to NEAR AI's sign-in, which would not
+    /// bring that session back.
+    func test_theAccountHeadingSignsInToWhatIsMissing() throws {
+        let route = HomeFormat.accountSignInRoute
+        XCTAssertEqual(route(try creditSummary(reason: "account-session-required")), .account)
+        XCTAssertEqual(route(try creditSummary(reason: nil)), .nearAi)
+        XCTAssertEqual(route(nil), .nearAi)
+        let home = try String(
+            contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent("Views/Monitor/HomeViews.swift"), encoding: .utf8)
+        XCTAssertTrue(home.contains("case .account: Task { await model.signInToAccount() }"))
+        XCTAssertTrue(home.contains("busy: model.credentialBusy || model.accountSigningIn"))
+    }
+
     /// The heading's words: the core's "No data", a dash, then the managed
     /// copy's "Sign in" as a link that begins the same NEAR AI sign-in as
     /// the Private AI section's button (the browser lists the logins,
