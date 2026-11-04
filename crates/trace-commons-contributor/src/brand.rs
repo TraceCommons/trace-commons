@@ -37,9 +37,13 @@ pub const APP_NAME: &str = crate::app_name!();
 /// The commons' name as a string literal, usable inside `concat!`.
 ///
 /// Not the app. The app is what runs on this device; the commons is where
-/// its traces go -- the hosted service, the account, the server. A sentence
-/// about where a trace ends up names this, and a sentence about what the
-/// device is doing names [`app_name!`].
+/// its traces go -- the hosted service, the account, the server.
+///
+/// Nothing a user sees names the commons for now (owner rule, 2026-11-02):
+/// a sentence about where a trace ends up says "the server that receives
+/// your traces" or similar instead. The macro is kept with no consumers;
+/// `tests/no_commons_name_in_copy.rs` fails if anything outside this file
+/// uses it, or if user-visible source spells the name out.
 #[macro_export]
 macro_rules! commons_name {
     () => {

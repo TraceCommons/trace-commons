@@ -31,12 +31,33 @@ struct ManagedTerminalPicker: View {
     }
 }
 
-/// "Open sessions in", asked in a launch dialog until the person has chosen
-/// a terminal (`ManagedSnapshot.asksForTerminal`): the same label and the
-/// same installed apps as Settings, starting on the current one. Nothing is
-/// written here; the dialog's Open saves the choice before the launch, so
-/// it is remembered and the row is not drawn again. Settings still changes
-/// it later.
+/// "Group sessions in herdr", under the picker (owner decision D4,
+/// 2026-11-03): sessions open as tabs of herdr's "Near.ai" workspace, and
+/// the terminal above hosts herdr when it is not running. The label is the
+/// core's (`herdr_grouping`). Drawn only while
+/// `ManagedSnapshot.offersHerdrGrouping`; moved only by a write the daemon
+/// accepted.
+struct ManagedHerdrGroupingSwitch: View {
+    let snapshot: ManagedSnapshot
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        Toggle(model.managedText("herdr_grouping"), isOn: Binding(
+            get: { snapshot.capabilities.herdrGrouping == true },
+            set: { on in
+                guard on != (snapshot.capabilities.herdrGrouping == true) else { return }
+                model.setManagedHerdrGrouping(on)
+            }))
+            .toggleStyle(GlassToggleStyle(.settings))
+            .disabled(model.managedBusy)
+    }
+}
+
+/// "Open sessions in", asked in a launch dialog on every launch while more
+/// than one terminal is installed (`ManagedSnapshot.asksForTerminal`): the
+/// same label and the same installed apps as Settings, starting on the
+/// current one. Nothing is written here; the dialog's Open saves the pick
+/// before the launch, so it becomes the default. Settings still changes it.
 struct ManagedLaunchTerminalRow: View {
     let snapshot: ManagedSnapshot
     @Binding var selection: String?

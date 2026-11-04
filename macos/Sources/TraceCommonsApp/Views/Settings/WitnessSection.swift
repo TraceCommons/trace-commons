@@ -65,6 +65,13 @@ struct WitnessSection: View {
                             .accessibilityElement(children: .combine)
                     }
 
+                    // Whether the extra privacy scan is configured, moved
+                    // here from the account section (Settings IA D7).
+                    if let settings = model.daemonSettings {
+                        SettingsStateRow(title: SettingsLegacyWords.extraScanConfigured,
+                                         isOn: settings.nearAIConfigured)
+                    }
+
                     if let state, WitnessSurface.offersConfigure(state) {
                         fields(copy)
                     }
@@ -174,6 +181,7 @@ struct WitnessSection: View {
                 HStack(spacing: GlassTokens.Space.s3) {
                     Button(copy.inferenceEnable) { showingInferenceDisclosure = true }
                         .buttonStyle(GlassButtonStyle(.glass))
+                        .accessibilityLabel(copy.inferenceEnableAccessibilityName ?? copy.inferenceEnable)
                         .disabled(model.inferenceEvidenceBusy || model.daemonSettings?.ironwireAttestedBodies == nil)
                     // Disable, the decline, is a link after Enable (Ron,
                     // 2026-10-09).
@@ -181,6 +189,7 @@ struct WitnessSection: View {
                         Task { await model.setInferenceEvidence(false) }
                     }
                     .buttonStyle(GlassButtonStyle(.link))
+                    .accessibilityLabel(copy.inferenceDisableAccessibilityName ?? copy.inferenceDisable)
                     .disabled(model.inferenceEvidenceBusy || model.daemonSettings?.ironwireAttestedBodies == nil)
                 }
                 // A failed save, directly under the buttons it is about.
@@ -223,6 +232,7 @@ struct WitnessSection: View {
                 HStack(spacing: GlassTokens.Space.s3) {
                     Button(copy.tokenEnable ?? "") { showingTokenDisclosure = true }
                         .buttonStyle(GlassButtonStyle(.glass))
+                        .accessibilityLabel(copy.tokenEnableAccessibilityName ?? copy.tokenEnable ?? "")
                         .disabled(model.tokenContributionBusy || model.daemonSettings?.tokenDistributionsContribution == nil)
                     // Disable, the decline, is a link after Enable (Ron,
                     // 2026-10-09).
@@ -230,6 +240,7 @@ struct WitnessSection: View {
                         Task { await model.setTokenContribution(false) }
                     }
                     .buttonStyle(GlassButtonStyle(.link))
+                    .accessibilityLabel(copy.tokenDisableAccessibilityName ?? copy.tokenDisable ?? "")
                     .disabled(model.tokenContributionBusy || model.daemonSettings?.tokenDistributionsContribution == nil)
                 }
                 // A failed save, directly under the buttons it is about.
@@ -277,10 +288,10 @@ struct WitnessSection: View {
             .disabled(model.tokenContributionBusy)
             .glassModal(isPresented: $showingTokenCapture) {
                 GlassConfirmation(
-                    title: label, message: storage.captureConfirmation ?? "",
+                    title: storage.captureConfirmTitle ?? label, message: storage.captureConfirmation ?? "",
                     actions: [
                         .cancel(storage.cancelLabel) { showingTokenCapture = false },
-                        GlassModalAction(label, isDefault: true) {
+                        GlassModalAction(storage.captureConfirmLabel ?? label, isDefault: true) {
                             showingTokenCapture = false
                             Task { await model.setLocalTokenCapture(true) }
                         },

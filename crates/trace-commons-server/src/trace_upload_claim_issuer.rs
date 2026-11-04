@@ -3585,7 +3585,7 @@ fn normalize_onboarding_ingest_url(value: Option<String>) -> anyhow::Result<Opti
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, StatusCode, header};
     use chrono::{Duration, Utc};
@@ -7107,7 +7107,7 @@ mod tests {
     /// `POST /v1/invite/lookup` without a database: routing, throttling,
     /// fail-closed behaviour and secret-free logging. The database-backed
     /// behaviour (labels, no use spent) is `tests/trace_invite_registry_pg.rs`.
-    mod invite_lookup {
+    pub(crate) mod invite_lookup {
         use super::*;
         use std::io::Write;
         use std::sync::Mutex;
@@ -7152,7 +7152,10 @@ mod tests {
         /// be dynamic: a plain `filter_fn` caches its first answer per
         /// callsite, so whichever thread registered the handler's `info!`
         /// would decide for all of them again.
-        fn capture_logs(f: impl FnOnce()) -> String {
+        ///
+        /// The lib's only global subscriber, so other modules' tests that
+        /// need a log capture call this one (`payout_pass`).
+        pub(crate) fn capture_logs(f: impl FnOnce()) -> String {
             use tracing_subscriber::Layer;
             use tracing_subscriber::layer::SubscriberExt;
             static INSTALL: std::sync::Once = std::sync::Once::new();

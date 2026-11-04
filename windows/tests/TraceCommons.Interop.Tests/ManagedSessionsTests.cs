@@ -174,6 +174,7 @@ public sealed class ManagedSessionsTests
         Assert.Equal("sign_in_needed", ManagedSignIn.ErrorKey("managed-near-ai-sign-in-required"));
         Assert.Equal("balance_too_low", ManagedSignIn.ErrorKey("managed-near-ai-balance-too-low"));
         Assert.Equal("project_chooses_model", ManagedSignIn.ErrorKey("managed-project-chooses-model"));
+        Assert.Equal("project_sets_auto_mode_server", ManagedSignIn.ErrorKey("managed-project-sets-auto-mode-server"));
         Assert.Equal("action_failed", ManagedSignIn.ErrorKey("managed-conflict"));
         Assert.Equal("action_failed", ManagedSignIn.ErrorKey(null));
         Assert.Equal("terminal_not_found", ManagedSignIn.ErrorKey("managed-terminal-not-found"));
@@ -192,6 +193,53 @@ public sealed class ManagedSessionsTests
         Assert.Equal("Open sessions in", snapshot.Text("terminal_choice"));
     }
 
+    private static ManagedSnapshot TerminalSnapshot(string capabilities) => ManagedSnapshot.Parse(
+        "{\"revision\":1,\"accounts\":[],\"sessions\":[],\"generations\":{},\"capabilities\":{\"managed_launch\":true,\"terminal_launch\":true,\"terminal_destination\":\"Windows Terminal\"," + capabilities + "},\"copy\":{}}")!;
+
+    private const string TwoTerminals = "\"terminal_choices\":[{\"id\":\"windows_terminal\",\"name\":\"Windows Terminal\"},{\"id\":\"alacritty\",\"name\":\"Alacritty\"}]";
+
+    /// <summary>#1891: asked on every launch once the daemon reports
+    /// terminal_chosen (true or false) and more than one is installed.</summary>
+    [Theory]
+    [InlineData("true", true)]
+    [InlineData("false", true)]
+    public void ALaunchAsksForTheTerminalOnEveryLaunchWithTwoInstalled(string chosen, bool asks)
+    {
+        var snapshot = TerminalSnapshot($"\"terminal_chosen\":{chosen},\"terminal_current\":\"alacritty\"," + TwoTerminals);
+        Assert.Equal(asks, snapshot.AsksForTerminal);
+    }
+
+    [Fact]
+    public void ALaunchDoesNotAskWithOneTerminalOrAnOlderDaemon()
+    {
+        var one = TerminalSnapshot("\"terminal_chosen\":false,\"terminal_choices\":[{\"id\":\"windows_terminal\",\"name\":\"Windows Terminal\"}]");
+        Assert.False(one.AsksForTerminal);
+        Assert.Null(one.TerminalToSave(0));
+        var older = TerminalSnapshot(TwoTerminals);
+        Assert.False(older.AsksForTerminal);
+        Assert.Null(older.TerminalToSave(1));
+        Assert.False(TerminalSnapshot("\"terminal_chosen\":true").AsksForTerminal);
+    }
+
+    [Fact]
+    public void TheAskingDialogStartsOnTheCurrentTerminalElseTheFirst()
+    {
+        Assert.Equal(1, TerminalSnapshot("\"terminal_chosen\":true,\"terminal_current\":\"alacritty\"," + TwoTerminals).ProposedTerminalIndex);
+        Assert.Equal(0, TerminalSnapshot("\"terminal_chosen\":true,\"terminal_current\":\"ghost\"," + TwoTerminals).ProposedTerminalIndex);
+        Assert.Equal(0, TerminalSnapshot("\"terminal_chosen\":false," + TwoTerminals).ProposedTerminalIndex);
+        Assert.Equal(-1, TerminalSnapshot("\"terminal_chosen\":false").ProposedTerminalIndex);
+    }
+
+    [Fact]
+    public void AnAskedLaunchSavesThePickedTerminalAndNothingElseDoes()
+    {
+        var snapshot = TerminalSnapshot("\"terminal_chosen\":true,\"terminal_current\":\"windows_terminal\"," + TwoTerminals);
+        Assert.Equal("alacritty", snapshot.TerminalToSave(1));
+        Assert.Equal("windows_terminal", snapshot.TerminalToSave(0));
+        Assert.Null(snapshot.TerminalToSave(-1));
+        Assert.Null(snapshot.TerminalToSave(2));
+    }
+
     [Fact]
     public void AnOlderSnapshotOffersNoTerminalChoice()
     {
@@ -202,6 +250,25 @@ public sealed class ManagedSessionsTests
         Assert.Null(snapshot.Capabilities.TerminalCurrent);
         Assert.Empty(snapshot.TerminalChoices);
         Assert.Equal(-1, snapshot.TerminalSelectedIndex);
+    }
+
+    /// <summary>Owner, 2026-11-03: a session grouped in herdr opens there,
+    /// so the launch lines name herdr; an older daemon sends only
+    /// <c>terminal_destination</c>, which then names where sessions open.</summary>
+    [Fact]
+    public void ALaunchNamesWhereTheSessionOpens()
+    {
+        var grouped = ManagedSnapshot.Parse("""
+        {"revision":2,"accounts":[],"sessions":[],"generations":{},"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Windows Terminal","launch_destination":"herdr"},"copy":{}}
+        """);
+        Assert.NotNull(grouped);
+        Assert.Equal("herdr", grouped.Capabilities.SessionDestination);
+        Assert.Equal("Windows Terminal", grouped.Capabilities.TerminalDestination);
+        var older = ManagedSnapshot.Parse("""
+        {"revision":1,"accounts":[],"sessions":[],"generations":{},"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Windows Terminal"},"copy":{}}
+        """);
+        Assert.NotNull(older);
+        Assert.Equal("Windows Terminal", older.Capabilities.SessionDestination);
     }
 
     [Fact]

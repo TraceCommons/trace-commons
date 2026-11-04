@@ -27,6 +27,8 @@ public struct AccountDevicesCopy: Decodable, Equatable, Sendable {
     public let unlinkAccessibilityName: String
     public let unlinkConfirm: String
     public let unlinkConfirmButton: String
+    /// `{device}`: the confirmation's Unlink, named apart from the row's.
+    public let unlinkConfirmAccessibilityName: String
     public let cancelButton: String
     public let sessionEnded: String
     public let tooMany: String
@@ -46,6 +48,7 @@ public struct AccountDevicesCopy: Decodable, Equatable, Sendable {
         case unlinkAccessibilityName = "unlink_accessibility_name"
         case unlinkConfirm = "unlink_confirm"
         case unlinkConfirmButton = "unlink_confirm_button"
+        case unlinkConfirmAccessibilityName = "unlink_confirm_accessibility_name"
         case cancelButton = "cancel_button"
         case sessionEnded = "session_ended"
         case tooMany = "too_many"
@@ -58,7 +61,7 @@ public struct AccountDevicesCopy: Decodable, Equatable, Sendable {
         "link_accessibility_name", "link_body", "code_command", "copy_button", "copied",
         "waiting", "linked", "expired", "done_button", "unlink_button",
         "unlink_accessibility_name", "unlink_confirm", "unlink_confirm_button",
-        "cancel_button", "session_ended", "too_many", "failed",
+        "unlink_confirm_accessibility_name", "cancel_button", "session_ended", "too_many", "failed",
     ]
 
     public var sentences: [String] {
@@ -66,7 +69,7 @@ public struct AccountDevicesCopy: Decodable, Equatable, Sendable {
             title, body, thisDevice, unnamed, lastSeen, linkButton, linkAccessibilityName,
             linkBody, codeCommand, copyButton, copied, waiting, linked, expired, doneButton,
             unlinkButton, unlinkAccessibilityName, unlinkConfirm, unlinkConfirmButton,
-            cancelButton, sessionEnded, tooMany, failed,
+            unlinkConfirmAccessibilityName, cancelButton, sessionEnded, tooMany, failed,
         ]
     }
 
@@ -287,6 +290,11 @@ public struct AccountDevicesSurface: Equatable, Sendable {
 
     public func unlinkAccessibilityName(for device: AccountDevice) -> String {
         AccountDevicesCopy.render(copy.unlinkAccessibilityName, "device", with: name(for: device))
+    }
+
+    /// The confirmation's Unlink, named apart from the row's (rule 5).
+    public func unlinkConfirmAccessibilityName(for device: AccountDevice) -> String {
+        AccountDevicesCopy.render(copy.unlinkConfirmAccessibilityName, "device", with: name(for: device))
     }
 
     public func refusalLine(_ refusal: AccountDevicesRefusal) -> String {

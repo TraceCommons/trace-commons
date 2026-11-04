@@ -546,7 +546,10 @@ final class SubscriptionUsageTests: XCTestCase {
         let claudeDisclosure = try XCTUnwrap(settings.range(of: "detail(\"analytics_subscriptions_claude_detail\")"))
         let claudeSwitch = try XCTUnwrap(settings.range(of: "Toggle(text(\"analytics_subscriptions_setting_claude\")"))
         XCTAssertLessThan(claudeDisclosure.lowerBound, claudeSwitch.lowerBound)
-        XCTAssertTrue(content.contains("SubscriptionUsageSettingsSection()"))
+        // In Settings > Insights since the Settings IA review (D13).
+        XCTAssertTrue(content.contains("case .insights: InsightsSection()"))
+        let insights = try SettingsParityTests.text("Views/Settings/InsightsSettingsCard.swift")
+        XCTAssertTrue(insights.contains("SubscriptionUsageSettingsSection()"))
         XCTAssertTrue(overview.contains("InsightsLimitsRows.rows(subscriptions?.supportedProviders ?? []"))
         XCTAssertFalse(overview.contains("setEnabled"))
         XCTAssertTrue(overview.contains("InsightsInfo(row.account, [text(\"analytics_subscriptions_claude_detail\")])"))

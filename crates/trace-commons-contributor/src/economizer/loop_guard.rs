@@ -246,7 +246,7 @@ pub fn should_redirect_judged(
 /// agent to stop.
 pub fn redirect_text(turn: &TurnState) -> String {
     format!(
-        "Automated process check (Trace Commons): this turn has made {edits} edit(s) across \
+        "Automated process check (this app): this turn has made {edits} edit(s) across \
          {files} file(s), the busiest file {churn} time(s), and ran {checks} check(s); the same \
          failure has come back {repeats} time(s). That looks like a loop. Keep working, but step \
          back first: re-read the failing output, consider a different cause or a different \

@@ -23,8 +23,8 @@ use trace_commons_contributor_ffi::{
     TC_WITNESS_STATE_REFUSING_INFERENCE_RECEIPTS_MISSING, TC_WITNESS_STATE_REFUSING_PIN_MALFORMED,
     TC_WITNESS_STATE_REFUSING_UNPINNED, TC_WITNESS_STATE_UNREADABLE, TC_WITNESS_TONE_ATTENTION,
     TC_WITNESS_TONE_CLEAR, TC_WITNESS_TONE_HELD, TC_WITNESS_TONE_NEUTRAL, TC_WITNESS_TONE_REFUSED,
-    tc_call, tc_certificate_list_title, tc_certificate_row_line, tc_consent_copy,
-    tc_consent_gate_help, tc_contribution_attestation_line,
+    tc_account_attention_copy_json, tc_call, tc_certificate_list_title, tc_certificate_row_line,
+    tc_consent_copy, tc_consent_gate_help, tc_contribution_attestation_line,
     tc_contribution_attestation_reason_line, tc_contribution_attestation_tone,
     tc_contribution_eligibility_control, tc_contribution_eligibility_line,
     tc_contribution_eligibility_reason_line, tc_contribution_eligibility_tone,
@@ -2533,6 +2533,7 @@ fn write_enrolled_config(
         inference_receipt_endpoint: None,
         consent_scopes_chosen: Some(true),
         witness_origin: None,
+        account_identity: None,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION
             .to_string(),
@@ -5255,6 +5256,48 @@ fn a_legacy_migration_notice_crosses_the_abi_as_the_rust_builds_it() {
 }
 
 #[test]
+fn the_account_attention_status_crosses_the_abi_as_the_rust_builds_it() {
+    use std::ffi::CString;
+    use trace_commons_contributor::consent_copy as copy;
+    for wire in [
+        serde_json::json!({"account_state": "needs_attention",
+            "account_state_reason": "account_record_unreadable",
+            "near_ai_login_unconfirmed": true, "logged_in": true}),
+        serde_json::json!({"account_state": "needs_attention",
+            "account_state_reason": "account_address_refused",
+            "near_ai_login_unconfirmed": false}),
+    ] {
+        let arg = CString::new(wire.to_string()).unwrap();
+        let json = take_owned(unsafe { tc_account_attention_copy_json(arg.as_ptr()) });
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let expected =
+            serde_json::to_value(copy::account_attention_for_wire(&wire).expect("shown")).unwrap();
+        assert_eq!(parsed, expected, "the ABI hands over the status unchanged");
+        assert_eq!(parsed["action"], "Set up again");
+    }
+}
+
+#[test]
+fn no_account_attention_is_null_not_a_guess() {
+    use std::ffi::CString;
+    assert!(unsafe { tc_account_attention_copy_json(std::ptr::null()) }.is_null());
+    for text in [
+        "not json",
+        "null",
+        "[]",
+        r#"{"account_state":"ok","account_state_reason":null,"near_ai_login_unconfirmed":false}"#,
+        // A daemon too old to send the keys.
+        r#"{"logged_in":true}"#,
+    ] {
+        let arg = CString::new(text).unwrap();
+        assert!(
+            unsafe { tc_account_attention_copy_json(arg.as_ptr()) }.is_null(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn no_legacy_migration_notice_is_null_not_a_guess() {
     use std::ffi::CString;
     assert!(unsafe { tc_legacy_migration_notice(std::ptr::null()) }.is_null());
@@ -5661,6 +5704,28 @@ fn the_account_devices_copy_crosses_the_abi() {
     let copy = json_owned(tc_account_devices_copy_json());
     assert_eq!(copy, serde_json::to_value(account_devices_copy()).unwrap());
     assert!(copy["code_command"].as_str().unwrap().contains("{code}"));
+    assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
+}
+
+#[test]
+fn the_account_change_copy_crosses_the_abi() {
+    use trace_commons_contributor::account_change_copy::account_change_copy;
+    use trace_commons_contributor_ffi::tc_account_change_copy_json;
+    let copy = json_owned(tc_account_change_copy_json());
+    assert_eq!(copy, serde_json::to_value(account_change_copy()).unwrap());
+    assert!(copy["body"].as_str().unwrap().contains("{new_provider}"));
+    assert_eq!(copy["mismatch_change"], "Use a different account");
+    assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
+}
+
+#[test]
+fn the_set_up_again_copy_crosses_the_abi() {
+    use trace_commons_contributor::consent_copy::set_up_again_copy;
+    use trace_commons_contributor_ffi::tc_set_up_again_copy_json;
+    let copy = json_owned(tc_set_up_again_copy_json());
+    assert_eq!(copy, serde_json::to_value(set_up_again_copy()).unwrap());
+    assert_eq!(copy["action"], "Set up again");
+    assert_eq!(copy.as_object().unwrap().len(), 6);
     assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
 }
 

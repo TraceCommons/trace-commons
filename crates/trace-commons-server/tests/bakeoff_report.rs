@@ -1,16 +1,9 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// These source modules expose helpers for their own integration targets; this
-// target intentionally uses only corpus loading and discrimination AUC.
-#[allow(dead_code)]
-#[path = "../src/bin/gate_calibrate/bakeoff_corpus.rs"]
-mod bakeoff_corpus;
-#[allow(dead_code)]
-#[path = "../src/bin/gate_calibrate/bakeoff_metrics.rs"]
-mod bakeoff_metrics;
-#[path = "../src/bin/gate_calibrate/bakeoff_report.rs"]
-mod bakeoff_report;
+use crate::gate_calibrate::bakeoff_corpus;
+use crate::gate_calibrate::bakeoff_metrics;
+use crate::gate_calibrate::bakeoff_report;
 
 use bakeoff_report::{
     BASELINE_DOMINANCE_MARGIN, BaselineResults, CandidateResult, DETERMINISM_GATE, License,

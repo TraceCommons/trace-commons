@@ -128,7 +128,7 @@ async fn adopt_published_receipt_endpoint(
     // mechanism.
     let published = super::account_onboarding::published_receipt_endpoint(
         &cfg.ingest_url,
-        super::account_onboarding::Path::for_tenant(&cfg.tenant_id),
+        super::account_onboarding::Path::for_config(cfg),
     )
     .await;
     adopt_receipt_endpoint(shared, cfg, published.as_deref())

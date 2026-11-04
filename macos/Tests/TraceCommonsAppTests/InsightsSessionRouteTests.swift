@@ -415,16 +415,10 @@ final class InsightsSessionRouteTests: XCTestCase {
         let week = try Self.decode(Self.recorded())
         model.showCounter(week.coreOverview, sessions: InsightsCounterSessions(week: week))
 
-        for card in ["sessions", "tokens", "cache_share"] {
-            XCTAssertFalse(model.drills(card), "feed T rows carry no reference for the core's drill: \(card)")
-        }
         let breakdown = try XCTUnwrap(model.counterSessions)
         XCTAssertEqual(breakdown.rows.count, 2)
         XCTAssertEqual(breakdown.column, .shown)
 
-        model.showInputs("tokens")
-        model.showInputs("sessions")
-        XCTAssertNil(model.openCard)
         let after = await calls.count
         XCTAssertEqual(after, before, "feed T's rows are the daemon's; the core is not asked")
 
@@ -433,31 +427,12 @@ final class InsightsSessionRouteTests: XCTestCase {
         model.close()
     }
 
-    /// Under feed S the tokens and cache share figures still drill; the
-    /// Sessions figure does not, since its breakdown is always shown.
-    @MainActor
-    func testUnderFeedSTheFiguresStillDrill() {
-        let model = InsightsOverviewModel(service: { _ in throw InsightsError.invalidResponse })
-        for card in ["tokens", "cache_share"] { XCTAssertTrue(model.drills(card), card) }
-        XCTAssertFalse(model.drills("sessions"))
-    }
-
-    @MainActor
-    func testAClosedOverviewOpensNoDrill() throws {
-        // Nothing opens while the tab is closed.
-        let model = InsightsOverviewModel(service: { _ in throw InsightsError.invalidResponse })
-        model.showInputs("tokens")
-        XCTAssertNil(model.openCard)
-        XCTAssertNil(model.sessionsInputs)
-    }
-
     @MainActor
     func testAFeedTWeekWithoutRowsHasNoBreakdown() throws {
         let model = InsightsOverviewModel(service: { _ in throw InsightsError.invalidResponse })
         let week = try Self.decode(Self.recorded())
         model.showCounter(week.coreOverview, sessions: nil)
         XCTAssertNil(model.counterSessions)
-        XCTAssertFalse(model.drills("sessions"))
     }
 
     // MARK: The view's source
@@ -465,9 +440,10 @@ final class InsightsSessionRouteTests: XCTestCase {
     func testTheOverviewDrawsTheColumnFromTheCoresWords() throws {
         let source = try InsightsGlassConventionsTests.text("Views/InsightsOverviewTab.swift")
         XCTAssertFalse(source.contains(".disabled(model.counter != nil)"))
-        // A figure drills only when `drills` says so; one that does not is
-        // drawn plain, not as a disabled button.
-        XCTAssertTrue(source.contains("if model.drills(inputs) {"))
+        // No figure drills (product owner, 2026-10-29, #1753): each is drawn
+        // plain, never as a button or a disabled one.
+        XCTAssertFalse(source.contains("drillButton("))
+        XCTAssertFalse(source.contains("model.drills("))
         // A picked day's sessions are drawn in the window's inspector
         // (owner, 2026-10-29).
         XCTAssertTrue(try InsightsGlassConventionsTests.text("Views/InsightsBreakdownInspector.swift")

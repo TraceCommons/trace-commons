@@ -2,6 +2,11 @@ import {
   type AutomaticGrantCopy,
   parseAutomaticGrantCopy,
 } from "./automatic-grant-copy";
+import {
+  type AccountAttentionCopy,
+  parseAccountAttentionCopy,
+  parseSetUpAgainAnswer,
+} from "./account-attention";
 import { invokeTauri } from "./core-api";
 import {
   type ArmingRewordedNotice,
@@ -736,4 +741,24 @@ export async function getWithdrawalConfirmationPrompt(): Promise<string> {
     throw new Error("Invalid withdrawal confirmation copy");
   }
   return value;
+}
+
+/**
+ * The account section's status for the keys of `status.daemon` that the
+ * core reads, or null while there is nothing to show.
+ */
+export async function getAccountAttentionCopy(
+  wire: Record<string, unknown>,
+): Promise<AccountAttentionCopy | null> {
+  return parseAccountAttentionCopy(
+    await invokeTauri("account_attention_copy", { status: wire }),
+  );
+}
+
+/**
+ * Unenroll, which also signs out of NEAR AI. Resolves with the core's
+ * sentence for anything left behind; rejects when the daemon refused.
+ */
+export async function setUpAgain(): Promise<{ leftBehind: string | null }> {
+  return parseSetUpAgainAnswer(await invokeTauri("set_up_again"));
 }

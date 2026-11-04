@@ -205,11 +205,12 @@ read.
 The same resolver role and pool also serve the NEAR sign-in bootstrap below;
 no additional login role is needed.
 
-Passkeys are removed (migration V144, see "V144: passkey removal" below). The
+WebAuthn sign-in is removed (migration V144, see "V144: WebAuthn sign-in
+removal" below). The
 `TRACE_COMMONS_WEBAUTHN_RP_*`, `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING`,
 `TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY` and
 `TRACE_COMMONS_UNBOUND_REAPER_*` variables are accepted and ignored; see
-[`env-reference.md`](env-reference.md#removed-variables-passkeys).
+[`env-reference.md`](env-reference.md#removed-variables-webauthn-sign-in).
 
 ### Login-with-NEAR (contributor NEAR sign-in, Slice 3a)
 
@@ -410,7 +411,14 @@ the new tables need; the features that add tables document their own grant
 blocks (for example [`native-admission-session.md`](native-admission-session.md)
 and [`mission-insight-rewards.md`](mission-insight-rewards.md)). Only then
 install. An older binary ignores migration versions it does not know, so
-applying them ahead of the binary is safe for the build still running.
+applying them ahead of the binary is usually safe for the build still running.
+The exception is a migration that changes state an old process may act on,
+such as V147, which revokes payout links and says to stop the old service
+before the new one starts: then stop both units before applying it. The issuer
+also runs the migration runner at boot whenever
+`TRACE_COMMONS_INVITE_REGISTRY_DATABASE_URL` is set (it connects as the
+migrator on the pilot), and `pull-and-install.sh both` restarts it before
+ingest, so stop both units first whenever the build carries migrations.
 
 Two more things this incident showed:
 
@@ -668,15 +676,15 @@ seven days. A contributor who wants it gone now should sign in again and call
 `POST /v1/account/sessions/revoke-all`, which revokes every session on the
 account, the old one and the current one alike, and then sign in once more.
 
-### V144: passkey removal
+### V144: WebAuthn sign-in removal
 
-V144 removes passkeys. It is forward-only and runs in one transaction:
+V144 removes WebAuthn sign-in. It is forward-only and runs in one transaction:
 
-- Every passkey-origin account in state `unbound` or `closed` is closed and
+- Every account WebAuthn sign-in created in state `unbound` or `closed` is closed and
   its sessions revoked, then deleted; its sessions, credentials and login
   links go with it. An account that a non-cascading row keeps from being
   deleted stays closed with its sessions revoked.
-- `bound` passkey accounts are kept and sign in with their NEAR AI login.
+- `bound` accounts it created are kept and sign in with their NEAR AI login.
 - The functions `trace_unbound_passkey_account_count()` and
   `trace_reap_unbound_accounts(...)` and the tables `trace_account_bindings`
   and `trace_webauthn_credentials` are dropped.
@@ -1400,3 +1408,14 @@ So `unknown` on a deployed binary points at the build step, not at the host.
   `dstack` and `enclave_near_ai` (attested NEAR AI TEE scoring); the test
   gates are withheld as `non_production_gate`. Run the settlement as a dry
   run first.
+- On a pipeline-routed deployment the delta alone pays nothing: the
+  compatibility bundle's award is a `NoveltyUtility` ledger row that no
+  batch carries. Paying needs the graded credit rule,
+  `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_RULE=graded_perplexity_v1` (`flat`,
+  the default, keeps today's behaviour). Under it the award is the delta
+  times the trace's perplexity and anomaly terms, and the pipeline batches
+  it so the NEAR AI payout rail pays it. The rule is pinned in the signed
+  package like the delta, so changing it is a new package; see
+  [`pipeline-activation.md`](pipeline-activation.md), "Compatibility credit",
+  and the rollout in
+  `docs/superpowers/specs/2026-11-03-pilot-paying-bundle-design.md`.

@@ -87,7 +87,7 @@ struct InsightsBreakdownDetail: View {
                 // Nothing picked: Breakdown's title over the dash, as an
                 // empty table on Breakdown draws it.
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                    InsightsBreakdownTitle(day: nil, copy: copy, showWeek: {})
+                    InsightsBreakdownTitle(day: nil, copy: copy)
                     Text(text("analytics_unavailable")).insightsNote()
                 }
             }
@@ -98,15 +98,14 @@ struct InsightsBreakdownDetail: View {
     }
 
     /// The picked day's sessions: the daemon's rows under feed T, the
-    /// core's under feed S. "Show week" puts the week back.
+    /// core's under feed S. The day is cleared on Tokens by day.
     @ViewBuilder
     private var daySessions: some View {
         if let overview, let day {
-            let showWeek = { inspector.pick(day: nil) }
             if let sessions = overview.counterSessions {
-                InsightsCounterSessionsView(sessions: sessions, copy: copy, day: day, showWeek: showWeek)
+                InsightsCounterSessionsView(sessions: sessions, copy: copy, day: day)
             } else if let inputs = overview.sessionsInputs {
-                InsightsCardInputsView(inputs: inputs, snapshots: snapshots, copy: copy, day: day, showWeek: showWeek)
+                InsightsCardInputsView(inputs: inputs, snapshots: snapshots, copy: copy, day: day)
             }
         }
     }

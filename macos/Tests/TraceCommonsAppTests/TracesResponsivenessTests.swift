@@ -87,6 +87,20 @@ final class TracesResponsivenessTests: XCTestCase {
         XCTAssertTrue(store.offers.isEmpty, "a new client keeps the old offers")
     }
 
+    /// Every folder stays known while the idle filter narrows the tree, so
+    /// Home does not take an idle-only view for "nothing watched" and swap
+    /// its Traces cards for the walkthrough (#1888 review).
+    func test_everyFolderIsKeptUnderTheIdleFilter() async {
+        let store = await loaded(.busyQueue)
+        let all = store.everyFolder
+        XCTAssertFalse(all.isEmpty)
+        await store.showIdleOnly(true)
+        XCTAssertEqual(store.everyFolder.map(\.id), all.map(\.id), "the filter changes the tree, not every folder")
+        XCTAssertLessThanOrEqual(store.tree.folders.count, all.count)
+        store.attach(nil)
+        XCTAssertTrue(store.everyFolder.isEmpty, "a new client starts empty")
+    }
+
     func test_aNewClientDropsTheOldRowsLines() async {
         let store = await loaded()
         XCTAssertFalse(store.rowLines.isEmpty)

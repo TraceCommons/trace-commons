@@ -46,48 +46,6 @@ final class HomeAndTracesRedesignTests: XCTestCase {
         XCTAssertTrue(tree.matching("nothing-like-this").folders.isEmpty)
     }
 
-    /// The change is against the newest earlier day this Mac saw; with no
-    /// earlier day it is unknown, never zero; old days are let go.
-    func test_creditTotalsGiveTheChangeSinceTheLastDaySeen() throws {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "UTC"))
-        func day(_ text: String) throws -> Date { try XCTUnwrap(ISO8601DateFormatter().date(from: text + "T12:00:00Z")) }
-
-        var totals = CreditDailyTotals()
-        totals.record(10, on: try day("2026-10-09"), calendar: calendar)
-        XCTAssertNil(totals.delta(on: try day("2026-10-09"), calendar: calendar), "no earlier day")
-
-        // Two days later (none seen between): against the 9th.
-        totals.record(14.5, on: try day("2026-10-11"), calendar: calendar)
-        XCTAssertEqual(totals.delta(on: try day("2026-10-11"), calendar: calendar), 4.5)
-        // A later read the same day replaces that day's total.
-        totals.record(9, on: try day("2026-10-11"), calendar: calendar)
-        XCTAssertEqual(totals.delta(on: try day("2026-10-11"), calendar: calendar), -1)
-        XCTAssertNil(totals.delta(on: try day("2026-10-12"), calendar: calendar), "today not read yet")
-
-        for offset in 0 ..< 40 {
-            totals.record(Double(offset), on: try day("2026-10-12").addingTimeInterval(Double(offset) * 86_400),
-                          calendar: calendar)
-        }
-        XCTAssertEqual(totals.totals.count, CreditDailyTotals.keptDays)
-    }
-
-    /// The tile's sign and tone: green up, red down, and no line at all for
-    /// no change (owner, 2026-10-16).
-    func test_creditDeltaIsSignedAndToned() throws {
-        let words = try XCTUnwrap(MonitorWords.table?.homeHistory)
-        let up = try XCTUnwrap(HomeFormat.creditDelta(3, words: words))
-        XCTAssertTrue(up.text.hasPrefix("+3"))
-        XCTAssertEqual(up.ink, GlassTokens.Color.statusOnText)
-        let down = try XCTUnwrap(HomeFormat.creditDelta(-2.5, words: words))
-        XCTAssertTrue(down.text.contains("2.5"))
-        XCTAssertEqual(down.ink, GlassTokens.Color.statusOutsideText)
-        XCTAssertNil(HomeFormat.creditDelta(0, words: words))
-        XCTAssertNil(HomeFormat.creditDelta(0.04, words: words))
-        XCTAssertNil(HomeFormat.creditDelta(nil, words: words))
-        XCTAssertEqual(HomeFormat.creditTotal(nil), "—")
-    }
-
     /// Uncontributed counts what has not left this Mac, and adds up only
     /// the estimates the core says to draw.
     func test_uncontributedCountsWhatWaitsAndItsDrawnEstimate() throws {

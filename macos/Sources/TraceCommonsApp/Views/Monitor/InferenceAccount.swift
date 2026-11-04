@@ -74,7 +74,8 @@ struct PrivateAISettingsPanels: View {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
                         PrivateAIPanelHeader(
                             eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,
-                            refresh: copy.panelToolsRefreshAccessibility, onRefresh: { refreshTools() })
+                            refresh: copy.panelToolsRefreshAccessibility, refreshWord: copy.panelRefresh,
+                            onRefresh: { refreshTools() })
                         HarnessListSection(copy: copy, titled: false)
                     }
                 }
@@ -94,7 +95,8 @@ struct PrivateAISettingsPanels: View {
                     onDismiss: { store.dismissPrivateAIRefusal() },
                     onRefresh: { refreshConnection() },
                     // #1146: the sign-in is part of the connection panel.
-                    credential: AnyView(CredentialSection(copy: copy, prominent: true, titled: false)))
+                    credential: AnyView(CredentialSection(
+                        copy: copy, prominent: true, titled: false, placement: .signInShortcut)))
             }
         }
     }
@@ -149,6 +151,9 @@ struct PrivateAIPanelHeader: View {
     var title: String?
     /// The refresh icon's accessible name, from the core.
     let refresh: String
+    /// The word in the refresh pill, from the core; the accessible name
+    /// when nil.
+    var refreshWord: String?
     var disabled = false
     let onRefresh: () -> Void
 
@@ -160,7 +165,7 @@ struct PrivateAIPanelHeader: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: GlassTokens.Space.s4)
-            GlassRefreshButton(refresh, action: onRefresh)
+            GlassRefreshButton(refresh, title: refreshWord, action: onRefresh)
                 .disabled(disabled)
         }
     }
@@ -197,29 +202,53 @@ struct PrivateAIStatCard: View {
 /// #1146's `PrivateAiBalancePanel`, drawn in the main pane and in the
 /// inspector: the balance eyebrow and heading with its own re-read link, then
 /// the balance row's sentence or figures. When the NEAR AI login is not
-/// usable it also draws the Private AI tab's Sign in, which opens the browser
-/// (the Settings credential card keeps its own, with the provider chooser).
+/// usable it draws the Private AI tab's Sign in, which opens the browser
+/// (the Settings credential card keeps its own, with the provider chooser),
+/// in the re-read icon's place at the head's trailing end (owner,
+/// 2026-11-02): re-reading cannot help until a sign-in lands.
 struct PrivateAIBalanceCard: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
 
     /// Under its icon (owner, 2026-10-10): the heading with its re-read
-    /// icon and the state or the figures under it.
+    /// icon, or Sign in, and the state or the figures under it.
+    ///
+    /// While a sign-in is needed the card is drawn as the sessions card
+    /// draws its empty line (owner, 2026-11-02): the state, and the core's
+    /// waiting or failure line, as the subtitle under the title, Sign in at
+    /// the head's trailing end, and nothing under the head. Add funds never
+    /// shows in place of a sign-in (`FundingRow.showsAddFunds`), so nothing
+    /// is lost.
     var body: some View {
-        GlassIconCard(
-            systemImage: "dollarsign.circle", title: copy.balanceTitle,
-            refresh: .init(
-                copy.panelBalanceRefreshAccessibility,
-                isDisabled: model.credentialBusy, isRefreshing: model.balanceRefreshing,
-                action: { model.refreshNearAiBalanceFromButton() }),
-            content: {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                    BalanceRow(copy: copy)
-                    // To billing, verified, as Settings' Manage billing
-                    // (owner, 2026-10-27); hidden while a sign-in is needed.
-                    FundingRow(copy: copy, style: .addFunds)
-                    NearAiSignInControl(copy: copy)
-                }
-            })
+        let signIn = NearAiSignInOffer.balanceHeadSignIn(
+            state: model.balanceStatus.state, renewalFailure: model.accountRenewalFailure,
+            failed: model.nearAiSignInFailed, signingIn: model.nearAiSigningIn)
+        if signIn, let line = BalanceSurface.stateLine(model.balanceStatus, copy: copy, calls: model.balanceCalls) {
+            GlassIconCard(
+                systemImage: "dollarsign.circle", title: copy.balanceTitle,
+                subtitle: [line, NearAiSignInOffer.progressLine(
+                    copy, signingIn: model.nearAiSigningIn, failed: model.nearAiSignInFailed,
+                    mismatch: model.loginMismatchLine) ?? ""],
+                trailing: { NearAiSignInHeadButton(copy: copy) })
+        } else {
+            GlassIconCard(
+                systemImage: "dollarsign.circle", title: copy.balanceTitle,
+                refresh: signIn ? nil : GlassCardRefresh(
+                    copy.panelBalanceRefreshAccessibility, title: copy.panelBalanceRefresh,
+                    isDisabled: model.credentialBusy, isRefreshing: model.balanceRefreshing,
+                    action: { model.refreshNearAiBalanceFromButton() }),
+                accessory: {
+                    if signIn { NearAiSignInHeadButton(copy: copy) }
+                },
+                content: {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                        BalanceRow(copy: copy)
+                        // To billing, verified, as Settings' Manage billing
+                        // (owner, 2026-10-27); hidden while a sign-in is needed.
+                        FundingRow(copy: copy, style: .addFunds)
+                        NearAiSignInControl(copy: copy)
+                    }
+                })
+        }
     }
 }

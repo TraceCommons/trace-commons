@@ -92,7 +92,7 @@ export function SourceRootsPanel({
         ))}
       </div>
       <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
-        Daemon does not return saved paths. Re-enter path when replacing a
+        Saved paths are not shown. Re-enter path when replacing a
         watched root. Rust validates selected directories before saving.
       </p>
     </section>

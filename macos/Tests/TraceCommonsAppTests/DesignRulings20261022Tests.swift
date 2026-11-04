@@ -119,7 +119,7 @@ final class DesignRulings20261022Tests: XCTestCase {
         let panel = try Self.panel()
         let graph = try Self.section("    private var graph: some View {", in: panel)
         XCTAssertTrue(graph.contains("GlassBarGraph(\n                MenuPanelData.bars(buckets, words: MonitorShellWords.graphWords),"))
-        XCTAssertTrue(graph.contains("scaleFloor: 5, compact: true, hovered: $hovered)"))
+        XCTAssertTrue(graph.contains("scaleFloor: 5, compact: true, paused: model.status.paused, hovered: $hovered)"))
         XCTAssertTrue(graph.contains(".frame(height: EdgeRailGraph.height)"))
         XCTAssertTrue(graph.contains("let shared = store.sharedCount.map { shown?.shared ?? $0 }"))
         XCTAssertFalse(panel.contains("GlassDayGraph("), "the popover's own graph is back")

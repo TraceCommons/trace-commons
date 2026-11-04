@@ -279,11 +279,18 @@ public static class WithdrawCopy
             return NotFound;
         }
 
+        // A shell-made label such as "daemon-not-started" is shown without
+        // its process prefix; the label itself is unchanged.
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        string? shown = label is not null && label.StartsWith("daemon-", StringComparison.Ordinal)
+            ? label.Substring("daemon-".Length)
+            : label;
+
         return string.Format(
             CultureInfo.CurrentCulture,
             "Nothing was withdrawn and nothing was deleted. The request did not go through "
             + "({0}). You can try again.",
-            string.IsNullOrEmpty(label) ? "no reason given" : label);
+            string.IsNullOrEmpty(shown) ? "no reason given" : shown);
     }
 
     /// <summary>

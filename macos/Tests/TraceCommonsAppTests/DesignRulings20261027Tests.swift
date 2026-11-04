@@ -39,19 +39,16 @@ final class DesignRulings20261027Tests: XCTestCase {
         XCTAssertLessThan(GlassTokens.Color.cardNested.light.alpha, 0.2)
     }
 
-    /// A soft band of light crosses the card: brighter and faster than the
-    /// band before, but soft, not a reflection, every 18s and each time
-    /// Home is opened.
-    func test_lightGlancesAcrossTheCardEvery18Seconds() throws {
+    /// The band of light that crossed the card every 18s from this round is
+    /// gone (owner, 2026-11-02: remove the shimmer), and so is the
+    /// component that drew it; the beacon before it stays gone too.
+    func test_noLightCrossesTheCard() throws {
         let body = try Self.notContributedCard()
-        XCTAssertTrue(body.contains(".glassCardShimmer()"))
+        XCTAssertFalse(body.contains("Shimmer"))
         XCTAssertFalse(body.contains("glassCardBeacon"))
-        XCTAssertEqual(GlassCardShimmer.every, .seconds(18))
-        XCTAssertLessThan(GlassCardShimmer.duration, 1)
-        // Home is built afresh each time its tab is opened, which starts
-        // the passes.
-        let window = try Self.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains("case .home:\n                    HomeTabView("))
+        let component = GlassSurfaceRulesTests.root.deletingLastPathComponent()
+            .appendingPathComponent("TCDesign/Components/CardShimmer.swift")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: component.path))
     }
 
     /// Credit arriving bursts gold coins out of the Balance tile, and the
@@ -69,14 +66,17 @@ final class DesignRulings20261027Tests: XCTestCase {
         XCTAssertFalse(fields.contains { $0.hasPrefix("received24h") }, "the received line's fields are back")
     }
 
-    /// The coins fall over the cards below the Balance tile, on Home and in
-    /// the edge rail, rather than under them.
+    /// The coins fall over the cards around the Balance tile, on Home and in
+    /// the edge rail, rather than under them. Private AI sits above Account
+    /// since 2026-11-02 (owner), and the raised Account section draws over
+    /// the sections above it as the coins spill upward.
     func test_theCoinsFallOverTheCardsBelow() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
-        let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount) {"))
+        let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount, accessory: accountSignIn) {"))
         let raised = try XCTUnwrap(home.range(of: ".zIndex(1)", range: account.upperBound..<home.endIndex))
-        let privateAI = try XCTUnwrap(home.range(of: "privateAI\n", range: account.upperBound..<home.endIndex))
-        XCTAssertLessThan(raised.lowerBound, privateAI.lowerBound, "the Account section is under Private AI")
+        let privateAI = try XCTUnwrap(home.range(of: "            privateAI\n"))
+        XCTAssertLessThan(privateAI.lowerBound, account.lowerBound, "Private AI is above Account")
+        XCTAssertLessThan(account.upperBound, raised.lowerBound, "the Account section is raised")
         XCTAssertTrue(home.contains("stats\n                    .zIndex(1)"), "the tiles are under the cards below")
         let rail = try Self.text("Views/EdgeRail/EdgeRailView.swift")
         let tiles = try XCTUnwrap(rail.range(of: "HomeAccountTiles(store: data.home) { open(.inference) }\n"))

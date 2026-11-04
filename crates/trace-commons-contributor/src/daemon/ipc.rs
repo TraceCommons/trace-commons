@@ -408,6 +408,7 @@ pub const METHODS: &[&str] = &[
     "set_notifications_enabled",
     "set_notify_kind",
     "set_managed_terminal",
+    "set_managed_herdr",
     "enroll",
     "prepare_admission_session",
     "near_account_capabilities",
@@ -451,6 +452,8 @@ pub const METHODS: &[&str] = &[
     "payout_link_start",
     "payout_link_confirm",
     "payout_link_unlink",
+    "account_login_change",
+    "account_login_change_cancel",
     "referral_codes_list",
     "referral_codes_create",
     "referral_codes_disable",
@@ -612,6 +615,7 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "set_notify_kind",
     // Writes only the settings file, through `set_settings`.
     "set_managed_terminal",
+    "set_managed_herdr",
     // `auto_upload` is refused inside these two; the other modes only stop
     // sends.
     "set_project_mode",
@@ -935,6 +939,9 @@ pub struct GateHeld {
 /// `status_value`, `publish_if_decisions_owed_changed`), or a
 /// temporary in a `match` scrutinee, which lives for the whole `match`.
 pub struct DaemonShared {
+    /// NEAR AI's chat-model catalogue, shared by every reader (a leaf lock).
+    /// See `managed::catalogue_cache`.
+    pub(crate) model_catalogue: crate::managed::catalogue_cache::CatalogueCache,
     pub(crate) managed: Mutex<Result<super::managed::ManagedService, crate::managed::ManagedError>>,
     pub store: ConfigStore,
     pub(crate) subscription_usage: Arc<super::subscription_usage::UsageService>,
@@ -969,6 +976,16 @@ pub struct DaemonShared {
     /// exactly the lifetime an update swap needs: after the swap there is a
     /// new process and nothing left to un-quiesce.
     pub quiesced: AtomicBool,
+    /// Uploads are held while `unenroll` waits for one in flight to settle
+    /// (`unenroll::settle_uploads`). In-memory only, like `quiesced`, and
+    /// cleared when that call returns: the contributor's own pause is never
+    /// rewritten. Checked under the queue lock where an entry is claimed.
+    pub uploads_held: AtomicBool,
+    /// Raised to stop an upload in flight now: the upload pass races each
+    /// entry's upload against a change here, drops it, and returns the entry
+    /// to `Approved`. A count in a watch channel, so a raise between the
+    /// pass subscribing and awaiting is never lost.
+    pub upload_interrupt: tokio::sync::watch::Sender<u64>,
     pub shutdown: AtomicBool,
     /// Wakes the supervisor immediately on a shutdown request. Without it the
     /// daemon would not notice until its next poll, which is a minute away --
@@ -1527,9 +1544,12 @@ impl DaemonShared {
         let paused = state.paused;
         let pin_store = store.clone();
         let managed = Mutex::new(super::managed::ManagedService::open(&store));
+        let model_catalogue =
+            crate::managed::catalogue_cache::CatalogueCache::open(Some(store.dir()));
         let insights_counter = super::insights_week::CounterPass::for_store(&store);
         Ok(Self {
             managed,
+            model_catalogue,
             store,
             queue: Mutex::new(queue),
             policy: Mutex::new(policy),
@@ -1541,6 +1561,8 @@ impl DaemonShared {
             dev_dry_run: false,
             paused: AtomicBool::new(paused),
             quiesced: AtomicBool::new(false),
+            uploads_held: AtomicBool::new(false),
+            upload_interrupt: tokio::sync::watch::Sender::new(0),
             shutdown: AtomicBool::new(false),
             shutdown_signal: Arc::new(Notify::new()),
             events,
@@ -1669,7 +1691,7 @@ impl DaemonShared {
     /// The observed count is stored only once the change has been applied. A
     /// settings document that will not load leaves it where it was, so the
     /// next pass tries again rather than dropping the credential forever.
-    async fn absorb_near_ai_credential_change(&self) {
+    pub(crate) async fn absorb_near_ai_credential_change(&self) {
         let observed = super::nearai_credential::ceremony::change_count(self.store.dir());
         if observed == self.near_ai_credential_changes.load(Ordering::Acquire) {
             return;
@@ -2624,7 +2646,27 @@ impl DaemonShared {
         let routing = self.routing_value();
         // Taken before the locks below for the same reason as `routing`:
         // one lock order everywhere.
-        let account_scope = super::commons_credentials::account_scope(&self.store).ok();
+        // One account snapshot (the commit lock, then three files) for both
+        // the scope and the account's state, and one config read for every
+        // field below.
+        let account_snapshot = super::commons_credentials::snapshot(
+            &self.store,
+            super::commons_credentials::Kind::Account,
+        )
+        .ok();
+        let account_scope = account_snapshot
+            .as_ref()
+            .and_then(|snapshot| super::commons_credentials::scope_for_snapshot(snapshot).ok());
+        let cfg = self.store.load_config().ok().flatten();
+        // No credential-store read and no write (`account_attention`'s doc).
+        // `holds_near_ai_key` takes the settings lock, before the locks below.
+        let account_attention = super::account_attention::account_attention(
+            &self.store,
+            cfg.as_ref(),
+            account_snapshot.as_ref(),
+        );
+        let near_ai_login_unconfirmed =
+            account_attention.is_some() && self.holds_near_ai_key() == Some(true);
         let private_inference = self.private_inference_value();
         // Before the queue lock too: it takes the policy lock and then the
         // queue lock, the order `list_projects` takes them in.
@@ -2748,7 +2790,6 @@ impl DaemonShared {
             policy.contribution_mode_partial(queue.all().iter().map(|e| e.project_key.as_str()));
         drop(policy);
         let health = self.health.lock().expect("health lock");
-        let cfg = self.store.load_config().ok().flatten();
         let consent_hold = crate::config::consent_hold(cfg.as_ref());
         // One set of inputs for the lead and the mark (nudge A3), so the
         // two can never read different gates, counts or news.
@@ -2854,6 +2895,23 @@ impl DaemonShared {
             "logged_in": logged_in,
             "setup_complete": super::setup_completion::is_complete(&self.store, cfg.as_ref(), logged_in, setup_roots_declared),
             "account_scope": account_scope,
+            // Additive (#1836 F1). `ok`, or `needs_attention` while this
+            // app's account is locally broken in a way signing in again does
+            // not fix; then `account_state_reason` is
+            // `account_record_unreadable` or `account_address_refused`, and
+            // `null` otherwise. `near_ai_login_unconfirmed` is true while
+            // that holds and a NEAR AI login is stored: no Commons check
+            // could run for it. It picks the core's Private AI line.
+            // All three always present, so a shell can tell "nothing to
+            // say" from a daemon too old to say. Words:
+            // `consent_copy::account_attention_for_wire`.
+            "account_state": if account_attention.is_some() {
+                crate::consent_copy::ACCOUNT_STATE_NEEDS_ATTENTION
+            } else {
+                crate::consent_copy::ACCOUNT_STATE_OK
+            },
+            "account_state_reason": account_attention,
+            "near_ai_login_unconfirmed": near_ai_login_unconfirmed,
             "tenant_id": cfg.as_ref().map(|c| c.tenant_id.clone()),
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
             // Additive. `consent-scopes-not-chosen` while nothing may be sent
@@ -2947,6 +3005,18 @@ impl DaemonShared {
             // `ContributionModeCopy.auto_partial` under its label.
             "contribution_mode_partial": contribution_mode_partial,
         });
+        // Additive (F10, spec 2.4): `login_change_available` (this device may
+        // offer "Use a different account"), `payouts_need_login` (a
+        // wallet-origin account, whose payouts need a NEAR AI login), and
+        // `login_change_held` (a login the commons refused as another account
+        // is held aside, so the change skips signing in with it again). All
+        // three always present. No network and no credential store.
+        if let (Some(object), serde_json::Value::Object(fields)) = (
+            status.as_object_mut(),
+            super::account_login_change::status_fields(&self.store, cfg.as_ref()),
+        ) {
+            object.extend(fields);
+        }
         // Additive (nudge U4). `{count, tools, threshold_days}`: how many
         // waiting Ask-me sessions nobody has written to for the idle
         // threshold, the display names of the tools they came from, and the
@@ -3667,6 +3737,12 @@ fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
 /// Labels are explicit because several methods share a label that cannot
 /// be derived from their names, including the onboarding and profile groups.
 const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
+    // It waits for the revoke at NEAR AI and takes the key out of the
+    // running proxy; neither can happen on this dispatcher.
+    (
+        "near_ai_credential_forget",
+        "near-ai-credential-forget-requires-async",
+    ),
     (
         "managed_model_catalogue",
         "managed-model-catalogue-requires-async",
@@ -3791,6 +3867,14 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("payout_link_start", "payout-link-requires-async"),
     ("payout_link_confirm", "payout-link-requires-async"),
     ("payout_link_unlink", "payout-link-requires-async"),
+    (
+        "account_login_change",
+        "account-login-change-requires-async",
+    ),
+    (
+        "account_login_change_cancel",
+        "account-login-change-requires-async",
+    ),
     ("referral_codes_list", "referral-requires-async"),
     ("referral_codes_create", "referral-requires-async"),
     ("referral_codes_disable", "referral-requires-async"),
@@ -3984,6 +4068,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         "set_notify_kind" => handle_set_notify_kind(shared, req),
         "set_managed_terminal" => handle_set_managed_terminal(shared, req),
+        "set_managed_herdr" => handle_set_managed_herdr(shared, req),
         "set_project_mode" => handle_set_project_mode(shared, req),
         "set_contribution_override" => handle_set_contribution_override(shared, req),
         "clear_contribution_override" => handle_clear_contribution_override(shared, req),
@@ -4043,7 +4128,6 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "near_account_cancel" => super::account_onboarding::handle_cancel(shared, req),
         "near_ai_credential_status" => super::nearai_credential::handle_status(shared, req),
         "near_ai_credential_cancel" => super::nearai_credential::handle_cancel(shared, req),
-        "near_ai_credential_forget" => super::nearai_credential::handle_forget(shared, req),
 
         // Unlike the probe, discovery opens no connection: it reads one
         // small file the proxy left on disk. So it answers here, on the
@@ -4312,6 +4396,11 @@ fn decorate_token_storage(value: &mut serde_json::Value, enabled: Option<bool>) 
     } else {
         "Enable capture"
     });
+    // The confirmation's title and confirm button, apart from the switch's
+    // button (copy-guide rule 4). Only shown when turning capture on.
+    // DRAFT, NEEDS APPROVAL (2026-11-04).
+    value["capture_confirm_title"] = serde_json::json!("Enable token capture?");
+    value["capture_confirm_label"] = serde_json::json!("Enable capture");
     value["capture_confirmation"] = serde_json::json!(
         "Token capture stores raw request and response data on this device. It requires configured, supported model targets and restarts the hosted proxy. Contribution and witness sharing remain separate choices."
     );
@@ -6530,6 +6619,18 @@ fn handle_set_managed_terminal(shared: &DaemonShared, req: &Request) -> Response
     Response::ok(req.id, serde_json::json!({ "managed_terminal": app.id() }))
 }
 
+/// `set_managed_herdr {on}`: "Group sessions in herdr". Written through
+/// `set_settings` as `handle_set_bool_setting` does, then the managed
+/// revision moves so every shell re-reads the snapshot
+/// (`capabilities.herdr_grouping`).
+fn handle_set_managed_herdr(shared: &DaemonShared, req: &Request) -> Response {
+    let response = handle_set_bool_setting(shared, req, "managed_herdr");
+    if response.error.is_none() {
+        super::managed::terminal_changed(shared);
+    }
+    response
+}
+
 fn handle_managed_folder_settings(shared: &DaemonShared, req: &Request) -> Response {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -6973,6 +7074,8 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "payout_link_start" => super::payout_link::handle_start(shared, req).await,
         "payout_link_confirm" => super::payout_link::handle_confirm(shared, req).await,
         "payout_link_unlink" => super::payout_link::handle_unlink(shared, req).await,
+        "account_login_change" => super::account_login_change::handle(shared, req).await,
+        "account_login_change_cancel" => super::account_login_change::handle_cancel(shared, req),
         "referral_codes_list" => super::referral::handle_list(shared, req).await,
         "referral_codes_create" => super::referral::handle_create(shared, req).await,
         "referral_codes_disable" => super::referral::handle_disable(shared, req).await,
@@ -10047,14 +10150,14 @@ mod tests {
     use crate::config::tests_support::temp_store;
     use crate::daemon::policy::UNKNOWN_PROJECT_KEY;
 
-    /// Passkeys are gone, and so is the list of them a daemon before their
-    /// removal kept: a daemon starting on that state deletes the file. With
-    /// no such file, starting is unaffected.
+    /// An older daemon kept a list of sign-in credentials that nothing reads
+    /// any more: a daemon starting on that state deletes the file. With no
+    /// such file, starting is unaffected.
     #[test]
-    fn startup_deletes_the_retired_remembered_passkeys_file() {
+    fn startup_deletes_the_retired_remembered_credentials_file() {
         let (_dir, store) = temp_store();
         let retired = store.daemon_path("remembered-passkeys.json");
-        std::fs::write(&retired, b"{\"passkeys\":[]}").unwrap();
+        std::fs::write(&retired, b"{}").unwrap();
 
         DaemonShared::load(store.clone()).unwrap();
         assert!(!retired.exists());
@@ -12187,6 +12290,7 @@ mod tests {
                 inference_receipt_endpoint: None,
                 consent_scopes_chosen: Some(true),
                 witness_origin: None,
+                account_identity: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "https://issuer.invalid".to_string(),
@@ -14734,6 +14838,25 @@ mod tests {
         assert_eq!(r.error.unwrap().code, ERR_UNKNOWN_METHOD);
     }
 
+    /// Owner, 2026-11-03: the window picker's two methods are gone. An app
+    /// built from #1852 still calls them, `try?`-ing the answer: it must
+    /// get the same plain refusal as any unknown method, with nothing
+    /// advertised and nothing run, and its dialog then offers no window.
+    #[test]
+    fn the_removed_window_picker_methods_are_refused_as_unknown() {
+        let s = shared();
+        for method in ["managed_terminal_windows", "managed_terminal_tab_access"] {
+            assert!(!METHODS.contains(&method), "{method}");
+            for params in [serde_json::json!({}), serde_json::Value::Null] {
+                let r = handle_request(&s, &req(method, params));
+                assert!(r.result.is_none(), "{method}");
+                let error = r.error.unwrap();
+                assert_eq!(error.code, ERR_UNKNOWN_METHOD, "{method}");
+                assert_eq!(error.message, "unknown-method", "{method}");
+            }
+        }
+    }
+
     #[test]
     fn hello_advertises_the_schema_and_method_set() {
         let s = shared();
@@ -14867,9 +14990,9 @@ mod tests {
     }
 
     /// The ceremony is reachable over the socket, and forgetting says what it
-    /// actually did rather than implying a revocation it cannot perform.
-    #[test]
-    fn the_credential_ceremony_is_dispatched_and_forgetting_claims_nothing_extra() {
+    /// actually did rather than implying a revocation it did not perform.
+    #[tokio::test]
+    async fn the_credential_ceremony_is_dispatched_and_forgetting_claims_nothing_extra() {
         let s = shared();
         // A machine with nothing on it says so, in one word, to a caller
         // that names no attempt. It refused this once; a shell left to infer
@@ -14915,14 +15038,13 @@ mod tests {
             !serde_json::to_string(&body).unwrap().contains("sk-super"),
             "{body}"
         );
-        let r = handle_request(&s, &req("near_ai_credential_forget", serde_json::json!({})));
+        let r = handle_request_async(&s, &req("near_ai_credential_forget", serde_json::json!({})))
+            .await;
         let body = r.result.unwrap();
         assert_eq!(body["removed"], true);
-        // Local only: forget never calls the service, though the retained
-        // session would let it. `credential_forget_explains` says so, and
-        // `forget_answers_not_revoked_because_the_forget_sentence_says_so`
-        // ties the two together.
-        assert_eq!(body["revoked"], false);
+        // No NEAR AI client in a test build, so the revoke cannot happen,
+        // and the answer says so rather than claiming it.
+        assert_eq!(body["revoked"], false, "{body}");
         assert!(
             DaemonSettings::load(&s.store)
                 .unwrap()
@@ -18522,6 +18644,7 @@ mod tests {
                 inference_receipt_endpoint: None,
                 consent_scopes_chosen: Some(true),
                 witness_origin: None,
+                account_identity: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
                 issuer_url: "https://issuer.invalid".to_string(),
@@ -18843,7 +18966,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 74);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 77);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -19327,7 +19450,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 111, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 81, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 83, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =
@@ -21563,6 +21686,59 @@ mod tests {
                 snapshot(&s)["capabilities"]["terminal_current"],
                 chosen.id()
             );
+        }
+
+        /// "Group sessions in herdr": `set_managed_herdr {on}` persists
+        /// through `set_settings`, shows in `get_settings` and the managed
+        /// snapshot, and is announced as `managed_changed`. A value that is
+        /// not a boolean is refused before a write.
+        #[test]
+        fn grouping_in_herdr_persists_and_moves_the_snapshot() {
+            let saw_managed = |rx: &mut tokio::sync::broadcast::Receiver<Event>| {
+                let mut saw = false;
+                while let Ok(event) = rx.try_recv() {
+                    saw |= event.event == "managed_changed";
+                }
+                saw
+            };
+            let s = live();
+            let grouping = |s: &DaemonShared| {
+                handle_request(s, &req("managed_snapshot", serde_json::json!({})))
+                    .result
+                    .expect("snapshot")["capabilities"]["herdr_grouping"]
+                    .clone()
+            };
+            assert_eq!(grouping(&s), false);
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req("set_managed_herdr", serde_json::json!({"on": true})),
+            );
+            assert_eq!(
+                r.result.expect("set answers"),
+                serde_json::json!({"managed_herdr": true})
+            );
+            assert!(saw_managed(&mut rx));
+            assert_eq!(grouping(&s), true);
+            let settings = handle_request(&s, &req("get_settings", serde_json::json!({})))
+                .result
+                .unwrap();
+            assert_eq!(settings["managed_herdr"], true);
+            assert!(
+                crate::daemon::settings::DaemonSettings::load(&s.store)
+                    .unwrap()
+                    .managed_herdr
+            );
+            for bad in [
+                serde_json::json!({}),
+                serde_json::json!({"on": "true"}),
+                serde_json::json!({"on": null}),
+            ] {
+                let r = handle_request(&s, &req("set_managed_herdr", bad.clone()));
+                assert_eq!(r.error.expect("refused").message, "on-required", "{bad}");
+            }
+            assert!(!saw_managed(&mut rx), "a refusal publishes nothing");
+            assert_eq!(grouping(&s), true);
         }
 
         /// Nudge A2: `set_notify_kind {kind, on}` takes the digest or an

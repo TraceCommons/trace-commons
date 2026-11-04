@@ -86,6 +86,11 @@ pub const NATIVE_SESSION_ROTATION_INTERVAL_SECS: i64 = 60 * 60;
 /// a credential never lives indefinitely. The 3-day idle cap shared with
 /// browser sessions still applies, though the 12-hour sliding lifetime is the
 /// tighter of the two for a native session.
+///
+/// The days are 24-hour days: the cap is `created_at` plus
+/// `NATIVE_SESSION_MAX_LIFETIME_DAYS * 24` hours, the same instant whatever
+/// time zone the database session or the process runs in. A count of
+/// calendar days would land an hour off across a daylight-saving change.
 pub const NATIVE_SESSION_MAX_LIFETIME_DAYS: i64 = 30;
 
 // The cadence has to be well inside the lifetime, or a native token can never

@@ -173,28 +173,10 @@ struct InsightsOverviewTab: View {
         .insightsSection()
     }
 
-    /// A figure that opens its drill-down. A second press on the open one
-    /// closes it. Feed T rows carry no session reference the core could
-    /// look up, so under feed T only the Sessions figure drills, from the
-    /// daemon's rows; a figure that does not drill is drawn plain, never
-    /// dimmed as a disabled control.
-    @ViewBuilder
-    private func drillButton<Label: View>(_ inputs: String, @ViewBuilder label: () -> Label) -> some View {
-        if model.drills(inputs) {
-            Button {
-                if model.openCard == inputs { model.hideInputs() } else { model.showInputs(inputs) }
-            } label: {
-                label().contentShape(Rectangle())
-            }
-            .buttonStyle(GlassPressStyle())
-            .accessibilityHint(text("analytics_drill_title"))
-        } else {
-            label()
-        }
-    }
-
-    /// One harness: its tokens and cache share side by side, then, for
-    /// Codex, the note that it records whole-trace totals. Claude's days are
+    /// One harness: its tokens and cache share side by side, as plain
+    /// figures (product owner, 2026-10-29, #1753: their drill-downs loaded
+    /// figures no view drew), then, for Codex, the note that it records
+    /// whole-trace totals. Claude's days are
     /// on Details' Tokens by day (product owner, 2026-10-28).
     private func harnessCard(_ source: InsightsWeekSource, overview: InsightsWeekOverview) -> some View {
         VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
@@ -207,36 +189,32 @@ struct InsightsOverviewTab: View {
             }
             VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
                 HStack(alignment: .top, spacing: GlassTokens.Space.s8) {
-                    drillButton("tokens") {
-                        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                            Text(text("analytics_card_tokens")).insightsEyebrow()
-                            Text(figure(source.tokens)).insightsFigure()
-                            if source.change_permille != nil {
-                                Text(InsightsOverviewWords.change(source, copy: copy)).insightsCaption()
-                            }
-                            if let largest = source.largest_session {
-                                Text(InsightsOverviewWords.fill(text("analytics_largest"), ["t": figure(largest.tokens)]))
-                                    .insightsCaption()
-                            }
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                        Text(text("analytics_card_tokens")).insightsEyebrow()
+                        Text(figure(source.tokens)).insightsFigure()
+                        if source.change_permille != nil {
+                            Text(InsightsOverviewWords.change(source, copy: copy)).insightsCaption()
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    drillButton("cache_share") {
-                        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                            Text(text("analytics_card_cache_share")).insightsEyebrow()
-                            Text(source.cache_share.map { InsightsOverviewWords.share($0, copy: copy) + "%" }
-                                 ?? text("analytics_unavailable")).insightsFigure()
-                            // A bar, not a ring (owner decision D1, open).
-                            InsightsShareBar(permille: source.cache_share?.permille,
-                                             tick: InsightsOverviewWords.bestTick(source))
-                                .padding(.vertical, GlassTokens.Space.s2)
-                            if source.best != nil {
-                                Text(InsightsOverviewWords.bestWeek(source, copy: copy)).insightsCaption()
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
+                        if let largest = source.largest_session {
+                            Text(InsightsOverviewWords.fill(text("analytics_largest"), ["t": figure(largest.tokens)]))
+                                .insightsCaption()
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                        Text(text("analytics_card_cache_share")).insightsEyebrow()
+                        Text(source.cache_share.map { InsightsOverviewWords.share($0, copy: copy) + "%" }
+                             ?? text("analytics_unavailable")).insightsFigure()
+                        // A bar, not a ring (owner decision D1, open).
+                        InsightsShareBar(permille: source.cache_share?.permille,
+                                         tick: InsightsOverviewWords.bestTick(source))
+                            .padding(.vertical, GlassTokens.Space.s2)
+                        if source.best != nil {
+                            Text(InsightsOverviewWords.bestWeek(source, copy: copy)).insightsCaption()
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if source.source == "codex" {
                     codexInterval(overview)
@@ -336,8 +314,6 @@ struct InsightsCounterSessionsView: View {
     let copy: [String: String]
     /// The day picked on "Tokens by day"; `nil` is the whole week.
     var day: InsightsDayPick?
-    /// "Show week": the whole week again.
-    var showWeek: () -> Void = {}
     /// Folded (`InsightsBreakdownFold`) unless the caller opens it with
     /// every row, as the responder-scale tests do.
     @State var showAll = false
@@ -350,7 +326,7 @@ struct InsightsCounterSessionsView: View {
             InsightsDayBreakdown.rows(sessions.rows, day: day.index) { InsightsDayBreakdown.split($0.session) }
         }
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            InsightsBreakdownTitle(day: dayRows == nil ? nil : day, copy: copy, showWeek: showWeek)
+            InsightsBreakdownTitle(day: dayRows == nil ? nil : day, copy: copy)
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 // A week can contain thousands of sessions. Keep selectable
                 // text hosts off the responder tree until their rows are visible.
@@ -437,8 +413,6 @@ struct InsightsCardInputsView: View {
     /// The day picked on "Tokens by day"; `nil` is the whole week. Only the
     /// Sessions breakdown passes one.
     var day: InsightsDayPick?
-    /// "Show week": the whole week again.
-    var showWeek: () -> Void = {}
     /// Folded (`InsightsBreakdownFold`) unless the caller opens it with
     /// every row, as the responder-scale tests do.
     @State var showAll = false
@@ -448,7 +422,7 @@ struct InsightsCardInputsView: View {
     var body: some View {
         let dayRows = day.flatMap { day in InsightsDayBreakdown.rows(inputs.sessions, day: day.index) { $0.by_day } }
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            InsightsBreakdownTitle(day: dayRows == nil ? nil : day, copy: copy, showWeek: showWeek)
+            InsightsBreakdownTitle(day: dayRows == nil ? nil : day, copy: copy)
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 if inputs.card == "cache_share" {
                     ForEach(inputs.sources) { source in
@@ -516,24 +490,21 @@ struct InsightsCardInputsView: View {
     }
 }
 
-/// The Breakdown card's title: "Breakdown", or "Breakdown · Tuesday" with
-/// "Show week" beside it while a day is picked.
+/// The Breakdown card's title: "Breakdown", or "Breakdown · Tuesday" while
+/// a day is picked. No "Show week" beside it (product owner, 2026-10-29,
+/// #1753): it showed an empty Breakdown, not the week. A picked day is
+/// cleared on Tokens by day, by clicking it again, by Escape or by stepping
+/// past either end, and a new week clears it too.
 struct InsightsBreakdownTitle: View {
     let day: InsightsDayPick?
     let copy: [String: String]
-    let showWeek: () -> Void
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
-            if let day {
-                Text(InsightsOverviewWords.fill(copy["analytics_drill_title_day"] ?? "", ["day": day.weekday]))
-                    .insightsTitle()
-                Spacer(minLength: GlassTokens.Space.s4)
-                Button(copy["analytics_drill_day_week"] ?? "") { showWeek() }
-                    .buttonStyle(GlassButtonStyle(.link))
-            } else {
-                Text(copy["analytics_drill_title"] ?? "").insightsTitle()
-            }
+        if let day {
+            Text(InsightsOverviewWords.fill(copy["analytics_drill_title_day"] ?? "", ["day": day.weekday]))
+                .insightsTitle()
+        } else {
+            Text(copy["analytics_drill_title"] ?? "").insightsTitle()
         }
     }
 }

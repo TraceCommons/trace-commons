@@ -234,17 +234,14 @@ pub const NEAR_AI_PRIVACY_FILTER_BASE: &str = values::NEAR_AI_INFERENCE_BASE;
 pub const NEAR_AI_DASHBOARD_ORIGIN: &str = values::NEAR_AI_DASHBOARD_ORIGIN;
 /// The NEP-413 recipient NEAR AI expects in a NEAR wallet sign-in.
 pub const NEAR_AI_WALLET_RECIPIENT: &str = values::NEAR_AI_WALLET_RECIPIENT;
-/// The NEAR AI sign-in providers this build offers, in the order a picker
-/// lists them: `near` is the NEAR wallet ceremony, `github` and `google`
-/// NEAR AI's own login through that provider. The daemon refuses a
-/// ceremony for any other name, so a provider left out here is not reachable
-/// from any shell. The shells read the list from the core
-/// (`tc_build_channel_json`) and never keep one of their own.
+/// The NEAR AI sign-in providers this build offers, in the order the
+/// browser's login page lists them: `near` is the NEAR wallet ceremony,
+/// `github` and `google` NEAR AI's own login through that provider. A
+/// sign-in that names none opens that page (`daemon::nearai_credential::
+/// chooser`), or, with one provider, goes straight to it. The daemon refuses
+/// a ceremony for any other name, so a provider left out here is not
+/// reachable from any shell.
 pub const NEAR_AI_SIGN_IN_PROVIDERS: &[&str] = values::NEAR_AI_SIGN_IN_PROVIDERS;
-/// The provider a sign-in that names none starts: the first one offered.
-/// Production's is the NEAR wallet; staging's is NEAR AI's Google login,
-/// its only one.
-pub const NEAR_AI_DEFAULT_SIGN_IN_PROVIDER: &str = values::NEAR_AI_SIGN_IN_PROVIDERS[0];
 
 /// Where a staging build fetches its signed NEAR AI measurement pins (spec
 /// 5.3): a static file on the staging site. The device never takes this from

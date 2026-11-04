@@ -66,6 +66,18 @@ final class OnboardingCompletionTests: XCTestCase {
         XCTAssertEqual(notifications, 1, "pressing Done must notify observers, or the view never re-renders")
     }
 
+    /// Finishing first run marks this launch as the one that did (owner,
+    /// 2026-11-02: Home's Traces walkthrough stands in for the Traces cards
+    /// on it), under the same single notification; a model that never
+    /// finished first run in this launch does not read as one.
+    @MainActor
+    func testMarkingCompleteMarksThisLaunch() {
+        let model = enrolledModel(tenantID: tenant)
+        XCTAssertFalse(model.finishedFirstRunThisLaunch)
+        model.markOnboardingComplete()
+        XCTAssertTrue(model.finishedFirstRunThisLaunch)
+    }
+
     @MainActor
     func testMarkingCompleteFlipsTheFlagObserversWillRead() {
         let model = enrolledModel(tenantID: tenant)

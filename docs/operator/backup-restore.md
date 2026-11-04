@@ -37,6 +37,12 @@ bring-up step 9.
 gcloud sql backups restore <backup-id> --restore-instance=<new-instance>
 ```
 
+`--restore-instance` names the instance the backup is written into. A new
+instance leaves the live one alone and lets you inspect the restore first. To
+roll the live database back in place, name the live instance (the pilot is
+`tc-pilot`) with both services stopped: the instance is overwritten and every
+write since the backup is lost.
+
 After restore, validate the audit chain:
 
 ```sh
