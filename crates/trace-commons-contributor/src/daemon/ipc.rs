@@ -10123,14 +10123,14 @@ mod tests {
     use crate::config::tests_support::temp_store;
     use crate::daemon::policy::UNKNOWN_PROJECT_KEY;
 
-    /// Passkeys are gone, and so is the list of them a daemon before their
-    /// removal kept: a daemon starting on that state deletes the file. With
-    /// no such file, starting is unaffected.
+    /// An older daemon kept a list of sign-in credentials that nothing reads
+    /// any more: a daemon starting on that state deletes the file. With no
+    /// such file, starting is unaffected.
     #[test]
-    fn startup_deletes_the_retired_remembered_passkeys_file() {
+    fn startup_deletes_the_retired_remembered_credentials_file() {
         let (_dir, store) = temp_store();
         let retired = store.daemon_path("remembered-passkeys.json");
-        std::fs::write(&retired, b"{\"passkeys\":[]}").unwrap();
+        std::fs::write(&retired, b"{}").unwrap();
 
         DaemonShared::load(store.clone()).unwrap();
         assert!(!retired.exists());

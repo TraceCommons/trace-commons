@@ -87,10 +87,11 @@ pub const INVITE_SUBJECT_FILE: &str = "invite-subject.json";
 /// the daemon stops offering it (`daemon::legacy_migration`). Hashes only;
 /// belongs to this enrollment and swept by `wipe()`.
 pub const LEGACY_INVITE_REFUSAL_FILE: &str = "legacy-invite-refusal.json";
-/// The list of passkeys a daemon from before their removal kept. Named only
-/// so it can be deleted: at daemon startup
-/// ([`ConfigStore::remove_retired_files`]) and by `wipe()`.
-const REMEMBERED_PASSKEYS_FILE: &str = "remembered-passkeys.json";
+/// A list of sign-in credentials an older daemon kept; nothing reads it any
+/// more. Named only so it can be deleted: at daemon startup
+/// ([`ConfigStore::remove_retired_files`]) and by `wipe()`. The file name is
+/// what that daemon wrote, so it cannot change.
+const RETIRED_REMEMBERED_CREDENTIALS_FILE: &str = "remembered-passkeys.json";
 /// Name prefix of the per-entry redacted envelope files
 /// (`daemon::approved_envelope`). One file per previewed-and-approved queue
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
@@ -1481,7 +1482,7 @@ impl ConfigStore {
     /// Delete files only an older daemon wrote and nothing reads any more.
     /// A file that is already gone is not an error.
     pub(crate) fn remove_retired_files(&self) -> Result<()> {
-        self.remove_daemon_file(REMEMBERED_PASSKEYS_FILE)
+        self.remove_daemon_file(RETIRED_REMEMBERED_CREDENTIALS_FILE)
     }
 
     /// Remove a daemon runtime file (socket, lock). Missing is not an error.
@@ -1655,7 +1656,7 @@ impl ConfigStore {
             LEGACY_INVITE_LINK_FILE,
             INVITE_SUBJECT_FILE,
             LEGACY_INVITE_REFUSAL_FILE,
-            REMEMBERED_PASSKEYS_FILE,
+            RETIRED_REMEMBERED_CREDENTIALS_FILE,
             DAEMON_SETTLEMENT_FEATURES_FILE,
         ] {
             let path = self.dir.join(name);
@@ -1685,7 +1686,7 @@ impl ConfigStore {
             LEGACY_INVITE_LINK_FILE,
             INVITE_SUBJECT_FILE,
             LEGACY_INVITE_REFUSAL_FILE,
-            REMEMBERED_PASSKEYS_FILE,
+            RETIRED_REMEMBERED_CREDENTIALS_FILE,
             DAEMON_SETTLEMENT_FEATURES_FILE,
         ]
         .into_iter()
