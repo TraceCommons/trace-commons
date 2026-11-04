@@ -1001,6 +1001,9 @@ extension DaemonData {
         /// hidden for now, off by default). `nil` from a daemon that
         /// predates it, which reads as off; only an exact `true` shows them.
         public let missionsEnabled: Bool?
+        /// Decode-only (Settings draws no switch for it yet): whether usage
+        /// data is shared; on by default. `nil` from a daemon that predates it.
+        public let shareUsageData: Bool?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case managedCLIOptions = "managed_cli_options"
@@ -1040,6 +1043,7 @@ extension DaemonData {
             case insightsRecapCardEnabled = "insights_recap_card_enabled"
             case settlementEstimateEnabled = "settlement_estimate_enabled"
             case missionsEnabled = "missions_enabled"
+            case shareUsageData = "share_usage_data"
         }
 
         public var scrubCheckMode: ScrubCheckMode? { scrubCheck.flatMap(ScrubCheckMode.init(rawValue:)) }
