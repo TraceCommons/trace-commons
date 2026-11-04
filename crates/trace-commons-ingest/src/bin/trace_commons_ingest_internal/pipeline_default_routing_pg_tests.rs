@@ -26,10 +26,10 @@ use super::pipeline_http_pg_tests::{
 };
 use crate::ingest::app::pipeline_default_routing::{
     DEFAULT_ROUTING_ACTOR_REF, DEFAULT_ROUTING_ATTESTATION_SUFFIX, DEFAULT_ROUTING_PACKAGE_FILE,
-    DefaultRouteOutcome, DefaultRoutingPassReport, PIPELINE_DEFAULT_ROUTING_REASON_CODE,
-    PIPELINE_DEFAULT_ROUTING_RESULTS_MISSING_LABEL, PIPELINE_DEFAULT_ROUTING_RESULTS_STALE_LABEL,
-    PIPELINE_DEFAULT_ROUTING_REVISION_MISMATCH_LABEL, PipelineDefaultRouting,
-    PipelineDefaultRoutingConfig,
+    DefaultRouteOutcome, DefaultRoutingPassReport, MAX_BACK_TO_BACK_PASSES,
+    PIPELINE_DEFAULT_ROUTING_REASON_CODE, PIPELINE_DEFAULT_ROUTING_RESULTS_MISSING_LABEL,
+    PIPELINE_DEFAULT_ROUTING_RESULTS_STALE_LABEL, PIPELINE_DEFAULT_ROUTING_REVISION_MISMATCH_LABEL,
+    PipelineDefaultRouting, PipelineDefaultRoutingConfig,
 };
 use trace_commons_server::versioned_pipeline_activation::{PipelineActivationStore, RoutingState};
 
@@ -877,6 +877,133 @@ async fn the_loop_requalifies_its_tenants_after_a_deploy() {
         .await;
     assert_eq!(status, StatusCode::OK, "{receipt}");
     assert!(is_pipeline_receipt(&receipt), "{receipt}");
+}
+
+/// Issue #1906: tenants this mode routed, more than one `BATCH` of them,
+/// are all re-qualified by one run of back-to-back passes after a deploy,
+/// without the interval between passes.
+struct ManyRouted {
+    tenants: Vec<String>,
+    new_build: Arc<AppState>,
+    deployed: String,
+}
+
+impl ManyRouted {
+    const COUNT: usize = 5;
+
+    /// `COUNT` tenants routed by the fixture's process, then a new build on
+    /// another revision with `batch` 2 and the operator's set for it.
+    async fn new(fixture: &DefaultRoutingFixture) -> Self {
+        fixture.rearm().await;
+        // A time-ordered prefix: tenants other runs left in the shared
+        // database sort before these, and the new build starts after them.
+        let stamp = format!(
+            "tenant-0-first-pass-{:020}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let mut tenants = Vec::new();
+        for index in 0..Self::COUNT {
+            // Sorts before every other suite's tenants, so the pages the
+            // new build reads start with these.
+            let tenant = format!("{stamp}-{index}");
+            seed_tenant(&fixture.route.owner, &tenant).await;
+            fixture
+                .routing()
+                .restrict_loop_for_test(BTreeSet::from([tenant.clone()]));
+            let outcome = fixture
+                .routing()
+                .default_route_tenant(&fixture.state, &tenant)
+                .await;
+            assert!(
+                matches!(outcome, DefaultRouteOutcome::Activated),
+                "{outcome:?}"
+            );
+            tenants.push(tenant);
+        }
+        let deployed = sha256_prefixed("first-pass-deployed-revision");
+        let scope: BTreeSet<String> = tenants.iter().cloned().collect();
+        let results_dir = fixture.results.path().to_path_buf();
+        let new_build = fixture.process(|state| {
+            state.pipeline_code_revision_hash = Some(deployed.clone());
+            let routing = PipelineDefaultRouting::new(PipelineDefaultRoutingConfig {
+                results_dir,
+                interval: StdDuration::from_secs(3600),
+                batch: 2,
+            });
+            routing.restrict_loop_for_test(scope);
+            routing.start_requalify_after_for_test(stamp.clone());
+            state.pipeline_default_routing = Some(Arc::new(routing));
+        });
+        fixture.write_results(&fixture.route.attestations_on(&fixture.route.a, &deployed));
+        DefaultRoutingFixture::routing_of(&new_build)
+            .rearm(&new_build)
+            .await;
+        Self {
+            tenants,
+            new_build,
+            deployed,
+        }
+    }
+
+    async fn qualified(&self, fixture: &DefaultRoutingFixture) -> usize {
+        let store = PipelineQualificationStore::new(fixture.route.runtime.clone());
+        let mut count = 0;
+        for tenant in &self.tenants {
+            if store
+                .qualification(tenant, &fixture.route.a.bundle_id, &self.deployed)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_run_of_passes_requalifies_more_tenants_than_a_batch() {
+    let Some(fixture) = DefaultRoutingFixture::new().await else {
+        return;
+    };
+    let many = ManyRouted::new(&fixture).await;
+    assert_eq!(many.qualified(&fixture).await, 0);
+    let passes = DefaultRoutingFixture::routing_of(&many.new_build)
+        .run_passes(&many.new_build, None)
+        .await;
+    assert_eq!(many.qualified(&fixture).await, ManyRouted::COUNT);
+    assert!(
+        (3..=MAX_BACK_TO_BACK_PASSES).contains(&passes),
+        "five tenants at batch two need three passes: {passes}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_cap_bounds_a_run_of_passes() {
+    let Some(fixture) = DefaultRoutingFixture::new().await else {
+        return;
+    };
+    let many = ManyRouted::new(&fixture).await;
+    let passes = DefaultRoutingFixture::routing_of(&many.new_build)
+        .run_passes_capped(&many.new_build, None, 2)
+        .await;
+    assert_eq!(passes, 2);
+    assert_eq!(many.qualified(&fixture).await, 4, "two passes of two");
+}
+
+/// A process that is not armed makes no progress, so a run is one pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pass_with_no_progress_does_not_repeat() {
+    let Some(fixture) = DefaultRoutingFixture::new().await else {
+        return;
+    };
+    // Never armed: the results directory is not read.
+    let passes = fixture.routing().run_passes(&fixture.state, None).await;
+    assert_eq!(passes, 1);
 }
 
 /// Owner decision D6 (2026-11-03): once `main`'s award is raised (here to
