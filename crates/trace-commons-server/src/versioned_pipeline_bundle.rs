@@ -1406,7 +1406,7 @@ mod tests {
                 chunk_cap: reference.chunk_cap,
                 chunk_min_tokens: reference.chunk_min_tokens,
                 novelty_utility_microcredits: reference.novelty_utility_microcredits,
-                credit_rule: crate::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
+                credit_rule: reference.credit_rule,
             },
         )
         .expect("a production-compatible configuration validates");
