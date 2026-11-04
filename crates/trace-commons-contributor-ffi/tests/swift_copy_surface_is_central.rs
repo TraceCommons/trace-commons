@@ -926,6 +926,13 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCConsentCopy.swift",
         "tc_account_attention_copy_json",
     ),
+    (
+        "set up again",
+        "TraceCommonsApp/AppModel.swift",
+        "TCConsentCopy.setUpAgainCopyJSON",
+        "TCBridge/TCConsentCopy.swift",
+        "tc_set_up_again_copy_json",
+    ),
     // The offer to move, in Settings and as a card above the tabs, and a
     // refused move's sentence, both worded by the model.
     (

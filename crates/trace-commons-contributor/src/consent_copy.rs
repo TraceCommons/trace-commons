@@ -2760,10 +2760,57 @@ pub fn account_attention_for_wire(status: &serde_json::Value) -> Option<AccountA
     })
 }
 
+/// The account section's own Set up again, for an enrolled app whose
+/// account needs no attention (`tc_set_up_again_copy_json`): the owner asked
+/// for a way to clear this computer's sign-in and start over at any time
+/// (2026-11-04). The same approved button, confirmation and failure line as
+/// [`AccountAttentionCopy`], with none of its status lines: nothing is wrong
+/// to report.
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct SetUpAgainCopy {
+    pub action: &'static str,
+    pub confirm_title: &'static str,
+    pub confirm_body: &'static str,
+    pub confirm_action: &'static str,
+    pub confirm_cancel: &'static str,
+    pub failed: &'static str,
+}
+
+/// The words for [`SetUpAgainCopy`], whatever the account's state.
+#[must_use]
+pub fn set_up_again_copy() -> SetUpAgainCopy {
+    SetUpAgainCopy {
+        action: ACCOUNT_ATTENTION_ACTION,
+        confirm_title: ACCOUNT_ATTENTION_CONFIRM_TITLE,
+        confirm_body: ACCOUNT_ATTENTION_CONFIRM_BODY,
+        confirm_action: ACCOUNT_ATTENTION_CONFIRM_ACTION,
+        confirm_cancel: ACCOUNT_ATTENTION_CONFIRM_CANCEL,
+        failed: ACCOUNT_ATTENTION_FAILED,
+    }
+}
+
 #[cfg(test)]
 mod account_attention_tests {
     use super::*;
     use serde_json::json;
+
+    /// The account section's own Set up again says exactly what the
+    /// attention block's button and confirmation say.
+    #[test]
+    fn set_up_again_is_the_attention_blocks_button_and_confirmation() {
+        let attention = account_attention_for_wire(&json!({
+            "account_state": "needs_attention",
+        }))
+        .unwrap();
+        let own = set_up_again_copy();
+        assert_eq!(own.action, attention.action);
+        assert_eq!(own.confirm_title, attention.confirm_title);
+        assert_eq!(own.confirm_body, attention.confirm_body);
+        assert_eq!(own.confirm_action, attention.confirm_action);
+        assert_eq!(own.confirm_cancel, attention.confirm_cancel);
+        assert_eq!(own.failed, attention.failed);
+        assert_eq!(own.action, "Set up again");
+    }
 
     #[test]
     fn each_reason_gets_its_own_sentence() {

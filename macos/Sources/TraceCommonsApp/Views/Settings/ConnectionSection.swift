@@ -56,6 +56,9 @@ struct ConnectionSection: View {
                 }
                 // Change the NEAR AI login this account uses (F10).
                 AccountLoginChangeButton()
+                // Clear this computer's sign-in and start over (owner,
+                // 2026-11-04), behind the attention block's confirmation.
+                SetUpAgainControl()
             }
         }
     }
@@ -197,7 +200,6 @@ struct AccountAttentionBlock: View {
     let failed: Bool
     /// Runs only from the confirmation's own button.
     let setUpAgain: () -> Void
-    @State private var confirming = false
 
     /// The lines under the title, in order: the reason, then Private AI,
     /// then the refusal while the last attempt failed.
@@ -214,16 +216,73 @@ struct AccountAttentionBlock: View {
                         .foregroundStyle(GlassColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Button(attention.action) { confirming = true }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                    .disabled(busy)
+                SetUpAgainButton(
+                    action: attention.action, confirmTitle: attention.confirmTitle,
+                    confirmBody: attention.confirmBody, confirmAction: attention.confirmAction,
+                    confirmCancel: attention.confirmCancel, busy: busy, setUpAgain: setUpAgain)
             }
         }
-        .alert(attention.confirmTitle, isPresented: $confirming) {
-            Button(attention.confirmAction, role: .destructive, action: setUpAgain)
-            Button(attention.confirmCancel, role: .cancel) {}
-        } message: {
-            Text(attention.confirmBody)
+    }
+}
+
+/// "Set up again" and the confirmation it opens, one control wherever it is
+/// drawn, so the attention block and the account section ask the same way.
+/// Only the confirmation's own button runs `setUpAgain`.
+struct SetUpAgainButton: View {
+    let action: String
+    let confirmTitle: String
+    let confirmBody: String
+    let confirmAction: String
+    let confirmCancel: String
+    let busy: Bool
+    let setUpAgain: () -> Void
+    @State private var confirming = false
+
+    var body: some View {
+        Button(action) { confirming = true }
+            .buttonStyle(GlassButtonStyle(.glass))
+            .disabled(busy)
+            .alert(confirmTitle, isPresented: $confirming) {
+                Button(confirmAction, role: .destructive, action: setUpAgain)
+                Button(confirmCancel, role: .cancel) {}
+            } message: {
+                Text(confirmBody)
+            }
+    }
+}
+
+/// The account section's own "Set up again" (owner, 2026-11-04): clears
+/// this computer's sign-in -- the enrollment, the account session, the NEAR
+/// AI login and any change of login in progress -- then opens the first
+/// run. Drawn on an enrolled app whose account needs no attention
+/// (`SetUpAgainSurface`); every word is the Rust's.
+struct SetUpAgainControl: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        if SetUpAgainSurface.showsInAccountSection(
+            loggedIn: model.status.loggedIn, needsAttention: model.accountAttention != nil),
+            let copy = model.setUpAgainCopy
+        {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                SetUpAgainButton(
+                    action: copy.action, confirmTitle: copy.confirmTitle, confirmBody: copy.confirmBody,
+                    confirmAction: copy.confirmAction, confirmCancel: copy.confirmCancel,
+                    busy: model.settingUpAgain
+                ) {
+                    Task {
+                        if await model.setUpAgain() {
+                            openWindow(id: WindowID.firstRun)
+                        }
+                    }
+                }
+                if model.setUpAgainFailed {
+                    Text(copy.failed)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                }
+            }
         }
     }
 }

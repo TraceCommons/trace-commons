@@ -26,6 +26,10 @@ struct PrivateAISection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             PrivateAISettingsPanels(store: store)
+            // Switch the account's NEAR AI login (F10), under the
+            // connection card where the sign-in is, by the account
+            // section's rule.
+            AccountLoginChangeButton(offersMismatchChange: true, carded: true)
             // Which NEAR AI organization Private AI spends from. Drawn only
             // with two or more organizations.
             SpendOrganizationCard()

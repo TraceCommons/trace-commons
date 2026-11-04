@@ -38,4 +38,33 @@ final class AccountAttentionTests: XCTestCase {
         }
         XCTAssertNil(AccountAttention.decode(fromJSON: "not json"))
     }
+
+    /// The account section's own Set up again (owner, 2026-11-04): on an
+    /// enrolled app, and only while the attention block (which carries the
+    /// same button) is not drawn.
+    func testSetUpAgainShowsOnAnEnrolledAppWhoseAccountNeedsNoAttention() {
+        XCTAssertTrue(SetUpAgainSurface.showsInAccountSection(loggedIn: true, needsAttention: false))
+        XCTAssertFalse(
+            SetUpAgainSurface.showsInAccountSection(loggedIn: true, needsAttention: true),
+            "the attention block already carries it")
+        XCTAssertFalse(
+            SetUpAgainSurface.showsInAccountSection(loggedIn: false, needsAttention: false),
+            "an app that is not set up has the first run")
+        XCTAssertFalse(SetUpAgainSurface.showsInAccountSection(loggedIn: false, needsAttention: true))
+    }
+
+    func testTheSetUpAgainWordsDecodeWholeOrNotAtAll() {
+        let json = #"{"action":"A","confirm_title":"CT","confirm_body":"CB","confirm_action":"CA","confirm_cancel":"CC","failed":"F"}"#
+        let copy = SetUpAgainCopy.decode(fromJSON: json)
+        XCTAssertEqual(copy?.action, "A")
+        XCTAssertEqual(copy?.confirmBody, "CB")
+        XCTAssertEqual(copy?.failed, "F")
+        for key in SetUpAgainCopy.consumedFields {
+            var object = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+            object?[key] = " "
+            let data = try? JSONSerialization.data(withJSONObject: object ?? [:])
+            XCTAssertNil(SetUpAgainCopy.decode(fromJSON: String(decoding: data ?? Data(), as: UTF8.self)), key)
+        }
+        XCTAssertNil(SetUpAgainCopy.decode(fromJSON: "not json"))
+    }
 }
