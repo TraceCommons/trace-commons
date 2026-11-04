@@ -56,7 +56,8 @@ final class FirstRunCreditNoteTests: XCTestCase {
         XCTAssertFalse(source.contains("exclamationmark"), "a note, not a warning")
         // The headline says what the traces could earn while the note shows
         // (Zaki's review of #1690), and is unchanged once credit is on.
-        XCTAssertTrue(source.contains("earnsCredit: !TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses)"))
+        XCTAssertTrue(source.contains("let earnsCredit = !TracesScreenLayout.showsNoCredit(runner.state, uses: copy.uses)"))
+        XCTAssertTrue(source.contains("earnsCredit: earnsCredit) {"))
     }
 
     func testTracesEstimateIsConditionalWhileTrainCodingModelsIsOff() throws {

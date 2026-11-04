@@ -1145,7 +1145,8 @@ mod tests {
             Some((status, body)) => Router::new().route(
                 trace_commons_protocol::first_run_copy::FIRST_RUN_COPY_PATH,
                 post(
-                    move |headers: axum::http::HeaderMap, Json(request): Json<serde_json::Value>| {
+                    move |headers: axum::http::HeaderMap,
+                          Json(request): Json<serde_json::Value>| {
                         let body = body.clone();
                         let observed = observed.clone();
                         async move {
@@ -1230,8 +1231,14 @@ mod tests {
         let cases: Vec<(&str, Option<(StatusCode, String)>)> = vec![
             ("no route", None),
             ("400", Some((StatusCode::BAD_REQUEST, valid.to_string()))),
-            ("429", Some((StatusCode::TOO_MANY_REQUESTS, valid.to_string()))),
-            ("500", Some((StatusCode::INTERNAL_SERVER_ERROR, valid.to_string()))),
+            (
+                "429",
+                Some((StatusCode::TOO_MANY_REQUESTS, valid.to_string())),
+            ),
+            (
+                "500",
+                Some((StatusCode::INTERNAL_SERVER_ERROR, valid.to_string())),
+            ),
             ("not json", Some((StatusCode::OK, "not json".into()))),
             ("not an object", Some((StatusCode::OK, "[]".into()))),
             ("no headline", Some((StatusCode::OK, "{}".into()))),
@@ -1262,7 +1269,8 @@ mod tests {
         });
         let (got, _) = first_run_copy_against(
             Some((axum::http::StatusCode::OK, lines.to_string())),
-            crate::credit_estimate_table::FIRST_RUN_COPY_TIMEOUT + std::time::Duration::from_secs(2),
+            crate::credit_estimate_table::FIRST_RUN_COPY_TIMEOUT
+                + std::time::Duration::from_secs(2),
         )
         .await;
         assert_eq!(got, fallback_answer());

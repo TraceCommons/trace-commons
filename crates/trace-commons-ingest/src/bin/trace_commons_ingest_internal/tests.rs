@@ -103731,6 +103731,10 @@ mod first_run_copy_tests {
     /// Rate-limited per client address, like the other public routes.
     #[tokio::test]
     async fn the_route_is_rate_limited_per_address() {
+        // The limiter is process-global; hold the lock the other limiter
+        // tests hold, so none resets it mid-count.
+        let _lock = submit_rate_limit_test_lock().lock().await;
+        reset_account_rate_limiter_for_test();
         let temp = tempfile::tempdir().expect("temp dir");
         let state = test_state(temp.path().to_path_buf());
         let body = br#"{"trace_count":10,"total_bytes":0}"#.to_vec();

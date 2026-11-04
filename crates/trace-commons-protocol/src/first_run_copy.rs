@@ -173,7 +173,7 @@ pub fn coarsen_count(value: u64) -> u64 {
 pub fn is_coarse_count(value: u64) -> bool {
     let mut v = value;
     while v >= 100 {
-        if v % 10 != 0 {
+        if !v.is_multiple_of(10) {
             return false;
         }
         v /= 10;
