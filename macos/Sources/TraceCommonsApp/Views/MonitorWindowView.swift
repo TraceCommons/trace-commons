@@ -475,6 +475,9 @@ struct MonitorWindowView: View {
         // view, picking Traces its Traces view; Home keeps the choice.
         .onChange(of: tab) { _, picked in
             if let view = Self.mapTab(for: picked) { mapTab = view }
+            // Opening Traces is a new visit: the resume notice's Not now
+            // from the last one no longer hides it.
+            closedNotices = PausedResumeNotice.closed(closedNotices, afterOpeningTraces: picked == .traces)
         }
         // The app's own settings read saw Private AI move (a NEAR AI sign-in
         // or sign-out landed, a status change, a switch write): this

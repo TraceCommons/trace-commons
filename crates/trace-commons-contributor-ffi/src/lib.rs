@@ -6363,6 +6363,23 @@ pub extern "C" fn tc_account_change_copy_json() -> *mut c_char {
     })
 }
 
+/// The account section's own Set up again (`consent_copy::set_up_again_copy`),
+/// for an enrolled app whatever its account's state: `action`, the
+/// confirmation (`confirm_title`, `confirm_body`, `confirm_action`,
+/// `confirm_cancel`) and `failed`, the same approved words as
+/// [`tc_account_attention_copy_json`]'s. Only `confirm_action` unenrolls
+/// (`unenroll`); then the first run starts.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_set_up_again_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::consent_copy::set_up_again_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
 /// The words for adding Train coding models to traces already sent
 /// (`consent_copy::sent_traces_training_copy`), as a JSON object of
 /// `SentTracesTrainingCopy`'s fields. Every string is a draft for owner

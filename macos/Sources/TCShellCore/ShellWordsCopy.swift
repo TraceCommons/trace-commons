@@ -145,6 +145,16 @@ public struct ShellWordsCopy: Decodable, Equatable, Sendable {
     public let history: History
     public let scrubbing: Scrubbing
     public let settings: Settings
+    public let pausedNotice: PausedNotice
+
+    /// The Traces tab's resume notice (approved 2026-11-04): Settings'
+    /// paused sentence, Resume and Not now. When it shows is
+    /// `PausedResumeNotice`'s.
+    public struct PausedNotice: Decodable, Equatable, Sendable {
+        public let body: String
+        public let resume: String
+        public let notNow: String
+    }
 
     /// Fill a string's `{name}` holes, each with its value; adds nothing.
     public static func fill(_ template: String, _ values: [String: String]) -> String {

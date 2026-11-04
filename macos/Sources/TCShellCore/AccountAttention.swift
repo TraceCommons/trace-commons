@@ -90,3 +90,60 @@ public struct AccountAttention: Decodable, Equatable, Sendable {
         return words.contains(where: \.isEmpty) ? nil : copy
     }
 }
+
+/// The account section's own Set up again (owner, 2026-11-04: a way to clear
+/// this computer's sign-in and start over at any time), in the Rust's words
+/// (`consent_copy::set_up_again_copy`): the attention block's approved
+/// button, confirmation and failure line, with no status lines of its own.
+public struct SetUpAgainCopy: Decodable, Equatable, Sendable {
+    /// "Set up again": opens the confirmation; nothing runs yet.
+    public let action: String
+    /// The confirmation. Only `confirmAction` unenrolls, then the first run
+    /// opens.
+    public let confirmTitle: String
+    public let confirmBody: String
+    public let confirmAction: String
+    public let confirmCancel: String
+    /// Shown under the button when the daemon refused to set up again.
+    public let failed: String
+
+    enum CodingKeys: String, CodingKey {
+        case action
+        case confirmTitle = "confirm_title"
+        case confirmBody = "confirm_body"
+        case confirmAction = "confirm_action"
+        case confirmCancel = "confirm_cancel"
+        case failed
+    }
+
+    /// The payload fields this shell decodes, by wire name. Compared against
+    /// the live export by `TCBridgeTests`.
+    public static let consumedFields = [
+        "action", "confirm_title", "confirm_body", "confirm_action", "confirm_cancel", "failed",
+    ]
+
+    /// Decode the payload, or nil if it will not parse or any word is empty:
+    /// shown whole or not at all.
+    public static func decode(fromJSON json: String) -> SetUpAgainCopy? {
+        guard let data = json.data(using: .utf8),
+            let copy = try? JSONDecoder().decode(SetUpAgainCopy.self, from: data)
+        else {
+            return nil
+        }
+        let words = [
+            copy.action, copy.confirmTitle, copy.confirmBody, copy.confirmAction, copy.confirmCancel,
+            copy.failed,
+        ]
+        return words.contains(where: { $0.trimmingCharacters(in: .whitespaces).isEmpty }) ? nil : copy
+    }
+}
+
+public enum SetUpAgainSurface {
+    /// Whether the account section draws its own Set up again: on an
+    /// enrolled app whose account needs no attention. While it needs
+    /// attention the attention block carries the same button, and two would
+    /// stack; an app that is not enrolled has the first run instead.
+    public static func showsInAccountSection(loggedIn: Bool, needsAttention: Bool) -> Bool {
+        loggedIn && !needsAttention
+    }
+}

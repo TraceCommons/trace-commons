@@ -1556,6 +1556,26 @@ fn cancel_locked(dir: &std::path::Path, attempt_id: Option<&str>) -> Option<Stat
     Some(entry.state.clone())
 }
 
+/// Forget this directory's sign-in attempt altogether: one still in flight
+/// is stopped first, and a finished one's outcome stops reading in
+/// [`attempt_status`]. Unenroll calls it, so a sign-in refused as another
+/// account ([`STATUS_DIFFERENT_ACCOUNT`]) does not leave `login_mismatch`
+/// set for the next account on this machine. A sign-out does not: there
+/// [`cancel`] keeps answering a finished attempt's word to the shell that
+/// started it. A leg that finishes after this finds no entry and writes
+/// nothing.
+pub(crate) fn forget_attempt(dir: &std::path::Path) {
+    let locks = crate::daemon::nearai_credential::session::coordination(dir).ok();
+    let _commit = locks.as_ref().and_then(|locks| locks.commit.lock().ok());
+    let removed = attempts()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(dir);
+    if let Some(task) = removed.and_then(|attempt| attempt.abort) {
+        task.abort();
+    }
+}
+
 /// The local clear without the revoke, for tests that only need the clear.
 /// Production clears through `disconnect::clear_store` or the daemon's
 /// `disconnect`, which also revoke.
@@ -1680,6 +1700,26 @@ mod tests {
         // not be a way to start over.
         assert_eq!(cancelled.attempt_id, attempt_id);
         assert_eq!(attempt_status(dir.path()), Some("cancelled"));
+    }
+
+    /// Unenroll forgets the attempt outright: a finished outcome (a sign-in
+    /// refused as another account) stops reading, which a plain cancel does
+    /// not do, and one still in flight is stopped and forgotten too.
+    #[tokio::test]
+    async fn forget_attempt_drops_a_finished_outcome_and_one_in_flight() {
+        let (dir, store) = temp_store();
+        mark_finished_for_test(dir.path(), "attempt-1", STATUS_DIFFERENT_ACCOUNT);
+        assert!(cancel(dir.path(), None).is_none());
+        assert_eq!(attempt_status(dir.path()), Some(STATUS_DIFFERENT_ACCOUNT));
+        forget_attempt(dir.path());
+        assert_eq!(attempt_status(dir.path()), None);
+
+        begin(&store, "google").await.unwrap();
+        assert_eq!(attempt_status(dir.path()), Some("waiting_for_browser"));
+        forget_attempt(dir.path());
+        assert_eq!(attempt_status(dir.path()), None);
+        // Nothing is left to cancel either.
+        assert!(cancel(dir.path(), None).is_none());
     }
 
     /// Naming the wrong attempt is still refused.

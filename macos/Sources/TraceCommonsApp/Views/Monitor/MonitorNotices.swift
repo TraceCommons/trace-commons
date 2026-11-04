@@ -17,8 +17,9 @@ import TCShellCore
 /// - Traces (the tree and History): the traces moving now, the undos, the
 ///   core's health, the consent notices about folders (grant voids,
 ///   arming rewordings, a gate hold), the arming offer, the backlog and
-///   idle suggestions and the idle notifications offer, and the
-///   first-contribution note; on History also its verdict news and the
+///   idle suggestions and the idle notifications offer, the
+///   first-contribution note, and Resume while the person has paused
+///   uploads; on History also its verdict news and the
 ///   verdict notifications offer.
 /// - Private AI: the offer to route AI requests through NEAR AI, and the
 ///   NEAR AI sign-in while there is none (owner, 2026-10-19: the sign-in
@@ -281,6 +282,32 @@ struct MonitorNotices: View {
     /// What waits on an answer about the traces: the first-contribution
     /// note, the idle notifications offer, the backlog or idle suggestion,
     /// and the arming offer.
+    /// The resume notice (owner, 2026-11-04, notice and words approved):
+    /// while the person has paused uploads and nothing else holds them,
+    /// each time the Traces tab is opened. Not now closes it until the tab
+    /// is next opened (`PausedResumeNotice.closed`, from the window).
+    private var pausedItems: [GlassPopoverItem] {
+        guard let words = ShellWords.table?.pausedNotice,
+            PausedResumeNotice.shows(
+                paused: model.status.paused, loggedIn: model.status.loggedIn,
+                needsAttention: model.accountAttention != nil,
+                contributionHeld: model.status.gateHeld.held,
+                dismissedThisVisit: closed.contains(PausedResumeNotice.id))
+        else { return [] }
+        return [GlassPopoverItem(id: PausedResumeNotice.id) {
+            GlassPopoverNotice(title: words.body) {
+                GlassNoticeMark(.off)
+            } summary: { EmptyView() } details: { EmptyView() } actions: {
+                Button(words.resume) { model.resume() }
+                    .buttonStyle(GlassButtonStyle(.primary))
+                    .lineLimit(1)
+                Button(words.notNow) { closed.insert(PausedResumeNotice.id) }
+                    .buttonStyle(GlassButtonStyle(.link))
+                    .lineLimit(1)
+            }
+        }]
+    }
+
     private var tracesOffers: [GlassPopoverItem] {
         var items: [GlassPopoverItem] = []
         // Only on an answered, empty history; whether anything is under
@@ -308,6 +335,9 @@ struct MonitorNotices: View {
             })
         }
         items += offerItems(.traces)
+        // Resume while the person has paused uploads: on both of the
+        // Traces tab's pages.
+        items += pausedItems
         if let card = traces.nudgeCard {
             items.append(nudgeItem(
                 card, busy: traces.nudgeBusy,

@@ -5719,6 +5719,17 @@ fn the_account_change_copy_crosses_the_abi() {
 }
 
 #[test]
+fn the_set_up_again_copy_crosses_the_abi() {
+    use trace_commons_contributor::consent_copy::set_up_again_copy;
+    use trace_commons_contributor_ffi::tc_set_up_again_copy_json;
+    let copy = json_owned(tc_set_up_again_copy_json());
+    assert_eq!(copy, serde_json::to_value(set_up_again_copy()).unwrap());
+    assert_eq!(copy["action"], "Set up again");
+    assert_eq!(copy.as_object().unwrap().len(), 6);
+    assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
+}
+
+#[test]
 fn the_sent_traces_training_copy_crosses_the_abi() {
     use trace_commons_contributor::consent_copy::sent_traces_training_copy;
     use trace_commons_contributor_ffi::tc_sent_traces_training_copy_json;

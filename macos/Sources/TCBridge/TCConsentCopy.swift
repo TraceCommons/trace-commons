@@ -152,6 +152,16 @@ public enum TCConsentCopy {
         return String(cString: raw)
     }
 
+    /// The account section's own "Set up again" (owner, 2026-11-04), as a
+    /// JSON object: the attention block's approved button, confirmation and
+    /// failure line, whatever the account's state. Nil on a caught panic.
+    /// Decoded by `TCShellCore.SetUpAgainCopy`.
+    public static func setUpAgainCopyJSON() -> String? {
+        guard let raw = tc_set_up_again_copy_json() else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
     /// The notice for approved sessions held on a busy privacy witness, as a
     /// JSON object, from `status.witness_capacity` (`WitnessCapacity.wireJSON`).
     /// Decoded by `TCShellCore.WitnessCapacityNotice`.

@@ -379,6 +379,11 @@ final class AppModel: ObservableObject {
     /// Words the account-attention status keys. The ABI in the app; replaced
     /// only by tests.
     var accountAttentionWording: (String) -> String? = TCConsentCopy.accountAttentionJSON(forStatus:)
+    /// The account section's own "Set up again" (owner, 2026-11-04), in the
+    /// Rust's words, whatever the account's state; nil if they cannot be
+    /// read, and then nothing is drawn.
+    let setUpAgainCopy: SetUpAgainCopy? = TCConsentCopy.setUpAgainCopyJSON().flatMap(
+        SetUpAgainCopy.decode(fromJSON:))
     /// "Set up again" is running.
     @Published private(set) var settingUpAgain = false
     /// The daemon refused the last "Set up again"; cleared by the next one.
