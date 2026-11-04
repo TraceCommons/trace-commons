@@ -1073,6 +1073,7 @@ mod tests {
             approved_unattended: None,
             approved_verdict: None,
             uploaded_bytes: None,
+            previous_account: false,
         }
     }
 
