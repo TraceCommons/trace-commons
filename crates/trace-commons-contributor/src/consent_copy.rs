@@ -983,10 +983,9 @@ pub const LEGACY_MIGRATION_OFFER_LATER: &str = "You can move later from Settings
 /// wire key keeps an older name (`LegacyMigrationOfferCopy`).
 pub const LEGACY_MIGRATION_NEAR_AI_LOGIN_WAITING: &str = "Waiting for your browser...";
 
-/// DRAFT, NEEDS APPROVAL (reworded 2026-11-04). The NEAR AI
-/// sign-in in the browser ended without finishing (it failed, or ran out of
-/// time). Nothing ran.
-pub const LEGACY_MIGRATION_NEAR_AI_LOGIN_FAILED: &str = "Your browser step didn't finish, so nothing was moved. Your invite keeps working; try again when you're ready.";
+/// Approved by the owner 2026-11-04. The NEAR AI sign-in in the browser
+/// ended without finishing (it failed, or ran out of time). Nothing ran.
+pub const LEGACY_MIGRATION_NEAR_AI_LOGIN_FAILED: &str = "Sign-in didn't finish, so nothing was moved. Your invite keeps working; try again when you're ready.";
 
 /// Not yet approved. Stops waiting on the NEAR AI sign-in. Nothing is moved.
 pub const LEGACY_MIGRATION_NEAR_AI_LOGIN_CANCEL: &str = "Cancel";
