@@ -2644,7 +2644,8 @@ pub(crate) fn validate_local_envelope(
 /// Re-scan a finished envelope for a residual secret shape. Returns
 /// `Ok(Some(Refused))` (emitting the same `refusing session` warn every
 /// caller relies on) when the redactor's re-scan still finds a secret shape
-/// in the serialized envelope, else `Ok(None)`. This is the single seam both
+/// in the serialized envelope, or when the scan itself could not finish
+/// (`secret-scan-failed`), else `Ok(None)`. This is the single seam both
 /// the dry-run and real submit paths route through, so deleting either call
 /// site removes the fail-closed guard entirely -- callers must `continue` on
 /// `Some(_)`.
@@ -2653,11 +2654,20 @@ fn residual_secret_refusal(
     envelope: &TraceContributionEnvelope,
     session_ref: &str,
 ) -> Result<Option<SubmitOutcome>> {
-    if envelope_has_residual_secret(redactor, envelope)? {
-        tracing::warn!("refusing session: secret survived redaction");
-        return Ok(Some(refused("secret-leak-detected", session_ref)));
+    match envelope_has_residual_secret(redactor, envelope) {
+        Ok(true) => {
+            tracing::warn!("refusing session: secret survived redaction");
+            Ok(Some(refused("secret-leak-detected", session_ref)))
+        }
+        Ok(false) => Ok(None),
+        // A scan that could not finish proves nothing, so the session is
+        // refused. Refused, not an error: an error here ends the whole
+        // upload pass, and this session would end every pass after it.
+        Err(_) => {
+            tracing::warn!("refusing session: residual secret scan failed");
+            Ok(Some(refused("secret-scan-failed", session_ref)))
+        }
     }
-    Ok(None)
 }
 
 /// `cfg` with `opts.pii_filter` overriding `cfg.pii_filter` when set.
