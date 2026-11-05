@@ -108,3 +108,23 @@ MAX_CONTEXT. Claude currently clamps this override to at least 100,000 tokens,
 so reject unproven or smaller safe budgets. Token-count HTTP 400 remains terminal;
 validate the installed Desktop client fallback and tool loop with a synthetic
 local server first, keeping that evidence distinct from real NEAR inference.
+
+## Feature flag integration authorized 2026-11-05
+
+Use PR #2003's shared environment runtime, not a separate setting or build-only
+gate. Register `claude_desktop_private_ai`, default false, timing live, requiring
+`claude_desktop_private_ai_v1`. All compatible profiles declare the capability
+and remote-enable ceiling; example manifests remain false. No live manifest
+publication is authorized by this implementation request.
+
+Both native UI and daemon behavior require an effective enabled snapshot;
+missing state is off. Disable/expiry withdraws the listener and cancels pending
+starts before they can publish, allowing accepted streams to drain. Preserve
+the saved binding across flag disable so a later enable can restore it. Account,
+key and Private AI policy revocations still delete it even while the flag is
+off. Disconnect remains available over IPC for cleanup. Native disable closes
+setup and clears the preset; late requests cannot restore it or copy it.
+
+Stack PR #2000 on #2003 to reuse the exact runtime. Repair the four Windows
+failures on the same branch and verify on a hosted Windows runner. Keep the
+previous real Desktop promotion gates distinct from flag plumbing and CI.

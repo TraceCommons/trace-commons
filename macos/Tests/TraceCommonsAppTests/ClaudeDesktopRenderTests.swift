@@ -45,10 +45,10 @@ final class ClaudeDesktopRenderTests: XCTestCase {
             }
             let daemon = DesktopRenderDaemon(result: snapshot, catalogue: catalogue)
             let client = DaemonClient(daemon: daemon)
-            let app = AppModel()
+            let app = try DesktopFeatureFixture.app(client: client, enabled: true)
             app.setStartupForTesting(.running)
-            app.setClientForTesting(client)
-            let setup = ClaudeDesktopSetupModel(client: client)
+            XCTAssertTrue(app.featureIsEnabled(ClaudeDesktopSetupModel.featureID))
+            let setup = try XCTUnwrap(app.makeClaudeDesktopSetup())
             await setup.refresh()
             let decodedCatalogue = try JSONDecoder().decode(ManagedModelCatalogue.self,
                 from: JSONSerialization.data(withJSONObject: catalogue))

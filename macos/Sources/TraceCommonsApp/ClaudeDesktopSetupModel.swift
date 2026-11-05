@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import Observation
 import TCShellCore
@@ -27,6 +28,8 @@ extension DaemonClient {
 /// only while its setup form is open and is copied only by the Copy action.
 @MainActor @Observable
 final class ClaudeDesktopSetupModel {
+    static let featureID = "claude_desktop_private_ai"
+
     private(set) var status: ClaudeDesktopStatus?
     private(set) var busy = false
     private(set) var failed = false
@@ -38,17 +41,43 @@ final class ClaudeDesktopSetupModel {
     var selectedBackgroundModel = ""
 
     @ObservationIgnored private let client: DaemonClient
+    @ObservationIgnored private let features: AppModel
+    @ObservationIgnored private var featureSubscription: AnyCancellable?
+    private(set) var featureEnabled = false
     @ObservationIgnored private var presentation = UUID()
     @ObservationIgnored private var catalogueRead = UUID()
 
-    init(client: DaemonClient) { self.client = client }
+    init(client: DaemonClient, features: AppModel) {
+        self.client = client
+        self.features = features
+        featureSubscription = features.$featureFlags.sink { [weak self] snapshot in
+            // AppModel is MainActor and publishes synchronously in willSet.
+            // Read the incoming decision so disable clears the preset before
+            // the next SwiftUI render or detached response can run.
+            MainActor.assumeIsolated {
+                self?.featureDecisionChanged(snapshot?.isEnabled(Self.featureID) ?? false)
+            }
+        }
+    }
+
+    private var isEnabled: Bool {
+        featureEnabled && features.featureIsEnabled(Self.featureID)
+    }
+
+    private func featureDecisionChanged(_ enabled: Bool) {
+        featureEnabled = enabled
+        guard !enabled else { return }
+        close()
+        status = nil
+        failed = false
+    }
 
     var resolvedModel: String? {
         selectedModel.isEmpty ? catalogue?.default : selectedModel
     }
 
     var canSave: Bool {
-        guard isPresented, !busy, !catalogueBusy, status?.canConfigure == true,
+        guard isEnabled, isPresented, !busy, !catalogueBusy, status?.canConfigure == true,
               let resolvedModel else { return false }
         return catalogue?.models.contains { $0.id == resolvedModel } == true
     }
@@ -56,12 +85,12 @@ final class ClaudeDesktopSetupModel {
     var modelNames: [String: String] { ManagedSurface.modelNames(catalogue) }
 
     func readCachedCatalogue(_ catalogue: ManagedModelCatalogue?) {
-        guard !isPresented, let catalogue else { return }
+        guard isEnabled, !isPresented, let catalogue else { return }
         self.catalogue = catalogue
     }
 
     func open() {
-        guard status != nil, !busy else { return }
+        guard isEnabled, status != nil, !busy else { return }
         presentation = UUID()
         isPresented = true
         environment = nil
@@ -81,14 +110,15 @@ final class ClaudeDesktopSetupModel {
     /// Called only from the visible row's task. One request at a time,
     /// including writes; the daemon bounds its credential/catalogue reads.
     func refresh() async {
-        guard !busy else { return }
+        guard isEnabled, !busy else { return }
         busy = true
+        let token = presentation
         defer { busy = false }
         let client = client
         let result = await Task.detached(priority: .utility) {
             try? client.claudeDesktopStatus()
         }.value
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, isEnabled, presentation == token else { return }
         guard let result else {
             close()
             status = nil
@@ -100,12 +130,12 @@ final class ClaudeDesktopSetupModel {
     /// The catalogue loader is injected by the view from AppModel's
     /// existing path. Late callbacks from a dismissed form are ignored.
     func loadCatalogue(using load: (@escaping @MainActor (ManagedModelCatalogue?) -> Void) -> Void) {
-        guard isPresented, !catalogueBusy else { return }
+        guard isEnabled, isPresented, !catalogueBusy else { return }
         catalogueBusy = true
         let token = UUID()
         catalogueRead = token
         load { [weak self] catalogue in
-            guard let self, self.isPresented, self.catalogueRead == token else { return }
+            guard let self, self.isEnabled, self.isPresented, self.catalogueRead == token else { return }
             self.catalogueBusy = false
             self.catalogue = catalogue
             if catalogue == nil { self.failed = true }
@@ -114,12 +144,14 @@ final class ClaudeDesktopSetupModel {
     }
 
     func chooseModel(_ value: String) {
+        guard isEnabled else { return }
         selectedModel = value
         environment = nil
         reconcileBackground()
     }
 
     func chooseBackground(_ value: String) {
+        guard isEnabled else { return }
         selectedBackgroundModel = value
         environment = nil
     }
@@ -139,17 +171,18 @@ final class ClaudeDesktopSetupModel {
     /// Fetch an existing route's preset only after an explicit Copy action
     /// in a newly opened form. Opening or polling never exports secrets.
     func copyEnvironment(write: @MainActor (String) -> Void = ClaudeDesktopSetupModel.writeClipboard) async {
-        guard isPresented, !busy else { return }
+        guard isEnabled, isPresented, !busy else { return }
+        let token = presentation
         if environment == nil {
             guard selectionsMatchStatus else { return }
             await requestEnvironment { try $0.claudeDesktopPreset() }
         }
-        guard isPresented, let environment else { return }
+        guard isEnabled, isPresented, presentation == token, let environment else { return }
         write(environment)
     }
 
     var canCopy: Bool {
-        isPresented && !busy && (environment != nil || selectionsMatchStatus)
+        isEnabled && isPresented && !busy && (environment != nil || selectionsMatchStatus)
     }
 
     private var selectionsMatchStatus: Bool {
@@ -159,9 +192,10 @@ final class ClaudeDesktopSetupModel {
     }
 
     func disconnect() async {
-        guard !busy, status?.canDisconnect == true else { return }
+        guard isEnabled, !busy, status?.canDisconnect == true else { return }
         environment = nil
         presentation = UUID()
+        let token = presentation
         busy = true
         failed = false
         defer { busy = false }
@@ -169,7 +203,7 @@ final class ClaudeDesktopSetupModel {
         let result = await Task.detached(priority: .userInitiated) {
             try? client.claudeDesktopDisconnect()
         }.value
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, isEnabled, presentation == token else { return }
         if let result { accept(result) }
         else { failed = true }
     }
@@ -177,7 +211,7 @@ final class ClaudeDesktopSetupModel {
     private func requestEnvironment(
         _ operation: @escaping @Sendable (DaemonClient) throws -> ClaudeDesktopStatus
     ) async {
-        guard isPresented, !busy else { return }
+        guard isEnabled, isPresented, !busy else { return }
         busy = true
         failed = false
         environment = nil
@@ -185,7 +219,7 @@ final class ClaudeDesktopSetupModel {
         let client = client
         defer { busy = false }
         let result = await Task.detached(priority: .userInitiated) { try? operation(client) }.value
-        guard !Task.isCancelled, isPresented, presentation == token else { return }
+        guard !Task.isCancelled, isEnabled, isPresented, presentation == token else { return }
         guard let result else { failed = true; return }
         accept(result)
         selectedModel = result.model ?? selectedModel

@@ -38,6 +38,7 @@ async fn fixture() -> (String, Calls, tokio::task::JoinHandle<()>) {
 }
 pub(in crate::daemon) fn shared(store: ConfigStore, base: &str) -> DaemonShared {
     let shared = DaemonShared::load(store).unwrap();
+    set_rollout(&shared, true);
     shared.claude_desktop.lock().unwrap().test_base_url = Some(base.into());
     shared.settings.lock().unwrap().private_inference = true;
     shared.settings.lock().unwrap().near_ai_inference = Some(NearAiInferenceCredential {
@@ -49,6 +50,22 @@ pub(in crate::daemon) fn shared(store: ConfigStore, base: &str) -> DaemonShared 
         minted_at: chrono::Utc::now(),
     });
     shared
+}
+fn set_rollout(shared: &DaemonShared, enabled: bool) {
+    let snapshot = shared.feature_flags.snapshot();
+    let now = chrono::Utc::now();
+    let manifest = json!({
+        "schema_version":1,
+        "environment":snapshot.environment,
+        "revision":snapshot.revision.unwrap_or(0) + 1,
+        "issued_at":now,
+        "expires_at":now + chrono::Duration::hours(1),
+        "flags":{"claude_desktop_private_ai":enabled}
+    });
+    shared
+        .feature_flags
+        .accept(&serde_json::to_vec(&manifest).unwrap(), now)
+        .unwrap();
 }
 async fn call(shared: &DaemonShared, method: &str, params: Value) -> Value {
     let req = Request {
@@ -712,5 +729,305 @@ async fn ipc_developer_dry_run_refuses_without_mutating_the_saved_binding() {
         assert_eq!(std::fs::read(store.daemon_path(FILE)).unwrap(), saved);
     }
     stop(&shared, true).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn rollout_defaults_off_and_blocks_presets_without_removing_saved_metadata() {
+    let (base, calls, server) = fixture().await;
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = shared(store.clone(), &base);
+    let configured = configure(&shared).await;
+    let saved = std::fs::read(store.daemon_path(FILE)).unwrap();
+    stop(&shared, false).await;
+    finish_drains(&shared).await;
+    // A separate cache directory exercises the same embedded default-off profile.
+    let rollout_dir = tempfile::tempdir().unwrap();
+    let mut restarted = DaemonShared::load(store.clone()).unwrap();
+    restarted.feature_flags = crate::feature_flags::Runtime::open(
+        crate::feature_flags::registry().unwrap(),
+        crate::feature_flags::embedded_profile().unwrap(),
+        rollout_dir.path(),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    restarted.claude_desktop.lock().unwrap().test_base_url = Some(base);
+    *restarted.settings.lock().unwrap() = shared.settings.lock().unwrap().clone();
+    assert!(!rollout_enabled(&restarted));
+    for method in [
+        "claude_desktop_status",
+        "claude_desktop_preset",
+        "claude_desktop_configure",
+    ] {
+        let params = if method.ends_with("configure") {
+            json!({"model":"fixture-main"})
+        } else {
+            json!({})
+        };
+        let value = call(&restarted, method, params).await;
+        assert_eq!(value["state"], "unavailable");
+        assert!(value.get("environment").is_none());
+        assert!(
+            !value
+                .to_string()
+                .contains(variables(&configured)["ANTHROPIC_VERTEX_PROJECT_ID"])
+        );
+    }
+    assert!(restarted.claude_desktop.lock().unwrap().route.is_none());
+    assert_eq!(std::fs::read(store.daemon_path(FILE)).unwrap(), saved);
+    assert!(calls.lock().unwrap().is_empty());
+    call(&restarted, "claude_desktop_disconnect", json!({})).await;
+    assert!(!store.daemon_path(FILE).exists());
+    server.abort();
+}
+
+#[tokio::test]
+async fn rollout_live_disable_drains_and_reenable_preserves_the_same_capability() {
+    let (base, notified, server) = held_stream_fixture().await;
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = Arc::new(shared(store.clone(), &base));
+    let configured = configure(&shared).await;
+    let env = variables(&configured);
+    let response = reqwest::Client::new().post(format!("{}/projects/{}/locations/global/publishers/anthropic/models/claude-sonnet-current:streamRawPredict", env["ANTHROPIC_VERTEX_BASE_URL"], env["ANTHROPIC_VERTEX_PROJECT_ID"]))
+        .json(&json!({"anthropic_version":"vertex-2023-10-16","max_tokens":16,"messages":[{"role":"user","content":"hello"}]})).send().await.unwrap();
+    notified.notified().await;
+    let lifecycle = tokio::spawn({
+        let shared = shared.clone();
+        async move { run_rollout(&shared).await }
+    });
+    set_rollout(&shared, false);
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let stopped = {
+                let held = shared.claude_desktop.lock().unwrap();
+                held.route.is_none() && held.start_done.iter().all(|done| *done.borrow())
+            };
+            if stopped {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("live disable acknowledges socket release without waiting for stream drain");
+    let address = env["ANTHROPIC_VERTEX_BASE_URL"]
+        .trim_start_matches("http://")
+        .trim_end_matches("/vertex");
+    assert!(tokio::net::TcpStream::connect(address).await.is_err());
+    assert!(store.daemon_path(FILE).exists());
+    assert!(
+        call(&shared, "claude_desktop_preset", json!({}))
+            .await
+            .get("environment")
+            .is_none()
+    );
+    drop(response);
+    finish_drains(&shared).await;
+    set_rollout(&shared, true);
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if shared.claude_desktop.lock().unwrap().route.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        call(&shared, "claude_desktop_preset", json!({})).await["environment"],
+        configured["environment"]
+    );
+    lifecycle.abort();
+    stop(&shared, true).await;
+    finish_drains(&shared).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn rollout_expiry_stops_listener_and_account_changes_revoke_while_off() {
+    let (base, _, server) = fixture().await;
+    for revoked in ["none", "sign_out", "key_change", "private_ai_off"] {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let shared = Arc::new(shared(store.clone(), &base));
+        configure(&shared).await;
+        let lifecycle = tokio::spawn({
+            let shared = shared.clone();
+            async move { run_rollout(&shared).await }
+        });
+        shared
+            .feature_flags
+            .tick(chrono::Utc::now() + chrono::Duration::hours(2));
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while shared.claude_desktop.lock().unwrap().route.is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!rollout_enabled(&shared));
+        assert!(store.daemon_path(FILE).exists());
+        match revoked {
+            "sign_out" => shared.settings.lock().unwrap().near_ai_inference = None,
+            "key_change" => {
+                shared
+                    .settings
+                    .lock()
+                    .unwrap()
+                    .near_ai_inference
+                    .as_mut()
+                    .unwrap()
+                    .key = "sk-another-account".into()
+            }
+            "private_ai_off" => shared.settings.lock().unwrap().private_inference = false,
+            _ => {}
+        }
+        reconcile(&shared).await;
+        assert_eq!(
+            store.daemon_path(FILE).exists(),
+            revoked == "none",
+            "{revoked}"
+        );
+        lifecycle.abort();
+        stop(&shared, true).await;
+        finish_drains(&shared).await;
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn disabling_rollout_cancels_a_pending_start_without_publishing_metadata() {
+    let (base, reached, server) = gated_fixture().await;
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = Arc::new(shared(store.clone(), &base));
+    let pending = tokio::spawn({
+        let shared = shared.clone();
+        async move { configure(&shared).await }
+    });
+    reached.notified().await;
+    let lifecycle = tokio::spawn({
+        let shared = shared.clone();
+        async move { run_rollout(&shared).await }
+    });
+    set_rollout(&shared, false);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result["state"], "unavailable");
+    assert!(result.get("environment").is_none());
+    assert!(!store.daemon_path(FILE).exists());
+    assert!(shared.claude_desktop.lock().unwrap().route.is_none());
+    lifecycle.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn final_start_publication_rechecks_rollout_without_a_reconcile() {
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let app = Router::new().route("/v1/models", get({
+        let reached = reached.clone();
+        let release = release.clone();
+        move || {
+            let reached = reached.clone();
+            let release = release.clone();
+            let first = first.clone();
+            async move {
+                if first.swap(false, Ordering::AcqRel) {
+                    reached.notify_one();
+                    release.notified().await;
+                }
+                Json(json!({"data":[{"id":"fixture-main","owned_by":"nearai","context_length":262144,"max_output_length":8192},{"id":"fixture-background","owned_by":"nearai","context_length":262144,"max_output_length":8192}]}))
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = Arc::new(shared(store.clone(), &base));
+    let pending = tokio::spawn({
+        let shared = shared.clone();
+        async move { configure(&shared).await }
+    });
+    reached.notified().await;
+    set_rollout(&shared, false);
+    release.notify_one();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result["state"], "unavailable");
+    assert!(result.get("environment").is_none());
+    assert!(!store.daemon_path(FILE).exists());
+    assert!(!shared.claude_desktop.lock().unwrap().starting);
+    assert!(shared.claude_desktop.lock().unwrap().route.is_none());
+    finish_drains(&shared).await;
+    server.abort();
+}
+
+pub(in crate::daemon) fn listener_stopped(
+    shared: &DaemonShared,
+) -> tokio::sync::watch::Receiver<bool> {
+    shared
+        .claude_desktop
+        .lock()
+        .unwrap()
+        .route
+        .as_ref()
+        .unwrap()
+        .listener_stopped_for_test()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn final_publication_holds_rollout_guard_until_metadata_and_route_commit() {
+    let (base, _, server) = fixture().await;
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = Arc::new(shared(store.clone(), &base));
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let entered = Mutex::new(Some(entered));
+    let (release, released) = std::sync::mpsc::channel();
+    let released = Mutex::new(released);
+    let weak = Arc::downgrade(&shared);
+    shared.claude_desktop.lock().unwrap().test_publication = Some(Arc::new(move || {
+        let shared = weak.upgrade().unwrap();
+        // This assertion is at the exact old race gap, after the enabled
+        // decision and before Desktop ownership. It deterministically fails if
+        // final publication no longer owns the Runtime state mutex.
+        assert!(shared.feature_flags.try_snapshot().is_none());
+        entered.lock().unwrap().take().unwrap().send(()).unwrap();
+        released.lock().unwrap().recv().unwrap();
+    }));
+    let pending = tokio::spawn({
+        let shared = shared.clone();
+        async move { configure(&shared).await }
+    });
+    observed.await.unwrap();
+    // Off may be attempted while publication is held, but its acceptance must
+    // observe the completed save. The exact-gap assertion above proves why it
+    // cannot overtake this commit; no scheduler timing is used as evidence.
+    let (attempt, attempted) = tokio::sync::oneshot::channel();
+    let disabled = std::thread::spawn({
+        let shared = shared.clone();
+        let store = store.clone();
+        move || {
+            attempt.send(()).unwrap();
+            set_rollout(&shared, false);
+            assert!(load(&store).unwrap().is_some());
+        }
+    });
+    attempted.await.unwrap();
+    release.send(()).unwrap();
+    pending.await.unwrap();
+    disabled.join().unwrap();
+    assert!(!rollout_enabled(&shared));
+    shared.claude_desktop.lock().unwrap().test_publication = None;
+    reconcile(&shared).await;
+    assert!(shared.claude_desktop.lock().unwrap().route.is_none());
+    assert!(load(&store).unwrap().is_some());
+    stop(&shared, true).await;
+    finish_drains(&shared).await;
     server.abort();
 }

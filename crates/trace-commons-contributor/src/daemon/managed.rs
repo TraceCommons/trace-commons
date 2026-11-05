@@ -4841,6 +4841,7 @@ mod desktop_withdrawal_tests {
         .await;
         assert!(configured.error.is_none(), "{configured:?}");
         let configured = configured.result.unwrap();
+        assert_eq!(configured["state"], "ready");
         let environment = configured["environment"].as_str().unwrap();
         let desktop_address = environment
             .lines()
@@ -4882,22 +4883,32 @@ mod desktop_withdrawal_tests {
             .send().await.unwrap();
         assert!(held.status().is_success());
         reached.notified().await;
+        let mut desktop_stopped = crate::daemon::claude_desktop::tests::listener_stopped(&shared);
         shared.settings.lock().unwrap().near_ai_inference = None;
         let withdrawing = tokio::spawn({
             let shared = shared.clone();
             async move { shared.reconcile_private_inference().await }
         });
+        // Observe the actual listener barrier within the revocation deadline.
+        // A refused TCP connect has its own OS retry timing on Windows, so it
+        // cannot measure when stop_accepting released the listener.
         let closed = tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
-                if tokio::net::TcpStream::connect(&desktop_address)
-                    .await
-                    .is_err()
-                {
+                if *desktop_stopped.borrow_and_update() {
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                desktop_stopped
+                    .changed()
+                    .await
+                    .expect("Desktop route must acknowledge listener closure");
             }
         })
+        .await;
+        // Verify the network outcome too, while the CLI stream is still held.
+        let refused = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::net::TcpStream::connect(&desktop_address),
+        )
         .await;
         let still_draining = !withdrawing.is_finished();
         let preset_revoked = !store
@@ -4912,6 +4923,10 @@ mod desktop_withdrawal_tests {
         assert!(
             closed.is_ok(),
             "Desktop withdrawal waited for the managed CLI stream"
+        );
+        assert!(
+            matches!(refused, Ok(Err(_))),
+            "the closed Desktop listener must refuse new connections"
         );
         assert!(
             still_draining,

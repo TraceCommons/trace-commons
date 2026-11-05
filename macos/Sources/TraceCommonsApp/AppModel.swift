@@ -68,7 +68,8 @@ final class AppModel: ObservableObject {
     /// The Desktop form owns this controller and its temporary preset;
     /// no Desktop credentials are published or cached in AppModel.
     func makeClaudeDesktopSetup() -> ClaudeDesktopSetupModel? {
-        client.map { ClaudeDesktopSetupModel(client: $0) }
+        guard featureIsEnabled(ClaudeDesktopSetupModel.featureID), let client else { return nil }
+        return ClaudeDesktopSetupModel(client: client, features: self)
     }
 
     /// Read or reset one folder/agent profile without choosing an account.

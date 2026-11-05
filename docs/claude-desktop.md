@@ -1,5 +1,10 @@
 # Claude Desktop Code with Private AI
 
+Claude Desktop support is gated by the default-off `claude_desktop_private_ai`
+environment flag. A compatible build and a reviewed enable are required before
+setup appears. Flag disable or expiry closes setup and stops new requests while
+accepted calls drain; re-enable can restore the same saved connection.
+
 Turn on Private AI and sign in to NEAR AI in Trace Commons. Open Claude
 Desktop setup in the Private AI tools list, select the main and background
 models, and choose Save. Choose Copy to copy the environment variables.

@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use std::{path::Path, sync::atomic::Ordering};
 use uuid::Uuid;
 
+const ROLLOUT_FLAG: &str = "claude_desktop_private_ai";
 const FILE: &str = crate::config::DAEMON_CLAUDE_DESKTOP_CONNECTION_FILE;
 
 /// Only routing metadata and an opaque local capability. Never an inference key.
@@ -41,6 +42,8 @@ pub(crate) struct Connection {
     terminating: bool,
     #[cfg(test)]
     test_base_url: Option<String>,
+    #[cfg(test)]
+    test_publication: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 impl Connection {
     pub(crate) fn open(store: &ConfigStore) -> Self {
@@ -58,6 +61,8 @@ impl Connection {
             terminating: false,
             #[cfg(test)]
             test_base_url: None,
+            #[cfg(test)]
+            test_publication: None,
         }
     }
     fn advance(&mut self) -> u64 {
@@ -72,7 +77,13 @@ impl Connection {
 fn fingerprint(key: &str) -> String {
     format!("{:x}", Sha256::digest(key.as_bytes()))
 }
+fn rollout_enabled(shared: &DaemonShared) -> bool {
+    shared.feature_flags.snapshot().is_enabled(ROLLOUT_FLAG)
+}
 fn eligible_key(shared: &DaemonShared) -> Result<String, &'static str> {
+    if !rollout_enabled(shared) {
+        return Err("unavailable");
+    }
     if shared.shutdown.load(Ordering::Acquire) {
         return Err("disabled");
     }
@@ -264,7 +275,8 @@ fn value(shared: &DaemonShared, explicit_preset: bool) -> Value {
         .claude_desktop
         .lock()
         .expect("desktop connection lock");
-    let ready = !held.terminating
+    let ready = eligible.is_ok()
+        && !held.terminating
         && held
             .route
             .as_ref()
@@ -298,7 +310,8 @@ fn value(shared: &DaemonShared, explicit_preset: bool) -> Value {
 
 /// Stop accepting before acknowledging disconnect, switch-off or key withdrawal.
 /// The ledger remains available to Insights. Shutdown preserves the preset only
-/// for a normal restart; account/policy changes revoke it permanently.
+/// for a normal restart or temporary rollout disable; account/policy changes
+/// revoke it permanently.
 pub(crate) async fn stop(shared: &DaemonShared, revoke: bool) {
     let (route, starts, completion) = {
         let mut held = shared
@@ -414,7 +427,12 @@ async fn start(
         Ok(key) => {
             ManagedRoute::start_desktop(&shared.store, key, &base_url, &binding, cancelled, done)
                 .await
-                .map_err(|_| ())
+                .map_err(|error| {
+                    #[cfg(test)]
+                    eprintln!("desktop route start failed: {error:?}");
+                    #[cfg(not(test))]
+                    let _ = error;
+                })
         }
         Err(_) => Err(()),
     };
@@ -432,40 +450,59 @@ async fn start(
     };
     let budget = context_budget(&binding.model, &binding.background_model, route.models());
     let mut rejected = Some(route);
+    #[cfg(test)]
+    let publication = shared
+        .claude_desktop
+        .lock()
+        .unwrap()
+        .test_publication
+        .clone();
     {
-        // The settings lock spans identity recheck and metadata publication.
-        // Configure cannot attach a route to a key switched during startup.
+        // Settings -> feature policy -> Desktop ownership. The policy guard
+        // spans save and publication, so accepting an off manifest cannot finish
+        // between an enabled decision and making the route visible.
         let settings = shared.settings.lock().expect("settings lock");
-        let current = !shared.shutdown.load(Ordering::Acquire)
-            && !shared.dev_dry_run
-            && settings.private_inference
-            && settings
-                .near_ai_inference
-                .as_ref()
-                .is_some_and(|credential| fingerprint(&credential.key) == binding.key_sha256);
-        let mut held = shared
-            .claude_desktop
-            .lock()
-            .expect("desktop connection lock");
-        if current && held.generation == generation && !held.terminating {
-            held.starting = false;
-            if let Some((compact, output)) = budget {
-                if binding.port == 0 {
-                    binding.compact_window = compact;
-                    binding.output_tokens = output;
-                }
-                binding.port = rejected.as_ref().unwrap().port();
-                if save(&shared.store, &binding, expected.as_ref()).is_ok() {
-                    held.binding = Some(binding);
-                    held.route = rejected.take();
-                    held.unavailable = false;
+        shared.feature_flags.with_snapshot(|snapshot| {
+            let current = snapshot.is_enabled(ROLLOUT_FLAG)
+                && !shared.shutdown.load(Ordering::Acquire)
+                && !shared.dev_dry_run
+                && settings.private_inference
+                && settings
+                    .near_ai_inference
+                    .as_ref()
+                    .is_some_and(|credential| fingerprint(&credential.key) == binding.key_sha256);
+            #[cfg(test)]
+            if let Some(publication) = publication {
+                publication();
+            }
+            let mut held = shared
+                .claude_desktop
+                .lock()
+                .expect("desktop connection lock");
+            if held.generation == generation {
+                held.starting = false;
+            }
+            if current && held.generation == generation && !held.terminating {
+                if let Some((compact, output)) = budget {
+                    if binding.port == 0 {
+                        binding.compact_window = compact;
+                        binding.output_tokens = output;
+                    }
+                    binding.port = rejected.as_ref().unwrap().port();
+                    if save(&shared.store, &binding, expected.as_ref()).is_ok() {
+                        held.binding = Some(binding);
+                        held.route = rejected.take();
+                        held.unavailable = false;
+                    } else {
+                        #[cfg(test)]
+                        eprintln!("desktop metadata save failed");
+                        held.unavailable = true;
+                    }
                 } else {
                     held.unavailable = true;
                 }
-            } else {
-                held.unavailable = true;
             }
-        }
+        });
     }
     guard.completed = true;
     if let Some(route) = rejected {
@@ -546,6 +583,10 @@ async fn reconcile_inline(shared: &DaemonShared) {
         }
         return;
     }
+    if !rollout_enabled(shared) {
+        stop(shared, false).await;
+        return;
+    }
     let pending = {
         let mut held = shared
             .claude_desktop
@@ -589,6 +630,44 @@ async fn reconcile_inline(shared: &DaemonShared) {
         pending.3,
     )
     .await;
+}
+
+/// A feature-specific owner, run beside remote refresh/expiry. An off transition
+/// cancels catalogue startup immediately, while stop keeps its socket-release
+/// barrier before a later enable may resume the persisted capability.
+pub(crate) async fn run_rollout(shared: &DaemonShared) {
+    let mut changes = shared.feature_flags.subscribe();
+    loop {
+        let enabled = rollout_enabled(shared);
+        if enabled {
+            tokio::select! {
+                biased;
+                _ = wait_rollout_change(shared, &mut changes, enabled) => continue,
+                _ = reconcile_inline(shared) => {},
+            }
+        } else {
+            // Do not cancel the listener-close acknowledgement on re-enable.
+            reconcile_inline(shared).await;
+        }
+        if rollout_enabled(shared) != enabled {
+            continue;
+        }
+        wait_rollout_change(shared, &mut changes, enabled).await;
+    }
+}
+async fn wait_rollout_change(
+    shared: &DaemonShared,
+    changes: &mut tokio::sync::watch::Receiver<u64>,
+    enabled: bool,
+) {
+    loop {
+        if rollout_enabled(shared) != enabled {
+            return;
+        }
+        if changes.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 pub(crate) async fn handle(shared: &DaemonShared, request: &Request) -> Response {
@@ -665,11 +744,13 @@ async fn handle_inline(shared: &DaemonShared, request: &Request) -> Response {
             }
             let pending = {
                 let settings = shared.settings.lock().expect("settings lock");
+                let enabled = rollout_enabled(shared);
                 let mut held = shared
                     .claude_desktop
                     .lock()
                     .expect("desktop connection lock");
                 if held.terminating
+                    || !enabled
                     || !settings.private_inference
                     || shared.shutdown.load(Ordering::Acquire)
                     || settings

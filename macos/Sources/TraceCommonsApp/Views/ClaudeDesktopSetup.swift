@@ -8,14 +8,16 @@ struct ClaudeDesktopSettingsRow: View {
     let closeLabel: String
     @EnvironmentObject private var model: AppModel
     @State private var setup: ClaudeDesktopSetupModel?
+    private var isEnabled: Bool { model.featureIsEnabled(ClaudeDesktopSetupModel.featureID) }
 
     var body: some View {
         Group {
-            if let setup, let status = setup.status {
+            if isEnabled, let setup, let status = setup.status {
                 ClaudeDesktopToolRow(setup: setup, status: status)
             }
         }
-        .task {
+        .task(id: isEnabled) {
+            guard isEnabled else { setup?.close(); setup = nil; return }
             var namedModel: String?
             while !Task.isCancelled {
                 if setup == nil { setup = model.makeClaudeDesktopSetup() }
@@ -32,9 +34,9 @@ struct ClaudeDesktopSettingsRow: View {
         }
         .onDisappear { setup?.close(); setup = nil }
         .glassModal(isPresented: Binding(
-            get: { setup?.isPresented == true },
+            get: { isEnabled && setup?.isPresented == true },
             set: { if !$0 { setup?.close() } })) {
-                if let setup, setup.status != nil {
+                if isEnabled, let setup, setup.status != nil {
                     ClaudeDesktopSetupSheet(setup: setup, closeLabel: closeLabel)
                 }
             }

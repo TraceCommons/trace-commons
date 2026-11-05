@@ -114,3 +114,23 @@ Final FFI tests passed (293 tests); a fresh FFI build followed by the full Swift
 suite passed, including setup recovery and render regressions. The independent
 review's two findings were fixed and rechecked. Both linked PRs remain drafts;
 CI, merge, release and deployment are separate states.
+
+## Feature flag and Windows follow-up
+
+- [x] Register the live/default-false flag and capability in all three profiles;
+  keep examples disabled and bump registry/profile versions together.
+- [x] Gate daemon configure/export/restore, reconcile disable/expiry promptly,
+  preserve bindings across flag disable and revoke on account-policy changes.
+  Test opt-in, off/default/missing, pending starts, drain, expiry and re-enable.
+- [x] Gate native setup from the daemon snapshot; clear setup secrets and ignore
+  late responses on disable. Test missing/off/on and in-flight disable.
+- [ ] Diagnose Windows failures from hosted logs; repair the cause and retain
+  lifecycle assertions. Verify with hosted Windows CI after publication.
+- [ ] Run final contributor/protocol/FFI tests, lint, formatting, profile scripts,
+  license boundary, fresh FFI build plus Swift suite; review, update and push PR.
+
+Local follow-up validation passed with 5,540 contributor tests, 676 protocol
+tests, 295 FFI tests, four license-boundary tests, eight profile/publisher/CLI
+checks and the full rebuilt native suite. Review's atomic publication finding
+was repaired with a controlled interleaving regression; all affected checks
+were rerun. Hosted Windows diagnosis/verification is tracked in the PR.

@@ -75,3 +75,32 @@ formatting and diff checks. The final upstream all-feature run passed with
 1,575 passed/two ignored and the independent Vertex rerun passed 13 tests.
 All four license configurations, four license-boundary tests and three locked
 metadata reads passed. No merge, deployment or release was performed.
+
+## PR #2003 feature flag integration
+
+The Desktop feature is now a live, default-false environment flag:
+`claude_desktop_private_ai`, requiring `claude_desktop_private_ai_v1`. Registry
+and all profile versions are 2, and example manifests remain false. Native
+setup and daemon configure/export/restore fail closed without an effective
+enable. Disable/expiry closes the listener and clears native preset state,
+while accepted streams drain and the saved binding remains for re-enable.
+Account, credential and Private AI policy revocations still remove the binding.
+No live configuration was published.
+
+Local combined checks passed: contributor 5,540 passed/10 ignored; protocol 676
+passed; FFI 295 passed; license boundary four passed; profile/publisher/real-CLI
+checks eight passed; three-crate lint; formatting; fresh FFI build followed by
+the full Swift suite (3,542 XCTest cases executed, nine skipped, zero failures;
+eight Swift Testing cases passed).
+
+Windows CI previously failed four new Desktop tests. The withdrawal regression
+now measures the actual listener-close acknowledgement within one second and
+separately checks TCP refusal within five seconds, preserving the held CLI
+stream assertion. Three other failures returned unavailable during setup;
+bounded test-only stage/error labels were added to identify the cause on the
+hosted Windows rerun. These failures are not declared fixed by local macOS tests.
+
+Final review also found a flag-off versus final-publication race. Startup now
+holds a synchronous feature snapshot guard through metadata save and route
+publication, in settings -> feature policy -> Desktop lock order. A controlled
+interleaving regression verifies that off acceptance cannot overtake the commit.

@@ -164,7 +164,11 @@ impl ManagedRoute {
             ),
         )
         .await
-        .map_err(|_| ManagedError::LaunchUnknown)?
+        .map_err(|_| {
+            #[cfg(test)]
+            eprintln!("Desktop route startup exceeded its deadline");
+            ManagedError::LaunchUnknown
+        })?
     }
 
     async fn start_with_binding(
@@ -190,6 +194,10 @@ impl ManagedRoute {
             .build()
             .map_err(|_| ManagedError::LaunchUnknown)?;
         let deadline = tokio::time::Instant::now() + READY_WITHIN;
+        #[cfg(test)]
+        if desktop.is_some() {
+            eprintln!("Desktop route startup: fetching catalogue");
+        }
         // Choose first: a default that is not listed starts no proxy. An
         // empty catalogue is read again, as an unreadable one is.
         let (models, selected_model) = loop {
@@ -232,6 +240,10 @@ impl ManagedRoute {
             {
                 return Err(ManagedError::ModelUnavailable);
             }
+        }
+        #[cfg(test)]
+        if desktop.is_some() {
+            eprintln!("Desktop route startup: preparing private storage");
         }
         let home = home_for(store, id);
         if let Some(root) = home.parent() {
@@ -316,11 +328,29 @@ responses_via_chat = {responses_via_chat}
                 .map_err(|_| ManagedError::InvalidRequest)?,
             );
         }
+        #[cfg(test)]
+        if desktop.is_some() {
+            eprintln!("Desktop route startup: starting embedded proxy");
+        }
         let proxy = tokio::select! {
             biased;
             _ = cancelled(&mut cancellation) => return Err(ManagedError::LaunchUnknown),
             proxy = embed::start_with_options(&home, Some(desktop.map_or(0, |b| b.port)), options, |_, _| {}) => {
-                proxy.map_err(|_| ManagedError::LaunchUnknown)?
+                proxy.map_err(|_error| {
+                    #[cfg(test)]
+                    if desktop.is_some() {
+                        let label = match _error {
+                            embed::EmbedError::Paths => "paths",
+                            embed::EmbedError::Config => "config",
+                            embed::EmbedError::Lock { .. } => "home-locked",
+                            embed::EmbedError::PortInUse { .. } => "port-in-use",
+                            embed::EmbedError::Bind => "bind",
+                            embed::EmbedError::Registry { .. } => "registry",
+                        };
+                        eprintln!("Desktop embedded proxy startup failed: {label}");
+                    }
+                    ManagedError::LaunchUnknown
+                })?
             }
         };
         let mut starting = StartingProxy {
@@ -328,6 +358,10 @@ responses_via_chat = {responses_via_chat}
             completion,
         };
         let proxy = starting.proxy.as_ref().expect("starting proxy");
+        #[cfg(test)]
+        if desktop.is_some() {
+            eprintln!("Desktop route startup: waiting for proxy readiness");
+        }
         let ready: Result<(), ManagedError> = async {
             let token = std::fs::read_to_string(home.join("control.token"))
                 .map_err(|_| ManagedError::StorageUnavailable)?;
@@ -371,6 +405,10 @@ responses_via_chat = {responses_via_chat}
             }
             // Ordinary CLI routes pin the backend only. Desktop's scoped
             // gateway independently enforces both selected model bindings.
+            #[cfg(test)]
+            if desktop.is_some() {
+                eprintln!("Desktop route startup: pinning backend");
+            }
             let pin = client
                 .post(format!("http://127.0.0.1:{}/_ironwire/pin", proxy.port()))
                 .bearer_auth(token.trim())
@@ -389,6 +427,10 @@ responses_via_chat = {responses_via_chat}
         }
         .await;
         if let Err(error) = ready {
+            #[cfg(test)]
+            if desktop.is_some() {
+                eprintln!("Desktop proxy readiness failed: {error:?}");
+            }
             let proxy = starting.proxy.take().expect("starting proxy");
             if desktop.is_some() {
                 stop_desktop_proxy(proxy, starting.completion.take()).await;
@@ -491,6 +533,11 @@ responses_via_chat = {responses_via_chat}
 
     pub(crate) fn is_finished(&self) -> bool {
         self.owner.is_finished()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn listener_stopped_for_test(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.listener_stopped.clone()
     }
 
     pub(crate) fn request_shutdown(&mut self) {

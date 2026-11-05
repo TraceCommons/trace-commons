@@ -10081,7 +10081,11 @@ See [feature flags](operator/feature-flags.md) for lifetime and offline behavior
 ## Claude Desktop Code connection
 
 These asynchronous methods own one connection separately from managed CLI
-sessions. They require no new trace collection consent:
+sessions. They require an enabled `claude_desktop_private_ai` effective feature
+flag; missing or disabled flags refuse setup/export/restore. Disconnect remains
+available for cleanup. A live disable stops accepting requests, clears pending
+starts and preserves the saved binding for re-enable; account-policy changes
+still revoke it. They require no new trace collection consent:
 
 | Method | Parameters | Action |
 | --- | --- | --- |

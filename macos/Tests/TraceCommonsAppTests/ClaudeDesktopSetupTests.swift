@@ -96,9 +96,106 @@ final class ClaudeDesktopSetupTests: XCTestCase {
         setup.loadCatalogue { done in done(catalogue) }
     }
 
+    func testAbsentMissingAndOffFeatureDecisionsCreateNoRowControllerOrIPC() async throws {
+        let daemon = DesktopDaemon()
+        let client = DaemonClient(daemon: daemon)
+        let app = AppModel()
+        app.setClientForTesting(client)
+        let snapshots: [FeatureFlagSnapshot?] = [
+            nil, try DesktopFeatureFixture.snapshot(enabled: nil), try DesktopFeatureFixture.snapshot(enabled: false),
+        ]
+        for snapshot in snapshots {
+            app.featureFlags = snapshot
+            XCTAssertFalse(app.featureIsEnabled(ClaudeDesktopSetupModel.featureID))
+            XCTAssertNil(app.makeClaudeDesktopSetup())
+            // Even a retained/stale caller cannot issue Desktop IPC while
+            // the current authoritative feature snapshot is absent or off.
+            let setup = ClaudeDesktopSetupModel(client: client, features: app)
+            await setup.refresh()
+            setup.open()
+            setup.loadCatalogue { _ in XCTFail("feature-off must not request a catalogue") }
+            await setup.save()
+            await setup.copyEnvironment { _ in XCTFail("feature-off must not copy") }
+            await setup.disconnect()
+            XCTAssertNil(setup.status)
+            XCTAssertFalse(setup.isPresented)
+        }
+        XCTAssertTrue(daemon.calls.isEmpty)
+    }
+
+    func testLiveDisableSynchronouslyClosesSheetClearsPresetAndAllowsReenable() async throws {
+        let daemon = DesktopDaemon(state: "ready", model: "main")
+        let app = try DesktopFeatureFixture.app(client: DaemonClient(daemon: daemon), enabled: true)
+        let setup = try XCTUnwrap(app.makeClaudeDesktopSetup())
+        try await open(setup)
+        daemon.answer(state: "ready", model: "main", environment: "sensitive-preset")
+        await setup.save()
+        XCTAssertNotNil(setup.environment)
+
+        app.featureFlags = try DesktopFeatureFixture.snapshot(enabled: false, generation: 2)
+        // No render/run-loop turn is needed to discard the credential.
+        XCTAssertNil(setup.environment)
+        XCTAssertNil(setup.status)
+        XCTAssertFalse(setup.isPresented)
+        XCTAssertFalse(setup.canSave)
+        XCTAssertFalse(setup.canCopy)
+        let before = daemon.calls.count
+        await setup.refresh()
+        await setup.copyEnvironment { _ in XCTFail("disabled feature copied") }
+        await setup.disconnect()
+        XCTAssertEqual(daemon.calls.count, before)
+
+        app.featureFlags = try DesktopFeatureFixture.snapshot(enabled: true, generation: 3)
+        try await open(setup)
+        XCTAssertTrue(setup.isPresented)
+        XCTAssertTrue(setup.canSave)
+        XCTAssertNil(setup.environment)
+        await setup.save()
+        XCTAssertEqual(setup.environment, "sensitive-preset")
+
+        app.featureFlags = nil
+        XCTAssertNil(setup.environment)
+        XCTAssertFalse(setup.isPresented)
+    }
+
+    func testLiveDisableDiscardsLateConfigureAndPresetEvenAfterReenable() async throws {
+        for blocked in ["claude_desktop_configure", "claude_desktop_preset"] {
+            let started = DispatchSemaphore(value: 0)
+            let release = DispatchSemaphore(value: 0)
+            let daemon = DesktopDaemon(state: "ready", model: "main") { method in
+                if method == blocked {
+                    started.signal()
+                    release.wait()
+                }
+            }
+            let app = try DesktopFeatureFixture.app(client: DaemonClient(daemon: daemon), enabled: true)
+            let setup = try XCTUnwrap(app.makeClaudeDesktopSetup())
+            try await open(setup)
+            daemon.answer(state: "ready", model: "main", environment: "sensitive-preset")
+            var copied: [String] = []
+            let requesting = Task {
+                if blocked == "claude_desktop_configure" { await setup.save() }
+                else { await setup.copyEnvironment { copied.append($0) } }
+            }
+            let began = await Task.detached { waitForDesktopConfigure(started) }.value
+            XCTAssertTrue(began)
+            app.featureFlags = try DesktopFeatureFixture.snapshot(enabled: false, generation: 2)
+            XCTAssertFalse(setup.isPresented)
+            XCTAssertNil(setup.environment)
+            app.featureFlags = try DesktopFeatureFixture.snapshot(enabled: true, generation: 3)
+            release.signal()
+            await requesting.value
+            XCTAssertTrue(copied.isEmpty)
+            XCTAssertNil(setup.environment)
+            XCTAssertNil(setup.status)
+            XCTAssertFalse(setup.isPresented)
+            XCTAssertFalse(setup.busy)
+        }
+    }
+
     func testSaveUsesConcreteCatalogueDefaultWithoutClipboardWrite() async throws {
         let daemon = DesktopDaemon()
-        let setup = ClaudeDesktopSetupModel(client: DaemonClient(daemon: daemon))
+        let setup = try DesktopFeatureFixture.enabledSetup(client: DaemonClient(daemon: daemon))
         try await open(setup)
         XCTAssertTrue(setup.canSave)
         XCTAssertNil(setup.environment)
@@ -123,7 +220,7 @@ final class ClaudeDesktopSetupTests: XCTestCase {
 
     func testOpeningExistingConnectionDoesNotExportPresetUntilCopy() async throws {
         let daemon = DesktopDaemon(state: "ready", model: "main")
-        let setup = ClaudeDesktopSetupModel(client: DaemonClient(daemon: daemon))
+        let setup = try DesktopFeatureFixture.enabledSetup(client: DaemonClient(daemon: daemon))
         try await open(setup)
         XCTAssertEqual(daemon.calls.map(\.method), ["claude_desktop_status"])
         XCTAssertNil(setup.environment)
@@ -139,7 +236,7 @@ final class ClaudeDesktopSetupTests: XCTestCase {
 
     func testStatusChangeAndDisconnectClearPreset() async throws {
         let daemon = DesktopDaemon()
-        let setup = ClaudeDesktopSetupModel(client: DaemonClient(daemon: daemon))
+        let setup = try DesktopFeatureFixture.enabledSetup(client: DaemonClient(daemon: daemon))
         try await open(setup)
         daemon.answer(state: "ready", model: "main", environment: "sensitive-preset")
         await setup.save()
@@ -160,13 +257,13 @@ final class ClaudeDesktopSetupTests: XCTestCase {
     func testBlockedStateAndUnreadableCatalogueCannotSave() async throws {
         for state in ["sign_in_required", "disabled", "new_state"] {
             let daemon = DesktopDaemon(state: state)
-            let setup = ClaudeDesktopSetupModel(client: DaemonClient(daemon: daemon))
+            let setup = try DesktopFeatureFixture.enabledSetup(client: DaemonClient(daemon: daemon))
             try await open(setup)
             XCTAssertFalse(setup.canSave)
             await setup.save()
             XCTAssertFalse(daemon.calls.contains { $0.method == "claude_desktop_configure" })
         }
-        let setup = ClaudeDesktopSetupModel(client: DaemonClient(daemon: DesktopDaemon()))
+        let setup = try DesktopFeatureFixture.enabledSetup(client: DaemonClient(daemon: DesktopDaemon()))
         await setup.refresh()
         setup.open()
         setup.loadCatalogue { $0(nil) }
@@ -176,7 +273,7 @@ final class ClaudeDesktopSetupTests: XCTestCase {
 
     func testRejectedConfigureCanChooseCompatibleModelAndRetryInSameSheet() async throws {
         let daemon = DesktopDaemon()
-        let setup = ClaudeDesktopSetupModel(client: DaemonClient(daemon: daemon))
+        let setup = try DesktopFeatureFixture.enabledSetup(client: DaemonClient(daemon: daemon))
         try await open(setup)
         setup.chooseModel("other")
         daemon.answer(state: "unavailable")
@@ -207,7 +304,7 @@ final class ClaudeDesktopSetupTests: XCTestCase {
 
     func testUnavailableWithoutModelCanDisconnectAndUnknownStateCannot() async throws {
         let daemon = DesktopDaemon(state: "unavailable")
-        let setup = ClaudeDesktopSetupModel(client: DaemonClient(daemon: daemon))
+        let setup = try DesktopFeatureFixture.enabledSetup(client: DaemonClient(daemon: daemon))
         await setup.refresh()
         XCTAssertTrue(setup.status?.canDisconnect == true)
         daemon.answer(state: "disconnected")
@@ -216,7 +313,7 @@ final class ClaudeDesktopSetupTests: XCTestCase {
         XCTAssertEqual(daemon.calls.last?.method, "claude_desktop_disconnect")
 
         let unknownDaemon = DesktopDaemon(state: "future_state", model: "main")
-        let unknown = ClaudeDesktopSetupModel(client: DaemonClient(daemon: unknownDaemon))
+        let unknown = try DesktopFeatureFixture.enabledSetup(client: DaemonClient(daemon: unknownDaemon))
         try await open(unknown)
         await unknown.disconnect()
         await unknown.save()
@@ -224,7 +321,7 @@ final class ClaudeDesktopSetupTests: XCTestCase {
     }
 
     func testDismissedFormIgnoresLateCatalogueRead() async throws {
-        let setup = ClaudeDesktopSetupModel(client: DaemonClient(daemon: DesktopDaemon()))
+        let setup = try DesktopFeatureFixture.enabledSetup(client: DaemonClient(daemon: DesktopDaemon()))
         await setup.refresh()
         setup.open()
         var complete: (@MainActor (ManagedModelCatalogue?) -> Void)?
@@ -236,7 +333,7 @@ final class ClaudeDesktopSetupTests: XCTestCase {
     }
 
     func testModelChoiceUsesDaemonBackgroundAllowlist() async throws {
-        let setup = ClaudeDesktopSetupModel(client: DaemonClient(daemon: DesktopDaemon()))
+        let setup = try DesktopFeatureFixture.enabledSetup(client: DaemonClient(daemon: DesktopDaemon()))
         try await open(setup)
         setup.chooseBackground("other")
         setup.chooseModel("main")
@@ -255,7 +352,7 @@ final class ClaudeDesktopSetupTests: XCTestCase {
                 release.wait()
             }
         }
-        let setup = ClaudeDesktopSetupModel(client: DaemonClient(daemon: daemon))
+        let setup = try DesktopFeatureFixture.enabledSetup(client: DaemonClient(daemon: daemon))
         try await open(setup)
         daemon.answer(state: "ready", model: "main", environment: "sensitive-preset")
         let saving = Task { await setup.save() }
