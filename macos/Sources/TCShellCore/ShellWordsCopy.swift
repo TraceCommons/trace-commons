@@ -158,8 +158,8 @@ public struct ShellWordsCopy: Decodable, Equatable, Sendable {
     public let scrubbing: Scrubbing
     public let settings: Settings
     public let pausedNotice: PausedNotice
-    /// Settings > Projects' summary and Manage sheet (DRAFT, NEEDS
-    /// APPROVAL, 2026-11-04). Optional so an older core still decodes; the
+    /// Settings > Projects' summary and Manage sheet (approved by the owner
+    /// 2026-11-04, #1952). Optional so an older core still decodes; the
     /// card and the sheet draw nothing that needs a word it lacks.
     public let projectsManager: ProjectsManager?
 
