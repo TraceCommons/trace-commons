@@ -43,17 +43,22 @@ use crate::config::{ContributorConfig, WitnessSettings};
 /// this build trusts, each as 64 lowercase hex characters (the raw 32-byte
 /// key).
 ///
-/// **Empty on purpose until the owner creates the list-signing key** (a
-/// Google Cloud KMS `ec-sign-ed25519` key, owner decision Q11). With no key
-/// nothing can verify, the client never fetches, and the feature is inert:
-/// the sign-up pins are the whole of the trust, exactly as before.
+/// - `ea396d6a7f0e867f`: the commons' list-signing key, version 1. A Google
+///   Cloud KMS `ec-sign-ed25519` key, not exportable, with signing permission
+///   for the owner's account only (owner decision Q11, created 2026-11-05).
 ///
-/// To add a key, export the KMS key version's public key and convert it with
-/// `trace-commons-witness-list public-key` (runbook:
+/// The key id is the first 16 hex characters of the key's SHA-256
+/// (`trace-commons-witness-list public-key`). To add a key, export the KMS
+/// key version's public key and convert it with that command (runbook:
 /// `docs/operator/witness-accepted-list.md`). Rotation: add the new key here
 /// and ship it to clients **before** the list is signed by it alone; remove
 /// the old one only after that. Keep this set small.
-pub const TRUSTED_LIST_SIGNING_KEYS: &[&str] = &[];
+pub const TRUSTED_LIST_SIGNING_KEYS: &[&str] =
+    &["fed526376edb29b3328cb6c4a0a1f6a2d6c1267641b705cd276c5adf21d0a523"];
+
+/// The key ids of [`TRUSTED_LIST_SIGNING_KEYS`], in the same order. Pinned
+/// by a test, so a key cannot change without its id changing here too.
+pub const TRUSTED_LIST_SIGNING_KEY_IDS: &[&str] = &["ea396d6a7f0e867f"];
 
 /// The file the verified served document is kept in, in the state directory.
 /// It holds the exact bytes served and is verified again every time it is
@@ -424,14 +429,41 @@ mod tests {
     }
 
     #[test]
-    fn this_build_ships_no_list_signing_key_so_the_feature_is_inert() {
-        // Remove this assertion in the change that adds the owner's key.
-        assert!(TRUSTED_LIST_SIGNING_KEYS.is_empty());
+    fn this_build_trusts_exactly_the_commons_list_signing_key() {
+        let shipped: Vec<[u8; 32]> = TRUSTED_LIST_SIGNING_KEYS
+            .iter()
+            .map(|key| parse_public_key_hex(key).expect("a shipped key parses"))
+            .collect();
+        let ids: Vec<String> = shipped.iter().map(key_id_for).collect();
+        assert_eq!(ids, TRUSTED_LIST_SIGNING_KEY_IDS);
+        assert_eq!(ids, ["ea396d6a7f0e867f"]);
+        // A state directory with no test keys gets the shipped set.
         let dir = tempfile::tempdir().unwrap();
-        assert!(trusted_keys(dir.path()).is_empty());
-        // A correctly signed list is refused without a trusted key.
-        let signer = key();
-        let document = signed(&signer, &list(1, vec![entry("cc", 1, 20)]));
+        assert_eq!(trusted_keys(dir.path()), shipped);
+    }
+
+    #[test]
+    fn the_shipped_key_is_the_one_kms_exported() {
+        // The PEM `gcloud kms keys versions get-public-key` wrote for the
+        // list-signing key, version 1. Public, not secret.
+        const PEM_BODY: &str = "MCowBQYDK2VwAyEA/tUmN27bKbMyjLbEoKH2otbBJnZBtwXNJ2xa3yHQpSM=";
+        use base64::Engine as _;
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(PEM_BODY)
+            .unwrap();
+        // The Ed25519 SubjectPublicKeyInfo prefix, then the raw key.
+        assert_eq!(hex::encode(&der[..12]), "302a300506032b6570032100");
+        assert_eq!(hex::encode(&der[12..]), TRUSTED_LIST_SIGNING_KEYS[0]);
+    }
+
+    #[test]
+    fn a_list_signed_by_any_other_key_is_refused_under_the_shipped_set() {
+        // No signature from the real key can be made here (it never leaves
+        // KMS), so the shipped set is exercised against a stranger's list:
+        // it must be refused, and nothing stored.
+        let dir = tempfile::tempdir().unwrap();
+        let stranger = key();
+        let document = signed(&stranger, &list(1, vec![entry("cc", 1, 20)]));
         assert_eq!(
             install(
                 dir.path(),
@@ -440,6 +472,34 @@ mod tests {
                 WITNESS_URL
             ),
             Err("witness-accepted-list-signature-invalid")
+        );
+        assert!(!dir.path().join(ACCEPTED_LIST_FILE).exists());
+    }
+
+    #[test]
+    fn a_list_signed_by_a_trusted_key_verifies_through_the_same_path() {
+        // The wiring the shipped key uses, with a test key in its place.
+        let dir = tempfile::tempdir().unwrap();
+        let signer = key();
+        set_test_keys(dir.path(), vec![public(&signer)]);
+        let document = signed(&signer, &list(1, vec![entry("cc", 1, 20)]));
+        assert_eq!(
+            install(
+                dir.path(),
+                &document,
+                &trusted_keys(dir.path()),
+                WITNESS_URL
+            ),
+            Ok(InstallOutcome::Installed { version: 1 })
+        );
+        assert_eq!(
+            install(
+                dir.path(),
+                &document,
+                &trusted_keys(dir.path()),
+                WITNESS_URL
+            ),
+            Ok(InstallOutcome::NotNewer)
         );
     }
 
@@ -752,6 +812,8 @@ mod tests {
     #[tokio::test]
     async fn a_build_without_a_key_never_fetches() {
         let dir = tempfile::tempdir().unwrap();
+        // This directory trusts no key, as a build with an empty set.
+        set_test_keys(dir.path(), Vec::new());
         // An origin nothing listens on: a fetch would fail, not skip.
         let cfg = cfg_for("http://127.0.0.1:9");
         assert_eq!(refresh(&cfg, dir.path()).await, RefreshOutcome::Skipped);
