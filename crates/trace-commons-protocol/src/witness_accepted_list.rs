@@ -157,7 +157,9 @@ impl AcceptedList {
 
     /// The entries in force at `now`.
     pub fn entries_valid_at(&self, now: DateTime<Utc>) -> impl Iterator<Item = &AcceptedEntry> {
-        self.entries.iter().filter(move |entry| entry.is_valid_at(now))
+        self.entries
+            .iter()
+            .filter(move |entry| entry.is_valid_at(now))
     }
 
     /// The bytes an operator signs: the payload as key-sorted, compact JSON.
@@ -280,7 +282,8 @@ pub fn verify_signed_list(
     }
     let signed: SignedAcceptedList =
         serde_json::from_value(value).map_err(|_| AcceptedListError::Malformed)?;
-    if signed.signatures.is_empty() || signed.signatures.len() > WITNESS_ACCEPTED_LIST_MAX_SIGNATURES
+    if signed.signatures.is_empty()
+        || signed.signatures.len() > WITNESS_ACCEPTED_LIST_MAX_SIGNATURES
     {
         return Err(AcceptedListError::Malformed);
     }
@@ -296,6 +299,48 @@ pub fn verify_signed_list(
     if !payload.is_object() {
         return Err(AcceptedListError::Malformed);
     }
+    if payload.get("schema").and_then(serde_json::Value::as_str)
+        != Some(WITNESS_ACCEPTED_LIST_SCHEMA)
+    {
+        return Err(AcceptedListError::SchemaUnsupported);
+    }
+    let list: AcceptedList =
+        serde_json::from_value(payload).map_err(|_| AcceptedListError::Malformed)?;
+    list.validate()?;
+    Ok(list)
+}
+
+/// Check everything about a served document except whether its signatures
+/// verify: the size bound, the served shape, one to
+/// [`WITNESS_ACCEPTED_LIST_MAX_SIGNATURES`] well-formed signatures, and a
+/// payload that is a valid [`AcceptedList`].
+///
+/// For the server, which serves the list but holds no trusted key: it
+/// refuses to serve a file that no client could accept, so an unsigned or
+/// mangled list is never published. Signature verification is the client's.
+pub fn check_served_shape(document: &[u8]) -> Result<AcceptedList, AcceptedListError> {
+    if document.len() > WITNESS_ACCEPTED_LIST_MAX_BYTES {
+        return Err(AcceptedListError::TooLarge);
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(document).map_err(|_| AcceptedListError::Malformed)?;
+    if !value.is_object() {
+        return Err(AcceptedListError::Malformed);
+    }
+    let signed: SignedAcceptedList =
+        serde_json::from_value(value).map_err(|_| AcceptedListError::Malformed)?;
+    let hex_of_len =
+        |text: &str, len: usize| text.len() == len && text.bytes().all(|b| b.is_ascii_hexdigit());
+    if signed.signatures.is_empty()
+        || signed.signatures.len() > WITNESS_ACCEPTED_LIST_MAX_SIGNATURES
+        || !signed.signatures.iter().all(|signature| {
+            hex_of_len(&signature.key_id, KEY_ID_HEX_LEN) && hex_of_len(&signature.signature, 128)
+        })
+    {
+        return Err(AcceptedListError::Malformed);
+    }
+    let payload: serde_json::Value =
+        serde_json::from_str(&signed.payload).map_err(|_| AcceptedListError::Malformed)?;
     if payload.get("schema").and_then(serde_json::Value::as_str)
         != Some(WITNESS_ACCEPTED_LIST_SCHEMA)
     {
@@ -665,6 +710,30 @@ mod tests {
         assert_eq!(parse_public_key_hex("abcd"), None);
         assert_eq!(key_id_for(&raw).len(), KEY_ID_HEX_LEN);
         assert_ne!(key_id_for(&raw), key_id_for(&public(&test_key())));
+    }
+
+    #[test]
+    fn the_served_shape_check_passes_a_signed_list_and_refuses_an_unsigned_one() {
+        let key = test_key();
+        let document = signed(&key, &list(3));
+        assert_eq!(check_served_shape(&document), Ok(list(3)));
+        let payload = list(3).canonical_payload().unwrap();
+        assert_eq!(
+            check_served_shape(&assemble_signed_list(payload.clone(), vec![])),
+            Err(AcceptedListError::Malformed)
+        );
+        let junk = ListSignature {
+            key_id: "k".into(),
+            signature: "00".into(),
+        };
+        assert_eq!(
+            check_served_shape(&assemble_signed_list(payload.clone(), vec![junk])),
+            Err(AcceptedListError::Malformed)
+        );
+        assert_eq!(
+            check_served_shape(payload.as_bytes()),
+            Err(AcceptedListError::Malformed)
+        );
     }
 
     #[test]
