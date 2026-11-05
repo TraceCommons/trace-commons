@@ -81,6 +81,7 @@ the link.
 | Linking legacy invite tenants to NEAR accounts, marking pooled tenants, or retiring a shared event invite | [`./legacy-invite-migration.md`](./legacy-invite-migration.md) |
 | Counting legacy invite tenants, accounts, links and readiness blockers before account admission | [`./legacy-invite-counts.md`](./legacy-invite-counts.md) |
 | Deploying the redaction witness on dstack (this project's first CVM) | [`../../deploy/witness/README.md`](../../deploy/witness/README.md) |
+| Load-testing the redaction witness locally | [`./witness-load-testing.md`](./witness-load-testing.md) |
 | Looking up an env var | [`./env-reference.md`](./env-reference.md) |
 | Driving review / admin / worker / tenant workflows from a CLI | [`./operator-binaries.md`](./operator-binaries.md) |
 | Working the quarantine queue (review, release, contributor notification) | [`./quarantine-review.md`](./quarantine-review.md) |
@@ -160,6 +161,11 @@ Every runbook in this directory, with a one-line description.
   the allowlist-before-deploy upgrade order, why a guest-API surface migration
   is a key rotation and not an upgrade, that the image is **not** reproducibly
   buildable, and the limit on what a witness certificate attests.
+- [`./witness-load-testing.md`](./witness-load-testing.md) — load-testing the
+  redaction witness locally: a stand-in dstack agent, a stand-in NEAR AI
+  classifier with the measured latency, and a driver that sends synthetic
+  contributions and reports latency percentiles and throughput. Synthetic
+  text only, loopback by default.
 - [`./drills.md`](./drills.md) — the full set of `/v1/admin/*-drill`
   endpoints, what each validates, and cadence guidance.
 - [`./near-attestation-drill.md`](./near-attestation-drill.md) — the NEAR AI
