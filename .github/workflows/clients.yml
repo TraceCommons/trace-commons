@@ -19,6 +19,8 @@ on:
   pull_request:
     paths:
       - "macos/**"
+      - "scripts/feature-flags/**"
+      - "scripts/ci/test-feature-profiles.sh"
       # The glass design tokens and their generator: a JSON-only change has
       # to run the drift guard below and TokenDriftTests.
       - "design-tokens/**"

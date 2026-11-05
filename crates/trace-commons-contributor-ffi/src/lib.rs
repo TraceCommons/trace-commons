@@ -841,6 +841,15 @@ pub extern "C" fn tc_build_channel_json() -> *mut c_char {
     })
 }
 
+/// Immutable feature build identity; no networking or disk access. Free with tc_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_feature_profile_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let identity = trace_commons_contributor::feature_flags::build_profile_identity()?;
+        Ok(to_owned_cstring(&serde_json::to_string(&identity)?))
+    })
+}
+
 /// The command-line tool's state for the app at `bundle_path`
 /// (`cli_tool::probe`): the link this build's channel installs in
 /// `/usr/local/bin`, what is there now, and the AppleScript that changes it.
