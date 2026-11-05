@@ -112,7 +112,9 @@ pub fn apply_patch(
             .into_iter()
             .flatten()
             .any(|model| !super::opencode::valid_model(model))
-            || (update.background_model.is_some() && update.tool == ToolId::Codex)
+            || (update.background_model.is_some()
+                && !matches!(update.tool, ToolId::Claude | ToolId::Opencode))
+            || (update.tool == ToolId::Hermes && update.collect_traces)
         {
             return Err("settings-invalid-value");
         }

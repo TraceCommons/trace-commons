@@ -108,8 +108,33 @@ extension ManagedFolderSettingsTests {
             let params = draft.applying(to: ["tool": tool, "connection": "near_ai_signin", "account_id": "current-account"], daemonKeepsSavedModel: true)
             XCTAssertEqual(params["account_id"] as? String, "current-account")
             XCTAssertEqual(params["model"] as? String, "chosen-model")
-            XCTAssertEqual(params["collect_traces"] as? Bool, true)
+            XCTAssertEqual(params["collect_traces"] as? Bool, tool != "hermes")
             XCTAssertEqual(params["cli_options"] as? String, "--custom")
+        }
+    }
+
+    func testHermesFolderChoicesSupportDefaultsButNeverCollectionOrBackgroundModels() {
+        for connection in ["api_key", "near_ai", "near_ai_signin"] {
+            XCTAssertEqual(ManagedSurface.folderModelMode(tool: "hermes", connection: connection),
+                           connection == "near_ai_signin" ? .catalogue : .text)
+            XCTAssertFalse(ManagedSurface.offersBackgroundModel(tool: "hermes", connection: connection))
+            var draft = ManagedFolderDraft()
+            draft.useDefaults(tool: "hermes", cwd: nil, cliOptions: "--custom")
+            draft.collectTraces = true
+            draft.chooseBackground("stale-background")
+            let base: [String: Any] = ["tool": "hermes", "connection": connection, "account_id": "h"]
+            let defaults = draft.applying(to: base, daemonKeepsSavedModel: true, daemonReadsBackground: true)
+            XCTAssertNil(defaults["model"])
+            XCTAssertEqual(defaults["collect_traces"] as? Bool, false)
+            XCTAssertNil(defaults["background_model"])
+            draft.choose("  provider/model \n")
+            let chosen = draft.applying(to: base, daemonKeepsSavedModel: true, daemonReadsBackground: true)
+            XCTAssertEqual(chosen["model"] as? String, "provider/model")
+            XCTAssertEqual(chosen["account_id"] as? String, "h")
+            XCTAssertEqual(chosen["collect_traces"] as? Bool, false)
+            XCTAssertNil(chosen["background_model"])
+            draft.choose(" \n")
+            XCTAssertNil(draft.applying(to: base, daemonKeepsSavedModel: false)["model"])
         }
     }
 

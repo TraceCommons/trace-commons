@@ -23,7 +23,7 @@ fn saved_options_round_trip_through_ipc_and_restart() {
     let daemon = DaemonShared::load(ConfigStore::open(home.path().to_path_buf()).unwrap()).unwrap();
     assert_eq!(
         call(&daemon, "managed_snapshot", json!({}))["cli_options"],
-        json!({"claude":"", "codex":"", "opencode":""})
+        json!({"claude":"", "codex":"", "opencode":"", "hermes":""})
     );
     let options = r#"--model custom -c 'model_reasoning_effort="high"' --sandbox workspace-write"#;
     let revision = call(&daemon, "managed_snapshot", json!({}))["revision"]
@@ -82,6 +82,37 @@ fn saved_options_round_trip_through_ipc_and_restart() {
         call(&daemon, "managed_snapshot", json!({}))["cli_options"]["codex"],
         ""
     );
+}
+
+#[test]
+fn hermes_options_cannot_replace_the_managed_route_profile_or_conversation() {
+    use trace_commons_contributor::managed::{ToolId, options::parse};
+    assert_eq!(
+        parse(
+            ToolId::Hermes,
+            "--reasoning high --max-turns=12 --checkpoints"
+        )
+        .unwrap(),
+        ["--reasoning", "high", "--max-turns=12", "--checkpoints"]
+    );
+    for invalid in [
+        "--profile personal",
+        "-p personal",
+        "--provider openrouter",
+        "--prov=openrouter",
+        "--base-url https://example.com",
+        "--api-key other",
+        "--model other",
+        "-mother",
+        "--resume latest",
+        "-c",
+        "--tui",
+        "gateway start",
+        "--no-safe-mode",
+        "--reasoning",
+    ] {
+        assert!(parse(ToolId::Hermes, invalid).is_err(), "{invalid}");
+    }
 }
 
 #[test]

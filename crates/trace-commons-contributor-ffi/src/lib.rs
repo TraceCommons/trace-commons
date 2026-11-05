@@ -7393,8 +7393,8 @@ mod managed_availability_tests {
     fn tools_and_copy_are_available_without_a_daemon_handle() {
         let tools = owned_json(tc_managed_tools_json());
         let rows = tools.as_array().unwrap();
-        assert_eq!(rows.len(), 3);
-        for (row, name) in rows.iter().zip(["claude", "codex", "opencode"]) {
+        assert_eq!(rows.len(), 4);
+        for (row, name) in rows.iter().zip(["claude", "codex", "opencode", "hermes"]) {
             assert_eq!(row["tool"], name);
             assert!(row["installed"].is_boolean());
             assert!(row["install_url"].as_str().unwrap().starts_with("https://"));

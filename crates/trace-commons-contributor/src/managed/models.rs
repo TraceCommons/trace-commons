@@ -192,7 +192,7 @@ fn preference(tool: ToolId) -> Option<(&'static str, &'static str)> {
     match tool {
         ToolId::Claude => Some(("anthropic/claude-sonnet-", "anthropic/")),
         ToolId::Codex => Some(("openai/gpt-", "openai/")),
-        ToolId::Opencode => None,
+        ToolId::Opencode | ToolId::Hermes => None,
     }
 }
 
@@ -276,7 +276,7 @@ pub fn offered(tool: ToolId, models: Vec<ChatModel>) -> Vec<ChatModel> {
             .into_iter()
             .filter(|m| !CODEX_REFUSED.contains(&m.id.as_str()))
             .collect(),
-        ToolId::Claude | ToolId::Opencode => models,
+        ToolId::Claude | ToolId::Opencode | ToolId::Hermes => models,
     }
 }
 
@@ -406,7 +406,7 @@ fn tier_background(tool: ToolId, tier: ModelTier, models: &[ChatModel]) -> Optio
     let same = models.iter().filter(move |m| m.tier == Some(tier));
     let haiku = match tool {
         ToolId::Claude => newest_in("anthropic/claude-haiku-", same.clone()),
-        ToolId::Codex | ToolId::Opencode => None,
+        ToolId::Codex | ToolId::Opencode | ToolId::Hermes => None,
     };
     haiku.or_else(|| listed(BACKGROUND_PREFERRED, same))
 }
@@ -492,7 +492,7 @@ pub fn flag_model(tool: ToolId, args: &[String]) -> Option<&str> {
             found = Some(value);
         }
     }
-    found.filter(|_| tool != ToolId::Opencode)
+    found.filter(|_| !matches!(tool, ToolId::Opencode | ToolId::Hermes))
 }
 
 /// Claude Code's model aliases, each with the family whose newest listed

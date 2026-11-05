@@ -200,3 +200,66 @@ fn cli_requires_a_new_choice_after_default_removal() {
     assert!(resolve(&snapshot, ToolId::Claude, None, None).is_err());
     assert!(resolve(&snapshot, ToolId::Claude, Some("Remaining"), None).is_ok());
 }
+
+#[test]
+fn hermes_launches_accept_keys_and_sign_in_but_not_unqualified_session_features() {
+    use serde_json::json;
+    use trace_commons_contributor::managed::{sessions::SessionRegistry, signin};
+    let home = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(home.path().join("state")).unwrap();
+    let mut accounts = AccountStore::open(&store).unwrap();
+    assert_eq!(
+        accounts.add(ToolId::Hermes, ConnectionKind::Subscription, "No"),
+        Err(ManagedError::InvalidRequest)
+    );
+    let mut registry = SessionRegistry::open(&store).unwrap();
+    let sign_in = signin::entry(ToolId::Hermes).unwrap();
+    let api = accounts
+        .add(ToolId::Hermes, ConnectionKind::ApiKey, "OpenAI")
+        .unwrap();
+    let near = accounts
+        .add(ToolId::Hermes, ConnectionKind::NearAi, "Private")
+        .unwrap();
+    for account in [&sign_in, &api, &near] {
+        let request = json!({"request_id":uuid::Uuid::new_v4(), "tool":"hermes", "connection":account.connection,
+            "account_id":account.id, "cwd":home.path(), "expected_generation":0, "model":"private/model"});
+        for (key, value) in [
+            ("collect_traces", json!(true)),
+            ("background_model", json!("other/model")),
+            ("purpose", json!("login")),
+            ("model", json!("bad model")),
+        ] {
+            let mut refused = request.clone();
+            refused[key] = value;
+            assert_eq!(
+                registry
+                    .prepare(serde_json::from_value(refused).unwrap(), account)
+                    .err(),
+                Some(ManagedError::InvalidRequest),
+                "{key}"
+            );
+        }
+        let mut default = request.clone();
+        default["request_id"] = json!(uuid::Uuid::new_v4());
+        default["model"] = serde_json::Value::Null;
+        let prepared = registry.prepare(serde_json::from_value(default).unwrap(), account);
+        if account.connection == ConnectionKind::NearAiSignIn {
+            let prepared = prepared.unwrap();
+            let context = registry
+                .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+                .unwrap();
+            assert_eq!(context.session.model, None);
+            assert!(!context.session.collect_traces);
+        } else {
+            assert_eq!(prepared.err(), Some(ManagedError::InvalidRequest));
+        }
+        let prepared = registry
+            .prepare(serde_json::from_value(request).unwrap(), account)
+            .unwrap();
+        let context = registry
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(context.session.model.as_deref(), Some("private/model"));
+        assert!(!context.session.collect_traces);
+    }
+}

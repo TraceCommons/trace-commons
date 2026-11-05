@@ -614,7 +614,7 @@ fn inputs(shared: &DaemonShared) -> ([bool; 2], Vec<LoginSpec>) {
         let provider = match account.tool {
             ToolId::Codex => Provider::Codex,
             ToolId::Claude => Provider::Claude,
-            ToolId::Opencode => continue,
+            ToolId::Opencode | ToolId::Hermes => continue,
         };
         if !enabled[provider.index()] {
             continue;

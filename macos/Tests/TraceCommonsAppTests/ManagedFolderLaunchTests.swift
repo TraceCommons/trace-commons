@@ -115,7 +115,24 @@ final class ManagedFolderLaunchTests: XCTestCase {
     }
 
     @MainActor
-    func testFolderScreenShowsCollectionOptionsForAllThreeAgents() throws {
+    func testHermesDefaultsRequireSignInAndSavedKeysRequireExplicitModels() throws {
+        var draft = ManagedFolderDraft()
+        draft.useDefaults(tool: "hermes", cwd: nil, cliOptions: "")
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"provider/model"}],"default":"provider/model"}"#.utf8))
+        for connection in ["api_key", "near_ai", "near_ai_signin"] {
+            draft.choose(nil)
+            XCTAssertEqual(ManagedFolderOptions.modelIsAvailable(draft, tool: "hermes", connection: connection, catalogue: nil),
+                           connection == "near_ai_signin")
+            draft.choose("provider/model")
+            XCTAssertTrue(ManagedFolderOptions.modelIsAvailable(draft, tool: "hermes", connection: connection, catalogue: catalogue))
+        }
+        draft.choose("removed/model")
+        XCTAssertFalse(ManagedFolderOptions.modelIsAvailable(draft, tool: "hermes", connection: "near_ai_signin", catalogue: catalogue))
+        XCTAssertEqual(ManagedWords.glassTool("hermes"), .other(initials: "He"))
+    }
+
+    @MainActor
+    func testFolderScreenRendersForEveryManagedAgent() throws {
         _ = NSApplication.shared
         let model = AppModel()
         XCTAssertEqual(model.managedText("collect_managed_trace"), "Collect trace for review")

@@ -13,7 +13,7 @@ pub fn snapshot(store: &ConfigStore) -> Result<BTreeMap<ToolId, String>, Managed
     // A saved value this build no longer accepts is still shown, so the
     // person can change it; a launch with it is refused
     // ([`arguments`] parses it again).
-    for tool in [ToolId::Claude, ToolId::Codex, ToolId::Opencode] {
+    for tool in super::signin::TOOLS {
         values.entry(tool).or_default();
     }
     Ok(values)
@@ -193,6 +193,17 @@ fn validate(tool: ToolId, args: &[String]) -> Result<(), ManagedError> {
             return Err(invalid());
         }
         match tool {
+            ToolId::Hermes => {
+                // An allow-list also refuses argparse abbreviations and
+                // subcommands that could replace our profile/route/session.
+                if matches!(flag, "--reasoning" | "--max-turns" | "--run-budget") {
+                    if !arg.contains('=') {
+                        iter.next().ok_or_else(invalid)?;
+                    }
+                } else if !matches!(arg.as_str(), "--verbose" | "--checkpoints") {
+                    return Err(invalid());
+                }
+            }
             ToolId::Claude => {
                 if matches!(
                     flag,

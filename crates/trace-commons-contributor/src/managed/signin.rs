@@ -11,11 +11,17 @@ use uuid::Uuid;
 const CLAUDE: Uuid = Uuid::from_u128(0x6e65_6172_2d61_4900_8000_0000_0000_0001);
 const CODEX: Uuid = Uuid::from_u128(0x6e65_6172_2d61_4900_8000_0000_0000_0002);
 const OPENCODE: Uuid = Uuid::from_u128(0x6e65_6172_2d61_4900_8000_0000_0000_0003);
+const HERMES: Uuid = Uuid::from_u128(0x6e65_6172_2d61_4900_8000_0000_0000_0004);
 
 /// OpenCode starts on its session proxy's default model, as Claude Code and
 /// Codex do; the daemon tells its launcher that model, and every model the
 /// proxy serves, with the port.
-pub const TOOLS: [ToolId; 3] = [ToolId::Claude, ToolId::Codex, ToolId::Opencode];
+pub const TOOLS: [ToolId; 4] = [
+    ToolId::Claude,
+    ToolId::Codex,
+    ToolId::Opencode,
+    ToolId::Hermes,
+];
 
 /// The stable id of a tool's sign-in entry. Stable so the tool's isolated
 /// profile directory survives between launches. Optional so a tool added
@@ -25,6 +31,7 @@ pub fn account_id(tool: ToolId) -> Option<AccountId> {
         ToolId::Claude => CLAUDE,
         ToolId::Codex => CODEX,
         ToolId::Opencode => OPENCODE,
+        ToolId::Hermes => HERMES,
     }))
 }
 
@@ -90,10 +97,10 @@ mod tests {
     fn entries_follow_the_sign_in() {
         assert!(entries(false).is_empty());
         let present = entries(true);
-        assert_eq!(present.len(), 3);
+        assert_eq!(present.len(), 4);
         assert_eq!(
             present.iter().map(|a| a.tool).collect::<Vec<_>>(),
-            vec![ToolId::Claude, ToolId::Codex, ToolId::Opencode]
+            TOOLS.to_vec()
         );
         for (account, tool) in present.iter().zip(TOOLS) {
             assert_eq!(account.tool, tool);
@@ -109,6 +116,10 @@ mod tests {
             account_id(ToolId::Opencode).map(|id| id.0.to_string()),
             Some("6e656172-2d61-4900-8000-000000000003".to_owned())
         );
+        assert_eq!(
+            account_id(ToolId::Hermes).map(|id| id.0.to_string()),
+            Some("6e656172-2d61-4900-8000-000000000004".to_owned())
+        );
         assert_eq!(tool_for(AccountId(Uuid::new_v4())), None);
     }
 
@@ -121,7 +132,7 @@ mod tests {
             generation: Generation(3),
         };
         let out = defaults(vec![saved.clone()], true, |_| Generation(7));
-        assert_eq!(out.len(), 3);
+        assert_eq!(out.len(), 4);
         assert_eq!(out[0], saved);
         assert_eq!(out[1].tool, ToolId::Codex);
         assert_eq!(Some(out[1].account_id), account_id(ToolId::Codex));

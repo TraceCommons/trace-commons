@@ -263,3 +263,35 @@ fn opencode_launcher_detects_supported_major_versions() {
         Err(ManagedError::UnsupportedVersion)
     ));
 }
+
+#[cfg(unix)]
+#[test]
+fn hermes_requires_the_isolated_cli_contract_not_a_dependency_version_in_its_banner() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(home.path().join("state")).unwrap();
+    let account = AccountStore::open(&store)
+        .unwrap()
+        .add(ToolId::Hermes, ConnectionKind::ApiKey, "Work")
+        .unwrap();
+    let profiles = NativeProfiles::new(&store);
+    let native = home.path().join("hermes");
+    for (flags, status, supported) in [
+        ("--cli --safe-mode --provider --model --base-url", 0, true),
+        ("--cli --provider --model --base-url", 0, false),
+        ("--cli --safe-mode --provider --model --base-url", 2, false),
+        (
+            "Hermes Agent dev Python: 3.14.0 OpenAI SDK: 2.54.0",
+            0,
+            false,
+        ),
+    ] {
+        std::fs::write(&native, format!("#!/bin/sh\n[ \"$1 $2 $3 $4\" = '--profile default chat --help' ] || exit 42\nprintf '%s\\n' '{flags}'\nexit {status}\n")).unwrap();
+        std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            profiles.verify_version(&account, &native).is_ok(),
+            supported,
+            "{flags}"
+        );
+    }
+}

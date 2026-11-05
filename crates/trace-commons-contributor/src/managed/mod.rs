@@ -7,6 +7,7 @@ pub mod codex;
 pub mod collection_plan;
 pub mod folder;
 pub mod herdr;
+pub mod hermes;
 pub mod models;
 pub mod native_collection;
 pub mod opencode;
@@ -31,6 +32,7 @@ pub enum ToolId {
     Claude,
     Codex,
     Opencode,
+    Hermes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]

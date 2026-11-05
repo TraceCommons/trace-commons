@@ -440,6 +440,7 @@ impl ManagedService {
                             .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
                     })
             }
+            ToolId::Hermes => false,
         }
     }
 
@@ -537,6 +538,7 @@ impl ManagedService {
                     self.accounts.selection(ToolId::Claude),
                     self.accounts.selection(ToolId::Codex),
                     self.accounts.selection(ToolId::Opencode),
+                    self.accounts.selection(ToolId::Hermes),
                 ]
                 .into_iter()
                 .flatten()
@@ -565,7 +567,7 @@ impl ManagedService {
                 let destination = terminal::destination(choice);
                 let opens_in = launch_destination(terminal.herdr, destination);
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":destination,"launch_destination":opens_in,"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices,"herdr_available":herdr_available,"herdr_grouping":terminal.herdr}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode),"hermes":self.accounts.generation(ToolId::Hermes)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":destination,"launch_destination":opens_in,"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices,"herdr_available":herdr_available,"herdr_grouping":terminal.herdr}}),
                 )
             }
             "managed_tool_setup" => {
@@ -2449,9 +2451,10 @@ mod tests {
         let (_home, _store, mut service) = service();
         let without = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
         let tools = without["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 4);
         assert_eq!(tools[2]["tool"], "opencode");
-        assert_eq!(without["generations"].as_object().unwrap().len(), 3);
+        assert_eq!(tools[3]["tool"], "hermes");
+        assert_eq!(without["generations"].as_object().unwrap().len(), 4);
         assert_eq!(without["capabilities"]["near_ai_signin"], false);
         assert_eq!(without["sign_in_accounts"], json!([]));
         assert_eq!(without["defaults"], json!([]));
@@ -2459,14 +2462,17 @@ mod tests {
         let with = call(&mut service, "managed_snapshot", json!({}), true).unwrap();
         assert_eq!(with["capabilities"]["near_ai_signin"], true);
         let entries = with["sign_in_accounts"].as_array().unwrap();
-        assert_eq!(entries.len(), 3);
-        for (entry, tool) in entries.iter().zip(["claude", "codex", "opencode"]) {
+        assert_eq!(entries.len(), 4);
+        for (entry, tool) in entries
+            .iter()
+            .zip(["claude", "codex", "opencode", "hermes"])
+        {
             assert_eq!(entry["tool"], tool);
             assert_eq!(entry["connection"], "near_ai_signin");
             assert_eq!(entry["auth_state"], "ready");
         }
         let defaults = with["defaults"].as_array().unwrap();
-        assert_eq!(defaults.len(), 3);
+        assert_eq!(defaults.len(), 4);
         assert!(defaults.iter().all(|d| d["connection"] == "near_ai_signin"));
         // Derived, not saved.
         assert_eq!(with["accounts"], json!([]));

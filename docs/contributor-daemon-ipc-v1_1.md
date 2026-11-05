@@ -9763,9 +9763,9 @@ Acceptance can earn pending credit; this is not credit redemption.
 ### Installed coding tools
 
 `managed_snapshot.tools` is an additive array of `{tool, installed, install_url}`
-rows for `claude`, `codex`, and `opencode`. Each row reports executable discovery
+rows for `claude`, `codex`, `opencode`, and `hermes`. Each row reports executable discovery
 independently of trace-source discovery, saved accounts, or sign-in. It does not
-verify tool versions, read traces, or grant consent. All three are managed
+verify tool versions, read traces, or grant consent. All four are managed
 tools; see "Managed OpenCode launch additions" below for OpenCode's launch
 fields. `install_url` is the tool's setup guide from the shared install-guide
 table (`tc_install_guides_json`). Missing native launch binaries return
@@ -9783,6 +9783,22 @@ snapshot refresh checks again. Before daemon startup,
 the shared copy object, and `tc_install_guides_json` returns the install-guide
 table as `{source slug: url}` for every tool first run asks about; all three
 strings are freed with `tc_string_free`.
+
+### Managed Hermes launches
+
+The `hermes` tool supports `near_ai_signin`, saved `near_ai` keys and OpenAI
+`api_key` accounts, with its own generation/default and stable sign-in account.
+Subscriptions and login launches are refused. The sign-in may omit `model` to
+use the proxy default; saved keys require a model ID with OpenCode's validation.
+`collect_traces: true`, `resume_of`, and `background_model` are refused for Hermes.
+
+The native launcher gives each session a fresh `HERMES_HOME`, selects
+`--profile default chat --cli --safe-mode`, and explicitly sets the custom
+provider, model and endpoint. Keys are in the environment, never argv or saved
+configuration. It qualifies required CLI switches through a bounded
+`chat --help` probe. The macOS shell hides unsupported controls and does not
+offer Hermes when an older daemon omits its availability row. The CLI option
+allow-list is documented in [Managed sessions](managed-sessions.md#hermes-sessions).
 
 ### Managed OpenCode launch additions
 
