@@ -87,7 +87,7 @@ while accepted streams drain and the saved binding remains for re-enable.
 Account, credential and Private AI policy revocations still remove the binding.
 No live configuration was published.
 
-Local combined checks passed: contributor 5,543 passed/10 ignored; protocol 676
+Local combined checks passed: contributor 5,546 passed/10 ignored; protocol 676
 passed; FFI 295 passed; license boundary four passed; profile/publisher/real-CLI
 checks eight passed; three-crate lint; formatting; fresh FFI build followed by
 the full Swift suite (3,542 XCTest cases executed, nine skipped, zero failures;
@@ -135,3 +135,15 @@ new inference request. Existing streams and generic routing remain unchanged.
 The final upstream pin is `eeab5a61ae658842946f03c857f1f50345dd9487` (1,579
 all-feature tests passed, two ignored; lint and formatting passed). Hosted
 results for the final combined revision are recorded in the PR.
+
+The next combined Windows run passed every other check and failed only the
+live-disable TCP-refusal assertion. Its same-socket HTTP probe observed a read
+failure, no HTTP response and zero additional fixture completions after exact
+listener acknowledgement. The test now requires concrete request refusal:
+TCP refusal, EOF/known closed-transport error before any response bytes, or a
+complete valid HTTP 403. Timeouts, generic errors, partial/malformed headers and
+all other statuses remain failures; the fixture count must still stay one.
+A live-gateway positive control proves that the same raw request produces HTTP
+200 and one fixture completion before stop. Local full contributor tests passed
+5,546/10 ignored, followed by focused final probe tests, lint and formatting.
+Production code was unchanged by this final assertion repair.

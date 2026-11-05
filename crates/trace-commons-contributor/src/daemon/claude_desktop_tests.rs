@@ -788,13 +788,13 @@ async fn rollout_defaults_off_and_blocks_presets_without_removing_saved_metadata
     server.abort();
 }
 
-/// Diagnose only an already-connected post-close socket. No response text or
-/// request capability escapes this helper; the sole output is a fixed label and
-/// parsed numeric HTTP status. Keep this separate from the refusal assertion.
+/// Probe the old capability on the same socket that connected after listener
+/// acknowledgement. Only a specific closed transport or HTTP 403 proves refusal;
+/// timeouts, malformed responses and other HTTP statuses remain failures.
 async fn probe_old_capability_on_socket(
     socket: &mut tokio::net::TcpStream,
     project: &str,
-) -> (&'static str, u16) {
+) -> (&'static str, u16, bool) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let exchange = async {
         let body = json!({"anthropic_version":"vertex-2023-10-16","max_tokens":16,"messages":[{"role":"user","content":"hello"}]}).to_string();
@@ -802,45 +802,78 @@ async fn probe_old_capability_on_socket(
             "POST /vertex/projects/{project}/locations/global/publishers/anthropic/models/claude-sonnet-current:streamRawPredict HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
-        if socket.write_all(request.as_bytes()).await.is_err() {
-            return ("write-failed", 0);
+        if let Err(error) = socket.write_all(request.as_bytes()).await {
+            return probe_transport_failure(error.kind(), "write-failed");
         }
         let mut header = Vec::new();
         let mut buffer = [0; 1024];
         loop {
             let read = match socket.read(&mut buffer).await {
-                Ok(0) => return ("closed-without-http", 0),
+                Ok(0) if header.is_empty() => return ("closed-without-http", 0, true),
+                Ok(0) => return ("incomplete-http", 0, false),
                 Ok(read) => read,
-                Err(_) => return ("read-failed", 0),
+                Err(error) if header.is_empty() => {
+                    return probe_transport_failure(error.kind(), "read-failed");
+                }
+                Err(_) => return ("incomplete-http", 0, false),
             };
             header.extend_from_slice(&buffer[..read]);
-            if let Some(end) = header.windows(2).position(|part| part == b"\r\n") {
-                let status = std::str::from_utf8(&header[..end]).ok().and_then(|line| {
-                    let mut fields = line.split_whitespace();
+            if let Some(end) = header.windows(4).position(|part| part == b"\r\n\r\n") {
+                let status = std::str::from_utf8(&header[..end]).ok().and_then(|header| {
+                    let mut lines = header.split("\r\n");
+                    let status_line = lines.next()?;
+                    if !status_line
+                        .bytes()
+                        .all(|byte| byte == b'\t' || (byte >= 32 && byte != 127))
+                    {
+                        return None;
+                    }
+                    for line in lines {
+                        let (name, value) = line.split_once(':')?;
+                        reqwest::header::HeaderName::from_bytes(name.as_bytes()).ok()?;
+                        reqwest::header::HeaderValue::from_bytes(value.as_bytes()).ok()?;
+                    }
+                    let mut fields = status_line.split_whitespace();
                     let protocol = fields.next()?;
                     if !matches!(protocol, "HTTP/1.0" | "HTTP/1.1") {
                         return None;
                     }
-                    fields
-                        .next()?
-                        .parse::<u16>()
+                    reqwest::StatusCode::from_bytes(fields.next()?.as_bytes())
                         .ok()
+                        .map(|status| status.as_u16())
                         .filter(|status| (100..=599).contains(status))
                 });
                 return match status {
-                    Some(status) if (200..300).contains(&status) => ("http-success", status),
-                    Some(status) => ("http-rejected", status),
-                    None => ("non-http-status", 0),
+                    Some(403) => ("http-revoked", 403, true),
+                    Some(status) if (200..300).contains(&status) => ("http-success", status, false),
+                    Some(status) => ("http-other-status", status, false),
+                    None => ("non-http-status", 0, false),
                 };
             }
             if header.len() >= 8192 {
-                return ("header-limit", 0);
+                return ("header-limit", 0, false);
             }
         }
     };
     tokio::time::timeout(std::time::Duration::from_secs(2), exchange)
         .await
-        .unwrap_or(("http-timeout", 0))
+        .unwrap_or(("http-timeout", 0, false))
+}
+fn probe_transport_failure(
+    kind: std::io::ErrorKind,
+    other: &'static str,
+) -> (&'static str, u16, bool) {
+    use std::io::ErrorKind;
+    match kind {
+        ErrorKind::ConnectionReset => ("connection-reset", 0, true),
+        ErrorKind::ConnectionAborted => ("connection-aborted", 0, true),
+        ErrorKind::BrokenPipe => ("broken-pipe", 0, true),
+        ErrorKind::NotConnected => ("not-connected", 0, true),
+        _ => {
+            eprintln!("Desktop post-close transport kind: {kind:?}");
+            (other, 0, false)
+        }
+    }
 }
 
 #[tokio::test]
@@ -874,18 +907,21 @@ async fn rollout_live_disable_drains_and_reenable_preserves_the_same_capability(
     let address = env["ANTHROPIC_VERTEX_BASE_URL"]
         .trim_start_matches("http://")
         .trim_end_matches("/vertex");
-    let tcp_refused = match tokio::net::TcpStream::connect(address).await {
+    // Windows can complete a TCP handshake after close acknowledgement while
+    // the ensuing HTTP exchange is reset. The product contract is that the old
+    // capability cannot serve inference; require concrete refusal evidence.
+    let closed_or_revoked = match tokio::net::TcpStream::connect(address).await {
         Err(_) => true,
         Ok(mut socket) => {
             let before = completions.load(Ordering::Acquire);
-            let (classification, status) =
+            let (classification, status, refused) =
                 probe_old_capability_on_socket(&mut socket, env["ANTHROPIC_VERTEX_PROJECT_ID"])
                     .await;
             let delta = completions.load(Ordering::Acquire).saturating_sub(before);
             eprintln!(
                 "Desktop post-close diagnostic: {classification}; http_status={status}; fixture_call_delta={delta}"
             );
-            false
+            refused
         }
     };
     assert_eq!(
@@ -894,8 +930,8 @@ async fn rollout_live_disable_drains_and_reenable_preserves_the_same_capability(
         "closed Desktop route forwarded another completion"
     );
     assert!(
-        tcp_refused,
-        "Desktop listener accepted TCP after acknowledged closure"
+        closed_or_revoked,
+        "old Desktop capability did not prove transport closure or HTTP 403 after listener acknowledgement"
     );
     assert!(store.daemon_path(FILE).exists());
     assert!(
@@ -1175,4 +1211,136 @@ async fn cancelled_reconfigure_preserves_prior_listener_barriers_for_every_stop(
     first.await;
     second.await;
     third.await;
+}
+
+#[tokio::test]
+async fn late_capability_probe_accepts_only_eof_or_http_403() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for (reply, expected_status, refused) in [
+        ("", 0, true),
+        (
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n",
+            403,
+            true,
+        ),
+        ("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", 200, false),
+        (
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n",
+            503,
+            false,
+        ),
+        ("not-http\r\n\r\n", 0, false),
+        ("HTTP/1.1 0403 Forbidden\r\n\r\n", 0, false),
+        ("HTTP/1.1 403 Forbidden\r\nnot-a-header\r\n\r\n", 0, false),
+        (
+            "HTTP/1.1 403 Forbidden\r\nBad Header: value\r\n\r\n",
+            0,
+            false,
+        ),
+        (
+            "HTTP/1.1 403 Forbidden\r\nX-Reason: bad\0value\r\n\r\n",
+            0,
+            false,
+        ),
+        ("HTTP/1.1 403 Forbidden\r\n", 0, false),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            // Read the complete request so closing a successful fixture response
+            // does not itself reset the transport because unread body bytes remain.
+            loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(read, 0);
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let header_end = end + 4;
+                    let length = std::str::from_utf8(&request[..end])
+                        .unwrap()
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    if request.len() >= header_end + length {
+                        break;
+                    }
+                }
+            }
+            socket.write_all(reply.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (_, status, closed_or_revoked) =
+            probe_old_capability_on_socket(&mut socket, "fixture-project").await;
+        assert_eq!(status, expected_status);
+        assert_eq!(closed_or_revoked, refused);
+        server.await.unwrap();
+    }
+}
+
+#[test]
+fn late_capability_probe_rejects_unspecified_transport_failures() {
+    use std::io::ErrorKind;
+    for kind in [
+        ErrorKind::ConnectionReset,
+        ErrorKind::ConnectionAborted,
+        ErrorKind::BrokenPipe,
+        ErrorKind::NotConnected,
+    ] {
+        assert!(probe_transport_failure(kind, "read-failed").2);
+    }
+    for kind in [
+        ErrorKind::TimedOut,
+        ErrorKind::WouldBlock,
+        ErrorKind::UnexpectedEof,
+        ErrorKind::Other,
+    ] {
+        assert!(!probe_transport_failure(kind, "read-failed").2);
+    }
+}
+
+#[tokio::test]
+async fn late_capability_probe_has_a_live_gateway_positive_control() {
+    let (base, reached, completions, server) = held_stream_fixture().await;
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = shared(store, &base);
+    let configured = configure(&shared).await;
+    let env = variables(&configured);
+    let address = env["ANTHROPIC_VERTEX_BASE_URL"]
+        .trim_start_matches("http://")
+        .trim_end_matches("/vertex");
+    let mut live = tokio::net::TcpStream::connect(address).await.unwrap();
+    let (classification, status, refused) =
+        probe_old_capability_on_socket(&mut live, env["ANTHROPIC_VERTEX_PROJECT_ID"]).await;
+    assert_eq!(classification, "http-success");
+    assert_eq!(status, 200);
+    assert!(
+        !refused,
+        "the valid old-capability request must detect a live route"
+    );
+    reached.notified().await;
+    assert_eq!(completions.load(Ordering::Acquire), 1);
+    let stopped = listener_stopped(&shared);
+    stop(&shared, false).await;
+    assert!(*stopped.borrow());
+    let closed_or_revoked = match tokio::net::TcpStream::connect(address).await {
+        Err(_) => true,
+        Ok(mut socket) => {
+            probe_old_capability_on_socket(&mut socket, env["ANTHROPIC_VERTEX_PROJECT_ID"])
+                .await
+                .2
+        }
+    };
+    assert!(closed_or_revoked);
+    assert_eq!(completions.load(Ordering::Acquire), 1);
+    drop(live);
+    finish_drains(&shared).await;
+    stop(&shared, true).await;
+    server.abort();
 }

@@ -130,13 +130,13 @@ CI, merge, release and deployment are separate states.
 - [x] Run final contributor/protocol/FFI tests, lint, formatting, profile scripts,
   license boundary, fresh FFI build plus Swift suite; review, update and push PR.
 
-Local follow-up validation passed with 5,543 contributor tests, 676 protocol
+Local follow-up validation passed with 5,546 contributor tests, 676 protocol
 tests, 295 FFI tests, four license-boundary tests, eight profile/publisher/CLI
 checks and the full rebuilt native suite. Review's atomic publication finding
 was repaired with a controlled interleaving regression; all affected checks
 were rerun. Hosted Windows diagnosis/verification is tracked in the PR.
 
-Final Windows repair validation passed locally with 5,543 contributor tests,
+Final Windows repair validation passed locally with 5,546 contributor tests,
 676 protocol tests, 295 FFI tests and the rebuilt full native suite, plus all
 profile, license, metadata and lint checks. Upstream's exact-head Windows
 lifecycle gate passed on `eeab5a61ae658842946f03c857f1f50345dd9487`.
