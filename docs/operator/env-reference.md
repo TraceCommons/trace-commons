@@ -467,6 +467,7 @@ audit-relevant and is included in gate version hash derivation.
 | `TRACE_NEAR_AI_PRIVACY_MODEL` | optional | `openai/privacy-filter` | Model slug. |
 | `TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS` | optional | `10000` | HTTP request timeout. |
 | `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_BYTES` | optional | (sidecar default) | Refuses inputs above this size. |
+| `TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES` | optional | `245760` (240 KiB) | Largest serialized `privacy/classify` request body. Windows are cut so each body fits; a body over it or a 413 halves the window (at most four times) before the field is refused. Must be above zero and under the 262144-byte limit measured 2026-09-03. Replaces the retired `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS`, which is now refused at startup if set. |
 
 ---
 

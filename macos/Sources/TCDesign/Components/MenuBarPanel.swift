@@ -323,6 +323,10 @@ public struct GlassMenuBarStrip: View {
         /// be read: no bars are drawn from it, no badge, and the attention
         /// mark.
         case unavailable
+        /// The first reply has not come: nothing is known yet, which is
+        /// neither trouble nor a count. No bars from data, no badge, grey,
+        /// and no attention mark.
+        case loading
     }
 
     /// The re-engagement mark the core lit. It never replaces or hides a
@@ -391,7 +395,7 @@ public struct GlassMenuBarStrip: View {
     static func steps(
         traces: [GlassDayColumn], privateAI: [GlassDayColumn]?, condition: Condition
     ) -> [Step] {
-        guard condition != .unavailable else { return traces.map { _ in Step() } }
+        guard condition != .unavailable, condition != .loading else { return traces.map { _ in Step() } }
         let ai = shownPrivateAI(privateAI, condition: condition) ?? []
         let traceMax = traces.map { Swift.max($0.up, $0.down) }.max() ?? 0
         let aiMax = ai.map { Swift.max($0.up, $0.down) }.max() ?? 0
@@ -413,13 +417,13 @@ public struct GlassMenuBarStrip: View {
 
     /// The Private AI steps drawn: none while unknown or unavailable.
     static func shownPrivateAI(_ privateAI: [GlassDayColumn]?, condition: Condition) -> [GlassDayColumn]? {
-        condition == .unavailable ? nil : privateAI
+        condition == .unavailable || condition == .loading ? nil : privateAI
     }
 
     /// The badge drawn, if any: none when unavailable, since an unknown
     /// count is never a number.
     nonisolated static func shownBadge(_ badge: Int?, condition: Condition) -> Int? {
-        guard condition != .unavailable, let badge, badge > 0 else { return nil }
+        guard condition != .unavailable, condition != .loading, let badge, badge > 0 else { return nil }
         return badge
     }
 
@@ -437,7 +441,7 @@ public struct GlassMenuBarStrip: View {
     /// Whether the trace segments are drawn grey. Pausing stops watching
     /// for traces, not Private AI, so its segments keep their colours.
     static func grey(_ condition: Condition) -> Bool {
-        condition == .paused || condition == .unavailable
+        condition == .paused || condition == .unavailable || condition == .loading
     }
 
     /// The badge's height (and least width), its figure's size and inset,

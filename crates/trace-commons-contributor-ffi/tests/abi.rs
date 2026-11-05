@@ -49,6 +49,7 @@ use trace_commons_contributor_ffi::{
     tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
     tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
 };
+use trace_commons_contributor_ffi::{tc_count_figure, tc_credit_figure};
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
     tc_harness_plan_outcome_code, tc_harness_spend_line, tc_harness_state_code,
@@ -4746,8 +4747,44 @@ fn a_null_remaining_balance_never_crosses_as_zero() {
     // The other two figures use the empty-string convention, and a zero is
     // still not an absence there either.
     assert_eq!(take_owned(tc_near_ai_balance_limit_line(0, 0, 9)), "");
-    assert_eq!(take_owned(tc_near_ai_balance_spent_line(0, 0, 9)), "");
-    assert!(take_owned(tc_near_ai_balance_spent_line(1, 0, 9)).contains("$0.00"));
+    for remaining in [0, 1] {
+        assert_eq!(
+            take_owned(tc_near_ai_balance_spent_line(0, 0, 9, remaining)),
+            ""
+        );
+        assert!(take_owned(tc_near_ai_balance_spent_line(1, 0, 9, remaining)).contains("$0.00"));
+    }
+    // Beside a remaining figure Spent rounds up to the cent; with none it is
+    // floored. A sub-cent spend is the phrase either way.
+    assert_eq!(
+        take_owned(tc_near_ai_balance_spent_line(1, 18_185_000_000, 9, 1)),
+        "Spent: $18.19"
+    );
+    assert_eq!(
+        take_owned(tc_near_ai_balance_spent_line(1, 18_185_000_000, 9, 0)),
+        "Spent: $18.18"
+    );
+    assert_eq!(
+        take_owned(tc_near_ai_balance_spent_line(1, 1, 9, 1)),
+        "Spent: less than $0.01"
+    );
+}
+
+/// The credit figure crosses the ABI as the core formats it.
+#[test]
+fn credit_figure_crosses_the_abi() {
+    for (value, want) in [
+        (0.0, "0"),
+        (48.0, "48"),
+        (4.25, "4.3"),
+        (0.04, "<0.1"),
+        (1234.5, "1,234.5"),
+        (f64::NAN, "\u{2014}"),
+    ] {
+        assert_eq!(take_owned(tc_credit_figure(value)), want, "{value}");
+    }
+    assert_eq!(take_owned(tc_count_figure(0)), "0");
+    assert_eq!(take_owned(tc_count_figure(1234)), "1,234");
 }
 
 /// A state this build has never heard of borrows nobody's sentence, and is

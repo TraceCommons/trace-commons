@@ -73,32 +73,27 @@ final class SummaryInspectorTests: XCTestCase {
         XCTAssertEqual(SummaryFacts.kept(loaded: false, sessions: [held]), "—")
         XCTAssertEqual(SummaryFacts.kept(loaded: true, sessions: [held, clear]), "2")
 
-        // Contributed is Ron's `isContributed`: accepted, waiting to be
-        // scored and held for privacy review, all time (1 + 2 + 1 here),
-        // the same set the statistics count; any part unsaid is a dash.
-        XCTAssertEqual(SummaryFacts.contributed(nil), "—")
+        // Contributed is the core's own figure, read and never re-added:
+        // the recorded rollup's 2 accepted and 1 waiting are 3, and its 1
+        // held is not in it. Unsaid is a dash, never a sum made here.
+        XCTAssertEqual(HomeFormat.contributed(nil), "—")
         let rollup = try recorded(DaemonData.HistoryRollup.self, "history_rollup")
-        XCTAssertEqual(SummaryFacts.contributed(rollup), "4")
-        for part in ["accepted", "submitted", "quarantined"] {
-            let unsaid = try recorded(DaemonData.HistoryRollup.self, "history_rollup") {
-                var all = $0["all_time"] as? [String: Any] ?? [:]
-                all[part] = NSNull()
-                $0["all_time"] = all
-            }
-            XCTAssertEqual(SummaryFacts.contributed(unsaid), "—", part)
+        XCTAssertEqual(rollup.allTime?.quarantined, 1)
+        XCTAssertEqual(HomeFormat.contributed(rollup), "3")
+        let olderRollup = try recorded(DaemonData.HistoryRollup.self, "history_rollup") {
+            var all = $0["all_time"] as? [String: Any] ?? [:]
+            all["contributed"] = nil
+            $0["all_time"] = all
         }
-        let submittedOnly = try recorded(DaemonData.HistoryRollup.self, "history_rollup") {
-            $0["all_time"] = ["submitted": 5, "accepted": 0, "quarantined": 0, "withdrawn": 0, "other": 0]
-        }
-        XCTAssertEqual(SummaryFacts.contributed(submittedOnly), "5", "waiting to be scored is contributed")
+        XCTAssertEqual(HomeFormat.contributed(olderRollup), "—", "an older daemon's rollup is not summed here")
 
         // Home's tile, History's card and the Traces summary read one
-        // definition: 56 accepted and 1 waiting is 57 on all three.
+        // figure: the core's 57 (56 accepted and 1 waiting) beside 3 held.
         let mixed = try recorded(DaemonData.HistoryRollup.self, "history_rollup") {
-            $0["all_time"] = ["submitted": 1, "accepted": 56, "quarantined": 0, "withdrawn": 0, "other": 0]
+            $0["all_time"] = ["submitted": 1, "accepted": 56, "quarantined": 3, "withdrawn": 0, "other": 0,
+                              "contributed": 57]
         }
         XCTAssertEqual(HomeFormat.contributed(mixed), "57")
-        XCTAssertEqual(SummaryFacts.contributed(mixed), HomeFormat.contributed(mixed))
 
         // The header's tool count is said only when the core said which
         // tools it reads; an unread one is left out, never "— of —".
@@ -247,7 +242,7 @@ final class SummaryInspectorTests: XCTestCase {
         let staleRollup = SummaryFacts.fresh(rollup, unless: .unreachable)
         XCTAssertNil(staleRollup)
         XCTAssertEqual(SummaryFacts.pending(rollup: staleRollup, credit: known).value, "—")
-        XCTAssertEqual(SummaryFacts.contributed(staleRollup), "—")
+        XCTAssertEqual(HomeFormat.contributed(staleRollup), "—")
 
         // The view reads history, credit and the rollup only through that rule.
         let view = try Self.source("Views/Monitor/SummaryInspector.swift")

@@ -16,6 +16,27 @@ public enum ProjectMode: String, Decodable, Equatable, Sendable {
     case ignore
 }
 
+/// Why a `list_projects` label carries a suffix: every project sharing
+/// `group` has one. `group` is the daemon's folded basename, an identity;
+/// `baseLabel` is the label without its suffix, for display.
+public struct ProjectCollision: Decodable, Equatable, Sendable {
+    public let group: String
+    public let baseLabel: String
+    public let suffix: String
+
+    public init(group: String, baseLabel: String, suffix: String) {
+        self.group = group
+        self.baseLabel = baseLabel
+        self.suffix = suffix
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case group
+        case baseLabel = "base_label"
+        case suffix
+    }
+}
+
 /// One row of `list_projects`.
 ///
 /// ## Why `addedAt` is optional
@@ -103,6 +124,13 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
     public let tools: [ProjectTool]
     /// Modes the running daemon will accept; absent on older daemons.
     private let daemonOfferableModes: [ProjectMode]?
+    /// On a row whose label carries the daemon's suffix only: the collision
+    /// it resolves, by the daemon's own test (`policy::LabelCollision`).
+    /// Read, not computed, on the rule `isUnresolvedBucket` follows: parsing
+    /// the label would group a folder literally named `notes (beef)`, and
+    /// could fold names differently from the daemon. Absent on every other
+    /// row and from an older daemon, which draws no groups.
+    public let collision: ProjectCollision?
 
     public var id: String { projectId }
 
@@ -122,7 +150,8 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         automaticDisclosure: String? = nil,
         folderMode: ProjectMode? = nil,
         tools: [ProjectTool] = [],
-        daemonOfferableModes: [ProjectMode]? = nil
+        daemonOfferableModes: [ProjectMode]? = nil,
+        collision: ProjectCollision? = nil
     ) {
         self.projectId = projectId
         self.projectLabel = projectLabel
@@ -140,6 +169,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         self.folderMode = folderMode
         self.tools = tools
         self.daemonOfferableModes = daemonOfferableModes
+        self.collision = collision
     }
 
     public enum CodingKeys: String, CodingKey {
@@ -159,6 +189,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         case folderMode = "folder_mode"
         case tools
         case daemonOfferableModes = "offerable_modes"
+        case collision
     }
 
     public init(from decoder: any Decoder) throws {
@@ -190,6 +221,7 @@ public struct ProjectRow: Decodable, Identifiable, Equatable, Sendable {
         folderMode = try c.decodeIfPresent(ProjectMode.self, forKey: .folderMode)
         tools = try c.decodeIfPresent([ProjectTool].self, forKey: .tools) ?? []
         daemonOfferableModes = try c.decodeIfPresent([ProjectMode].self, forKey: .daemonOfferableModes)
+        collision = try c.decodeIfPresent(ProjectCollision.self, forKey: .collision)
     }
 
     /// Whether this project could ever be armed to contribute without asking.

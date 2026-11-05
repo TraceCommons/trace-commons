@@ -463,7 +463,11 @@ submission is necessary but not sufficient for large sessions.
   throughput inside the enclave, and window concurrency for the
   self-hosted backend, whose window concurrency is a setting its own
   comment says is kept sequential on purpose
-  (`privacy_filter_self_hosted.rs:163-166`, `:193`).
+  (`privacy_filter_self_hosted.rs:163-166`, `:193`). The measurements, the in-process
+  changes and the replica design are in
+  [2026-11-05-witness-scaling-design.md](2026-11-05-witness-scaling-design.md):
+  a request's time is classifier round trips, one per text leaf, not
+  bytes.
 - **Labels only**, as everywhere on this path: `witness-timeout`,
   `witness-too-large`, `witness_saturated`. No content, no host.
 
@@ -497,10 +501,19 @@ the witness call. The daemon now has a witness worker
   result applies only while the approval it ran under still holds (a
   cancel or revoke meanwhile drops it).
 - **Retries.** `witness_saturated` defers the entry and every other queued
-  one until the witness's own delay. `witness_timeout` and
-  `witness_unreachable` keep the approval and retry with backoff, three in
-  a row, then end `failed` under the same label for a person's retry
-  (`submit::witness_failure_is_transient`, the one classification).
+  one until the witness's own delay. A witness whose evidence could not be
+  fetched (`submit::witness_failure_is_transient`: `witness_timeout`,
+  `witness_unreachable`, `witness_attestation_unavailable`,
+  `witness_collateral_unavailable`) keeps the approval and is retried on
+  the daemon's transient-upload backoff (#1964), and the worker takes no
+  other session until that retry. Once that budget is spent the entry
+  returns to Pending under the same label, held for a person; it is never
+  refused. Evidence that was fetched and did not verify
+  (`submit::witness_trust_hold`) is never retried: the entry returns to
+  Pending under `witness-not-trusted`, or `witness-measurement-not-accepted`
+  for a measurement a new accepted list may admit. This replaces the "3
+  consecutive timeouts, then 'Try again later'" rule earlier in this
+  section.
 - **Pause, unenroll, panics.** A job checks pause, quiesce, the unenroll
   hold and shutdown before it sends anything. Unenroll stops a call in
   flight and waits for the worker. A panic in a job refuses that entry

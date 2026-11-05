@@ -899,14 +899,31 @@ pub const WITNESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 ///
 /// Read from `reqwest`'s own classification, never from the error's text,
 /// which can carry the URL.
+///
+/// The connect phase is asked first. A connection that never opened is
+/// `witness_unreachable` however it failed -- refused at once, or a SYN
+/// nobody answered until the connect deadline ran out. `reqwest` reports
+/// that second case as both a connect error and a timeout; on Windows it is
+/// what a closed port looks like, because the stack retries the SYN for
+/// about two seconds instead of refusing. Only a deadline that ran out once
+/// connected -- the request, the headers, the body -- is `witness_timeout`.
 fn send_failure(error: &reqwest::Error, otherwise: WitnessTrustError) -> WitnessTrustError {
-    if error.is_timeout() {
-        WitnessTrustError::WitnessTimeout
-    } else if error.is_connect() {
+    if error.is_connect() {
         WitnessTrustError::WitnessUnreachable
+    } else if error.is_timeout() {
+        WitnessTrustError::WitnessTimeout
     } else {
         otherwise
     }
+}
+
+/// The connect deadline for a transport whose whole-request deadline is
+/// `timeout`: [`WITNESS_CONNECT_TIMEOUT`], and never more than half of
+/// `timeout`, so a connection that never opens always meets the connect
+/// deadline first and is reported as unreachable rather than as the whole
+/// request timing out.
+fn connect_deadline(timeout: Duration) -> Duration {
+    WITNESS_CONNECT_TIMEOUT.min(timeout / 2)
 }
 
 /// The longest a witness's `Retry-After` may hold a session, in seconds. One
@@ -949,7 +966,7 @@ impl HttpWitnessTransport {
         let http = reqwest::Client::builder()
             // Raw sessions are authorized for this attested endpoint only.
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(timeout.min(WITNESS_CONNECT_TIMEOUT))
+            .connect_timeout(connect_deadline(timeout))
             .timeout(timeout)
             .build()
             .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
@@ -3910,6 +3927,54 @@ mod tests {
                 .await
                 .err(),
             Some(WitnessTrustError::WitnessUnreachable)
+        );
+    }
+
+    /// A connection that never opens -- no refusal, just no answer to the
+    /// SYN -- is unreachable, not a timeout. TEST-NET-1 (RFC 5737) is never
+    /// routed: the connect either hangs until the connect deadline or fails
+    /// at once with no route, and both must read the same. This is the case
+    /// a closed loopback port takes on Windows.
+    #[tokio::test]
+    async fn a_witness_whose_connection_never_opens_is_unreachable() {
+        let base = "http://192.0.2.1:9";
+        let transport = deadline_transport(base, base);
+        let error = tokio::time::timeout(
+            TEST_CEILING,
+            transport.attestation(&WitnessNonce::fresh().unwrap()),
+        )
+        .await
+        .expect("the attestation call returned instead of hanging")
+        .unwrap_err();
+        assert_eq!(error, WitnessTrustError::WitnessUnreachable);
+        let verified = crate::witness::verify::verified_witness_for_test(
+            base,
+            "0x1111111111111111111111111111111111111111",
+        );
+        let error = tokio::time::timeout(
+            TEST_CEILING,
+            transport.witness(&verified, b"private-test-transcript"),
+        )
+        .await
+        .expect("the witness call returned instead of hanging")
+        .err();
+        assert_eq!(error, Some(WitnessTrustError::WitnessUnreachable));
+    }
+
+    #[test]
+    fn the_connect_deadline_always_comes_before_the_request_deadline() {
+        for timeout in [
+            TEST_DEADLINE,
+            WITNESS_PROBE_TIMEOUT,
+            WITNESS_REVIEW_TIMEOUT,
+            Duration::from_secs(5),
+        ] {
+            assert!(connect_deadline(timeout) < timeout, "{timeout:?}");
+            assert!(connect_deadline(timeout) < timeout.min(WITNESS_PROBE_TIMEOUT));
+        }
+        assert_eq!(
+            connect_deadline(WITNESS_REVIEW_TIMEOUT),
+            WITNESS_CONNECT_TIMEOUT
         );
     }
 

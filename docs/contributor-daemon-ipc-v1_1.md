@@ -25,12 +25,22 @@ old behaviour, because no application has shipped against `v1` yet. See
   entry that needs a witness review to the daemon's witness worker and moves
   on; the worker pins the certified review on the still-approved entry and a
   later pass uploads it. `status.witness_capacity` gains
-  `privacy_check_sessions` and `checking_sessions`; `witness_timeout` and
-  `witness_unreachable` keep an approval and retry (three in a row, then
-  `failed`) instead of refusing. `witness_preview_request` takes an optional
+  `privacy_check_sessions` and `checking_sessions`. A witness that could not
+  be reached or did not answer is retried by the worker as before (see the
+  transient-upload backoff), and the worker rests until that retry.
+  `witness_preview_request` takes an optional
   `background: true` that answers `in_progress` at once and ends with a new
   `witness_review_ready` event. See [`witness_capacity`](#witness_capacity)
   and "Explicit witnessed review".
+- `list_projects` rows whose label carries the daemon's disambiguating
+  suffix carry `collision` (`group`, `base_label`, `suffix`), so a client
+  groups rows by the daemon's own collision test rather than by parsing a
+  label. Absent on every other row. See
+  [`collision`](#collision-1952-review).
+- `plan_project_modes` and `set_project_modes` plan and make a bulk or
+  group mode change (Ask or Never only), asking first when it turns off
+  Automatic or removes waiting traces, from the daemon's live state. See
+  [`plan_project_modes` and `set_project_modes`](#plan_project_modes-and-set_project_modes).
 - The daily upload limit is retired. `set_settings` accepts
   `max_uploads_per_day` and `max_bytes_per_day` and ignores them, so a
   shell built while the limit existed can still save its other settings;
@@ -679,6 +689,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `resume` | — | `paused: false` | |
 | `list_projects` | `include_found` (optional boolean) | `projects[]` of `{project_id, project_label, mode, folder_mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now`, `overridden_by` (`null` or the override's mode) | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
+| `plan_project_modes` | `project_ids` (array), `mode` | `outcome`, `project_ids`, `turns_off_automatic`, `pending`, `confirmation` (when `outcome` is `confirm`), `bulk_modes` | reads only; see "`plan_project_modes` and `set_project_modes`" below |
+| `set_project_modes` | `project_ids` (array), `mode` (`notify_only` or `ignore`), `agreed` (optional `{turns_off_automatic, pending}`) | `changed`, `total`, `purged`, `refused` (only when stopped part way) | `auto_upload` refused with `bulk-automatic-refused`; `bulk-confirmation-stale` when the live counts outgrow `agreed`; see below |
 | `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208) and with `consent-scopes-not-chosen` while the enrollment's scopes were never chosen; see "The contribution override" below |
 | `clear_contribution_override` | — | `cleared`, `returned: <count>` | every folder back on its own mode; see "The contribution override" below |
 | `mission_matches` | `catalogue` (a contribution mission catalogue; PROVISIONAL, shape owned by Z7/Z8) | `matches[]` of mission ids, `read: {tools, folders}` (counts) | K16 (#1173): which contribution missions this Mac's work fits, worked out on this Mac only; read-only; refused with `catalogue-required`, `catalogue-invalid` or `catalogue-schema-unsupported`; see "`mission_matches`" below |
@@ -907,11 +919,16 @@ waiting for the worker is held until the same time without being sent, so a
 busy witness is asked once, not once per session. There is no attempt
 limit: a busy witness never costs a session.
 
-A witness that does not answer in time (`witness_timeout`) or cannot be
-reached (`witness_unreachable`) also keeps the approval: the entry stays
-`approved` under that label and is retried with backoff (a minute,
-doubling, jittered). After three such failures in a row it ends `failed`
-under the same label, for a person's retry; it is never `refused` for it.
+A witness whose evidence could not be fetched (`witness_timeout`,
+`witness_unreachable`, `witness_attestation_unavailable`,
+`witness_collateral_unavailable`) also keeps the approval: the entry stays
+`approved` under that label and is retried on the transient-upload backoff,
+and the worker takes no other session until that retry, since the next
+would meet the same witness. Once that budget is spent the entry returns to
+`pending` under the same label, held for a person; it is never `refused`
+for it. Evidence that was fetched and did not verify is never retried: the
+entry returns to `pending` under `witness-not-trusted` or
+`witness-measurement-not-accepted`.
 
 It is beside `health` because the daemon also
 sets `witness-saturated` in the health slot, set and retracted from the
@@ -1998,6 +2015,70 @@ cancels any scheduled preview for the entry, as `dismiss` does. Neither
 method writes an audit row, as `dismiss` does not: they are decisions about
 one session, not autonomy changes.
 
+### `plan_project_modes` and `set_project_modes`
+
+A bulk or group mode change (Settings > Projects' Manage sheet), planned
+and made by the daemon so no client decides when it asks first. The rules
+(owner decisions 2026-11-04 on #1952):
+
+- A bulk change sets `notify_only` (Ask) or `ignore` (Never), never
+  `auto_upload`. Arming is a grant, made one project at a time through the
+  arming confirmation. `bulk_modes` on every plan names the two, and a
+  client's bulk menus offer those only.
+- It asks first when it turns off Automatic on one or more projects
+  (`turns_off_automatic`), or when a Never removes waiting traces
+  (`pending`; always 0 for Ask).
+- Projects already in the mode, or unable to take it, are skipped and not
+  counted. An id the daemon does not know is skipped. Repeated ids count
+  once. At most 10,000 ids.
+
+`plan_project_modes` changes nothing:
+
+```json
+{
+  "outcome": "confirm",
+  "project_ids": ["proj_9f2c1ab30d4e5f60", "proj_0d4e5f609f2c1ab3"],
+  "turns_off_automatic": 1,
+  "pending": 3,
+  "confirmation": {
+    "title": "Set 2 projects to Never?",
+    "body": "This turns off Automatic for 1 project. This removes 3 waiting traces. Traces already sent aren't affected.",
+    "button": "Never",
+    "keep": "Keep",
+    "help": "Setting it back to Ask can offer the removed traces again.",
+    "destructive": true
+  },
+  "bulk_modes": ["notify_only", "ignore"]
+}
+```
+
+`outcome` is `nothing` (no project changes), `apply` (change straight
+away), `confirm` (ask first, in `confirmation`'s words, rendered whole), or
+`refused` (`auto_upload`). `help` is present only when a Never removes
+waiting traces. A plan for no ids answers `nothing` with `bulk_modes`,
+which is how a client learns the menus' modes.
+
+`set_project_modes` plans again from the live policy and queue, then runs
+one `set_project_mode` per project the plan reaches, in order, with that
+method's audit records and purge. `auto_upload` is refused with
+`bulk-automatic-refused` before anything is read. A change whose plan asks
+first runs only when `agreed` carries the counts the person was shown and
+neither live count is larger; otherwise it is refused with
+`bulk-confirmation-stale` and nothing changes, and the client plans and
+asks again. That closes the window between the confirmation and the
+call; the plan and the per-project changes are not under one lock, so a
+trace arriving during the change itself is removed as one project's Never
+would remove it, and `purged` reports what was actually removed. The first
+refusal stops the rest:
+
+```json
+{ "changed": ["proj_9f2c1ab30d4e5f60"], "total": 2, "purged": 1, "refused": "project-key-unrecognized" }
+```
+
+`refused` is present only when the change stopped part way; `changed` is
+what did change, so a client keeps the others selected and can say "1 of 2
+changed."
+
 ### `set_project_mode` and the ignore purge
 
 Setting a project to `ignore` also clears whatever it has waiting. Two
@@ -3014,6 +3095,24 @@ Until 2026-10-29 a row under that grant carried only
 `["auto_upload", "ignore"]` and `set_project_mode` refused `notify_only` with
 `automatic-sharing-requires-ignore`; both are gone.
 
+#### `collision` (#1952 review)
+
+Present only on a row whose `project_label` carries the four-hex-digit
+suffix the daemon adds when two known projects' folded basenames are the
+same, and absent (never null) on every other row:
+
+```json
+"collision": { "group": "api", "base_label": "Api", "suffix": "57b3" }
+```
+
+`group` is the folded basename the collision test compared: every row in
+one group has the same value, and it says no more than the label already
+does. `base_label` is the label without its suffix, spelled from the
+unfolded path; `suffix` is the four hex digits, from `sha256(key)`. A
+client groups rows by `group` and never by parsing `project_label`: a
+folder whose own name is `notes (beef)` has no `collision` and is not
+grouped. The unresolved bucket never carries one.
+
 #### `unpurposed_traces` (K7)
 
 A top-level count beside `projects[]`, for the design's suggestion: "27 scrubbed
@@ -3435,6 +3534,23 @@ reason no unattended approval can satisfy:
   behalf that the Automatic Scrub check held because the envelope built for
   it is worth a second look -- nothing matched, it looks unsure, or it was
   trimmed to fit. See `scrub_check` under `set_settings`.
+- `witness_timeout`, `witness_unreachable`, `witness_attestation_unavailable`
+  or `witness_collateral_unavailable`, on a `pending` entry: the witness's
+  evidence could not be fetched (no answer in time, no connection, no
+  attestation or no collateral) through every retry. Nothing was judged and
+  nothing was sent. While it is still being retried the entry stays
+  `approved` under the same label, with `retry_after` set, and is not held.
+  Earlier builds refused such a session as `witness_attestation_unavailable`;
+  a newer build offers that refusal again.
+- `witness-measurement-not-accepted`: the witness's evidence was fetched and
+  verified, but it reports a measurement outside the accepted set. It is not
+  retried, and nothing was sent. A person decides; a newer accepted list can
+  make the same witness valid.
+- `witness-not-trusted`: the witness's evidence was fetched and did not
+  verify -- the quote is not genuine, it is not bound to this client's nonce,
+  it names another signer than the pinned one, or the certificate on the
+  witness's answer does not verify or does not match its bytes. It is not
+  retried, and nothing was sent. A person decides.
 
 A group control is by definition not a review of one
 session, so held entries are left out for every contributor, invited or not,
@@ -7504,9 +7620,9 @@ loads (`#[serde(default)]`).
 
 ```json
 {
-  "week":     {"submitted": 0, "accepted": 0, "quarantined": 0, "other": 0},
-  "month":    {"submitted": 0, "accepted": 0, "quarantined": 0, "other": 0},
-  "all_time": {"submitted": 0, "accepted": 0, "quarantined": 0, "other": 0},
+  "week":     {"submitted": 0, "accepted": 0, "quarantined": 0, "withdrawn": 0, "other": 0, "contributed": 0},
+  "month":    {"submitted": 0, "accepted": 0, "quarantined": 0, "withdrawn": 0, "other": 0, "contributed": 0},
+  "all_time": {"submitted": 0, "accepted": 0, "quarantined": 0, "withdrawn": 0, "other": 0, "contributed": 0},
   "credit_pending": 0.0,
   "credit_final": 0.0,
   "quarantined": 0,
@@ -7518,6 +7634,15 @@ loads (`#[serde(default)]`).
 `quarantined` is reported separately and must be rendered separately.
 Quarantine means **held for operator privacy review**, not rejected. A
 contributor who sees it grouped with failures reads it as rejection.
+
+`contributed` (in each of `week`, `month` and `all_time`) is what every
+shell's Contributed figure shows: `accepted + submitted`, accepted plus
+waiting to be scored. Held (`quarantined`) is **not** in it; it is its own
+figure beside Contributed, and counting it in both made one page read as
+more traces than there are. A shell reads this field and never re-adds the
+buckets itself. It is a sum of two buckets, not a bucket, so it is not part
+of a window's total. A daemon older than this field omits it; a shell draws
+a dash for it then, never a figure it added up.
 
 `taken_back` (K7) is how many history records have been taken back -- the
 design's third tile, "2 taken back": withdrawn from this daemon (a local
@@ -7906,7 +8031,7 @@ sentence, and it does not divide by `10^scale` itself.
 | `tc_near_ai_balance_amount` | `present`, `nanos`, `scale` | The bare amount, e.g. `$8.50`. |
 | `tc_near_ai_balance_remaining_line` | `present`, `nanos`, `scale` | `Left to spend: $8.50.`, or the no-limit sentence when `present == 0`. |
 | `tc_near_ai_balance_limit_line` | `present`, `nanos`, `scale` | The ceiling, or `""`. |
-| `tc_near_ai_balance_spent_line` | `present`, `nanos`, `scale` | What the account has spent, or `""`. |
+| `tc_near_ai_balance_spent_line` | `present`, `nanos`, `scale`, `remaining_present` | What the account has spent, or `""`. `remaining_present` is whether `remaining_nanos` is non-null; it picks the rounding (below). |
 | `tc_near_ai_balance_observed_line` | `seconds_ago` | How long ago **this daemon** asked. Negative gives `""`. |
 
 `present` is `0` for a `null` on the wire and non-zero otherwise. It is a
@@ -7918,6 +8043,13 @@ debt as no figure at all.
 The rounding is **down**, toward minus infinity, so a printed figure is never
 larger than the one that arrived; a nonzero amount under a cent is
 `less than $0.01` and not `$0.00`.
+
+One exception: Spent drawn beside a remaining figure (`remaining_present`
+non-zero) rounds **up** to the cent, so Limit, Spent and what is left add up
+on the cents shown (limit $130.00 and spent $18.185 leave $111.81, so Spent
+reads $18.19). With no remaining figure there is nothing to add up with, and
+Spent rounds down like every other amount. A spend above zero and under a
+cent is `less than $0.01` either way, never `$0.01`.
 
 #### Three neighbouring fields, three different meanings for a missing key
 

@@ -39,6 +39,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "pr
 wiremock = "0.6"
 
 [features]
+# `dep:tiktoken-rs` is no longer used by this backend (it windows by request
+# body), but stays in the feature so the separate GTK and Tauri lockfiles,
+# which reach this crate only through the contributor, do not change. Drop it
+# together with a refresh of those lockfiles and the flatpak vendor manifest.
 near-ai-privacy-filter = ["dep:reqwest", "dep:futures", "dep:tracing", "dep:tiktoken-rs"]
 # Loopback classifier backend. No tokenizer and no concurrent streams: the
 # local model has a real 128k context, so a field goes up in one request.

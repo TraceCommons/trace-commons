@@ -206,8 +206,141 @@ pub fn credit_outcome_label(reason: &str) -> &'static str {
         .map_or(NO_CREDIT_REASON_UNAVAILABLE, |row| row.label)
 }
 
+/// What a credit figure above zero and under 0.05 reads as: it rounds to
+/// zero tenths, and a "0" beside "credit pending" says nothing is pending
+/// when something is. Approved by the owner 2026-11-04 (#1962).
+pub const CREDIT_UNDER_A_TENTH: &str = "<0.1";
+
+/// A credit figure as every shell's History and Home tiles draw it, so one
+/// contribution reads the same on every machine.
+///
+/// - Rounded once to tenths, half away from zero (4.25 is 4.3, never 4.2),
+///   in whole millionths first so a sum that should be 0.35 but reads
+///   0.34999999999999998 is still 0.4: the rounding of the daemon's digest
+///   sentences (`daemon::nudge::tenths_of`). The digest keeps its own
+///   one-decimal form ("6.0 credit pending."), the design's wording.
+/// - A whole figure is whole ("0", "48"), anything else has one decimal
+///   ("12.5"): "Pending 0.0" and "48.0" beside a "48" are what this
+///   replaces.
+/// - Above zero and under 0.05 is [`CREDIT_UNDER_A_TENTH`], never "0".
+/// - A comma between thousands ("1,234.5"), the same as every count beside
+///   it ([`count_figure`]): owner-approved 2026-11-04 (#1962). A fixed
+///   comma, not the reader's locale, so every shell reads alike.
+/// - Credit is never negative; a figure below zero that rounds to zero is
+///   "0", never "-0".
+/// - Not finite is a dash, the sign every shell uses for a figure it was
+///   not given.
+#[must_use]
+pub fn credit_figure(value: f64) -> String {
+    if !value.is_finite() {
+        return "\u{2014}".to_string();
+    }
+    let millionths = (value * 1e6).round();
+    // Past what an i64 of tenths holds is not a credit figure anybody has;
+    // say so rather than print a saturated number.
+    if millionths.abs() >= 9.0e18 {
+        return "\u{2014}".to_string();
+    }
+    let millionths = millionths as i64;
+    let magnitude = (millionths.unsigned_abs() + 50_000) / 100_000;
+    if magnitude == 0 {
+        return if millionths > 0 {
+            CREDIT_UNDER_A_TENTH.to_string()
+        } else {
+            "0".to_string()
+        };
+    }
+    let sign = if millionths < 0 { "-" } else { "" };
+    let whole = count_figure(magnitude / 10);
+    if magnitude.is_multiple_of(10) {
+        format!("{sign}{whole}")
+    } else {
+        format!("{sign}{whole}.{}", magnitude % 10)
+    }
+}
+
+/// A count as every shell draws it beside a credit figure: a comma between
+/// thousands ("1,234"), the same grouping [`credit_figure`] uses, so the
+/// tiles side by side read alike. Owner-approved 2026-11-04 (#1962).
+#[must_use]
+pub fn count_figure(count: u64) -> String {
+    let digits = count.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// The cases the review ran through the old Swift formatter, and what
+    /// each now reads on every shell.
+    #[test]
+    fn credit_figure_rounds_half_away_and_never_reads_zero_for_some() {
+        for (value, want) in [
+            (0.0, "0"),
+            (48.0, "48"),
+            (12.5, "12.5"),
+            (0.05, "0.1"),
+            (0.04, "<0.1"),
+            (0.000_001, "<0.1"),
+            (-0.04, "0"),
+            (4.25, "4.3"),
+            (12.25, "12.3"),
+            (0.35, "0.4"),
+            // The float just below 0.35, as a sum can land.
+            (f64::from_bits(0.35_f64.to_bits() - 1), "0.4"),
+            (1234.5, "1,234.5"),
+            (1234.0, "1,234"),
+            (999.95, "1,000"),
+            (1_234_567.25, "1,234,567.3"),
+            (-1234.5, "-1,234.5"),
+            (9.96, "10"),
+            (-1.25, "-1.3"),
+        ] {
+            assert_eq!(credit_figure(value), want, "{value}");
+        }
+    }
+
+    /// The f32 the rollup carries, as the decimal the server wrote: 0.35f32
+    /// widened is 0.3499999940..., which the millionths step still reads as
+    /// 0.35.
+    #[test]
+    fn credit_figure_reads_a_widened_f32_as_its_decimal() {
+        assert_eq!(credit_figure(f64::from(0.35_f32)), "0.4");
+        assert_eq!(credit_figure(f64::from(4.25_f32)), "4.3");
+    }
+
+    /// Counts group the same way as credit, so "1,234" sits beside
+    /// "1,234.5".
+    #[test]
+    fn count_figure_groups_thousands_with_a_comma() {
+        for (count, want) in [
+            (0, "0"),
+            (7, "7"),
+            (999, "999"),
+            (1000, "1,000"),
+            (1234, "1,234"),
+            (123_456, "123,456"),
+            (1_234_567, "1,234,567"),
+            (u64::MAX, "18,446,744,073,709,551,615"),
+        ] {
+            assert_eq!(count_figure(count), want, "{count}");
+        }
+    }
+
+    #[test]
+    fn credit_figure_is_a_dash_for_no_number() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e300] {
+            assert_eq!(credit_figure(value), "\u{2014}", "{value}");
+        }
+    }
+
     use super::*;
 
     /// Every reason the server may send has words of its own, in the

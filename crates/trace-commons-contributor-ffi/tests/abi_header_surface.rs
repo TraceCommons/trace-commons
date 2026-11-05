@@ -89,6 +89,7 @@ fn rust_base_type_to_c(ty: &str) -> String {
         "i64" => "int64_t",
         "i32" => "int32_t",
         "u8" => "uint8_t",
+        "f64" => "double",
         "()" | "" => "void",
         other => panic!(
             "unmapped Rust type `{other}` on the C ABI surface -- add it to \
@@ -317,7 +318,7 @@ fn canonical_c_type(decl: &str) -> String {
             "struct" => {}
             "char" | "void" | "int" | "int8_t" | "int16_t" | "int32_t" | "int64_t" | "uint8_t"
             | "uint16_t" | "uint32_t" | "uint64_t" | "size_t" | "tc_handle" | "tc_preview"
-            | "tc_compute_handle" => {
+            | "tc_compute_handle" | "double" => {
                 if let Some(existing) = &base {
                     panic!("two base types (`{existing}`, `{token}`) in C type `{decl}`");
                 }

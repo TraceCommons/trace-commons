@@ -399,6 +399,30 @@ final class DaemonClient: Sendable {
         return (object?["purged"] as? Int) ?? 0
     }
 
+    /// What setting `projectIDs` to `mode` at once would do, planned by the
+    /// daemon from its live policy and queue (`plan_project_modes`).
+    /// Changes nothing.
+    func planProjectModes(projectIDs: [String], mode: ProjectMode) throws -> ProjectsBulkPlan {
+        try call(
+            "plan_project_modes",
+            params: ["project_ids": projectIDs, "mode": mode.rawValue],
+            as: ProjectsBulkPlan.self)
+    }
+
+    /// Sets `projectIDs` to Ask or Never (`set_project_modes`). `agreed` is
+    /// the plan whose confirmation the person accepted; the daemon refuses
+    /// with `bulk-confirmation-stale` when its live counts grew past that
+    /// plan's, or when the change asks and nothing was agreed.
+    func setProjectModes(projectIDs: [String], mode: ProjectMode, agreed: ProjectsBulkPlan?) throws
+        -> ProjectsBulkResult
+    {
+        var params: [String: Any] = ["project_ids": projectIDs, "mode": mode.rawValue]
+        if let agreed {
+            params["agreed"] = ["turns_off_automatic": agreed.turnsOffAutomatic, "pending": agreed.pending]
+        }
+        return try call("set_project_modes", params: params, as: ProjectsBulkResult.self)
+    }
+
     /// The one project worth offering to arm right now, or nil.
     ///
     /// The daemon answers with an empty object when there is nothing to

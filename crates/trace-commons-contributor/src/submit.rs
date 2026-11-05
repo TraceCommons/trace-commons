@@ -621,12 +621,6 @@ pub async fn submit_sessions(
     submit_sessions_with_progress(store, cfg, sessions, opts, |_, _, _| {}).await
 }
 
-/// Consecutive transient witness failures ([`witness_failure_is_transient`])
-/// one approved entry survives before it leaves the daemon's retry loop
-/// (the witness-at-submission spec, section 6): it ends `Failed` under the
-/// same label, kept for a person's retry, never refused.
-pub const MAX_WITNESS_TRANSIENT_FAILURES: u32 = 3;
-
 /// The witness labels after which a batch stops contacting the witness.
 ///
 /// Each says the witness cannot take work right now -- it did not answer in
@@ -642,18 +636,75 @@ pub const WITNESS_BATCH_STOP_LABELS: [&str; 3] = [
     REASON_WITNESS_SATURATED,
 ];
 
-/// Whether a witness failure label says the witness judged nothing because
-/// it did not answer: it ran past its deadline (`witness_timeout`) or could
-/// not be reached (`witness_unreachable`). Such a session is never refused:
-/// the daemon keeps its approval and retries it with backoff. A busy witness
-/// (`witness_saturated`) is not covered: it names its own retry delay and has
-/// its own path. Every other witness label is a judgement, or a trust check
-/// that failed, and stays a refusal. The one classification, shared with
-/// #1964.
+/// Whether a witness failure label says its evidence could not be fetched,
+/// so nothing was judged: the witness ran past its deadline
+/// (`witness_timeout`), could not be reached (`witness_unreachable`), or did
+/// not hand over its attestation (`witness_attestation_unavailable`: a
+/// non-success answer, a body with no quote, a broken connection) or Intel's
+/// collateral (`witness_collateral_unavailable`). Such a session is `Failed`,
+/// never refused, and the daemon retries it with the transient-upload
+/// backoff, holding it for a person under the same label once that budget is
+/// spent. A busy witness (`witness_saturated`) is not covered: it names its
+/// own retry delay and has its own path.
+///
+/// Fetching is the only thing these labels say failed. Evidence that was
+/// fetched and did not verify has labels of its own
+/// ([`witness_trust_hold`]), and every other witness label is a
+/// judgement or a local refusal that stays one. Nothing is uploaded without a
+/// verified witness either way.
 #[must_use]
 pub fn witness_failure_is_transient(label: &str) -> bool {
-    matches!(label, "witness_timeout" | "witness_unreachable")
+    matches!(
+        label,
+        "witness_timeout"
+            | "witness_unreachable"
+            | "witness_attestation_unavailable"
+            | "witness_collateral_unavailable"
+    )
 }
+
+/// The label to hold a session for a person under when the witness's
+/// evidence was fetched and did not verify, or `None` for any other label.
+///
+/// - [`REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED`]: the witness reports a
+///   measurement outside the accepted set
+///   ([`crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL`]). A new
+///   accepted list can cure it, so it is the hold that list clears.
+/// - [`REASON_WITNESS_NOT_TRUSTED`]: the quote is not a genuine one
+///   (`witness_quote_unverified`), is not bound to this client's nonce
+///   (`witness_quote_replayed`), names another signer than the pinned one
+///   (`witness_signer_unexpected`), or the certificate on the witness's
+///   answer does not verify or does not match its bytes
+///   (`witness_certificate_unverified`, `witness_certificate_mismatched`).
+///
+/// Never retried, since asking again gets the same evidence, and never a
+/// terminal refusal of the trace: the daemon revokes the approval and a
+/// person decides. Nothing is sent meanwhile. The `submit` command still
+/// reports the specific label.
+#[must_use]
+pub fn witness_trust_hold(label: &str) -> Option<&'static str> {
+    if label == crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL {
+        return Some(REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED);
+    }
+    matches!(
+        label,
+        "witness_quote_unverified"
+            | "witness_quote_replayed"
+            | "witness_signer_unexpected"
+            | "witness_certificate_unverified"
+            | "witness_certificate_mismatched"
+    )
+    .then_some(REASON_WITNESS_NOT_TRUSTED)
+}
+
+/// See [`witness_trust_hold`]. One of
+/// `daemon::queue::REASONS_NEEDING_A_PERSON`.
+pub const REASON_WITNESS_NOT_TRUSTED: &str = "witness-not-trusted";
+
+/// See [`witness_trust_hold`]. One of
+/// `daemon::queue::REASONS_NEEDING_A_PERSON`, and the only witness hold a new
+/// accepted list releases.
+pub const REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED: &str = "witness-measurement-not-accepted";
 
 /// The label to stop a batch on, if `outcome` is one of
 /// [`WITNESS_BATCH_STOP_LABELS`].
@@ -1766,6 +1817,13 @@ impl<'a> SubmitContext<'a> {
                 if label == trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR {
                     return Ok(Err(SubmitOutcome::Failed {
                         reason_label: REASON_WITNESS_SATURATED.to_string(),
+                    }));
+                }
+                // Nor one whose evidence could not be fetched: `Failed`,
+                // which the daemon retries (`witness_failure_is_transient`).
+                if witness_failure_is_transient(label) {
+                    return Ok(Err(SubmitOutcome::Failed {
+                        reason_label: label.to_string(),
                     }));
                 }
                 Ok(Err(refused(label, &transcript.session_hash)))
@@ -4528,6 +4586,50 @@ mod tests {
             public_since: None,
             witness: None,
         }
+    }
+
+    /// Witness failures split by cause. Fetching the evidence failed
+    /// (timeout, no connection, the attestation or collateral not obtained):
+    /// nothing was judged, so it is retried. The evidence was fetched and did
+    /// not verify: never retried, held for a person under one of two labels.
+    /// A measurement outside the accepted set can be cured by a new accepted
+    /// list, so it has its own; a quote, nonce, signer or certificate that
+    /// does not verify is `witness-not-trusted`. No label is both retried and
+    /// held, and the rest are neither.
+    #[test]
+    fn witness_failures_split_into_fetch_and_trust() {
+        let fetch = [
+            "witness_timeout",
+            "witness_unreachable",
+            "witness_attestation_unavailable",
+            "witness_collateral_unavailable",
+        ];
+        let held = [
+            (
+                crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+                REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED,
+            ),
+            ("witness_quote_unverified", REASON_WITNESS_NOT_TRUSTED),
+            ("witness_quote_replayed", REASON_WITNESS_NOT_TRUSTED),
+            ("witness_signer_unexpected", REASON_WITNESS_NOT_TRUSTED),
+            ("witness_certificate_unverified", REASON_WITNESS_NOT_TRUSTED),
+            ("witness_certificate_mismatched", REASON_WITNESS_NOT_TRUSTED),
+        ];
+        for label in crate::witness::WitnessTrustError::ALL_REFUSAL_LABELS {
+            assert_eq!(
+                witness_failure_is_transient(label),
+                fetch.contains(&label),
+                "{label}"
+            );
+            assert_eq!(
+                witness_trust_hold(label),
+                held.iter()
+                    .find(|(l, _)| *l == label)
+                    .map(|(_, hold)| *hold),
+                "{label}"
+            );
+        }
+        assert!(!witness_failure_is_transient(REASON_WITNESS_SATURATED));
     }
 
     #[tokio::test]
@@ -7346,10 +7448,12 @@ mod tests {
         .upload_entry(source.as_ref(), &reference, &entry, Utc::now())
         .await
         .unwrap();
+        // Held for a person under the measurement hold (#1964), which a newer
+        // accepted list releases; never a terminal refusal.
         assert_eq!(
             decision,
-            UploadDecision::Refused {
-                reason_label: WITNESS_EXPECTED_MEASUREMENT_CONTROL.to_string()
+            UploadDecision::ApprovalStale {
+                reason_label: REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED.to_string()
             }
         );
         assert!(capture.lock().unwrap().bodies.is_empty(), "nothing sent");

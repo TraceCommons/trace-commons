@@ -31,10 +31,16 @@
 //!   session nobody looked at. Nothing reaches ingest from here.
 //! - **Results.** Any other outcome is recorded with the pass's own rules
 //!   (`apply_upload_decision`): a busy witness defers the entry and holds the
-//!   background lane until the witness's own delay; a timeout or an
-//!   unreachable witness keeps the approval and retries with backoff, at
-//!   most `MAX_WITNESS_TRANSIENT_FAILURES` times in a row; everything else
-//!   follows the existing refusal rules.
+//!   background lane until the witness's own delay. A witness whose evidence
+//!   could not be fetched (`submit::witness_failure_is_transient`: timeout,
+//!   unreachable, attestation or collateral unavailable) keeps the approval
+//!   and is retried on the transient-upload backoff, and the lane rests
+//!   until that retry, as the pass once stopped at the first; once the
+//!   budget is spent the entry waits for a person under the same label.
+//!   Evidence that was fetched and did not verify
+//!   (`submit::witness_trust_hold`) holds the entry for a person under
+//!   `witness-not-trusted` or `witness-measurement-not-accepted`, never
+//!   retried. Everything else follows the existing refusal rules.
 //!
 //! # Persistence and restart
 //!
@@ -637,9 +643,25 @@ fn record(
             // A busy witness is asked once, not once per waiting session:
             // everything queued behind this job is held until the witness's
             // own delay, with the same per-session spread the pass used.
-            let held = match applied.witness_busy_until {
-                Some(_) => shared.witness_worker.take_queued(),
-                None => Vec::new(),
+            // So is one that did not answer at all: the rest of the queue
+            // would meet the same wall. They are dropped from the worker,
+            // not deferred, and later passes enqueue them once the lane
+            // reopens at this entry's retry.
+            let held = if applied.witness_busy_until.is_some() || applied.outage {
+                shared.witness_worker.take_queued()
+            } else {
+                Vec::new()
+            };
+            let retry_at = if applied.outage {
+                shared
+                    .queue
+                    .lock()
+                    .expect("queue lock")
+                    .get(entry.entry_id)
+                    .filter(|e| e.state == QueueState::Approved)
+                    .and_then(|e| e.retry_after)
+            } else {
+                None
             };
             {
                 let mut q = shared.queue.lock().expect("queue lock");
@@ -655,9 +677,10 @@ fn record(
                 }
                 let _ = super::approved_envelope::sweep(&shared.store, &q.pinned_entry_ids());
             }
-            match applied.witness_busy_until {
-                Some((until, _)) => JobEnd::Busy(until),
-                None => JobEnd::Done,
+            match (applied.witness_busy_until, retry_at) {
+                (Some((until, _)), _) => JobEnd::Busy(until),
+                (None, Some(until)) => JobEnd::Busy(until),
+                (None, None) => JobEnd::Done,
             }
         }
     };
