@@ -180,7 +180,9 @@ pub trait WitnessTransport: Send + Sync {
     /// `POST /v1/attestation-collateral` against **ingest**, not the witness.
     async fn collateral(&self, quote: &[u8]) -> Result<Collateral, WitnessTrustError>;
 
-    /// `POST /v1/witness` with the raw contribution.
+    /// Review the raw contribution: submit it as a job to
+    /// `POST /v1/witness/jobs` and poll for the answer, or, on the
+    /// admission-evidence profile, `POST /v1/witness/admission`.
     ///
     /// Takes `&VerifiedWitness` rather than a URL, and that is the whole
     /// point: an implementation cannot be called without one, and only
@@ -480,7 +482,8 @@ fn verify_admission_context(
     Ok(())
 }
 
-/// The `POST /v1/witness` request document.
+/// The witness request document (`POST /v1/witness/jobs`, and the body the
+/// retired `POST /v1/witness` took).
 ///
 /// Split out of [`witness_contribution`] so that the AGPL crate's
 /// `witness_certificate_cross_implementation` test can drive the server's real
@@ -939,8 +942,9 @@ pub struct HttpWitnessTransport {
     review_timeout: Duration,
 }
 
-/// The whole-request deadline for a witness review (`/v1/witness`,
-/// `/v1/witness/admission`, the token-bundle route), body included.
+/// The deadline for a whole witness review: a job from submit to answer
+/// (`/v1/witness/jobs`), or one admission or token-bundle request, body
+/// included.
 ///
 /// Derived from the witness's own bound, not chosen beside it: the witness
 /// abandons a request after `DEFAULT_REQUEST_TIMEOUT_SECS` (540 s since
@@ -1341,7 +1345,11 @@ impl HttpWitnessTransport {
         let deadline = tokio::time::Instant::now() + self.review_timeout;
         let mut resubmitted = false;
         loop {
-            let job = self.submit_job(base, body).await?;
+            // A resubmit is held to the same deadline as the first submit:
+            // the review's budget does not restart.
+            let job = tokio::time::timeout_at(deadline, self.submit_job(base, body))
+                .await
+                .map_err(|_| WitnessTrustError::WitnessTimeout)??;
             match self.poll_job(&job, deadline).await {
                 Ok(envelope) => return Ok(envelope),
                 Err(PollMiss::Final(error)) => return Err(error),

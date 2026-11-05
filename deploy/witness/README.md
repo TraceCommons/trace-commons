@@ -1406,6 +1406,14 @@ deleted, because what they were wrong about is worth knowing.
 
 Still unverified:
 
+- **Submit-then-poll has not run on a CVM.** Three things it depends on are
+  read from dstack v0.5.9 source, not exercised against a live agent: `Info`
+  (`/v0/Info`, then `/Info`) answering `instance_id` as hex; `GetKey` at a
+  second path (`trace-commons-witness-results-v1`); and the `witness-results`
+  named volume taking its ownership from the image's directory so the
+  `witness` user can write it. The last two fail closed: the witness does
+  not start, which is an outage to fix, never a plaintext fallback. A
+  missing instance id only turns instance-addressed polling off.
 - **The container-user / socket-permission question is open** — see First boot.
 - **The image has never been reproduced**, by anyone, on any second machine.
 - **The attested-inference path has not completed end to end.** The witness is

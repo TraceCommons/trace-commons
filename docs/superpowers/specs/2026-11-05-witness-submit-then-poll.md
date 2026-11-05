@@ -125,9 +125,12 @@ only, never on the listener. Its answer becomes the job's result.
   admission check refuses a job the queue ahead would make miss this
   deadline.
 - **Concurrency.** Active jobs (accepted, not finished) are capped at
-  `TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS`, so the job table never
-  asks the load bound for a permit it does not have. Background jobs are
-  capped at that minus the reserved interactive slots.
+  `TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS`, and background jobs at
+  that minus the reserved interactive slots, so jobs alone never ask the
+  load bound for a permit it does not have. The admission and token-bundle
+  routes share the same permits; when they hold some, a job can find none,
+  and its result is `503 witness_saturated`, which the client already
+  treats as busy and retries.
 - **Raw bytes.** The body is held as one in-memory buffer from submit until
   the task hands it to the handler; it is dropped when the handler returns.
   It is never written anywhere.
@@ -242,8 +245,8 @@ inside the transport, so `witness_contribution`'s checks are untouched.
   app-id URL. A second miss returns `witness_unreachable` (or
   `witness_timeout`), which the daemon already treats as transient.
 - Busy at submit is `WitnessSaturated` with its `Retry-After`, as today.
-- The whole review keeps the existing `WITNESS_REVIEW_TIMEOUT` (570 s)
-  deadline, so the preview's 11-minute bound still holds. When it runs out,
+- The whole review, resubmit included, keeps the existing
+  `WITNESS_REVIEW_TIMEOUT` (570 s) deadline, so the preview's 11-minute bound still holds. When it runs out,
   the client sends a best-effort `DELETE` and returns `witness_timeout`.
 - No status type, FFI field or UI string changes (decision 3).
 
