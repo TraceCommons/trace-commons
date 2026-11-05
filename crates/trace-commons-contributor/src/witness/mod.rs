@@ -41,6 +41,7 @@
 //! image is not reproducibly buildable and has never been reproduced. No text
 //! in this module may say "verifiable against source".
 
+pub mod accepted_list;
 pub mod inference_record;
 pub mod status;
 pub mod transport;
@@ -107,6 +108,24 @@ pub struct WitnessTrust {
     /// Every measurement set that is admitted. Empty means nothing is
     /// pinned, which is a refusal and never a pass.
     pub measurements: Vec<ExpectedMeasurements>,
+    /// Further (signing address, measurement set) pairs admitted by a
+    /// verified signed accepted-measurements list, already filtered to the
+    /// entries valid now and to this witness URL
+    /// (`accepted_list::trust_with_accepted`). Each is judged as a pair: its
+    /// measurement admits only a quote naming its own address.
+    ///
+    /// Never counted by [`Self::is_pinned`]: a list adds candidates beside
+    /// the sign-up pins and never makes an unpinned client pinned.
+    pub accepted: Vec<AcceptedWitnessPin>,
+}
+
+/// One pair admitted by the signed accepted-measurements list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedWitnessPin {
+    /// The address the quote must name and the certificate must recover to.
+    pub signing_address: String,
+    /// The measurement set admitted for that address.
+    pub measurements: ExpectedMeasurements,
 }
 
 impl WitnessTrust {

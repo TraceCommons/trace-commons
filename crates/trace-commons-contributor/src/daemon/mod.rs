@@ -758,6 +758,9 @@ struct TickState {
     /// The contribution-mission slot's fetch schedule: due on the first tick
     /// with a config, then every `MISSION_SLOT_REFRESH`.
     mission_slot_schedule: activity_missions::MissionSlotSchedule,
+    /// The signed witness accepted-measurements list's fetch schedule: due
+    /// at start, then about daily (`witness::accepted_list`).
+    witness_list_schedule: crate::witness::accepted_list::ListRefreshSchedule,
 }
 
 impl TickState {
@@ -766,6 +769,9 @@ impl TickState {
             guards: pass_supervisor::PassGuards::daemon(),
             table_schedule: crate::credit_estimate_table::EstimateTableSchedule::starting(now),
             mission_slot_schedule: activity_missions::MissionSlotSchedule::default(),
+            witness_list_schedule: crate::witness::accepted_list::ListRefreshSchedule::starting(
+                now,
+            ),
         }
     }
 }
@@ -909,6 +915,17 @@ async fn run_tick(shared: &Arc<ipc::DaemonShared>, dry_run: bool, state: &mut Ti
                 shared,
                 "estimate-table",
                 refresh_estimate_table(shared, now, table_schedule),
+            )
+            .await;
+        // The signed witness accepted-measurements list: at start, then
+        // about daily. A public, anonymous read; a build with no trusted
+        // list key never fetches.
+        let witness_list_schedule = &mut state.witness_list_schedule;
+        guards
+            .run(
+                shared,
+                "witness-accepted-list",
+                refresh_witness_accepted_list(shared, now, witness_list_schedule),
             )
             .await;
         // Likewise on its own schedule, and likewise a public, anonymous read
@@ -2427,6 +2444,24 @@ async fn refresh_estimate_table(
         Err(refused) => Err(*refused),
     };
     settlement_estimate::apply_table_fetch(shared, settlement);
+}
+
+/// Fetch the signed witness accepted-measurements list when its schedule is
+/// due. Whatever the outcome, the stored list stays unless a newer verified
+/// one replaced it; `witness::accepted_list::refresh` logs one fixed label.
+async fn refresh_witness_accepted_list(
+    shared: &ipc::DaemonShared,
+    now: chrono::DateTime<Utc>,
+    schedule: &mut crate::witness::accepted_list::ListRefreshSchedule,
+) {
+    if !schedule.due(now) {
+        return;
+    }
+    schedule.attempted(now, crate::credit_estimate_table::random_draw());
+    let Ok(Some(cfg)) = shared.store.load_config() else {
+        return;
+    };
+    let _ = crate::witness::accepted_list::refresh(&cfg, shared.store.dir()).await;
 }
 
 /// How long after an upload the server is asked for verdicts.

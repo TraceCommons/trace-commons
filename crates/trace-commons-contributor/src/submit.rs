@@ -933,9 +933,13 @@ impl<'a> SubmitContext<'a> {
             .witness
             .clone()
             .ok_or_else(|| anyhow::anyhow!("witness-not-configured"))?;
-        let trust = settings
-            .trust()
-            .map_err(|_| anyhow::anyhow!("witness_expected_measurement_malformed"))?;
+        // The sign-up pins plus any signed accepted-list entry valid now.
+        let trust = crate::witness::accepted_list::trust_with_accepted(
+            &settings,
+            self.store.dir(),
+            Utc::now(),
+        )
+        .map_err(|_| anyhow::anyhow!("witness_expected_measurement_malformed"))?;
         if !trust.is_pinned() {
             anyhow::bail!("witness_expected_measurement");
         }
@@ -1357,9 +1361,12 @@ impl<'a> SubmitContext<'a> {
         // A malformed pin and an absent one are different operator mistakes,
         // and a contributor who mistyped a measurement should not be told they
         // configured none.
-        let trust = settings
-            .trust()
-            .map_err(|_| "witness_expected_measurement_malformed")?;
+        // The sign-up pins plus any signed accepted-list entry valid now
+        // (`witness::accepted_list`). The list only adds candidates; a
+        // malformed sign-up pin is still this refusal.
+        let trust =
+            crate::witness::accepted_list::trust_with_accepted(settings, self.store.dir(), now)
+                .map_err(|_| "witness_expected_measurement_malformed")?;
 
         #[cfg(test)]
         if let Some((response, record)) = self.witness_override.clone() {
@@ -1820,7 +1827,14 @@ impl<'a> SubmitContext<'a> {
                             Ok(token) => token,
                             Err(outcome) => return Ok(outcome),
                         };
-                        match self
+                        // Kept only when a signed accepted list could be
+                        // fetched (a trusted list key is compiled in), for the
+                        // one retry below.
+                        let retry_raw =
+                            (!crate::witness::accepted_list::trusted_keys(self.store.dir())
+                                .is_empty())
+                            .then(|| raw.clone());
+                        let mut witnessed_outcome = self
                             .witness_envelope(
                                 &settings,
                                 raw,
@@ -1828,8 +1842,34 @@ impl<'a> SubmitContext<'a> {
                                 &token,
                                 now,
                             )
-                            .await
+                            .await;
+                        // A measurement refusal is decided from the quote,
+                        // before anything raw is sent. Before reporting it,
+                        // fetch the signed accepted list once (spaced); only
+                        // if a newer list was stored is the witness asked
+                        // again, once, under the widened trust.
+                        if let (Err(WITNESS_EXPECTED_MEASUREMENT_CONTROL), Some(retry_raw)) =
+                            (&witnessed_outcome, retry_raw)
                         {
+                            if crate::witness::accepted_list::refresh_on_refusal(
+                                self.cfg,
+                                self.store.dir(),
+                                now,
+                            )
+                            .await
+                            {
+                                witnessed_outcome = self
+                                    .witness_envelope(
+                                        &settings,
+                                        retry_raw,
+                                        transcript.attested_call.as_deref(),
+                                        &token,
+                                        now,
+                                    )
+                                    .await;
+                            }
+                        }
+                        match witnessed_outcome {
                             // The record is dropped on this path: the CLI keeps
                             // no per-entry store to write it to. The daemon's
                             // review path is where it is kept.
