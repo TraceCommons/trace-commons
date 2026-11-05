@@ -266,7 +266,7 @@ struct MonitorWindowView: View {
                 inferenceDot: Self.inferenceDot(privateAIState, calls: model.privateInferenceCalls),
                 inferenceDescription: Self.inferenceDotDescription(privateAIState, calls: model.privateInferenceCalls),
                 tracesBadge: tracesBadge,
-                tracesDescription: Self.tracesDescription(traces.decisionsOwed),
+                tracesDescription: traces.phase == .loading ? nil : Self.tracesDescription(traces.decisionsOwed),
                 showsMap: $showsMap, showsInspector: $showsInspector, inspectorAvailable: inspectorAvailable,
                 showsGraph: $showsGraph,
                 breadcrumb: Self.breadcrumb(
@@ -535,7 +535,9 @@ struct MonitorWindowView: View {
     /// The Traces badge (R7): decisions owed, a dash when the core did not
     /// say, nothing at zero. Never queue depth.
     private var tracesBadge: GlassBadgeValue? {
-        traces.decisionsOwed.map(GlassBadgeValue.count) ?? .unknown
+        // Before the first answer the count is loading, not unknown.
+        if traces.phase == .loading { return .loading }
+        return traces.decisionsOwed.map(GlassBadgeValue.count) ?? .unknown
     }
 
     /// The Traces badge's text equivalent, from the core: "unavailable" for

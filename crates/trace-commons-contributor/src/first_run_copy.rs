@@ -120,6 +120,9 @@ pub struct FrameCopy {
     pub answer_every_tool: &'static str,
     /// `{count}`: sessions found for a tool (Tools) or a repo (Rules).
     pub session_count: &'static str,
+    /// The same for exactly one session. Same wording as the Settings
+    /// source row's `count_one`. DRAFT: pending the owner's approval.
+    pub session_count_one: &'static str,
     /// Takes back a choice not yet acted on (near.ai on Join).
     /// Approved 2026-10-06.
     pub undo: &'static str,
@@ -490,6 +493,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             continue_button: "Continue",
             answer_every_tool: "Answer every tool above to continue",
             session_count: "{count} traces",
+            session_count_one: "1 trace",
             undo: "Undo",
             choose: "Choose…",
             back: "Back",
@@ -765,6 +769,14 @@ mod tests {
 
     /// Every `{...}` in the table is one the module doc lists, so a shell
     /// knows every hole it has to fill.
+    #[test]
+    fn a_single_session_reads_in_the_singular() {
+        let frame = &first_run_copy().frame;
+        assert_eq!(frame.session_count_one, "1 trace");
+        assert!(!frame.session_count_one.contains('{'));
+        assert!(frame.session_count.contains("{count}"));
+    }
+
     #[test]
     fn every_placeholder_is_a_documented_one() {
         let json = serde_json::to_string(&first_run_copy()).unwrap();

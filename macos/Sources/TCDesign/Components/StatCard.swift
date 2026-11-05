@@ -24,6 +24,10 @@ public struct GlassStatCard: View {
     /// Where the symbol is drawn: beside the words, or as the card's
     /// watermark (`GlassCardWatermark`).
     private let iconPlacement: IconPlacement
+    /// The first answer has not come: a placeholder bar takes the value's
+    /// place, which is neither a zero nor a dash (a dash says the core did
+    /// not give one).
+    private let loading: Bool
 
     /// Where a stat card draws its symbol.
     public enum IconPlacement: Sendable {
@@ -37,6 +41,10 @@ public struct GlassStatCard: View {
     /// The icon's size: near the label and value's two lines together
     /// (14 + 22pt), so the symbol fills the tile's height.
     static let iconGlyph: CGFloat = 28
+    /// The loading placeholder: about two figures wide and one line tall,
+    /// so the card does not change height when the figure arrives.
+    static let loadingWidth: CGFloat = 36
+    static let loadingHeight: CGFloat = 18
     /// The icon's column: one width for every symbol, the widest
     /// (`lock.laptopcomputer`) included, so the labels beside them start at
     /// the same place from tile to tile.
@@ -45,8 +53,9 @@ public struct GlassStatCard: View {
     public init(
         _ label: String, value: String, detail: String? = nil, detailInk: GlassRGBA? = nil,
         systemImage: String? = nil, valueAccessory: String? = nil, interactive: Bool = false,
-        iconPlacement: IconPlacement = .leading
+        iconPlacement: IconPlacement = .leading, loading: Bool = false
     ) {
+        self.loading = loading
         self.systemImage = systemImage
         self.iconPlacement = iconPlacement
         self.valueAccessory = valueAccessory
@@ -92,12 +101,16 @@ public struct GlassStatCard: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
             HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
-                Text(value)
-                    .glassType(Self.valueType)
-                    .monospacedDigit()
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                if loading {
+                    GlassSkeleton(width: Self.loadingWidth, height: Self.loadingHeight)
+                } else {
+                    Text(value)
+                        .glassType(Self.valueType)
+                        .monospacedDigit()
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
                 if let valueAccessory {
                     Text(valueAccessory)
                         .glassType(GlassTokens.TypeScale.caption)

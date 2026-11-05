@@ -74,7 +74,7 @@ final class HomeViewTests: XCTestCase {
         let home = try Self.flat("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed), "
-                + "systemImage: HomeStatIcons.waiting, action: openTraces)"))
+                + "systemImage: HomeStatIcons.waiting, loading: traces.phase == .loading, action: openTraces)"))
         XCTAssertFalse(home.contains("store.status?.decisionsOwed"), "Home reads waiting from a second store")
     }
 
@@ -91,9 +91,11 @@ final class HomeViewTests: XCTestCase {
         // No sign-in line under it (owner, 2026-11-02): the heading's.
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: HomeFormat.creditReceivedWord, value: tiles.received, "
-                + "detail: creditDetail, systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
+                + "detail: creditDetail, systemImage: HomeStatIcons.credit, "
+                + "loading: store.isLoading(\"history_rollup\"), action: openPrivateAI)"))
         XCTAssertTrue(home.contains(
-            "HomeStatTile(label: HomeFormat.creditPendingTitleWord, value: tiles.pending, action: openPrivateAI)"))
+            "HomeStatTile(label: HomeFormat.creditPendingTitleWord, value: tiles.pending, "
+                + "loading: store.isLoading(\"history_rollup\", \"commons_credit_summary\"), action: openPrivateAI)"))
         // What is not contributed is an upsell two tiles tall across both
         // columns, under Waiting and Contributed (owner, 2026-10-19), and
         // the NEAR AI balance sits beside Credit.
@@ -129,8 +131,9 @@ final class HomeViewTests: XCTestCase {
         XCTAssertLessThan(waiting.lowerBound, upsell.lowerBound)
         XCTAssertLessThan(upsell.lowerBound, credit.lowerBound, "Not contributed sits under Waiting and Contributed")
         XCTAssertTrue(home.contains(
-            "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted), "
-                + "systemImage: HomeStatIcons.contributed, action: openHistory)"))
+            "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(freshRollup), "
+                + "systemImage: HomeStatIcons.contributed, loading: store.isLoading(\"history_rollup\"), "
+                + "action: openHistory)"))
         // The credit summary after a failed read is no summary (D6 then
         // shows a dash). The condition gates the figure but is not drawn
         // (owner, 2026-10-13).

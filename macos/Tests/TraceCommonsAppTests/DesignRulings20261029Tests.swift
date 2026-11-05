@@ -54,7 +54,7 @@ final class DesignRulings20261029Tests: XCTestCase {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains(
             "let creditDetail = HomeFormat.creditAccountTotal(freshCredit, words: MonitorWords.table?.homeHistory)"))
-        XCTAssertTrue(home.contains("detail: creditDetail, systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
+        XCTAssertTrue(home.contains("detail: creditDetail, systemImage: HomeStatIcons.credit,"))
         XCTAssertFalse(home.contains("creditDelta"))
         XCTAssertFalse(home.contains("creditTotal("))
         XCTAssertFalse(try Self.text("Views/Monitor/HomeStore.swift").contains("CreditDailyTotals"))
