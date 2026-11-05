@@ -893,6 +893,8 @@ mod refusal_label_set_tests {
             WitnessTrustError::WitnessSaturated {
                 retry_after_secs: 30,
             },
+            WitnessTrustError::WitnessTimeout,
+            WitnessTrustError::WitnessUnreachable,
         ];
         assert_eq!(
             every.len(),

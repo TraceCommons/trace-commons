@@ -138,6 +138,36 @@ pub const MONITOR_CORE_UNREACHABLE: &str =
 /// Approved by the owner 2026-11-04 (Settings copy pass 2, P1).
 pub const MONITOR_REQUEST_FAILED: &str = "That didn't go through.";
 
+/// What the Traces tab says, where Submit or a preview was asked for, when
+/// the trace has to go through the privacy check before it can be sent
+/// (`witness-review-required`). Opening the trace is where that check is
+/// started. DRAFT, needs owner approval.
+pub const MONITOR_NEEDS_PRIVACY_CHECK: &str = "Needs a privacy check first. Open it to start one.";
+
+/// What the Traces tab says when the privacy check did not answer in time
+/// or could not be reached (`witness_timeout`, `witness_unreachable`,
+/// `preview-timed-out`). Nothing was sent. DRAFT, needs owner approval.
+pub const MONITOR_PRIVACY_CHECK_NO_ANSWER: &str =
+    "The privacy check didn't answer. Try again later.";
+
+/// The Traces tab's line for one preview or Submit failure label, or
+/// `None` for a label with no line of its own (the caller says
+/// [`MONITOR_REQUEST_FAILED`]).
+///
+/// The one mapping: the macOS shell reads the same fields through
+/// `MonitorTracesCopy.failureLine(forLabel:)`, which must agree with this
+/// (`the_failure_lines_follow_their_labels`).
+#[must_use]
+pub fn monitor_failure_line(label: &str) -> Option<&'static str> {
+    match label {
+        crate::daemon::preview::REASON_WITNESS_REVIEW_REQUIRED => Some(MONITOR_NEEDS_PRIVACY_CHECK),
+        crate::daemon::preview::REASON_PREVIEW_TIMED_OUT
+        | "witness_timeout"
+        | "witness_unreachable" => Some(MONITOR_PRIVACY_CHECK_NO_ANSWER),
+        _ => None,
+    }
+}
+
 /// Every fixed word of the monitor's Traces tab. The row labels are single
 /// words; `keep` and `undo_keep` are Customize's (K5) so the two surfaces
 /// cannot drift.
@@ -183,6 +213,10 @@ pub struct MonitorTracesCopy {
     pub core_unreachable: &'static str,
     /// A request failed; see [`MONITOR_REQUEST_FAILED`].
     pub request_failed: &'static str,
+    /// See [`MONITOR_NEEDS_PRIVACY_CHECK`]. DRAFT.
+    pub needs_privacy_check: &'static str,
+    /// See [`MONITOR_PRIVACY_CHECK_NO_ANSWER`]. DRAFT.
+    pub privacy_check_no_answer: &'static str,
     /// Ron's plain Dismiss (#1146): the undo bar's, the Dismiss-session
     /// confirmation's and the review card's. Apart from [`Self::dismiss`],
     /// native's "Not this one", which this does not replace.
@@ -565,6 +599,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
         undo_keep: customize.undo_keep,
         core_unreachable: MONITOR_CORE_UNREACHABLE,
         request_failed: MONITOR_REQUEST_FAILED,
+        needs_privacy_check: MONITOR_NEEDS_PRIVACY_CHECK,
+        privacy_check_no_answer: MONITOR_PRIVACY_CHECK_NO_ANSWER,
         dismiss_action: "Dismiss",
         dismiss_all: "Dismiss all",
         optional_automation: "OPTIONAL AUTOMATION",
@@ -1951,6 +1987,41 @@ mod tests {
             copy.open_traces,
         ] {
             assert!(!word.is_empty() && !word.ends_with('.'), "{word}");
+        }
+    }
+
+    #[test]
+    fn the_failure_lines_follow_their_labels() {
+        let copy = monitor_traces_copy();
+        assert_eq!(
+            monitor_failure_line(crate::daemon::preview::REASON_WITNESS_REVIEW_REQUIRED),
+            Some(copy.needs_privacy_check)
+        );
+        for label in [
+            crate::daemon::preview::REASON_PREVIEW_TIMED_OUT,
+            "witness_timeout",
+            "witness_unreachable",
+        ] {
+            assert_eq!(
+                monitor_failure_line(label),
+                Some(copy.privacy_check_no_answer)
+            );
+        }
+        for label in [
+            "preview-failed",
+            "not-pending",
+            "",
+            "witness_quote_unverified",
+        ] {
+            assert_eq!(monitor_failure_line(label), None, "{label}");
+        }
+        // The copy rules: short, and none of the words a person is never
+        // shown.
+        for line in [copy.needs_privacy_check, copy.privacy_check_no_answer] {
+            assert!(line.chars().count() <= 60, "{line}");
+            for banned in ["Trace Commons", "daemon", "passkey", "witness"] {
+                assert!(!line.contains(banned), "{line} says {banned}");
+            }
         }
     }
 

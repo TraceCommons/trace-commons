@@ -35,6 +35,12 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
     public let undoKeep: String
     public let coreUnreachable: String
     public let requestFailed: String
+    /// A trace that has to go through the privacy check before it can be
+    /// sent (`witness-review-required`). DRAFT.
+    public let needsPrivacyCheck: String
+    /// The privacy check did not answer in time or could not be reached
+    /// (`witness_timeout`, `witness_unreachable`, `preview-timed-out`). DRAFT.
+    public let privacyCheckNoAnswer: String
     /// Ron's plain Dismiss (#1146): the undo bar's, the Dismiss-session
     /// confirmation's and the review card's. Not `dismiss` ("Not this one").
     public let dismissAction: String
@@ -62,6 +68,8 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
         case undoKeep = "undo_keep"
         case coreUnreachable = "core_unreachable"
         case requestFailed = "request_failed"
+        case needsPrivacyCheck = "needs_privacy_check"
+        case privacyCheckNoAnswer = "privacy_check_no_answer"
         case dismissAction = "dismiss_action"
         case dismissAll = "dismiss_all"
         case optionalAutomation = "optional_automation"
@@ -77,6 +85,7 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
         "review", "tool", "folder", "started", "length", "prompts", "size", "sends", "marks", "unsure",
         "eligibility", "attestation", "held", "sample", "residual_risk", "personal_information",
         "second_look_waiting", "contribute", "keep", "dismiss", "undo_contribute", "undo_keep", "core_unreachable", "request_failed",
+        "needs_privacy_check", "privacy_check_no_answer",
         "dismiss_action", "dismiss_all", "optional_automation", "tree", "counts", "inspector", "summary_panel", "session_review",
         "look_inside", "undo",
     ]
@@ -105,6 +114,7 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
             copy.residualRisk, copy.personalInformation, copy.secondLookWaiting,
             copy.contribute, copy.keep, copy.dismiss,
             copy.undoContribute, copy.undoKeep, copy.coreUnreachable, copy.requestFailed,
+            copy.needsPrivacyCheck, copy.privacyCheckNoAnswer,
             copy.dismissAction, copy.dismissAll, copy.optionalAutomation,
         ]
         let tables: [Bool] = [
@@ -117,9 +127,33 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
     /// What the tab says for a failed request: the core's line for a core
     /// that does not answer, or for one that refused. Never the error's own
     /// fixed label, which is for logs.
+    ///
+    /// A failure whose label has a line of its own says that line instead
+    /// (`failureLine(for:)`), so a trace waiting on the privacy check, or a
+    /// check that did not answer, is not reported as a generic failure.
     public func line(for error: DaemonDataError) -> String {
         if case .unreachable = error { return coreUnreachable }
-        return requestFailed
+        return failureLine(for: error) ?? requestFailed
+    }
+
+    /// The line for a preview or Submit failure whose label has one, or nil.
+    /// Reads the daemon's fixed label: an IPC error's message, or a skipped
+    /// approve's reason.
+    public func failureLine(for error: DaemonDataError) -> String? {
+        switch error {
+        case .daemon(_, let message): return failureLine(forLabel: message)
+        case .notApproved(let reason): return reason.flatMap(failureLine(forLabel:))
+        default: return nil
+        }
+    }
+
+    /// The same mapping as the core's `preview_copy::monitor_failure_line`.
+    public func failureLine(forLabel label: String) -> String? {
+        switch label {
+        case "witness-review-required": return needsPrivacyCheck
+        case "preview-timed-out", "witness_timeout", "witness_unreachable": return privacyCheckNoAnswer
+        default: return nil
+        }
     }
 }
 

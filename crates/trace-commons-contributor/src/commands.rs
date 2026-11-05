@@ -1880,7 +1880,20 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
         remediate_quarantined: sel.remediate_quarantined,
         verdict,
     };
-    let outcomes = submit::submit_sessions(store, &cfg, pairs, &opts).await?;
+    // One stderr line per session, so a batch that waits on the network is
+    // seen to move rather than sitting silent until the end. Labels only,
+    // and never in `--json` mode, whose stdout a caller parses.
+    let quiet = sel.json;
+    let outcomes =
+        submit::submit_sessions_with_progress(store, &cfg, pairs, &opts, |done, total, outcome| {
+            if !quiet && total > 1 {
+                eprintln!(
+                    "{done} of {total}: {}",
+                    submit::outcome_progress_label(outcome)
+                );
+            }
+        })
+        .await?;
 
     if let Some(path) = sel.manifest {
         let entries = submit::build_manifest(&outcomes);

@@ -224,3 +224,59 @@ async fn provisioned_near_window_review_builds_over_http_and_uploads_exact_appro
     );
     server.abort();
 }
+
+/// With a witness configured, an entry nobody has had reviewed cannot be
+/// previewed or approved locally. Both answers name that, rather than the
+/// generic `preview-failed` a person could do nothing with.
+#[tokio::test]
+async fn an_unreviewed_entry_under_a_witness_is_reported_as_needing_review() {
+    let body = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"synthetic onboarding task\"},\"cwd\":\"/synthetic/project\",\"timestamp\":\"2026-08-08T10:00:00Z\",\"sessionId\":\"sess-1\",\"uuid\":\"a1\"}\n";
+    let (s, id, dir) = shared_with_session(body);
+    let project = dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let path = project.join("sess-1.jsonl");
+    std::fs::write(&path, body).unwrap();
+    {
+        let mut queue = s.queue.lock().unwrap();
+        let mut entry = queue.get(id).unwrap().clone();
+        entry.path = path;
+        entry.session_hash = crate::source::session_hash(body.as_bytes());
+        *queue = super::super::super::queue::Queue::default();
+        queue.upsert(entry, 500).unwrap();
+    }
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.claude_source = Some(super::super::super::settings::SourceDeclaration::Watch {
+            path: dir.path().to_path_buf(),
+        });
+    }
+    let device = crate::identity::DeviceIdentity::load_or_generate(&s.store).unwrap();
+    let mut cfg = crate::commands::unenrolled_preview_config();
+    cfg.consent_scopes_chosen = Some(true);
+    cfg.device_key_id = device.device_key_id.clone();
+    cfg.user_subject = device.device_key_id.clone();
+    cfg.consent_scopes = vec!["debugging_evaluation".into()];
+    // Nothing listens here: the refusal comes before any network call.
+    cfg.witness = Some(crate::config::WitnessSettings {
+        url: "https://witness.invalid".into(),
+        signing_address: "0x1111111111111111111111111111111111111111".into(),
+        expected_measurements: vec![format!("mrtd={}", "aa".repeat(48))],
+        admission_evidence: false,
+    });
+    s.store.save_config(&cfg).unwrap();
+
+    let preview = handle_request_async(&s, &req("preview", serde_json::json!({"entry_id": id}))).await;
+    let error = preview.error.expect("an unreviewed preview is refused");
+    assert_eq!(error.message, super::super::super::preview::REASON_WITNESS_REVIEW_REQUIRED);
+
+    let approved = handle_approve(&s, &req("approve", serde_json::json!({"entry_id": id}))).await;
+    let result = approved.result.expect("approve answers with what it skipped");
+    assert_eq!(result["approved"], 0);
+    assert_eq!(
+        result["skipped"],
+        serde_json::json!([{
+            "entry_id": id.to_string(),
+            "reason_label": super::super::super::preview::REASON_WITNESS_REVIEW_REQUIRED,
+        }])
+    );
+}

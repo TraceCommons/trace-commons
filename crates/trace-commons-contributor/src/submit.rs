@@ -618,19 +618,111 @@ pub async fn submit_sessions(
     sessions: Vec<(Box<dyn TraceSource>, SessionRef)>,
     opts: &SubmitOptions,
 ) -> Result<Vec<SubmitOutcome>> {
+    submit_sessions_with_progress(store, cfg, sessions, opts, |_, _, _| {}).await
+}
+
+/// The witness labels after which a batch stops contacting the witness.
+///
+/// Each says the witness cannot take work right now -- it did not answer in
+/// time, could not be reached, or asked to be left alone -- and the next
+/// session would meet the same answer only after waiting for it again: up
+/// to `WITNESS_REVIEW_TIMEOUT` each, which across a `--since 48h` batch was
+/// an hour of silence. A session skipped this way is `Failed` under the same
+/// label, never sent anywhere and never refused: running `submit` again
+/// tries it.
+pub const WITNESS_BATCH_STOP_LABELS: [&str; 3] = [
+    "witness_timeout",
+    "witness_unreachable",
+    REASON_WITNESS_SATURATED,
+];
+
+/// The label to stop a batch on, if `outcome` is one of
+/// [`WITNESS_BATCH_STOP_LABELS`].
+fn witness_batch_stop(outcome: &SubmitOutcome) -> Option<&'static str> {
+    let label = match outcome {
+        SubmitOutcome::Refused { reason_label, .. } | SubmitOutcome::Failed { reason_label } => {
+            reason_label.as_str()
+        }
+        _ => return None,
+    };
+    WITNESS_BATCH_STOP_LABELS
+        .into_iter()
+        .find(|stop| *stop == label)
+}
+
+/// A short, label-only word for one outcome, for the CLI's per-session
+/// progress line: no session path, id or text.
+#[must_use]
+pub fn outcome_progress_label(outcome: &SubmitOutcome) -> String {
+    match outcome {
+        SubmitOutcome::Submitted { .. } => "ok".to_string(),
+        SubmitOutcome::AlreadySubmitted { .. } => "already-submitted".to_string(),
+        SubmitOutcome::SkippedParseFailure { reason_label } => format!("skipped ({reason_label})"),
+        SubmitOutcome::Refused { reason_label, .. } => format!("refused ({reason_label})"),
+        SubmitOutcome::Failed { reason_label } => format!("failed ({reason_label})"),
+        SubmitOutcome::HeldForReview { reason_label, .. }
+        | SubmitOutcome::HeldForSecondLook { reason_label, .. } => {
+            format!("held ({reason_label})")
+        }
+    }
+}
+
+/// [`submit_sessions`], calling `progress(done, total, outcome)` after each
+/// session so a person running a long batch sees it move.
+pub async fn submit_sessions_with_progress(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+    sessions: Vec<(Box<dyn TraceSource>, SessionRef)>,
+    opts: &SubmitOptions,
+    mut progress: impl FnMut(usize, usize, &SubmitOutcome),
+) -> Result<Vec<SubmitOutcome>> {
     if opts.unenrolled_preview && !opts.dry_run {
         anyhow::bail!("unenrolled preview requires dry-run");
     }
     let mut ctx = crate::daemon::run_blocking(|| {
         SubmitContext::new(store, cfg, opts, near_ai_settings_from_env())
     })?;
-    let mut outcomes = Vec::with_capacity(sessions.len());
-    for (source, session_ref) in sessions {
-        // The CLI's `submit`: a person ran the command, so the receipt says a
-        // person approved it, with the `--verdict` they passed (K7). Set per
-        // session because `submit_loaded` takes it one-shot.
-        ctx.set_upload_provenance(false, opts.verdict.map(|v| v.name().to_string()));
-        outcomes.push(ctx.submit_one(source.as_ref(), &session_ref).await?);
+    run_batch(
+        sessions,
+        async |(source, session_ref): (Box<dyn TraceSource>, SessionRef)| {
+            // The CLI's `submit`: a person ran the command, so the receipt
+            // says a person approved it, with the `--verdict` they passed
+            // (K7). Set per session because `submit_loaded` takes it
+            // one-shot.
+            ctx.set_upload_provenance(false, opts.verdict.map(|v| v.name().to_string()));
+            ctx.submit_one(source.as_ref(), &session_ref).await
+        },
+        &mut progress,
+    )
+    .await
+}
+
+/// The batch loop behind [`submit_sessions_with_progress`]: one session at
+/// a time, and after a [`WITNESS_BATCH_STOP_LABELS`] outcome, none of the
+/// rest reaches `submit` at all.
+async fn run_batch<S>(
+    sessions: Vec<S>,
+    mut submit: impl AsyncFnMut(S) -> Result<SubmitOutcome>,
+    progress: &mut impl FnMut(usize, usize, &SubmitOutcome),
+) -> Result<Vec<SubmitOutcome>> {
+    let total = sessions.len();
+    let mut outcomes = Vec::with_capacity(total);
+    let mut stopped: Option<&'static str> = None;
+    for session in sessions {
+        let outcome = match stopped {
+            // Fail closed: nothing is redacted locally in the witness's
+            // place and nothing is sent.
+            Some(label) => SubmitOutcome::Failed {
+                reason_label: label.to_string(),
+            },
+            None => {
+                let outcome = submit(session).await?;
+                stopped = witness_batch_stop(&outcome);
+                outcome
+            }
+        };
+        progress(outcomes.len() + 1, total, &outcome);
+        outcomes.push(outcome);
     }
     Ok(outcomes)
 }
@@ -1001,7 +1093,7 @@ impl<'a> SubmitContext<'a> {
             settings.url.clone(),
             self.cfg.ingest_url.clone(),
             std::sync::Arc::new(config_allowlist(self.cfg)),
-            std::time::Duration::from_secs(120),
+            crate::witness::transport::WITNESS_REVIEW_TIMEOUT,
         )?
         .with_admission_evidence(true)
         .with_envelope_limit(self.store.envelope_limit_bytes());
@@ -1375,7 +1467,7 @@ impl<'a> SubmitContext<'a> {
             settings.url.clone(),
             self.cfg.ingest_url.clone(),
             std::sync::Arc::new(config_allowlist(self.cfg)),
-            std::time::Duration::from_secs(120),
+            crate::witness::transport::WITNESS_REVIEW_TIMEOUT,
         )
         .map_err(|e| e.refusal_label())?
         .with_admission_evidence(admission_profile)
@@ -4465,6 +4557,65 @@ mod tests {
         assert!(outcomes_have_failure(&[refusal], false));
     }
 
+    #[tokio::test]
+    async fn a_batch_stops_contacting_the_witness_after_it_times_out() {
+        for stop in WITNESS_BATCH_STOP_LABELS {
+            let mut attempted = Vec::new();
+            let mut seen = Vec::new();
+            let outcomes = run_batch(
+                vec![1, 2, 3, 4],
+                async |n: u32| {
+                    attempted.push(n);
+                    Ok(if n == 2 {
+                        refused(stop, "hash")
+                    } else {
+                        SubmitOutcome::Failed {
+                            reason_label: "unrelated".to_string(),
+                        }
+                    })
+                },
+                &mut |done, total, outcome: &SubmitOutcome| {
+                    seen.push((done, total, outcome_progress_label(outcome)));
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                attempted,
+                vec![1, 2],
+                "{stop}: later sessions were still sent"
+            );
+            assert_eq!(outcomes.len(), 4);
+            for skipped in &outcomes[2..] {
+                assert!(
+                    matches!(skipped, SubmitOutcome::Failed { reason_label } if reason_label == stop),
+                    "{skipped:?}"
+                );
+            }
+            assert_eq!(
+                seen.iter().map(|(d, t, _)| (*d, *t)).collect::<Vec<_>>(),
+                vec![(1, 4), (2, 4), (3, 4), (4, 4)],
+                "every session reports progress"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_batch_carries_on_past_an_ordinary_refusal() {
+        let mut attempted = 0;
+        run_batch(
+            vec![1, 2, 3],
+            async |_n: u32| {
+                attempted += 1;
+                Ok(refused("witness_attestation_unavailable", "hash"))
+            },
+            &mut |_, _, _| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempted, 3);
+    }
+
     #[test]
     fn only_size_refusal_is_non_fatal_in_dry_run() {
         assert!(!outcomes_have_failure(
@@ -7515,6 +7666,11 @@ pub async fn post_attestation(
             "trace-commons-contributor/",
             env!("CARGO_PKG_VERSION")
         ))
+        // A collector that accepts the connection and never answers must
+        // not hold the command open: this was the one client on the submit
+        // path with no timeout. The document is a few kilobytes.
+        .connect_timeout(StdDuration::from_secs(15))
+        .timeout(StdDuration::from_secs(30))
         .build()
     {
         Ok(client) => client,

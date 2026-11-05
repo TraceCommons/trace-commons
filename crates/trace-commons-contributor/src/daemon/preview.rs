@@ -402,6 +402,148 @@ pub(crate) fn input_fingerprint_with_env_filter(
 /// silent rebuild would send something the contributor never saw.
 pub const REASON_APPROVED_ENVELOPE_UNAVAILABLE: &str = "approved-envelope-unavailable";
 
+/// The fallback a failed preview build is reported under when nothing more
+/// specific is known.
+pub const REASON_PREVIEW_FAILED: &str = "preview-failed";
+
+/// A witness is configured and this entry has no certified review pinned,
+/// so no local build may stand in for one (`build_preview_core`'s
+/// `witness_claim_unavailable`). The entry has to be reviewed by the
+/// witness first (`witness_preview_request`).
+///
+/// Its own label, not `witness_claim_unavailable`: that one is a submission
+/// refusal whose words say the computer is not connected to a commons,
+/// which is not what happened here.
+pub const REASON_WITNESS_REVIEW_REQUIRED: &str = "witness-review-required";
+
+/// The build did not finish within [`PREVIEW_BUILD_DEADLINE`] and was
+/// abandoned. Nothing was pinned.
+pub const REASON_PREVIEW_TIMED_OUT: &str = "preview-timed-out";
+
+/// The longest one interactive preview build may take: a card, a pinning
+/// build, or a witness review. Past it the build is dropped and reported as
+/// [`REASON_PREVIEW_TIMED_OUT`], so a caller waiting on it always gets an
+/// answer.
+///
+/// Sized from the slowest legitimate build, which is a witness review: the
+/// quote and the collateral (`WITNESS_PROBE_TIMEOUT`, 30 s each) and then
+/// the review itself (`WITNESS_REVIEW_TIMEOUT`, 330 s, which is the
+/// witness's own 300 s bound plus room for its answer). That is 390 s of
+/// network at most; seven minutes leaves half a minute for reading,
+/// redacting and summarizing locally. A local build with a remote privacy
+/// filter shares the bound: each of its calls has its own timeout, and one
+/// still running after seven minutes is several megabytes of prose, which
+/// the witness itself would refuse.
+pub const PREVIEW_BUILD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(7 * 60);
+
+/// Every label [`preview_failure_label`] can return.
+pub const PREVIEW_FAILURE_LABELS: [&str; 10] = [
+    REASON_PREVIEW_FAILED,
+    REASON_WITNESS_REVIEW_REQUIRED,
+    REASON_PREVIEW_TIMED_OUT,
+    "parse-failed",
+    "pii-filter-unavailable",
+    "redaction-panicked",
+    "trace-redaction-failed",
+    crate::envelope::REASON_METADATA_CREDENTIAL,
+    crate::envelope::REASON_METADATA_KEY_COLLISION,
+    crate::envelope::REASON_CORRECTION_CREDENTIAL,
+];
+
+/// The fixed label a failed preview build is reported under.
+///
+/// The error's text is compared against the closed set the build itself
+/// produces and is never forwarded: anything not in
+/// [`PREVIEW_FAILURE_LABELS`] collapses to [`REASON_PREVIEW_FAILED`], so no
+/// path, URL or trace text can ride out on a label.
+#[must_use]
+pub fn preview_failure_label(error: &anyhow::Error) -> &'static str {
+    let text = error.to_string();
+    if text == "witness_claim_unavailable" {
+        return REASON_WITNESS_REVIEW_REQUIRED;
+    }
+    PREVIEW_FAILURE_LABELS
+        .into_iter()
+        .find(|label| *label == text)
+        .unwrap_or(REASON_PREVIEW_FAILED)
+}
+
+/// The event name a failed preview build is logged under in
+/// `daemon-errors.log`, with its label as `reason`.
+pub(crate) const PREVIEW_FAILURE_EVENT: &str = "preview_build_failed";
+
+/// How often one failure label may be logged. A queue of a hundred entries
+/// that all fail the same way is one line a minute, not a hundred.
+pub(crate) const PREVIEW_FAILURE_LOG_EVERY: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
+/// When each label was last logged, for [`PREVIEW_FAILURE_LOG_EVERY`].
+static PREVIEW_FAILURE_LOGGED: std::sync::Mutex<
+    std::collections::BTreeMap<&'static str, std::time::Instant>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Whether `label` is due a log line at `now`, recording it if so.
+fn preview_failure_due(
+    logged: &mut std::collections::BTreeMap<&'static str, std::time::Instant>,
+    label: &'static str,
+    now: std::time::Instant,
+) -> bool {
+    match logged.get(label) {
+        Some(at) if now.saturating_duration_since(*at) < PREVIEW_FAILURE_LOG_EVERY => false,
+        _ => {
+            logged.insert(label, now);
+            true
+        }
+    }
+}
+
+/// The `reason` value a label is logged with: the log accepts only
+/// lowercase letters, digits and `_`, so the queue family's hyphens become
+/// underscores. The label set is closed, so nothing else can be written.
+fn preview_failure_log_value(label: &'static str) -> String {
+    label.replace('-', "_")
+}
+
+/// [`preview_failure_label`], logged once per label per
+/// [`PREVIEW_FAILURE_LOG_EVERY`] to `daemon-errors.log`. Label only: no
+/// entry id, path, URL or trace text.
+pub(crate) fn reported_failure_label(error: &anyhow::Error) -> &'static str {
+    let label = preview_failure_label(error);
+    report_failure_label(label);
+    label
+}
+
+/// Log a failure label that was already chosen, under the same rate limit.
+pub(crate) fn report_failure_label(label: &'static str) {
+    let due = {
+        let mut logged = PREVIEW_FAILURE_LOGGED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        preview_failure_due(&mut logged, label, std::time::Instant::now())
+    };
+    if due {
+        let reason = preview_failure_log_value(label);
+        super::diagnostics_log::record_labels(
+            tracing::Level::WARN,
+            PREVIEW_FAILURE_EVENT,
+            &[("reason", reason.as_str())],
+        );
+    }
+}
+
+/// Run one preview build under `deadline`, reporting an overrun as
+/// [`REASON_PREVIEW_TIMED_OUT`]. The build is dropped at the deadline, so
+/// whatever it held -- the large-session gate, a connection -- is released.
+pub(crate) async fn within_deadline<T>(
+    deadline: std::time::Duration,
+    build: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout(deadline, build).await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!(REASON_PREVIEW_TIMED_OUT)),
+    }
+}
+
 /// The fixed reason label an entry is re-offered under when an
 /// envelope-determining input changed between approval and upload.
 pub const REASON_INPUTS_CHANGED: &str = "approval-inputs-changed";
@@ -642,6 +784,30 @@ pub async fn build_preview_with_correction(
     correction: Option<&str>,
     attested_bodies: bool,
 ) -> Result<(PreviewSummary, String, TraceContributionEnvelope)> {
+    within_deadline(
+        PREVIEW_BUILD_DEADLINE,
+        build_preview_with_correction_unbounded(
+            store,
+            cfg,
+            near_ai,
+            source,
+            session_ref,
+            correction,
+            attested_bodies,
+        ),
+    )
+    .await
+}
+
+async fn build_preview_with_correction_unbounded(
+    store: &ConfigStore,
+    cfg: Option<&ContributorConfig>,
+    near_ai: Option<NearAiSettings>,
+    source: &dyn TraceSource,
+    session_ref: &SessionRef,
+    correction: Option<&str>,
+    attested_bodies: bool,
+) -> Result<(PreviewSummary, String, TraceContributionEnvelope)> {
     // Held across the read, the redaction, the digest and the body below --
     // the whole peak -- and released when this returns. See
     // `crate::large_session_gate`.
@@ -710,20 +876,23 @@ pub async fn build_preview_card(
     source: &dyn TraceSource,
     session_ref: &SessionRef,
 ) -> Result<PreviewCardSummary> {
-    // See `build_preview_with_correction`: one large session builds at a
-    // time, and a small one never waits.
-    let _large_session = crate::large_session_gate::admit(session_ref.size_bytes).await;
-    let (core, _envelope) = build_preview_core(
-        cfg,
-        near_ai,
-        source,
-        session_ref,
-        None,
-        attested_bodies,
-        store.envelope_limit_bytes(),
-    )
-    .await?;
-    Ok(core)
+    within_deadline(PREVIEW_BUILD_DEADLINE, async {
+        // See `build_preview_with_correction`: one large session builds at a
+        // time, and a small one never waits.
+        let _large_session = crate::large_session_gate::admit(session_ref.size_bytes).await;
+        let (core, _envelope) = build_preview_core(
+            cfg,
+            near_ai,
+            source,
+            session_ref,
+            None,
+            attested_bodies,
+            store.envelope_limit_bytes(),
+        )
+        .await?;
+        Ok(core)
+    })
+    .await
 }
 
 /// Shared build behind [`build_preview`] and [`build_preview_card`]: load the
@@ -746,7 +915,10 @@ async fn build_preview_core(
     // `envelope-too-large` label (`ConfigStore::envelope_limit_bytes`).
     envelope_limit: usize,
 ) -> Result<(PreviewCardSummary, TraceContributionEnvelope)> {
-    let mut transcript = source.load(session_ref)?;
+    // Labelled, never forwarded: a parser's error can quote the file.
+    let mut transcript = source
+        .load(session_ref)
+        .map_err(|_| anyhow::anyhow!("parse-failed"))?;
     let raw_session_bytes = session_ref.size_bytes;
 
     let enrolled = cfg.is_some();
@@ -924,6 +1096,21 @@ pub struct WitnessPreview {
 /// It does not persist or approve; the IPC handler atomically pins the returned
 /// artifact under its queue lock after rechecking source/configuration state.
 pub async fn build_witnessed_preview(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+    near_ai: Option<NearAiSettings>,
+    source: &dyn TraceSource,
+    session_ref: &SessionRef,
+    options: WitnessPreviewOptions<'_>,
+) -> Result<WitnessPreview> {
+    within_deadline(
+        PREVIEW_BUILD_DEADLINE,
+        build_witnessed_preview_unbounded(store, cfg, near_ai, source, session_ref, options),
+    )
+    .await
+}
+
+async fn build_witnessed_preview_unbounded(
     store: &ConfigStore,
     cfg: &ContributorConfig,
     near_ai: Option<NearAiSettings>,
@@ -1501,6 +1688,103 @@ mod tests {
                 .unwrap()
                 .to_string(),
             "witness_claim_unavailable"
+        );
+        // ...and that refusal reaches a caller as the instruction it is,
+        // never as the generic `preview-failed` it used to collapse to.
+        let error = build_preview_card(&store, Some(&cfg), None, true, &source, &reference)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            preview_failure_label(&error),
+            REASON_WITNESS_REVIEW_REQUIRED
+        );
+    }
+
+    #[test]
+    fn every_preview_failure_label_maps_to_itself() {
+        for label in PREVIEW_FAILURE_LABELS {
+            assert_eq!(preview_failure_label(&anyhow::anyhow!("{label}")), label);
+        }
+        assert_eq!(
+            preview_failure_label(&anyhow::Error::new(crate::envelope::RedactionPanicked)),
+            "redaction-panicked"
+        );
+        assert_eq!(
+            preview_failure_label(&anyhow::anyhow!("witness_claim_unavailable")),
+            REASON_WITNESS_REVIEW_REQUIRED
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_preview_failure_never_crosses_as_itself() {
+        // An error's text can carry a URL, a path or trace content. Only
+        // the closed set crosses.
+        for text in [
+            "error sending request for url (https://witness.example/v1/witness)",
+            "/Users/someone/.claude/projects/x.jsonl: unexpected EOF",
+            "",
+            "PREVIEW-FAILED",
+        ] {
+            assert_eq!(
+                preview_failure_label(&anyhow::anyhow!("{text}")),
+                REASON_PREVIEW_FAILED
+            );
+        }
+    }
+
+    #[test]
+    fn every_preview_failure_label_is_loggable_as_a_label() {
+        for label in PREVIEW_FAILURE_LABELS {
+            let value = preview_failure_log_value(label);
+            assert_eq!(
+                super::super::diagnostics_log::label_value(&value),
+                value,
+                "{label} would be written as `invalid`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_label_is_logged_once_a_minute() {
+        let mut logged = std::collections::BTreeMap::new();
+        let t0 = std::time::Instant::now();
+        assert!(preview_failure_due(&mut logged, "preview-failed", t0));
+        assert!(!preview_failure_due(
+            &mut logged,
+            "preview-failed",
+            t0 + std::time::Duration::from_secs(59)
+        ));
+        // Another label is its own line.
+        assert!(preview_failure_due(
+            &mut logged,
+            REASON_PREVIEW_TIMED_OUT,
+            t0 + std::time::Duration::from_secs(1)
+        ));
+        assert!(preview_failure_due(
+            &mut logged,
+            "preview-failed",
+            t0 + PREVIEW_FAILURE_LOG_EVERY
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_build_that_never_finishes_is_reported_at_the_deadline() {
+        let build = std::future::pending::<Result<()>>();
+        let error = within_deadline(PREVIEW_BUILD_DEADLINE, build)
+            .await
+            .unwrap_err();
+        assert_eq!(preview_failure_label(&error), REASON_PREVIEW_TIMED_OUT);
+    }
+
+    #[test]
+    fn the_preview_deadline_outlasts_a_whole_witness_review() {
+        use crate::witness::transport::{WITNESS_PROBE_TIMEOUT, WITNESS_REVIEW_TIMEOUT};
+        // Quote, collateral, then the review: a review the witness would
+        // still finish must not be cut off by the build's own deadline.
+        assert!(
+            PREVIEW_BUILD_DEADLINE > WITNESS_PROBE_TIMEOUT * 2 + WITNESS_REVIEW_TIMEOUT,
+            "the build deadline would abandon a witness review still in its bounds"
         );
     }
 

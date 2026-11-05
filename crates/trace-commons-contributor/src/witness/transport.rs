@@ -31,6 +31,12 @@ pub const WITNESS_CERTIFICATE_HEADER: &str = "x-trace-witness-certificate";
 /// The header the signature travels in.
 pub const WITNESS_SIGNATURE_HEADER: &str = "x-trace-witness-signature";
 
+/// The error label a witness answers with when its own request deadline
+/// ran out (`504`). The server's spelling, in
+/// `trace_commons_server::witness_service::http`; the client cannot depend
+/// on that crate, so it is written here and pinned by a test.
+pub const WITNESS_REQUEST_TIMED_OUT: &str = "witness_request_timed_out";
+
 /// A contributor's attestation nonce: exactly 32 bytes, fresh per
 /// verification.
 ///
@@ -859,6 +865,48 @@ pub struct HttpWitnessTransport {
     background_workload: bool,
     /// See [`WitnessTransport::envelope_limit_bytes`].
     envelope_limit: usize,
+    /// The per-request deadline for the quote and the collateral: the
+    /// smaller of the transport's timeout and [`WITNESS_PROBE_TIMEOUT`].
+    probe_timeout: Duration,
+}
+
+/// The whole-request deadline for a witness review (`/v1/witness`,
+/// `/v1/witness/admission`, the token-bundle route), body included.
+///
+/// Derived from the witness's own bound, not chosen beside it: the witness
+/// abandons a request after `DEFAULT_REQUEST_TIMEOUT_SECS` (300 s,
+/// `trace-commons-witness`), measured as several megabytes of transcript
+/// through its classifier, and answers `504 witness_request_timed_out`. A
+/// client that gave up first (this was 120 s) abandoned healthy work the
+/// witness was still doing, kept a witness slot busy for nothing, and
+/// reported it as the quote endpoint being down. Thirty seconds over the
+/// witness's bound leaves room for its 504 to arrive, so the witness's own
+/// answer is the one a person normally gets.
+pub const WITNESS_REVIEW_TIMEOUT: Duration = Duration::from_secs(330);
+
+/// The deadline for the small witness-path calls: the quote
+/// (`/v1/attestation`) and the collateral ingest serves for it. Neither does
+/// work that scales with the session, so neither may hold a review for the
+/// length of [`WITNESS_REVIEW_TIMEOUT`].
+pub const WITNESS_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The deadline for opening a connection to the witness or to ingest on
+/// this path.
+pub const WITNESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// What a failed witness request was: a deadline, no connection at all, or
+/// `otherwise` -- the label the call reported before this distinction.
+///
+/// Read from `reqwest`'s own classification, never from the error's text,
+/// which can carry the URL.
+fn send_failure(error: &reqwest::Error, otherwise: WitnessTrustError) -> WitnessTrustError {
+    if error.is_timeout() {
+        WitnessTrustError::WitnessTimeout
+    } else if error.is_connect() {
+        WitnessTrustError::WitnessUnreachable
+    } else {
+        otherwise
+    }
 }
 
 /// The longest a witness's `Retry-After` may hold a session, in seconds. One
@@ -894,9 +942,14 @@ impl HttpWitnessTransport {
         allowlist: Arc<HostAllowlist>,
         timeout: Duration,
     ) -> Result<Self, WitnessTrustError> {
+        // `timeout` bounds every request whole -- connect, send, headers
+        // and the body read -- because `reqwest`'s client timeout covers the
+        // body too. The quote and the collateral get the shorter
+        // `probe_timeout` per request, below.
         let http = reqwest::Client::builder()
             // Raw sessions are authorized for this attested endpoint only.
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(timeout.min(WITNESS_CONNECT_TIMEOUT))
             .timeout(timeout)
             .build()
             .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
@@ -908,6 +961,7 @@ impl HttpWitnessTransport {
             admission_evidence: false,
             background_workload: false,
             envelope_limit: MAX_ENVELOPE_BYTES,
+            probe_timeout: timeout.min(WITNESS_PROBE_TIMEOUT),
         })
     }
 
@@ -970,16 +1024,17 @@ impl WitnessTransport for HttpWitnessTransport {
             .http
             .get(url)
             .query(&[("nonce", nonce.to_hex())])
+            .timeout(self.probe_timeout)
             .send()
             .await
-            .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
+            .map_err(|e| send_failure(&e, WitnessTrustError::WitnessAttestationUnavailable))?;
         if !response.status().is_success() {
             return Err(WitnessTrustError::WitnessAttestationUnavailable);
         }
         let body: serde_json::Value = response
             .json()
             .await
-            .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
+            .map_err(|e| send_failure(&e, WitnessTrustError::WitnessAttestationUnavailable))?;
         Ok(AttestationEvidence {
             quote_hex: body
                 .get("quote_hex")
@@ -999,8 +1054,12 @@ impl WitnessTransport for HttpWitnessTransport {
         let url = base
             .join(COLLATERAL_PATH)
             .map_err(|_| WitnessTrustError::WitnessHostNotAllowed)?;
-        fetch_collateral(&self.http, url, quote)
+        // Ingest's collateral, bounded like the quote. A collateral fetch
+        // that never answers is still `witness_collateral_unavailable`:
+        // ingest is not the witness, and the label says which one failed.
+        tokio::time::timeout(self.probe_timeout, fetch_collateral(&self.http, url, quote))
             .await
+            .map_err(|_| WitnessTrustError::WitnessCollateralUnavailable)?
             .map_err(|_| WitnessTrustError::WitnessCollateralUnavailable)
     }
 
@@ -1041,6 +1100,12 @@ impl WitnessTransport for HttpWitnessTransport {
             }) {
                 return WitnessTrustError::WitnessSaturated { retry_after_secs };
             }
+            // The witness's own deadline ran out and it certified nothing.
+            // The same instruction to a person as this client's deadline
+            // running out, so the same label.
+            if status == 504 && label.as_deref() == Some(WITNESS_REQUEST_TIMED_OUT) {
+                return WitnessTrustError::WitnessTimeout;
+            }
             match label.as_deref().and_then(|label| {
                 trace_commons_protocol::admission::AdmissionRefusal::from_response(status, label)
             }) {
@@ -1071,11 +1136,15 @@ impl WitnessTransport for HttpWitnessTransport {
             };
             request = request.header(WITNESS_WORKLOAD_HEADER, WITNESS_BACKGROUND_WORKLOAD);
         }
+        // A send that fails is the witness call failing, not the quote
+        // endpoint: a deadline is `witness_timeout`, no connection is
+        // `witness_unreachable`. Anything else keeps the label this call
+        // always reported.
         let response = request
             .body(body.to_vec())
             .send()
             .await
-            .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
+            .map_err(|e| send_failure(&e, WitnessTrustError::WitnessAttestationUnavailable))?;
         if !response.status().is_success() {
             return Err(refusal_from(response).await);
         }
@@ -1103,7 +1172,7 @@ impl WitnessTransport for HttpWitnessTransport {
         let envelope_bytes = response
             .bytes()
             .await
-            .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?
+            .map_err(|e| send_failure(&e, WitnessTrustError::WitnessResponseMalformed))?
             .to_vec();
         Ok(WitnessedEnvelope {
             envelope_bytes,
@@ -1176,19 +1245,22 @@ async fn token_review_refusal(response: reqwest::Response) -> WitnessTrustError 
     const REFUSAL_BODY_BOUND: usize = 4096;
     let status = response.status().as_u16();
     let retry_after_secs = saturation_retry_after(response.headers());
-    let saturated = match response.bytes().await {
+    let label = match response.bytes().await {
         Ok(body) => {
             serde_json::from_slice::<serde_json::Value>(&body[..body.len().min(REFUSAL_BODY_BOUND)])
                 .ok()
                 .and_then(|value| value.get("error")?.as_str().map(str::to_string))
-                .is_some_and(|label| {
-                    trace_commons_protocol::witness_pacing::is_witness_saturation(status, &label)
-                })
         }
-        Err(_) => false,
+        Err(_) => None,
     };
+    let saturated = label.as_deref().is_some_and(|label| {
+        trace_commons_protocol::witness_pacing::is_witness_saturation(status, label)
+    });
+    let timed_out = label.as_deref() == Some(WITNESS_REQUEST_TIMED_OUT);
     if saturated {
         WitnessTrustError::WitnessSaturated { retry_after_secs }
+    } else if status == 504 && timed_out {
+        WitnessTrustError::WitnessTimeout
     } else {
         WitnessTrustError::WitnessAdmissionEvidenceRefused
     }
@@ -1238,7 +1310,7 @@ impl HttpWitnessTransport {
             .body(body)
             .send()
             .await
-            .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
+            .map_err(|e| send_failure(&e, WitnessTrustError::WitnessAttestationUnavailable))?;
         if !response.status().is_success() {
             return Err(token_review_refusal(response).await);
         }
@@ -1246,7 +1318,7 @@ impl HttpWitnessTransport {
         while let Some(chunk) = response
             .chunk()
             .await
-            .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?
+            .map_err(|e| send_failure(&e, WitnessTrustError::WitnessResponseMalformed))?
         {
             if bytes.len().saturating_add(chunk.len()) > 64 * 1024 * 1024 {
                 return Err(WitnessTrustError::WitnessPayloadTooLarge);
@@ -3680,5 +3752,205 @@ mod tests {
         assert_eq!(target_hits.load(Ordering::SeqCst), 0);
         origin_task.abort();
         target_task.abort();
+    }
+
+    // --- Deadlines -------------------------------------------------------
+    //
+    // A witness (or ingest) that accepts the connection and then never
+    // answers must cost a bounded wait and a label that says so, never an
+    // indefinite one. Each stub below holds every accepted socket open
+    // without writing, or writes only part of an answer.
+
+    /// Accepts connections and never answers. Returns the base URL; the
+    /// task holds every socket until it is aborted.
+    async fn silent_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        (base, task)
+    }
+
+    /// Answers every request with a complete witness head and then stalls
+    /// the body forever.
+    async fn stalled_body_server() -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 64 * 1024];
+                let _ = socket.read(&mut buf).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: 1000\r\n{WITNESS_CERTIFICATE_HEADER}: c\r\n\
+                     {WITNESS_SIGNATURE_HEADER}: s\r\n\r\n{{"
+                );
+                let _ = socket.write_all(head.as_bytes()).await;
+                held.push(socket);
+            }
+        });
+        (base, task)
+    }
+
+    const TEST_DEADLINE: Duration = Duration::from_millis(300);
+    /// Far above `TEST_DEADLINE` and far below anything that reads as a hang.
+    const TEST_CEILING: Duration = Duration::from_secs(10);
+
+    fn deadline_transport(witness: &str, collateral: &str) -> HttpWitnessTransport {
+        HttpWitnessTransport::new(
+            witness.to_string(),
+            collateral.to_string(),
+            Arc::new(permissive()),
+            TEST_DEADLINE,
+        )
+        .expect("the transport builds")
+    }
+
+    #[tokio::test]
+    async fn a_silent_attestation_endpoint_times_out_with_its_own_label() {
+        let (base, task) = silent_server().await;
+        let transport = deadline_transport(&base, &base);
+        let started = std::time::Instant::now();
+        let error = tokio::time::timeout(
+            TEST_CEILING,
+            transport.attestation(&WitnessNonce::fresh().unwrap()),
+        )
+        .await
+        .expect("the attestation call returned instead of hanging")
+        .unwrap_err();
+        assert_eq!(error, WitnessTrustError::WitnessTimeout);
+        assert!(started.elapsed() < TEST_CEILING);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_silent_collateral_endpoint_is_bounded() {
+        let (base, task) = silent_server().await;
+        let transport = deadline_transport(&base, &base);
+        let error = tokio::time::timeout(TEST_CEILING, transport.collateral(b"quote"))
+            .await
+            .expect("the collateral call returned instead of hanging")
+            .unwrap_err();
+        // Ingest is not the witness: its label names the collateral.
+        assert_eq!(error, WitnessTrustError::WitnessCollateralUnavailable);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_silent_witness_times_out_on_every_route() {
+        let (base, task) = silent_server().await;
+        let verified = crate::witness::verify::verified_witness_for_test(
+            &base,
+            "0x1111111111111111111111111111111111111111",
+        );
+        for admission in [false, true] {
+            let transport = deadline_transport(&base, &base).with_admission_evidence(admission);
+            let error = tokio::time::timeout(
+                TEST_CEILING,
+                transport.witness(&verified, b"private-test-transcript"),
+            )
+            .await
+            .expect("the witness call returned instead of hanging")
+            .err();
+            assert_eq!(error, Some(WitnessTrustError::WitnessTimeout));
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_witness_that_stalls_its_body_times_out() {
+        // The head arrives, so `send()` succeeds; the deadline must still
+        // cover the body read. A client-level `timeout` does, and this is
+        // the test that would fail if it were ever narrowed to the head.
+        let (base, task) = stalled_body_server().await;
+        let verified = crate::witness::verify::verified_witness_for_test(
+            &base,
+            "0x1111111111111111111111111111111111111111",
+        );
+        let transport = deadline_transport(&base, &base);
+        let error = tokio::time::timeout(
+            TEST_CEILING,
+            transport.witness(&verified, b"private-test-transcript"),
+        )
+        .await
+        .expect("the body read returned instead of hanging")
+        .err();
+        assert_eq!(error, Some(WitnessTrustError::WitnessTimeout));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_witness_nobody_is_listening_on_is_unreachable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let transport = deadline_transport(&base, &base);
+        assert_eq!(
+            transport
+                .attestation(&WitnessNonce::fresh().unwrap())
+                .await
+                .unwrap_err(),
+            WitnessTrustError::WitnessUnreachable
+        );
+        let verified = crate::witness::verify::verified_witness_for_test(
+            &base,
+            "0x1111111111111111111111111111111111111111",
+        );
+        assert_eq!(
+            transport
+                .witness(&verified, b"private-test-transcript")
+                .await
+                .err(),
+            Some(WitnessTrustError::WitnessUnreachable)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_witness_own_deadline_reads_as_a_timeout() {
+        let app = Router::new().fallback(|| async {
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                [(header::CONTENT_TYPE, "application/json")],
+                format!(r#"{{"error":"{WITNESS_REQUEST_TIMED_OUT}"}}"#),
+            )
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let verified = crate::witness::verify::verified_witness_for_test(
+            &base,
+            "0x1111111111111111111111111111111111111111",
+        );
+        for admission in [false, true] {
+            let transport = transport_for(&base, permissive()).with_admission_evidence(admission);
+            assert_eq!(
+                transport
+                    .witness(&verified, b"private-test-transcript")
+                    .await
+                    .err(),
+                Some(WitnessTrustError::WitnessTimeout)
+            );
+        }
+        task.abort();
+    }
+
+    #[test]
+    fn the_review_deadline_outlasts_the_witness_own() {
+        // `trace-commons-witness`'s DEFAULT_REQUEST_TIMEOUT_SECS. Written
+        // out because this crate cannot depend on the server's; moving that
+        // default means moving this, or a slow redaction the witness would
+        // still finish is abandoned by the client first.
+        const WITNESS_SERVER_REQUEST_TIMEOUT_SECS: u64 = 300;
+        assert!(WITNESS_REVIEW_TIMEOUT.as_secs() > WITNESS_SERVER_REQUEST_TIMEOUT_SECS);
+        assert!(WITNESS_PROBE_TIMEOUT < WITNESS_REVIEW_TIMEOUT);
+        assert!(WITNESS_CONNECT_TIMEOUT <= WITNESS_PROBE_TIMEOUT);
     }
 }

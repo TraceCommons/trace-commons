@@ -697,9 +697,9 @@ impl PreviewJobRunner for DaemonPreviewRunner {
                 Ok(summary) => {
                     PreviewOutcome::Ready(Arc::new(super::ipc::preview_card_value(&summary)))
                 }
-                Err(_) => PreviewOutcome::Failed {
+                Err(error) => PreviewOutcome::Failed {
                     code: super::ipc::ERR_UNAVAILABLE,
-                    label: "preview-failed",
+                    label: super::preview::reported_failure_label(&error),
                 },
             }
         })
