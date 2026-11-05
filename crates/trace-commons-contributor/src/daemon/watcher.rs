@@ -253,11 +253,37 @@ fn tick_over(
         }
     }
 
+    retract_queue_full_under_cap(shared, max_queue_entries);
     let held_by_project = std::mem::take(&mut out.gate_blocked_by_project);
     let report = finish_pass(shared, out, true, now)?;
     report_gate(shared, &ctx.gate, &report);
     record_gate_held(shared, &ctx, &report, held_by_project);
     Ok(report)
+}
+
+/// Retract `queue-full` once the queue counts under its cap. A new entry
+/// landing used to be the only thing that retracted it, so a queue that
+/// drained through uploads and decisions, with nothing new left to offer,
+/// kept reporting full. Counted the way admission counts
+/// (`queue::counts_against_the_cap`), after every session of a full pass has
+/// been visited: any refusal this pass was made at the cap, so a count under
+/// it means there is room now.
+fn retract_queue_full_under_cap(shared: &DaemonShared, max_queue_entries: usize) {
+    let live = shared
+        .queue
+        .lock()
+        .expect("queue lock")
+        .all()
+        .iter()
+        .filter(|e| super::queue::counts_against_the_cap(e))
+        .count();
+    if live < max_queue_entries {
+        shared
+            .health
+            .lock()
+            .expect("health lock")
+            .resolve(health::LABEL_QUEUE_FULL);
+    }
 }
 
 /// The Insights counter pass (feed T), gated on the `insights_counter_pass`
@@ -1784,19 +1810,6 @@ fn visit_session(
         return;
     }
 
-    // A full queue with no live entry at this path: whatever the
-    // load produced, `replace_live_at_path` would refuse it
-    // `queue-full` and the work would be discarded. Refuse it here
-    // instead, before the read, the parse and the group hash, and
-    // raise the same health label the refusal below raises -- the
-    // contributor's queue is genuinely full and sessions are going
-    // unoffered, which is the same condition either way.
-    if !can_land {
-        let mut health = shared.health.lock().expect("health lock");
-        health.fail(health::LABEL_QUEUE_FULL, ctx.now);
-        return;
-    }
-
     let cwd = resolve_cwd(shared, source, session_ref, &obs);
     let (project_key, project_path) = project_for(cwd.as_deref());
     let mode = {
@@ -1822,6 +1835,52 @@ fn visit_session(
     if mode == ProjectMode::Ignore {
         out.report.ignored += 1;
         return;
+    }
+
+    // A full queue with no live entry at this path: whatever the load
+    // produced, `replace_live_at_path` would refuse it `queue-full` and the
+    // work would be discarded. Refuse it here instead, before the read, the
+    // parse and the group hash, and raise the same health label the refusal
+    // below raises -- the contributor's queue is genuinely full and sessions
+    // are going unoffered, which is the same condition either way.
+    //
+    // Except a session this pass would approve unattended, while the
+    // unattended approvals already queued are under the cap themselves. The
+    // cap bounds the backlog waiting for a person; a session in an armed
+    // folder that clears every hold waits for nobody and leaves the queue on
+    // upload, so a queue full of cards for a person must not keep it out.
+    // The unattended lane keeps its own bound of the same size, which is
+    // what paces an Automatic history backfill oldest first (#1611) rather
+    // than approving all of it in one pass. The same `would_arm` the entry
+    // is built with decides it, so the exemption can never reach a session
+    // the watcher would not approve. The cwd it needs is cached against size
+    // and mtime, so asking costs no read.
+    let over_cap = !can_land;
+    if over_cap {
+        let (returned_from_keep, lane_has_room) = {
+            let queue = shared.queue.lock().expect("queue lock");
+            (
+                queue.returned_from_keep_at_path(&obs.path),
+                unattended_lane_has_room(&queue, ctx.max_queue_entries),
+            )
+        };
+        let exempt = lane_has_room
+            && would_arm(
+                shared,
+                ctx,
+                source,
+                &project_key,
+                &obs,
+                mode,
+                from_trajectory,
+                returned_from_keep,
+            )
+            && !ctx.gate.blocks();
+        if !exempt {
+            let mut health = shared.health.lock().expect("health lock");
+            health.fail(health::LABEL_QUEUE_FULL, ctx.now);
+            return;
+        }
     }
 
     // Hashing reads the whole group, so it happens only here: for a
@@ -1932,15 +1991,17 @@ fn visit_session(
             transcript.started_at,
         );
     }
-    // The Manual Scrub check arms nothing either (K4 of #1118): the session
-    // is queued `Pending` for a person, like any in an Ask folder.
-    let would_arm = mode == ProjectMode::AutoUpload
-        && ctx.consent_chosen
-        && !ctx.scrub_check_manual
-        && !from_trajectory
-        && !returned_from_keep
-        && armed_settle_elapsed(obs.modified_at, ctx.now)
-        && !waits_for_a_person(shared, ctx, source, &project_key, &obs.path);
+    // See `would_arm` for every hold, the Manual Scrub check's included.
+    let would_arm = would_arm(
+        shared,
+        ctx,
+        source,
+        &project_key,
+        &obs,
+        mode,
+        from_trajectory,
+        returned_from_keep,
+    );
     let armed = would_arm && !ctx.gate.blocks();
     // What the gate held back, counted so that enforcing it cannot stop an
     // armed folder without saying so.
@@ -1972,7 +2033,16 @@ fn visit_session(
     // between the two would retire the old offer and never land the
     // replacement, leaving the conversation with no live card at
     // all. See `Queue::replace_live_at_path`.
-    match queue.replace_live_at_path(entry, ctx.max_queue_entries) {
+    // An armed session is held to the unattended lane's bound rather than
+    // the cap (see `over_cap`). One that was let past the cap for being
+    // armed but has since come to wait -- the arming hold above found it
+    // older than an arming -- is held to the cap again here.
+    let cap = if armed && unattended_lane_has_room(&queue, ctx.max_queue_entries) {
+        usize::MAX
+    } else {
+        ctx.max_queue_entries
+    };
+    match queue.replace_live_at_path(entry, cap) {
         Ok(outcome) => {
             if outcome.superseded > 0 {
                 out.changed = true;
@@ -1993,9 +2063,11 @@ fn visit_session(
                     }
                 }
                 // A new entry passed the capacity check: there is
-                // space in the queue.
-                let mut health = shared.health.lock().expect("health lock");
-                health.resolve(health::LABEL_QUEUE_FULL);
+                // space in the queue. Not when it landed over the cap.
+                if !over_cap {
+                    let mut health = shared.health.lock().expect("health lock");
+                    health.resolve(health::LABEL_QUEUE_FULL);
+                }
             } else {
                 // Dedup path: re-observing an already-queued session.
                 // The insert deliberately never rewrites an existing
@@ -2051,6 +2123,46 @@ fn visit_session(
             health.fail(health::LABEL_QUEUE_FULL, ctx.now);
         }
     }
+}
+
+/// Whether fewer than `max_queue_entries` unattended approvals wait in the
+/// queue: the bound on sessions let past a full queue for being armed. See
+/// `visit_session`'s `over_cap`.
+fn unattended_lane_has_room(queue: &super::queue::Queue, max_queue_entries: usize) -> bool {
+    queue
+        .all()
+        .iter()
+        .filter(|e| e.state == QueueState::Approved && e.approved_unattended)
+        .count()
+        < max_queue_entries
+}
+
+/// Whether a freshly loaded session in `mode` would be approved unattended,
+/// before the automatic-contribution gate: the folder is armed, consent is
+/// chosen, the Scrub check is Automatic, the session is not a trajectory
+/// export or returned from a keep, it has settled, and no grant or arming
+/// holds it for a person. Asked twice per session, by the capacity check and
+/// by the entry built from the load, so the two cannot disagree.
+#[allow(clippy::too_many_arguments)]
+fn would_arm(
+    shared: &DaemonShared,
+    ctx: &PassContext,
+    source: &dyn TraceSource,
+    project_key: &str,
+    obs: &Observation,
+    mode: ProjectMode,
+    from_trajectory: bool,
+    returned_from_keep: bool,
+) -> bool {
+    // The Manual Scrub check arms nothing either (K4 of #1118): the session
+    // is queued `Pending` for a person, like any in an Ask folder.
+    mode == ProjectMode::AutoUpload
+        && ctx.consent_chosen
+        && !ctx.scrub_check_manual
+        && !from_trajectory
+        && !returned_from_keep
+        && armed_settle_elapsed(obs.modified_at, ctx.now)
+        && !waits_for_a_person(shared, ctx, source, project_key, &obs.path)
 }
 
 /// Where a session was filed: its project and how the queue shows it.
@@ -9181,9 +9293,12 @@ mod tests {
     #[tokio::test]
     async fn queue_full_survives_when_only_dedup_reobservation_occurs() {
         // When only dedup re-observation occurs (session is already queued),
-        // Queue::upsert returns Ok(()) BEFORE checking capacity. Do not retract
-        // queue-full, as there is no evidence of available space.
+        // Queue::upsert returns Ok(()) BEFORE checking capacity, so the
+        // insert says nothing about space. With the queue still at its cap
+        // the label must survive; only a full pass counting the queue under
+        // its cap retracts it (see the test after this one).
         let f = WatcherFixture::new();
+        f.set_max_queue_entries(1);
         // Write a session and settle it so it is queued
         f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
         f.settle(at("2030-01-01T00:00:00Z")).await;
@@ -9203,6 +9318,177 @@ mod tests {
             !{ f.shared.health.lock().unwrap().ok() },
             "queue-full must persist on dedup re-observation"
         );
+    }
+
+    /// The label used to clear only when a new entry was inserted, so a
+    /// queue that drained through uploads and decisions, with nothing new
+    /// to offer, kept reporting full. A full pass that counts the queue
+    /// under its cap retracts it.
+    #[tokio::test]
+    async fn queue_full_clears_once_a_full_pass_counts_the_queue_under_its_cap() {
+        let f = WatcherFixture::new();
+        f.set_max_queue_entries(1);
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let second = f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+        f.settle(at("2030-01-01T00:01:00Z")).await;
+        assert_eq!(f.queue_len(), 1, "the second session found the queue full");
+        assert_eq!(
+            f.shared.health.lock().unwrap().last_error_label.as_deref(),
+            Some(health::LABEL_QUEUE_FULL)
+        );
+
+        // The waiting card is decided, and nothing new is left to offer.
+        {
+            let mut queue = f.shared.queue.lock().unwrap();
+            let id = queue.all()[0].entry_id;
+            queue.set_state(
+                id,
+                QueueState::Refused,
+                Some(super::super::queue::REASON_DISMISSED.to_string()),
+            );
+        }
+        std::fs::remove_file(second).unwrap();
+        tick(&f.shared, at("2030-01-01T00:03:00Z")).await.unwrap();
+        assert!(
+            f.shared.health.lock().unwrap().ok(),
+            "back under the cap, the queue is no longer full: {:?}",
+            f.shared.health.lock().unwrap().last_error_label
+        );
+    }
+
+    /// A session in an Automatic folder does not wait for a person, so a
+    /// queue full of cards that do must not keep it out: it lands approved
+    /// and leaves the queue on upload.
+    #[tokio::test]
+    async fn at_capacity_a_session_in_an_automatic_folder_lands_approved() {
+        let f = WatcherFixture::new();
+        f.set_max_queue_entries(1);
+        f.write_session("ask", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.states(), vec![QueueState::Pending], "the cap is reached");
+
+        f.set_mode("auto", ProjectMode::AutoUpload);
+        f.write_session("auto", "22222222-2222-2222-2222-222222222222", 0);
+        let report = f.settle(at("2030-01-01T00:01:00Z")).await;
+        assert_eq!(report.auto_ready, 1, "{report:?}");
+        let mut states = f.states();
+        states.sort_by_key(|s| format!("{s:?}"));
+        assert_eq!(states, vec![QueueState::Approved, QueueState::Pending]);
+    }
+
+    /// The unattended lane past a full queue has its own bound, the same
+    /// size as the cap, so an Automatic backlog is still admitted a cap's
+    /// worth at a time rather than all at once.
+    #[tokio::test]
+    async fn at_capacity_the_unattended_lane_is_bounded_by_the_cap_too() {
+        let f = WatcherFixture::new();
+        f.set_max_queue_entries(1);
+        f.write_session("ask", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+
+        f.set_mode("auto", ProjectMode::AutoUpload);
+        f.write_session("auto", "22222222-2222-2222-2222-222222222222", 0);
+        f.write_session("auto", "33333333-3333-3333-3333-333333333333", 0);
+        let report = f.settle(at("2030-01-01T00:01:00Z")).await;
+        assert_eq!(report.auto_ready, 1, "{report:?}");
+        let mut states = f.states();
+        states.sort_by_key(|s| format!("{s:?}"));
+        assert_eq!(states, vec![QueueState::Approved, QueueState::Pending]);
+    }
+
+    /// The cap still bounds what waits for a person: at capacity a session
+    /// in an Ask folder is refused, beside an Automatic one that lands.
+    #[tokio::test]
+    async fn at_capacity_a_session_in_an_ask_folder_is_still_refused_queue_full() {
+        let f = WatcherFixture::new();
+        f.set_max_queue_entries(1);
+        f.write_session("ask", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+
+        f.set_mode("auto", ProjectMode::AutoUpload);
+        f.write_session("ask", "22222222-2222-2222-2222-222222222222", 0);
+        f.write_session("auto", "33333333-3333-3333-3333-333333333333", 0);
+        f.settle(at("2030-01-01T00:01:00Z")).await;
+        {
+            let queue = f.shared.queue.lock().unwrap();
+            assert_eq!(queue.all().len(), 2, "{:?}", queue.all());
+            assert!(
+                queue.all().iter().all(|e| !e
+                    .path
+                    .ends_with("22222222-2222-2222-2222-222222222222.jsonl")),
+                "the second Ask session is not offered"
+            );
+        }
+        assert_eq!(
+            f.shared.health.lock().unwrap().last_error_label.as_deref(),
+            Some(health::LABEL_QUEUE_FULL)
+        );
+    }
+
+    /// Only a session that would be approved unattended passes the cap. An
+    /// Automatic folder under the Manual Scrub check approves nothing on
+    /// anyone's behalf; its session would wait for a person, so at capacity
+    /// it is refused like any other.
+    #[tokio::test]
+    async fn at_capacity_an_automatic_session_that_would_wait_for_a_person_is_refused() {
+        let f = WatcherFixture::new();
+        f.set_max_queue_entries(1);
+        f.write_session("ask", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+
+        f.shared.settings.lock().unwrap().scrub_check = crate::daemon::settings::ScrubCheck::Manual;
+        f.set_mode("auto", ProjectMode::AutoUpload);
+        f.write_session("auto", "22222222-2222-2222-2222-222222222222", 0);
+        let c = loads();
+        for minute in 1..=3 {
+            f.tick_counted(at(&format!("2030-01-01T00:0{minute}:00Z")), &c);
+        }
+        assert_eq!(
+            count(&c),
+            0,
+            "refused before the read, as any session the full queue cannot hold"
+        );
+        assert_eq!(f.states(), vec![QueueState::Pending]);
+        assert_eq!(
+            f.shared.health.lock().unwrap().last_error_label.as_deref(),
+            Some(health::LABEL_QUEUE_FULL)
+        );
+    }
+
+    /// Consent not chosen holds every unattended approval, so it holds the
+    /// capacity exemption too.
+    #[tokio::test]
+    async fn at_capacity_an_automatic_session_without_chosen_consent_is_refused() {
+        let f = WatcherFixture::new();
+        f.set_max_queue_entries(1);
+        f.write_session("ask", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+
+        f.admitted_on_evidence();
+        let mut cfg = f.shared.store.load_config().unwrap().unwrap();
+        cfg.consent_scopes_chosen = Some(false);
+        f.shared.store.save_config(&cfg).unwrap();
+        f.set_mode("auto", ProjectMode::AutoUpload);
+        f.write_session("auto", "22222222-2222-2222-2222-222222222222", 0);
+        f.settle(at("2030-01-01T00:01:00Z")).await;
+        assert_eq!(f.states(), vec![QueueState::Pending]);
+    }
+
+    /// Characterizes the path the "armed after queueing" report suspected:
+    /// an entry queued `Pending` before its folder became Automatic is
+    /// approved on the next full pass, with nothing about the file changed.
+    #[tokio::test]
+    async fn a_pending_entry_is_approved_on_the_next_pass_after_its_folder_is_armed() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(f.states(), vec![QueueState::Pending]);
+
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        let report = tick(&f.shared, at("2030-01-01T00:01:00Z")).await.unwrap();
+        assert_eq!(report.auto_ready, 1, "{report:?}");
+        assert_eq!(f.states(), vec![QueueState::Approved]);
     }
     #[tokio::test]
     async fn a_session_a_full_queue_cannot_hold_is_never_loaded() {
