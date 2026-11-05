@@ -984,6 +984,19 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_tile_api_prices_codex", "Codex at API prices"),
     // The sample data card, in the product owner's own words (2026-11-02).
     ("analytics_sample_banner", "Sample data shown below"),
+    // Approved by the owner on 2026-11-05 for disabled local trace analysis.
+    (
+        "analytics_local_analysis_off",
+        "Local trace analysis is off",
+    ),
+    (
+        "analytics_local_analysis_detail",
+        "Enable it to see Insights from traces on this Mac.",
+    ),
+    (
+        "analytics_local_analysis_enable",
+        "Enable local trace analysis",
+    ),
     (
         "analytics_sample_banner_detail",
         "Your own data will replace it once trace activity is provided.",

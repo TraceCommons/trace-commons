@@ -344,6 +344,10 @@ struct MonitorWindowView: View {
                                  openTraces: {
                                      tab = .traces
                                      tracesPage = .tree
+                                 }, enableLocalAnalysis: {
+                                     await model.setInsightsSwitch(.counterPass, true)
+                                     return model.daemonSettings?.insightsCounterPass == true
+                                         && model.insightsSwitchRefusal[.counterPass] == nil
                                  })
                 }
             } footer: {

@@ -33,6 +33,7 @@ struct InsightsView: View {
     /// The get-started card's one action: Traces, on its folder list.
     /// `nil` draws no link.
     private let openTraces: (() -> Void)?
+    private let enableLocalAnalysis: (@MainActor () async -> Bool)?
     /// The sample under the get-started card, built the first time it is
     /// drawn (`InsightsSampleModels`); never the person's own models.
     @State private var sample: InsightsSampleModels?
@@ -46,7 +47,8 @@ struct InsightsView: View {
                     inspector: InsightsBreakdownInspector? = nil,
                     home: HomeStore? = nil,
                     payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil,
-                    openTraces: (() -> Void)? = nil) {
+                    openTraces: (() -> Void)? = nil,
+                    enableLocalAnalysis: (@MainActor () async -> Bool)? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
         var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
             { @Sendable refresh, interactive, provider, login in
@@ -89,7 +91,7 @@ struct InsightsView: View {
                   benchmarks: InsightsBenchmarksModel(reader: benchmarks),
                   inspector: inspector,
                   home: home,
-                  payoutStreams: payoutStreams, openTraces: openTraces)
+                  payoutStreams: payoutStreams, openTraces: openTraces, enableLocalAnalysis: enableLocalAnalysis)
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -107,9 +109,11 @@ struct InsightsView: View {
                     inspector: InsightsBreakdownInspector? = nil,
                     home: HomeStore? = nil,
                     payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil,
-                    openTraces: (() -> Void)? = nil) {
+                    openTraces: (() -> Void)? = nil,
+                    enableLocalAnalysis: (@MainActor () async -> Bool)? = nil) {
         self.inspector = inspector ?? InsightsBreakdownInspector()
         self.openTraces = openTraces
+        self.enableLocalAnalysis = enableLocalAnalysis
         self.storeSelection = storeSelection
         self.storeCopy = storeCopy ?? [:]
         _model = State(initialValue: model)
@@ -175,7 +179,16 @@ struct InsightsView: View {
     }
 
     private var getStarted: InsightsGetStarted {
-        InsightsGetStarted(copy: model.copy, openTraces: openTraces)
+        InsightsGetStarted(copy: model.copy, openTraces: openTraces,
+                           localAnalysisOff: model.localAnalysisEnabled == false,
+                           enablingLocalAnalysis: model.enablingLocalAnalysis,
+                           enableLocalAnalysis: enableLocalAnalysis.map { enable in
+                               { Task {
+                                   await model.enableLocalAnalysis(using: enable)
+                                   overviewModel.reload()
+                                   await benchmarksModel.load()
+                               } }
+                           })
     }
 
     @ViewBuilder
