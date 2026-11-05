@@ -32,11 +32,17 @@ What a client does with a list:
   witness settings, so a refresh re-asks nothing. A change of witness URL
   still re-asks, as before (Q10).
 
-**Current state: inert.** Clients ship with an empty trusted key set
-(`TRUSTED_LIST_SIGNING_KEYS` in
-`crates/trace-commons-contributor/src/witness/accepted_list.rs`), so no list
-verifies and clients do not fetch one. The feature turns on in the client
-release that compiles in the public key created below.
+**Current state: on.** Clients trust one list-signing key, compiled into
+`TRUSTED_LIST_SIGNING_KEYS` in
+`crates/trace-commons-contributor/src/witness/accepted_list.rs`:
+
+| Key | Key id | Public key (raw, hex) |
+|---|---|---|
+| list-signing key, KMS version 1 (created 2026-11-05) | `ea396d6a7f0e867f` | `fed526376edb29b3328cb6c4a0a1f6a2d6c1267641b705cd276c5adf21d0a523` |
+
+Every signature in a served list names its key id; a list whose signatures
+all name other ids is refused. Until a signed list is installed on ingest,
+the route answers 404 and clients keep their sign-up pins.
 
 ## The tool
 
@@ -127,12 +133,12 @@ It prints `public_key_hex=<64 hex>` and `key_id=<16 hex>` (the first 16 hex
 characters of the key's SHA-256; every signature names it). The public key is
 not secret.
 
-Add the `public_key_hex` value to `TRUSTED_LIST_SIGNING_KEYS` in
-`crates/trace-commons-contributor/src/witness/accepted_list.rs`, and in the
-same change remove the first assertion of
-`this_build_ships_no_list_signing_key_so_the_feature_is_inert` (it pins the
-empty set). Ship that client release and let it reach devices before relying
-on the list. Keep the PEM beside this runbook's notes for `sign` and
+Add the `public_key_hex` value to `TRUSTED_LIST_SIGNING_KEYS` and the
+`key_id` to `TRUSTED_LIST_SIGNING_KEY_IDS` in
+`crates/trace-commons-contributor/src/witness/accepted_list.rs`, and update
+`this_build_trusts_exactly_the_commons_list_signing_key`, which pins the set.
+Ship that client release and let it reach devices before relying on the
+list. (Version 1 was compiled in this way; see the table above.) Keep the PEM beside this runbook's notes for `sign` and
 `verify`; it can be exported again at any time.
 
 ## Publish a list
@@ -229,7 +235,8 @@ minutes), and tries again if a newer list arrived.
 1. Create a new key version (`gcloud kms keys versions create --key <KEY>
    --keyring <KEYRING> --location <LOCATION> --project <PROJECT>`) and export
    its public key as above.
-2. Add its `public_key_hex` to `TRUSTED_LIST_SIGNING_KEYS` beside the old one
+2. Add its `public_key_hex` to `TRUSTED_LIST_SIGNING_KEYS` (and its key id to
+   `TRUSTED_LIST_SIGNING_KEY_IDS`) beside the old one
    and ship that client release.
 3. Until devices have it, sign each list with both versions:
 
