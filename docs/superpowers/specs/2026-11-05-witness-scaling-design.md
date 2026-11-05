@@ -281,12 +281,24 @@ Most of the remaining calls are synthetic tool output with whitespace in
 it. Real sessions carry more ids, paths and flags, so they should save
 more; that is not measured.
 
+**The alias moves with it (owner decision 2026-11-05).** With the skip on,
+the pipeline alias is `ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v2`
+(`-self-hosted-v2`, `-sidecar-v3` for the other backends); with it off, the
+pre-skip `-near-ai-v1` / `-self-hosted-v1` / `-sidecar-v2`. Certificates and
+envelopes therefore say which traces went through the skip. Clients
+(`FULL_REDACTION_PIPELINE_VERSIONS`) accept both generations; an unknown
+alias is still refused. Ingest's bypass allowlist is operator env: list
+both in `TRACE_COMMONS_WITNESS_ALLOWED_POLICY_VERSIONS` through the
+redeploy.
+
+**Deploy order.** A 0.24.4 app does not refuse a new-alias certificate, but
+its compiled allowlist lacks the new alias, so its automatic folders would
+fall back to the patterns-only wording. Redeploy the witness only after an
+app release carrying this change has reached devices.
+
 **Not covered.** The ingest server's prose-PII backstop
 (`rescrub_envelope_prose_pii_with`) is unchanged and still classifies
-every string and key it examines. The redaction pipeline alias is
-unchanged as well. Whether the skip should move the alias is an owner
-question: it changes classifier coverage without changing which
-classifier runs.
+every string and key it examines.
 
 ## 3. More than one witness
 

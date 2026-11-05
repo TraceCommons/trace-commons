@@ -41,12 +41,25 @@ pub const TRACE_CONTRIBUTION_POLICY_VERSION: &str = "2026-04-24";
 pub const DETERMINISTIC_REDACTION_PIPELINE_VERSION: &str = "ironclaw-deterministic-secret-path-v3";
 /// v2 refuses classifier errors; v1 could return deterministic-only output.
 /// Never treat a historical v1 certificate as proof of a complete pipeline.
-pub const PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v2";
-pub const PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX: &str = "privacy-filter-near-ai-v1";
+/// v3 is v2 with the structural classifier skip (see
+/// [`classifier_skips_structural_text`], owner decision 2026-11-05).
+pub const PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v3";
+/// The near-ai pipeline with the structural classifier skip. Its v1 is the
+/// same pipeline without it.
+pub const PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX: &str = "privacy-filter-near-ai-v2";
 /// Distinct from the near-ai suffix even though both serve the same weights:
 /// the hosted endpoint wraps a 512-context model in an internal splitter, so
 /// a stored summary must record which one actually produced the redaction.
-pub const PRIVACY_FILTER_SELF_HOSTED_PIPELINE_SUFFIX: &str = "privacy-filter-self-hosted-v1";
+/// v2 has the structural classifier skip; v1 is the same pipeline without it.
+pub const PRIVACY_FILTER_SELF_HOSTED_PIPELINE_SUFFIX: &str = "privacy-filter-self-hosted-v2";
+
+/// The classifier suffixes of the same pipelines with the structural skip
+/// off (`TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL=0`), which is every pipeline
+/// before 2026-11-05: what the live witness and 0.24.4 apps report.
+pub const PRIVACY_FILTER_SIDECAR_NO_SKIP_PIPELINE_SUFFIX: &str = "privacy-filter-sidecar-v2";
+pub const PRIVACY_FILTER_NEAR_AI_NO_SKIP_PIPELINE_SUFFIX: &str = "privacy-filter-near-ai-v1";
+pub const PRIVACY_FILTER_SELF_HOSTED_NO_SKIP_PIPELINE_SUFFIX: &str =
+    "privacy-filter-self-hosted-v1";
 
 /// Exact known fail-closed classifier pipelines, shared by client and server.
 ///
@@ -55,7 +68,15 @@ pub const PRIVACY_FILTER_SELF_HOSTED_PIPELINE_SUFFIX: &str = "privacy-filter-sel
 /// membership does not replace consent, risk holds or operator trust policy.
 /// Historical sidecar v1 is deliberately excluded: it could silently fall back.
 /// New versions require explicit review; do not accept prefixes or normalize.
+///
+/// Both generations are listed through the structural-skip bump
+/// (2026-11-05): the first three name pipelines with the skip, the last
+/// three the same pipelines without it, which the live witness and 0.24.4
+/// apps still report until they are replaced.
 pub const FULL_REDACTION_PIPELINE_VERSIONS: &[&str] = &[
+    "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v2",
+    "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v2",
+    "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v3",
     "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1",
     "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1",
     "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v2",
@@ -2571,18 +2592,32 @@ fn merge_privacy_filter_summary(
 /// redaction witness -- reports the same alias from the same function
 /// instead of assembling its own string that can drift.
 pub fn redaction_pipeline_version(backend: PrivacyFilterBackendTag) -> String {
-    match backend {
-        PrivacyFilterBackendTag::None => DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
-        PrivacyFilterBackendTag::Sidecar => format!(
-            "{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+{PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX}"
-        ),
-        PrivacyFilterBackendTag::NearAi => format!(
-            "{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+{PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX}"
-        ),
-        PrivacyFilterBackendTag::SelfHosted => format!(
-            "{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+{PRIVACY_FILTER_SELF_HOSTED_PIPELINE_SUFFIX}"
-        ),
-    }
+    redaction_pipeline_version_for(backend, structural_skip_from_env())
+}
+
+/// The alias for `backend` with the structural classifier skip on or off.
+/// A redactor reports its own through
+/// [`DeterministicTraceRedactor::pipeline_version`]; [`redaction_pipeline_version`]
+/// is this with the process environment's setting, which is what a redactor
+/// built from that environment uses.
+pub fn redaction_pipeline_version_for(
+    backend: PrivacyFilterBackendTag,
+    skip_structural: bool,
+) -> String {
+    let suffix = match (backend, skip_structural) {
+        (PrivacyFilterBackendTag::None, _) => {
+            return DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string();
+        }
+        (PrivacyFilterBackendTag::Sidecar, true) => PRIVACY_FILTER_SIDECAR_PIPELINE_SUFFIX,
+        (PrivacyFilterBackendTag::Sidecar, false) => PRIVACY_FILTER_SIDECAR_NO_SKIP_PIPELINE_SUFFIX,
+        (PrivacyFilterBackendTag::NearAi, true) => PRIVACY_FILTER_NEAR_AI_PIPELINE_SUFFIX,
+        (PrivacyFilterBackendTag::NearAi, false) => PRIVACY_FILTER_NEAR_AI_NO_SKIP_PIPELINE_SUFFIX,
+        (PrivacyFilterBackendTag::SelfHosted, true) => PRIVACY_FILTER_SELF_HOSTED_PIPELINE_SUFFIX,
+        (PrivacyFilterBackendTag::SelfHosted, false) => {
+            PRIVACY_FILTER_SELF_HOSTED_NO_SKIP_PIPELINE_SUFFIX
+        }
+    };
+    format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+{suffix}")
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -4209,6 +4244,12 @@ impl DeterministicTraceRedactor {
         Self::new(known_path_prefixes)
     }
 
+    /// The alias of the pipeline this redactor runs: its classifier backend,
+    /// and whether the structural skip is on.
+    pub fn pipeline_version(&self) -> String {
+        redaction_pipeline_version_for(self.privacy_filter_backend, self.skip_structural)
+    }
+
     /// Turn the structural skip on or off regardless of
     /// `TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL`. For tests and for a caller
     /// that must match another party's setting exactly.
@@ -5224,7 +5265,7 @@ impl DeterministicTraceRedactor {
         let mut warnings = privacy_warnings(residual_pii_risk);
         warnings.extend(report.warnings.clone());
         let privacy = PrivacyMetadata {
-            redaction_pipeline_version: redaction_pipeline_version(self.privacy_filter_backend),
+            redaction_pipeline_version: self.pipeline_version(),
             redaction_counts: report.counts,
             redaction_distinct_counts: state.placeholders.distinct_counts(),
             privacy_filter_summary,
@@ -9737,6 +9778,110 @@ mod tests {
         }
     }
 
+    /// The structural-skip alias bump (owner decision 2026-11-05): the new
+    /// aliases are accepted, the aliases from before the skip are still
+    /// accepted (the live witness and 0.24.4 apps emit them through a
+    /// redeploy), and an unknown alias is refused.
+    #[test]
+    fn both_the_pre_skip_and_the_structural_skip_aliases_are_full_pipelines() {
+        for version in [
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v2",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v2",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v3",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v2",
+        ] {
+            assert!(
+                super::is_full_redaction_pipeline_version(version),
+                "{version}"
+            );
+        }
+        for unknown in [
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v3",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v3",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v4",
+            "ironclaw-deterministic-secret-path-v4+privacy-filter-near-ai-v2",
+        ] {
+            assert!(
+                !super::is_full_redaction_pipeline_version(unknown),
+                "{unknown}"
+            );
+        }
+    }
+
+    /// The alias names whether the structural skip ran: the new suffix with
+    /// it, the pre-skip suffix without it, for every classifier backend.
+    #[test]
+    fn the_alias_says_whether_the_structural_skip_ran() {
+        use super::{
+            DETERMINISTIC_REDACTION_PIPELINE_VERSION as D, PrivacyFilterBackendTag as B,
+            redaction_pipeline_version_for,
+        };
+        for (backend, with_skip, without_skip) in [
+            (
+                B::NearAi,
+                "privacy-filter-near-ai-v2",
+                "privacy-filter-near-ai-v1",
+            ),
+            (
+                B::SelfHosted,
+                "privacy-filter-self-hosted-v2",
+                "privacy-filter-self-hosted-v1",
+            ),
+            (
+                B::Sidecar,
+                "privacy-filter-sidecar-v3",
+                "privacy-filter-sidecar-v2",
+            ),
+        ] {
+            assert_eq!(
+                redaction_pipeline_version_for(backend, true),
+                format!("{D}+{with_skip}")
+            );
+            assert_eq!(
+                redaction_pipeline_version_for(backend, false),
+                format!("{D}+{without_skip}")
+            );
+        }
+        assert_eq!(redaction_pipeline_version_for(B::None, true), D);
+        assert_eq!(redaction_pipeline_version_for(B::None, false), D);
+    }
+
+    /// The envelope a redactor writes carries the alias of the pipeline that
+    /// actually ran, skip on or off.
+    #[tokio::test]
+    async fn the_envelope_records_the_alias_of_the_pipeline_that_ran() {
+        let raw = RawTraceContribution::from_capture_turns(
+            &[RawTraceCaptureTurn {
+                user_input: "hello".to_string(),
+                response: None,
+                tool_calls: Vec::new(),
+                started_at: chrono::Utc::now(),
+                completed_at: None,
+                state: None,
+            }],
+            RecordedTraceContributionOptions {
+                include_message_text: true,
+                ..RecordedTraceContributionOptions::default()
+            },
+        );
+        for (skip, suffix) in [(true, "near-ai-v2"), (false, "near-ai-v1")] {
+            let redactor = DeterministicTraceRedactor::deterministic_only(Vec::new())
+                .with_privacy_filter(
+                    Arc::new(NoopPrivacyFilterAdapter),
+                    PrivacyFilterBackendTag::NearAi,
+                )
+                .with_structural_skip(skip);
+            assert!(redactor.pipeline_version().ends_with(suffix));
+            let envelope = redactor.redact_trace(raw.clone()).await.expect("redacts");
+            assert_eq!(
+                envelope.privacy.redaction_pipeline_version,
+                redactor.pipeline_version()
+            );
+        }
+    }
+
     #[test]
     fn redaction_pipeline_version_emits_per_backend_suffix() {
         use super::{
@@ -9749,15 +9894,15 @@ mod tests {
         );
         assert_eq!(
             redaction_pipeline_version(PrivacyFilterBackendTag::Sidecar),
-            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-sidecar-v2")
+            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-sidecar-v3")
         );
         assert_eq!(
             redaction_pipeline_version(PrivacyFilterBackendTag::NearAi),
-            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-near-ai-v1")
+            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-near-ai-v2")
         );
         assert_eq!(
             redaction_pipeline_version(PrivacyFilterBackendTag::SelfHosted),
-            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-self-hosted-v1")
+            format!("{DETERMINISTIC_REDACTION_PIPELINE_VERSION}+privacy-filter-self-hosted-v2")
         );
     }
 

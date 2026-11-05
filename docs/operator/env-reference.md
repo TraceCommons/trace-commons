@@ -449,8 +449,11 @@ instead.
 
 The `near-ai` backend requires the `near-ai-privacy-filter` Cargo feature;
 pilot builds enable it. When `near-ai` is active, the pipeline-version suffix
-appended to envelope records is `+privacy-filter-near-ai-v1`; this value is
-audit-relevant and is included in gate version hash derivation.
+appended to envelope records is `+privacy-filter-near-ai-v2` with the
+structural skip on (the default since 2026-11-05) and `+privacy-filter-near-ai-v1`
+with it off (`TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL=0`); this value is
+audit-relevant and is included in gate version hash derivation. Through a
+witness redeploy, list both in `TRACE_COMMONS_WITNESS_ALLOWED_POLICY_VERSIONS`.
 
 | Var | R? | Default | Description |
 |---|---|---|---|
