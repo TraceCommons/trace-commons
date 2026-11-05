@@ -22,8 +22,15 @@ and reads its failures as its own (memory note on NEAR AI classify limits,
   # and with the array's total near the body limit (e.g. 64 x 3 KiB)
   near_ai_probe.py batch --yes --batch-sizes 64 --batch-item-kib 3
 
-  # per-request latency at a few body sizes
-  near_ai_probe.py latency --yes --sizes-kib 4,32,128,232
+  # per-request latency across body sizes, with a fitted base + per-KiB
+  near_ai_probe.py latency --yes
+
+  # how many requests may overlap: bursts of 2, then 4, then 8, a minute
+  # apart, stopping at the first burst with any failure. This is the probe
+  # that poisoned the key for minutes on 2026-08-28: run it last, on its own
+  # key, and expect serial traffic on that key to fail for a while after a
+  # failed burst.
+  near_ai_probe.py overlap --yes --i-understand-overlap
 
 Results decide two settings in trace-commons-protocol:
 TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES (default 240 KiB) and
@@ -35,6 +42,7 @@ SSL_CERT_FILE=/etc/ssl/cert.pem.
 
 import argparse
 import hashlib
+import threading
 import json
 import os
 import random
@@ -98,6 +106,7 @@ class Client:
         self.sleep = args.sleep
         self.sent = 0
         self.max_requests = args.max_requests
+        self.count_lock = threading.Lock()
         self.key = os.environ.get("TRACE_NEAR_AI_PRIVACY_API_KEY", "").strip()
         self.context = ssl.create_default_context(cafile=os.environ.get("SSL_CERT_FILE") or None)
 
@@ -106,7 +115,15 @@ class Client:
             raise SystemExit(f"stopping: --max-requests {self.max_requests} reached")
         if self.sent:
             time.sleep(self.sleep)
-        self.sent += 1
+        return self.post_unpaced(body)
+
+    def post_unpaced(self, body):
+        """One request with no pause before it, for the overlap bursts. Still
+        counted against --max-requests."""
+        with self.count_lock:
+            if self.sent >= self.max_requests:
+                return "skipped:max-requests", None, 0.0
+            self.sent += 1
         request = urllib.request.Request(
             self.url,
             data=body,
@@ -208,17 +225,78 @@ def run_batch(client, args, rng):
 
 def run_latency(client, args, rng):
     report(mode="latency", sizes_kib=args.sizes_kib)
+    points = []
     for size in [int(value) for value in args.sizes_kib.split(",")]:
         body = body_for(client.model, text_with_body_size(client.model, rng, size * 1024))
         status, parsed, seconds = client.post(body)
         usage = (parsed or {}).get("usage", {}) if status == 200 else {}
-        report(body_bytes=len(body), status=status, seconds=f"{seconds:.2f}",
-               input_tokens=usage.get("input_tokens"))
+        report(body_bytes=len(body), body_kib=f"{len(body) / 1024:.1f}", status=status,
+               seconds=f"{seconds:.2f}", input_tokens=usage.get("input_tokens"))
+        if status == 200:
+            points.append((len(body) / 1024.0, seconds))
+    # Least-squares base + per-KiB, the shape the adapter's timeout takes
+    # (TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS + _PER_KIB_MS). Compare it against
+    # the defaults, 15 s + 0.25 s/KiB, with about 2x headroom.
+    if len(points) >= 2:
+        n = len(points)
+        mean_x = sum(x for x, _ in points) / n
+        mean_y = sum(y for _, y in points) / n
+        sxx = sum((x - mean_x) ** 2 for x, _ in points)
+        slope = sum((x - mean_x) * (y - mean_y) for x, y in points) / sxx if sxx else 0.0
+        report(result="latency_fit", base_s=f"{mean_y - slope * mean_x:.2f}",
+               per_kib_s=f"{slope:.4f}", points=n,
+               worst_ratio_to_default_timeout=f"{max(y / (15 + 0.25 * x) for x, y in points):.2f}")
+
+
+def run_overlap(client, args, rng):
+    if not args.i_understand_overlap:
+        raise SystemExit("overlap bursts can poison the key for minutes; add --i-understand-overlap")
+    levels = [int(value) for value in args.overlap_levels.split(",")]
+    report(mode="overlap", levels=args.overlap_levels, body_kib=args.overlap_body_kib,
+           pause_s=args.overlap_pause)
+    body = body_for(client.model, text_with_body_size(client.model, rng, args.overlap_body_kib * 1024))
+    # Serial baseline first: a failure here means the key is already unwell
+    # and nothing below would mean anything.
+    status, _, seconds = client.post(body)
+    report(phase="baseline", status=status, seconds=f"{seconds:.2f}")
+    if status != 200:
+        report(stop="baseline failed; not bursting")
+        return
+    for level in levels:
+        time.sleep(args.overlap_pause)
+        results = []
+        lock = threading.Lock()
+        start = threading.Barrier(level)
+
+        def one():
+            start.wait()
+            outcome = client.post_unpaced(body)
+            with lock:
+                results.append(outcome)
+
+        threads = [threading.Thread(target=one) for _ in range(level)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        statuses = {}
+        for status, _, _ in results:
+            statuses[str(status)] = statuses.get(str(status), 0) + 1
+        slowest = max(seconds for _, _, seconds in results)
+        report(phase="burst", in_flight=level, statuses=json.dumps(statuses, separators=(",", ":")),
+               slowest_s=f"{slowest:.2f}")
+        # Serial follow-up after the same pause: did the burst poison the key?
+        time.sleep(args.overlap_pause)
+        status, _, seconds = client.post(body)
+        report(phase="after_burst", in_flight=level, status=status, seconds=f"{seconds:.2f}")
+        if set(statuses) != {"200"} or status != 200:
+            report(stop=f"failures at {level} in flight; not escalating")
+            break
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("mode", choices=["limit", "batch", "latency"])
+    parser.add_argument("mode", choices=["limit", "batch", "latency", "overlap"])
     parser.add_argument("--yes", action="store_true", help="actually send requests")
     parser.add_argument("--base-url", default=os.environ.get("TRACE_NEAR_AI_PRIVACY_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -232,7 +310,12 @@ def main():
     parser.add_argument("--compare", type=int, default=2, help="batch inputs re-sent alone to compare")
     parser.add_argument("--batch-item-kib", type=int, default=0,
                         help="pad each batch input to about this size (0: short texts)")
-    parser.add_argument("--sizes-kib", default="4,32,128,232")
+    parser.add_argument("--sizes-kib", default="1,4,16,32,64,96,128,160,200")
+    parser.add_argument("--overlap-levels", default="2,4,8")
+    parser.add_argument("--overlap-body-kib", type=int, default=8)
+    parser.add_argument("--overlap-pause", type=float, default=60.0,
+                        help="seconds before each burst and before each follow-up")
+    parser.add_argument("--i-understand-overlap", action="store_true")
     args = parser.parse_args()
     loopback = args.base_url.startswith(("http://127.0.0.1", "http://localhost"))
     if not (args.base_url.startswith("https://") or loopback):
@@ -246,7 +329,12 @@ def main():
     if not client.key:
         raise SystemExit("TRACE_NEAR_AI_PRIVACY_API_KEY is not set")
     rng = random.Random(args.seed)
-    {"limit": run_limit, "batch": run_batch, "latency": run_latency}[args.mode](client, args, rng)
+    if args.mode == "overlap":
+        # 1 baseline + per level (burst + follow-up); the default 12 is too
+        # few for 2,4,8, so size the cap to the plan and no larger.
+        client.max_requests = 1 + sum(int(v) + 1 for v in args.overlap_levels.split(","))
+    {"limit": run_limit, "batch": run_batch, "latency": run_latency,
+     "overlap": run_overlap}[args.mode](client, args, rng)
     report(requests_sent=client.sent)
 
 

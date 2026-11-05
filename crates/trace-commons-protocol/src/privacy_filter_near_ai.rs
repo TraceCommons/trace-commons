@@ -18,17 +18,10 @@ use crate::trace_contribution::{
 
 pub const DEFAULT_BASE_URL: &str = "https://cloud-api.near.ai/v1";
 pub const DEFAULT_MODEL: &str = "openai/privacy-filter";
-/// Per-request timeout, sized for a full window at the body cap.
-///
-/// Measured by the owner against the live endpoint on 2026-11-05 with
-/// synthetic text: 20 KiB in 11.3 s, 103 KiB in 14.8 s, 205 KiB in 36.5 s --
-/// several times slower than 2026-09-03, when 243 KiB took 9.3 s. At that
-/// rate a 240 KiB window takes over 40 s, past the old 30 s timeout, which
-/// would turn every full window into four timed-out attempts and a refusal.
-/// 90 s leaves room for the cap and for the endpoint slowing further; four
-/// attempts at it still fit inside the witness's 300 s request limit only
-/// for a single window, which is the case a retry is for.
-pub const DEFAULT_TIMEOUT_MS: u64 = 90_000;
+/// 32,000-token windows measured 5.4 s and the largest success took 9.3 s, so
+/// the previous 10 s default left a window legitimately slower than the
+/// timeout. Raised with the budget it has to serve.
+pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 /// Largest `privacy/classify` request BODY, in bytes of the exact serialized
 /// JSON the adapter sends. **Windows are sized by this and nothing else.**

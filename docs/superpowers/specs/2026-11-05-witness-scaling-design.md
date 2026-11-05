@@ -61,9 +61,8 @@ in 36.5 s. That is several times slower than the September model, and the
 fixed cost per call (~11 s) is what grew most. At that rate each text leaf
 costs over 10 s on its own, which makes call count, the subject of 2.1 and
 2.3, matter even more than the stand-in tables below show. It also put a
-full window past the adapter's old 30 s per-call timeout, so this branch
-raises `DEFAULT_TIMEOUT_MS` to 90 s. Rerun the stand-in with `--base-ms
-11000` to model today's endpoint.
+full window past the adapter's 30 s per-call timeout; #1973 sizes the
+timeout by body and lowers the window cap for that.
 
 ## 2. In-process changes (this branch)
 
@@ -298,9 +297,9 @@ are not in this repository, and nobody has measured them.
 2. Re-measure the endpoint with synthetic text, at low volume, on a key no
    driver is using: `scripts/witness-load/near_ai_probe.py limit`, `batch`
    and `latency` (body limit by binary search with escape-heavy text, array
-   batching, per-call latency). Overlap tolerance at 2/4/8 is not in the
-   probe on purpose: it is the measurement that poisoned the key last time,
-   and should be run deliberately, on its own key.
+   batching, per-call latency), then `overlap` (bursts of 2/4/8, a minute
+   apart, stopping at the first failure). Overlap is the measurement that
+   poisoned the key last time, so it runs last, deliberately, on its own key.
 3. Set `TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT` and the body cap from
    step 2. Ship with the redeploy the companion spec already sequences.
 4. Turn batching on (2.3) if step 2 shows it holds.

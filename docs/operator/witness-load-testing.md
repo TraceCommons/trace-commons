@@ -88,13 +88,29 @@ export TRACE_NEAR_AI_PRIVACY_API_KEY=...   # from your own secret store
 python3 -I scripts/witness-load/near_ai_probe.py limit --yes      # body limit, <= 8 requests
 python3 -I scripts/witness-load/near_ai_probe.py batch --yes      # arrays of 4, 16, 64 short texts
 python3 -I scripts/witness-load/near_ai_probe.py batch --yes --batch-sizes 64 --batch-item-kib 3
-python3 -I scripts/witness-load/near_ai_probe.py latency --yes    # 4, 32, 128, 232 KiB bodies
+python3 -I scripts/witness-load/near_ai_probe.py latency --yes    # 1 to 200 KiB bodies, fitted
+# Last, on its own key: bursts of 2, 4, 8 overlapping requests, a minute apart
+python3 -I scripts/witness-load/near_ai_probe.py overlap --yes --i-understand-overlap
 ```
 
 Read `limit` as: the largest 200 and the smallest 413, in body bytes. The
 search stops on any other status rather than reading it as a size answer.
 Read `batch` as: `entries_match_inputs=True` and `same_spans=True` on every
 compared input. Anything else means batching stays off.
+
+Read `latency` from its last line: `base_s` and `per_kib_s` fit the shape
+of the adapter's timeout (`TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS` +
+`_PER_KIB_MS` x body KiB), and `worst_ratio_to_default_timeout` is the
+slowest measured request as a fraction of the default timeout for its size.
+Above about 0.5, there is less than 2x headroom: raise the timeout or lower
+the window cap.
+
+Read `overlap` as the largest `in_flight` whose burst and `after_burst` were
+all `200`. That is the most `TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT`
+should be, summed across every witness replica sharing the key. The mode
+sends a serial baseline first and stops at the first burst with any
+failure. A failed burst has poisoned this key for minutes before (2026-08-28),
+so run it last and on a key nothing else is using.
 
 ## Reading the numbers
 
