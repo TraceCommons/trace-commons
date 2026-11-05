@@ -141,14 +141,15 @@ pub const MONITOR_REQUEST_FAILED: &str = "That didn't go through.";
 /// What the Traces tab says, where Submit or a preview was asked for, when
 /// the trace has to go through the privacy check before it can be sent
 /// (`witness-review-required`). Opening the trace is where that check is
-/// started. DRAFT, needs owner approval.
+/// started. Approved by the owner 2026-11-05 (#1959) until the witness
+/// moves to submission (docs/superpowers/specs/2026-11-05-witness-at-submission-design.md).
 pub const MONITOR_NEEDS_PRIVACY_CHECK: &str = "Needs a privacy check first. Open it to start one.";
 
 /// What the Traces tab says when the privacy check did not answer in time
 /// or could not be reached (`witness_timeout`, `witness_unreachable`,
-/// `preview-timed-out`). Nothing was sent. DRAFT, needs owner approval.
-pub const MONITOR_PRIVACY_CHECK_NO_ANSWER: &str =
-    "The privacy check didn't answer. Try again later.";
+/// `preview-timed-out`). Nothing was sent. The owner's approved wording
+/// (2026-11-05), the same line the witness-at-submission spec uses.
+pub const MONITOR_PRIVACY_CHECK_NO_ANSWER: &str = "Privacy check timed out. Try again later.";
 
 /// The Traces tab's line for one preview or Submit failure label, or
 /// `None` for a label with no line of its own (the caller says
