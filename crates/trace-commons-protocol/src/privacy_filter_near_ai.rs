@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use futures::stream::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
-use crate::privacy_filter_spans::{ClassifySpan, apply_windowed_spans, chunk_token_ranges};
+use crate::privacy_filter_spans::{ClassifySpan, apply_windowed_spans};
 use crate::trace_contribution::{
     PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES, PrivacyFilterAdapter, PrivacyFilterConfigError,
     SafePrivacyFilterRedaction, TraceContributionError,
@@ -23,96 +23,53 @@ pub const DEFAULT_MODEL: &str = "openai/privacy-filter";
 /// timeout. Raised with the budget it has to serve.
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
-/// Maximum input tokens per `privacy/classify` request.
+/// Largest `privacy/classify` request BODY, in bytes of the exact serialized
+/// JSON the adapter sends. **Windows are sized by this and nothing else.**
 ///
-/// **The endpoint limits input TOKENS per request and reports exceeding that
-/// as a generic 502** -- not a 413, not a 429 -- so an over-limit request is
-/// indistinguishable from a vendor outage by status code alone. That ambiguity
-/// cost a day of misdiagnosis on 2026-08-27, during which a byte budget was
-/// tuned three times (20_000 -> 4_000 -> 8_000 -> 4_000) without ever
-/// addressing the quantity actually being limited.
-///
-/// A byte budget cannot express this. Token density varies ~1.6x across
-/// realistic content -- measured against the endpoint's own
-/// `usage.input_tokens`, English prose runs ~4.7 bytes/token while the paths,
-/// hashes and UUIDs that fill trace content run ~3.0. So any byte budget is
-/// either too small for prose (needless extra requests) or too large for dense
-/// content (silent 502s). 8_000 bytes was the latter: fine for most windows,
-/// deterministically fatal for token-dense ones, which is exactly the
-/// intermittent failure the #462 fingerprints caught.
-///
-/// Budgeting in tokens fixes both ends at once: prose windows get BIGGER
-/// (~9,400 bytes at this budget, fewer requests than the 4_000-byte cap it
-/// replaces) while dense windows get capped where they actually break.
-///
-/// Sized against measurement, not the advertised context. The served model
-/// reports `context_length: 512` and the cloud-api wrapper splits internally,
-/// so requests spanning several context windows are normal.
-///
-/// **This ceiling moves.** It moved DOWN on 2026-08-31 (to ~1,000) and back UP
-/// on 2026-09-03, when the token ceiling disappeared entirely. Re-measured
-/// against the live endpoint with exact o200k_base counts and trace-realistic
-/// content (3.17 chars/token):
+/// The endpoint's binding limit is the body size. Measured 2026-09-03 against
+/// the live endpoint with trace-realistic content:
 ///
 /// | true tokens | body | result |
 /// |---|---|---|
-/// | 2,000 - 64,000 | 6 KB - 203 KB | 200 OK, 1.5-7.1 s, PII span found each time |
+/// | 2,000 -> 64,000 | 6.4 KB -> 203 KB | 200 OK, 1.5-7.1 s |
 /// | 73,256 | 243 KiB | 200 OK, 9.3 s -- largest success |
 /// | 78,940 | 261 KiB | 413 |
 /// | 100,000 | 330 KiB | 413 |
 ///
-/// The binding limit is now a request BODY SIZE of ~256 KiB, not a token
-/// count, and it reports an honest `413 Failed to buffer the request body`
-/// rather than the generic 502 that made an over-limit request
-/// indistinguishable from an outage.
+/// An over-limit body gets an honest `413 Failed to buffer the request body`.
+/// Before that date the limit was on tokens per request and was reported as
+/// a generic 502 (2026-08-27 to 2026-08-31, ceilings of ~1,000 to ~6,000
+/// tokens); the token budget that answered that era is gone, because a token
+/// budget can only bound the body indirectly through bytes-per-token, which
+/// varies about 2x between prose and trace content and far more for
+/// escape-heavy text.
 ///
-/// The budget is set well under the proven ceiling rather than at it: this
-/// number has moved twice, so the margin is the point. Override with
-/// `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS` -- added because the previous
-/// value was hardcoded, which meant a vendor-side change could only be
-/// answered with a rebuild and a deploy.
+/// So the adapter builds the request body for a candidate window, measures
+/// its length, and cuts the window when it would exceed this cap (see
+/// [`window_ranges`]). 240 KiB sits under the ~256 KiB measured limit. That
+/// limit has moved before, so a 413 is not fatal: the window is halved and
+/// each half classified, at most [`MAX_CLASSIFY_413_SPLITS`] times deep.
 ///
-/// Re-measure before trusting this number.
-pub const MAX_CLASSIFY_INPUT_TOKENS: usize = 32_000;
+/// Override with `TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES`.
+/// Re-measure before trusting the number.
+pub const MAX_CLASSIFY_REQUEST_BODY_BYTES: usize = 240 * 1024;
 
-/// Largest input proven to classify successfully, measured 2026-09-03:
-/// 73,256 tokens (243 KiB body) returned 200; 78,940 (261 KiB) returned 413.
-///
-/// Was 1,500 on 2026-08-31 and 3,000 on 2026-08-27. The endpoint regressed,
-/// then recovered past both. Note this is now a body-size boundary expressed
-/// in tokens: dense content hits the byte limit at a lower token count than
-/// prose does, which is why the budget below keeps real margin.
-pub const MEASURED_CLASSIFY_TOKEN_LIMIT: usize = 73_256;
+/// The smallest body proven to be refused with a 413 (261 KiB, 2026-09-03),
+/// rounded down to the 256 KiB the endpoint's buffer limit appears to be.
+pub const MEASURED_CLASSIFY_BODY_LIMIT_BYTES: usize = 256 * 1024;
 
-// Keep real margin under the measured failure point. The budget is not a
-// guess: exceeding it is what produced the intermittent 502s.
-// A compile-time invariant, not a test: a budget set at the measured limit is
-// one vendor change away from failing every window, and this number has moved
-// twice already (down 2026-08-31, up 2026-09-03). Require 2x margin so the
-// build breaks rather than production.
+// A cap at or over the measured limit turns every full window into a 413 and
+// a halving round trip. Enforced at compile time.
 const _: () = assert!(
-    MAX_CLASSIFY_INPUT_TOKENS * 2 <= MEASURED_CLASSIFY_TOKEN_LIMIT,
-    "MAX_CLASSIFY_INPUT_TOKENS must stay well under the measured token limit"
+    MAX_CLASSIFY_REQUEST_BODY_BYTES < MEASURED_CLASSIFY_BODY_LIMIT_BYTES,
+    "MAX_CLASSIFY_REQUEST_BODY_BYTES must stay under the measured body limit"
 );
 
-/// Largest `privacy/classify` request BODY, in bytes of serialized JSON.
-///
-/// The endpoint's binding limit is the body size, not tokens: measured
-/// 2026-09-03, a 232 KB body classified and a 250 KB body returned
-/// `413 Failed to buffer the request body` (see the table on
-/// [`MAX_CLASSIFY_INPUT_TOKENS`]). A 413 is a permanent failure here, so the
-/// trace is charged for it.
-///
-/// The token budget alone does not bound the body. JSON escaping and padding
-/// put far more than prose's ~3-5 bytes in a token: measured o200k_base
-/// tokens of escaped quotes and backslashes carry ~8 body bytes, `\r\n` ~16,
-/// tabs and newlines ~32, runs of `-`/`=` ~64, runs of spaces ~128. A
-/// 32,000-token window of escaped JSON tool output, a padded table or a
-/// whitespace-heavy log is well past 256 KiB. So a window whose body would
-/// exceed this is cut further (see [`window_ranges`]).
-///
-/// 200 KiB leaves margin under the 232 KB proven success.
-pub const MAX_CLASSIFY_REQUEST_BODY_BYTES: usize = 200 * 1024;
+/// How many times a window answered with a 413 may be halved before the
+/// field is refused. Four halvings take a full window to 1/16 of the cap
+/// (15 KiB): a limit that has fallen that far is an endpoint change for an
+/// operator to look at, not something to keep bisecting through.
+pub const MAX_CLASSIFY_413_SPLITS: usize = 4;
 
 /// How many `privacy/classify` requests for a single field may be in flight
 /// at once.
@@ -147,9 +104,9 @@ pub struct NearAiPrivacyFilterAdapter {
     model: String,
     api_key: SecretApiKey,
     max_input_bytes: usize,
-    /// Per-request token budget. Configurable because the endpoint's ceiling
-    /// has moved twice; see [`MAX_CLASSIFY_INPUT_TOKENS`].
-    max_input_tokens: usize,
+    /// Largest serialized request body. Configurable because the endpoint's
+    /// limit has moved before; see [`MAX_CLASSIFY_REQUEST_BODY_BYTES`].
+    max_request_body_bytes: usize,
     /// Memoized classifications, keyed by SHA-256 of the window text.
     ///
     /// Agent traces re-read the same files and echo the same tool output
@@ -234,25 +191,24 @@ impl NearAiPrivacyFilterAdapter {
         timeout: Duration,
         max_input_bytes: usize,
     ) -> Result<Self, PrivacyFilterConfigError> {
-        Self::with_max_input_tokens(
+        Self::with_max_request_body_bytes(
             base_url,
             model,
             api_key,
             timeout,
             max_input_bytes,
-            MAX_CLASSIFY_INPUT_TOKENS,
+            MAX_CLASSIFY_REQUEST_BODY_BYTES,
         )
     }
 
-    /// As [`Self::new`], with an explicit per-request token budget.
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_max_input_tokens(
+    /// As [`Self::new`], with an explicit request-body cap.
+    pub fn with_max_request_body_bytes(
         base_url: impl Into<String>,
         model: impl Into<String>,
         api_key: impl Into<String>,
         timeout: Duration,
         max_input_bytes: usize,
-        max_input_tokens: usize,
+        max_request_body_bytes: usize,
     ) -> Result<Self, PrivacyFilterConfigError> {
         let base_url = base_url.into();
         // The classify request carries the API key as a bearer token, so the
@@ -281,7 +237,7 @@ impl NearAiPrivacyFilterAdapter {
             model: model.into(),
             api_key: SecretApiKey(api_key.into()),
             max_input_bytes,
-            max_input_tokens,
+            max_request_body_bytes,
             window_cache: std::sync::Mutex::new(ClassifyWindowCache::default()),
         })
     }
@@ -333,35 +289,53 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
             Err(_) => PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES,
         };
 
+    // The token budget this variable set is gone: windows are sized by the
+    // encoded request body. A host that still sets it is refused at startup
+    // rather than silently ignored, so nobody believes a budget is in force
+    // that is not.
+    if std::env::var_os("TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS").is_some() {
+        return Err(PrivacyFilterConfigError::InvalidEnv {
+            var: "TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS",
+            reason: "retired: windows are sized by request body; set \
+                     TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES instead"
+                .to_string(),
+        });
+    }
+
     // Zero is rejected rather than silently meaning "unlimited": an unbounded
-    // budget sends the whole text as one request, which is exactly the
-    // over-limit case this budget exists to prevent.
-    let max_input_tokens = match std::env::var("TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS") {
+    // cap sends the whole field as one request, which is exactly the
+    // over-limit case this cap exists to prevent. A cap at or over the
+    // measured limit is refused for the same reason.
+    let max_request_body_bytes = match std::env::var("TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES")
+    {
         Ok(value) => {
             let parsed = value.trim().parse::<usize>().map_err(|err| {
                 PrivacyFilterConfigError::InvalidEnv {
-                    var: "TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS",
+                    var: "TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES",
                     reason: err.to_string(),
                 }
             })?;
-            if parsed == 0 {
+            if parsed == 0 || parsed >= MEASURED_CLASSIFY_BODY_LIMIT_BYTES {
                 return Err(PrivacyFilterConfigError::InvalidEnv {
-                    var: "TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS",
-                    reason: "must be greater than zero".to_string(),
+                    var: "TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES",
+                    reason: format!(
+                        "must be greater than zero and under the measured limit of \
+                         {MEASURED_CLASSIFY_BODY_LIMIT_BYTES} bytes"
+                    ),
                 });
             }
             parsed
         }
-        Err(_) => MAX_CLASSIFY_INPUT_TOKENS,
+        Err(_) => MAX_CLASSIFY_REQUEST_BODY_BYTES,
     };
 
-    let adapter = NearAiPrivacyFilterAdapter::with_max_input_tokens(
+    let adapter = NearAiPrivacyFilterAdapter::with_max_request_body_bytes(
         base_url,
         model,
         api_key,
         Duration::from_millis(timeout_ms),
         max_input_bytes,
-        max_input_tokens,
+        max_request_body_bytes,
     )?;
     Ok(Arc::new(adapter))
 }
@@ -412,54 +386,72 @@ fn json_escaped_len(text: &str) -> usize {
         .sum()
 }
 
-/// The windows a field is classified in: [`chunk_token_ranges`]'s token
-/// windows -- unchanged whenever each window's body fits -- with any window
-/// whose JSON-escaped size exceeds `max_input_json_bytes` cut further, after
-/// its last newline under the cap where there is one, so no request goes out
-/// over [`MAX_CLASSIFY_REQUEST_BODY_BYTES`]. Contiguous and covering the
-/// whole text, on char boundaries.
-fn window_ranges(
-    text: &str,
-    max_tokens: usize,
-    max_input_json_bytes: usize,
-) -> Vec<std::ops::Range<usize>> {
+/// The windows a field is classified in: contiguous, covering the whole
+/// text, on char boundaries, each as large as `max_input_json_bytes` of
+/// JSON-escaped input allows. A window ends after the last newline that fits
+/// where there is one, so a line is split only when it alone exceeds the cap.
+///
+/// `max_input_json_bytes` is the request-body cap less the measured envelope
+/// (see [`NearAiPrivacyFilterAdapter::max_input_json_bytes`]), and
+/// [`json_escaped_len`] is exactly what `serde_json` writes, so every window's
+/// serialized body fits the cap. `classify_window` re-measures the real body
+/// before sending anyway.
+///
+/// One linear pass: each character's escaped cost is computed once.
+fn window_ranges(text: &str, max_input_json_bytes: usize) -> Vec<std::ops::Range<usize>> {
     let max_input_json_bytes = max_input_json_bytes.max(1);
     let mut ranges = Vec::new();
-    for range in chunk_token_ranges(text, max_tokens) {
-        if json_escaped_len(&text[range.clone()]) <= max_input_json_bytes {
-            ranges.push(range);
-            continue;
-        }
-        let mut start = range.start;
-        while start < range.end {
-            let mut used = 0usize;
-            let mut end = start;
-            let mut last_newline_end: Option<usize> = None;
-            for (offset, character) in text[start..range.end].char_indices() {
-                let mut buffer = [0u8; 4];
-                let cost = json_escaped_len(character.encode_utf8(&mut buffer));
-                if used + cost > max_input_json_bytes && end > start {
-                    break;
-                }
-                used += cost;
-                end = start + offset + character.len_utf8();
-                if character == '\n' {
-                    last_newline_end = Some(end);
-                }
+    let mut start = 0usize;
+    while start < text.len() {
+        let mut used = 0usize;
+        let mut end = start;
+        let mut last_newline_end: Option<usize> = None;
+        for (offset, character) in text[start..].char_indices() {
+            let mut buffer = [0u8; 4];
+            let cost = json_escaped_len(character.encode_utf8(&mut buffer));
+            if used + cost > max_input_json_bytes && end > start {
+                break;
             }
-            if end < range.end {
-                if let Some(newline_end) = last_newline_end {
-                    end = newline_end;
-                }
+            used += cost;
+            end = start + offset + character.len_utf8();
+            if character == '\n' {
+                last_newline_end = Some(end);
             }
-            ranges.push(start..end);
-            start = end;
         }
+        if end < text.len() {
+            if let Some(newline_end) = last_newline_end {
+                end = newline_end;
+            }
+        }
+        ranges.push(start..end);
+        start = end;
     }
     ranges
 }
 
-/// Hash-only label for a response whose span texts disagree with its offsets.
+/// Where to halve a window the endpoint refused as too large: after the last
+/// newline in the first half when that keeps at least a quarter of the window
+/// on the left, otherwise at the middle char boundary. `None` when the window
+/// is a single character and cannot be split.
+fn split_point(text: &str) -> Option<usize> {
+    let mut middle = text.len() / 2;
+    while middle > 0 && !text.is_char_boundary(middle) {
+        middle -= 1;
+    }
+    if middle == 0 {
+        // The first character is wider than half the window: split after it,
+        // if anything follows.
+        let first = text.chars().next()?.len_utf8();
+        return (first < text.len()).then_some(first);
+    }
+    match text[..middle].rfind('\n') {
+        Some(newline) if newline + 1 >= text.len() / 4 && newline + 1 < text.len() => {
+            Some(newline + 1)
+        }
+        _ => Some(middle),
+    }
+}
+
 const SPAN_TEXT_MISMATCH_LABEL: &str = "privacy_filter_span_text_mismatch";
 
 /// Fail closed unless every span's reported `text` is exactly the request
@@ -559,11 +551,10 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
         // them into full-text codepoints before merging so the single
         // apply_spans pass validates and redacts against the whole field.
         //
-        // Windows are bounded by the request BODY as well as by tokens (see
-        // MAX_CLASSIFY_REQUEST_BODY_BYTES): for ordinary text they are
-        // exactly the token windows; a window of escape- or whitespace-heavy
-        // text that would be refused with a 413 is cut further.
-        let ranges = window_ranges(text, self.max_input_tokens, self.max_input_json_bytes());
+        // Windows are sized by the serialized request BODY and nothing else
+        // (see MAX_CLASSIFY_REQUEST_BODY_BYTES): the endpoint's limit is a
+        // body size, so a window is as large as the body cap allows.
+        let ranges = window_ranges(text, self.max_input_json_bytes());
 
         // Accumulate each window's starting codepoint in ONE pass over the
         // field. This used to be `text[..range.start].chars().count()` inside
@@ -596,7 +587,7 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
                 |(range, codepoint_start)| {
                     let window = &text[range];
                     async move {
-                        self.classify_window(window)
+                        self.classify_window(window, MAX_CLASSIFY_413_SPLITS)
                             .await
                             .map(|spans| (codepoint_start, spans))
                     }
@@ -678,23 +669,97 @@ impl NearAiPrivacyFilterAdapter {
     /// (in that window's codepoint coordinates). Fail-closed on any
     /// transport error, non-2xx status, malformed body, or empty data
     /// array.
-    async fn classify_window(
+    /// Classify one window, in that window's own codepoint coordinates.
+    ///
+    /// The request body is serialized here and its length checked against
+    /// the cap before anything is sent. A body over the cap, or one the
+    /// endpoint refuses with a 413, is halved (see [`split_point`]) and each
+    /// half classified, at most `splits_left` times deep; the halves' spans
+    /// are shifted back into this window's coordinates, so the caller cannot
+    /// tell a split window from a whole one. The endpoint classifies a span
+    /// the same wherever the window boundary falls only to the extent its
+    /// model does, which is why splitting is the exception and the cap keeps
+    /// it so.
+    fn classify_window<'a>(
+        &'a self,
+        text: &'a str,
+        splits_left: usize,
+    ) -> futures::future::BoxFuture<'a, Result<Vec<ClassifySpan>, TraceContributionError>> {
+        Box::pin(async move {
+            // Memoize on the window's content hash. The lock is taken only
+            // around the map access and released before any await, so it
+            // never spans a network round trip.
+            let key: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()).into();
+            if let Some(hit) = self.cached_window(&key) {
+                return Ok(hit);
+            }
+            let body = serde_json::to_vec(&ClassifyRequest {
+                model: &self.model,
+                input: text,
+            })
+            .map_err(|_| TraceContributionError::RedactionFailed {
+                reason: "near-ai privacy classifier request did not serialize".to_string(),
+            })?;
+            let spans = if body.len() > self.max_request_body_bytes {
+                self.classify_halves(text, splits_left).await?
+            } else {
+                match self.send_window(text, body).await? {
+                    WindowAnswer::Spans(spans) => spans,
+                    WindowAnswer::TooLarge => self.classify_halves(text, splits_left).await?,
+                }
+            };
+            // Verified before it is remembered (in `send_window`, per
+            // half): a refused response is never served from the cache.
+            self.remember_window(key, &spans);
+            Ok(spans)
+        })
+    }
+
+    /// Classify `text` as two windows and merge their spans into `text`'s
+    /// codepoint coordinates. Refuses, permanently, when the split budget is
+    /// spent or the window is one character.
+    async fn classify_halves(
         &self,
         text: &str,
+        splits_left: usize,
     ) -> Result<Vec<ClassifySpan>, TraceContributionError> {
-        // Memoize on the window's content hash. The lock is taken only around
-        // the map access and released before any await, so it never spans a
-        // network round trip.
-        let key: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()).into();
-        if let Some(hit) = self.cached_window(&key) {
-            return Ok(hit);
-        }
-
-        let endpoint = format!("{}/privacy/classify", self.base_url.trim_end_matches('/'));
-        let request_body = ClassifyRequest {
-            model: &self.model,
-            input: text,
+        let split = match (splits_left, split_point(text)) {
+            (0, _) | (_, None) => {
+                let diagnostics = classify_input_diagnostics(&[text]);
+                tracing::warn!(
+                    classify_input = %diagnostics,
+                    failure = "too_large",
+                    "near-ai privacy classify failed"
+                );
+                return Err(TraceContributionError::RedactionFailed {
+                    reason: format!(
+                        "near-ai privacy classifier refused the request as too large after \
+                         {MAX_CLASSIFY_413_SPLITS} halvings {diagnostics}"
+                    ),
+                });
+            }
+            (_, Some(split)) => split,
         };
+        let (left, right) = text.split_at(split);
+        let mut spans = self.classify_window(left, splits_left - 1).await?;
+        let shift = left.chars().count();
+        let right_spans = self.classify_window(right, splits_left - 1).await?;
+        spans.extend(right_spans.into_iter().map(|span| ClassifySpan {
+            start: span.start + shift,
+            end: span.end + shift,
+            ..span
+        }));
+        Ok(spans)
+    }
+
+    /// One request for one window, with the transient retries. A 413 comes
+    /// back as [`WindowAnswer::TooLarge`] for the caller to split.
+    async fn send_window(
+        &self,
+        text: &str,
+        body: Vec<u8>,
+    ) -> Result<WindowAnswer, TraceContributionError> {
+        let endpoint = format!("{}/privacy/classify", self.base_url.trim_end_matches('/'));
 
         let mut attempt = 0;
         loop {
@@ -705,7 +770,8 @@ impl NearAiPrivacyFilterAdapter {
                 .client
                 .post(&endpoint)
                 .bearer_auth(&self.api_key.0)
-                .json(&request_body)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.clone())
                 .send()
                 .await;
             let response = match send_result {
@@ -738,6 +804,9 @@ impl NearAiPrivacyFilterAdapter {
             };
 
             let status = response.status();
+            if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+                return Ok(WindowAnswer::TooLarge);
+            }
             if !status.is_success() {
                 let transient = crate::privacy_filter_spans::is_transient_classifier_status(status);
                 if transient && attempt < MAX_CLASSIFY_ATTEMPTS {
@@ -797,27 +866,32 @@ impl NearAiPrivacyFilterAdapter {
             // Verified before it is remembered: a refused response must
             // never be served from the cache.
             let spans = verify_span_texts(text, entry.spans)?;
-            self.remember_window(key, &spans);
-            return Ok(spans);
+            return Ok(WindowAnswer::Spans(spans));
         }
     }
 }
 
+/// What one classify request answered.
+enum WindowAnswer {
+    /// Verified spans, in the window's own codepoint coordinates.
+    Spans(Vec<ClassifySpan>),
+    /// A 413: the body was over the endpoint's limit.
+    TooLarge,
+}
+
 impl NearAiPrivacyFilterAdapter {
     /// The escaped-input budget that keeps a request's whole serialized body
-    /// within [`MAX_CLASSIFY_REQUEST_BODY_BYTES`]: the body is the request
-    /// envelope (model, keys, the input's quotes) plus the input's
-    /// JSON-escaped bytes, and the envelope is measured, not guessed.
+    /// within the adapter's body cap: the body is the request envelope
+    /// (model, keys, the input's quotes) plus the input's JSON-escaped bytes,
+    /// and the envelope is measured, not guessed.
     fn max_input_json_bytes(&self) -> usize {
         let envelope = serde_json::to_vec(&ClassifyRequest {
             model: &self.model,
             input: "",
         })
         .map(|body| body.len())
-        .unwrap_or(MAX_CLASSIFY_REQUEST_BODY_BYTES);
-        MAX_CLASSIFY_REQUEST_BODY_BYTES
-            .saturating_sub(envelope)
-            .max(1)
+        .unwrap_or(self.max_request_body_bytes);
+        self.max_request_body_bytes.saturating_sub(envelope).max(1)
     }
 }
 
@@ -858,11 +932,33 @@ async fn backoff(failed_attempt: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // These exercise the windowing helpers, which now live in the shared
-    // module because both backends window. The tests stayed here rather than
-    // moving with them: they are written against this backend's token budget
-    // and its measured endpoint behaviour.
-    use crate::privacy_filter_spans::{chunk_byte_ranges, classifier_token_count};
+
+    /// The exact body the adapter would send for `input`.
+    fn request_body_len(input: &str) -> usize {
+        serde_json::to_vec(&ClassifyRequest {
+            model: DEFAULT_MODEL,
+            input,
+        })
+        .expect("serializes")
+        .len()
+    }
+
+    fn input_budget(cap: usize) -> usize {
+        cap - request_body_len("")
+    }
+
+    /// Escape-heavy text: quotes, backslashes, newlines, tabs, other control
+    /// characters, and 2-, 3- and 4-byte UTF-8.
+    fn escape_heavy(lines: usize) -> String {
+        (0..lines)
+            .map(|i| {
+                format!(
+                    "{i} \"quoted\" C:\\path\\x\t\u{1}\u{1f} caf\u{e9} \u{4e2d}\u{6587} \u{1f600} {}\r\n",
+                    "\\\"".repeat(i % 7)
+                )
+            })
+            .collect()
+    }
 
     /// A span whose reported text is not the text at its offsets fails the
     /// server's prose-PII rescrub closed, with the hash-only label, and
@@ -1020,31 +1116,118 @@ mod tests {
         }
     }
 
-    /// A padded, escaped table costs few tokens and megabytes of body: its
-    /// windows are cut under the cap, cover it exactly, and ordinary text
-    /// keeps its token windows unchanged.
+    /// Every window's serialized request body -- measured by serializing
+    /// it, not by the arithmetic `window_ranges` uses -- fits the cap, for
+    /// escape-heavy text whose body is several times its length.
     #[test]
-    fn windows_are_cut_under_the_body_cap_and_unchanged_otherwise() {
-        const CAP: usize = 200 * 1024;
-        let table: String = (0..3_000)
-            .map(|i| format!("| \\\"{i}\\\" |{}|{}|\n", " ".repeat(300), "=".repeat(300)))
-            .collect();
-        let windows = window_ranges(&table, MAX_CLASSIFY_INPUT_TOKENS, CAP);
-        assert!(windows.len() > 1);
+    fn escape_heavy_windows_stay_under_the_cap_after_encoding() {
+        let cap = MAX_CLASSIFY_REQUEST_BODY_BYTES;
+        let text = escape_heavy(12_000);
         assert!(
-            windows
-                .iter()
-                .all(|w| json_escaped_len(&table[w.clone()]) <= CAP),
-            "every window fits the body cap"
+            request_body_len(&text) > 3 * cap,
+            "the fixture must need several windows"
         );
-        let covered: String = windows.iter().map(|w| &table[w.clone()]).collect();
-        assert_eq!(covered, table);
+        let windows = window_ranges(&text, input_budget(cap));
+        assert!(windows.len() > 3);
+        for window in &windows {
+            let body = request_body_len(&text[window.clone()]);
+            assert!(body <= cap, "a {body}-byte body is over the {cap}-byte cap");
+        }
+        let covered: String = windows.iter().map(|w| &text[w.clone()]).collect();
+        assert_eq!(covered, text);
+    }
 
-        let prose = "An ordinary line of prose about a code review.\n".repeat(4_000);
+    /// The cap is used, not wasted: each window but the last is full to
+    /// within one line of the cap, so a field costs as few requests as the
+    /// body limit allows.
+    #[test]
+    fn windows_fill_the_cap_to_within_a_line() {
+        let cap = MAX_CLASSIFY_REQUEST_BODY_BYTES;
+        let text = escape_heavy(12_000);
+        let longest_line = text
+            .split_inclusive('\n')
+            .map(|line| request_body_len(line) - request_body_len(""))
+            .max()
+            .expect("lines");
+        let windows = window_ranges(&text, input_budget(cap));
+        for window in &windows[..windows.len() - 1] {
+            assert!(
+                request_body_len(&text[window.clone()]) + longest_line > cap,
+                "a window stopped more than a line short of the cap"
+            );
+            assert!(
+                text[window.clone()].ends_with('\n'),
+                "a window split a line"
+            );
+        }
+    }
+
+    /// A 241 KB single field of ordinary tool output -- the size that took
+    /// 115 s on the live witness -- is one or two requests, not dozens.
+    #[test]
+    fn a_large_ordinary_field_takes_few_requests() {
+        let text: String = (0..6_000)
+            .map(|i| {
+                format!(
+                    "[{i:06}] INFO build::module took {}ms /home/u/src/f{i}.rs\n",
+                    i % 997
+                )
+            })
+            .collect();
+        assert!(text.len() > 240_000);
+        let windows = window_ranges(&text, input_budget(MAX_CLASSIFY_REQUEST_BODY_BYTES));
+        assert!(windows.len() <= 2, "{} windows", windows.len());
+    }
+
+    /// No window boundary falls inside a codepoint, including in a run with
+    /// no newline at all, where the cut is at the cap itself. (`&text[..]` on
+    /// a non-boundary would panic, so the slice is the assertion; the
+    /// explicit check says what is being tested.)
+    #[test]
+    fn windows_never_split_a_codepoint() {
+        let text = "\u{e9}\u{4e2d}\u{1f600}\"\\".repeat(40_000);
+        let envelope = request_body_len("");
+        for input_cap in [
+            4,
+            5,
+            6,
+            7,
+            1_000,
+            input_budget(MAX_CLASSIFY_REQUEST_BODY_BYTES),
+        ] {
+            let windows = window_ranges(&text, input_cap);
+            for window in &windows {
+                assert!(text.is_char_boundary(window.start) && text.is_char_boundary(window.end));
+                assert!(!window.is_empty());
+                assert!(request_body_len(&text[window.clone()]) <= envelope + input_cap);
+            }
+            let covered: String = windows.iter().map(|w| &text[w.clone()]).collect();
+            assert_eq!(covered, text);
+        }
+    }
+
+    /// The 413 split point is a char boundary that leaves both halves
+    /// non-empty, prefers a newline, and refuses a single character.
+    #[test]
+    fn split_points_are_char_boundaries_inside_the_window() {
+        let accents = "\u{e9}".repeat(1001);
+        for text in [
+            "\u{1f600}\u{1f600}\u{1f600}",
+            "ab",
+            "\u{1f600}a",
+            "line one\nline two\nline three\nline four\n",
+            accents.as_str(),
+        ] {
+            let split = split_point(text).expect("splittable");
+            assert!(split > 0 && split < text.len(), "{text:?} at {split}");
+            assert!(text.is_char_boundary(split));
+        }
         assert_eq!(
-            window_ranges(&prose, MAX_CLASSIFY_INPUT_TOKENS, CAP),
-            chunk_token_ranges(&prose, MAX_CLASSIFY_INPUT_TOKENS)
+            split_point("line one\nline two\nline three\nline four\n"),
+            Some("line one\nline two\n".len())
         );
+        assert_eq!(split_point("\u{1f600}"), None);
+        assert_eq!(split_point("a"), None);
     }
 
     fn span(category: &str, start: usize, end: usize, score: f64) -> ClassifySpan {
@@ -1152,175 +1335,6 @@ mod tests {
         );
     }
 
-    /// The tokenizer must be the one the endpoint actually charges against.
-    /// These counts are the endpoint's own `usage.input_tokens`, recorded
-    /// 2026-08-27; `cl100k_base` disagrees on several of them.
-    #[test]
-    fn tokenizer_reproduces_the_endpoints_own_counts() {
-        let cases: &[(&str, usize)] = &[
-            ("hello", 1),
-            ("hello world", 2),
-            ("The quick brown fox jumps over the lazy dog.", 10),
-            ("alice@example.com", 3),
-            ("/usr/local/lib/python3.11/site-packages/", 11),
-            ("a7f3c9d2e1b48856f0c1d2e3a4b5c6d7", 29),
-            ("tenant_id submission_id auth_principal_ref", 8),
-            ("supercalifragilisticexpialidocious", 10),
-        ];
-        for (text, expected) in cases {
-            assert_eq!(
-                classifier_token_count(text),
-                Some(*expected),
-                "token count drifted from the endpoint's accounting for {text:?}"
-            );
-        }
-    }
-
-    /// The property the whole change exists for: no window may exceed the
-    /// budget, whatever the content's token density.
-    #[test]
-    fn every_window_fits_the_token_budget() {
-        let prose = "Please email alice@example.com about invoice 12345. ".repeat(600);
-        let dense = (0..600)
-            .map(|i| format!("user{i:04}@example.com /home/u{i:04}/src/f{i:04}.rs"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let hex = "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7".repeat(400);
-
-        for (label, text) in [("prose", &prose), ("dense", &dense), ("hex", &hex)] {
-            let ranges = chunk_token_ranges(text, MAX_CLASSIFY_INPUT_TOKENS);
-            for range in &ranges {
-                let tokens = classifier_token_count(&text[range.clone()]).expect("tokenizer");
-                assert!(
-                    tokens <= MAX_CLASSIFY_INPUT_TOKENS,
-                    "{label}: window of {tokens} tokens exceeds the budget of {}",
-                    MAX_CLASSIFY_INPUT_TOKENS
-                );
-            }
-        }
-    }
-
-    /// The endpoint's real limit is a request BODY SIZE (~256 KiB measured
-    /// 2026-09-03), not a token count. A token budget only respects that
-    /// indirectly, via bytes-per-token -- which varies about 2x between dense
-    /// trace content and prose. This asserts the budget cannot produce a body
-    /// over the limit for any representative content type, because exceeding
-    /// it is a 413 for the whole window, not a partial result.
-    #[test]
-    fn a_full_budget_window_stays_under_the_measured_body_limit() {
-        const MEASURED_BODY_LIMIT_BYTES: usize = 243 * 1024; // largest proven success
-
-        let prose = "Please email alice@example.com about invoice 12345. ".repeat(4000);
-        let dense = (0..4000)
-            .map(|i| format!("user{i:04}@example.com /home/u{i:04}/src/f{i:04}.rs"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let hex = "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7".repeat(3000);
-
-        for (label, text) in [("prose", &prose), ("dense", &dense), ("hex", &hex)] {
-            let ranges = chunk_token_ranges(text, MAX_CLASSIFY_INPUT_TOKENS);
-            let widest = ranges
-                .iter()
-                .map(|r| text[r.clone()].len())
-                .max()
-                .expect("at least one window");
-            assert!(
-                widest <= MEASURED_BODY_LIMIT_BYTES,
-                "{label}: a {MAX_CLASSIFY_INPUT_TOKENS}-token window reached {widest} bytes, \
-                 over the {MEASURED_BODY_LIMIT_BYTES}-byte limit proven to work"
-            );
-        }
-    }
-
-    /// Ranges must be contiguous and cover the whole field: a gap would drop
-    /// text from classification entirely, which is a silent privacy hole
-    /// rather than a performance bug.
-    #[test]
-    fn token_windows_cover_the_whole_field_without_gaps() {
-        let text = (0..300)
-            .map(|i| format!("line {i} with alice@example.com and /var/log/f{i}.log"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let ranges = chunk_token_ranges(&text, MAX_CLASSIFY_INPUT_TOKENS);
-
-        assert_eq!(ranges.first().expect("at least one window").start, 0);
-        assert_eq!(ranges.last().expect("at least one window").end, text.len());
-        for pair in ranges.windows(2) {
-            assert_eq!(pair[0].end, pair[1].start, "gap or overlap between windows");
-        }
-        let rebuilt: String = ranges.iter().map(|r| &text[r.clone()]).collect();
-        assert_eq!(rebuilt, text, "windows must reconstruct the field exactly");
-    }
-
-    /// Budgeting in tokens is what lets sparse content travel in FEWER
-    /// requests than dense content of the same size -- the thing a byte
-    /// budget structurally cannot do, and the reason dense windows used to
-    /// 502 while prose windows of identical size were fine.
-    #[test]
-    fn sparse_content_packs_into_fewer_windows_than_dense() {
-        // Line-delimited on purpose. The greedy packer this test is about
-        // works on line segments; an UNBROKEN run takes the bisection path
-        // instead, which halves until each piece fits and so quantises the
-        // window count to a power of two. Two inputs of very different token
-        // density then land on the same count -- prose at 149k tokens and
-        // dense at 250k both produced 8 windows -- and the comparison says
-        // nothing. The original fixtures were single lines and passed only
-        // because, at the old 1,000-token budget, they happened to fall in
-        // different bisection bands.
-        // Sized from measurement: at 16,000 lines prose is ~176k tokens (~6
-        // windows) and dense ~256k (~8), a margin of two. At 4,000 both round
-        // to 2 and tie; a margin of one is fragile to packing slack.
-        let lines = 16_000;
-        let prose = "The agent reviewed the report and summarised the findings.\n".repeat(lines);
-        let dense = (0..lines)
-            .map(|i| format!("user{i:04}@example.com /home/u{i:04}/src/f{i:04}.rs\n"))
-            .collect::<String>();
-
-        let prose_tokens = classifier_token_count(&prose).expect("tokenizer");
-        let dense_tokens = classifier_token_count(&dense).expect("tokenizer");
-        assert!(
-            prose_tokens > MAX_CLASSIFY_INPUT_TOKENS && dense_tokens > MAX_CLASSIFY_INPUT_TOKENS,
-            "both fixtures must exceed the budget or neither splits"
-        );
-        assert!(
-            dense_tokens > prose_tokens,
-            "the dense fixture must actually be denser: prose {prose_tokens}, dense {dense_tokens}"
-        );
-
-        let prose_windows = chunk_token_ranges(&prose, MAX_CLASSIFY_INPUT_TOKENS).len();
-        let dense_windows = chunk_token_ranges(&dense, MAX_CLASSIFY_INPUT_TOKENS).len();
-        assert!(
-            prose_windows < dense_windows,
-            "prose took {prose_windows} windows and dense took {dense_windows}; \
-             token budgeting should give sparse content larger windows"
-        );
-    }
-
-    /// A single line longer than the budget still has to be split, or one
-    /// base64 blob or long log line stalls its whole field.
-    #[test]
-    fn an_oversized_single_line_is_split() {
-        // Size the fixture FROM the budget. A literal repeat count was sized
-        // for a 1,000-token budget and silently stopped exceeding it when the
-        // budget rose to 32,000 -- the test still passed its inner assertion
-        // while no longer testing splitting at all.
-        let unit = "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7";
-        let unit_tokens = classifier_token_count(unit).expect("tokenizer");
-        let repeats = (MAX_CLASSIFY_INPUT_TOKENS / unit_tokens) * 2 + 8;
-        let one_line = unit.repeat(repeats);
-        assert!(!one_line.contains('\n'));
-        assert!(
-            classifier_token_count(&one_line).expect("tokenizer") > MAX_CLASSIFY_INPUT_TOKENS,
-            "fixture must exceed the budget or this test proves nothing"
-        );
-        let ranges = chunk_token_ranges(&one_line, MAX_CLASSIFY_INPUT_TOKENS);
-        assert!(ranges.len() > 1, "an oversized single line must be split");
-        for range in &ranges {
-            let tokens = classifier_token_count(&one_line[range.clone()]).expect("tokenizer");
-            assert!(tokens <= MAX_CLASSIFY_INPUT_TOKENS);
-        }
-    }
-
     /// A cold cache is all misses. Sampling only on hits meant the telemetry
     /// stayed silent exactly when it was most needed -- right after a deploy
     /// -- and "no telemetry" could not be distinguished from "no lookups".
@@ -1353,43 +1367,6 @@ mod tests {
         // Cannot call redact_text without a client; test apply_spans
         // covers the inner behavior. Empty-text short-circuit is in
         // redact_text proper, exercised by integration tests in Task 8.
-    }
-
-    #[test]
-    fn chunk_byte_ranges_cover_text_and_respect_limit() {
-        let text = "line one\nline two\nline three\n";
-        let ranges = chunk_byte_ranges(text, 12);
-        assert_eq!(ranges.first().unwrap().start, 0);
-        assert_eq!(ranges.last().unwrap().end, text.len());
-        let mut prev = 0;
-        for r in &ranges {
-            assert_eq!(r.start, prev, "ranges must be contiguous");
-            assert!(r.end - r.start <= 12, "range {r:?} exceeds limit");
-            assert!(text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
-            prev = r.end;
-        }
-        let joined: String = ranges.iter().map(|r| &text[r.clone()]).collect();
-        assert_eq!(joined, text, "windows must reconstruct the input");
-        // Newline-preferring: no window splits mid-line here.
-        for r in &ranges {
-            assert!(text[r.clone()].ends_with('\n') || r.end == text.len());
-        }
-    }
-
-    #[test]
-    fn chunk_byte_ranges_hard_splits_a_long_unbroken_run() {
-        // A single line longer than the limit must still be split, on a
-        // char boundary, into covering windows.
-        let text = "café".repeat(10); // 50 bytes, no newline, multibyte
-        let ranges = chunk_byte_ranges(&text, 8);
-        let mut prev = 0;
-        for r in &ranges {
-            assert_eq!(r.start, prev);
-            assert!(r.end - r.start <= 8);
-            assert!(text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
-            prev = r.end;
-        }
-        assert_eq!(prev, text.len());
     }
 
     #[test]
