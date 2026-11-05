@@ -154,12 +154,23 @@ final class ProjectsManagerSheetTests: XCTestCase {
         XCTAssertTrue(source.contains(".accessibilityLabel(ShellWordsCopy.fill(words.selectAccessibility, [\"title\": project.displayLabel]))"))
     }
 
-    /// A group's Never with traces waiting asks in the one Never
-    /// confirmation's words, named by the group.
-    func test_groupNeverWithTracesWaitingAsksByName() throws {
-        let request = ProjectsManagerSheet.BulkNever(ids: ["a", "b"], name: "api", pending: 3)
-        let copy = try XCTUnwrap(ProjectsManagerSheet.bulkNeverCopy(request))
-        let one = try XCTUnwrap(ProjectsSection.ignoreCopy(ProjectRow(projectId: "a", projectLabel: "api", mode: .ask, pendingCount: 3)))
-        XCTAssertEqual(copy, one)
+    /// A group's or a selection's Never with traces waiting asks in the one
+    /// Never confirmation's words, titled by how many projects it changes
+    /// (owner, 2026-11-04: "Set 3 projects to Never?" for a group too).
+    func test_groupAndBulkNeverAreTitledByCount() throws {
+        let words = try XCTUnwrap(ShellWords.table?.projectsManager)
+        let rows = [
+            ProjectRow(projectId: "a", projectLabel: "api (1111)", mode: .ask, pendingCount: 1),
+            ProjectRow(projectId: "b", projectLabel: "api (2222)", mode: .ask, pendingCount: 2),
+            ProjectRow(projectId: "c", projectLabel: "api (3333)", mode: .ask),
+        ]
+        let name = ProjectsManagerSheet.neverName(["a", "b", "c"], in: rows, words: words)
+        let copy = try XCTUnwrap(ProjectsManagerSheet.bulkNeverCopy(.init(ids: ["a", "b", "c"], name: name, pending: 3)))
+        XCTAssertEqual(copy.title, "Set 3 projects to Never?")
+        // One project is named, as its own row's Never is.
+        XCTAssertEqual(ProjectsManagerSheet.neverName(["b"], in: rows, words: words), "api (2222)")
+        // The group's name is never the title.
+        XCTAssertFalse(Self.source.contains("run(group.members, to: wanted, name: group.name)"))
+        XCTAssertTrue(Self.source.contains("name: Self.neverName(ids, in: rows, words: words)"))
     }
 }

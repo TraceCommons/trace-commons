@@ -602,7 +602,7 @@ pub fn paused_notice_words() -> PausedNoticeWords {
 /// contribution-mode table's (`project_copy::contribution_mode_copy`), and a
 /// bulk Never asks in `project_copy::ignore_project_copy`'s words.
 ///
-/// Every word here is DRAFT, NEEDS APPROVAL (2026-11-04).
+/// Every word here was approved by the owner 2026-11-04 (#1952).
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ProjectsManagerWords {
     /// The summary card's button that opens the sheet.
@@ -632,25 +632,25 @@ pub struct ProjectsManagerWords {
 #[must_use]
 pub fn projects_manager_words() -> ProjectsManagerWords {
     ProjectsManagerWords {
-        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        // Approved by the owner 2026-11-04 (#1952).
         manage: "Manage\u{2026}",
-        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        // Approved by the owner 2026-11-04 (#1952).
         search: "Search projects",
-        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        // Approved by the owner 2026-11-04 (#1952).
         all: "All",
-        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        // Approved by the owner 2026-11-04 (#1952).
         mode_count: "{title} {count}",
-        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        // Approved by the owner 2026-11-04 (#1952).
         selected: "{count} selected",
-        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        // Approved by the owner 2026-11-04 (#1952).
         set_to: "Set to",
-        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        // Approved by the owner 2026-11-04 (#1952).
         projects_count: "{count} projects",
-        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        // Approved by the owner 2026-11-04 (#1952).
         no_matches: "No matching projects.",
-        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        // Approved by the owner 2026-11-04 (#1952).
         group_accessibility: "{title}, {count} projects",
-        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        // Approved by the owner 2026-11-04 (#1952).
         select_accessibility: "Select {title}",
     }
 }

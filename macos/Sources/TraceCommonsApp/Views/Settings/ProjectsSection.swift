@@ -287,23 +287,33 @@ struct ProjectsManagerSheet: View {
         }
     }
 
-    /// The one Never confirmation's words (`ignore_project_copy`), for a
-    /// group by its name or for several projects by their count.
+    /// The one Never confirmation's words (`ignore_project_copy`), named by
+    /// `neverName`.
     static func bulkNeverCopy(_ request: BulkNever) -> ProjectIgnoreCopy? {
         ProjectIgnoreCopy.decode(fromJSON: TCCoreCopy.projectIgnoreCopyJSON(
             project: request.name, pending: request.pending))
     }
 
+    /// What a group or bulk Never confirmation calls the projects it
+    /// changes: the project's own name when it is one, else how many
+    /// ("Set 3 projects to Never?"), for a group as for a selection (owner,
+    /// 2026-11-04). Counted from the projects the change reaches, not those
+    /// already Never.
+    static func neverName(_ ids: [String], in rows: [ProjectRow], words: ShellWordsCopy.ProjectsManager) -> String {
+        if ids.count == 1, let row = rows.first(where: { $0.id == ids[0] }) { return row.displayLabel }
+        return ShellWordsCopy.fill(words.projectsCount, ["count": String(ids.count)])
+    }
+
     /// Carry out a group or bulk change: Ask and Never only, a Never that
     /// clears waiting traces asks first, anything else is refused.
-    private func run(_ rows: [ProjectRow], to mode: ProjectMode, name: String) {
+    private func run(_ rows: [ProjectRow], to mode: ProjectMode) {
         switch ProjectsManager.plan(rows, to: mode) {
         case .nothing, .refused: return
         case .apply(let ids):
             model.setProjectModes(ids, mode: mode)
             selection.subtract(ids)
         case .confirmNever(let ids, let pending):
-            bulkNever = BulkNever(ids: ids, name: name, pending: pending)
+            bulkNever = BulkNever(ids: ids, name: Self.neverName(ids, in: rows, words: words), pending: pending)
         }
     }
 
@@ -313,10 +323,7 @@ struct ProjectsManagerSheet: View {
     }
 
     private func bulkBar(_ selected: [ProjectRow]) -> some View {
-        let name = selected.count == 1
-            ? selected[0].displayLabel
-            : ShellWordsCopy.fill(words.projectsCount, ["count": String(selected.count)])
-        return HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
+        HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
             Text(ShellWordsCopy.fill(words.selected, ["count": String(selected.count)]))
                 .glassType(GlassTokens.TypeScale.label.weight(.semibold))
             Spacer(minLength: 0)
@@ -328,7 +335,7 @@ struct ProjectsManagerSheet: View {
                     get: { nil },
                     set: { wanted in
                         guard let wanted else { return }
-                        run(selected, to: wanted, name: name)
+                        run(selected, to: wanted)
                     }),
                 options: bulkOptions,
                 placeholder: words.setTo)
@@ -389,7 +396,7 @@ struct ProjectsManagerSheet: View {
                     get: { group.mode.flatMap { ProjectsManager.bulkModes.contains($0) ? $0 : nil } },
                     set: { wanted in
                         guard let wanted else { return }
-                        run(group.members, to: wanted, name: group.name)
+                        run(group.members, to: wanted)
                     }),
                 options: bulkOptions,
                 placeholder: shownMode)
