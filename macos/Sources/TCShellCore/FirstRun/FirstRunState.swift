@@ -2,10 +2,10 @@ import Foundation
 
 /// One screen of the animated first run (Ron's 2026-10-21 canvas, built
 /// natively on the owner's request of 2026-10-22). The order is
-/// `FirstRunNavigation.steps`: Welcome, then the tools to watch, how traces
-/// may be used, what they could earn, Private AI, and signing in last.
+/// `FirstRunNavigation.steps`: Welcome, then the tools to watch, Private AI,
+/// what traces could earn, how they may be used, and signing in last.
 /// Ron's #1030 Folders and Rules screens are gone: Tools asks what Folders
-/// did, and its Customize opens the per-repo rules in place.
+/// did, and Customize on Uses opens the per-repo rules in place.
 public enum FirstRunStep: String, Codable, Equatable, Sendable {
     case welcome
     case tools
@@ -87,9 +87,9 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// Folders added on Tools, each its own row. Set through `add(_:)` and
     /// answered through `answerAdded(path:watched:)`.
     public var addedFolders: [AddedFolder]
-    /// Rule per `project_id`, set under Customize on Tools.
+    /// Rule per `project_id`, set under Customize on Uses.
     public var rules: [String: ProjectMode]
-    /// Chosen past sessions per `project_id`, set under Customize on Tools.
+    /// Chosen past sessions per `project_id`, set under Customize on Uses.
     public var pastSelections: [String: Set<String>]
     public var scopes: Set<String>
     /// Writing it, to any value, clears `grantReady`: a new choice needs a
@@ -138,14 +138,6 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// daemon reports is not recorded again. A later enrollment (a new
     /// invite enrolled) clears it.
     public var signedOutOfEnrolment: Bool
-    /// Private AI only, chosen on Tools (`FirstRunNavigation.choosePrivateAIOnly`):
-    /// signed in to NEAR AI for Private AI, with nothing watched, queued,
-    /// consented or sent. Uses and Traces are skipped
-    /// (`FirstRunNavigation.steps(for:)`), and Start sends nothing but the
-    /// completion marker (`FirstRunPlan`). Sharing is added later from
-    /// Settings.
-    public var privateAIOnly: Bool
-
     public init(
         step: FirstRunStep = .welcome,
         invite: String = "",
@@ -167,8 +159,7 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         signedIn: Bool = false,
         nearAIEnrolled: Bool = false,
         notFound: Set<SourceKind> = [],
-        signedOutOfEnrolment: Bool = false,
-        privateAIOnly: Bool = false
+        signedOutOfEnrolment: Bool = false
     ) {
         self.step = step
         self.invite = invite
@@ -191,7 +182,6 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         self.nearAIEnrolled = nearAIEnrolled
         self.notFound = notFound
         self.signedOutOfEnrolment = signedOutOfEnrolment
-        self.privateAIOnly = privateAIOnly
     }
 
     /// Record what discovery found. A tool not on this Mac is not asked

@@ -77,15 +77,4 @@ final class FirstRunCreditNoteTests: XCTestCase {
             TracesScreenLayout.estimate(found: 1365, lookup: nil, earnsCredit: true),
             "We have detected some traces that can earn you credit.")
     }
-
-    func testTheLinkReturnsToUsesWithEveryChoiceKept() {
-        var state = FirstRunState(step: .traces, scopes: ["debugging_evaluation", "ranking_training"])
-        state = UsesScreenLayout.choosingSharing(state, .automatic)
-        state.privateAI = true
-        let back = TracesScreenLayout.backToUses(state)
-        XCTAssertEqual(back.step, .uses)
-        var same = back
-        same.step = .traces
-        XCTAssertEqual(same, state, "nothing but the step changes")
-    }
 }

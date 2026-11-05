@@ -126,8 +126,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let neither: String
         /// `{tool}`: a tool watched in two rows.
         public let oneFolderPerTool: String
-        /// Beside Continue: finish setup for Private AI alone.
-        public let privateAiOnly: String
     }
 
     public struct Rules: Decodable, Equatable, Sendable {
@@ -218,9 +216,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let theCommons: String
         /// Under Automatic before sign-in.
         public let automaticAfterSignIn: String
-        /// The two equal buttons above the optional uses.
-        public let allowAll: String
-        public let onlyRequired: String
         /// The collapsed section holding the required use; `{title}` is its
         /// title.
         public let alwaysOn: String

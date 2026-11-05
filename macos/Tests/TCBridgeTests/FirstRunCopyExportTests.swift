@@ -34,7 +34,6 @@ final class FirstRunCopyExportTests: XCTestCase {
         let privateAI = try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: try XCTUnwrap(TCPrivateInference.copyJSON())))
         XCTAssertEqual(copy.folders.signInFailed, privateAI.credentialFailed)
         XCTAssertFalse(copy.folders.signInFailed.lowercased().contains("skip"))
-        XCTAssertEqual(copy.tools.privateAiOnly, "Use Private AI only")
         XCTAssertNotEqual(copy.folders.lookupUnavailable, copy.join.inviteError)
         XCTAssertNotEqual(copy.uses.completeFailed, copy.uses.sharingRefused)
     }

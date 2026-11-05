@@ -123,6 +123,9 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
         Window("First run", id: WindowID.firstRun) {
             FirstRunWindowView(navigation: navigation)
                 .environmentObject(model)
+                // First run is dark whatever the app's appearance (Ron,
+                // 2026-11-05); the other windows keep following it.
+                .preferredColorScheme(.dark)
                 .tint(GlassTokens.Color.purpleSoft.color)
                 // No focus ring drawn round controls (owner, 2026-10-11).
                 .focusEffectDisabled()

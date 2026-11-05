@@ -112,8 +112,8 @@ pub struct FrameCopy {
     /// `private_ai.title_bold`, and free to diverge: one names a step, the
     /// other ends a title. DRAFT, NEEDS APPROVAL.
     pub step_private_ai: &'static str,
-    /// Approved 2026-10-08 (button rule). On Tools it opens the per-repo
-    /// rules in place (Ron, 2026-10-21).
+    /// Approved 2026-10-08 (button rule). On Uses it opens the per-repo
+    /// rules in place (Ron, 2026-11-05).
     pub custom_setup_instead: &'static str,
     pub continue_button: &'static str,
     /// Why Continue is off while a found tool is unanswered.
@@ -182,8 +182,9 @@ pub struct JoinCopy {
     /// Unread by the macOS shell since sign-in became required (owner,
     /// 2026-10-12): Join has no Skip. Kept so the wire table is unchanged.
     pub skip_note: &'static str,
-    /// Approved 2026-10-08 (button rule). Unread since 2026-10-12, as
-    /// `skip_note`.
+    /// Approved 2026-10-08 (button rule). Join has not read it since
+    /// 2026-10-12; Uses' primary action reads it until the person chooses
+    /// something (Ron, 2026-11-05).
     pub skip: &'static str,
 }
 
@@ -228,6 +229,9 @@ pub struct TracesCopy {
     /// back: only the link does, since it opens a step the footer's Back
     /// would not name. Owner, 2026-10-27; approved in these words in
     /// Zaki's review of #1690 (2026-10-28).
+    /// `no_credit` and `back_to_uses` are unread by the macOS shell since
+    /// Traces moved before Uses (Ron, 2026-11-05). Kept so the wire table is
+    /// unchanged.
     pub no_credit: &'static str,
     pub back_to_uses: &'static str,
 }
@@ -300,10 +304,6 @@ pub struct ToolsCopy {
     /// one of them to say "I don't use it"; this says so beside the added
     /// folder. Approved 2026-10-06.
     pub one_folder_per_tool: &'static str,
-    /// The secondary action beside Continue: finish setup for Private AI
-    /// alone, watching no tool and sharing nothing (tester report,
-    /// owner-approved path 2026-11-04). DRAFT, NEEDS APPROVAL (2026-11-04).
-    pub private_ai_only: &'static str,
 }
 
 /// Rules and the past-session picker (`rules-screen.tsx`).
@@ -417,13 +417,6 @@ pub struct UsesCopy {
     /// Under Automatic before sign-in: sign-in is the last step, and the
     /// grant needs the enrollment it makes. DRAFT, NEEDS APPROVAL.
     pub automatic_after_sign_in: &'static str,
-    /// Two buttons of equal weight above the optional data uses, which
-    /// start unticked (R7): `allow_all` ticks every optional use, the
-    /// public handle excepted; `only_required` unticks them, leaving the
-    /// required use. Owner, 2026-10-27; approved as written in Zaki's
-    /// review of #1690 (2026-10-28).
-    pub allow_all: &'static str,
-    pub only_required: &'static str,
     /// The collapsed section under the optional uses that holds the
     /// required use; `{title}` is that use's title. Owner, 2026-10-28.
     pub always_on: &'static str,
@@ -566,7 +559,6 @@ pub fn first_run_copy() -> FirstRunCopy {
             trajectory_label: "Exported traces",
             neither: "Neither",
             one_folder_per_tool: "{tool} can watch only one folder. Answer “Not used” on one of its rows.",
-            private_ai_only: "Use Private AI only",
         },
         rules: RulesCopy {
             title_light: "Set your ",
@@ -638,8 +630,6 @@ pub fn first_run_copy() -> FirstRunCopy {
             you_review: "You review",
             the_commons: "The commons",
             automatic_after_sign_in: "Starts when setup finishes after sign-in.",
-            allow_all: "Allow all",
-            only_required: "Only required",
             always_on: "Always on: {title} for shared traces",
             credit_scope: crate::consent_copy::DATA_USE_CREDIT_SCOPE,
             credit_required: crate::consent_copy::DATA_USE_CREDIT_REQUIRED,
@@ -1095,15 +1085,6 @@ mod tests {
         let line = copy.folders.sign_in_failed.to_lowercase();
         assert!(!line.contains("skip"), "{line}");
         assert!(line.contains("try again"), "{line}");
-    }
-
-    /// Private AI only is an action (copy guide rule 1) naming the
-    /// destination the way the rest of the app does ("Private AI").
-    #[test]
-    fn private_ai_only_is_named_by_its_destination() {
-        let copy = first_run_copy();
-        assert_eq!(copy.tools.private_ai_only, "Use Private AI only");
-        assert_ne!(copy.tools.private_ai_only, copy.frame.continue_button);
     }
 
     /// Every way leaving Folders or Tools can stop has a sentence, so
