@@ -193,7 +193,9 @@ pub struct JoinCopy {
 pub struct WelcomeCopy {
     /// Ron's words (2026-10-21). The shell raises it a word at a time.
     pub title: &'static str,
-    /// Ron's words (2026-10-21).
+    /// Benefit first, before any tool is asked for (Alejo's launch
+    /// feedback, 2026-11-05; it was Ron's 2026-10-21 line). DRAFT, NEEDS
+    /// APPROVAL.
     pub body: &'static str,
     /// DRAFT, NEEDS APPROVAL. Also Join's primary button on the Private AI
     /// only path, where nothing is shared so "Start sharing" would be
@@ -285,6 +287,10 @@ pub struct FoldersCopy {
 pub struct ToolsCopy {
     pub title_light: &'static str,
     pub title_bold: &'static str,
+    /// Under the title: what connecting gives, and which tools can (Alejo's
+    /// launch feedback, 2026-11-05: benefit first, and say it is for
+    /// terminal tools). DRAFT, NEEDS APPROVAL.
+    pub subtitle: &'static str,
     pub add_tool: &'static str,
     pub add_tool_caption: &'static str,
     /// A picked folder whose layout matches no kind the core reads.
@@ -424,6 +430,12 @@ pub struct UsesCopy {
     /// `credit_required` under its description (owner, 2026-10-27).
     pub credit_scope: &'static str,
     pub credit_required: &'static str,
+    /// Uses' button, which reads what it does (Alejo's launch feedback,
+    /// 2026-11-05): `dont_share_now` while no use is picked, drawn dark;
+    /// `share_traces` once one is, drawn as the primary. DRAFT, NEEDS
+    /// APPROVAL.
+    pub dont_share_now: &'static str,
+    pub share_traces: &'static str,
 }
 
 /// The Private AI card's fallbacks only; its words are
@@ -495,7 +507,7 @@ pub fn first_run_copy() -> FirstRunCopy {
         },
         welcome: WelcomeCopy {
             title: "Welcome to Near AI",
-            body: "Private AI solutions that put you in control of your data.",
+            body: "Think of it as a privacy VPN for your AI: when it's on, your AI work stays confidential. In about a minute, your coding tools run on private AI, and the traces you choose to share earn credit.",
             start: "Get started",
         },
         join: JoinCopy {
@@ -551,6 +563,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             title_light: "Connect your ",
             // Ron, 2026-10-21: "Connect your tools", under the graphic.
             title_bold: "tools",
+            subtitle: "Claude Code, Codex and OpenCode in your terminal can run on private AI. Connect one to start.",
             add_tool: "Not seeing your tool above? Click to add or drag & drop.",
             add_tool_caption: "OpenCode, a moved Claude Code or Codex folder, or a folder of exported traces",
             add_tool_refused: concat!(crate::app_name!(), " can't read this folder yet."),
@@ -633,6 +646,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             always_on: "Always on: {title} for shared traces",
             credit_scope: crate::consent_copy::DATA_USE_CREDIT_SCOPE,
             credit_required: crate::consent_copy::DATA_USE_CREDIT_REQUIRED,
+            dont_share_now: "Don't share traces now",
+            share_traces: "Share traces",
         },
         traces: TracesCopy {
             title_light: "What your traces ",
@@ -1129,8 +1144,14 @@ mod tests {
         assert_eq!(copy.welcome.title, "Welcome to Near AI");
         assert_eq!(
             copy.welcome.body,
-            "Private AI solutions that put you in control of your data."
+            "Think of it as a privacy VPN for your AI: when it's on, your AI work stays confidential. In about a minute, your coding tools run on private AI, and the traces you choose to share earn credit."
         );
+        assert_eq!(
+            copy.tools.subtitle,
+            "Claude Code, Codex and OpenCode in your terminal can run on private AI. Connect one to start."
+        );
+        assert_eq!(copy.uses.dont_share_now, "Don't share traces now");
+        assert_eq!(copy.uses.share_traces, "Share traces");
         assert_eq!(copy.tools.title_bold, "tools");
         for bold in [
             copy.tools.title_bold,
