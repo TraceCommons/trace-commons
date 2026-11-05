@@ -1712,6 +1712,29 @@ impl Queue {
         true
     }
 
+    /// Release every session held because the witness reported a measurement
+    /// outside the accepted set (`submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED`),
+    /// for a newly installed accepted list that may now include it. Each goes
+    /// back to waiting as a fresh offer dated `now`, like
+    /// [`Self::return_to_waiting`]: a standing opt-in applies to it again on
+    /// the next pass, and the next send asks the witness again under the new
+    /// list. `witness-not-trusted` holds stay: a list does not change whether
+    /// a quote, nonce, signer or certificate verifies. Returns how many moved.
+    pub fn release_measurement_holds(&mut self, now: DateTime<Utc>) -> usize {
+        let mut released = 0;
+        for e in self.entries.iter_mut() {
+            if e.state == QueueState::Pending
+                && e.reason_label.as_deref()
+                    == Some(crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED)
+            {
+                e.reason_label = None;
+                e.discovered_at = now;
+                released += 1;
+            }
+        }
+        released
+    }
+
     /// Whether `entry_id` is still an approval made on the contributor's
     /// behalf. For a caller that chose it earlier and let the lock go: in
     /// between, the contributor may have dismissed it or approved it
@@ -3178,6 +3201,48 @@ mod tests {
 
         assert!(q.reoffer_panicked_refusals("0.24.5"));
         assert_eq!(q.get(current.entry_id).unwrap().state, QueueState::Pending);
+    }
+
+    /// A new accepted list can cure a measurement that was not accepted, so
+    /// it releases those holds back to waiting -- and only those: a quote,
+    /// nonce, signer or certificate that did not verify is not something a
+    /// list changes.
+    #[test]
+    fn a_new_accepted_list_releases_only_measurement_holds() {
+        let measurement = crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED;
+        let untrusted = crate::submit::REASON_WITNESS_NOT_TRUSTED;
+        let mut q = Queue::new();
+        let held = entry("measurement", "2026-11-01T00:00:00Z");
+        let other = entry("untrusted", "2026-11-01T00:00:00Z");
+        let refused = entry("refused", "2026-11-01T00:00:00Z");
+        for e in [&held, &other, &refused] {
+            q.upsert(e.clone(), 5000).unwrap();
+        }
+        q.set_state(held.entry_id, QueueState::Pending, Some(measurement.into()));
+        q.set_state(other.entry_id, QueueState::Pending, Some(untrusted.into()));
+        q.set_state(
+            refused.entry_id,
+            QueueState::Refused,
+            Some(measurement.into()),
+        );
+        assert!(q.get(held.entry_id).unwrap().held_for_review());
+
+        let now = at("2026-11-05T00:00:00Z");
+        assert_eq!(q.release_measurement_holds(now), 1);
+        let released = q.get(held.entry_id).unwrap();
+        assert_eq!(released.state, QueueState::Pending);
+        assert_eq!(released.reason_label, None);
+        assert!(!released.held_for_review());
+        assert_eq!(released.discovered_at, now, "a fresh offer, dated now");
+        let kept = q.get(other.entry_id).unwrap();
+        assert_eq!(kept.reason_label.as_deref(), Some(untrusted));
+        assert!(kept.held_for_review());
+        assert_eq!(q.get(refused.entry_id).unwrap().state, QueueState::Refused);
+        assert_eq!(
+            q.release_measurement_holds(now),
+            0,
+            "nothing left to release"
+        );
     }
 
     /// The witness labels that hold a session for a person hold it only

@@ -2490,6 +2490,48 @@ async fn refresh_witness_accepted_list(
         return;
     };
     let _ = crate::witness::accepted_list::refresh(&cfg, shared.store.dir()).await;
+    // Read back rather than taken from the outcome: a list installed by a
+    // refusal inside a send (`accepted_list::refresh_on_refusal`) is stored
+    // too, and this fetch then finds nothing newer.
+    let dir = shared.store.dir();
+    let version = crate::witness::accepted_list::load_verified(
+        dir,
+        &crate::witness::accepted_list::trusted_keys(dir),
+    )
+    .map(|list| list.version);
+    note_accepted_list_version(shared, schedule, version, now);
+}
+
+/// When the stored accepted list is one `schedule` has not seen, release the
+/// sessions held because their witness reported a measurement outside the
+/// accepted set (`Queue::release_measurement_holds`), so the new list is
+/// asked about them. Holds for a witness that did not verify stay.
+fn note_accepted_list_version(
+    shared: &ipc::DaemonShared,
+    schedule: &mut crate::witness::accepted_list::ListRefreshSchedule,
+    version: Option<u64>,
+    now: chrono::DateTime<Utc>,
+) {
+    if !schedule.list_version_changed(version) {
+        return;
+    }
+    let decisions_owed_before = shared.decisions_owed_value();
+    let released = {
+        let mut q = shared.queue.lock().expect("queue lock");
+        let released = q.release_measurement_holds(now);
+        if released > 0 && q.save(&shared.store).is_err() {
+            tracing::warn!("could not save the queue after a new witness accepted list");
+        }
+        released
+    };
+    if released > 0 {
+        tracing::info!(
+            released,
+            "released sessions held for a measurement a new accepted list may accept"
+        );
+        shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+    shared.publish_if_decisions_owed_changed(decisions_owed_before);
 }
 
 /// How long after an upload the server is asked for verdicts.
@@ -3060,6 +3102,74 @@ mod tests {
                 uploaded_bytes: None,
                 previous_account: false,
             }
+        }
+
+        /// A changed accepted list releases measurement holds and leaves
+        /// `witness-not-trusted` holds alone; an unchanged one releases
+        /// nothing.
+        #[test]
+        fn a_changed_accepted_list_releases_measurement_holds_only() {
+            let (_dir, shared) = fixture();
+            let (measurement, untrusted) = {
+                let mut q = shared.queue.lock().unwrap();
+                let mut ids = Vec::new();
+                for (name, label) in [
+                    ("m", crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED),
+                    ("u", crate::submit::REASON_WITNESS_NOT_TRUSTED),
+                ] {
+                    let e = queue::QueueEntry {
+                        entry_id: queue::entry_id_for(name),
+                        session_hash: format!("sha256:{name}"),
+                        source: "claude-code".into(),
+                        project_key: format!("/Users/z/code/{name}"),
+                        project_label: name.into(),
+                        path: std::path::PathBuf::from(format!("/Users/z/{name}.jsonl")),
+                        size_bytes: 10,
+                        discovered_at: at(0),
+                        state: queue::QueueState::Pending,
+                        reason_label: Some(label.to_string()),
+                        ..Default::default()
+                    };
+                    ids.push(e.entry_id);
+                    q.upsert(e, 5000).unwrap();
+                }
+                (ids[0], ids[1])
+            };
+            let mut schedule = crate::witness::accepted_list::ListRefreshSchedule::starting(at(0));
+            let mut rx = shared.events.subscribe();
+
+            note_accepted_list_version(&shared, &mut schedule, Some(7), at(1));
+            {
+                let q = shared.queue.lock().unwrap();
+                assert_eq!(q.get(measurement).unwrap().reason_label, None);
+                assert_eq!(
+                    q.get(untrusted).unwrap().reason_label.as_deref(),
+                    Some(crate::submit::REASON_WITNESS_NOT_TRUSTED)
+                );
+            }
+            assert!(
+                drain(&mut rx)
+                    .iter()
+                    .any(|(event, _)| event == ipc::EVENT_QUEUE_CHANGED),
+                "the release is published"
+            );
+
+            // Held again under the same list: the same version releases nothing.
+            shared.queue.lock().unwrap().set_state(
+                measurement,
+                queue::QueueState::Pending,
+                Some(crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED.to_string()),
+            );
+            note_accepted_list_version(&shared, &mut schedule, Some(7), at(2));
+            assert!(
+                shared
+                    .queue
+                    .lock()
+                    .unwrap()
+                    .get(measurement)
+                    .unwrap()
+                    .held_for_review()
+            );
         }
 
         fn fixture() -> (tempfile::TempDir, ipc::DaemonShared) {

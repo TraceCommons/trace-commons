@@ -7213,10 +7213,12 @@ mod tests {
         .upload_entry(source.as_ref(), &reference, &entry, Utc::now())
         .await
         .unwrap();
+        // Not retried, and not a terminal refusal: held for a person under
+        // the hold a later accepted list releases (`witness_trust_hold`).
         assert_eq!(
             decision,
-            UploadDecision::Refused {
-                reason_label: WITNESS_EXPECTED_MEASUREMENT_CONTROL.to_string()
+            UploadDecision::ApprovalStale {
+                reason_label: REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED.to_string()
             }
         );
         assert!(capture.lock().unwrap().bodies.is_empty(), "nothing sent");
