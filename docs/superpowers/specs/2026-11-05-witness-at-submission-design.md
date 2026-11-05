@@ -471,6 +471,68 @@ submission is necessary but not sufficient for large sessions.
 - **Labels only**, as everywhere on this path: `witness-timeout`,
   `witness-too-large`, `witness_saturated`. No content, no host.
 
+### 6.1 The witness worker (built 2026-11-05)
+
+Owner direction, 2026-11-05: "the witness should not synchronously block
+anything." This changes section 6's assumption that the upload pass makes
+the witness call. The daemon now has a witness worker
+(`daemon/witness_worker.rs`), and every daemon witness call runs there.
+
+- **Async.** The upload pass runs every gate it always ran, then hands an
+  approved entry that still needs a witness review to the worker and moves
+  on. It never awaits a witness call, so watching, expiry, history,
+  admission and other uploads are never held up by one.
+- **Bounded concurrency.** One background call at a time
+  (`BACKGROUND_SLOTS`), declared background so a busy witness turns it
+  away first. A person's explicit review (`witness_preview_request` with
+  `background: true`) has its own lane (`INTERACTIVE_SLOTS`), so it never
+  waits behind background work.
+- **Result.** The worker pins the certified review on the entry, which
+  stays approved (`Queue::pin_witnessed_approval`); the next pass uploads
+  exactly those bytes through the existing witness-pin path, which
+  re-mints the claim, checks the certified grants and applies the risk and
+  Scrub holds for a session nobody looked at. The worker never uploads.
+- **Persistence and restart.** Nothing new is persisted. The entry stays
+  approved while the witness works and the in-flight set is in memory, so
+  a restart, stop or quiesce loses only the call, and the next pass sends
+  the raw session again. That re-send happens only when the first request's
+  result was never received: a received result is pinned on disk before
+  anything else, and a pinned entry is never sent to the witness again. A
+  result applies only while the approval it ran under still holds (a
+  cancel or revoke meanwhile drops it).
+- **Retries.** `witness_saturated` defers the entry and every other queued
+  one until the witness's own delay. A witness whose evidence could not be
+  fetched (`submit::witness_failure_is_transient`: `witness_timeout`,
+  `witness_unreachable`, `witness_attestation_unavailable`,
+  `witness_collateral_unavailable`) keeps the approval and is retried on
+  the daemon's transient-upload backoff (#1964), and the worker takes no
+  other session until that retry. Once that budget is spent the entry
+  returns to Pending under the same label, held for a person; it is never
+  refused. Evidence that was fetched and did not verify
+  (`submit::witness_trust_hold`) is never retried: the entry returns to
+  Pending under `witness-not-trusted`, or `witness-measurement-not-accepted`
+  for a measurement a new accepted list may admit. This replaces the "3
+  consecutive timeouts, then 'Try again later'" rule earlier in this
+  section.
+- **Pause, unenroll, panics.** A job checks pause, quiesce, the unenroll
+  hold and shutdown before it sends anything. Unenroll stops a call in
+  flight and waits for the worker. A panic in a job refuses that entry
+  under `redaction-panicked` and rests the lane with backoff; the worker
+  carries on.
+- **Phase 4 plugs in here.** Today an entry with a plain (local) pin under
+  a witness still refuses `witness_certificate_missing` at upload and is
+  not sent to the worker (`witness_worker::needs_witness_job`). Phase 4
+  widens that predicate to plain pins and runs the subset check in the
+  worker between "witnessed" and "pin": pass pins the witness's bytes as
+  now, fail saves them and returns the entry to Pending with
+  `witness-changed-after-review`. The row states in section 6 map onto the
+  worker: "Running privacy check..." while the entry is in flight
+  (`status.witness_capacity.checking_sessions`), "Privacy check
+  unavailable. Trying again." while it waits out a retry.
+- **CLI.** `submit` still waits for its results, but works on two
+  sessions at once (`CLI_SUBMIT_CONCURRENCY`) and prints progress per
+  session.
+
 ## 7. Prerequisite: devices must be able to learn a new witness measurement
 
 **Owner decision (2026-11-04): hold the witness redeploy until this

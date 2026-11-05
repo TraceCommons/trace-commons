@@ -954,6 +954,10 @@ enum DaemonEvent: Equatable {
     /// cache -- see the contract's note that a cache hit "no event
     /// follows".
     case previewReady(PreviewRequestResult)
+    /// `witness_review_ready`: a review started in the background finished.
+    /// `failure` is `nil` when it was pinned, else the refusal or busy
+    /// answer with the daemon's own `view`, as a synchronous call throws it.
+    case witnessReviewReady(entryID: String, failure: DaemonClient.Failure?)
     /// `near_ai_balance_changed`: NEAR AI credit arrived; read the balance
     /// again.
     case nearAiBalanceChanged

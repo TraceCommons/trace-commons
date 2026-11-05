@@ -751,53 +751,138 @@ pub async fn submit_sessions_with_progress(
     if opts.unenrolled_preview && !opts.dry_run {
         anyhow::bail!("unenrolled preview requires dry-run");
     }
-    let mut ctx = crate::daemon::run_blocking(|| {
-        SubmitContext::new(store, cfg, opts, near_ai_settings_from_env())
-    })?;
-    run_batch(
-        sessions,
-        async |(source, session_ref): (Box<dyn TraceSource>, SessionRef)| {
-            // The CLI's `submit`: a person ran the command, so the receipt
-            // says a person approved it, with the `--verdict` they passed
-            // (K7). Set per session because `submit_loaded` takes it
-            // one-shot.
-            ctx.set_upload_provenance(false, opts.verdict.map(|v| v.name().to_string()));
-            ctx.submit_one(source.as_ref(), &session_ref).await
-        },
-        &mut progress,
-    )
-    .await
+    // One pipeline per lane, so sessions go through the witness and ingest
+    // side by side rather than each waiting for the one before. Each mints
+    // its own claim and runs the canary once.
+    let lanes = CLI_SUBMIT_CONCURRENCY.min(sessions.len()).max(1);
+    let mut contexts = Vec::with_capacity(lanes);
+    for _ in 0..lanes {
+        contexts.push(crate::daemon::run_blocking(|| {
+            SubmitContext::new(store, cfg, opts, near_ai_settings_from_env())
+        })?);
+    }
+    let lanes: Vec<_> = contexts
+        .into_iter()
+        .map(|mut ctx| {
+            async move |(source, session_ref): (Box<dyn TraceSource>, SessionRef)| {
+                // The CLI's `submit`: a person ran the command, so the
+                // receipt says a person approved it, with the `--verdict`
+                // they passed (K7). Set per session because `submit_loaded`
+                // takes it one-shot.
+                ctx.set_upload_provenance(false, opts.verdict.map(|v| v.name().to_string()));
+                ctx.submit_one(source.as_ref(), &session_ref).await
+            }
+        })
+        .collect();
+    run_batch(sessions, lanes, &mut progress).await
 }
 
-/// The batch loop behind [`submit_sessions_with_progress`]: one session at
-/// a time, and after a [`WITNESS_BATCH_STOP_LABELS`] outcome, none of the
-/// rest reaches `submit` at all.
-async fn run_batch<S>(
+/// Sessions one CLI `submit` works on at once. Two: a witnessed session
+/// can take minutes, and the witness serves a handful of requests at a time
+/// for every contributor, so more would mostly queue on its side.
+pub const CLI_SUBMIT_CONCURRENCY: usize = 2;
+
+/// The batch loop behind [`submit_sessions_with_progress`]: each lane takes
+/// the next session as it finishes the last, so up to `lanes.len()` are in
+/// flight at once. After a [`WITNESS_BATCH_STOP_LABELS`] outcome no session
+/// not yet started reaches `submit` at all. Outcomes come back in the
+/// order the sessions were given; progress is reported per session, by its
+/// position, as it starts and as it ends. A fail-closed precondition (`Err`)
+/// stops every lane from taking more and is returned.
+async fn run_batch<S, F>(
     sessions: Vec<S>,
-    mut submit: impl AsyncFnMut(S) -> Result<SubmitOutcome>,
+    lanes: Vec<F>,
     progress: &mut impl FnMut(usize, usize, Option<&SubmitOutcome>),
-) -> Result<Vec<SubmitOutcome>> {
+) -> Result<Vec<SubmitOutcome>>
+where
+    F: AsyncFnMut(S) -> Result<SubmitOutcome>,
+{
+    use std::sync::Mutex;
     let total = sessions.len();
-    let mut outcomes = Vec::with_capacity(total);
-    let mut stopped: Option<&'static str> = None;
-    for session in sessions {
-        let outcome = match stopped {
-            // Fail closed: nothing is redacted locally in the witness's
-            // place and nothing is sent.
-            Some(label) => SubmitOutcome::Failed {
-                reason_label: label.to_string(),
-            },
-            None => {
-                progress(outcomes.len() + 1, total, None);
-                let outcome = submit(session).await?;
-                stopped = witness_batch_stop(&outcome);
-                outcome
+    let work = Mutex::new(
+        sessions
+            .into_iter()
+            .enumerate()
+            .collect::<std::collections::VecDeque<_>>(),
+    );
+    let outcomes: Mutex<Vec<Option<SubmitOutcome>>> =
+        Mutex::new((0..total).map(|_| None).collect());
+    let stopped: Mutex<Option<&'static str>> = Mutex::new(None);
+    let failed: Mutex<Option<anyhow::Error>> = Mutex::new(None);
+    let progress = Mutex::new(progress);
+    let report = |n: usize, outcome: Option<&SubmitOutcome>| {
+        (progress.lock().expect("progress lock"))(n, total, outcome);
+    };
+    let lane = async |mut submit: F| {
+        loop {
+            if failed.lock().expect("batch lock").is_some() {
+                return;
             }
-        };
-        progress(outcomes.len() + 1, total, Some(&outcome));
-        outcomes.push(outcome);
+            let Some((index, session)) = work.lock().expect("batch lock").pop_front() else {
+                return;
+            };
+            let stop = *stopped.lock().expect("batch lock");
+            let outcome = match stop {
+                // Fail closed: nothing is redacted locally in the witness's
+                // place and nothing is sent.
+                Some(label) => SubmitOutcome::Failed {
+                    reason_label: label.to_string(),
+                },
+                None => {
+                    report(index + 1, None);
+                    match submit(session).await {
+                        Ok(outcome) => {
+                            if let Some(label) = witness_batch_stop(&outcome) {
+                                stopped.lock().expect("batch lock").get_or_insert(label);
+                            }
+                            outcome
+                        }
+                        Err(e) => {
+                            failed.lock().expect("batch lock").get_or_insert(e);
+                            return;
+                        }
+                    }
+                }
+            };
+            report(index + 1, Some(&outcome));
+            outcomes.lock().expect("batch lock")[index] = Some(outcome);
+        }
+    };
+    let mut running: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>>> =
+        lanes.into_iter().map(|f| Box::pin(lane(f)) as _).collect();
+    // Join every lane, polling each that has not finished.
+    std::future::poll_fn(|cx| {
+        running.retain_mut(|lane| lane.as_mut().poll(cx).is_pending());
+        if running.is_empty() {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+    drop(running);
+    if let Some(e) = failed.into_inner().expect("batch lock") {
+        return Err(e);
     }
-    Ok(outcomes)
+    Ok(outcomes
+        .into_inner()
+        .expect("batch lock")
+        .into_iter()
+        .map(|o| o.expect("every session has an outcome"))
+        .collect())
+}
+
+/// What [`SubmitContext::witness_for_pin`] produced.
+pub(crate) enum WitnessForPin {
+    /// The witness certified this session's raw contribution.
+    Witnessed {
+        response: Box<WitnessedEnvelope>,
+        attested_inference: Box<InferenceAttestationRecord>,
+    },
+    /// Nothing was certified, and this is the outcome to report: a refusal,
+    /// a busy witness (`Failed` under [`REASON_WITNESS_SATURATED`]), or the
+    /// claim's own refusal.
+    Outcome(SubmitOutcome),
 }
 
 /// A long-lived submit pipeline: everything `submit_sessions` used to hoist
@@ -1615,6 +1700,215 @@ impl<'a> SubmitContext<'a> {
         Ok((parsed, response, attested_inference, shipped))
     }
 
+    /// Send one raw contribution to the configured witness and return its
+    /// certified envelope, or the outcome to report instead.
+    ///
+    /// The witnessed arm of `submit_loaded`, shared with the daemon's
+    /// witness worker (`daemon::witness_worker`) so the two cannot drift:
+    /// the measurement pin is judged before the claim is minted, the claim
+    /// is minted before anything raw is sent, and a busy witness is a
+    /// retry, never a refusal. `Err` is a fail-closed precondition.
+    async fn witness_raw(
+        &mut self,
+        settings: &WitnessSettings,
+        raw: RawTraceContribution,
+        transcript: &crate::source::SessionTranscript,
+        now: DateTime<Utc>,
+    ) -> Result<
+        std::result::Result<
+            (
+                TraceContributionEnvelope,
+                WitnessedEnvelope,
+                InferenceAttestationRecord,
+            ),
+            SubmitOutcome,
+        >,
+    > {
+        // The pin is judged BEFORE the mint, which is before anything
+        // reaches the network. An unpinned client cannot judge any quote it
+        // receives, so minting a claim for a submission that was always
+        // going to be refused would spend a round trip to learn nothing.
+        match settings.trust() {
+            Ok(trust) if trust.is_pinned() => {}
+            Ok(_) => {
+                record_last_result(WitnessLastResult::Refused {
+                    label: WITNESS_EXPECTED_MEASUREMENT_CONTROL.to_string(),
+                    certificate_obtained: false,
+                });
+                return Ok(Err(refused(
+                    WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+                    &transcript.session_hash,
+                )));
+            }
+            Err(_) => {
+                record_last_result(WitnessLastResult::Refused {
+                    label: "witness_expected_measurement_malformed".to_string(),
+                    certificate_obtained: false,
+                });
+                return Ok(Err(refused(
+                    "witness_expected_measurement_malformed",
+                    &transcript.session_hash,
+                )));
+            }
+        }
+        // The claim is minted BEFORE anything raw is sent. The grants have
+        // to be inside the certified bytes, and a stamp afterwards is a byte
+        // change the certificate does not cover.
+        let token = match self.ensure_claim(now, &transcript.session_hash).await? {
+            Ok(token) => token,
+            Err(outcome) => return Ok(Err(outcome)),
+        };
+        // Kept only when a signed accepted list could be fetched (a trusted
+        // list key is compiled in), for the one retry below.
+        let retry_raw = (!crate::witness::accepted_list::trusted_keys(self.store.dir()).is_empty())
+            .then(|| raw.clone());
+        let mut witnessed_outcome = self
+            .witness_envelope(
+                settings,
+                raw,
+                transcript.attested_call.as_deref(),
+                &token,
+                now,
+            )
+            .await;
+        // A measurement refusal is decided from the quote, before anything
+        // raw is sent. Before reporting it, fetch the signed accepted list
+        // once (spaced); only if a newer list was stored is the witness asked
+        // again, once, under the widened trust.
+        if let (Err(WITNESS_EXPECTED_MEASUREMENT_CONTROL), Some(retry_raw)) =
+            (&witnessed_outcome, retry_raw)
+        {
+            if crate::witness::accepted_list::refresh_on_refusal(self.cfg, self.store.dir(), now)
+                .await
+            {
+                witnessed_outcome = self
+                    .witness_envelope(
+                        settings,
+                        retry_raw,
+                        transcript.attested_call.as_deref(),
+                        &token,
+                        now,
+                    )
+                    .await;
+            }
+        }
+        match witnessed_outcome {
+            // The record is dropped on the CLI path: the CLI keeps no
+            // per-entry store to write it to. The daemon's review path and
+            // its witness worker are where it is kept.
+            Ok((parsed, response, attested_inference, shipped)) => {
+                // `parse_witnessed_envelope` inside `witness_envelope` is
+                // what verified this certificate against the bytes that came
+                // back, so reaching here IS "obtained and verified" -- there
+                // is no other way in.
+                record_last_result(WitnessLastResult::Certified {
+                    n_of_m: n_of_m_from_certificate(&response.certificate_json),
+                });
+                self.last_receipt_shipped = shipped;
+                Ok(Ok((parsed, response, attested_inference)))
+            }
+            Err(label) => {
+                record_last_result(WitnessLastResult::Refused {
+                    label: label.to_string(),
+                    certificate_obtained: certificate_obtained_for(label),
+                });
+                // A busy witness judged nothing. The session is held for a
+                // retry, never refused for it.
+                if label == trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR {
+                    return Ok(Err(SubmitOutcome::Failed {
+                        reason_label: REASON_WITNESS_SATURATED.to_string(),
+                    }));
+                }
+                // Nor one whose evidence could not be fetched: `Failed`,
+                // which the daemon retries (`witness_failure_is_transient`).
+                if witness_failure_is_transient(label) {
+                    return Ok(Err(SubmitOutcome::Failed {
+                        reason_label: label.to_string(),
+                    }));
+                }
+                Ok(Err(refused(label, &transcript.session_hash)))
+            }
+        }
+    }
+
+    /// The witness half of a daemon upload, on its own: build the raw
+    /// contribution an approved entry would send, with the approval's own
+    /// verdict and correction, and have the witness certify it. Nothing is
+    /// uploaded; the daemon pins the certified bytes on the approved entry
+    /// and a later upload pass sends exactly those (see
+    /// `daemon::witness_worker`).
+    ///
+    /// Runs the same canary and size gates `submit_loaded` runs before its
+    /// witness call, in the same order. `Err` is a fail-closed precondition
+    /// (`SubmitPreconditionFailure`), as there.
+    pub(crate) async fn witness_for_pin(
+        &mut self,
+        transcript: &crate::source::SessionTranscript,
+        verdict: Option<crate::envelope::ContributorVerdict>,
+        correction: Option<&str>,
+        large_session_permit: Option<crate::large_session_gate::LargeSessionPermit>,
+    ) -> Result<WitnessForPin> {
+        self.last_receipt_shipped = ReceiptShipped::NoCall;
+        self.last_witness_retry_after
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        let Some(settings) = self.cfg.witness.clone() else {
+            return Ok(WitnessForPin::Outcome(refused(
+                "witness-not-configured",
+                &transcript.session_hash,
+            )));
+        };
+        let redactor = match build_redactor_with(
+            &self.effective_cfg,
+            transcript.cwd.as_deref(),
+            self.near_ai.clone(),
+        ) {
+            Ok(r) => r,
+            Err(_) => {
+                return Ok(WitnessForPin::Outcome(refused(
+                    "pii-filter-unavailable",
+                    &transcript.session_hash,
+                )));
+            }
+        };
+        if !self.canary_checked {
+            canary_self_test_async(&redactor)
+                .await
+                .map_err(|_| SubmitPreconditionFailure(PRECONDITION_CANARY_FAILED))?;
+            self.canary_checked = true;
+            self.canary_runs += 1;
+        }
+        let now = Utc::now();
+        let raw = crate::envelope::build_raw_contribution_with_correction(
+            transcript,
+            &self.effective_cfg,
+            now,
+            verdict,
+            correction,
+        );
+        let envelope_limit = self.store.envelope_limit_bytes();
+        if raw_contribution_size_ok(&raw, envelope_limit).is_err() {
+            let size = raw_contribution_size(&raw).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+            return Ok(WitnessForPin::Outcome(refused_for_size(
+                &transcript.session_hash,
+                size,
+                envelope_limit,
+            )));
+        }
+        // The build is done. A large session's permit goes before the
+        // witness call, which can take minutes, so a preview of another
+        // large session is not held up behind the network.
+        drop(large_session_permit);
+        Ok(
+            match self.witness_raw(&settings, raw, transcript, now).await? {
+                Ok((_, response, attested_inference)) => WitnessForPin::Witnessed {
+                    response: Box::new(response),
+                    attested_inference: Box::new(attested_inference),
+                },
+                Err(outcome) => WitnessForPin::Outcome(outcome),
+            },
+        )
+    }
+
     /// What the most recent `submit_loaded` receipt fetch produced.
     ///
     /// Meaningful immediately after a submission returns `Submitted`: the
@@ -1972,125 +2266,13 @@ impl<'a> SubmitContext<'a> {
                         }
                     }
                     Some(settings) => {
-                        // The pin is judged BEFORE the mint, which is before
-                        // anything reaches the network. An unpinned client
-                        // cannot judge any quote it receives, so minting a
-                        // claim for a submission that was always going to be
-                        // refused would spend a round trip to learn nothing.
-                        match settings.trust() {
-                            Ok(trust) if trust.is_pinned() => {}
-                            Ok(_) => {
-                                record_last_result(WitnessLastResult::Refused {
-                                    label: WITNESS_EXPECTED_MEASUREMENT_CONTROL.to_string(),
-                                    certificate_obtained: false,
-                                });
-                                return Ok(refused(
-                                    WITNESS_EXPECTED_MEASUREMENT_CONTROL,
-                                    &transcript.session_hash,
-                                ));
-                            }
-                            Err(_) => {
-                                record_last_result(WitnessLastResult::Refused {
-                                    label: "witness_expected_measurement_malformed".to_string(),
-                                    certificate_obtained: false,
-                                });
-                                return Ok(refused(
-                                    "witness_expected_measurement_malformed",
-                                    &transcript.session_hash,
-                                ));
-                            }
-                        }
-                        // The claim is minted BEFORE anything raw is sent. The
-                        // grants have to be inside the certified bytes, and a
-                        // stamp afterwards is a byte change the certificate
-                        // does not cover.
-                        let token = match self.ensure_claim(now, &transcript.session_hash).await? {
-                            Ok(token) => token,
-                            Err(outcome) => return Ok(outcome),
-                        };
-                        // Kept only when a signed accepted list could be
-                        // fetched (a trusted list key is compiled in), for the
-                        // one retry below.
-                        let retry_raw =
-                            (!crate::witness::accepted_list::trusted_keys(self.store.dir())
-                                .is_empty())
-                            .then(|| raw.clone());
-                        let mut witnessed_outcome = self
-                            .witness_envelope(
-                                &settings,
-                                raw,
-                                transcript.attested_call.as_deref(),
-                                &token,
-                                now,
-                            )
-                            .await;
-                        // A measurement refusal is decided from the quote,
-                        // before anything raw is sent. Before reporting it,
-                        // fetch the signed accepted list once (spaced); only
-                        // if a newer list was stored is the witness asked
-                        // again, once, under the widened trust.
-                        if let (Err(WITNESS_EXPECTED_MEASUREMENT_CONTROL), Some(retry_raw)) =
-                            (&witnessed_outcome, retry_raw)
-                        {
-                            if crate::witness::accepted_list::refresh_on_refusal(
-                                self.cfg,
-                                self.store.dir(),
-                                now,
-                            )
-                            .await
-                            {
-                                witnessed_outcome = self
-                                    .witness_envelope(
-                                        &settings,
-                                        retry_raw,
-                                        transcript.attested_call.as_deref(),
-                                        &token,
-                                        now,
-                                    )
-                                    .await;
-                            }
-                        }
-                        match witnessed_outcome {
-                            // The record is dropped on this path: the CLI keeps
-                            // no per-entry store to write it to. The daemon's
-                            // review path is where it is kept.
-                            Ok((parsed, response, attested_inference, shipped)) => {
-                                // `parse_witnessed_envelope` inside
-                                // `witness_envelope` is what verified this
-                                // certificate against the bytes that came
-                                // back, so reaching here IS "obtained and
-                                // verified" -- there is no other way in.
-                                record_last_result(WitnessLastResult::Certified {
-                                    n_of_m: n_of_m_from_certificate(&response.certificate_json),
-                                });
-                                self.last_receipt_shipped = shipped;
+                        match self.witness_raw(&settings, raw, &transcript, now).await? {
+                            Ok((parsed, response, attested_inference)) => {
                                 witnessed = Some(response);
                                 witnessed_record = Some(attested_inference);
                                 parsed
                             }
-                            Err(label) => {
-                                record_last_result(WitnessLastResult::Refused {
-                                    label: label.to_string(),
-                                    certificate_obtained: certificate_obtained_for(label),
-                                });
-                                // A busy witness judged nothing. The session
-                                // is held for a retry, never refused for it.
-                                if label
-                                    == trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR
-                                {
-                                    return Ok(SubmitOutcome::Failed {
-                                        reason_label: REASON_WITNESS_SATURATED.to_string(),
-                                    });
-                                }
-                                // Nor one that did not answer: `Failed`, which
-                                // the daemon retries.
-                                if witness_failure_is_transient(label) {
-                                    return Ok(SubmitOutcome::Failed {
-                                        reason_label: label.to_string(),
-                                    });
-                                }
-                                return Ok(refused(label, &transcript.session_hash));
-                            }
+                            Err(outcome) => return Ok(outcome),
                         }
                     }
                 }
@@ -4745,7 +4927,7 @@ mod tests {
             let mut started = Vec::new();
             let outcomes = run_batch(
                 vec![1, 2, 3, 4],
-                async |n: u32| {
+                vec![async |n: u32| {
                     attempted.push(n);
                     Ok(if n == 2 {
                         refused(stop, "hash")
@@ -4754,7 +4936,7 @@ mod tests {
                             reason_label: "unrelated".to_string(),
                         }
                     })
-                },
+                }],
                 &mut |done, total, outcome: Option<&SubmitOutcome>| {
                     if let Some(outcome) = outcome {
                         seen.push((done, total, outcome_progress_label(outcome)));
@@ -4790,15 +4972,68 @@ mod tests {
         }
     }
 
+    /// `submit` works on [`CLI_SUBMIT_CONCURRENCY`] sessions at once: a slow
+    /// session (a witness taking minutes) no longer holds up the next one.
+    /// Outcomes keep the order the sessions were given, and every session
+    /// reports its start and its end by position.
+    #[tokio::test]
+    async fn a_batch_works_on_sessions_side_by_side() {
+        let live = std::sync::atomic::AtomicUsize::new(0);
+        let most = std::sync::atomic::AtomicUsize::new(0);
+        let mut started = Vec::new();
+        let mut ended = Vec::new();
+        let lane = || {
+            async |n: u32| {
+                let now = live.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                most.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+                // The first session is slow; the rest are quick.
+                let ms = if n == 1 { 400 } else { 50 };
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(SubmitOutcome::Failed {
+                    reason_label: format!("s{n}"),
+                })
+            }
+        };
+        let outcomes = run_batch(
+            vec![1, 2, 3, 4, 5],
+            (0..CLI_SUBMIT_CONCURRENCY).map(|_| lane()).collect(),
+            &mut |done, total, outcome: Option<&SubmitOutcome>| {
+                assert_eq!(total, 5);
+                match outcome {
+                    None => started.push(done),
+                    Some(_) => ended.push(done),
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            most.load(std::sync::atomic::Ordering::SeqCst),
+            CLI_SUBMIT_CONCURRENCY
+        );
+        let labels: Vec<String> = outcomes.iter().map(outcome_progress_label).collect();
+        assert_eq!(
+            labels,
+            ["s1", "s2", "s3", "s4", "s5"].map(|l| format!("failed ({l})"))
+        );
+        // The quick sessions finished while the slow first one ran.
+        assert_ne!(ended.first(), Some(&1), "the slow session held up the rest");
+        started.sort_unstable();
+        ended.sort_unstable();
+        assert_eq!(started, vec![1, 2, 3, 4, 5]);
+        assert_eq!(ended, vec![1, 2, 3, 4, 5]);
+    }
+
     #[tokio::test]
     async fn a_batch_carries_on_past_an_ordinary_refusal() {
         let mut attempted = 0;
         run_batch(
             vec![1, 2, 3],
-            async |_n: u32| {
+            vec![async |_n: u32| {
                 attempted += 1;
                 Ok(refused("witness_attestation_unavailable", "hash"))
-            },
+            }],
             &mut |_, _, _| {},
         )
         .await
@@ -7213,8 +7448,8 @@ mod tests {
         .upload_entry(source.as_ref(), &reference, &entry, Utc::now())
         .await
         .unwrap();
-        // Not retried, and not a terminal refusal: held for a person under
-        // the hold a later accepted list releases (`witness_trust_hold`).
+        // Held for a person under the measurement hold (#1964), which a newer
+        // accepted list releases; never a terminal refusal.
         assert_eq!(
             decision,
             UploadDecision::ApprovalStale {

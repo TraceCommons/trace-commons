@@ -21,6 +21,17 @@ old behaviour, because no application has shipped against `v1` yet. See
 
 **New in this revision (additive, no existing field or shape changed):**
 
+- The witness no longer blocks anything. The upload pass hands an approved
+  entry that needs a witness review to the daemon's witness worker and moves
+  on; the worker pins the certified review on the still-approved entry and a
+  later pass uploads it. `status.witness_capacity` gains
+  `privacy_check_sessions` and `checking_sessions`. A witness that could not
+  be reached or did not answer is retried by the worker as before (see the
+  transient-upload backoff), and the worker rests until that retry.
+  `witness_preview_request` takes an optional
+  `background: true` that answers `in_progress` at once and ends with a new
+  `witness_review_ready` event. See [`witness_capacity`](#witness_capacity)
+  and "Explicit witnessed review".
 - `list_projects` rows whose label carries the daemon's disambiguating
   suffix carry `collision` (`group`, `base_label`, `suffix`), so a client
   groups rows by the daemon's own collision test rather than by parsing a
@@ -662,7 +673,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `referral_codes_disable` | `code_id` (**required**, a UUID the list answered) | `code_id`, `state` | asynchronous only; account session. People who joined with the code keep earning its owner a bonus. `referral_code_not_found` for a code this account does not hold. Audit row `referral-code-disabled` |
 | `referral_apply` | `code` (**required**, as typed) | `outcome: "applied"`, `applied_at`, `earn_until` | asynchronous only; account session. Text that is not a code is refused here with `referral-code-invalid` and never sent; a code is sent only in canonical form. Every refusal by the commons is the one label `referral_not_applied`, whatever the reason. Audit row `referral-applied` |
 | `referral_status` | — | `applied`, `applied_at`, `applied_via` (`signup` or `later`), `earn_until`, `apply_until`, `can_apply` | asynchronous only; account session. The referee sees that a code is applied, never whose. `can_apply` is true while none is applied and `apply_until` has not passed |
-| `witness_preview_request` | `entry_id`, `raw_session_confirmed: true`; optional `outcome`, `correction` | `status: "ready"`, `summary` | awaits explicit remote review; saves and pins certified bytes without approval or upload |
+| `witness_preview_request` | `entry_id`, `raw_session_confirmed: true`; optional `outcome`, `correction`, `background` | `status: "ready"`, `summary`; with `background: true`, `status: "in_progress"`, `entry_id` | awaits explicit remote review (or, in the background, returns at once and ends with a `witness_review_ready` event); saves and pins certified bytes without approval or upload |
 | `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
 | `preview_cancel` | `entry_id` | `entry_id`, `dropped` | drops a queued preview, or discards a running one's result; `dropped: false` is a no-op, not an error |
@@ -771,7 +782,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   "health": { "last_error_label": null, "since": null },
   "routing": { "state": "not_declared", "last_refresh_at": null },
   "grant_voids": [],
-  "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null },
+  "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null, "privacy_check_sessions": 0, "checking_sessions": 0 },
   "arming_rewordings": [],
   "automatic_contribution_held": { "held_sessions": 0, "reasons": [], "projects": [] },
   "contribution_override": null,
@@ -883,17 +894,41 @@ tried again. Always present; `waiting_sessions` is `0` and `next_retry_at`
 | --- | --- |
 | `waiting_sessions` | approved entries whose `reason_label` is `witness-saturated` |
 | `next_retry_at` | the earliest `retry_after` among them (RFC 3339), or `null` |
+| `privacy_check_sessions` | additive: approved entries still waiting on, or in, the privacy check -- a witness is configured and no certified review is pinned yet, whether queued for the witness worker, being checked, or waiting out a retry. `0` without a witness |
+| `checking_sessions` | additive: witness calls running now (background and a person's own review) |
 
-The upload pass marks its witness requests
+**The witness never blocks the upload pass.** Since this revision the
+upload pass does not await the witness. An approved entry that still needs
+a witness review is handed to the daemon's witness worker and the pass
+moves on; the worker runs at most one background witness call at a time
+(and a person's own review on a lane of its own), pins the certified review
+on the entry, which stays `approved`, and a later upload pass sends exactly
+those bytes. Watching, expiry, history and other uploads are never held up
+by a witness call. A restart mid-call loses only the call: the entry is
+still approved with no pin and is sent to the witness again; a result that
+arrived is pinned before anything else happens and is never re-requested.
+
+The worker marks its witness requests
 `x-trace-witness-workload: background`; a review a contributor asked for
 sends no header. On a saturation refusal the entry keeps its approval, is
 labelled `witness-saturated`, and is not claimed again before the witness's
 own `Retry-After` (bounded to an hour; an unreadable value is the contract's
 30 seconds), doubling while the witness stays busy, capped at an hour, plus
-up to half the witness's delay of per-session jitter. Every later entry in
-the same pass that would need the witness is held until the same time
-without being sent, so a busy witness is asked once per pass, not once per
-session. There is no attempt limit: a busy witness never costs a session.
+up to half the witness's delay of per-session jitter. Every other entry
+waiting for the worker is held until the same time without being sent, so a
+busy witness is asked once, not once per session. There is no attempt
+limit: a busy witness never costs a session.
+
+A witness whose evidence could not be fetched (`witness_timeout`,
+`witness_unreachable`, `witness_attestation_unavailable`,
+`witness_collateral_unavailable`) also keeps the approval: the entry stays
+`approved` under that label and is retried on the transient-upload backoff,
+and the worker takes no other session until that retry, since the next
+would meet the same witness. Once that budget is spent the entry returns to
+`pending` under the same label, held for a person; it is never `refused`
+for it. Evidence that was fetched and did not verify is never retried: the
+entry returns to `pending` under `witness-not-trusted` or
+`witness-measurement-not-accepted`.
 
 It is beside `health` because the daemon also
 sets `witness-saturated` in the health slot, set and retracted from the
@@ -1771,6 +1806,27 @@ Exact envelope bytes are base64-encoded only inside the atomic local record;
 ingest receives the original bytes. The envelope remains bounded by the existing
 size limit; the record including encoding/certificate overhead is limited to twice
 that size, under the existing aggregate approved-artifact storage ceiling.
+
+**Background mode.** `witness_preview_request` also takes
+`background: true`. The same checks that need no network (consent, the id,
+an entry that is `pending` and not already pinned) are answered at once,
+as above; otherwise the call returns immediately with
+`{status: "in_progress", entry_id}` and the review runs on the witness
+worker's interactive lane. Asking again for the same entry while it runs
+answers `in_progress` again and starts nothing. A second entry while one
+review runs is `busy` / `witness-review-in-progress`. When the review ends
+the daemon publishes one `witness_review_ready` event:
+
+| `status` | Also carries |
+|---|---|
+| `ready` | `summary`, as the synchronous call returns it; `queue_changed` follows |
+| `busy` | `code`, `label` (`witness_saturated`), and the `view` the synchronous call carries |
+| `failed` | `code`, `label`, and `view` -- the same refusal labels and sentence as the synchronous call |
+
+Without the flag the call is synchronous exactly as before. Unenroll stops
+a review in flight (`failed`, `witness-review-stale`). A daemon with no
+runtime of its own (a one-shot command) answers synchronously even when the
+flag is set.
 
 This enables a local implementation seam, not a deployed capability claim.
 Live acceptance still requires configured trusted witness deployment, usable
@@ -9123,6 +9179,7 @@ deletes that file when it starts.
 | `digest_due` | batching interval elapsed with pending work, and the master and digest notification switches are on and no standalone re-engagement notification posted in the last hour | `{pending, contributed, contributed_projects, contribution, credit_final, credit_pending, text, fold?}` -- `contribution` is the contribution sentence as the core worded it (credit included, e.g. "2 traces contributed from api. 4.3 credit earned."), or `null` when nothing was contributed; it states every earned figure, and a shell that builds its own digest (Windows) posts it as the contribution half. `text` states the same sentence but, when the digest folds in verdict news, leaves out the credit of the traces that fold already states ("is now final"), so each earned figure appears once on each surface. The fold states a folded trace's credit as it was when the trace went final (a later revision is not stated again), and each part is rounded on its own, so the fold's figure plus `text`'s earned figure can differ from `contribution` by a rounding step; a fold that states no credit (its finals add to under 0.05) covers none. `credit_final` and `credit_pending` are rounded once to tenths and decimal-clean (0 when they round to nothing); `credit_final` is the final credit (a decided figure, 0 included) of those contributions and `credit_pending` the credit still being scored; the digest says the first as "earned" and the second as "pending", and a daemon that predates `credit_final` omits it (read as 0) -- `fold` is `{kind, text}` when the attention arbiter folded a re-engagement sentence in as the digest's third sentence; `text` already ends with it |
 | `resync_required` | this client fell behind the event buffer | `{}` |
 | `preview_ready` | a scheduled preview finished and was delivered | the same object `preview_request` returns for a cache hit -- see "Scheduled previews" |
+| `witness_review_ready` | additive: a `witness_preview_request {background: true}` review finished | `{entry_id, status, summary?, code?, label?, view?}` -- see "Explicit witnessed review" |
 | `inference_call_added` | the poll tick read a call from IronWire's log that no earlier tick had (K14) | `{id, tool, model, proof}` -- see below |
 | `managed_changed` | a saved model account or managed session changed (see `docs/managed-sessions.md`) | `{revision}` |
 | `usage_changed` | additive: the poll tick's ledger read added at least one call while the `insights_ledger_feed` setting is on | `{}` -- see below |

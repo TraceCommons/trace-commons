@@ -676,6 +676,12 @@ pub const EVENT_RESYNC_REQUIRED: &str = "resync_required";
 /// published for a job that was cancelled while it ran; see
 /// `preview_scheduler::PreviewScheduler::cancel`.
 pub const EVENT_PREVIEW_READY: &str = "preview_ready";
+/// A person's witness review started with `witness_preview_request
+/// {background: true}` has finished: `entry_id` and `status` (`ready`,
+/// `busy` or `failed`), with `summary` when ready, or `code`, `label` and
+/// the daemon's `view` otherwise -- the same `view` the synchronous call
+/// carries on an error. Published once per started review. Label-only.
+pub const EVENT_WITNESS_REVIEW_READY: &str = "witness_review_ready";
 /// The poll tick read a call from IronWire's log that no earlier tick had
 /// (K14). Label-only: the call's ledger id, the tool `inference_calls`
 /// names for it, its model label and IronWire's proof label -- see
@@ -1021,6 +1027,9 @@ pub struct DaemonShared {
     /// this handle -- the pool must not hold an `Arc<DaemonShared>` through
     /// the scheduler, or the two would keep each other alive forever.
     pub previews: Arc<PreviewScheduler>,
+    /// The witness worker: every daemon call to the redaction witness runs
+    /// here, off the periodic loop. See `witness_worker`.
+    pub(crate) witness_worker: super::witness_worker::WitnessWorker,
     /// The routing overlay's one long-lived instance, built from the
     /// declaration in settings and refreshed on the poll tick.
     ///
@@ -1644,6 +1653,7 @@ impl DaemonShared {
             time_driven_status: Mutex::new(None),
             estimate_in_force: Mutex::new(EstimateInForce::of(EstimateTableSlot::built_in())),
             previews: Arc::new(PreviewScheduler::default()),
+            witness_worker: Default::default(),
             routing,
             managed_history: RwLock::new(Ok(None)),
             managed_history_refresh: tokio::sync::Mutex::new(()),
@@ -2601,6 +2611,21 @@ impl DaemonShared {
         }
     }
 
+    /// `status.witness_capacity.privacy_check_sessions` and
+    /// `checking_sessions`: approved traces waiting on or in the privacy
+    /// check, and how many witness calls are running now. See
+    /// `witness_worker`.
+    pub(crate) fn privacy_check(
+        &self,
+        cfg: Option<&crate::config::ContributorConfig>,
+    ) -> (usize, usize) {
+        let waiting = {
+            let queue = self.queue.lock().expect("queue lock");
+            super::witness_worker::privacy_check_waiting(cfg, &queue)
+        };
+        (waiting, self.witness_worker.in_flight())
+    }
+
     /// What `status.nudge` reads besides the queue and the gates: the
     /// suggestion ledger, the suggestions switch and the queue TTL. Each is
     /// taken in its own short lock, state then settings, and released before
@@ -2752,6 +2777,8 @@ impl DaemonShared {
         let automatic_contribution_held = self.gate_held_value();
         // Before the queue lock: it takes the queue lock itself.
         let witness_capacity = self.witness_capacity();
+        // Before the queue lock, which it takes itself.
+        let privacy_check = self.privacy_check(cfg.as_ref());
         // Snapshot settings without nesting its lock under policy or queue.
         let (scrub_check, setup_roots_declared, max_queue_entries) = {
             let settings = self.settings.lock().expect("settings lock");
@@ -3049,6 +3076,12 @@ impl DaemonShared {
             "witness_capacity": {
                 "waiting_sessions": witness_capacity.waiting_sessions,
                 "next_retry_at": witness_capacity.next_retry_at,
+                // Additive. Approved traces still waiting on, or in, the
+                // privacy check (the witness worker): queued, running, or
+                // waiting out a retry. Counts only. `checking_sessions`
+                // is how many of those the witness is working on now.
+                "privacy_check_sessions": privacy_check.0,
+                "checking_sessions": privacy_check.1,
             },
             // Additive. Whether moving a legacy invite identity to a NEAR AI
             // account can be offered, and the notice after it moved, until a
@@ -7339,7 +7372,11 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         }
         "set_settings" => handle_set_settings_async(shared, req).await,
         "witness_preview_request" => {
-            witness_review_response(handle_witness_preview_request(shared, req).await)
+            if req.params.get("background").and_then(|v| v.as_bool()) == Some(true) {
+                handle_witness_preview_background(shared, req).await
+            } else {
+                witness_review_response(handle_witness_preview_request(shared, req).await)
+            }
         }
         "approve" => handle_approve(shared, req).await,
         "include_past_sessions" => handle_include_past_sessions(shared, req).await,
@@ -8242,6 +8279,134 @@ async fn handle_witness_preview_request(shared: &DaemonShared, req: &Request) ->
         None,
     )
     .await
+}
+
+/// `witness_preview_request` with `background: true`: the same review, run
+/// on the witness worker's interactive lane, answered at once with
+/// `{status: "in_progress", entry_id}`. The result arrives as one
+/// `witness_review_ready` event (and `queue_changed` when a review was
+/// pinned). The synchronous form is unchanged for shells that do not ask.
+///
+/// The cheap refusals (consent, a bad id, an entry that is not waiting or
+/// already pinned) are still answered here, synchronously, so a shell is
+/// told at once. A daemon with no runtime of its own to run on (a one-shot
+/// command) answers synchronously, exactly as without the flag.
+async fn handle_witness_preview_background(shared: &DaemonShared, req: &Request) -> Response {
+    if req
+        .params
+        .get("raw_session_confirmed")
+        .and_then(|v| v.as_bool())
+        != Some(true)
+    {
+        return Response::err(req.id, ERR_BAD_PARAMS, "witness-review-consent-required");
+    }
+    let id = match parse_entry_id(&req.params) {
+        Ok(id) => id,
+        Err(label) => return Response::err(req.id, ERR_BAD_PARAMS, label),
+    };
+    {
+        let queue = shared.queue.lock().expect("queue lock");
+        match queue.get(id) {
+            Some(entry) if entry.state == QueueState::Pending => {
+                if entry.holds_witness_certificate() {
+                    return Response::err(req.id, ERR_BAD_PARAMS, "witness-review-already-pinned");
+                }
+            }
+            Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "not-pending"),
+            None => return Response::err(req.id, ERR_BAD_PARAMS, ERR_UNKNOWN_ENTRY_ID),
+        }
+    }
+    let in_progress = || {
+        Response::ok(
+            req.id,
+            serde_json::json!({"status": "in_progress", "entry_id": id.to_string()}),
+        )
+    };
+    if shared.witness_worker.in_interactive_review(id) {
+        // Already running: the event for it is still coming.
+        return in_progress();
+    }
+    if !shared.witness_worker.start_interactive(id) {
+        return Response::err(req.id, ERR_BUSY, "witness-review-in-progress");
+    }
+    let job = req.clone();
+    // Unenroll stops it at its next await point, as it stops an upload.
+    let mut interrupt = shared.upload_interrupt.subscribe();
+    let spawned = shared.spawn_detached(move |shared| async move {
+        let raced = super::race_upload(
+            crate::envelope::catch_unwind_future(handle_witness_preview_request(&shared, &job)),
+            WITNESS_REVIEW_JOB_BOUND,
+            &mut interrupt,
+        )
+        .await;
+        let response = match raced {
+            super::RacedUpload::Settled(Ok(response)) => witness_review_response(response),
+            super::RacedUpload::Stopped(_) => witness_review_response(Response::err(
+                job.id,
+                ERR_UNAVAILABLE,
+                "witness-review-stale",
+            )),
+            super::RacedUpload::Settled(Err(())) => {
+                tracing::warn!(pass = "witness", "witness review panicked");
+                witness_review_response(Response::err(
+                    job.id,
+                    ERR_UNAVAILABLE,
+                    "witness-review-failed",
+                ))
+            }
+        };
+        shared.witness_worker.finish_interactive(id);
+        let ready = response.error.is_none();
+        shared.publish(
+            EVENT_WITNESS_REVIEW_READY,
+            witness_review_event(id, &response),
+        );
+        if ready {
+            shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+        }
+    });
+    if spawned.is_none() {
+        shared.witness_worker.finish_interactive(id);
+        return witness_review_response(handle_witness_preview_request(shared, req).await);
+    }
+    in_progress()
+}
+
+/// A backstop on a background review: the review has its own deadline
+/// inside (`preview::PREVIEW_BUILD_DEADLINE`); this only guarantees the
+/// interactive lane is given back.
+const WITNESS_REVIEW_JOB_BOUND: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// The `witness_review_ready` payload for one finished review.
+fn witness_review_event(entry_id: uuid::Uuid, response: &Response) -> serde_json::Value {
+    let id = entry_id.to_string();
+    match &response.error {
+        None => {
+            let summary = response
+                .result
+                .as_ref()
+                .and_then(|r| r.get("summary"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            serde_json::json!({"entry_id": id, "status": "ready", "summary": summary})
+        }
+        Some(error) => {
+            let view = response
+                .result
+                .as_ref()
+                .and_then(|r| r.get("view"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let busy = view.get("state").and_then(|s| s.as_str()) == Some("Busy");
+            serde_json::json!({
+                "entry_id": id,
+                "status": if busy { "busy" } else { "failed" },
+                "code": error.code,
+                "label": error.message,
+                "view": view,
+            })
+        }
+    }
 }
 
 /// Attach the refusal's sentence to a review response.
