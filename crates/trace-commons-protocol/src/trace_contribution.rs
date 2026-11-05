@@ -4022,9 +4022,43 @@ pub fn classifier_skips_structural_text(text: &str) -> bool {
     {
         return false;
     }
-    !bytes
+    if bytes
         .windows(2)
         .any(|pair| pair[0].is_ascii_uppercase() && pair[1].is_ascii_lowercase())
+    {
+        return false;
+    }
+    // Shapes that carry an address, a host or a phone number are classified
+    // however short (owner follow-up, 2026-11-05).
+    let dotted_without_slash = bytes.contains(&b'.') && !bytes.contains(&b'/');
+    let ipv6_shaped = bytes.iter().filter(|b| **b == b':').count() >= 2
+        && bytes.iter().all(|b| b.is_ascii_hexdigit() || *b == b':');
+    let long_digit_run = bytes
+        .split(|b| !b.is_ascii_digit())
+        .any(|run| run.len() >= 7);
+    !(dotted_without_slash || ipv6_shaped || long_digit_run)
+}
+
+/// Keys whose values name a person or an account. A value under one of
+/// these, at any depth, is always classified, whatever its shape (owner
+/// decision 2026-11-05). Matched case-insensitively against the whole key.
+pub const IDENTITY_KEYS: [&str; 9] = [
+    "author",
+    "user",
+    "username",
+    "name",
+    "owner",
+    "email",
+    "login",
+    "committer",
+    "assignee",
+];
+
+/// Whether `key` is one of [`IDENTITY_KEYS`], ignoring case.
+pub fn is_identity_key(key: &str) -> bool {
+    IDENTITY_KEYS
+        .iter()
+        .any(|identity| identity.eq_ignore_ascii_case(key))
 }
 
 /// `TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL`: unset, `1`, `true` or `on` skip
@@ -4157,8 +4191,14 @@ impl DeterministicTraceRedactor {
         report: &mut RedactionReport,
         privacy_filter_summary: &mut Option<SafePrivacyFilterSummary>,
     ) -> Result<String, TraceContributionError> {
-        self.apply_privacy_filter_to_text_mapped(text, report, privacy_filter_summary, &mut None)
-            .await
+        self.apply_privacy_filter_to_text_mapped(
+            text,
+            report,
+            privacy_filter_summary,
+            &mut None,
+            false,
+        )
+        .await
     }
     async fn apply_privacy_filter_to_text_mapped(
         &self,
@@ -4166,6 +4206,7 @@ impl DeterministicTraceRedactor {
         report: &mut RedactionReport,
         privacy_filter_summary: &mut Option<SafePrivacyFilterSummary>,
         map: &mut Option<crate::private_edit_map::EditMap>,
+        force_classify: bool,
     ) -> Result<String, TraceContributionError> {
         let Some(adapter) = self.privacy_filter.as_ref() else {
             return Ok(text);
@@ -4173,7 +4214,8 @@ impl DeterministicTraceRedactor {
         // A structural token -- an id, a path, a number, a lowercase name --
         // carries no prose for the classifier to find. The deterministic
         // pass has already run over it. See `classifier_skips_structural_text`.
-        if self.skip_structural && classifier_skips_structural_text(&text) {
+        // A value under an identity key is classified regardless.
+        if self.skip_structural && !force_classify && classifier_skips_structural_text(&text) {
             return Ok(text);
         }
         // A configured prose classifier is a required control. Preserve its
@@ -4343,18 +4385,15 @@ impl DeterministicTraceRedactor {
     ) -> Result<String, TraceContributionError> {
         let (redacted, child_report) = self.redact_text_with_state(input, state);
         report.merge(child_report);
-        if state.edit_map.is_some() {
-            self.apply_privacy_filter_to_text_mapped(
-                redacted,
-                report,
-                privacy_filter_summary,
-                &mut state.edit_map,
-            )
-            .await
-        } else {
-            self.apply_privacy_filter_to_text(redacted, report, privacy_filter_summary)
-                .await
-        }
+        let force_classify = state.force_classify;
+        self.apply_privacy_filter_to_text_mapped(
+            redacted,
+            report,
+            privacy_filter_summary,
+            &mut state.edit_map,
+            force_classify,
+        )
+        .await
     }
 
     // Metadata is also contributor input. Share the exact text pipeline and
@@ -4410,15 +4449,17 @@ impl DeterministicTraceRedactor {
                     if exhausted || !context.charge(text.len()) {
                         return Ok(Value::String(text));
                     }
-                    Value::String(
-                        self.redact_text_with_state_through_prose_filter(
+                    context.state.force_classify = context.identity;
+                    let redacted = self
+                        .redact_text_with_state_through_prose_filter(
                             &text,
                             context.state,
                             context.report,
                             context.summary,
                         )
-                        .await?,
-                    )
+                        .await;
+                    context.state.force_classify = false;
+                    Value::String(redacted?)
                 }
                 Value::Array(values) => {
                     // Every child consumes at least one node. Stop before
@@ -4462,11 +4503,13 @@ impl DeterministicTraceRedactor {
                             }
                             continue;
                         }
+                        let identity_key = is_identity_key(&key);
                         let key = if redact_keys && context.charge(key.len()) {
-                            if self.skip_structural {
-                                // Keys never go to the classifier (owner
-                                // decision 2026-11-05); the deterministic
-                                // detectors still run over them.
+                            if self.skip_structural && classifier_skips_structural_text(&key) {
+                                // An identifier-shaped key does not go to the
+                                // classifier (owner decisions 2026-11-05); the
+                                // deterministic detectors still run over it.
+                                // Any other key is classified like a value.
                                 let (redacted, key_report) =
                                     self.redact_text_with_state(&key, context.state);
                                 context.report.merge(key_report);
@@ -4483,9 +4526,13 @@ impl DeterministicTraceRedactor {
                         } else {
                             key
                         };
+                        let outer_identity = context.identity;
+                        context.identity = outer_identity || identity_key;
                         let value = self
                             .redact_metadata_value(value, child_keys, depth + 1, context)
-                            .await?;
+                            .await;
+                        context.identity = outer_identity;
+                        let value = value?;
                         if redacted.insert(key, value).is_some() {
                             return Err(TraceContributionError::RedactionFailed {
                                 reason: METADATA_KEY_COLLISION_REFUSAL.into(),
@@ -4820,6 +4867,9 @@ impl DeterministicTraceRedactor {
 struct RedactionState {
     edit_map: Option<crate::private_edit_map::EditMap>,
     placeholders: PlaceholderMap,
+    /// Set while redacting a value under an identity key: the classifier
+    /// sees it even when it has the structural-skip shape.
+    force_classify: bool,
 }
 
 impl RedactionState {
@@ -4965,6 +5015,7 @@ impl DeterministicTraceRedactor {
                     summary: &mut privacy_filter_summary,
                     refuse_on_secret: true,
                     exhausted: false,
+                    identity: false,
                 },
             )
             .await?;
@@ -5000,6 +5051,7 @@ impl DeterministicTraceRedactor {
                         summary: &mut privacy_filter_summary,
                         refuse_on_secret: true,
                         exhausted: false,
+                        identity: false,
                     },
                 )
                 .await?;
@@ -5060,6 +5112,7 @@ impl DeterministicTraceRedactor {
                         // the detector finds here.
                         refuse_on_secret: false,
                         exhausted: false,
+                        identity: false,
                     },
                 )
                 .await?;
@@ -5339,6 +5392,9 @@ struct MetadataRedactionContext<'a> {
     /// so a hit on that path would be a mask reported as a leak.
     refuse_on_secret: bool,
     exhausted: bool,
+    /// Inside the value of an identity key (`author`, `email`, ...); see
+    /// [`is_identity_key`].
+    identity: bool,
 }
 
 impl MetadataRedactionContext<'_> {
@@ -16051,6 +16107,30 @@ mod structural_skip_tests {
         ] {
             assert!(classifier_skips_structural_text(skipped), "{skipped:?}");
         }
+        // Owner follow-up, 2026-11-05: shapes that can carry an address, a
+        // host or a phone number are always classified, however short.
+        for classified in [
+            "203.0.113.7",
+            "10.0.0.12",
+            "build.corp.internal",
+            "main.rs",
+            "v1.2.3",
+            "2001:db8::1",
+            "fe80::1",
+            "4155550123",
+            "id-1234567",
+        ] {
+            assert!(
+                !classifier_skips_structural_text(classified),
+                "{classified:?}"
+            );
+        }
+        for still_skipped in ["src/main.rs", "123456", "2026-11-05T00:00:01Z", "a:b"] {
+            assert!(
+                classifier_skips_structural_text(still_skipped),
+                "{still_skipped:?}"
+            );
+        }
         for classified in [
             "Jane Doe",
             "Jane",
@@ -16105,14 +16185,18 @@ mod structural_skip_tests {
             .await
             .expect("redacts");
         let asked = adapter.asked.lock().unwrap().clone();
-        for key in [
-            "tool", "Jane Doe", "path", "status", "code", "sha", "who", "greeting",
-        ] {
+        // Identifier-shaped keys are not classified; a key that is not
+        // identifier-shaped is (owner follow-up, 2026-11-05).
+        for key in ["tool", "path", "status", "code", "sha", "who", "greeting"] {
             assert!(
                 !asked.iter().any(|t| t == key),
                 "key {key:?} was classified"
             );
         }
+        assert!(
+            asked.iter().any(|t| t == "Jane Doe"),
+            "a key that is not identifier-shaped must be classified"
+        );
         for skipped in ["bash", "edit_file", "src/main.rs", "200", "true"] {
             assert!(
                 !asked.iter().any(|t| t == skipped),
@@ -16131,6 +16215,59 @@ mod structural_skip_tests {
             asked.iter().any(|t| t.contains("for Jane")),
             "event content"
         );
+    }
+
+    /// Every value under an identity key is classified, however token-shaped,
+    /// matched case-insensitively and through nesting; the same value under
+    /// any other key is skipped.
+    #[tokio::test]
+    async fn values_under_identity_keys_are_always_classified() {
+        let payload = serde_json::json!({
+            "author": "jdoe",
+            "USERNAME": "x1",
+            "Owner": {"id": "bob_smith"},
+            "login": "jdoe2",
+            "email": "nobody",
+            "committer": "ci-bot",
+            "assignee": ["qa_lead"],
+            "user": "u42",
+            "name": "nm",
+            "other": "jdoe3",
+        });
+        let adapter = Arc::new(Recording::default());
+        redactor(adapter.clone(), true)
+            .redact_trace(contribution(payload, "ok"))
+            .await
+            .expect("redacts");
+        let asked = adapter.asked.lock().unwrap().clone();
+        for value in [
+            "jdoe",
+            "x1",
+            "bob_smith",
+            "jdoe2",
+            "nobody",
+            "ci-bot",
+            "qa_lead",
+            "u42",
+            "nm",
+        ] {
+            assert!(
+                asked.iter().any(|t| t == value),
+                "{value:?} under an identity key was not classified"
+            );
+        }
+        assert!(
+            !asked.iter().any(|t| t == "jdoe3"),
+            "the same shape under another key is skipped"
+        );
+        for key in ["author", "USERNAME", "login", "other"] {
+            assert!(
+                !asked.iter().any(|t| t == key),
+                "key {key:?} was classified"
+            );
+        }
+        // A capitalized key is not identifier-shaped, so it is classified.
+        assert!(asked.iter().any(|t| t == "Owner"));
     }
 
     /// With the skip off, keys and structural values go to the classifier
@@ -16160,13 +16297,21 @@ mod structural_skip_tests {
     /// and update the spec.
     #[tokio::test]
     async fn skip_shaped_values_the_deterministic_pass_does_not_catch() {
-        for sample in [
+        // Since the owner's follow-up (2026-11-05) the address, host and
+        // phone shapes are classified; a bare lowercase username outside an
+        // identity key is the gap that remains.
+        for now_classified in [
             "203.0.113.7",
             "build.corp.internal",
-            "jdoe",
             "2001:db8::1",
             "4155550123",
         ] {
+            assert!(
+                !classifier_skips_structural_text(now_classified),
+                "{now_classified:?}"
+            );
+        }
+        for sample in ["jdoe"] {
             assert!(classifier_skips_structural_text(sample), "{sample:?}");
             let envelope = DeterministicTraceRedactor::deterministic_only(Vec::new())
                 .redact_trace(contribution(serde_json::json!({ "v": sample }), sample))
