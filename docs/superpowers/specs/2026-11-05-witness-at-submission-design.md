@@ -1,0 +1,417 @@
+# Run the redaction witness at submission, not at preview
+
+Status: DRAFT for owner review. No code changes.
+Date: 2026-11-05.
+
+Code references are to `origin/main` at c7997d6e0. Paths under
+`crates/trace-commons-contributor/src/` are written without that prefix.
+
+## The decision
+
+When a redaction witness is configured, **the preview is built on the Mac
+by the deterministic redactor, with no network, and the raw session goes to
+the witness only when the contributor submits.** At submission the client
+checks that the witness's envelope is the approved preview with only more
+removed. If it is, the witness's bytes are uploaded. If it is not, nothing
+is uploaded and the trace comes back to the contributor, showing what the
+witness returned, for a fresh decision.
+
+**The consent rule.** Approving a trace approves sending *this, or this
+with more removed, and nothing else*. To find out what more to remove, the
+full trace goes to the privacy witness when the contributor submits.
+
+"More removed" is a mechanical check (section 4), not a judgement. It
+holds by construction for every redactor the witness runs today, with one
+configuration gap that must be closed first (section 4.3, open question
+Q1).
+
+## Why
+
+The owner: "It's not clear to me that the witness should be called before
+preview. The witness should probably happen on submission."
+
+What happens today under a configured witness:
+
+1. **The ordinary preview refuses.** `build_preview_core` returns
+   `witness_claim_unavailable` for any enrolled client with a witness
+   (`daemon/preview.rs:783-802`). The comment says why: the preview
+   envelope is what `use_approved_envelope` later uploads, so a local
+   preview would be an uncertified submission. And it records the cost:
+   "with a witness configured, the desktop shells' approve-then-upload
+   flow does not work."
+2. **To see a trace at all, the contributor sends it to the witness
+   first.** The only witnessed preview is the explicit
+   `witness_preview_request` (`daemon/ipc.rs:8155-8346`), which refuses
+   without `raw_session_confirmed: true` (`ipc.rs:8166-8173`), mints a
+   claim, sends the raw session, and pins the certified bytes
+   (`record_previewed_envelope`, `ipc.rs:8327-8331`). Every shell fronts
+   it with a confirm step and the disclosure at `witness_copy.rs:792-797`:
+   "This sends this trace, including its unredacted conversation ... to
+   your configured remote witness before you approve a contribution."
+   Callers: `macos/Sources/TraceCommonsApp/DaemonClient.swift:190-197`,
+   `windows/src/TraceCommons.Interop/NativeWitnessReview.cs:10-16`,
+   `crates/trace-commons-contributor-gtk/src/ui/preview.rs:959-961`,
+   `tauri-desktop/src-tauri/src/commands/native_flows.rs:202-216`.
+3. **So the raw session leaves the Mac before the contributor has
+   decided anything**, and looking at a trace depends on the witness being
+   up and fast. A hung or broken witness turns "look at this trace" into
+   a failure (observed 2026-11-04: Submit did nothing, `preview-failed`).
+
+The automatic path already works the way the owner describes. An entry
+with no pinned preview under a configured witness is witnessed inside
+`submit_loaded` at upload time: claim minted first, raw session sent,
+certified bytes uploaded (`submit.rs:1780-1880`). Nobody-looked entries
+(`approved_unattended`) are held when the certificate's verdict is not
+`low` (`daemon/uploader.rs:654-659`, `submit.rs:895-897`), and the held
+certificate is saved so the person who opens it sees the witness's bytes
+without a second witness run (`hold_for_review`, `uploader.rs:199-230`,
+spec 2026-09-23 R5). This spec makes the interactive path match the
+automatic one, and adds the check that makes a person's approval mean
+something.
+
+## 1. Terms
+
+- **Approved preview.** The envelope the deterministic redactor built on
+  the Mac and the contributor approved. Stored as today's plain local pin
+  (`daemon/approved_envelope.rs` `save`/`load`, `queue.rs:405-426`).
+- **Witnessed envelope.** The bytes the witness returns, with its
+  certificate (`WitnessContributionResponse`,
+  `crates/trace-commons-server/src/witness_service/mod.rs:752-760`).
+- **Subset check.** The client-side comparison in section 4.
+- **Witness pin.** Today's `witness-sha256:` pin
+  (`approved_envelope.rs:152`, `queue.rs:833-837`): the contributor
+  approved the witness's own bytes.
+
+## 2. Flow
+
+### 2.1 Interactive (a person approves)
+
+1. **Preview.** Built locally, deterministic only, no network:
+   `build_deterministic_preview_redactor` (`envelope.rs:145-149`) with the
+   enrolled config. Lift the refusal at `preview.rs:800-802` for this
+   case. The client's own `pii_filter` (NEAR AI) is *not* run for a
+   witnessed client's preview: the witness runs the classifier, and a
+   local classifier pass would make the subset check fail whenever the two
+   classifiers disagree (section 4.4).
+2. **Approve.** Pins the approved preview exactly as a non-witness client
+   pins one today (`previewed_envelope_digest`, plain digest), together
+   with `approved_inputs`. Settings invalidation is unchanged: `witness`
+   and `pii_filter` are both in the input fingerprint
+   (`preview.rs:2640-2660`), so changing the witness, its pins or the
+   filter re-asks.
+3. **Submit (upload pass or CLI).** The uploader loads the approved
+   preview. Today `submit_loaded` refuses a local pin under a configured
+   witness with `witness_certificate_missing` (`submit.rs:1717-1727`).
+   That branch changes: verify the witness's measurement pin (unchanged,
+   `submit.rs:1790-1815`), mint the claim (`ensure_claim`,
+   `submit.rs:1196-1244`), send the raw session, verify the certificate
+   (`parse_witnessed_envelope`), run the residual-secret sweep (unchanged),
+   then run the subset check against the approved preview.
+4. **Pass.** Upload the witnessed bytes unchanged, with the certificate,
+   exactly as a witness pin uploads today. The grant check is the
+   existing `ensure_certified_grant` (`submit.rs:2813-2838`).
+5. **Fail.** Upload nothing. Save the witnessed artifact (the R5 save,
+   `hold_for_review`) and return the entry to Pending with a new label,
+   `witness-changed-after-review`. Opening it shows the witness's bytes
+   through `summarize_witnessed_preview` (`preview.rs:1061-1062`) with no
+   second witness run. Approving it then pins the witness's bytes (a
+   witness pin), and the next upload sends them as-is, with no check.
+
+Showing the witnessed bytes on the second look means the raw session has
+already gone to the witness under the first approval. That is acceptable:
+the first approval *was* the decision to send, its copy said the full
+trace goes to the witness on submit, and the automatic path already does
+exactly this for held sessions. Nothing reaches the commons without a
+person approving the bytes that are sent.
+
+### 2.2 Approve without preview, and automatic folders
+
+Unchanged. An approve-all or a row approved without opening it has no
+approved preview, so `submit_loaded` takes the existing witness arm
+(`submit.rs:1780-1880`) and sends what the witness returns. The subset
+check has nothing to compare against and does not run. Automatic folders
+keep the risk hold and the R5 save. The consent rule for these is the one
+already stated by the connect-and-forget spec: the person agreed to send
+without looking.
+
+### 2.3 Admission evidence and token bundles
+
+Out of scope; they keep the explicit review. Both build a different
+document from the preview: admission sends an isolated final-call
+contribution (`final_call_witness_input`, `envelope.rs:716-743`) and
+refuses a verdict or correction (`submit.rs:1110-1124`); token review
+builds a bundle whose summary is part of what the contributor approves
+(`preview.rs:966-978`, `1045-1051`). Ingest requires a verified
+certificate for both (`trace_commons_ingest_internal/admission.rs:614`,
+`:946`; `token_bundles.rs:51-52`). A local preview of either would not be
+the document sent. `witness_preview_request` stays, reached only from
+those two flows.
+
+### 2.4 CLI
+
+`submit` already witnesses at submission: it has no approved preview, so
+it takes the `submit.rs:1780-1880` arm. No change. `daemon preview
+<entry_id>` gains the local preview under a witness, as the shells do.
+
+## 3. What the contributor sees (DRAFT strings)
+
+Owner rules: very short; no product name; never "daemon" or "passkey".
+These are drafts. The changed state is a new queue state, not a banner,
+but it is listed in Q5 for approval under copy-guide rule 9.
+
+| Where | DRAFT |
+|---|---|
+| Preview footer, witnessed client | "When you submit, a privacy check may remove more." |
+| Approve confirm, first time | "Your full trace goes to a secure privacy check when you submit. It can remove more. It can't add anything." |
+| Row state while checking | "Running privacy check…" |
+| Row state, check unavailable (retrying) | "Privacy check unavailable. Trying again." |
+| Row state, `witness-changed-after-review` | "Changed by the privacy check. Review again to send." |
+| Second preview header | "This is what the privacy check returned." |
+
+The disclosure at `witness_copy.rs:794` ("...before you approve a
+contribution") stays for the admission and token flows only.
+
+## 4. The subset check
+
+A pure function in the contributor crate (permissive), over two parsed
+envelopes plus the claim: `subset_check(approved, witnessed, token) ->
+Ok | Err(label)`. Label-only errors, no content in logs.
+
+### 4.1 Fields
+
+**Must match exactly:** `schema_version`, `submission_id` (already
+required, `submit.rs:1160`), `ironclaw` except dynamic-map text
+(4.2), `contributor`, `outcome` (a correction is never scrubbed, S5,
+`trace_contribution.rs:5023-5040`), `replay`, `conversation_id`,
+`source_session`; per event: count, order, `event_id`,
+`parent_event_id`, `event_type`, `timestamp`, `tool_name`,
+`tool_category`, `tool_call_id`, `latency_ms`, `token_counts`,
+`cost_usd`, `success`, `failure_modes`, `side_effect`; every non-string
+JSON leaf.
+
+**Ignored, rebuilt per run:** `trace_id` (fresh `Uuid::new_v4()` per
+build, `envelope.rs:835`), `created_at`, and all of `privacy`
+(`redaction_counts`, `redaction_distinct_counts`,
+`privacy_filter_summary`, `pii_labels_present`, `residual_pii_risk`,
+`redaction_hash`, `warnings`, `redaction_pipeline_version`;
+`trace_contribution.rs:5048-5057`). One monotone sanity check is kept:
+for every label, the witness's count is at least the approved count.
+
+**Consent and trace card:** come from the claim on the witness side, not
+the config. Checked by `ensure_certified_grant` (granted scopes and uses
+match the fresh claim) plus "granted is a subset of what the approved
+preview showed", which `validate_review_grant` already enforces against
+the config (`submit.rs:2785-2811`). `trace_card.tool_categories` must
+match (derived from events).
+
+### 4.2 Text
+
+Every string — `redacted_content`, structured-payload strings, metadata
+strings, and the **keys** of dynamic maps (payloads, `feature_flags`,
+`tool_manifest_hashes`, `expected_assertions`; keys are redacted too,
+`trace_contribution.rs:4385-4409`) — passes if:
+
+> the witness's string equals the approved string with zero or more
+> non-overlapping substrings each replaced by one placeholder token.
+
+The placeholder grammar is closed. Every producer was read:
+
+- `<PRIVATE_{LABEL}_{N}>` — deterministic placeholders
+  (`PlaceholderMap::placeholder_for`, `trace_contribution.rs:4793-4804`).
+- `[REDACTED:{label}]` — the prose classifier (`apply_spans`,
+  `privacy_filter_spans.rs:95-110`).
+- `[REDACTED]` — secret ranges (`trace_contribution.rs:4644-4651`).
+- `<REDACTED_PRIVATE_KEY>` — PEM blocks (`:4634-4643`, `:8187`).
+
+**Numbered placeholders are matched as symbols, not literally.**
+Numbering is first-seen per label across the whole trace (`next_by_label`),
+so a single extra deterministic hit on the witness side renumbers every
+later placeholder of that label. The check builds one mapping per label
+from approved `<PRIVATE_X_i>` to witness `<PRIVATE_X_j>` and requires it
+to be a function and injective across the whole envelope (distinct stays
+distinct, same stays same). A placeholder may also be swallowed whole by
+a larger replacement.
+
+**Object keys.** Keys equal on both sides are paired first. Each
+remaining witness key must be derivable (rule above) from exactly one
+remaining approved key; any ambiguity fails closed.
+
+**Structural removals allowed, and only these:** on `HttpExchange`
+events, `redacted_content` → absent, and removal of `body`/`headers`
+under `request`, `response` or the payload root — what
+`strip_inference_bodies` does (`witness_service/inference.rs:1017-1049`).
+Nothing else may add, drop or reorder events, array items or keys.
+
+Matching is a left-to-right scan with the approved string as the
+template; tokens are recognised by the grammar, so the cost is linear in
+the envelope apart from the key pairing. Bounded by the existing envelope
+limit.
+
+### 4.3 Does the witness only ever add placeholder redactions?
+
+**For text the witness changes: yes, by construction.**
+
+- The witness performs the redaction itself, through the same protocol
+  code as the client: `redact_trace` over a `DeterministicTraceRedactor`,
+  with or without a prose filter (`witness_service/mod.rs:843-880`;
+  binary wiring `bin/trace-commons-witness.rs:452-460`).
+- Deterministic first, classifier second, on the same text, in one shared
+  helper (`redact_text_with_state_through_prose_filter`,
+  `trace_contribution.rs:4273-4293`). The classifier sees the
+  deterministic output, so its replacements are spans of that output.
+- Both production classifiers — the NEAR AI filter
+  (`privacy_filter_near_ai.rs:609`) and the self-hosted one
+  (`privacy_filter_self_hosted.rs:197`) — return through
+  `apply_windowed_spans` → `apply_spans`, which splices `[REDACTED:label]`
+  at validated codepoint offsets after collapsing overlaps and keeps every
+  other byte (`privacy_filter_spans.rs:37-110`, `293-310`). Windowing
+  only splits the classifier's input; offsets are shifted back and the
+  splice is done once over the whole field.
+- **No truncation.** An over-limit field is refused, not cut
+  (`privacy_filter_near_ai.rs:535-543`); a failed classifier is a
+  refusal, never a deterministic-only downgrade
+  (`trace_contribution.rs:4112-4117`). Scan-budget exhaustion leaves a
+  value unchanged on both sides (`:4346-4348`, `:4364-4367`) under the same constants.
+- **No normalisation of text.** `canonicalize_event_payloads`
+  (`:7452`) orders payloads; the check compares parsed values, so key
+  order does not matter.
+- **Body stripping** removes fields and is allowed explicitly (4.2).
+- The "chunk-capped tail" seen in scoring is a scorer property, not a
+  redaction one; nothing in the redaction path caps a tail.
+
+**One configuration gap: the deterministic passes are not the same
+pass.** The client seeds `known_path_prefixes` with the home directory
+and the transcript's cwd (`envelope.rs:151-160`). The witness takes its
+prefixes from an operator flag, empty by default
+(`bin/trace-commons-witness.rs:200-209`, `427-433`), and the request
+carries none (`WitnessContributionRequest`, `witness_service/mod.rs:708-721`).
+The generic path regex covers `/Users`, `/home`, `/private/var` and
+`/tmp` (`trace_contribution.rs:8277-8284`), so on macOS and Linux homes
+are caught on both sides. It does not cover a Windows home
+(`C:\Users\...`) or a cwd outside those roots. There the client masks the
+path and the witness leaves it, so the witness's envelope has text the
+preview did not — the check fails, correctly, on most Windows traces.
+
+Fix (Q1): the witness request carries the client's prefixes as hints the
+witness adds to its own, like `granted` (attribution only; they can only
+add redactions, and they travel inside a request that already holds the
+raw session). This is a witness image change, so a new measurement.
+
+Version skew is the other source of divergence: a witness image whose
+deterministic pass is older than the client's can redact less. The check
+catches it and the fail path converges (the second approval pins the
+witness's bytes, which are uploaded as-is). It costs a second look; it
+leaks nothing.
+
+### 4.4 Why the local preview runs no classifier
+
+If the client ran its own classifier (NEAR AI) for the preview and the
+witness ran a different one, every span the client's classifier caught
+and the witness's missed would fail the check. The witness is the single
+complete redaction point (spec 2026-09-23 R2); the client's pass is
+defence in depth and must be a subset of the witness's. Deterministic
+only, with the same prefixes, is.
+
+## 5. Interactions
+
+- **Residual-risk verdict.** A person-approved entry that passes the
+  check uploads whatever the certificate's verdict; the person saw a
+  superset of what is sent (Q3). The `approved_unattended` hold is
+  unchanged.
+- **Scopes.** Minted at submission, immediately before the witness call,
+  so the gap that `witness-grant-changed` guards today (pin made at
+  preview, upload later) mostly disappears. A 401/403 at upload still
+  re-mints and refuses on changed grants (`submit.rs:3040-3060`). The
+  `witness_claim_expired` label in the 2026-09-02 spec was never built;
+  the live labels are `witness-grant-changed` and `witness-claim-invalid`.
+- **Settings changes.** Covered by the fingerprint (`preview.rs:2654-2660`).
+  Unchanged.
+- **Pin age.** Local pins already expire after three days
+  (`approved_envelope.rs:86`, `release_stale_pins`). Unchanged.
+- **Attestation and measurement.** Still verified before anything raw is
+  sent (`submit.rs:1790-1815`). Unchanged; just later.
+- **Offline, timeouts, busy.** Preview works offline. At submission the
+  entry stays Approved and the upload pass retries: a busy witness returns
+  `REASON_WITNESS_SATURATED` with its own retry delay
+  (`submit.rs:1856-1862`); the transport deadline is 120 s
+  (`submit.rs:1378`). Labels only. The `preview-errors-and-deadlines`
+  branch (another agent) exists locally with no commits past `main` at
+  time of writing; whatever labels it adds for the witness call should be
+  reused on the submission path, and become moot for the ordinary preview.
+- **Size.** Placeholders can be longer than what they replace, so the
+  witness's envelope can exceed the approved size. The witness transport
+  already enforces the envelope limit (`submit.rs:1383`); an over-limit
+  result is refused for size as today. `would_send_bytes` shows the
+  approved preview's size with a "may change slightly" reading (Q6).
+- **Server.** No change. Ingest verifies a certificate against the body as
+  received and fails open for ordinary submissions
+  (`trace-commons-ingest.rs:15408-15447`); nothing server-side reads a
+  preview digest (`previewed_envelope_digest` appears only in contributor
+  code and a Windows interop test).
+- **Migration.** None needed. Existing `witness-sha256:` pins keep
+  uploading the witness's bytes through `holds_witness_certificate`. A
+  witnessed client has no plain local pins today, because the preview
+  refused. A plain pin under a witness, which was refused, is now checked.
+- **Shells.** macOS first (lead): drop the "Prepare witness review"
+  action from the ordinary preview (`PreviewSheet.swift:344-375`; keep it
+  for admission/token), show the preview footer, the changed state and
+  the second-preview header. GTK and Windows follow macOS. Tauri is
+  frozen: it needs only to render the new label and stop calling
+  `witness_preview_request` for ordinary previews.
+
+## 6. Alternatives
+
+| Option | For | Against |
+|---|---|---|
+| **A. Keep witness at preview, better errors and deadlines** | Contributor approves the exact certified bytes; no check to build. | Raw session still leaves before any decision; viewing still depends on the witness. The owner's objection stands. |
+| **B. Local-only redaction for interactive approvals** | Fast, offline, simple. | Uncertified upload from a contributor enrolled as certified — the downgrade `preview.rs:786-797` exists to prevent. No classifier pass at all. |
+| **C. Witness before preview behind an explicit "send for final check" step** | Consent is explicit. | This is today's flow (confirm modal + `raw_session_confirmed`). Same objection as A. |
+| **D. Witness at submission, no check** | Already built (approve without preview). | The approval is of something other than what is sent; a witness bug that adds text would go out unseen. |
+| **E. Witness at submission, subset check (recommended)** | Preview is local and offline; raw leaves only on submit; the person approves an upper bound on what is sent; certified bytes still go out. | A check to build and test; a second look on divergence; Windows needs Q1 first. |
+
+**Recommendation: E**, phased so that it ships to macOS before Q1 lands
+and to Windows after.
+
+## 7. Open questions for the owner
+
+1. **Send the client's path prefixes to the witness?** Needed for the
+   check to pass on Windows and for cwds outside the standard roots.
+   *Recommend yes*, as hints added to the witness's own, in a new
+   measurement. Until then, Windows witnessed clients keep today's flow.
+2. **Is the consent rule right?** "This, or this with more removed, and
+   nothing else." *Recommend yes.*
+3. **Upload regardless of the certificate's verdict for a person's
+   approval?** *Recommend yes*; the unattended hold stays.
+4. **Name the witness "privacy check" in copy?** Today's strings say
+   "witness" and "privacy witness". *Recommend "privacy check".*
+5. **Approve the DRAFT strings in section 3**, including the
+   `witness-changed-after-review` row state. *Recommend as drafted.*
+6. **Size shown before submission.** The approved preview's size, which
+   can grow slightly. *Recommend showing it unqualified*; placeholders
+   change it by bytes, not by meaning.
+7. **Second look shows the witness's bytes** (raw already sent under the
+   first approval). *Recommend yes*, as argued in 2.1.
+8. **Retire `witness_preview_request` for ordinary previews?**
+   *Recommend yes*; keep it for admission and token review.
+
+## 8. Phased plan (sketch, no code)
+
+1. **Check.** `subset_check` in the contributor crate with label-only
+   errors. Tests: property tests that splice random grammar tokens into
+   random envelopes and must pass; any inserted byte, reorder, dropped
+   event or non-stripped key removal must fail; renumbering must pass
+   when injective and fail when it merges or splits; a replay of the
+   deterministic + mock-classifier pipeline through the real
+   `redact_trace` against a deterministic-only preview of the same raw
+   must pass.
+2. **Daemon and submit.** Lift the preview refusal for the ordinary
+   path; replace the `witness_certificate_missing` refusal for a plain
+   pin with witness + check; on fail, R5 save and
+   `witness-changed-after-review`. Existing witness pins unchanged.
+3. **macOS.** Strings, row state, preview footer, second-preview header;
+   ordinary preview stops offering the witness review.
+4. **Witness request prefixes (Q1).** Protocol field, witness image,
+   measurement rollout; then enable the new path on Windows.
+5. **GTK, Windows, Tauri** parity with macOS (Tauri minimal).
+6. **Docs.** Update the 2026-09-02 witness-client spec and the
+   2026-09-04 native-inference onboarding dependency 1 to point here.
