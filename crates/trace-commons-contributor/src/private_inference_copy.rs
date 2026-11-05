@@ -3255,6 +3255,16 @@ pub fn queue_outcome_line(label: &str) -> &'static str {
         crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED => {
             "The privacy scan kept failing; not sent. Approve it again to retry"
         }
+        // The witness's evidence did not verify (`submit::witness_trust_hold`).
+        // Owner-approved wording, 2026-11-05.
+        crate::submit::REASON_WITNESS_NOT_TRUSTED => {
+            "The privacy check couldn't be verified. Nothing was sent."
+        }
+        // The witness reports a measurement outside the accepted list; a
+        // newer list releases the hold. Owner-approved wording, 2026-11-05.
+        crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED => {
+            "The privacy check was updated and isn't trusted yet. Nothing was sent."
+        }
         _ => "Status unavailable",
     }
 }
@@ -3498,6 +3508,15 @@ mod tests {
             assert_ne!(line, "Status unavailable", "{label}");
             assert!(!line.contains(label), "raw label: {label}");
         }
+        // The witness holds, in the owner's approved words (2026-11-05).
+        assert_eq!(
+            queue_outcome_line(crate::submit::REASON_WITNESS_NOT_TRUSTED),
+            "The privacy check couldn't be verified. Nothing was sent."
+        );
+        assert_eq!(
+            queue_outcome_line(crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED),
+            "The privacy check was updated and isn't trusted yet. Nothing was sent."
+        );
         // A rate-limited entry is still approved and goes on its own; the
         // line says so and does not read as a refusal.
         let paused = queue_outcome_line(crate::submit::REASON_RATE_LIMITED);
