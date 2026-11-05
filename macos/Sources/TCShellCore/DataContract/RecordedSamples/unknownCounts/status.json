@@ -36,7 +36,9 @@
   "grant_voids": [],
   "witness_capacity": {
     "waiting_sessions": 0,
-    "next_retry_at": null
+    "next_retry_at": null,
+    "privacy_check_sessions": 0,
+    "checking_sessions": 0
   },
   "legacy_invite_migration": {
     "offered": false,
