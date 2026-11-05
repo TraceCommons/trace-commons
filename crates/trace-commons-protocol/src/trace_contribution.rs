@@ -2669,6 +2669,29 @@ pub trait PrivacyFilterAdapter: Send + Sync {
         text: &str,
     ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>;
 
+    /// How many texts a caller holding many should hand to one
+    /// [`Self::redact_texts`] call. 1 (the default) means the backend gains
+    /// nothing from being handed several at once.
+    fn preferred_batch_inputs(&self) -> usize {
+        1
+    }
+
+    /// Redact several independent texts, one answer per text in the same
+    /// order. Each answer must be exactly what [`Self::redact_text`] would
+    /// return for that text given the same classifier answers; a backend
+    /// overrides this only to make fewer round trips. The default asks
+    /// about each text in turn.
+    async fn redact_texts(
+        &self,
+        texts: &[&str],
+    ) -> Vec<Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>> {
+        let mut answers = Vec::with_capacity(texts.len());
+        for text in texts {
+            answers.push(self.redact_text(text).await);
+        }
+        answers
+    }
+
     /// As [`Self::redact_text`], for a caller that will give up at
     /// `deadline`: a backend that retries starts no retry that could not
     /// finish by then, and fails transiently instead. The answer for a text
@@ -2680,6 +2703,21 @@ pub trait PrivacyFilterAdapter: Send + Sync {
     ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
         let _ = deadline;
         self.redact_text(text).await
+    }
+
+    /// [`Self::redact_texts`] for a caller that will give up at `deadline`,
+    /// as [`Self::redact_text_before`] is to [`Self::redact_text`]. The
+    /// default asks about each text in turn with the deadline.
+    async fn redact_texts_before(
+        &self,
+        texts: &[&str],
+        deadline: std::time::Instant,
+    ) -> Vec<Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>> {
+        let mut answers = Vec::with_capacity(texts.len());
+        for text in texts {
+            answers.push(self.redact_text_before(text, deadline).await);
+        }
+        answers
     }
 }
 

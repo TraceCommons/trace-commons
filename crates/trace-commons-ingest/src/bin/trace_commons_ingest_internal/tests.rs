@@ -6671,6 +6671,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         witness_accepted_list_path: None,
         first_run_copy: Default::default(),
         first_run_stats: None,
+        witness_blocked: None,
         root,
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -31410,6 +31411,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         witness_accepted_list_path: None,
         first_run_copy: Default::default(),
         first_run_stats: None,
+        witness_blocked: None,
         root: temp.path().to_path_buf(),
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -104107,5 +104109,225 @@ mod first_run_copy_tests {
         assert_eq!(first_run_copy::usd_figure(20_000_000), "$20");
         assert_eq!(first_run_copy::usd_figure(1_030_750_000), "$1,030.75");
         assert_eq!(first_run_copy::usd_figure(19_999), "$0.01");
+    }
+}
+
+mod witness_blocked_tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use std::sync::Mutex as StdMutex;
+    use tower::ServiceExt;
+    use trace_commons_protocol::witness_blocked::{WITNESS_BLOCKED_HEADER, WitnessBlockedCounts};
+    use trace_commons_server::db::witness_blocked::{
+        WitnessBlockedStats, WitnessBlockedStore, WitnessBlockedTotal,
+    };
+
+    /// Records every report it is handed; fails every write when `fail`.
+    #[derive(Default)]
+    struct FakeStore {
+        recorded: StdMutex<Vec<(String, WitnessBlockedCounts)>>,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl WitnessBlockedStore for FakeStore {
+        async fn record_witness_blocked(
+            &self,
+            tenant_id: &str,
+            counts: &WitnessBlockedCounts,
+        ) -> Result<(), trace_commons_server::error::DatabaseError> {
+            if self.fail {
+                return Err(trace_commons_server::error::DatabaseError::Query(
+                    "synthetic".to_string(),
+                ));
+            }
+            self.recorded
+                .lock()
+                .unwrap()
+                .push((tenant_id.to_string(), *counts));
+            Ok(())
+        }
+
+        async fn witness_blocked_stats(
+            &self,
+            since: chrono::NaiveDate,
+        ) -> Result<WitnessBlockedStats, trace_commons_server::error::DatabaseError> {
+            Ok(WitnessBlockedStats {
+                since,
+                per_day: Vec::new(),
+                per_label: Vec::new(),
+                all: WitnessBlockedTotal {
+                    blocked: 3,
+                    tenants: 2,
+                },
+            })
+        }
+    }
+
+    fn state_with(store: Option<Arc<FakeStore>>) -> (tempfile::TempDir, Arc<AppState>) {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::get_mut(&mut state)
+            .expect("sole owner of the test state")
+            .witness_blocked = store.map(|s| s as Arc<dyn WitnessBlockedStore>);
+        (temp, state)
+    }
+
+    async fn status_read(state: Arc<AppState>, report: Option<&str>) -> StatusCode {
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/contributors/me/submission-status")
+            .header(AUTHORIZATION, "Bearer token-a")
+            .header(CONTENT_TYPE, "application/json");
+        if let Some(value) = report {
+            request = request.header(WITNESS_BLOCKED_HEADER, value);
+        }
+        let response = app(state)
+            .oneshot(
+                request
+                    .body(Body::from(r#"{"submission_ids":[]}"#))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response");
+        response.status()
+    }
+
+    /// A report is added for the tenant the request authenticated as.
+    #[tokio::test]
+    async fn a_report_is_recorded_for_the_authenticated_tenant() {
+        let store = Arc::new(FakeStore::default());
+        let (_temp, state) = state_with(Some(store.clone()));
+        assert_eq!(
+            status_read(state, Some("busy=2,unreachable=1")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            *store.recorded.lock().unwrap(),
+            vec![(
+                "tenant-a".to_string(),
+                WitnessBlockedCounts {
+                    busy: 2,
+                    timed_out: 0,
+                    unreachable: 1,
+                }
+            )]
+        );
+    }
+
+    /// No report, a refused report, a failed write and no database each
+    /// leave the status read answering as it always did.
+    #[tokio::test]
+    async fn a_report_never_changes_the_answer() {
+        let store = Arc::new(FakeStore::default());
+        let (_temp, state) = state_with(Some(store.clone()));
+        assert_eq!(status_read(state.clone(), None).await, StatusCode::OK);
+        for refused in [
+            "busy=1001",
+            "busy=-1",
+            "tenant=1",
+            "busy=1,busy=1",
+            "busy=0",
+            "",
+        ] {
+            assert_eq!(
+                status_read(state.clone(), Some(refused)).await,
+                StatusCode::OK,
+                "{refused:?}"
+            );
+        }
+        assert!(store.recorded.lock().unwrap().is_empty());
+
+        let failing = Arc::new(FakeStore {
+            fail: true,
+            ..FakeStore::default()
+        });
+        let (_temp, state) = state_with(Some(failing));
+        assert_eq!(status_read(state, Some("busy=1")).await, StatusCode::OK);
+
+        let (_temp, state) = state_with(None);
+        assert_eq!(status_read(state, Some("busy=1")).await, StatusCode::OK);
+    }
+
+    /// A report on an unauthenticated request is never recorded.
+    #[tokio::test]
+    async fn an_unauthenticated_report_is_not_recorded() {
+        let store = Arc::new(FakeStore::default());
+        let (_temp, state) = state_with(Some(store.clone()));
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/contributors/me/submission-status")
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(WITNESS_BLOCKED_HEADER, "busy=1")
+                    .body(Body::from(r#"{"submission_ids":[]}"#))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(store.recorded.lock().unwrap().is_empty());
+    }
+
+    async fn stats(
+        state: Arc<AppState>,
+        token: Option<&str>,
+        query: &str,
+    ) -> (StatusCode, Vec<u8>) {
+        let mut request = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/v1/admin/witness-blocked-stats{query}"));
+        if let Some(token) = token {
+            request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = app(state)
+            .oneshot(request.body(Body::empty()).expect("request builds"))
+            .await
+            .expect("response");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body")
+            .to_vec();
+        (status, body)
+    }
+
+    /// The totals route is admin-only, bounds its window, and needs a
+    /// database.
+    #[tokio::test]
+    async fn the_stats_route_is_admin_only_and_bounded() {
+        let store = Arc::new(FakeStore::default());
+        let (_temp, state) = state_with(Some(store));
+        assert_eq!(
+            stats(state.clone(), None, "").await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            stats(state.clone(), Some("token-a"), "").await.0,
+            StatusCode::FORBIDDEN
+        );
+        for bad in ["?days=0", "?days=367", "?days=-1", "?tenant=a"] {
+            assert_eq!(
+                stats(state.clone(), Some("admin-token-a"), bad).await.0,
+                StatusCode::BAD_REQUEST,
+                "{bad}"
+            );
+        }
+        let (status, body) = stats(state.clone(), Some("admin-token-a"), "?days=7").await;
+        assert_eq!(status, StatusCode::OK);
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let since = (Utc::now().date_naive() - chrono::Days::new(6)).to_string();
+        assert_eq!(value["since"], serde_json::json!(since));
+        assert_eq!(
+            value["all"],
+            serde_json::json!({"blocked": 3, "tenants": 2})
+        );
+
+        let (_temp, state) = state_with(None);
+        assert_eq!(
+            stats(state, Some("admin-token-a"), "").await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 }

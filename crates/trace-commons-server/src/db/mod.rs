@@ -20,6 +20,7 @@ pub mod postgres_inference_connection;
 mod postgres_legacy_payout_carry;
 mod postgres_payout;
 mod postgres_referral;
+pub mod witness_blocked;
 #[doc(hidden)]
 pub use postgres_referral::REFERRAL_RESOLVER_ASSUME_SQL;
 mod postgres_referral_bonus;

@@ -55,6 +55,8 @@ mod upload_allowance;
 mod usage_region;
 #[path = "trace_commons_ingest_internal/witness_accepted_list.rs"]
 mod witness_accepted_list;
+#[path = "trace_commons_ingest_internal/witness_blocked.rs"]
+mod witness_blocked;
 
 #[cfg(test)]
 use public_run::validate_public_run_provenance;
@@ -1890,6 +1892,10 @@ struct AppState {
     /// Where each first-run estimate request is recorded and the operator's
     /// statistics are read (V153). `None` without a database.
     first_run_stats: Option<Arc<dyn trace_commons_server::db::first_run_stats::FirstRunStatsStore>>,
+    /// Where the daily totals of submissions the witness blocked are added
+    /// and read (V154). `None` without a database: reports are dropped.
+    witness_blocked:
+        Option<Arc<dyn trace_commons_server::db::witness_blocked::WitnessBlockedStore>>,
     inference_connection_catalog:
         Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
@@ -5371,6 +5377,10 @@ impl AppState {
             first_run_stats: db_connections.as_ref().map(|connections| {
                 connections.postgres.clone()
                     as Arc<dyn trace_commons_server::db::first_run_stats::FirstRunStatsStore>
+            }),
+            witness_blocked: db_connections.as_ref().map(|connections| {
+                connections.postgres.clone()
+                    as Arc<dyn trace_commons_server::db::witness_blocked::WitnessBlockedStore>
             }),
             attestation_signing,
             legacy_invite_link,
@@ -9465,6 +9475,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/first-run-estimate-stats",
             get(first_run_copy::stats_handler),
+        )
+        .route(
+            "/v1/admin/witness-blocked-stats",
+            get(witness_blocked::stats_handler),
         )
         .route(
             "/v1/admin/pii-backstop-requeue-quarantined",
@@ -18496,6 +18510,10 @@ async fn submission_status_handler(
     Json(body): Json<TraceSubmissionStatusRequest>,
 ) -> ApiResult<Json<Vec<TraceSubmissionStatusUpdate>>> {
     let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    // The daemon's count of submissions the witness blocked rides on this
+    // read. Recorded for the authenticated tenant only, and never able to
+    // change the answer.
+    witness_blocked::record_report(state.as_ref(), tenant.tenant_id(), &headers).await;
     if body.submission_ids.len() > 500 {
         return Err(api_error(
             StatusCode::PAYLOAD_TOO_LARGE,
