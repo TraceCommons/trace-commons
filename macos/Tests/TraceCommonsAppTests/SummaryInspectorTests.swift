@@ -80,12 +80,12 @@ final class SummaryInspectorTests: XCTestCase {
         let rollup = try recorded(DaemonData.HistoryRollup.self, "history_rollup")
         XCTAssertEqual(rollup.allTime?.quarantined, 1)
         XCTAssertEqual(HomeFormat.contributed(rollup), "3")
-        let unsaid = try recorded(DaemonData.HistoryRollup.self, "history_rollup") {
+        let olderRollup = try recorded(DaemonData.HistoryRollup.self, "history_rollup") {
             var all = $0["all_time"] as? [String: Any] ?? [:]
             all["contributed"] = nil
             $0["all_time"] = all
         }
-        XCTAssertEqual(HomeFormat.contributed(unsaid), "—", "an older daemon's rollup is not summed here")
+        XCTAssertEqual(HomeFormat.contributed(olderRollup), "—", "an older daemon's rollup is not summed here")
 
         // Home's tile, History's card and the Traces summary read one
         // figure: the core's 57 (56 accepted and 1 waiting) beside 3 held.
