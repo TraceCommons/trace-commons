@@ -193,15 +193,22 @@ final class ProjectsManagerSheetTests: XCTestCase {
     }
 
     /// The bulk confirmation draws the daemon's words, destructive only for
-    /// a Never.
-    func test_theBulkConfirmationIsTheDaemons() {
+    /// a Never, and Return confirms neither: a change that turns off
+    /// Automatic is pressed, as a Never is (owner, 2026-11-04 on #1963).
+    func test_theBulkConfirmationIsTheDaemonsAndNeverTheReturnDefault() {
         let never = ProjectsBulkPlan.Confirmation(
             title: "t", body: "b", button: "Never", keep: "Keep", help: "h", destructive: true)
-        XCTAssertEqual(ProjectsManagerSheet.confirmAction(never) {}.role, .destructive)
+        let neverAction = ProjectsManagerSheet.confirmAction(never) {}
+        XCTAssertEqual(neverAction.role, .destructive)
+        XCTAssertFalse(neverAction.isDefault)
         let ask = ProjectsBulkPlan.Confirmation(
-            title: "t", body: "b", button: "Ask", keep: "Keep", help: nil, destructive: false)
+            title: "t", body: "This turns off Automatic for 1 project.", button: "Ask", keep: "Keep",
+            help: nil, destructive: false)
         let action = ProjectsManagerSheet.confirmAction(ask) {}
         XCTAssertEqual(action.role, .standard)
         XCTAssertEqual(action.title, "Ask")
+        XCTAssertFalse(action.isDefault, "Return must not turn off Automatic")
+        XCTAssertTrue(action.isProminent)
+        XCTAssertFalse(Self.source.contains("GlassModalAction(copy.button, isDefault: true"))
     }
 }

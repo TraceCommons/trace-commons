@@ -10,7 +10,7 @@ pub const IGNORE_PROJECT_TOOLTIP: &str = "Stops this project being offered and c
      Anything already submitted is unaffected, and you can undo this in Settings.";
 
 /// The mode is named Never, so the title says so (it was "Ignore
-/// {project}?"). DRAFT, NEEDS APPROVAL (2026-11-04).
+/// {project}?"). Approved by the owner 2026-11-04 (#1963).
 pub fn ignore_project_title(project: &str) -> String {
     format!("Set {project} to Never?")
 }
@@ -232,7 +232,7 @@ pub fn bulk_projects_name(labels: &[&str]) -> String {
 
 /// The line a bulk or group change that turns off Automatic says first
 /// (owner decision 2026-11-04 on #1952: such a change always asks, with
-/// the count). DRAFT, NEEDS APPROVAL.
+/// the count). Approved by the owner 2026-11-04 (#1963).
 #[must_use]
 pub fn bulk_turns_off_automatic(count: usize) -> String {
     if count == 1 {
@@ -264,8 +264,8 @@ pub struct BulkModeConfirmation {
 /// turning off Automatic on `automatic_off` of them and, for a Never,
 /// removing `pending` waiting traces.
 ///
-/// The Never title is [`ignore_project_title`]'s (DRAFT, NEEDS APPROVAL);
-/// the Ask title has the same shape and is DRAFT, NEEDS APPROVAL. The
+/// The Never title is [`ignore_project_title`]'s; the Ask title has the
+/// same shape. Both approved by the owner 2026-11-04 (#1963). The
 /// pending sentence is [`ignore_project_body`]'s (approved), said only
 /// when traces wait.
 #[must_use]

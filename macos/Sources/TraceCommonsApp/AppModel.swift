@@ -2116,7 +2116,7 @@ final class AppModel: ObservableObject {
     /// from its live state, and runs only when `agreed` (the plan whose
     /// confirmation was accepted) still covers it. The list is refreshed
     /// whatever the answer, so it shows what did change. A change stopped
-    /// part way says how many of how many changed (DRAFT words).
+    /// part way says how many of how many changed.
     func setProjectModes(_ projectIDs: [String], mode: ProjectMode, agreed: ProjectsBulkPlan?) async -> BulkChange {
         guard let client, !projectIDs.isEmpty else { return .failed }
         let outcome = await DaemonWork.run {

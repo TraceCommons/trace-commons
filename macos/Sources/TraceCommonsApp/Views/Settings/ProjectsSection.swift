@@ -304,11 +304,14 @@ struct ProjectsManagerSheet: View {
     }
 
     /// The bulk confirmation's confirm: destructive for a Never, as the
-    /// daemon's words say.
+    /// daemon's words say. Never the Return default either way: every bulk
+    /// confirmation turns off Automatic or removes waiting traces, so it is
+    /// pressed, not entered (owner, 2026-11-04 on #1963). An Ask is drawn
+    /// as the primary button without the key.
     static func confirmAction(_ copy: ProjectsBulkPlan.Confirmation, _ action: @escaping () -> Void) -> GlassModalAction {
         copy.destructive
             ? .destructive(copy.button, help: copy.help, action: action)
-            : GlassModalAction(copy.button, isDefault: true, action: action)
+            : GlassModalAction(copy.button, isProminent: true, help: copy.help, action: action)
     }
 
     /// All, then each mode with how many projects are in it.

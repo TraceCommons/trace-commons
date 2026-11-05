@@ -603,7 +603,8 @@ pub fn paused_notice_words() -> PausedNoticeWords {
 /// bulk Never asks in `project_copy::ignore_project_copy`'s words.
 ///
 /// The first ten words were approved by the owner 2026-11-04 (#1952); the
-/// six the review of #1952 added are DRAFT, NEEDS APPROVAL.
+/// six the review of #1952 added were approved by the owner 2026-11-04
+/// (#1963).
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ProjectsManagerWords {
     /// The summary card's button that opens the sheet.
@@ -629,22 +630,22 @@ pub struct ProjectsManagerWords {
     /// A project's checkbox's accessible name.
     pub select_accessibility: &'static str,
     /// The search field's prompt, a key apart from its label
-    /// ([`Self::search`]). DRAFT, NEEDS APPROVAL.
+    /// ([`Self::search`]). Approved by the owner 2026-11-04 (#1963).
     pub search_prompt: &'static str,
     /// The checkbox above the list that selects every project shown.
-    /// DRAFT, NEEDS APPROVAL.
+    /// Approved by the owner 2026-11-04 (#1963).
     pub select_all: &'static str,
     /// A group header's checkbox's accessible name: the group's `{title}`.
-    /// DRAFT, NEEDS APPROVAL.
+    /// Approved by the owner 2026-11-04 (#1963).
     pub select_group_accessibility: &'static str,
     /// A group header's mode menu's accessible name, apart from its
-    /// disclosure's ([`Self::group_accessibility`]). DRAFT, NEEDS APPROVAL.
+    /// disclosure's ([`Self::group_accessibility`]). Approved by the owner 2026-11-04 (#1963).
     pub group_menu_accessibility: &'static str,
     /// The bulk menu's accessible name: what it acts on, `{count}`
-    /// selected projects. DRAFT, NEEDS APPROVAL.
+    /// selected projects. Approved by the owner 2026-11-04 (#1963).
     pub bulk_menu_accessibility: &'static str,
     /// A bulk change stopped part way: `{count}` of `{total}` projects
-    /// changed. DRAFT, NEEDS APPROVAL.
+    /// changed. Approved by the owner 2026-11-04 (#1963).
     pub changed_some: &'static str,
 }
 
@@ -671,17 +672,17 @@ pub fn projects_manager_words() -> ProjectsManagerWords {
         group_accessibility: "{title}, {count} projects",
         // Approved by the owner 2026-11-04 (#1952).
         select_accessibility: "Select {title}",
-        // DRAFT, NEEDS APPROVAL (#1952 review).
+        // Approved by the owner 2026-11-04 (#1963).
         search_prompt: "Project name",
-        // DRAFT, NEEDS APPROVAL (#1952 review).
+        // Approved by the owner 2026-11-04 (#1963).
         select_all: "Select all",
-        // DRAFT, NEEDS APPROVAL (#1952 review).
+        // Approved by the owner 2026-11-04 (#1963).
         select_group_accessibility: "Select {title} projects",
-        // DRAFT, NEEDS APPROVAL (#1952 review).
+        // Approved by the owner 2026-11-04 (#1963).
         group_menu_accessibility: "Set {title} projects",
-        // DRAFT, NEEDS APPROVAL (#1952 review).
+        // Approved by the owner 2026-11-04 (#1963).
         bulk_menu_accessibility: "Set {count} selected projects",
-        // DRAFT, NEEDS APPROVAL (#1952 review).
+        // Approved by the owner 2026-11-04 (#1963).
         changed_some: "{count} of {total} changed.",
     }
 }
