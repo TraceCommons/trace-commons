@@ -207,7 +207,9 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertFalse(uses.contains("GlassTag(copy.uses.required"))
         // The required use is one "Always on" line now (owner, 2026-10-28).
         XCTAssertFalse(uses.contains("Text(copy.uses.required)"))
-        XCTAssertTrue(uses.contains("GlassTokens.Color.statusOnText"))
+        // "Required to earn credit." is an amber heads-up (product owner,
+        // 2026-11-05), no longer the on colour.
+        XCTAssertTrue(uses.contains("GlassTokens.Color.statusAskText"))
         let join = try Self.appSource("Views/FirstRun/JoinScreen.swift")
         XCTAssertTrue(join.contains("busy: starting && runner.isCommitting"))
         XCTAssertFalse(join.contains("bodyEmphasis"))
