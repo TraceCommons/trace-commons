@@ -77,6 +77,14 @@ final class ManagedToolAvailabilityTests: XCTestCase {
             XCTAssertEqual(value.canLaunch(tool: "opencode"), installed.contains("opencode"))
             XCTAssertEqual(value.canLaunch(tool: "hermes"), installed.contains("hermes"))
             XCTAssertEqual(value.tools?.count, 4)
+            XCTAssertEqual(value.allowingHermes(true), value)
+            let disabled = value.allowingHermes(false)
+            XCTAssertEqual(disabled.setupTools, installed.filter { $0 != "hermes" })
+            XCTAssertFalse(disabled.canLaunch(tool: "hermes"))
+            XCTAssertFalse(disabled.missingInstallTools.contains { $0.tool == "hermes" })
+            XCTAssertTrue(disabled.updateRecoveryTools(attemptedTool: "hermes").isEmpty)
+            XCTAssertEqual(disabled.needsToolInstallation, installed.filter { $0 != "hermes" }.isEmpty)
+            XCTAssertEqual(disabled.accounts, value.accounts)
         }
     }
     func testSignInEntryIsPreservedButMissingToolCannotStart() throws {

@@ -32,7 +32,7 @@ struct ManagedFolderExplainerSheet: View {
     @State private var catalogueReads = ManagedCatalogueReads()
     private var supportsFolderSettings: Bool { model.managedSnapshot?.capabilities.folderSettings == true }
     private var canOpen: Bool {
-        guard !model.managedBusy else { return false }
+        guard !model.managedBusy, model.managedToolIsEnabled(tool) else { return false }
         return !supportsFolderSettings || (draft.matches(tool: tool, cwd: path)
             && ManagedFolderOptions.launchModelReady(draft, tool: tool, connection: "near_ai_signin",
                                                      catalogue: catalogueReads.catalogue, catalogueFailed: catalogueReads.failed))

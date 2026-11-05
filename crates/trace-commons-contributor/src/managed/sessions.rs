@@ -1521,6 +1521,15 @@ impl SessionRegistry {
         self.commit(next)
     }
 
+    /// The tool of a session, including rows replaced in the visible history.
+    pub fn tool(&self, id: Uuid) -> Option<ToolId> {
+        self.data
+            .entries
+            .iter()
+            .find(|e| e.view.id == id)
+            .map(|e| e.view.tool)
+    }
+
     /// The connection and state of a session, without consuming anything.
     pub fn describe(&self, id: Uuid) -> Option<(ConnectionKind, SessionState)> {
         self.data

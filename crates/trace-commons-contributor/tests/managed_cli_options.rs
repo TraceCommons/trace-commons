@@ -23,7 +23,7 @@ fn saved_options_round_trip_through_ipc_and_restart() {
     let daemon = DaemonShared::load(ConfigStore::open(home.path().to_path_buf()).unwrap()).unwrap();
     assert_eq!(
         call(&daemon, "managed_snapshot", json!({}))["cli_options"],
-        json!({"claude":"", "codex":"", "opencode":"", "hermes":""})
+        json!({"claude":"", "codex":"", "opencode":""})
     );
     let options = r#"--model custom -c 'model_reasoning_effort="high"' --sandbox workspace-write"#;
     let revision = call(&daemon, "managed_snapshot", json!({}))["revision"]

@@ -39,3 +39,31 @@ fn local_validation_rejects_unknown_flags_without_a_daemon() {
     std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
     assert!(!check().status.success());
 }
+
+#[test]
+fn hermes_profiles_are_default_off_and_require_build_capability() {
+    use feature_flags::{Environment, Runtime};
+    for environment in [
+        Environment::Production,
+        Environment::Staging,
+        Environment::Testing,
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let registry = feature_flags::registry().unwrap();
+        let profile = feature_flags::profile_for_environment(environment).unwrap();
+        let now = chrono::Utc::now();
+        let manifest = serde_json::to_vec(&serde_json::json!({"schema_version":1,
+            "environment":environment,"revision":1,"issued_at":now,
+            "expires_at":now+chrono::Duration::hours(1),"flags":{"managed_hermes":true}}))
+        .unwrap();
+        let runtime = Runtime::open(registry.clone(), profile.clone(), home.path(), now).unwrap();
+        assert!(!runtime.snapshot().is_enabled("managed_hermes"));
+        runtime.accept(&manifest, now).unwrap();
+        assert!(runtime.snapshot().is_enabled("managed_hermes"));
+        let mut incapable = profile;
+        incapable.capabilities.remove("managed_hermes");
+        let runtime = Runtime::open(registry, incapable, home.path(), now).unwrap();
+        runtime.accept(&manifest, now).unwrap();
+        assert!(!runtime.snapshot().is_enabled("managed_hermes"));
+    }
+}

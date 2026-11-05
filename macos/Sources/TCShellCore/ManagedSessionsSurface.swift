@@ -36,7 +36,7 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
     /// older daemon and for a launch from the command line.
     public let canStop: Bool
     /// The ended session can be launched again as it was.
-    public let canStartAgain: Bool
+    public private(set) var canStartAgain: Bool
     /// The ended session can be resumed: its conversation continues. False
     /// from an older daemon.
     public let canResume: Bool
@@ -79,6 +79,12 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
         canDismiss = try c.decodeIfPresent(Bool.self, forKey: .canDismiss) ?? false
         resumedFrom = try c.decodeIfPresent(String.self, forKey: .resumedFrom).flatMap(SourceCandidate.Wire.parseTimestamp)
         startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt).flatMap(SourceCandidate.Wire.parseTimestamp)
+    }
+
+    func withoutStartAgain() -> Self {
+        var session = self
+        session.canStartAgain = false
+        return session
     }
 }
 
@@ -178,16 +184,16 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         }
     }
     public var cliOptions: [String: String]?
-    public let tools: [ManagedToolAvailability]?
+    public private(set) var tools: [ManagedToolAvailability]?
     public let copy: [String: String]?
     public var revision: UInt64
     public let accounts: [ManagedAccount]
     /// One entry per tool, derived from the NEAR AI sign-in and never
     /// saved. Empty, or absent from an older daemon, without one.
-    public let signInAccounts: [ManagedAccount]?
-    public let defaults: [ManagedSelection]
+    public private(set) var signInAccounts: [ManagedAccount]?
+    public private(set) var defaults: [ManagedSelection]
     public let generations: [String: UInt64]
-    public let sessions: [ManagedSession]
+    public private(set) var sessions: [ManagedSession]
     public let capabilities: Capabilities
     /// Whether a coding session has started on this computer, from the app
     /// or the command line (#1408). Absent from an older daemon.
@@ -889,6 +895,19 @@ public extension ManagedSurface {
 }
 
 public extension ManagedSnapshot {
+    /// Apply the latest daemon feature decision to an independently sampled
+    /// managed snapshot. Keep saved accounts and session history intact.
+    func allowingHermes(_ enabled: Bool) -> Self {
+        guard !enabled else { return self }
+        var snapshot = self
+        snapshot.tools = tools?.filter { $0.tool != "hermes" }
+        snapshot.signInAccounts = signInAccounts?.filter { $0.tool != "hermes" }
+        snapshot.defaults = defaults.filter { $0.tool != "hermes" }
+        snapshot.cliOptions?.removeValue(forKey: "hermes")
+        snapshot.sessions = sessions.map { $0.tool == "hermes" ? $0.withoutStartAgain() : $0 }
+        return snapshot
+    }
+
     /// A failed operation identifies its tool; old error payloads fall back
     /// to installed tools, never an unrelated hardcoded provider.
     func updateRecoveryTools(attemptedTool: String?) -> [ManagedToolAvailability] {

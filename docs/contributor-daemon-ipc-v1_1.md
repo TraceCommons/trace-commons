@@ -9763,7 +9763,8 @@ Acceptance can earn pending credit; this is not credit redemption.
 ### Installed coding tools
 
 `managed_snapshot.tools` is an additive array of `{tool, installed, install_url}`
-rows for `claude`, `codex`, `opencode`, and `hermes`. Each row reports executable discovery
+rows for `claude`, `codex`, `opencode`, and, when `managed_hermes` is enabled,
+`hermes`. Each row reports executable discovery
 independently of trace-source discovery, saved accounts, or sign-in. It does not
 verify tool versions, read traces, or grant consent. All four are managed
 tools; see "Managed OpenCode launch additions" below for OpenCode's launch
@@ -9779,12 +9780,23 @@ files are skipped. Windows installation detection includes `.exe`, `.cmd`, and
 wrapper-only installations can be reported installed without being launchable
 through managed sessions. Discovery never invokes a command interpreter. Each
 snapshot refresh checks again. Before daemon startup,
-`tc_managed_tools_json` returns the same array, `tc_managed_copy_json` returns
+`tc_managed_tools_json` returns discovery rows for all four tools, not feature
+availability; shells must independently gate Hermes using the daemon's feature
+snapshot. `tc_managed_copy_json` returns
 the shared copy object, and `tc_install_guides_json` returns the install-guide
 table as `{source slug: url}` for every tool first run asks about; all three
 strings are freed with `tc_string_free`.
 
 ### Managed Hermes launches
+
+The default-off, live `managed_hermes` flag gates new accounts, setup, selection,
+preparation, start-again and terminal launch/redemption. Disabled or expired
+decisions return `managed-invalid-request`, including for an unredeemed ticket.
+Snapshots omit Hermes tools, CLI options, sign-in accounts and defaults, and
+disable start-again while retaining saved accounts/history and existing session
+reporting, focus, stop and dismissal. Native views also gate stale snapshots and
+open launch dialogs. The CLI checks before prompting for sign-in. No environment
+manifest is published by adding this flag.
 
 The `hermes` tool supports `near_ai_signin`, saved `near_ai` keys and OpenAI
 `api_key` accounts, with its own generation/default and stable sign-in account.

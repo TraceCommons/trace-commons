@@ -12,8 +12,14 @@ defaults, required capabilities, and `live` or `next_start` application timing.
 Bump the registry version and every profile's matching version when definitions
 change. Never reuse a retired ID. Experimental flags default false.
 
-The shipped registry starts empty. No existing feature is automatically gated.
-Tests use fixture flags, which are absent from shipped registry/profile data.
+The shipped registry includes `managed_hermes`, a default-off, live flag for
+Hermes in Private AI and the managed CLI. All three profiles declare its build
+capability and permit remote enablement. No manifest is published by this change.
+Enabling offers new Hermes setup/accounts/launches; disabling hides those entry
+points and rejects new launches, including prepared tickets. Existing accounts
+and session history remain, and running sessions can still report, stop and be
+dismissed. Other managed tools are unaffected.
+Tests also use fixture flags absent from shipped registry/profile data.
 
 Production builds use the production profile. Staging builds default to staging;
 the staging workflow also offers a testing profile. Testing uses the same staging

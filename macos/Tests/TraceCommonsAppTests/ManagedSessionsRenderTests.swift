@@ -78,6 +78,7 @@ final class ManagedSessionsRenderTests: XCTestCase {
         let fixture = try Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json"))
         var value = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture) as? [String: Any])
         let model = AppModel()
+        model.featureFlags = try FeatureFlagIntegrationTests.hermesFlags(enabled: true)
         let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }

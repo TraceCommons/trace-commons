@@ -251,6 +251,15 @@ fn agrees(answer: &str) -> bool {
 
 pub async fn launch(store: &ConfigStore, args: LaunchArgs) -> anyhow::Result<i32> {
     use std::io::IsTerminal;
+    // Refuse before account resolution can prompt for sign-in. The daemon
+    // rechecks when preparing and redeeming, including after a live disable.
+    if args.tool == ToolId::Hermes {
+        let flags: crate::feature_flags::Snapshot =
+            call(store, "feature_flags_snapshot", json!({}))?;
+        if !flags.is_enabled("managed_hermes") {
+            return Err(ManagedError::InvalidRequest.into());
+        }
+    }
     let mut snapshot: Snapshot = call(store, "managed_snapshot", json!({}))?;
     let resolved = |snapshot: &Snapshot| {
         resolve(

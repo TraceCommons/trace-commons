@@ -516,6 +516,36 @@ impl ManagedService {
             .ok_or(ManagedError::NotFound)
     }
 
+    /// Live disable prevents new work, including already-prepared tickets,
+    /// but does not interrupt reporting, stopping or cleaning up a session.
+    fn check_feature(&self, request: &Request, hermes_enabled: bool) -> Result<(), ManagedError> {
+        if hermes_enabled {
+            return Ok(());
+        }
+        let hermes = match request.method.as_str() {
+            "managed_tool_setup" | "managed_account_add" | "managed_launch_prepare" => {
+                request.params["tool"].as_str() == Some("hermes")
+            }
+            "managed_select" => request.params["selection"]["tool"].as_str() == Some("hermes"),
+            "managed_session_start_again"
+            | "managed_session_resume"
+            | "managed_terminal_launch"
+            | "managed_launch_redeem" => {
+                request.params["session_id"]
+                    .as_str()
+                    .and_then(|id| Uuid::parse_str(id).ok())
+                    .and_then(|id| self.sessions.tool(id))
+                    == Some(ToolId::Hermes)
+            }
+            _ => false,
+        };
+        if hermes {
+            Err(ManagedError::InvalidRequest)
+        } else {
+            Ok(())
+        }
+    }
+
     /// `sign_in` says only whether the daemon holds a NEAR AI sign-in;
     /// `terminal` is the terminal the settings name, and whether the person
     /// chose it.
@@ -524,14 +554,17 @@ impl ManagedService {
         request: &Request,
         sign_in: bool,
         terminal: TerminalChoice,
+        hermes_enabled: bool,
     ) -> Result<Value, ManagedError> {
+        self.check_feature(request, hermes_enabled)?;
         let choice = terminal.setting;
         match request.method.as_str() {
             "managed_snapshot" => {
                 let mut sessions = self.sessions.views()?;
                 let roots = self.sessions.resume_roots();
                 for view in &mut sessions {
-                    view.can_start_again = self.can_start_again(view, sign_in);
+                    view.can_start_again = (view.tool != ToolId::Hermes || hermes_enabled)
+                        && self.can_start_again(view, sign_in);
                     view.can_resume = self.can_resume(view, &roots);
                 }
                 let saved = [
@@ -543,8 +576,22 @@ impl ManagedService {
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>();
-                let defaults =
+                let mut defaults =
                     signin::defaults(saved, sign_in, |tool| self.accounts.generation(tool));
+                defaults.retain(|entry| entry.tool != ToolId::Hermes || hermes_enabled);
+                let mut sign_in_accounts = signin::entries(sign_in);
+                sign_in_accounts.retain(|entry| entry.tool != ToolId::Hermes || hermes_enabled);
+                let mut tools = crate::managed::profiles::tools();
+                if let Some(tools) = tools.as_array_mut() {
+                    tools.retain(|entry| entry["tool"] != "hermes" || hermes_enabled);
+                }
+                let mut cli_options = crate::managed::options::snapshot(
+                    &ConfigStore::open(self.config_dir.clone())
+                        .map_err(|_| ManagedError::StorageUnavailable)?,
+                )?;
+                if !hermes_enabled {
+                    cli_options.remove(&ToolId::Hermes);
+                }
                 // The offered apps found here, for a shell's picker.
                 let choices: Vec<Value> = self
                     .installed_terminals(None)
@@ -567,7 +614,7 @@ impl ManagedService {
                 let destination = terminal::destination(choice);
                 let opens_in = launch_destination(terminal.herdr, destination);
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode),"hermes":self.accounts.generation(ToolId::Hermes)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":destination,"launch_destination":opens_in,"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices,"herdr_available":herdr_available,"herdr_grouping":terminal.herdr}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":tools,"cli_options":cli_options,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":sign_in_accounts,"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode),"hermes":self.accounts.generation(ToolId::Hermes)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":destination,"launch_destination":opens_in,"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices,"herdr_available":herdr_available,"herdr_grouping":terminal.herdr}}),
                 )
             }
             "managed_tool_setup" => {
@@ -1028,7 +1075,12 @@ pub fn handle(shared: &DaemonShared, request: &Request) -> Response {
     let choice = terminal_choice(shared);
     let mut ended = vec![];
     let result = with_service(shared, |service| {
-        let value = service.handle(request, sign_in, choice);
+        let value = service.handle(
+            request,
+            sign_in,
+            choice,
+            shared.feature_flags.snapshot().is_enabled("managed_hermes"),
+        );
         ended = service.take_routes(false);
         value
     });
@@ -1072,6 +1124,16 @@ where
     if request.method == "managed_session_focus" {
         return session_focus(shared, request);
     }
+    if prepares_a_session(&request.method) {
+        if let Err(refusal) = with_service(shared, |service| {
+            service.check_feature(
+                request,
+                shared.feature_flags.snapshot().is_enabled("managed_hermes"),
+            )
+        }) {
+            return respond(request, Err(refusal));
+        }
+    }
     // A launch that would prepare a new session on the sign-in waits for
     // the balance before anything is committed: a refusal, a cancelled
     // request or a sign-out during the wait leaves no session behind, and
@@ -1096,7 +1158,12 @@ where
     let choice = terminal_choice(shared);
     let mut ended = vec![];
     let result = with_service(shared, |service| {
-        let value = service.handle(request, sign_in, choice);
+        let value = service.handle(
+            request,
+            sign_in,
+            choice,
+            shared.feature_flags.snapshot().is_enabled("managed_hermes"),
+        );
         ended = service.take_routes(false);
         value
     });
@@ -1112,6 +1179,10 @@ where
 fn terminal_launch(shared: &DaemonShared, request: &Request) -> Response {
     let choice = terminal_choice(shared);
     let launch = match with_service(shared, |service| {
+        service.check_feature(
+            request,
+            shared.feature_flags.snapshot().is_enabled("managed_hermes"),
+        )?;
         service.begin_terminal_launch(request, choice.setting, choice.herdr)
     }) {
         Ok(launch) => launch,
@@ -1451,6 +1522,10 @@ async fn redeem_async(shared: &DaemonShared, request: &Request) -> Response {
     };
     let key = sign_in_key(shared);
     let redeemed = with_service(shared, |service| {
+        service.check_feature(
+            request,
+            shared.feature_flags.snapshot().is_enabled("managed_hermes"),
+        )?;
         service.redeem(p.session_id, &p.ticket, key.is_some())
     });
     let (mut context, on_sign_in) = match redeemed {
@@ -2228,6 +2303,7 @@ mod tests {
                 chosen,
                 herdr: false,
             },
+            true,
         )
     }
 
@@ -3495,6 +3571,7 @@ mod tests {
                         chosen: true,
                         herdr,
                     },
+                    true,
                 )
                 .unwrap()["capabilities"]
                 .clone()
