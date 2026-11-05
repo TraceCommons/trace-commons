@@ -13,6 +13,11 @@ What it models, and from what measurement:
 - Latency per request: `--base-ms + --per-kib-ms * body_KiB`. The defaults fit
   the live endpoint as measured 2026-09-03 (6.4 KB in 1.5 s, 203 KB in 7.1 s,
   243 KiB in 9.3 s): about 1.3 s fixed plus 32 ms per KiB.
+- Or, with `--curve measured-2026-11-05`, the endpoint as the owner measured
+  it that day (tiny 1.0 s, 20 KiB 11.3 s, 103 KiB 14.8 s, 205 KiB 36.5 s),
+  interpolated linearly between those points and extended past the last;
+  `--curve measured-2026-11-05-dense` uses the escape-heavy measurements
+  (4 KiB 3.39 s, 32 KiB 19.41 s, 128 KiB 64.0 s, 232 KiB 96.22 s).
 - The ~256 KiB body limit: a body over `--max-body-bytes` gets a 413, as the
   live endpoint answers.
 - Overlap sensitivity (optional): with `--trip-above N`, a request that arrives
@@ -74,6 +79,24 @@ class Stats:
 
 STATS = Stats()
 CONFIG = argparse.Namespace()
+
+
+# (body KiB, seconds), measured 2026-11-05 against the live endpoint.
+MEASURED_2026_11_05 = [(0.0, 1.0), (20.0, 11.3), (103.0, 14.8), (205.0, 36.5)]
+# The same day, escape-heavy token-dense text (near_ai_probe.py latency).
+MEASURED_2026_11_05_DENSE = [(0.0, 1.0), (4.0, 3.39), (32.0, 19.41), (128.0, 64.0), (232.0, 96.22)]
+
+
+def latency_seconds(body_bytes):
+    if CONFIG.curve == "linear":
+        return (CONFIG.base_ms + CONFIG.per_kib_ms * body_bytes / 1024.0) / 1000.0
+    kib = body_bytes / 1024.0
+    points = MEASURED_2026_11_05_DENSE if CONFIG.curve.endswith("-dense") else MEASURED_2026_11_05
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        if kib <= x1:
+            return y0 + (y1 - y0) * (kib - x0) / (x1 - x0)
+    (x0, y0), (x1, y1) = points[-2], points[-1]
+    return y1 + (y1 - y0) * (kib - x1) / (x1 - x0)
 
 
 def spans_for(text):
@@ -141,7 +164,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             inputs = request["input"]
             if isinstance(inputs, str):
                 inputs = [inputs]
-            delay = (CONFIG.base_ms + CONFIG.per_kib_ms * length / 1024.0) / 1000.0
+            delay = latency_seconds(length)
             time.sleep(delay)
             with STATS.lock:
                 STATS.ok += 1
@@ -180,6 +203,7 @@ def main():
     parser.add_argument("--base-ms", type=float, default=1300.0)
     parser.add_argument("--per-kib-ms", type=float, default=32.0)
     parser.add_argument("--max-body-bytes", type=int, default=256 * 1024)
+    parser.add_argument("--curve", choices=["linear", "measured-2026-11-05", "measured-2026-11-05-dense"], default="linear")
     parser.add_argument("--trip-above", type=int, default=None)
     parser.add_argument("--verbose", action="store_true")
     parser.parse_args(namespace=CONFIG)
