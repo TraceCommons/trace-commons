@@ -110,7 +110,7 @@ pub const WITNESS_TOKEN_DISCLOSURE: &str = "Adds token probabilities and alterna
 pub const WITNESS_TOKEN_ENABLE_TOOLTIP: &str =
     "The witness filters alternatives before contribution. They stay restricted research data.";
 /// Approved by the owner 2026-11-04 (Settings copy pass 2, P278).
-pub const WITNESS_TOKEN_CAPTURE_NOTE: &str = "Needs IronWire capture, set up separately.";
+pub const WITNESS_TOKEN_CAPTURE_NOTE: &str = "Needs request capture, set up separately.";
 /// Cut by the owner: empty, and a shell skips empty text. Approved by the owner 2026-11-04 (Settings copy pass 2, P263).
 pub const WITNESS_TOKEN_SCOPE_NOTE: &str = "";
 /// Approved 2026-10-07: they were "Include
@@ -151,7 +151,7 @@ pub const WITNESS_INFERENCE_ENABLE_TOOLTIP: &str = concat!(
 );
 /// Approved by the owner 2026-11-04 (Settings copy pass 2, P264).
 pub const WITNESS_INFERENCE_CAPTURE_NOTE: &str = concat!(
-    "Needs IronWire capture, set up separately. Turning this off doesn't stop capture or ",
+    "Needs request capture, set up separately. Turning this off doesn't stop capture or ",
     "delete stored bodies."
 );
 /// The model-call card's Disable button's tooltip. Approved by the owner 2026-11-04 (Settings copy pass 2, P264).
@@ -839,7 +839,7 @@ pub fn witness_copy() -> WitnessCopy {
         admission: AdmissionCopy {
             heading: "Prepare next NEAR inference",
             disclosure: "For new inference evidence, this adds an account-bound challenge to the next request in this trace. Use your own funded NEAR AI backend, then continue the agent task and return here to review. You can separately choose witness review of eligible existing history, subject to server limits.",
-            prerequisite: "IronWire must already route this agent to that backend and capture request bodies. Inference-body evidence also needs your separate permission in Settings.",
+            prerequisite: "This agent must already use the selected provider with request capture enabled. Inference-body evidence also needs your separate permission in Settings.",
             backend: "NEAR AI backend name",
             confirm: "Prepare trace",
             confirm_line: "I understand and want to prepare this trace.",
@@ -868,7 +868,7 @@ pub fn witness_copy() -> WitnessCopy {
             start: "Share a trace you already have, or finish a new task in a supported agent. Choose its folder in Settings, then come back here to review it.",
             review: "Open a waiting trace and choose Look inside. If you've set up a witness, you're asked before the trace is sent to it for review. Check what comes back before you send it.",
             follow_up: "Follow it in History. Sending, acceptance and credit happen separately. Points are not a spendable NEAR AI balance.",
-            agent_setup: "To make new NEAR AI usage to contribute, set up your agent with your own paid provider account and model. Capturing requests with IronWire, and sending what it captures, each need their own setup. This app doesn't create a provider account for you.",
+            agent_setup: "To make new NEAR AI usage to contribute, set up your agent with your own paid provider account and model. Capturing requests and sending captured data each need their own setup. This app doesn't create a provider account for you.",
         },
     }
 }
