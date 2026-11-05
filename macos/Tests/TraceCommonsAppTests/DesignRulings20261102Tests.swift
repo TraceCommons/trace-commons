@@ -74,12 +74,13 @@ final class DesignRulings20261102Tests: XCTestCase {
         XCTAssertTrue(card.contains("Image(systemName: \"arrow.right\")"), "a step's action is a text link")
     }
 
-    /// Private AI is the first section on Home, above Traces and Account.
+    /// Private AI is the first section on Home, above Traces and Account,
+    /// under the Traces hero, which leads Home (owner, 2026-11-05).
     func test_privateAIIsFirstOnHome() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains(
             "return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n"
-                + "            privateAI\n            HomeSection(words?.sectionTraces) {"))
+                + "            tracesHero\n            privateAI\n            HomeSection(words?.sectionTraces) {"))
         XCTAssertEqual(home.components(separatedBy: "            privateAI\n").count - 1, 1)
     }
 

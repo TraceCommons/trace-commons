@@ -371,14 +371,20 @@ struct ProjectsManagerSheet: View {
         ProjectModeChoices.options(for: bulkModes ?? [], copy: modeCopy)
     }
 
+    /// Selects, or clears, every one of `ids`.
+    private func select(_ ids: [String], _ on: Bool) {
+        selection = ProjectsManager.selecting(selection, ids: ids, on: on)
+    }
+
     /// A checkbox over `ids`: checked when all are selected, mixed when
     /// some are, and setting it selects or clears them all.
     private func selectionToggle<Label: View>(_ ids: [String], @ViewBuilder label: () -> Label) -> some View {
         let state = ProjectsManager.selectionState(selection, of: ids)
-        let write: (Bool) -> Void = { on in selection = ProjectsManager.selecting(selection, ids: ids, on: on) }
+        // Each setter a closure literal, so it takes the view's actor
+        // (a stored closure value is not Sendable for `Binding(set:)`).
         let sources: [Binding<Bool>] = state == .some
-            ? [Binding(get: { true }, set: write), Binding(get: { false }, set: write)]
-            : [Binding(get: { state == .all }, set: write)]
+            ? [Binding(get: { true }, set: { select(ids, $0) }), Binding(get: { false }, set: { select(ids, $0) })]
+            : [Binding(get: { state == .all }, set: { select(ids, $0) })]
         return Toggle(sources: sources, isOn: \.self, label: label)
             .toggleStyle(GlassCheckboxStyle())
             .disabled(ids.isEmpty)
