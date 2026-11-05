@@ -956,3 +956,38 @@ async fn escape_heavy_bodies_arrive_under_the_cap() {
         .collect();
     assert_eq!(inputs, text);
 }
+
+/// The timeout grows with the body: a slow answer to a small request is
+/// abandoned, the same delay on a larger request is waited for.
+#[tokio::test]
+async fn the_timeout_grows_with_the_request_body() {
+    use trace_commons_protocol::privacy_filter_near_ai::call_timeout;
+    // 200 ms + 40 ms/KiB: under 1 KiB waits ~240 ms, 16 KiB ~840 ms.
+    assert_eq!(call_timeout(200, 40, 100), Duration::from_millis(240));
+    assert_eq!(call_timeout(200, 40, 16 * 1024), Duration::from_millis(840));
+    let server = server_with(|_: &wiremock::Request| {
+        ResponseTemplate::new(200)
+            .set_delay(Duration::from_millis(500))
+            .set_body_json(json!({ "data": [{ "spans": [] }] }))
+    })
+    .await;
+    let adapter = || {
+        NearAiPrivacyFilterAdapter::new(
+            server.uri(),
+            "openai/privacy-filter",
+            "test-api-key-do-not-leak",
+            Duration::from_millis(200),
+            1_000_000,
+        )
+        .expect("adapter builds")
+        .with_timeout_per_kib_ms(40)
+    };
+    let small = adapter().redact_text("a short text").await;
+    assert!(small.is_err(), "a 500 ms answer must time out at ~240 ms");
+    assert!(small.unwrap_err().is_transient());
+    let large = adapter().redact_text(&"x".repeat(16 * 1024)).await;
+    assert!(
+        large.is_ok(),
+        "a 500 ms answer is inside ~840 ms: {large:?}"
+    );
+}

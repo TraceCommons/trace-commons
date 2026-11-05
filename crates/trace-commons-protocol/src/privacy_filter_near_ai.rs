@@ -18,10 +18,75 @@ use crate::trace_contribution::{
 
 pub const DEFAULT_BASE_URL: &str = "https://cloud-api.near.ai/v1";
 pub const DEFAULT_MODEL: &str = "openai/privacy-filter";
-/// 32,000-token windows measured 5.4 s and the largest success took 9.3 s, so
-/// the previous 10 s default left a window legitimately slower than the
-/// timeout. Raised with the budget it has to serve.
-pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+/// The fixed part of a classify request's timeout. The whole timeout grows
+/// with the request body: `base + per_kib x body KiB` (see [`call_timeout`]).
+///
+/// Measured by the owner against the live endpoint on 2026-11-05 with
+/// synthetic text, one request at a time:
+///
+/// | body | seconds |
+/// |---|---|
+/// | tiny | 0.7-1.2 |
+/// | 20 KiB | 11.3 |
+/// | 103 KiB | 14.8 |
+/// | 205 KiB | 36.5 |
+///
+/// Several times slower than 2026-09-03 (243 KiB in 9.3 s), and slower per
+/// byte as bodies grow past ~100 KiB. The previous flat 30 s timeout was
+/// under what a 205 KiB body took, so a full window timed out on every
+/// attempt. 15 s + 250 ms/KiB is about 1.8x the measured time at 20 KiB and
+/// over 2x at the 128 KiB window cap, so an endpoint somewhat slower than
+/// this measurement still answers inside it.
+///
+/// Override with `TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS` (this base) and
+/// `TRACE_NEAR_AI_PRIVACY_TIMEOUT_PER_KIB_MS`.
+pub const DEFAULT_TIMEOUT_MS: u64 = 15_000;
+
+/// The part of a classify request's timeout that grows with its body, per
+/// KiB. See [`DEFAULT_TIMEOUT_MS`].
+pub const DEFAULT_TIMEOUT_PER_KIB_MS: u64 = 250;
+
+/// One classify request's timeout for a body of `body_bytes`: `base_ms`
+/// plus `per_kib_ms` for each started KiB.
+pub const fn call_timeout_ms(base_ms: u64, per_kib_ms: u64, body_bytes: usize) -> u64 {
+    let kib = (body_bytes as u64).div_ceil(1024);
+    base_ms.saturating_add(per_kib_ms.saturating_mul(kib))
+}
+
+/// [`call_timeout_ms`] as a `Duration`.
+pub fn call_timeout(base_ms: u64, per_kib_ms: u64, body_bytes: usize) -> Duration {
+    Duration::from_millis(call_timeout_ms(base_ms, per_kib_ms, body_bytes))
+}
+
+/// The longest one window can take before the adapter gives up on it:
+/// [`MAX_CLASSIFY_ATTEMPTS`] attempts at the full timeout, plus the backoff
+/// between them. A caller with its own deadline (the witness's 300 s request
+/// limit) must leave room for at least this.
+pub const fn worst_case_window_ms(base_ms: u64, per_kib_ms: u64, body_bytes: usize) -> u64 {
+    let attempts = MAX_CLASSIFY_ATTEMPTS as u64;
+    let mut backoff = 0u64;
+    let mut failed = 1;
+    while failed < MAX_CLASSIFY_ATTEMPTS {
+        backoff += backoff_ms(failed);
+        failed += 1;
+    }
+    attempts * call_timeout_ms(base_ms, per_kib_ms, body_bytes) + backoff
+}
+
+/// The worst case for a full window at the defaults must fit well inside
+/// the witness's 300 s request limit, which also has the rest of a
+/// contribution to classify. 240 s is the ceiling; at the defaults one full
+/// window's worst case is about 190 s.
+pub const MAX_WORST_CASE_WINDOW_MS: u64 = 240_000;
+
+const _: () = assert!(
+    worst_case_window_ms(
+        DEFAULT_TIMEOUT_MS,
+        DEFAULT_TIMEOUT_PER_KIB_MS,
+        MAX_CLASSIFY_REQUEST_BODY_BYTES
+    ) <= MAX_WORST_CASE_WINDOW_MS,
+    "a full window's retries at the default timeout must fit the witness's request limit"
+);
 
 /// Largest `privacy/classify` request BODY, in bytes of the exact serialized
 /// JSON the adapter sends. **Windows are sized by this and nothing else.**
@@ -46,13 +111,20 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 ///
 /// So the adapter builds the request body for a candidate window, measures
 /// its length, and cuts the window when it would exceed this cap (see
-/// [`window_ranges`]). 240 KiB sits under the ~256 KiB measured limit. That
-/// limit has moved before, so a 413 is not fatal: the window is halved and
-/// each half classified, at most [`MAX_CLASSIFY_413_SPLITS`] times deep.
+/// [`window_ranges`]). That limit has moved before, so a 413 is not fatal:
+/// the window is halved and each half classified, at most
+/// [`MAX_CLASSIFY_413_SPLITS`] times deep.
+///
+/// **128 KiB, not the 240 KiB the body limit would allow, because of time.**
+/// On 2026-11-05 the endpoint took 14.8 s for 103 KiB and 36.5 s for 205 KiB
+/// (see [`DEFAULT_TIMEOUT_MS`]): past ~100 KiB it gets slower per byte, so
+/// two 103 KiB requests (29.6 s) beat one 205 KiB request. A smaller window
+/// also keeps each attempt, and a window's four attempts, inside the
+/// witness's 300 s request limit (see [`MAX_WORST_CASE_WINDOW_MS`]).
 ///
 /// Override with `TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES`.
 /// Re-measure before trusting the number.
-pub const MAX_CLASSIFY_REQUEST_BODY_BYTES: usize = 240 * 1024;
+pub const MAX_CLASSIFY_REQUEST_BODY_BYTES: usize = 128 * 1024;
 
 /// The smallest body proven to be refused with a 413 (261 KiB, 2026-09-03),
 /// rounded down to the 256 KiB the endpoint's buffer limit appears to be.
@@ -107,6 +179,9 @@ pub struct NearAiPrivacyFilterAdapter {
     /// Largest serialized request body. Configurable because the endpoint's
     /// limit has moved before; see [`MAX_CLASSIFY_REQUEST_BODY_BYTES`].
     max_request_body_bytes: usize,
+    /// The timeout's fixed and per-KiB parts; see [`call_timeout`].
+    timeout_base_ms: u64,
+    timeout_per_kib_ms: u64,
     /// Memoized classifications, keyed by SHA-256 of the window text.
     ///
     /// Agent traces re-read the same files and echo the same tool output
@@ -238,8 +313,19 @@ impl NearAiPrivacyFilterAdapter {
             api_key: SecretApiKey(api_key.into()),
             max_input_bytes,
             max_request_body_bytes,
+            timeout_base_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+            timeout_per_kib_ms: DEFAULT_TIMEOUT_PER_KIB_MS,
             window_cache: std::sync::Mutex::new(ClassifyWindowCache::default()),
         })
+    }
+}
+
+impl NearAiPrivacyFilterAdapter {
+    /// The part of each request's timeout that grows with its body, per KiB.
+    /// `timeout` passed to the constructor is the fixed part.
+    pub fn with_timeout_per_kib_ms(mut self, per_kib_ms: u64) -> Self {
+        self.timeout_per_kib_ms = per_kib_ms;
+        self
     }
 }
 
@@ -265,6 +351,21 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
+    let timeout_per_kib_ms = match std::env::var("TRACE_NEAR_AI_PRIVACY_TIMEOUT_PER_KIB_MS") {
+        Ok(value) => {
+            value
+                .trim()
+                .parse::<u64>()
+                .map_err(|err| PrivacyFilterConfigError::InvalidEnv {
+                    var: "TRACE_NEAR_AI_PRIVACY_TIMEOUT_PER_KIB_MS",
+                    reason: err.to_string(),
+                })?
+        }
+        Err(_) => DEFAULT_TIMEOUT_PER_KIB_MS,
+    };
+
+    // The fixed part of each request's timeout; the part that grows with the
+    // body is the variable above.
     let timeout_ms = match std::env::var("TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS") {
         Ok(value) => {
             value
@@ -336,7 +437,8 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
         Duration::from_millis(timeout_ms),
         max_input_bytes,
         max_request_body_bytes,
-    )?;
+    )?
+    .with_timeout_per_kib_ms(timeout_per_kib_ms);
     Ok(Arc::new(adapter))
 }
 
@@ -769,6 +871,11 @@ impl NearAiPrivacyFilterAdapter {
             let send_result = self
                 .client
                 .post(&endpoint)
+                .timeout(call_timeout(
+                    self.timeout_base_ms,
+                    self.timeout_per_kib_ms,
+                    body.len(),
+                ))
                 .bearer_auth(&self.api_key.0)
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(body.clone())
@@ -925,8 +1032,18 @@ fn classify_input_diagnostics(windows: &[&str]) -> String {
 /// Exponential backoff before retrying a classify attempt: 250ms, 500ms,
 /// 1s, ... keyed on the just-failed attempt number (1-based).
 async fn backoff(failed_attempt: usize) {
-    let millis = 250u64.saturating_mul(1u64 << (failed_attempt.saturating_sub(1)).min(5));
-    tokio::time::sleep(Duration::from_millis(millis)).await;
+    tokio::time::sleep(Duration::from_millis(backoff_ms(failed_attempt))).await;
+}
+
+/// The pause after the `failed_attempt`th failure: 250 ms, doubling.
+const fn backoff_ms(failed_attempt: usize) -> u64 {
+    let shift = if failed_attempt == 0 {
+        0
+    } else {
+        failed_attempt - 1
+    };
+    let shift = if shift > 5 { 5 } else { shift };
+    250u64 << shift
 }
 
 #[cfg(test)]
@@ -1162,8 +1279,29 @@ mod tests {
         }
     }
 
+    /// The defaults leave a full window's retries inside the witness's 300 s
+    /// request limit, with room; the compile-time assert says the same, and
+    /// this pins the number it computes.
+    #[test]
+    fn a_full_windows_worst_case_fits_the_witness_limit() {
+        let worst = worst_case_window_ms(
+            DEFAULT_TIMEOUT_MS,
+            DEFAULT_TIMEOUT_PER_KIB_MS,
+            MAX_CLASSIFY_REQUEST_BODY_BYTES,
+        );
+        assert_eq!(worst, 4 * (15_000 + 250 * 128) + 250 + 500 + 1_000);
+        assert!(worst < 300_000);
+        // The 2026-11-05 times (20 and 103 KiB measured, 128 KiB interpolated
+        // between 103 and 205) sit at least 1.7x inside each call's timeout.
+        for (kib, measured_ms) in [(20, 11_300), (103, 14_800), (128, 20_000)] {
+            let timeout =
+                call_timeout_ms(DEFAULT_TIMEOUT_MS, DEFAULT_TIMEOUT_PER_KIB_MS, kib * 1024);
+            assert!(timeout * 10 >= measured_ms * 17, "{kib} KiB: {timeout} ms");
+        }
+    }
+
     /// A 241 KB single field of ordinary tool output -- the size that took
-    /// 115 s on the live witness -- is one or two requests, not dozens.
+    /// 115 s on the live witness -- is a few requests, not dozens.
     #[test]
     fn a_large_ordinary_field_takes_few_requests() {
         let text: String = (0..6_000)
@@ -1176,7 +1314,7 @@ mod tests {
             .collect();
         assert!(text.len() > 240_000);
         let windows = window_ranges(&text, input_budget(MAX_CLASSIFY_REQUEST_BODY_BYTES));
-        assert!(windows.len() <= 2, "{} windows", windows.len());
+        assert!(windows.len() <= 3, "{} windows", windows.len());
     }
 
     /// No window boundary falls inside a codepoint, including in a run with

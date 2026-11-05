@@ -630,6 +630,29 @@ async fn main() -> Result<()> {
 }
 
 #[cfg(test)]
+mod classify_deadline_tests {
+    use super::*;
+
+    /// One classifier window's worst case -- every attempt timing out at
+    /// the default per-call timeout, plus backoff -- fits inside the
+    /// request limit, so a request whose one window retries is not
+    /// abandoned for it.
+    #[test]
+    fn a_windows_worst_case_fits_the_request_timeout() {
+        use trace_commons_protocol::privacy_filter_near_ai as near_ai;
+        let worst_ms = near_ai::worst_case_window_ms(
+            near_ai::DEFAULT_TIMEOUT_MS,
+            near_ai::DEFAULT_TIMEOUT_PER_KIB_MS,
+            near_ai::MAX_CLASSIFY_REQUEST_BODY_BYTES,
+        );
+        assert!(
+            worst_ms < DEFAULT_REQUEST_TIMEOUT_SECS * 1000,
+            "{worst_ms} ms"
+        );
+    }
+}
+
+#[cfg(test)]
 mod certificate_issuance_tests {
     use super::*;
     use trace_commons_server::witness_service::WitnessCertificateIssuance;
