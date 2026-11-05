@@ -733,6 +733,11 @@ pub const DATA_USE_CREDIT_SCOPE: &str = "model_training";
 /// 2026-10-27; approved as written in Zaki's review of #1690 (2026-10-28).
 pub const DATA_USE_CREDIT_REQUIRED: &str = "Required to earn credit.";
 
+/// The reminder on Home while [`DATA_USE_CREDIT_SCOPE`] is off, in the
+/// product owner's words (2026-11-05). First run shows none: the line under
+/// Train coding models already says it there.
+pub const NO_CREDIT_REMINDER: &str = "You won't earn credit until Train coding models is on. You can turn it on anytime in Settings.";
+
 /// The tag beside a scope that permits a use of the traces
 /// (`grants_data_use`). Tauri's wording, moved into the core so every shell
 /// can draw it. Approved 2026-10-06.
@@ -4774,5 +4779,14 @@ mod payout_link_copy_tests {
         assert!(DATA_USE_REWARD_OPPORTUNITIES_TOOLTIP.contains("accepted"));
         assert!(!DATA_USE_REWARD_OPPORTUNITIES.contains("earn nothing"));
         assert_eq!(DATA_USE_CREDIT_REQUIRED, "Required to earn credit.");
+    }
+
+    /// The no-credit reminder, in the product owner's words (2026-11-05).
+    #[test]
+    fn the_no_credit_reminder_is_the_owners() {
+        assert_eq!(
+            NO_CREDIT_REMINDER,
+            "You won't earn credit until Train coding models is on. You can turn it on anytime in Settings."
+        );
     }
 }

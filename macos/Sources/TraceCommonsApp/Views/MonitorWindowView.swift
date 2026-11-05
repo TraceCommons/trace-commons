@@ -334,6 +334,7 @@ struct MonitorWindowView: View {
                             tracesPage = .history
                         },
                         openInsights: { tab = .insights },
+                        openSettings: { navigation.requestSettings(at: .consent) },
                         insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts,
                         missionsEnabled: model.missionsShown, inference: inference)
                 case .insights:
