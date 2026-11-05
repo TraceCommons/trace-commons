@@ -135,6 +135,18 @@ impl NativeProfiles {
                     }
                 }
             }
+            ToolId::Hermes => {
+                super::hermes::isolate(&mut command, &root)?;
+                match action {
+                    NativeAction::Version => {
+                        command.arg("--version");
+                    }
+                    NativeAction::Run => {
+                        command.args(["chat", "--cli", "--safe-mode"]);
+                    }
+                    _ => return Err(ManagedError::InvalidRequest),
+                }
+            }
             ToolId::Opencode => {
                 super::opencode::isolate(&mut command, &root)?;
                 match action {
@@ -222,6 +234,20 @@ impl NativeProfiles {
     }
 
     pub fn verify_version(&self, account: &AccountView, native: &Path) -> Result<(), ManagedError> {
+        if account.tool == ToolId::Hermes {
+            // Hermes's banner contains dependency versions too. Qualify the
+            // actual CLI switches our isolated launch requires instead.
+            let root = self.profile_root(account.id)?;
+            let mut command = Command::new(native);
+            command.current_dir(&root);
+            super::hermes::isolate(&mut command, &root)?;
+            command.args(["chat", "--help"]);
+            return if super::hermes::supported_help(&bounded_output(command)?) {
+                Ok(())
+            } else {
+                Err(ManagedError::UnsupportedVersion)
+            };
+        }
         let numeric = self.native_version(account, native)?;
         let supported = match account.tool {
             ToolId::Claude => numeric.is_some_and(|v| v.0 == 2 && v >= (2, 1, 289)),
@@ -229,6 +255,7 @@ impl NativeProfiles {
             // Each major has its own CLI/configuration contract. Import/export
             // validation still checks the selected implementation before launch.
             ToolId::Opencode => numeric.is_some_and(|v| matches!(v.0, 1 | 2)),
+            ToolId::Hermes => unreachable!(),
         };
         if !supported {
             return Err(ManagedError::UnsupportedVersion);
@@ -244,7 +271,7 @@ impl NativeProfiles {
             return Ok(AuthState::SignInRequired);
         }
         let ready = match account.tool {
-            ToolId::Opencode => return Err(ManagedError::InvalidRequest),
+            ToolId::Opencode | ToolId::Hermes => return Err(ManagedError::InvalidRequest),
             ToolId::Claude => {
                 let value: serde_json::Value = serde_json::from_slice(&output.stdout)
                     .map_err(|_| ManagedError::UnsupportedVersion)?;
@@ -757,8 +784,8 @@ fn check_project_config_in(
         connection,
         ConnectionKind::NearAi | ConnectionKind::NearAiSignIn
     );
-    // OpenCode runs in pure mode with project config disabled.
-    if tool == ToolId::Opencode {
+    // OpenCode and Hermes run with project/user customization disabled.
+    if matches!(tool, ToolId::Opencode | ToolId::Hermes) {
         return Ok(());
     }
     let project_root = cwd
@@ -769,7 +796,7 @@ fn check_project_config_in(
         let names: &[&str] = match tool {
             ToolId::Claude => &[".claude/settings.json", ".claude/settings.local.json"],
             ToolId::Codex => &[".codex/config.toml"],
-            ToolId::Opencode => &[],
+            ToolId::Opencode | ToolId::Hermes => &[],
         };
         for name in names {
             let path = ancestor.join(name);
@@ -782,7 +809,7 @@ fn check_project_config_in(
                 return Err(ManagedError::Conflict);
             }
             match tool {
-                ToolId::Opencode => return Err(ManagedError::InvalidRequest),
+                ToolId::Opencode | ToolId::Hermes => return Err(ManagedError::InvalidRequest),
                 ToolId::Claude => {
                     let value: serde_json::Value =
                         serde_json::from_slice(&bytes).map_err(|_| ManagedError::Conflict)?;
@@ -997,6 +1024,7 @@ pub fn find_native(tool: ToolId) -> Result<PathBuf, ManagedError> {
         ToolId::Claude => "claude",
         ToolId::Codex => "codex",
         ToolId::Opencode => "opencode",
+        ToolId::Hermes => "hermes",
     })
 }
 
@@ -1042,6 +1070,13 @@ fn discovery_folders(paths: &std::ffi::OsStr, home: Option<&Path>, name: &str) -
         folders.push(home.join(".cargo/bin"));
         if name == "opencode" {
             folders.push(home.join(".opencode/bin"));
+        }
+        if name == "hermes" {
+            folders.push(home.join(".hermes/bin"));
+            #[cfg(windows)]
+            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                folders.push(PathBuf::from(local).join("hermes/bin"));
+            }
         }
     }
     #[cfg(target_os = "macos")]
@@ -1107,7 +1142,8 @@ pub fn tools() -> serde_json::Value {
     serde_json::json!([
         {"tool": "claude", "installed": installed("claude"), "install_url": install_guide("claude-code")},
         {"tool": "codex", "installed": installed("codex"), "install_url": install_guide("codex")},
-        {"tool": "opencode", "installed": installed("opencode"), "install_url": install_guide("opencode")}
+        {"tool": "opencode", "installed": installed("opencode"), "install_url": install_guide("opencode")},
+        {"tool": "hermes", "installed": installed("hermes"), "install_url": install_guide("hermes")}
     ])
 }
 
@@ -1881,8 +1917,8 @@ mod tests {
     fn availability_rows_cover_every_managed_tool() {
         let rows = tools();
         let rows = rows.as_array().unwrap();
-        assert_eq!(rows.len(), 3);
-        for (row, name) in rows.iter().zip(["claude", "codex", "opencode"]) {
+        assert_eq!(rows.len(), 4);
+        for (row, name) in rows.iter().zip(["claude", "codex", "opencode", "hermes"]) {
             assert_eq!(row["tool"], name);
             assert!(row["installed"].is_boolean());
             assert!(row["install_url"].as_str().unwrap().starts_with("https://"));
@@ -1890,7 +1926,7 @@ mod tests {
             // Every row is a managed tool (#1417 made OpenCode one).
             assert!(serde_json::from_value::<ToolId>(row["tool"].clone()).is_ok());
         }
-        for name in ["claude", "codex", "opencode"] {
+        for name in ["claude", "codex", "opencode", "hermes"] {
             assert!(serde_json::from_str::<ToolId>(&format!("\"{name}\"")).is_ok());
         }
     }

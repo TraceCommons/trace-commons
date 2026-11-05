@@ -12,10 +12,11 @@ final class ManagedCLIOptionsTests: XCTestCase {
     }
 
     func testOptionsDecodeIndependentlyForEachAgent() throws {
-        let value = try snapshot(options: #"{"claude":"--model opus","codex":"-c model_reasoning_effort=high","opencode":"--model provider/model"}"#)
+        let value = try snapshot(options: #"{"claude":"--model opus","codex":"-c model_reasoning_effort=high","opencode":"--model provider/model","hermes":"--model hermes-model"}"#)
         XCTAssertEqual(value.cliOptions?["claude"], "--model opus")
         XCTAssertEqual(value.cliOptions?["codex"], "-c model_reasoning_effort=high")
         XCTAssertEqual(value.cliOptions?["opencode"], "--model provider/model")
+        XCTAssertEqual(value.cliOptions?["hermes"], "--model hermes-model")
     }
 
     func testDraftSurvivesRefreshAndClearsOnlyAfterTheMatchingSave() {

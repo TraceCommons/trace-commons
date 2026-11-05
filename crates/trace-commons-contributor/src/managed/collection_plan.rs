@@ -325,6 +325,7 @@ pub fn staged(store: &ConfigStore, plan: &CollectionPlan) -> bool {
             super::native_collection::published(store, plan.tool, plan.session_id)
         }
         ToolId::Opencode => super::opencode::exported(store, plan.session_id),
+        ToolId::Hermes => false,
     }
 }
 

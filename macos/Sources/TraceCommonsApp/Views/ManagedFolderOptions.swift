@@ -104,12 +104,14 @@ struct ManagedFolderOptions: View {
         if supportsFolderSettings {
             GlassTextField(model.managedText("cli_options_label"), text: $draft.cliOptions)
                 .helpIfAny(model.managedText("cli_options_tooltip"))
-            Toggle(model.managedText("collect_managed_trace"), isOn: $draft.collectTraces)
-                .toggleStyle(GlassToggleStyle(.settings))
-            Text(model.managedText("managed_collection_scope"))
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+            if ManagedSurface.offersTraceCollection(tool: tool) {
+                Toggle(model.managedText("collect_managed_trace"), isOn: $draft.collectTraces)
+                    .toggleStyle(GlassToggleStyle(.settings))
+                Text(model.managedText("managed_collection_scope"))
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack(alignment: .firstTextBaseline) {
                 Text(model.managedText("folder_settings_scope"))
                     .glassType(GlassTokens.TypeScale.caption)

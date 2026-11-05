@@ -25,7 +25,7 @@ pub struct LaunchArgs {
     pub connection: Option<ConnectionKind>,
     #[arg(long)]
     pub cwd: Option<PathBuf>,
-    /// Model ID. Required for OpenCode on a saved key. For Claude Code or
+    /// Model ID. Required for OpenCode or Hermes on a saved key. For Claude Code or
     /// Codex on NEAR AI, picks the model the session runs on instead of the
     /// tool's default; it must be a NEAR AI chat model.
     #[arg(long)]
@@ -360,7 +360,7 @@ fn effective_model(
     if default_model {
         return None;
     }
-    if tool == ToolId::Opencode
+    if matches!(tool, ToolId::Opencode | ToolId::Hermes)
         || matches!(
             connection,
             ConnectionKind::NearAi | ConnectionKind::NearAiSignIn

@@ -182,7 +182,7 @@ public extension ManagedSurface {
     }
 
     static func folderModelMode(tool: String, connection: String) -> ManagedFolderModelMode {
-        if tool == "opencode" { return connection == "near_ai_signin" ? .catalogue : .text }
+        if ["opencode", "hermes"].contains(tool) { return connection == "near_ai_signin" ? .catalogue : .text }
         return ["near_ai", "near_ai_signin"].contains(connection) ? .catalogue : .none
     }
 }
@@ -198,10 +198,15 @@ public extension ManagedFolderDraft {
                   daemonReadsBackground: Bool = false) -> [String: Any] {
         var result = params
         result["cli_options"] = cliOptions
-        result["collect_traces"] = collectTraces
         let tool = params["tool"] as? String ?? "", connection = params["connection"] as? String ?? ""
+        result["collect_traces"] = ManagedSurface.offersTraceCollection(tool: tool) && collectTraces
         let mode = ManagedSurface.folderModelMode(tool: tool, connection: connection)
-        result["model"] = mode == .none ? nil : model
+        if tool == "hermes" {
+            let chosen = (model ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            result["model"] = chosen.isEmpty ? nil : chosen
+        } else {
+            result["model"] = mode == .none ? nil : model
+        }
         if keepsSavedModel && mode != .none && daemonKeepsSavedModel { result["keep_saved_model"] = true }
         if daemonReadsBackground, ManagedSurface.offersBackgroundModel(tool: tool, connection: connection),
            let backgroundModel {

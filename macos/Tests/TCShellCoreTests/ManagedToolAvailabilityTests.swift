@@ -7,7 +7,7 @@ final class ManagedToolAvailabilityTests: XCTestCase {
         return try JSONDecoder().decode(ManagedSnapshot.self, from: Data("{\"revision\":1,\"accounts\":[{\"id\":\"old\",\"tool\":\"claude\",\"connection\":\"api_key\",\"label\":\"Saved\",\"auth_state\":\"ready\"}],\"defaults\":[],\"generations\":{},\"sessions\":[],\"capabilities\":{\"managed_launch\":true,\"terminal_launch\":true}\(extra)}".utf8))
     }
     private func tools(_ installed: [String]) -> String {
-        "[" + ["claude", "codex", "opencode"].map {
+        "[" + ["claude", "codex", "opencode", "hermes"].map {
             "{\"tool\":\"\($0)\",\"installed\":\(installed.contains($0)),\"install_url\":\"https://example.com/\($0)\"}"
         }.joined(separator: ",") + "]"
     }
@@ -41,7 +41,17 @@ final class ManagedToolAvailabilityTests: XCTestCase {
         XCTAssertNil(value.tools)
         XCTAssertEqual(value.setupTools, ["claude", "codex", "opencode"])
         XCTAssertTrue(value.canLaunch(tool: "claude"))
+        XCTAssertFalse(value.canLaunch(tool: "hermes"))
+        XCTAssertFalse(value.missingInstallTools.contains { $0.tool == "hermes" })
         XCTAssertFalse(value.needsToolInstallation)
+    }
+
+    func testOlderToolRowsDoNotOfferHermes() throws {
+        let value = try snapshot(#"[{"tool":"claude","installed":true,"install_url":"https://example.com/claude"}]"#)
+        XCTAssertEqual(value.setupTools, ["claude"])
+        XCTAssertFalse(value.canLaunch(tool: "hermes"))
+        XCTAssertFalse(value.missingInstallTools.contains { $0.tool == "hermes" })
+        XCTAssertTrue(value.updateRecoveryTools(attemptedTool: "hermes").isEmpty)
     }
     func testZeroInstalledOffersInstallationWithoutLosingSavedAccount() throws {
         let value = try snapshot(tools([]))
@@ -54,16 +64,19 @@ final class ManagedToolAvailabilityTests: XCTestCase {
         // #1417 made OpenCode a managed tool: it belongs in setup and launch.
         XCTAssertEqual(try snapshot(tools(["opencode"])).setupTools, ["opencode"])
         XCTAssertEqual(try snapshot(tools(["codex", "opencode"])).setupTools, ["codex", "opencode"])
-        XCTAssertEqual(ManagedSurface.supportedTools, ["claude", "codex", "opencode"])
+        XCTAssertEqual(try snapshot(tools(["hermes"])).setupTools, ["hermes"])
+        XCTAssertEqual(try snapshot(tools(["hermes"])).updateRecoveryTools(attemptedTool: "hermes").map(\.tool), ["hermes"])
+        XCTAssertEqual(ManagedSurface.supportedTools, ["claude", "codex", "opencode", "hermes"])
     }
     func testEveryInstallationCombinationFiltersSetup() throws {
-        for mask in 0..<8 {
+        for mask in 0..<16 {
             let installed = ManagedSurface.supportedTools.enumerated().compactMap { mask & (1 << $0.offset) != 0 ? $0.element : nil }
             let value = try snapshot(tools(installed))
-            XCTAssertEqual(value.setupTools, ["claude", "codex", "opencode"].filter(installed.contains))
+            XCTAssertEqual(value.setupTools, ["claude", "codex", "opencode", "hermes"].filter(installed.contains))
             XCTAssertEqual(value.needsToolInstallation, installed.isEmpty)
             XCTAssertEqual(value.canLaunch(tool: "opencode"), installed.contains("opencode"))
-            XCTAssertEqual(value.tools?.count, 3)
+            XCTAssertEqual(value.canLaunch(tool: "hermes"), installed.contains("hermes"))
+            XCTAssertEqual(value.tools?.count, 4)
         }
     }
     func testSignInEntryIsPreservedButMissingToolCannotStart() throws {

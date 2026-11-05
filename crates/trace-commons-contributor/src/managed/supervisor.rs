@@ -162,16 +162,28 @@ async fn run_native(
             best_effort_stderr(&project_workflows_notice());
         }
     }
-    let mut command = profiles.command(
-        &account,
-        &native,
-        if login {
-            NativeAction::Login
-        } else {
-            NativeAction::Run
-        },
-        &row.cwd,
-    )?;
+    let hermes = if row.tool == super::ToolId::Hermes && !login {
+        Some(super::hermes::HermesSession::new(
+            &native,
+            profiles.profile_root(account.id)?.join(row.id.to_string()),
+        )?)
+    } else {
+        None
+    };
+    let mut command = if let Some(session) = &hermes {
+        session.command(&row.cwd)?
+    } else {
+        profiles.command(
+            &account,
+            &native,
+            if login {
+                NativeAction::Login
+            } else {
+                NativeAction::Run
+            },
+            &row.cwd,
+        )?
+    };
     command.args(leading_args(row.tool, resume));
     if !login && row.tool != super::ToolId::Opencode {
         command.args(&context.cli_options);
@@ -236,6 +248,14 @@ async fn run_native(
                 let key = SecretStore::new(store).get(account.id)?;
                 match row.tool {
                     super::ToolId::Opencode => return Err(ManagedError::InvalidRequest.into()),
+                    super::ToolId::Hermes => {
+                        super::hermes::route(
+                            &mut command,
+                            row.model.as_deref().ok_or(ManagedError::InvalidRequest)?,
+                            "https://api.openai.com/v1",
+                            key.expose(),
+                        )?;
+                    }
                     super::ToolId::Claude => {
                         command.env("ANTHROPIC_API_KEY", key.expose());
                     }
@@ -480,6 +500,7 @@ async fn run_native(
             crate::brand::APP_NAME
         ));
     }
+    drop(hermes);
     if let Some(route) = route {
         route.shutdown().await;
     }
@@ -759,6 +780,17 @@ fn near_ai_route(
         .unwrap_or(default);
     match tool {
         super::ToolId::Opencode => return Err(ManagedError::InvalidRequest),
+        super::ToolId::Hermes => {
+            if port == 0 || !models.iter().any(|model| model.id == default) {
+                return Err(ManagedError::ModelUnavailable);
+            }
+            super::hermes::route(
+                command,
+                default,
+                &format!("{base}/openai/v1"),
+                "managed-local-session",
+            )?;
+        }
         super::ToolId::Claude => {
             command
                 .env("ANTHROPIC_BASE_URL", format!("{base}/anthropic"))

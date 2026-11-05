@@ -288,7 +288,8 @@ struct ManagedSessionsSection: View {
             model.managedText(session.connection),
         ].compactMap { $0 }.filter { !$0.isEmpty }
         if let selectedModel = session.model { meta.append(ManagedSurface.rowModel(selectedModel, names: modelNames)) }
-        if let collection = session.collection, ["off", "pending", "collected", "failed"].contains(collection) {
+        if ManagedSurface.offersTraceCollection(tool: session.tool),
+           let collection = session.collection, ["off", "pending", "collected", "failed"].contains(collection) {
             meta.append(model.managedText("collection_" + collection))
         }
         if let code = session.exitCode {
@@ -515,7 +516,7 @@ struct ManagedAccountSheet: View {
     @State private var label = ""
     @State private var key = ""
 
-    private var availableTools: [String] { model.managedSnapshot?.setupTools ?? ManagedSurface.supportedTools }
+    private var availableTools: [String] { model.managedSnapshot?.setupTools ?? ManagedSurface.setupTools(nil) }
     private var subscription: Bool { connection == "subscription" }
 
     private var canSave: Bool {
@@ -539,14 +540,14 @@ struct ManagedAccountSheet: View {
                 HStack(alignment: .top, spacing: GlassTokens.Space.s5) {
                     ManagedField(label: model.managedText("tool")) {
                         GlassSelect(
-                            model.managedText("tool"), selection: Binding(get: { tool }, set: { tool = $0; if tool == "opencode" && connection == "subscription" { connection = "api_key" } }),
+                            model.managedText("tool"), selection: Binding(get: { tool }, set: { tool = $0; reconcileConnection() }),
                             options: availableTools.map { GlassPickerOption(model.managedText($0), value: $0) })
                     }
                     ManagedField(label: model.managedText("connection")) {
                         GlassSelect(
                             model.managedText("connection"), selection: $connection,
                             options: ManagedSurface.connectionOptions(signedIn: model.managedSnapshot?.nearAiSignedIn == true, tool: tool)
-                                .map { GlassPickerOption(model.managedText(tool == "opencode" && $0 == "api_key" ? "openai_api_key" : $0), value: $0) })
+                                .map { GlassPickerOption(model.managedText(["opencode", "hermes"].contains(tool) && $0 == "api_key" ? "openai_api_key" : $0), value: $0) })
                     }
                 }
                 GlassTextField(model.managedText("label"), text: $label, prompt: model.managedText("label_placeholder"))
@@ -564,7 +565,11 @@ struct ManagedAccountSheet: View {
 
     private func reconcileTool() {
         if !availableTools.contains(tool), let first = availableTools.first { tool = first }
-        if tool == "opencode" && connection == "subscription" { connection = "api_key" }
+        reconcileConnection()
+    }
+
+    private func reconcileConnection() {
+        if ["opencode", "hermes"].contains(tool), connection == "subscription" { connection = "api_key" }
     }
 
     private func save() {
