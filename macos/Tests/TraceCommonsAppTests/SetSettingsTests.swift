@@ -377,11 +377,33 @@ final class NativeWitnessReviewTests: XCTestCase {
         let client = DaemonClient(daemon: daemon)
         XCTAssertThrowsError(try client.requestWitnessReview(entryID: "entry"))
         daemon.response = #"{"result":{"status":"ready","summary":{}}}"#
-        try client.requestWitnessReview(entryID: "entry")
+        XCTAssertFalse(try client.requestWitnessReview(entryID: "entry"), "an older daemon answers at once")
         XCTAssertEqual(daemon.calls.last?.method, "witness_preview_request")
         XCTAssertEqual(daemon.lastParams?["entry_id"] as? String, "entry")
         XCTAssertEqual(daemon.lastParams?["raw_session_confirmed"] as? Bool, true)
-        XCTAssertEqual(daemon.lastParams?.count, 2)
+        XCTAssertEqual(daemon.lastParams?["background"] as? Bool, true)
+        XCTAssertEqual(daemon.lastParams?.count, 3)
+        daemon.response = #"{"result":{"status":"in_progress","entry_id":"entry"}}"#
+        XCTAssertTrue(try client.requestWitnessReview(entryID: "entry"), "the event will end it")
+    }
+
+    func testReviewReadyEventCarriesTheDaemonsOutcome() throws {
+        XCTAssertNil(DaemonClient.witnessReviewFailure(from: [
+            "entry_id": "entry", "status": "ready", "summary": [String: Any](),
+        ]))
+        let failure = try XCTUnwrap(DaemonClient.witnessReviewFailure(from: [
+            "entry_id": "entry", "status": "failed", "code": "unavailable",
+            "label": "witness_timeout",
+            "view": ["state": "Refused", "message": "The privacy check took too long."],
+        ]))
+        XCTAssertEqual(failure.message, "witness_timeout")
+        XCTAssertEqual(DaemonClient.refusalSentence(from: failure), "The privacy check took too long.")
+        let busy = try XCTUnwrap(DaemonClient.witnessReviewFailure(from: [
+            "entry_id": "entry", "status": "busy", "code": "unavailable",
+            "label": "witness_saturated",
+            "view": ["state": "Busy", "message": "busy", "retry_at": "2030-01-01T00:00:00Z", "retry_label": "Try again"],
+        ]))
+        XCTAssertNotNil(DaemonClient.busyRetryLine(from: busy))
     }
 }
 
