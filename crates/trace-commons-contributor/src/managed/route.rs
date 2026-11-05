@@ -276,6 +276,10 @@ responses_via_chat = {responses_via_chat}
 }
 
 #[cfg(test)]
+#[path = "desktop_route_tests.rs"]
+mod desktop_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::{
