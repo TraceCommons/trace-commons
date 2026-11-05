@@ -2578,22 +2578,25 @@ async fn refresh_estimate_table(
 /// Fetch the signed witness accepted-measurements list when its schedule is
 /// due. Whatever the outcome, the stored list stays unless a newer verified
 /// one replaced it; `witness::accepted_list::refresh` logs one fixed label.
+///
+/// Then, on every tick and not only after a fetch, release the measurement
+/// holds a newly stored list may cure (`note_accepted_list_version`). The
+/// version is read back from the stored list rather than taken from the
+/// fetch's outcome, because a refusal inside a send also stores one
+/// (`accepted_list::refresh_on_refusal`); checking each tick means the other
+/// held sessions see it within a tick rather than at the next daily fetch.
+/// One small file read and a signature check.
 async fn refresh_witness_accepted_list(
     shared: &ipc::DaemonShared,
     now: chrono::DateTime<Utc>,
     schedule: &mut crate::witness::accepted_list::ListRefreshSchedule,
 ) {
-    if !schedule.due(now) {
-        return;
+    if schedule.due(now) {
+        schedule.attempted(now, crate::credit_estimate_table::random_draw());
+        if let Ok(Some(cfg)) = shared.store.load_config() {
+            let _ = crate::witness::accepted_list::refresh(&cfg, shared.store.dir()).await;
+        }
     }
-    schedule.attempted(now, crate::credit_estimate_table::random_draw());
-    let Ok(Some(cfg)) = shared.store.load_config() else {
-        return;
-    };
-    let _ = crate::witness::accepted_list::refresh(&cfg, shared.store.dir()).await;
-    // Read back rather than taken from the outcome: a list installed by a
-    // refusal inside a send (`accepted_list::refresh_on_refusal`) is stored
-    // too, and this fetch then finds nothing newer.
     let dir = shared.store.dir();
     let version = crate::witness::accepted_list::load_verified(
         dir,
