@@ -1974,12 +1974,13 @@ pub unsafe extern "C" fn tc_unsubscribe(handle: *mut tc_handle, token: u64) {
     }
     {
         // Attached handles keep no task per token -- there is one socket and
-        // one sink -- so unsubscribing is dropping that sink. Done before the
-        // runtime-context refusal below, which guards a join this path does
-        // not perform.
+        // one sink. Disable cloned readers and drain any callback before the
+        // host can free ctx; removing only the slot is not a callback barrier.
         let handle_ref = unsafe { &*handle };
         if let Some(attached) = attached_of(handle_ref) {
-            attached.clear_sink();
+            if !attached.clear_sink_and_wait() {
+                set_last_error("unsubscribe-refused-inside-runtime-context");
+            }
             return;
         }
     }

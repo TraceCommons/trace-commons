@@ -310,3 +310,72 @@ fn attaching_is_refused_where_the_transport_cannot_be_held_open() {
     );
     assert_eq!(take_err(err), "attach-unsupported");
 }
+
+/// The host releases its Swift callback context as soon as unsubscribe returns.
+/// Clearing only the event slot is insufficient while a reader already holds it.
+#[cfg(unix)]
+#[test]
+fn attached_unsubscribe_waits_until_an_active_callback_has_finished() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    struct Gate {
+        first: AtomicBool,
+        entered: mpsc::SyncSender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+        finished: mpsc::SyncSender<()>,
+    }
+    extern "C" fn callback(_: *const c_char, context: *mut c_void) {
+        let gate = unsafe { &*(context as *const Gate) };
+        if !gate.first.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let _ = gate.entered.send(());
+        let _ = gate.release.lock().unwrap().recv();
+        let _ = gate.finished.send(());
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let owner = start(dir.path());
+    let mut error = std::ptr::null_mut();
+    let attached = unsafe { tc_daemon_attach(cstr(dir.path()).as_ptr(), &mut error) };
+    assert!(!attached.is_null());
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+    let context = Box::into_raw(Box::new(Gate {
+        first: AtomicBool::new(true),
+        entered: entered_tx,
+        release: Mutex::new(release_rx),
+        finished: finished_tx,
+    }));
+    let token = unsafe { tc_subscribe(attached, Some(callback), context.cast()) };
+    assert_ne!(token, 0);
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let (done_tx, done_rx) = mpsc::sync_channel(1);
+    let carried = attached as usize;
+    let unsubscribe = std::thread::spawn(move || {
+        unsafe { trace_commons_contributor_ffi::tc_unsubscribe(carried as *mut tc_handle, token) };
+        done_tx.send(()).unwrap();
+    });
+    let returned_early = done_rx
+        .recv_timeout(std::time::Duration::from_millis(100))
+        .is_ok();
+    release_tx.send(()).unwrap();
+    finished_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    unsubscribe.join().unwrap();
+    unsafe {
+        drop(Box::from_raw(context));
+        tc_handle_free(attached);
+        tc_daemon_stop(owner);
+        tc_handle_free(owner);
+    }
+    assert!(
+        !returned_early,
+        "unsubscribe returned while its callback still borrowed the host context"
+    );
+}
