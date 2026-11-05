@@ -747,10 +747,23 @@ impl QueueEntry {
         }
     }
 
-    /// [`super::second_look::second_look_reasons`] for this entry: the
-    /// recorded scrub and the discovery-time trim.
+    /// [`super::second_look::second_look_reasons`] for this entry with no
+    /// witness: every reason the recorded scrub and the discovery-time trim
+    /// give.
     pub fn second_look_reasons(&self) -> Vec<&'static str> {
-        super::second_look::second_look_reasons(self.scrub(), self.subagents_dropped)
+        super::second_look::second_look_reasons(
+            self.scrub(),
+            self.subagents_dropped,
+            super::second_look::RedactionWitness::Absent,
+        )
+    }
+
+    /// Whether the session is known to have no message from the person
+    /// ([`REASON_NO_USER_MESSAGES`]). `false` when no shape was recorded.
+    pub fn has_no_user_messages(&self) -> bool {
+        self.shape
+            .as_ref()
+            .is_some_and(|shape| shape.user_turns == 0)
     }
 
     /// Whether this entry is waiting on a person and must not be approved on
@@ -955,6 +968,17 @@ pub const REASON_RETURNED_FROM_KEEP: &str = "returned-from-keep";
 /// bytes under one set of consent scopes, not a decision about the
 /// conversation.
 pub const REASON_TOO_LARGE: &str = "envelope-too-large";
+
+/// A session with no message from the person in it (`SessionShape::user_turns`
+/// is zero): nothing to contribute. Owner decision, 2026-11-05.
+///
+/// Recorded as `Refused`, the shape of [`REASON_TOO_LARGE`]: a verdict on one
+/// set of bytes, terminal, not waiting for anyone and not counted against the
+/// cap, never sent to the witness or uploaded. Deliberately not
+/// [`REASON_DISMISSED`], which suppresses the conversation forever: a session
+/// that gains a message is a new set of bytes and is offered again. An entry
+/// with no recorded shape is unknown, never zero, and is not skipped.
+pub const REASON_NO_USER_MESSAGES: &str = "no-user-messages";
 
 /// A project the contributor has chosen to ignore; its waiting sessions are
 /// cleared when the mode is set.
@@ -1796,6 +1820,78 @@ impl Queue {
                 e.discovered_at = now;
                 released += 1;
             }
+        }
+        released
+    }
+
+    /// Skip every entry with no message from the person
+    /// ([`QueueEntry::has_no_user_messages`]) that is waiting, or approved on
+    /// the contributor's behalf and not yet sending: `Refused` under
+    /// [`REASON_NO_USER_MESSAGES`]. For entries queued before the watcher
+    /// skipped them on sight. A person's own approval is left to the upload,
+    /// which refuses it the same way. Returns how many moved.
+    pub fn skip_entries_without_user_messages(&mut self) -> usize {
+        let mut skipped = 0;
+        for e in self.entries.iter_mut() {
+            let waiting = e.state == QueueState::Pending
+                || (e.state == QueueState::Approved && e.approved_unattended);
+            if waiting && e.has_no_user_messages() {
+                e.state = QueueState::Refused;
+                e.reason_label = Some(REASON_NO_USER_MESSAGES.to_string());
+                e.approved_unattended = false;
+                e.approved_scopes = None;
+                e.approved_inputs = None;
+                e.approved_at = None;
+                e.retry_after = None;
+                skipped += 1;
+            }
+        }
+        skipped
+    }
+
+    /// On a device with a redaction witness, release every entry held under
+    /// `second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED` whose recorded
+    /// scrub says it was held only because nothing matched: back to waiting
+    /// as a fresh offer dated `now`, like [`Self::release_witness_risk_holds`].
+    /// The caller decides that the device has a witness.
+    ///
+    /// Released only when the scrub record is readable (`QueueEntry::scrub`
+    /// is `Scrubbed`) and the witness rule gives no reason at all
+    /// (`second_look_reasons` under `RedactionWitness::Present`): nothing
+    /// unsure, nothing trimmed. No record, or any other reason, stays held,
+    /// and so does an entry with no message from the person.
+    ///
+    /// A local preview pin is cleared with its counts, so the entry goes
+    /// through the witness again (an upload refuses a local pin on a witness
+    /// device). A witness pin is kept: its upload re-checks the verdict and
+    /// the Scrub check without a second witness run. Returns how many moved.
+    pub fn release_nothing_matched_holds(&mut self, now: DateTime<Utc>) -> usize {
+        use super::second_look::{self, RedactionWitness, Scrub};
+        let mut released = 0;
+        for e in self.entries.iter_mut() {
+            let held = e.state == QueueState::Pending
+                && e.reason_label.as_deref()
+                    == Some(second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED);
+            let scrub = e.scrub();
+            let only_nothing_matched = matches!(scrub, Scrub::Scrubbed(_))
+                && second_look::second_look_reasons(
+                    scrub,
+                    e.subagents_dropped,
+                    RedactionWitness::Present,
+                )
+                .is_empty();
+            if !held || !only_nothing_matched || e.has_no_user_messages() {
+                continue;
+            }
+            e.reason_label = None;
+            e.discovered_at = now;
+            if !e.holds_witness_certificate() {
+                e.previewed_envelope_digest = None;
+                e.would_send_bytes = None;
+                e.attested_inference = None;
+                e.scrub = None;
+            }
+            released += 1;
         }
         released
     }

@@ -540,6 +540,14 @@ impl Uploader<'_, '_> {
         entry: &QueueEntry,
         now: DateTime<Utc>,
     ) -> Option<UploadDecision> {
+        // A session with no message from the person has nothing to
+        // contribute. Skipped, whoever approved it, before anything is read,
+        // built, witnessed or sent. See `queue::REASON_NO_USER_MESSAGES`.
+        if entry.has_no_user_messages() {
+            return Some(UploadDecision::Refused {
+                reason_label: super::queue::REASON_NO_USER_MESSAGES.to_string(),
+            });
+        }
         // The Manual Scrub check (K4 of #1118): nothing goes without a
         // person. The watcher approves nothing on anyone's behalf while it
         // is set; this catches an approval made before the switch, and
@@ -1624,6 +1632,51 @@ mod tests {
         );
         assert!(pin.is_some(), "the built envelope is pinned");
         assert_eq!(uploads_recorded(&state), 0, "nothing was sent");
+    }
+
+    /// A session with no message from the person is refused before anything
+    /// is read, built, witnessed or sent, whoever approved it, in any Scrub
+    /// check mode. One whose shape is unknown is not.
+    #[tokio::test]
+    async fn a_session_with_no_user_messages_is_skipped_whoever_approved_it() {
+        let session = session_saying(ONE_EMAIL);
+        let no_messages = |approved_unattended: bool| {
+            move |session: &GrowingSession, cfg: &crate::config::ContributorConfig| QueueEntry {
+                approved_unattended,
+                shape: Some(crate::daemon::queue::SessionShape {
+                    user_turns: 0,
+                    ..Default::default()
+                }),
+                ..session.entry_for(&session.current_hash(), cfg)
+            }
+        };
+        for (unattended, settings) in [(true, automatic()), (true, manual()), (false, automatic())]
+        {
+            let (decision, state) = upload_under(&session, no_messages(unattended), settings).await;
+            assert!(
+                matches!(
+                    &decision,
+                    UploadDecision::Refused { reason_label }
+                        if reason_label == crate::daemon::queue::REASON_NO_USER_MESSAGES
+                ),
+                "{decision:?}"
+            );
+            assert_eq!(uploads_recorded(&state), 0);
+        }
+        let (decision, _) = upload_under(
+            &session,
+            |session: &GrowingSession, cfg: &crate::config::ContributorConfig| QueueEntry {
+                shape: None,
+                ..session.entry_for(&session.current_hash(), cfg)
+            },
+            automatic(),
+        )
+        .await;
+        assert!(
+            !matches!(&decision, UploadDecision::Refused { reason_label }
+                if reason_label == crate::daemon::queue::REASON_NO_USER_MESSAGES),
+            "no recorded shape is unknown, not zero: {decision:?}"
+        );
     }
 
     /// A hold under `reason`, decided on `expected` second-look labels.

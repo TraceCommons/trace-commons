@@ -317,30 +317,35 @@ fn held_for_review(
 /// A body that cannot be serialized for the unsure-span detector is held as
 /// `looks-unsure`: an unreadable body counts as unsure.
 ///
-/// `pinnable` is whether the caller may pin these bytes as a local preview:
-/// true on the local-redaction path, false for a witnessed envelope.
+/// `witnessed` is whether these are the bytes of a witness certificate that
+/// was checked against the configured witness. On a witnessed envelope
+/// nothing matched does not hold (`second_look::RedactionWitness`); the
+/// verdict hold ran before this. A local-redaction envelope may be pinned as
+/// a local preview; a witnessed one is not.
 fn held_for_second_look(
     hold: Option<u32>,
     envelope: &TraceContributionEnvelope,
-    pinnable: bool,
+    witnessed: bool,
 ) -> Option<SubmitOutcome> {
-    use crate::daemon::second_look::{self, Scrub};
+    use crate::daemon::second_look::{self, RedactionWitness, Scrub};
     let subagents_dropped = hold?;
     let counts = built_scrub_counts(
         &envelope.privacy.redaction_counts,
         crate::daemon::preview::body_of(envelope),
     );
     let scrub = Scrub::Scrubbed(counts);
+    let witness = RedactionWitness::from_present(witnessed);
     let reason_label = second_look::unattended_hold(
         crate::daemon::settings::ScrubCheck::Automatic,
         scrub,
         subagents_dropped,
+        witness,
     )?;
     Some(SubmitOutcome::HeldForSecondLook {
         reason_label: reason_label.to_string(),
-        reasons: second_look::second_look_reasons(scrub, subagents_dropped),
+        reasons: second_look::second_look_reasons(scrub, subagents_dropped, witness),
         counts,
-        envelope: pinnable.then(|| Box::new(envelope.clone())),
+        envelope: (!witnessed).then(|| Box::new(envelope.clone())),
     })
 }
 
@@ -2323,7 +2328,7 @@ impl<'a> SubmitContext<'a> {
             }
             // A dry run reports what the real send would do, hold included.
             if let Some(held) =
-                held_for_second_look(hold_unless_scrub_clear, &envelope, witnessed.is_none())
+                held_for_second_look(hold_unless_scrub_clear, &envelope, witnessed.is_some())
             {
                 return Ok(held);
             }
@@ -2408,7 +2413,7 @@ impl<'a> SubmitContext<'a> {
         // commons. The scrub is read off the envelope that would be sent, so
         // it is always a real count, never "not yet scrubbed".
         if let Some(held) =
-            held_for_second_look(hold_unless_scrub_clear, &envelope, witnessed.is_none())
+            held_for_second_look(hold_unless_scrub_clear, &envelope, witnessed.is_some())
         {
             return Ok(held);
         }
@@ -7510,6 +7515,65 @@ mod tests {
         assert!(state.prior_uploads.is_empty());
     }
 
+    /// The envelope about to be sent decides it: a witnessed one where
+    /// nothing personal matched goes, a locally redacted one waits, and a
+    /// trimmed one waits either way. Only the local envelope is pinned.
+    #[tokio::test]
+    async fn nothing_matched_holds_only_an_envelope_no_witness_checked() {
+        use crate::daemon::second_look::{
+            REASON_NOTHING_MATCHED, REASON_SECOND_LOOK_REVIEW_REQUIRED, REASON_TRIMMED_TO_FIT,
+        };
+        let cfg = cfg_for("http://127.0.0.1:1", "http://127.0.0.1:1", "device");
+        let mut envelope = baseline_envelope(&cfg).await;
+        // Nothing personal removed, only paths; a body with nothing unsure.
+        envelope.privacy.redaction_counts = [("local_path".to_string(), 2)].into();
+        let body = crate::daemon::preview::body_of(&envelope).unwrap();
+        assert_eq!(
+            crate::daemon::second_look::ScrubCounts::of(&envelope.privacy.redaction_counts, &body)
+                .unsure_spans,
+            0,
+            "the fixture has nothing that looks unsure"
+        );
+
+        assert!(held_for_second_look(Some(0), &envelope, true).is_none());
+
+        let Some(SubmitOutcome::HeldForSecondLook {
+            reason_label,
+            reasons,
+            envelope: pinned,
+            ..
+        }) = held_for_second_look(Some(0), &envelope, false)
+        else {
+            panic!("a local envelope where nothing matched waits");
+        };
+        assert_eq!(reason_label, REASON_SECOND_LOOK_REVIEW_REQUIRED);
+        assert_eq!(reasons, vec![REASON_NOTHING_MATCHED]);
+        assert!(pinned.is_some());
+
+        let Some(SubmitOutcome::HeldForSecondLook {
+            reasons,
+            envelope: pinned,
+            ..
+        }) = held_for_second_look(Some(1), &envelope, true)
+        else {
+            panic!("a trimmed witnessed envelope waits");
+        };
+        assert_eq!(
+            reasons,
+            vec![REASON_TRIMMED_TO_FIT],
+            "nothing matched is not a reason"
+        );
+        assert!(
+            pinned.is_none(),
+            "a witnessed envelope is never pinned as a local one"
+        );
+
+        assert!(
+            held_for_second_look(None, &envelope, false).is_none(),
+            "not asked"
+        );
+    }
+
     /// A body that cannot be serialized for the unsure-span detector counts
     /// as unreadable, and unreadable holds: the check is never skipped.
     #[test]
@@ -7523,9 +7587,11 @@ mod tests {
             crate::daemon::second_look::unattended_hold(
                 crate::daemon::settings::ScrubCheck::Automatic,
                 crate::daemon::second_look::Scrub::Scrubbed(counts),
-                0
+                0,
+                crate::daemon::second_look::RedactionWitness::Present,
             ),
-            Some(crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED)
+            Some(crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED),
+            "unreadable holds even on a witnessed envelope"
         );
     }
 
