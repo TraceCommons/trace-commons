@@ -594,6 +594,68 @@ pub fn paused_notice_words() -> PausedNoticeWords {
 }
 
 // ---------------------------------------------------------------------------
+// Settings > Projects' summary and Manage sheet
+
+/// The words of Settings > Projects' summary card and its Manage sheet
+/// (owner design, 2026-11-04): search, the mode filter, groups of projects
+/// sharing a name, and the bulk change. The mode names and "Mixed" are the
+/// contribution-mode table's (`project_copy::contribution_mode_copy`), and a
+/// bulk Never asks in `project_copy::ignore_project_copy`'s words.
+///
+/// Every word here is DRAFT, NEEDS APPROVAL (2026-11-04).
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProjectsManagerWords {
+    /// The summary card's button that opens the sheet.
+    pub manage: &'static str,
+    /// The sheet's search field, named and prompted by this.
+    pub search: &'static str,
+    /// The mode filter's first choice: every mode.
+    pub all: &'static str,
+    /// One mode's count on the summary card: the mode's name, then `{count}`.
+    pub mode_count: &'static str,
+    /// How many projects are selected.
+    pub selected: &'static str,
+    /// The bulk change's menu, beside [`Self::selected`].
+    pub set_to: &'static str,
+    /// Several projects as one name, for the bulk Never confirmation's title
+    /// (`ignore_project_title`).
+    pub projects_count: &'static str,
+    /// The list when the search and filter match nothing.
+    pub no_matches: &'static str,
+    /// A group header's accessible name: the group's `{title}` and how many
+    /// projects it holds.
+    pub group_accessibility: &'static str,
+    /// A project's checkbox's accessible name.
+    pub select_accessibility: &'static str,
+}
+
+#[must_use]
+pub fn projects_manager_words() -> ProjectsManagerWords {
+    ProjectsManagerWords {
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        manage: "Manage\u{2026}",
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        search: "Search projects",
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        all: "All",
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        mode_count: "{title} {count}",
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        selected: "{count} selected",
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        set_to: "Set to",
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        projects_count: "{count} projects",
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        no_matches: "No matching projects.",
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        group_accessibility: "{title}, {count} projects",
+        // DRAFT, NEEDS APPROVAL (2026-11-04).
+        select_accessibility: "Select {title}",
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The table
 
 /// Every table above, as the one object `tc_shell_words_copy_json` returns.
@@ -606,6 +668,7 @@ pub struct ShellWordsCopy {
     pub scrubbing: ScrubbingWords,
     pub settings: SettingsWords,
     pub paused_notice: PausedNoticeWords,
+    pub projects_manager: ProjectsManagerWords,
 }
 
 #[must_use]
@@ -618,12 +681,48 @@ pub fn shell_words_copy() -> ShellWordsCopy {
         scrubbing: scrubbing_words(),
         settings: settings_words(),
         paused_notice: paused_notice_words(),
+        projects_manager: projects_manager_words(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Settings > Projects' Manage sheet: short words that never name the
+    /// background service, a passkey or a NEAR AI subject, with only the
+    /// holes the shells fill. The commons' name is
+    /// `tests/no_commons_name_in_copy.rs`'s to refuse.
+    #[test]
+    fn the_projects_manager_words_are_short_and_plain() {
+        let words = serde_json::to_value(projects_manager_words()).unwrap();
+        let map = words.as_object().unwrap();
+        assert_eq!(map.len(), 10);
+        for (key, value) in map {
+            let text = value.as_str().unwrap();
+            assert!(!text.is_empty(), "{key}");
+            assert!(text.chars().count() <= 30, "{key} is long: {text}");
+            for banned in ["daemon", "passkey", "Near.ai", "NEAR AI"] {
+                assert!(
+                    !text.to_lowercase().contains(&banned.to_lowercase()),
+                    "{key} says {banned}"
+                );
+            }
+        }
+        let w = projects_manager_words();
+        assert_eq!(w.manage, "Manage\u{2026}");
+        assert!(w.selected.contains("{count}"));
+        assert!(w.projects_count.contains("{count}"));
+        assert!(w.mode_count.contains("{title}") && w.mode_count.contains("{count}"));
+        assert!(
+            w.group_accessibility.contains("{title}") && w.group_accessibility.contains("{count}")
+        );
+        assert!(w.select_accessibility.contains("{title}"));
+        // The bulk Never confirmation is the one Never's, titled for many.
+        let title =
+            crate::project_copy::ignore_project_title(&w.projects_count.replace("{count}", "3"));
+        assert_eq!(title, "Set 3 projects to Never?");
+    }
 
     /// The resume notice says Settings' own paused sentence, not a copy of
     /// it, with the two labels approved 2026-11-04.

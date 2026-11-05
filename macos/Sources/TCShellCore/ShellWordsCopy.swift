@@ -158,6 +158,29 @@ public struct ShellWordsCopy: Decodable, Equatable, Sendable {
     public let scrubbing: Scrubbing
     public let settings: Settings
     public let pausedNotice: PausedNotice
+    /// Settings > Projects' summary and Manage sheet (DRAFT, NEEDS
+    /// APPROVAL, 2026-11-04). Optional so an older core still decodes; the
+    /// card and the sheet draw nothing that needs a word it lacks.
+    public let projectsManager: ProjectsManager?
+
+    /// `shell_words_copy::ProjectsManagerWords`.
+    public struct ProjectsManager: Decodable, Equatable, Sendable {
+        public let manage: String
+        public let search: String
+        public let all: String
+        /// `{title} {count}`: one mode's name and how many projects are in it.
+        public let modeCount: String
+        /// `{count} selected`.
+        public let selected: String
+        public let setTo: String
+        /// `{count} projects`: several projects as one name.
+        public let projectsCount: String
+        public let noMatches: String
+        /// `{title}, {count} projects`: a group header's accessible name.
+        public let groupAccessibility: String
+        /// `Select {title}`: a project's checkbox's accessible name.
+        public let selectAccessibility: String
+    }
 
     /// The Traces tab's resume notice (approved 2026-11-04): Settings'
     /// paused sentence, Resume and Not now. When it shows is

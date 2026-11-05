@@ -47,9 +47,15 @@ final class OtherCollectionsLazyTests: XCTestCase {
         let last = try XCTUnwrap(model.projects.last)
         OtherCollectionRowBodies.startRecording()
         defer { OtherCollectionRowBodies.stopRecording() }
-        // Settings' body scrolls its cards as one. Keep the real section's
-        // card wrappers between the rows and this viewport.
-        let host = Host(ScrollView { VStack { ProjectsSection() } }.environmentObject(model))
+        // The list lives in Settings > Projects' Manage sheet; the section
+        // itself draws a summary and no rows.
+        let summary = Host(ScrollView { VStack { ProjectsSection() } }.environmentObject(model))
+        summary.settle()
+        summary.close()
+        XCTAssertTrue(built("projects").isEmpty, "the Settings body built project rows")
+        let words = try XCTUnwrap(ShellWords.table?.projectsManager)
+        let modes = try XCTUnwrap(ProjectsSection.modeCopy)
+        let host = Host(ProjectsManagerSheet(words: words, modeCopy: modes, onClose: {}).environmentObject(model))
         defer { host.close() }
         host.settle()
         assertVisibleOnly("projects", total: count)

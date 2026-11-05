@@ -272,7 +272,7 @@ final class SettingsSectionsTests: XCTestCase {
             .privateAI: ("PrivateAISection", "PrivateAISettingsPanels(store: store)"),
             .referrals: ("ReferralsSection", "GlassEyebrowCard(surface.copy.title)"),
             .witness: ("WitnessSection", "GlassEyebrowCard(copy.heading)"),
-            .projects: ("ProjectsSection", "GlassEyebrowCard(SettingsWords.projects)"),
+            .projects: ("ProjectsSection", "GlassEyebrowCard(SettingsWords.projects, accessory: {"),
             .changes: ("ChangesSection", "GlassEyebrowCard(SettingsLegacyWords.auditHeading)"),
         ]
         for section in SettingsSection.allCases where section != .compute {
