@@ -21,9 +21,18 @@ with more removed, and nothing else*. To find out what more to remove, the
 full trace goes to the privacy witness when the contributor submits.
 
 "More removed" is a mechanical check (section 4), not a judgement. It
-holds by construction for every redactor the witness runs today, with one
-configuration gap that must be closed first (section 4.3, open question
-Q1).
+holds by construction for every redactor the witness runs, provided the
+witness's deterministic pass is at least the client's. Today it is not:
+the path prefixes do not travel (section 4.3, Q1) and the live image
+predates the tool-output detectors (section 7.3). Both need a witness
+redeploy, and **the owner has held any redeploy until devices can refresh
+their measurement pins** (section 7). So the order is: pin refresh in
+clients, then redeploy, then this.
+
+The second driver is time. The live witness took 114.7 s on 241 KB of
+tool output against a 120 s client deadline, so a witnessed preview of a
+real trace times out. At submission the call runs in the background with
+a deadline matched to the witness's own, and retries (section 6).
 
 ## Why
 
@@ -54,8 +63,22 @@ What happens today under a configured witness:
    `tauri-desktop/src-tauri/src/commands/native_flows.rs:202-216`.
 3. **So the raw session leaves the Mac before the contributor has
    decided anything**, and looking at a trace depends on the witness being
-   up and fast. A hung or broken witness turns "look at this trace" into
-   a failure (observed 2026-11-04: Submit did nothing, `preview-failed`).
+   up and fast.
+4. **The live witness is too slow for an interactive deadline.** Measured
+   2026-11-04 against the live witness: synthetic requests succeed, but a
+   request carrying 241 KB of tool output took 114.7 s. The client gives
+   a witness call 120 s (`HttpWitnessTransport::new(..., 120 s)`,
+   `submit.rs:1004` for token review, `submit.rs:1378` for everything
+   else; the deadline is a whole-request `reqwest` timeout,
+   `witness/transport.rs:891-901`). Real sessions are larger: one queued
+   Claude Code session was 868 KB. So a witnessed preview of a real trace
+   times out and the app reports `preview-failed`, which is what the
+   owner saw. The witness's own limit is 300 s
+   (`DEFAULT_REQUEST_TIMEOUT_SECS`, `bin/trace-commons-witness.rs:110-124`,
+   overridable by `TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS`, `:191-198`).
+   This is the strongest practical reason to move the witness: at
+   submission the call runs in the background, can wait longer, and can
+   be retried, and nobody is staring at a spinner.
 
 The automatic path already works the way the owner describes. An entry
 with no pinned preview under a configured witness is witnessed inside
@@ -175,6 +198,8 @@ but it is listed in Q5 for approval all the same.
 | Preview footer, witnessed client | "When you submit, your full trace goes to a secure privacy check. It can only remove more." |
 | Row state while checking | "Running privacy check…" |
 | Row state, check unavailable (retrying) | "Privacy check unavailable. Trying again." |
+| Row state, retries exhausted (section 6) | "Privacy check timed out. Try again later." |
+| Refusal, over the size ceiling (section 6) | existing `failed_too_large` sentence |
 | Row state, `witness-changed-after-review` | "Changed by the privacy check. Review again to send." |
 | Second preview header | "This is what the privacy check returned." |
 
@@ -324,7 +349,8 @@ add redactions, and they travel inside a request that already holds the
 raw session). This is a witness image change, so a new measurement.
 
 Version skew is the other source of divergence: a witness image whose
-deterministic pass is older than the client's can redact less. The check
+deterministic pass is older than the client's can redact less. That is
+the live state today (section 7.3). The check
 catches it and the fail path converges (the second approval pins the
 witness's bytes, which are uploaded as-is). It costs a second look; it
 leaks nothing.
@@ -356,14 +382,12 @@ only, with the same prefixes, is.
   (`approved_envelope.rs:86`, `release_stale_pins`). Unchanged.
 - **Attestation and measurement.** Still verified before anything raw is
   sent (`submit.rs:1790-1815`). Unchanged; just later.
-- **Offline, timeouts, busy.** Preview works offline. At submission the
-  entry stays Approved and the upload pass retries: a busy witness returns
-  `REASON_WITNESS_SATURATED` with its own retry delay
-  (`submit.rs:1856-1862`); the transport deadline is 120 s
-  (`submit.rs:1378`). Labels only. The `preview-errors-and-deadlines`
-  branch (another agent) exists locally with no commits past `main` at
-  time of writing; whatever labels it adds for the witness call should be
-  reused on the submission path, and become moot for the ordinary preview.
+- **Offline, timeouts, busy.** Preview works offline. Submission
+  deadlines, retries and size limits are section 6. The
+  `preview-errors-and-deadlines` branch (another agent) exists locally with
+  no commits past `main` at time of writing; whatever labels it adds for
+  the witness call should be reused on the submission path, and become
+  moot for the ordinary preview.
 - **Size.** Placeholders can be longer than what they replace, so the
   witness's envelope can exceed the approved size. The witness transport
   already enforces the envelope limit (`submit.rs:1383`); an over-limit
@@ -385,7 +409,143 @@ only, with the same prefixes, is.
   frozen: it needs only to render the new label and stop calling
   `witness_preview_request` for ordinary previews.
 
-## 6. Alternatives
+## 6. Deadlines, retries and size at submission
+
+The witness's throughput, not its availability, is the binding
+constraint today (section "Why", item 4): about 2 KB/s of tool output on
+the one measurement we have. At that rate the 868 KB session would need
+roughly 400 s, over the witness's own 300 s limit, so moving the call to
+submission is necessary but not sufficient for large sessions.
+
+- **Deadline.** The submission path's client deadline becomes the
+  witness's request limit plus a margin for transfer: 330 s against
+  today's 300 s default, set as one named constant beside the 120 s ones
+  it replaces (`submit.rs:1378`). The interactive token and admission
+  reviews keep 120 s; a person is waiting on those. A client deadline
+  shorter than the witness's limit abandons work the witness would have
+  finished, and is the current bug.
+- **Background class.** The upload pass already declares its witness
+  calls background work (`witness_as_background`, `submit.rs:1458`),
+  which a witness with reserved interactive slots turns away first
+  (`reserved_interactive_slots`, `bin/trace-commons-witness.rs:190`).
+  Keep that: submission is background work.
+- **Retry.** A timeout, a connection failure and `witness_saturated` are
+  transient. The entry stays Approved and the upload pass retries with
+  its existing backoff (`REASON_WITNESS_SATURATED` carries the witness's
+  own delay, `submit.rs:1856-1862`). Each retry sends the raw session
+  again to the same pinned witness; the approval covers that, because it
+  is the same send to the same verified recipient. After a bounded number
+  of consecutive timeouts on one entry (recommend 3), the entry leaves the
+  retry loop with the row state "Privacy check timed out. Try again
+  later." and a manual retry; it is not dropped and not refused.
+- **Progress.** One row state while a call is in flight, "Running privacy
+  check…" (section 3). No percentage: the witness reports none, and an
+  invented one would be wrong.
+- **Size.** The client refuses before sending anything when the raw
+  contribution is over a witness size ceiling, with the label
+  `witness-too-large` and the existing `failed_too_large` sentence
+  (`witness_copy.rs:805`): "nothing left the machine". The ceiling is a
+  configured byte figure derived from measured witness throughput and its
+  request limit, not a guess; until it is measured, recommend 512 KB of
+  raw contribution (Q9). Splitting one session across several witness
+  requests is not proposed: a certificate covers one envelope, and a
+  merged artifact would need a new certificate format.
+- **Raising the ceiling** is witness work, outside this spec: classifier
+  throughput inside the enclave, and window concurrency for the
+  self-hosted backend, whose window concurrency is a setting its own
+  comment says is kept sequential on purpose
+  (`privacy_filter_self_hosted.rs:163-166`, `:193`).
+- **Labels only**, as everywhere on this path: `witness-timeout`,
+  `witness-too-large`, `witness_saturated`. No content, no host.
+
+## 7. Prerequisite: devices must be able to learn a new witness measurement
+
+**Owner decision (2026-11-04): hold the witness redeploy until this
+exists.** This spec depends on a redeploy (Q1's path prefixes, and the
+image gap in 7.3), so this section ships first.
+
+### 7.1 The problem
+
+A device writes its witness pins once, when it joins, and never again:
+
+- Wallet sign-up writes `witness: Some(witness)` into the new config
+  (`daemon/account_onboarding.rs:1147-1151`). The module header says the
+  bootstrap is trust-on-first-use over HTTPS from the chosen origin, and
+  "Later witness checks enforce the persisted pins"
+  (`account_onboarding.rs:4-7`).
+- NEAR AI sign-up does the same with `commons.witness`
+  (`daemon/nearai_onboarding.rs:1488-1494`).
+- Connecting inference writes a witness once, with origin
+  `ConnectedInference` (`daemon/inference_connection.rs:755`).
+- A CLI client can read pins from `TRACE_COMMONS_WITNESS_*` environment
+  variables (`config.rs:657-680`).
+
+Nothing refreshes them. The servers learn new sets from their own
+configuration: ingest's certificate check from
+`TRACE_COMMONS_WITNESS_EXPECTED_MEASUREMENTS`
+(`redaction_witness/config.rs:60`), and new sign-ups from the
+provisioning document (`TRACE_COMMONS_NEAR_PROVISIONING_WITNESS_JSON`,
+`trace_commons_ingest_internal/near_provisioning.rs:192`). A new witness
+image changes the measured configuration (mrconfigid), so after a
+redeploy every existing device refuses the witness with
+`witness_expected_measurement` until someone re-pins it by hand. Under
+this spec that refusal happens at submission, so every approved trace on
+every existing device would stop uploading.
+
+### 7.2 Design: a signed accepted-measurements list
+
+- **Served** by the commons at a new unauthenticated read route (name to
+  be chosen; none exists today), as one JSON document: a monotonically
+  increasing `version`, an `issued_at`, and a list of accepted entries,
+  each `{measurements, signing_address, not_before, not_after}`. The
+  signing address is carried because a new image may also change it.
+- **Signed** with an Ed25519 key held offline by the operator, separate
+  from every service key. Its public key ships **in the client binary**
+  as a release constant, so trust does not rest on the HTTPS origin that
+  served the bootstrap pins. A client with no compiled-in key never
+  refreshes and behaves as today.
+- **Refreshed** by the client at start-up and daily, and on a
+  `witness_expected_measurement` refusal before reporting it. A document
+  is accepted only if its signature verifies, its `version` is higher
+  than the stored one (no rollback), and its witness URL matches the
+  configured one. The verified document replaces the stored accepted
+  set; it never edits the URL.
+- **Rollover.** The operator publishes old + new, deploys the new image,
+  then publishes new only (or lets the old entry's `not_after` pass).
+  Clients accept any unexpired entry.
+- **Failure behaviour.** Fetch failure, bad signature, lower version, or
+  expired entries: keep the stored set, log a label. Never widen to
+  unpinned, never fall back to TOFU from the serving origin.
+- **Consent interaction.** `witness` is in the approval fingerprint
+  (`preview.rs:2654-2660`) and in the grant-terms void rule (spec
+  2026-09-23 R6), so a naive refresh re-asks every approval and voids
+  every automatic grant. A refresh delivered by a verified list should
+  not: it is the same witness, re-measured, endorsed by the release key.
+  The accepted set therefore lives outside the fingerprinted field; a
+  change of URL still voids (Q10).
+- **Ships before the redeploy**, in a client release that has reached the
+  devices that matter. Devices that have not updated keep refusing,
+  which is the existing fail-closed behaviour, not a new failure.
+- **Ingest** keeps its own environment configuration; serving the list
+  does not change what ingest verifies.
+
+### 7.3 Operational gaps found (open items)
+
+- **The live witness image predates the tool-output detectors** (#1366,
+  merged 2026-10-11 as a68b86898). Its deterministic pass lacks
+  `tool_output_detectors` (`trace_contribution.rs:4626-4634`), which the
+  client runs. Under section 4 that is a "witness removed less" case: the
+  check would fail, correctly, on any trace with a git author, IP, private
+  host, account name or phone in tool output. The subset check cannot
+  ship ahead of a redeploy, so phase order is: pin refresh, then redeploy,
+  then the check.
+- **Deploy provenance.** The live witness's mrconfigid matches no
+  documented deploy. Nobody can say from the repository which build is
+  running. Each deploy should record its commit, image digest and
+  resulting measurement in the operator docs, and the signed list's
+  entries should name that commit.
+
+## 8. Alternatives
 
 | Option | For | Against |
 |---|---|---|
@@ -395,15 +555,16 @@ only, with the same prefixes, is.
 | **D. Witness at submission, no check** | Already built (approve without preview). | The approval is of something other than what is sent; a witness bug that adds text would go out unseen. |
 | **E. Witness at submission, subset check (recommended)** | Preview is local and offline; raw leaves only on submit; the person approves an upper bound on what is sent; certified bytes still go out. | A check to build and test; a second look on divergence; Windows needs Q1 first. |
 
-**Recommendation: E**, phased so that it ships to macOS before Q1 lands
-and to Windows after.
+**Recommendation: E.** It depends on a witness redeploy, which is held
+until devices can refresh their measurement pins (section 7).
 
-## 7. Open questions for the owner
+## 9. Open questions for the owner
 
 1. **Send the client's path prefixes to the witness?** Needed for the
    check to pass on Windows and for cwds outside the standard roots.
    *Recommend yes*, as hints added to the witness's own, in a new
-   measurement. Until then, Windows witnessed clients keep today's flow.
+   measurement. It rides the same redeploy as the #1366 detectors
+   (section 7.3), so it adds no rollout of its own.
 2. **Is the consent rule right?** "This, or this with more removed, and
    nothing else." *Recommend yes.*
 3. **Upload regardless of the certificate's verdict for a person's
@@ -419,10 +580,29 @@ and to Windows after.
    first approval). *Recommend yes*, as argued in 2.1.
 8. **Retire `witness_preview_request` for ordinary previews?**
    *Recommend yes*; keep it for admission and token review.
+9. **Witness size ceiling until throughput is measured.** *Recommend
+   512 KB of raw contribution*, refused before anything is sent.
+10. **Should a signed measurement refresh leave approvals and automatic
+    grants intact?** *Recommend yes* for a new measurement at the same
+    URL; a URL change still voids and re-asks.
+11. **Who holds the list-signing key, and where?** *Recommend* an offline
+    key held by the owner, with a second holder for recovery; never on a
+    service host.
 
-## 8. Phased plan (sketch, no code)
+## 10. Phased plan (sketch, no code)
 
-1. **Check.** `subset_check` in the contributor crate with label-only
+Order is forced by section 7: refresh, then redeploy, then the check.
+
+1. **Measurement refresh in clients (section 7.2).** Signed list format,
+   compiled-in release key, refresh at start-up, daily and on refusal,
+   rollback protection, accepted set outside the approval fingerprint.
+   Served route on the commons. Ship in a client release and let it
+   reach devices.
+2. **Witness redeploy.** One image carrying the #1366 detectors, the
+   client path prefixes in the request (Q1), and the submission-length
+   request limit. Publish old + new in the signed list first; record
+   commit, image digest and measurement in the operator docs.
+3. **Check.** `subset_check` in the contributor crate with label-only
    errors. Tests: property tests that splice random grammar tokens into
    random envelopes and must pass; any inserted byte, reorder, dropped
    event or non-stripped key removal must fail; renumbering must pass
@@ -430,14 +610,14 @@ and to Windows after.
    deterministic + mock-classifier pipeline through the real
    `redact_trace` against a deterministic-only preview of the same raw
    must pass.
-2. **Daemon and submit.** Lift the preview refusal for the ordinary
+4. **Daemon and submit.** Lift the preview refusal for the ordinary
    path; replace the `witness_certificate_missing` refusal for a plain
    pin with witness + check; on fail, R5 save and
-   `witness-changed-after-review`. Existing witness pins unchanged.
-3. **macOS.** Strings, row state, preview footer, second-preview header;
-   ordinary preview stops offering the witness review.
-4. **Witness request prefixes (Q1).** Protocol field, witness image,
-   measurement rollout; then enable the new path on Windows.
-5. **GTK, Windows, Tauri** parity with macOS (Tauri minimal).
-6. **Docs.** Update the 2026-09-02 witness-client spec and the
+   `witness-changed-after-review`; 330 s submission deadline, timeout
+   retry bound, size ceiling (section 6). Existing witness pins
+   unchanged.
+5. **macOS.** Strings, row states, preview footer, second-preview
+   header; ordinary preview stops offering the witness review.
+6. **GTK, Windows, Tauri** parity with macOS (Tauri minimal).
+7. **Docs.** Update the 2026-09-02 witness-client spec and the
    2026-09-04 native-inference onboarding dependency 1 to point here.
