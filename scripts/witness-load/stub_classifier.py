@@ -15,6 +15,8 @@ What it models, and from what measurement:
   243 KiB in 9.3 s): about 1.3 s fixed plus 32 ms per KiB.
 - The ~256 KiB body limit: a body over `--max-body-bytes` gets a 413, as the
   live endpoint answers.
+- A refused key or other failure (optional): `--fail-status 401` answers
+  every classify request with that status.
 - Overlap sensitivity (optional): with `--trip-above N`, a request that arrives
   while more than N are already in flight fails fast with a 502, the shape of
   the 2026-08-28 "four concurrent fail, four serial pass" result. Off by
@@ -131,6 +133,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 with STATS.lock:
                     STATS.too_large += 1
                 return self.reply(413, {"error": "Failed to buffer the request body"})
+            if CONFIG.fail_status is not None:
+                status = CONFIG.fail_status
+                return self.reply(status, {"error": "stub failure"})
             if CONFIG.trip_above is not None and arrived_with >= CONFIG.trip_above:
                 status = 502
                 with STATS.lock:
@@ -181,6 +186,8 @@ def main():
     parser.add_argument("--per-kib-ms", type=float, default=32.0)
     parser.add_argument("--max-body-bytes", type=int, default=256 * 1024)
     parser.add_argument("--trip-above", type=int, default=None)
+    parser.add_argument("--fail-status", type=int, default=None,
+                        help="answer every classify request with this status (e.g. 401)")
     parser.add_argument("--verbose", action="store_true")
     parser.parse_args(namespace=CONFIG)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", CONFIG.port), Handler)
