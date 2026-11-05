@@ -1392,6 +1392,18 @@ mod tests {
                 redaction_pipeline_version(backend),
                 "alias must come from the protocol crate for {backend:?}"
             );
+            // The structural skip is on by default, so a full-pipeline
+            // witness reports the bumped alias (2026-11-05).
+            let bumped = match backend {
+                PrivacyFilterBackendTag::NearAi => "privacy-filter-near-ai-v2",
+                PrivacyFilterBackendTag::SelfHosted => "privacy-filter-self-hosted-v2",
+                _ => "privacy-filter-sidecar-v3",
+            };
+            assert!(
+                result.policy_version.ends_with(bumped),
+                "{backend:?}: {}",
+                result.policy_version
+            );
             assert_ne!(
                 result.policy_version, DETERMINISTIC_REDACTION_PIPELINE_VERSION,
                 "a full-pipeline witness must not report the deterministic \

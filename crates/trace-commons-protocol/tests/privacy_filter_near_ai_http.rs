@@ -1050,26 +1050,29 @@ async fn retries_stop_when_the_deadline_cannot_fit_another_attempt() {
             server.uri(),
             "openai/privacy-filter",
             "test-api-key-do-not-leak",
-            Duration::from_millis(300),
+            // Long enough that a loaded test machine still delivers each
+            // request to the server before its attempt times out, so the
+            // request counts below are exact.
+            Duration::from_millis(1_500),
             1_000_000,
         )
         .expect("adapter builds")
         .with_timeout_per_kib_ms(0)
     };
 
-    // Deadline 700 ms out: the first attempt times out at 300 ms; another
-    // would need 250 ms of backoff plus 300 ms, which does not fit.
+    // Deadline 2.5 s out: the first attempt times out at 1.5 s; another
+    // would need 250 ms of backoff plus 1.5 s, which does not fit.
     let server = server_with(move |_: &wiremock::Request| slow()).await;
     let started = std::time::Instant::now();
     let error = adapter(&server)
-        .redact_text_before("a slow window", started + Duration::from_millis(700))
+        .redact_text_before("a slow window", started + Duration::from_millis(2_500))
         .await
         .expect_err("the endpoint never answers in time");
     assert!(error.is_transient());
     // Counted, not timed: one request means no retry was started. The
     // elapsed bound only says it did not wait for the 10 s answer.
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(8),
         "{:?}",
         started.elapsed()
     );

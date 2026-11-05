@@ -490,6 +490,30 @@ mod tests {
 
     const NEAR_AI_FULL: &str = "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1";
 
+    /// Through the structural-skip alias bump (2026-11-05) a certificate
+    /// from the new witness and one from the live witness both certify a full
+    /// pipeline, and an unknown alias does not.
+    #[test]
+    fn both_the_new_and_the_pre_skip_alias_certify_and_an_unknown_one_does_not() {
+        for version in [
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v2",
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1",
+        ] {
+            let (response, witness) = certified(version);
+            assert_eq!(
+                session_redaction(Some(&response), Some(&witness)),
+                SessionRedaction::CertifiedFullPipeline,
+                "{version}"
+            );
+        }
+        let (response, witness) =
+            certified("ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v3");
+        assert_eq!(
+            session_redaction(Some(&response), Some(&witness)),
+            SessionRedaction::NotCertified
+        );
+    }
+
     /// K6: each exact allowlisted version, under a certificate that verifies
     /// against the pinned signer, is a certified full pipeline.
     #[test]
@@ -518,7 +542,9 @@ mod tests {
             "ironclaw-deterministic-secret-path-v3",
             "ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v1",
             "ironclaw-deterministic-secret-path-v2+privacy-filter-near-ai-v1",
-            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v2",
+            // The next near-ai version, not yet reviewed; v2 was admitted with
+            // the structural-skip bump (2026-11-05).
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v3",
             "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1+extra",
             "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai",
             "IRONCLAW-DETERMINISTIC-SECRET-PATH-V3+PRIVACY-FILTER-NEAR-AI-V1",
