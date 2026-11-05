@@ -1,6 +1,7 @@
 import Foundation
 import TCBridge
 import TCShellCore
+import TCLocalization
 
 /// The typed layer over the daemon's JSON. Every method here is one
 /// `trace_commons.daemon.v1_1` call, in and out of Swift types.
@@ -231,18 +232,21 @@ final class DaemonClient: Sendable {
     static func busyRetryLine(
         from error: Error,
         format: (Date) -> String = {
-            DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .short)
+            $0.formatted(Date.FormatStyle(date: .omitted, time: .shortened).locale(Localization.current.locale))
         }
     ) -> String? {
         guard let failure = error as? Failure, failure.viewState == "Busy",
               let at = failure.retryAt,
               let label = failure.retryLabel, !label.isEmpty
         else { return nil }
-        return "\(label): \(format(at))"
+        return Localization.fill(Localization.current.text("app.witness.retry_time"), [
+            "label": label, "time": format(at)
+        ])
     }
 
     /// The daemon's review `view`, read into a `Failure`'s fields.
     static func failure(code: String, message: String, view: [String: Any]?) -> Failure {
+        let view = view.flatMap { TCWitnessReviewPresentation.view(label: message, original: $0) } ?? view
         let sentence = view?["message"] as? String
         let retryAt = (view?["retry_at"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }
         return Failure(
@@ -619,7 +623,8 @@ final class DaemonClient: Sendable {
     /// instead of serving the figure it read in the last minute.
     func nearAiBalance(fresh: Bool = false) throws -> BalanceStatus {
         BalanceStatus.parse(fromJSON: try rawResultJSON(
-            BalanceSurface.statusMethod, params: fresh ? ["fresh": true] : [:]))
+            BalanceSurface.statusMethod, params: fresh ? ["fresh": true] : [:]),
+            changeLine: { TCNearAiBalance.changeLine(nanos: $0, scale: $1) })
     }
 
     /// The account's active NEAR AI organizations and which one Private AI
@@ -628,7 +633,8 @@ final class DaemonClient: Sendable {
     /// "several".
     func nearAiSpendOrganizations(fresh: Bool = false) throws -> SpendOrganizations {
         SpendOrganizations.parse(fromJSON: try rawResultJSON(
-            "near_ai_spend_organizations", params: fresh ? ["fresh": true] : [:]))
+            "near_ai_spend_organizations", params: fresh ? ["fresh": true] : [:]),
+            localizedView: { TCNearAiBalance.spendOrganizationViewJSON(currentName: $0) })
     }
 
     /// Switches the organization Private AI spends from. Throws the daemon's
@@ -644,7 +650,9 @@ final class DaemonClient: Sendable {
             ["expected_organization_id": $0.organizationID,
              "expected_connection_revision": $0.connectionRevision]
         } ?? [:]
-        return try call("near_ai_funding", params: params, as: FundingStatus.self)
+        let status = try call("near_ai_funding", params: params, as: FundingStatus.self)
+        return status.presenting(message: TCNearAiBalance.fundingMessage(
+            state: status.state, organizationName: status.organizationName))
     }
 
     /// Begins the ceremony and hands back where to open the browser.
@@ -1207,12 +1215,14 @@ enum DaemonEventParser {
         case "status_changed":
             return .statusChanged
         case "digest_due":
+            let digest = (try? JSONSerialization.data(withJSONObject: payload))
+                .flatMap { try? DaemonDataDecoding.decoder().decode(DaemonData.DigestDue.self, from: $0) }
             return .digestDue(
                 pending: payload["pending"] as? Int ?? 0,
                 contributed: payload["contributed"] as? Int ?? 0,
                 contributedProjects: payload["contributed_projects"] as? [String] ?? [],
                 creditPending: payload["credit_pending"] as? Double ?? 0,
-                text: payload["text"] as? String ?? ""
+                text: digest.map { NudgeSurface.digestText($0) } ?? (payload["text"] as? String ?? "")
             )
         case "reengage_due":
             guard let payloadData = try? JSONSerialization.data(withJSONObject: payload),

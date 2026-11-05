@@ -1,4 +1,5 @@
 import SwiftUI
+import TCLocalization
 import TCDesign
 import TCShellCore
 
@@ -169,6 +170,7 @@ struct AccountDevicesView: View {
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
+        formatter.locale = Localization.current.locale
         formatter.unitsStyle = .full
         return formatter
     }()

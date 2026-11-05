@@ -13,8 +13,10 @@
 
 use chrono::NaiveDate;
 use serde::Serialize;
+use serde_json::Value;
 use trace_commons_protocol::settlement_estimate::{SettlementEntryEstimate, SettlementTotal};
 
+use crate::localized_copy::{english, notifications as messages};
 use crate::nudge_copy as copy;
 
 /// One button a surface draws: a stable id the shell acts on, and its label.
@@ -40,6 +42,7 @@ pub struct CardText {
     pub body: String,
     pub actions: Vec<Action>,
     pub panel_row: String,
+    pub presentation: Value,
 }
 
 /// The text of one standalone notification (`reengage_due`).
@@ -48,6 +51,7 @@ pub struct NotificationText {
     pub title: String,
     pub body: String,
     pub actions: Vec<Action>,
+    pub presentation: Value,
 }
 
 /// The menu-bar mark's words: an accessibility sentence and the Windows
@@ -56,6 +60,58 @@ pub struct NotificationText {
 pub struct MarkText {
     pub accessibility: String,
     pub tooltip: String,
+    pub presentation: Value,
+}
+
+fn message_actions(presentation: &Value) -> Vec<Action> {
+    presentation["actions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|a| Action {
+            // Constructors below are the only source; never accept a wire action.
+            id: match a["id"].as_str() {
+                Some(ACTION_REVIEW) => ACTION_REVIEW,
+                Some(ACTION_SEE_HISTORY) => ACTION_SEE_HISTORY,
+                Some(ACTION_NOT_NOW) => ACTION_NOT_NOW,
+                _ => unreachable!("canonical notification action"),
+            },
+            label: english(&a["label"]),
+        })
+        .collect()
+}
+
+impl CardText {
+    fn from_presentation(presentation: Value) -> Self {
+        Self {
+            title: english(&presentation["title"]),
+            body: english(&presentation["body"]),
+            panel_row: english(&presentation["panel_row"]),
+            actions: message_actions(&presentation),
+            presentation,
+        }
+    }
+}
+
+impl NotificationText {
+    fn from_presentation(presentation: Value) -> Self {
+        Self {
+            title: english(&presentation["title"]),
+            body: english(&presentation["body"]),
+            actions: message_actions(&presentation),
+            presentation,
+        }
+    }
+}
+
+impl MarkText {
+    fn from_presentation(presentation: Value) -> Self {
+        Self {
+            accessibility: english(&presentation["accessibility"]),
+            tooltip: english(&presentation["tooltip"]),
+            presentation,
+        }
+    }
 }
 
 /// A local credit estimate summed over a batch, as `status` carries it.
@@ -97,13 +153,6 @@ pub struct Verdicts {
     pub since: NaiveDate,
 }
 
-impl Verdicts {
-    /// Credit becoming final is the only news.
-    fn finals_only(&self) -> bool {
-        self.accepted == 0 && self.held == 0
-    }
-}
-
 /// The longest tool name put into notification text, in characters (spec
 /// section 4.2).
 pub const TOOL_NAME_MAX_CHARS: usize = 64;
@@ -112,11 +161,15 @@ pub const TOOL_NAME_MAX_CHARS: usize = 64;
 /// must be given: a placeholder left in the output is a bug, and tests over
 /// every renderer below check for one.
 fn fill(template: &str, values: &[(&str, &str)]) -> String {
-    let mut out = template.to_string();
-    for (name, value) in values {
-        out = out.replace(&format!("{{{name}}}"), value);
-    }
-    out
+    let parameters: serde_json::Map<String, Value> = values
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), Value::String((*value).to_owned())))
+        .collect();
+    english(&crate::localized_copy::text(
+        "",
+        template,
+        Value::Object(parameters),
+    ))
 }
 
 fn cap_tool(name: &str) -> String {
@@ -125,7 +178,7 @@ fn cap_tool(name: &str) -> String {
 
 /// `{tool}`: one name, two joined, or "{k} tools". Empty for no tools,
 /// which no renderer places: a batch with no tool to name takes the
-/// `_NO_TOOL` templates instead (see [`names_tools`]).
+/// `_NO_TOOL` templates instead.
 #[must_use]
 pub fn tool_phrase(tools: &[String]) -> String {
     match tools {
@@ -204,45 +257,20 @@ pub fn settlement_share_line(total: &SettlementTotal) -> String {
 /// The settlement notification. `pricing_changed` picks the pricing body.
 #[must_use]
 pub fn settlement_notification(total: &SettlementTotal, pricing_changed: bool) -> NotificationText {
-    let (values, up_to) = settlement_band(total.low_usd_micros, total.high_usd_micros);
-    let template = match (pricing_changed, up_to) {
-        (true, true) => copy::NOTIFY_SETTLEMENT_BODY_PRICING_UP_TO,
-        (true, false) => copy::NOTIFY_SETTLEMENT_BODY_PRICING,
-        (false, true) => copy::NOTIFY_SETTLEMENT_BODY_UP_TO,
-        (false, false) => copy::NOTIFY_SETTLEMENT_BODY,
-    };
-    NotificationText {
-        title: copy::NOTIFY_SETTLEMENT_TITLE.to_string(),
-        body: fill_owned(template, &values),
-        actions: vec![
-            action(ACTION_REVIEW, copy::NOTIFY_SETTLEMENT_ACTION_REVIEW),
-            action(ACTION_NOT_NOW, copy::NOTIFY_SETTLEMENT_ACTION_NOT_NOW),
-        ],
-    }
+    NotificationText::from_presentation(messages::settlement_notification(total, pricing_changed))
 }
 
 /// The notification for NEAR AI credit received: `received_nanos` is the
 /// credit since the last such notification (all of it, the first time).
 #[must_use]
 pub fn near_ai_credit_notification(received_nanos: i64) -> NotificationText {
-    let amount = crate::private_inference_copy::format_amount(received_nanos, 9);
-    NotificationText {
-        title: copy::NOTIFY_NEAR_AI_CREDIT_TITLE.to_string(),
-        body: copy::NOTIFY_NEAR_AI_CREDIT_BODY.replace("{amount}", &amount),
-        actions: vec![
-            action(ACTION_REVIEW, copy::NOTIFY_NEAR_AI_CREDIT_ACTION_VIEW),
-            action(ACTION_NOT_NOW, copy::NOTIFY_NEAR_AI_CREDIT_ACTION_NOT_NOW),
-        ],
-    }
+    NotificationText::from_presentation(messages::near_ai_credit_notification(received_nanos))
 }
 
 /// The mark's words while the settlement estimate is news.
 #[must_use]
 pub fn settlement_mark_text() -> MarkText {
-    MarkText {
-        accessibility: copy::MARK_A11Y_SETTLEMENT.to_string(),
-        tooltip: copy::MARK_TOOLTIP_SETTLEMENT.to_string(),
-    }
+    MarkText::from_presentation(messages::mark_settlement())
 }
 
 /// A queue row's dollar band.
@@ -263,370 +291,72 @@ pub fn date_text(date: NaiveDate) -> String {
     date.format("%-d %B").to_string()
 }
 
-/// The clauses a batch card's body carries after its fixed sentence: which
-/// missions it fits, then the estimate, each only when there is something
-/// true to say.
-fn batch_clauses(batch: &Batch) -> Vec<String> {
-    let mut clauses = Vec::new();
-    if let Some(m) = batch.mission_fit.filter(|m| *m > 0) {
-        clauses.push(fill(
-            copy::pick(
-                m,
-                copy::NUDGE_MISSION_FIT_CLAUSE,
-                copy::NUDGE_MISSION_FIT_CLAUSE_ONE,
-            ),
-            &[("m", &m.to_string())],
-        ));
-    }
-    if let Some(e) = batch.estimate.filter(|e| e.drawn && e.known > 0) {
-        let (low, high) = (band_text(e.low), band_text(e.high));
-        let clause = if e.known >= batch.count {
-            fill(
-                copy::NUDGE_ESTIMATE_CLAUSE,
-                &[("low", &low), ("high", &high)],
-            )
-        } else {
-            fill(
-                copy::NUDGE_ESTIMATE_CLAUSE_PARTIAL,
-                &[
-                    ("known", &e.known.to_string()),
-                    ("low", &low),
-                    ("high", &high),
-                ],
-            )
-        };
-        clauses.push(clause);
-    }
-    clauses
-}
-
-fn join(first: String, rest: Vec<String>) -> String {
-    std::iter::once(first)
-        .chain(rest)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn action(id: &'static str, label: &str) -> Action {
-    Action {
-        id,
-        label: label.to_string(),
-    }
-}
-
-/// Whether a batch's words name its tools. A batch with none to name
-/// (`tools` empty: some source in it has no display name) reads without
-/// one, never "from 0 tools".
-fn names_tools(batch: &Batch) -> bool {
-    !batch.tools.is_empty()
-}
-
-/// `with_tool` when the batch names its tools, else `without`.
-fn by_tool(batch: &Batch, with_tool: &'static str, without: &'static str) -> &'static str {
-    if names_tools(batch) {
-        with_tool
-    } else {
-        without
-    }
-}
-
 /// The idle-sessions card (U4) and its panel row.
 #[must_use]
 pub fn idle_card(batch: &Batch) -> CardText {
-    let (n, days, tool) = (
-        batch.count.to_string(),
-        copy::days_phrase(batch.idle_days),
-        tool_phrase(&batch.tools),
-    );
-    let values = [("n", n.as_str()), ("days", days.as_str()), ("tool", &tool)];
-    let one = |many, single| copy::pick(batch.count, many, single);
-    CardText {
-        title: fill(
-            one(
-                by_tool(
-                    batch,
-                    copy::NUDGE_IDLE_TITLE,
-                    copy::NUDGE_IDLE_TITLE_NO_TOOL,
-                ),
-                by_tool(
-                    batch,
-                    copy::NUDGE_IDLE_TITLE_ONE,
-                    copy::NUDGE_IDLE_TITLE_NO_TOOL_ONE,
-                ),
-            ),
-            &values,
-        ),
-        body: join(
-            one(copy::NUDGE_IDLE_BODY, copy::NUDGE_IDLE_BODY_ONE).to_string(),
-            batch_clauses(batch),
-        ),
-        actions: vec![
-            action(ACTION_REVIEW, copy::NUDGE_IDLE_REVIEW),
-            action(ACTION_NOT_NOW, copy::NUDGE_NOT_NOW),
-        ],
-        panel_row: fill(
-            one(copy::NUDGE_PANEL_IDLE, copy::NUDGE_PANEL_IDLE_ONE),
-            &values,
-        ),
-    }
+    CardText::from_presentation(messages::idle_card(batch))
 }
 
 /// The review-backlog card (U1) and its panel row.
 #[must_use]
 pub fn backlog_card(batch: &Batch) -> CardText {
-    let n = batch.count.to_string();
-    let values = [("n", n.as_str())];
-    let one = |many, single| copy::pick(batch.count, many, single);
-    CardText {
-        title: fill(
-            one(copy::NUDGE_BACKLOG_TITLE, copy::NUDGE_BACKLOG_TITLE_ONE),
-            &values,
-        ),
-        body: join(
-            one(copy::NUDGE_BACKLOG_BODY, copy::NUDGE_BACKLOG_BODY_ONE).to_string(),
-            batch_clauses(batch),
-        ),
-        actions: vec![
-            action(ACTION_REVIEW, copy::NUDGE_BACKLOG_REVIEW),
-            action(ACTION_NOT_NOW, copy::NUDGE_NOT_NOW),
-        ],
-        panel_row: one(copy::NUDGE_PANEL_BACKLOG, copy::NUDGE_PANEL_BACKLOG_ONE).to_string(),
-    }
+    CardText::from_presentation(messages::backlog_card(batch))
 }
 
 /// The parts of [`copy::NUDGE_VERDICTS_TITLE`] dropped when their count is
 /// zero ("A zero clause is dropped"). Pinned by a test to occur in it.
+#[cfg(test)]
 const VERDICTS_ACCEPTED_CLAUSE: &str = "{a} accepted, ";
+#[cfg(test)]
 const VERDICTS_HELD_CLAUSE: &str = ", {h} held for privacy review";
-
-fn verdict_values(v: &Verdicts) -> [(&'static str, String); 4] {
-    [
-        ("a", v.accepted.to_string()),
-        ("h", v.held.to_string()),
-        ("date", date_text(v.since)),
-        (
-            "x",
-            v.credit_final_tenths.map(credit_text).unwrap_or_default(),
-        ),
-    ]
-}
 
 fn fill_owned(template: &str, values: &[(&'static str, String)]) -> String {
     let borrowed: Vec<(&str, &str)> = values.iter().map(|(k, v)| (*k, v.as_str())).collect();
     fill(template, &borrowed)
 }
 
-/// The final clause, or nothing when no credit became final.
-fn final_clause(v: &Verdicts) -> String {
-    v.credit_final_tenths
-        .map(|t| fill(copy::NUDGE_VERDICTS_FINAL_CLAUSE, &[("x", &credit_text(t))]))
-        .unwrap_or_default()
-}
-
 /// The verdicts card (U2) and its panel row. It has no "Not now": it is
 /// news, and opening it is what acknowledges it.
 #[must_use]
 pub fn verdicts_card(v: &Verdicts) -> CardText {
-    let values = verdict_values(v);
-    let (title, body, panel_row) = if v.finals_only() {
-        (
-            fill_owned(copy::NUDGE_VERDICTS_TITLE_FINAL_ONLY, &values),
-            String::new(),
-            fill_owned(copy::NUDGE_PANEL_VERDICTS_FINAL_ONLY, &values),
-        )
-    } else {
-        let mut template = copy::NUDGE_VERDICTS_TITLE.to_string();
-        if v.accepted == 0 {
-            template = template.replace(VERDICTS_ACCEPTED_CLAUSE, "");
-        } else if v.held == 0 {
-            template = template.replace(VERDICTS_HELD_CLAUSE, "");
-        }
-        (
-            fill_owned(&template, &values),
-            final_clause(v),
-            fill_owned(
-                by_zero_clause(
-                    v,
-                    copy::NUDGE_PANEL_VERDICTS,
-                    copy::NUDGE_PANEL_VERDICTS_ACCEPTED_ONLY,
-                    copy::NUDGE_PANEL_VERDICTS_HELD_ONLY,
-                ),
-                &values,
-            ),
-        )
-    };
-    CardText {
-        title,
-        body,
-        actions: vec![action(ACTION_SEE_HISTORY, copy::NUDGE_VERDICTS_SEE)],
-        panel_row,
-    }
-}
-
-/// `both` when some were accepted and some held, else the template that
-/// leaves out the zero count ("A zero clause is dropped"). Not for
-/// finals-only news, which has templates of its own.
-fn by_zero_clause(
-    v: &Verdicts,
-    both: &'static str,
-    accepted_only: &'static str,
-    held_only: &'static str,
-) -> &'static str {
-    if v.held == 0 {
-        accepted_only
-    } else if v.accepted == 0 {
-        held_only
-    } else {
-        both
-    }
-}
-
-/// The verdict sentence shared by the N2 notification and the digest fold:
-/// the counts, then the final clause; or the final clause alone. A zero
-/// count is left out, never said.
-fn verdict_sentence(v: &Verdicts) -> String {
-    if v.finals_only() {
-        return final_clause(v);
-    }
-    let template = if v.held == 0 {
-        copy::pick(
-            u64::from(v.accepted),
-            copy::NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY,
-            copy::NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY_ONE,
-        )
-    } else if v.accepted == 0 {
-        copy::pick(
-            u64::from(v.held),
-            copy::NOTIFY_VERDICTS_BODY_HELD_ONLY,
-            copy::NOTIFY_VERDICTS_BODY_HELD_ONLY_ONE,
-        )
-    } else {
-        copy::pick(
-            u64::from(v.accepted),
-            copy::NOTIFY_VERDICTS_BODY,
-            copy::NOTIFY_VERDICTS_BODY_ONE,
-        )
-    };
-    let body = fill_owned(template, &verdict_values(v));
-    join(body, vec![final_clause(v)])
+    CardText::from_presentation(messages::verdicts_card(v))
 }
 
 /// N1: the idle-sessions notification.
 #[must_use]
 pub fn idle_notification(batch: &Batch) -> NotificationText {
-    let (n, days, tool) = (
-        batch.count.to_string(),
-        copy::days_phrase(batch.idle_days),
-        tool_phrase(&batch.tools),
-    );
-    NotificationText {
-        title: copy::NOTIFY_TITLE.to_string(),
-        body: fill(
-            copy::pick(
-                batch.count,
-                by_tool(
-                    batch,
-                    copy::NOTIFY_IDLE_BODY,
-                    copy::NOTIFY_IDLE_BODY_NO_TOOL,
-                ),
-                by_tool(
-                    batch,
-                    copy::NOTIFY_IDLE_BODY_ONE,
-                    copy::NOTIFY_IDLE_BODY_NO_TOOL_ONE,
-                ),
-            ),
-            &[("n", &n), ("days", &days), ("tool", &tool)],
-        ),
-        actions: vec![
-            action(ACTION_REVIEW, copy::NOTIFY_ACTION_REVIEW_IDLE),
-            action(ACTION_NOT_NOW, copy::NOTIFY_ACTION_NOT_NOW),
-        ],
-    }
+    NotificationText::from_presentation(messages::idle_notification(batch))
 }
 
 /// N2: the verdicts notification.
 #[must_use]
 pub fn verdicts_notification(v: &Verdicts) -> NotificationText {
-    NotificationText {
-        title: copy::NOTIFY_TITLE.to_string(),
-        body: verdict_sentence(v),
-        actions: vec![action(ACTION_SEE_HISTORY, copy::NOTIFY_ACTION_SEE_HISTORY)],
-    }
+    NotificationText::from_presentation(messages::verdicts_notification(v))
 }
 
 /// The idle sentence folded into a due digest, with the mission clause when
 /// some of the batch fit one.
 #[must_use]
 pub fn digest_idle_sentence(batch: &Batch) -> String {
-    let (n, days, tool) = (
-        batch.count.to_string(),
-        copy::days_phrase(batch.idle_days),
-        tool_phrase(&batch.tools),
-    );
-    let sentence = fill(
-        copy::pick(
-            batch.count,
-            by_tool(
-                batch,
-                copy::DIGEST_IDLE_SENTENCE,
-                copy::DIGEST_IDLE_SENTENCE_NO_TOOL,
-            ),
-            by_tool(
-                batch,
-                copy::DIGEST_IDLE_SENTENCE_ONE,
-                copy::DIGEST_IDLE_SENTENCE_NO_TOOL_ONE,
-            ),
-        ),
-        &[("n", &n), ("days", &days), ("tool", &tool)],
-    );
-    let mission = Batch {
-        estimate: None,
-        ..batch.clone()
-    };
-    join(sentence, batch_clauses(&mission))
+    english(&messages::idle_sentence(batch, true))
 }
 
 /// The verdict sentence folded into a due digest.
 #[must_use]
 pub fn digest_verdict_sentence(v: &Verdicts) -> String {
-    verdict_sentence(v)
+    english(&messages::verdict_sentence(v))
 }
 
 /// The mark's words while it shows verdict news.
 #[must_use]
 pub fn mark_news_text(v: &Verdicts) -> MarkText {
-    let accessibility = if v.finals_only() {
-        fill_owned(copy::MARK_A11Y_VERDICTS_FINAL_ONLY, &verdict_values(v))
-    } else {
-        fill_owned(
-            by_zero_clause(
-                v,
-                copy::MARK_A11Y_VERDICTS,
-                copy::MARK_A11Y_VERDICTS_ACCEPTED_ONLY,
-                copy::MARK_A11Y_VERDICTS_HELD_ONLY,
-            ),
-            &verdict_values(v),
-        )
-    };
-    MarkText {
-        accessibility,
-        tooltip: copy::MARK_TOOLTIP_VERDICTS.to_string(),
-    }
+    MarkText::from_presentation(messages::mark_news(v))
 }
 
 /// The mark's words while it shows the idle halo.
 #[must_use]
 pub fn mark_ready_text(batch: &Batch) -> MarkText {
-    let (n, days) = (batch.count.to_string(), copy::days_phrase(batch.idle_days));
-    let values = [("n", n.as_str()), ("days", days.as_str())];
-    MarkText {
-        accessibility: fill(
-            copy::pick(batch.count, copy::MARK_A11Y_IDLE, copy::MARK_A11Y_IDLE_ONE),
-            &values,
-        ),
-        tooltip: fill(copy::MARK_TOOLTIP_IDLE, &values),
-    }
+    MarkText::from_presentation(messages::mark_ready(batch))
 }
 
 /// The digest switch's Settings help, finished, for its schedule: the
@@ -636,22 +366,7 @@ pub fn mark_ready_text(batch: &Batch) -> MarkText {
 /// said exactly.
 #[must_use]
 pub fn digest_help(evening: bool, interval_secs: Option<u64>) -> Option<String> {
-    if evening {
-        return Some(copy::SETTING_DIGEST_HELP_EVENING.to_string());
-    }
-    let secs = interval_secs?;
-    if secs < 3_600 || secs % 3_600 != 0 {
-        return None;
-    }
-    let hours = secs / 3_600;
-    Some(fill(
-        copy::pick(
-            hours,
-            copy::SETTING_DIGEST_HELP_INTERVAL,
-            copy::SETTING_DIGEST_HELP_INTERVAL_ONE,
-        ),
-        &[("hours", &hours.to_string())],
-    ))
+    messages::digest_help(evening, interval_secs).map(|message| english(&message))
 }
 
 /// A `list_pending` row's `settlement_estimate`, as a shell hands it back.
@@ -867,6 +582,13 @@ mod tests {
             held: h,
             credit_final_tenths: tenths,
             since: date(),
+        }
+    }
+
+    fn action(id: &'static str, label: &str) -> Action {
+        Action {
+            id,
+            label: label.to_owned(),
         }
     }
 

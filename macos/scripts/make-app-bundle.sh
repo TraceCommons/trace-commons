@@ -139,6 +139,19 @@ for resource_bundle in "$BIN_DIR"/*.bundle; do
   ditto "$resource_bundle" "$APP/Contents/Resources/$(basename "$resource_bundle")"
 done
 
+# Foundation copy lookup lives in the SwiftPM resource bundle, but macOS
+# permission prompts read InfoPlist.strings from the MAIN app bundle.
+LOCALIZATION_BUNDLE="$BIN_DIR/TraceCommons_TCLocalization.bundle"
+if [ ! -d "$LOCALIZATION_BUNDLE/en.lproj" ]; then
+  echo "FATAL: generated localization resources are missing" >&2
+  exit 1
+fi
+for language_resources in "$LOCALIZATION_BUNDLE"/*.lproj; do
+  language="$(basename "$language_resources")"
+  mkdir -p "$APP/Contents/Resources/$language"
+  cp "$language_resources/InfoPlist.strings" "$APP/Contents/Resources/$language/InfoPlist.strings"
+done
+
 # The app icon. Contents/Resources was created empty by every build before
 # the icon slice -- an LSUIElement app never shows an icon, so nobody noticed
 # there was none to show.

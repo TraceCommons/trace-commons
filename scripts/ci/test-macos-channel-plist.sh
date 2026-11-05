@@ -5,9 +5,8 @@
 # $TC_CHANNEL.env. This holds three things about it:
 #
 # - a production plist, with no channel chosen or with `production`, is
-#   byte-identical to the one rendered before the channel files existed
-#   (the fixtures under scripts/ci/tests/fixtures were taken from that
-#   script, unchanged);
+#   byte-identical to the reviewed production fixtures under
+#   scripts/ci/tests/fixtures (including the enabled localization list);
 # - a staging plist carries the staging bundle id, name, URL scheme, feed
 #   and channel, and nothing of production's identity or feed, and it never
 #   takes the production Sparkle key;

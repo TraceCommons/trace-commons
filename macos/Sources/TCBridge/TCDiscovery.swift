@@ -1,5 +1,6 @@
 import CTraceCommons
 import Foundation
+import TCLocalization
 
 /// `tc_discover_sources`: what session stores are on this machine.
 ///
@@ -20,7 +21,7 @@ public enum TCDiscovery {
     public static func managedCopyJSON() -> String? {
         guard let raw = tc_managed_copy_json() else { return nil }
         defer { tc_string_free(raw) }
-        return String(cString: raw)
+        return Localization.current.copyJSON(String(cString: raw), namespace: "managed_copy")
     }
 
     /// The discovery array as JSON, or nil if the ABI reported a caught

@@ -2,6 +2,7 @@ import SwiftUI
 import TCBridge
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// The inspector with nothing selected (Ron's #1146 `SummaryInspector`,
 /// `waiting-page.tsx:175-273`): what is waiting, what went, today's upload
@@ -326,16 +327,13 @@ enum SummaryFacts {
         var parts: [String] = []
         if let destinations {
             parts.append(FirstRunCopy.fill(words.summaryPanel.toolsWatched, [
-                "count": String(destinations.watchedCount), "total": String(destinations.tools.count),
+                "count": Localization.current.number(Int64(destinations.watchedCount)),
+                "total": Localization.current.number(Int64(destinations.tools.count)),
             ]))
         }
         if loaded {
-            parts.append(folders == 1
-                ? words.counts.projectCountOne
-                : FirstRunCopy.fill(words.counts.projectCount, ["count": String(folders)]))
-            parts.append(sessions == 1
-                ? words.counts.sessionsWaitingOne
-                : FirstRunCopy.fill(words.counts.sessionsWaiting, ["count": String(sessions)]))
+            parts.append(Localization.current.text("plural.summary.projects", count: Int64(folders)))
+            parts.append(Localization.current.text("plural.summary.waiting", count: Int64(sessions)))
         }
         return parts.joined(separator: " · ")
     }
@@ -393,7 +391,7 @@ enum SummaryFacts {
             Stat(
                 id: tool, title: InferenceTabView.toolName(tool),
                 sub: [
-                    FirstRunCopy.fill(counts.waitingCount, ["count": String(waiting[tool] ?? 0)]),
+                    FirstRunCopy.fill(counts.waitingCount, ["count": Localization.current.number(Int64(waiting[tool] ?? 0))]),
                     FirstRunCopy.fill(counts.contributedCount, [
                         "count": history == nil ? "—" : HomeFormat.count(contributed[tool] ?? 0),
                     ]),
@@ -417,6 +415,6 @@ enum SummaryFacts {
     /// Ledger rows the daemon could not read, when there are any.
     static func unreadableRows(_ routing: DaemonData.Routing?, copy: MonitorSafeguardsCopy) -> String? {
         guard let rows = routing?.unreadableRows, rows > 0 else { return nil }
-        return rows == 1 ? copy.rowsUnavailableOne : FirstRunCopy.fill(copy.rowsUnavailable, ["count": String(rows)])
+        return Localization.current.text("plural.summary.unavailable", count: Int64(clamping: rows))
     }
 }

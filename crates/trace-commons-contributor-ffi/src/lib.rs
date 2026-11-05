@@ -5917,6 +5917,106 @@ pub unsafe extern "C" fn tc_residual_secret_line_text(
     })
 }
 
+/// Locale-neutral equivalent of [`tc_residual_secret_line_text`]. Returns
+/// `{key, parameters?}` for a client to render with its native plural rules.
+/// The legacy English ABI stays available to existing clients.
+///
+/// # Safety
+/// `sites_json`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_residual_secret_message_json(
+    count: u32,
+    sites_json: *const c_char,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let sites: Vec<String> = unsafe { borrow_optional_str(sites_json) }
+            .and_then(|text| serde_json::from_str(text).ok())
+            .unwrap_or_default();
+        let message =
+            trace_commons_contributor::preview_copy::residual_secret_message(count, &sites);
+        Ok(to_owned_cstring(&serde_json::to_string(&message)?))
+    })
+}
+
+/// Canonical presentation templates for shared translation catalogs. Opens
+/// no store. Returns owned JSON; free with [`tc_string_free`].
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_message_templates_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(&serde_json::to_string(
+            &trace_commons_contributor::localized_copy::templates(),
+        )?))
+    })
+}
+
+/// Locale-neutral presentation for one explicitly supported operation.
+/// `input_json` contains facts, never preformatted text to translate. Unknown
+/// operations or malformed inputs return NULL; legacy English APIs remain.
+///
+/// # Safety
+/// Both arguments must be valid NUL-terminated strings, or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_localized_presentation_json(
+    operation: *const c_char,
+    input_json: *const c_char,
+) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let Some(operation) = (unsafe { borrow_optional_str(operation) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        // Only the handle-derived endpoint may choose a quit role. The
+        // generic presentation API cannot turn an attached watcher into a
+        // promise that quitting stops it.
+        if operation == "quit_prompt" {
+            return Ok(std::ptr::null_mut());
+        }
+        let input = (unsafe { borrow_optional_str(input_json) })
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+            .filter(serde_json::Value::is_object);
+        let input = match input {
+            Some(input) => input,
+            None if matches!(
+                operation,
+                "nudge_entry_tags_json" | "nudge_digest_help_json"
+            ) =>
+            {
+                serde_json::json!({})
+            }
+            None => return Ok(std::ptr::null_mut()),
+        };
+        let Some(message) = trace_commons_contributor::localized_copy::message(operation, &input)
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        Ok(to_owned_cstring(&serde_json::to_string(&message)?))
+    })
+}
+
+/// The same handle-derived quit role as [`tc_quit_prompt_json`], carrying
+/// message keys instead of finished English. Never accepts a client role.
+///
+/// # Safety
+/// The handle follows [`tc_quit_prompt_json`]'s ownership rules.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_localized_quit_prompt_json(handle: *const tc_handle) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let raw = unsafe { tc_quit_prompt_json(handle) };
+        if raw.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let prompt =
+            serde_json::from_str::<serde_json::Value>(unsafe { CStr::from_ptr(raw) }.to_str()?);
+        unsafe { tc_string_free(raw) };
+        let prompt = prompt?;
+        let Some(message) =
+            trace_commons_contributor::localized_copy::message("quit_prompt", &prompt)
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        Ok(to_owned_cstring(&serde_json::to_string(&message)?))
+    })
+}
+
 /// The preview's removed-summary panel (`redaction_summary::summary_copy`):
 /// a JSON object `{"removed": [row], "still_present": [row]}`, each row
 /// `{family, display, description, occurrences, distinct, detail}`.

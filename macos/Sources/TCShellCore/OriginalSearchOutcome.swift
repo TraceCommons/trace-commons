@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// What a search actually found, across both the redacted body and the
 /// original session.
@@ -38,13 +39,14 @@ public enum OriginalSearchOutcome: Equatable {
     public var sentence: String {
         switch self {
         case .absent:
-            return "0 matches -- not in this trace"
+            return Localization.current.text("app.search.absent")
         case .allRemoved(let count):
-            return "\(count) matches -- all \(count) were removed"
+            return Localization.current.text("app.search.removed", parameters: ["count": Localization.current.number(Int64(count))])
         case .someRemain(let remaining, let total):
-            return "\(total) matches -- \(remaining) would still be sent"
+            return Localization.current.text("app.search.remaining", parameters: [
+                "total": Localization.current.number(Int64(total)), "remaining": Localization.current.number(Int64(remaining))])
         case .unknown:
-            return "0 matches in what would be sent. Couldn't check the original."
+            return Localization.current.text("app.search.unknown")
         }
     }
 

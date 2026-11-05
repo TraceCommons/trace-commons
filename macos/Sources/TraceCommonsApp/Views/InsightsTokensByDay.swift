@@ -2,6 +2,7 @@ import Charts
 import SwiftUI
 import TCBridge
 import TCDesign
+import TCLocalization
 
 /// Tokens by day (#1695): on Breakdown beside the By project drill-down
 /// since the product owner's 2026-10-28 review, which took it off Overview.
@@ -45,8 +46,8 @@ struct InsightsTokensByDay: View {
     static func days(_ days: [InsightsDayTokens]) -> [Day] {
         let parse = Date.ISO8601FormatStyle().year().month().day()
         let utc = TimeZone(secondsFromGMT: 0) ?? .current
-        let short = Date.FormatStyle(timeZone: utc).weekday(.abbreviated)
-        let long = Date.FormatStyle(timeZone: utc).weekday(.abbreviated).month(.abbreviated).day()
+        let short = Date.FormatStyle(timeZone: utc).weekday(.abbreviated).locale(Localization.current.locale)
+        let long = Date.FormatStyle(timeZone: utc).weekday(.abbreviated).month(.abbreviated).day().locale(Localization.current.locale)
         return days.map { day in
             let date = try? Date(day.date, strategy: parse)
             return Day(id: day.date, name: date?.formatted(short) ?? day.date, label: date?.formatted(long) ?? day.date,

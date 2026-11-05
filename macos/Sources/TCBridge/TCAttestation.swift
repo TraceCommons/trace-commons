@@ -33,11 +33,8 @@ public enum TCAttestation {
     /// carries, and once credit weights attestations, saying it is would
     /// understate their work.
     public static func markLine(mark: String) -> String? {
-        guard let raw = mark.withCString({ tc_contribution_attestation_line($0) }) else {
-            return nil
-        }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_contribution_attestation_line.
+        LocalizedPresentation.line("contribution_attestation_line", parameters: ["mark": mark])
     }
 
     /// How firmly that sentence reads, as a raw `TC_PRIVATE_INFERENCE_TONE_*`
@@ -63,10 +60,7 @@ public enum TCAttestation {
     /// the mark line's fallback: an unknown mark still has to say something,
     /// an unknown reason has nothing honest to say.
     public static func reasonLine(reason: String) -> String? {
-        guard let raw = reason.withCString({ tc_contribution_attestation_reason_line($0) }) else {
-            return nil
-        }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_contribution_attestation_reason_line.
+        LocalizedPresentation.line("contribution_attestation_reason_line", parameters: ["reason": reason])
     }
 }

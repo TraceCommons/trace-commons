@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// The glass monitor's Traces words, decoded from
 /// `tc_monitor_traces_copy_json` (`preview_copy::monitor_traces_copy`).
@@ -748,14 +749,13 @@ public struct MonitorShellCopy: MonitorWordTable {
 
     /// Watching N tools: the singular is its own line.
     public func watching(tools: Int) -> String {
-        tools == 1 ? watchingToolsOne : watchingTools.replacingOccurrences(of: "{count}", with: String(tools))
+        Localization.current.text("plural.shell.watching", count: Int64(tools))
     }
 
     /// Home's second status line: sessions waiting, or nothing waiting.
     public func waiting(_ waiting: Int) -> String {
         guard waiting > 0 else { return nothingWaiting }
-        return waiting == 1
-            ? waitingForYouOne : waitingForYou.replacingOccurrences(of: "{count}", with: String(waiting))
+        return Localization.current.text("plural.shell.waiting", count: Int64(waiting))
     }
 
     /// The focus button's tip: select first, back to the whole map, or
@@ -913,17 +913,17 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
 
     /// A draft's declared sources: the singular is its own line.
     public func sources(_ count: Int) -> String {
-        count == 1 ? sourcesOne : sources.replacingOccurrences(of: "{count}", with: String(count))
+        Localization.current.text("plural.history.sources", count: Int64(count))
     }
 
     /// A project group's record count.
     public func records(_ count: Int) -> String {
-        count == 1 ? recordsOne : records.replacingOccurrences(of: "{count}", with: String(count))
+        Localization.current.text("plural.history.records", count: Int64(count))
     }
 
     /// The privacy review card's heading.
     public func held(_ count: Int) -> String {
-        count == 1 ? heldCountOne : heldCount.replacingOccurrences(of: "{count}", with: String(count))
+        Localization.current.text("plural.history.held", count: Int64(count))
     }
 
     /// A row's status line, around History's status word.

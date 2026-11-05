@@ -2,6 +2,7 @@ import SwiftUI
 import TCBridge
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// What Traces shows, apart from the view so it can be tested: the watched
 /// tools' traces counted, and the lines under the count. The commons words
@@ -212,7 +213,7 @@ struct TracesScreen: View {
                         .frame(width: 36, height: 36)
                         .position(x: center.x, y: center.y - 52)
                     VStack(spacing: 0) {
-                        Text((UInt64((Double(total) * counted).rounded())).formatted())
+                        Text(Localization.current.number(Int64(clamping: UInt64((Double(total) * counted).rounded()))))
                             .glassType(GlassTokens.TypeScale.number)
                             .foregroundStyle(GlassColor.textPrimary)
                             .scaleEffect(1.5)
@@ -223,7 +224,8 @@ struct TracesScreen: View {
                     }
                     .position(x: center.x, y: center.y + 8)
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(Text("\(total.formatted()) \(copy.traces.onThisMac)"))
+                    .accessibilityLabel(Text(Localization.current.text("app.first_run.trace_count", parameters: [
+                        "count": Localization.current.number(Int64(clamping: total)), "label": copy.traces.onThisMac])))
                 }
             }
             .onChange(of: counted >= 1) { _, done in

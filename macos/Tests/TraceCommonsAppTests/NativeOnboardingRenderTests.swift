@@ -2,10 +2,42 @@ import AppKit
 import SwiftUI
 import TCBridge
 import TCShellCore
+import TCLocalization
 import XCTest
 @testable import TraceCommonsApp
 
 final class NativeOnboardingRenderTests: XCTestCase {
+    @MainActor
+    func testLocalizedSettingsOnboardingAndMenuRender() throws {
+        let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"]
+            .map(URL.init(fileURLWithPath:))
+            ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil {
+                try? FileManager.default.removeItem(at: directory)
+            }
+        }
+        let words = Localization.current
+        let model = AppModel()
+        try render(ScrollView { GeneralSection().padding() }
+            .environment(\.locale, words.locale)
+            .environment(\.layoutDirection, words.isRightToLeft ? .rightToLeft : .leftToRight),
+            size: CGSize(width: 360, height: 900), to: directory.appendingPathComponent("language-settings-narrow.png"))
+        let copy = try XCTUnwrap(TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode))
+        let runner = FirstRunRunner(state: FirstRunState(step: .welcome), daemon: RecordingFirstRunDaemon())
+        try render(WelcomeScreen(copy: copy, runner: runner).environmentObject(model)
+            .environment(\.accessibilityReduceMotion, true)
+            .environment(\.locale, words.locale)
+            .environment(\.layoutDirection, words.isRightToLeft ? .rightToLeft : .leftToRight),
+            size: CGSize(width: 860, height: 760), to: directory.appendingPathComponent("language-onboarding.png"))
+        try render(MenuBarGlassPanel(navigation: MainWindowNavigation(), store: MenuPanelStore(client: nil))
+            .environmentObject(model)
+            .environment(\.locale, words.locale)
+            .environment(\.layoutDirection, words.isRightToLeft ? .rightToLeft : .leftToRight),
+            size: CGSize(width: 360, height: 600), to: directory.appendingPathComponent("language-menu.png"))
+    }
+
     @MainActor
     func testSyntheticFirstContributionAndWitnessConsentRenderWithoutRequestingReview() async throws {
         let copy = try XCTUnwrap(WitnessCopy.decode(fromJSON: TCWitness.copyJSON() ?? "")?.review)
@@ -90,6 +122,8 @@ final class NativeOnboardingRenderTests: XCTestCase {
         _ = NSApplication.shared
         let content = view.frame(width: size.width, height: size.height, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor))
+            .environment(\.locale, Localization.current.locale)
+            .environment(\.layoutDirection, Localization.current.isRightToLeft ? .rightToLeft : .leftToRight)
         let hosting = NSHostingView(rootView: content)
         let bounds = NSRect(origin: .zero, size: size)
         hosting.frame = bounds

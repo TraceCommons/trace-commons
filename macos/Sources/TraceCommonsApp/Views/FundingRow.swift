@@ -69,9 +69,17 @@ struct FundingStatus: Decodable, Sendable {
     }
 
     let state: String
-    let view: Presentation
+    private(set) var view: Presentation
     let organizationName: String?
     let destination: FundingDestination?
+
+    /// Replace prose only AFTER decoding has verified a ready-only binding.
+    /// A formatter failure keeps canonical daemon copy, never a new URL.
+    func presenting(message: String?) -> FundingStatus {
+        var status = self
+        if let message, !message.isEmpty { status.view = Presentation(message: message) }
+        return status
+    }
 
     private enum CodingKeys: String, CodingKey {
         case state, view

@@ -7,6 +7,11 @@ import TCShellCore
 @testable import TraceCommonsApp
 
 final class InsightsModelTests: XCTestCase {
+    func testMessageFillingDoesNotReinterpretUserValues() {
+        XCTAssertEqual(InsightsOverviewWords.fill("{harness}: {t}", ["harness": "Tool {t} %@", "t": "9"]),
+                       "Tool {t} %@: 9")
+    }
+
     @MainActor
     func testFreshNavigationDoesNotAdvanceContributionGates() {
         let trace = AppModel()

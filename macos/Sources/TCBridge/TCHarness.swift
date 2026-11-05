@@ -47,9 +47,8 @@ public enum TCHarness {
     /// `activity_shared` says cannot be worked out. `nil` only on a caught
     /// panic, which is drawn the same way.
     public static func stateLine(state: String) -> String {
-        guard let raw = state.withCString({ tc_harness_state_line($0) }) else { return "" }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_harness_state_line.
+        LocalizedPresentation.line("harness_state_line", parameters: ["state": state]) ?? ""
     }
 
     /// The sentence one `harness_plan` outcome carries.
@@ -67,9 +66,8 @@ public enum TCHarness {
     /// rather than borrowing the nearest refusal. `nil` only on a caught
     /// panic, which is drawn the same way.
     public static func outcomeLine(outcome: String) -> String {
-        guard let raw = outcome.withCString({ tc_harness_outcome_line($0) }) else { return "" }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_harness_outcome_line.
+        LocalizedPresentation.line("harness_outcome_line", parameters: ["label": outcome]) ?? ""
     }
 
     /// When the last call from a connected tool was answered here.
@@ -84,9 +82,8 @@ public enum TCHarness {
     /// reachable only by the shell that links the crate natively, so this
     /// app drew nothing where the GNOME one drew a line.
     public static func lastCallLine(secondsAgo: Int64) -> String {
-        guard let raw = tc_harness_last_call_line(secondsAgo) else { return "" }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_harness_last_call_line.
+        LocalizedPresentation.line("harness_last_call_line", parameters: ["seconds_ago": secondsAgo]) ?? ""
     }
 
     /// What the calls answered on this computer have cost today.
@@ -101,9 +98,8 @@ public enum TCHarness {
     /// with nothing on it, and it comes back saying so in words.
     /// `HarnessSpend.abiValue` does this conversion once, correctly.
     public static func spendLine(micros: Int64) -> String {
-        guard let raw = tc_harness_spend_line(micros) else { return "" }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_harness_spend_line.
+        LocalizedPresentation.line("harness_spend_line", parameters: ["micros": micros]) ?? ""
     }
 
     /// Whether one action may be offered for a tool in this state.

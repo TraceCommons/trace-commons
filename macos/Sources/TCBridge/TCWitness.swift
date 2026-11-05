@@ -1,5 +1,6 @@
 import CTraceCommons
 import Foundation
+import TCLocalization
 
 /// The redaction witness surface, read from and written to the Rust rather
 /// than modelled here.
@@ -77,7 +78,17 @@ public enum TCWitness {
         }
         freeIfPresent(&errPtr)
         defer { tc_string_free(raw) }
-        return .status(String(cString: raw))
+        let original = String(cString: raw)
+        // The facts export decides whether a count sentence applies. Do not
+        // reconstruct that decision from the trust state or the pin count.
+        guard var facts = try? JSONSerialization.jsonObject(with: Data(original.utf8)) as? [String: Any],
+              facts["pinned_measurement_line"] is String,
+              let count = facts["pinned_measurement_count"] else { return .status(original) }
+        facts["pinned_measurement_line"] = LocalizedPresentation.line(
+            "witness_pinned_count_line", parameters: ["count": count]) as Any? ?? NSNull()
+        guard let data = try? JSONSerialization.data(withJSONObject: facts),
+              let localized = String(data: data, encoding: .utf8) else { return .status(original) }
+        return .status(localized)
     }
 
     /// What the last submission THIS PROCESS made did about the witness, as
@@ -163,7 +174,7 @@ public enum TCWitness {
     public static func copyJSON() -> String? {
         guard let raw = tc_witness_copy() else { return nil }
         defer { tc_string_free(raw) }
-        return String(cString: raw)
+        return Localization.current.copyJSON(String(cString: raw), namespace: "witness_copy")
     }
 
     /// The sentence for a state, or nil for a value this build cannot name.
@@ -172,9 +183,8 @@ public enum TCWitness {
     /// of its own, and pairs that with `stateTone`, which fails closed to
     /// `TC_WITNESS_TONE_REFUSED` on the same input.
     public static func stateLine(state: Int32) -> String? {
-        guard let raw = tc_witness_state_line(state) else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_witness_state_line.
+        LocalizedPresentation.line("witness_state_line", parameters: ["state": state])
     }
 
     /// How that sentence is painted: `TC_WITNESS_TONE_*`.
@@ -192,9 +202,8 @@ public enum TCWitness {
     /// already contains it as the pair -- never the word "attested", and
     /// never a claim that a session is clean.
     public static func lastResultLine() -> String? {
-        guard let raw = tc_witness_last_result_line() else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_witness_last_result_line. Reads core global state.
+        LocalizedPresentation.line("witness_last_result_line")
     }
 
     /// How that sentence is painted: `TC_WITNESS_TONE_*`.

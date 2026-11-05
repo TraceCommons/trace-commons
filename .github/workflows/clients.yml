@@ -19,6 +19,8 @@ on:
   pull_request:
     paths:
       - "macos/**"
+      - "localization/**"
+      - "scripts/localization/**"
       # The glass design tokens and their generator: a JSON-only change has
       # to run the drift guard below and TokenDriftTests.
       - "design-tokens/**"
@@ -73,12 +75,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      - name: Translation catalog contracts
+        run: python3 -m unittest discover -s scripts/localization -p 'test_*.py'
       # The Swift package links the contributor FFI dylib
       # (`-ltrace_commons_contributor_ffi` out of TC_FFI_LIB_DIR, which
       # defaults to ../target/debug), so the dylib has to exist before
       # `swift test` can link anything. Debug profile, to match that default.
       - name: Build the FFI dylib
         run: cargo build -p trace-commons-contributor-ffi
+      - name: Translation source and generated resources agree
+        run: python3 scripts/localization/catalog.py --check --library target/debug/libtrace_commons_contributor_ffi.dylib --snapshot localization/generated/ffi-snapshot.json
       # The whole contributor lib suite, not a filter. Several credential
       # tests are `#[cfg(target_os = "macos")]` and compile nowhere else: the
       # data-protection store's unentitled answer (a CI runner is exactly an
@@ -125,6 +131,23 @@ jobs:
       - name: swift test
         working-directory: macos
         run: swift test -Xswiftc -warnings-as-errors
+      - name: Capture native localization review states
+        run: |
+          python3 scripts/localization/catalog.py --pseudo "$RUNNER_TEMP/localization-pseudo.bundle"
+          for language in en en-XA ar-XB; do
+            TC_LOCALIZATION_RESOURCES="$RUNNER_TEMP/localization-pseudo.bundle" \
+            TC_LOCALIZATION_LANGUAGE="$language" \
+            TRACE_COMMONS_SCREENSHOT_DIR="$RUNNER_TEMP/localization-review/$language" \
+              swift test --package-path macos --skip-build \
+                --filter NativeOnboardingRenderTests
+          done
+      - name: Upload native localization review screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: macos-localization-review
+          path: ${{ runner.temp }}/localization-review
+          if-no-files-found: warn
       # `swift test` builds Debug only, so a DEBUG-only symbol (sample
       # clients, monitor windows behind `#if DEBUG`) reachable from a Release
       # path compiled here and failed first in the release workflow. This

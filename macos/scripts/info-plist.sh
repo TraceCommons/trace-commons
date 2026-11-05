@@ -63,6 +63,21 @@ else
   SPARKLE_KEYS="    <key>SUEnableAutomaticChecks</key><false/>"
 fi
 
+# Declare only fully reviewed, enabled languages. The generated list is also
+# checked against the shared catalog in CI; pseudolanguages never enter it.
+LOCALIZATIONS="$(python3 - "$(dirname "$0")/../../localization/generated/locales.plist" <<'PY'
+import plistlib
+import sys
+import xml.etree.ElementTree as ET
+with open(sys.argv[1], "rb") as source:
+    languages = plistlib.load(source)
+array = ET.Element("array")
+for language in languages:
+    ET.SubElement(array, "string").text = language
+print(ET.tostring(array, encoding="unicode"))
+PY
+)"
+
 cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -80,6 +95,8 @@ cat <<PLIST
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${SHORT_VERSION}</string>
     <key>CFBundleVersion</key><string>${BUILD_VERSION}</string>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleLocalizations</key>${LOCALIZATIONS}
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHumanReadableCopyright</key><string>K&amp;Z Partners LLC</string>
     <!-- Shown in macOS's Automation prompt for the terminal app a Private

@@ -940,23 +940,35 @@ pub struct WitnessCapacityCopy {
 /// machine, and the daemon retries on its own.
 #[must_use]
 pub fn witness_capacity_notice(waiting_sessions: u64) -> WitnessCapacityCopy {
-    const REST: &str = "because the privacy witness is busy checking other traces. Nothing is sent until the witness can check";
-    let body = match waiting_sessions {
-        0 => format!(
-            "Approved traces are waiting {REST} them. They will be tried again automatically, and nothing has been lost."
-        ),
-        1 => format!(
-            "1 approved trace is waiting {REST} it. It will be tried again automatically, and nothing has been lost."
-        ),
-        n => format!(
-            "{n} approved traces are waiting {REST} them. They will be tried again automatically, and nothing has been lost."
-        ),
-    };
     WitnessCapacityCopy {
         title: WITNESS_CAPACITY_TITLE,
-        body,
+        body: crate::localized_copy::english(&witness_capacity_body_message(waiting_sessions)),
         next_check: WITNESS_CAPACITY_NEXT_CHECK,
     }
+}
+
+pub(crate) fn witness_capacity_body_message(waiting_sessions: u64) -> serde_json::Value {
+    const REST: &str = "because the privacy witness is busy checking other traces. Nothing is sent until the witness can check";
+    if waiting_sessions == 0 {
+        return crate::localized_copy::text(
+            "message.witness_capacity_notice.uncounted.body",
+            &format!(
+                "Approved traces are waiting {REST} them. They will be tried again automatically, and nothing has been lost."
+            ),
+            serde_json::json!({}),
+        );
+    }
+    crate::localized_copy::plural(
+        "message.witness_capacity_notice.waiting.body",
+        &format!(
+            "1 approved trace is waiting {REST} it. It will be tried again automatically, and nothing has been lost."
+        ),
+        &format!(
+            "{{count}} approved traces are waiting {REST} them. They will be tried again automatically, and nothing has been lost."
+        ),
+        waiting_sessions,
+        serde_json::json!({}),
+    )
 }
 
 /// [`witness_capacity_notice`] from `status.witness_capacity`, passed
@@ -1447,20 +1459,40 @@ pub fn gate_held_reason_line(label: &str) -> &'static str {
 /// How many sessions are held, counted and agreeing in number.
 #[must_use]
 pub fn gate_held_count_line(held_sessions: u64) -> String {
-    match held_sessions {
-        0 => "Traces from projects set to contribute automatically are waiting.".to_string(),
-        1 => "1 trace from a project set to contribute automatically is waiting.".to_string(),
-        n => format!("{n} traces from projects set to contribute automatically are waiting."),
+    crate::localized_copy::english(&gate_held_count_message(held_sessions))
+}
+
+pub(crate) fn gate_held_count_message(held_sessions: u64) -> serde_json::Value {
+    if held_sessions == 0 {
+        return crate::localized_copy::text(
+            "message.gate_held_notice.uncounted.body",
+            "Traces from projects set to contribute automatically are waiting.",
+            serde_json::json!({}),
+        );
     }
+    crate::localized_copy::plural(
+        "message.gate_held_notice.held.body",
+        "1 trace from a project set to contribute automatically is waiting.",
+        "{count} traces from projects set to contribute automatically are waiting.",
+        held_sessions,
+        serde_json::json!({}),
+    )
 }
 
 /// One held folder's line.
 #[must_use]
 pub fn gate_held_project_line(project_label: &str, held_sessions: u64) -> String {
-    match held_sessions {
-        1 => format!("{project_label}: 1 trace waiting"),
-        n => format!("{project_label}: {n} traces waiting"),
-    }
+    crate::localized_copy::english(&gate_held_project_message(project_label, held_sessions))
+}
+
+pub(crate) fn gate_held_project_message(project: &str, held_sessions: u64) -> serde_json::Value {
+    crate::localized_copy::plural(
+        "message.gate_held_notice.held.project_line",
+        "{project}: 1 trace waiting",
+        "{project}: {count} traces waiting",
+        held_sessions,
+        serde_json::json!({"project": project}),
+    )
 }
 
 /// One held folder in [`GateHeldNoticeCopy`].

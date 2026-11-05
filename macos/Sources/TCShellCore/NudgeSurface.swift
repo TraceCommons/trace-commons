@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// What each re-engagement surface draws from `status.nudge` and
 /// `reengage_due`, and what each of their buttons does.
@@ -149,10 +150,47 @@ public enum NudgeSurface {
         }
     }
 
-    static func actions(_ wire: [DaemonData.NudgeAction], kind: Kind) -> [Action] {
-        wire.compactMap { action in
-            intent(actionId: action.id, kind: kind).map { Action(intent: $0, label: action.label) }
+    static func actions(_ wire: [DaemonData.NudgeAction], kind: Kind, words: Words? = nil) -> [Action] {
+        // Presentation may localize labels, never add/reorder action IDs or
+        // change their meaning. Older/future mismatched trees keep raw labels.
+        let translated = words?.actions
+        let labelsMatch = translated?.map(\.id) == wire.map(\.id)
+        return wire.enumerated().compactMap { index, action in
+            intent(actionId: action.id, kind: kind).map {
+                Action(intent: $0, label: labelsMatch ? translated?[index].label ?? action.label : action.label)
+            }
         }
+    }
+
+    struct Words: Decodable {
+        let title: String?
+        let body: String?
+        let panelRow: String?
+        let accessibility: String?
+        let tooltip: String?
+        let actions: [DaemonData.NudgeAction]?
+
+        enum CodingKeys: String, CodingKey {
+            case title, body, accessibility, tooltip, actions
+            case panelRow = "panel_row"
+        }
+    }
+
+    private static func words(_ presentation: DaemonData.CoreJSON?) -> Words? {
+        guard let presentation,
+              let json = Localization.current.presentationJSON(String(decoding: presentation.data, as: UTF8.self))
+        else { return nil }
+        return try? JSONDecoder().decode(Words.self, from: Data(json.utf8))
+    }
+
+    /// Render only the explicit tree. Raw daemon text remains a compatibility
+    /// fallback, never a translation lookup. The tree already contains folds.
+    public static func digestText(_ due: DaemonData.DigestDue) -> String {
+        guard let presentation = due.presentation,
+              let json = Localization.current.presentationJSON(String(decoding: presentation.data, as: UTF8.self)),
+              let text = try? JSONDecoder().decode(String.self, from: Data(json.utf8))
+        else { return due.text ?? "" }
+        return text
     }
 
     // MARK: - Surfaces
@@ -162,9 +200,11 @@ public enum NudgeSurface {
         guard let kind = lead(nudge), place.kinds.contains(kind), let text = nudge?.text,
               !text.title.isEmpty
         else { return nil }
+        let words = words(text.presentation)
+        let body = words?.body ?? text.body
         return Card(
-            kind: kind, title: text.title, body: text.body.isEmpty ? nil : text.body,
-            actions: actions(text.actions, kind: kind))
+            kind: kind, title: words?.title ?? text.title, body: body.isEmpty ? nil : body,
+            actions: actions(text.actions, kind: kind, words: words))
     }
 
     /// The panel row for the lead, or nil. Tapping it does what the card's
@@ -174,7 +214,7 @@ public enum NudgeSurface {
         guard let kind = lead(nudge), let text = nudge?.text, !text.panelRow.isEmpty,
               let primary = actions(text.actions, kind: kind).first(where: { !$0.isNotNow })
         else { return nil }
-        return PanelRow(kind: kind, text: text.panelRow, intent: primary.intent)
+        return PanelRow(kind: kind, text: words(text.presentation)?.panelRow ?? text.panelRow, intent: primary.intent)
     }
 
     /// The mark to draw. Only `news` and `ready` are drawn, and neither
@@ -193,16 +233,19 @@ public enum NudgeSurface {
     /// nothing is lit.
     public static func markText(_ nudge: DaemonData.Nudge?, available: Bool) -> DaemonData.NudgeMarkText? {
         guard mark(nudge, available: available) != .none else { return nil }
-        return nudge?.markText
+        guard let text = nudge?.markText, let words = words(text.presentation) else { return nudge?.markText }
+        return .init(accessibility: words.accessibility ?? text.accessibility,
+                     tooltip: words.tooltip ?? text.tooltip, presentation: text.presentation)
     }
 
     /// The notification to post for a `reengage_due`, or nil for a kind
     /// this build does not know or one without words.
     public static func notification(_ due: DaemonData.ReengageDue) -> Notification? {
         guard let kind = Kind(rawValue: due.kind), !due.title.isEmpty, !due.body.isEmpty else { return nil }
-        let drawn = actions(due.actions, kind: kind)
+        let words = words(due.presentation)
+        let drawn = actions(due.actions, kind: kind, words: words)
         return Notification(
-            kind: kind, title: due.title, body: due.body, actions: drawn,
+            kind: kind, title: words?.title ?? due.title, body: words?.body ?? due.body, actions: drawn,
             defaultIntent: drawn.first { !$0.isNotNow }?.intent)
     }
 

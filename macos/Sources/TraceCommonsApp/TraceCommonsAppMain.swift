@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// The macOS contributor shell.
 ///
@@ -84,6 +85,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
         MenuBarExtra {
             MenuBarGlassPanel(navigation: navigation, store: menuPanel)
                 .environmentObject(model)
+                .environment(\.locale, Localization.current.locale)
+                .environment(\.layoutDirection, Localization.current.isRightToLeft ? .rightToLeft : .leftToRight)
                 .tint(GlassTokens.Color.purpleSoft.color)
                 // No focus ring drawn round controls (owner, 2026-10-11).
                 .focusEffectDisabled()
@@ -108,6 +111,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
         Window("Menu bar", id: WindowID.menuPreview) {
             MenuBarPreviewWindow(navigation: navigation, store: menuPanel)
                 .environmentObject(model)
+                .environment(\.locale, Localization.current.locale)
+                .environment(\.layoutDirection, Localization.current.isRightToLeft ? .rightToLeft : .leftToRight)
                 .tint(GlassTokens.Color.purpleSoft.color)
                 // No focus ring drawn round controls (owner, 2026-10-11).
                 .focusEffectDisabled()
@@ -120,9 +125,11 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
         // First run in a glass pane over the scene (R12 of #1173): the
         // onboarding gate, opened by `OpenMonitor` while onboarding is
         // required.
-        Window("First run", id: WindowID.firstRun) {
+        Window(Localization.current.text("app.window.first_run"), id: WindowID.firstRun) {
             FirstRunWindowView(navigation: navigation)
                 .environmentObject(model)
+                .environment(\.locale, Localization.current.locale)
+                .environment(\.layoutDirection, Localization.current.isRightToLeft ? .rightToLeft : .leftToRight)
                 .tint(GlassTokens.Color.purpleSoft.color)
                 // No focus ring drawn round controls (owner, 2026-10-11).
                 .focusEffectDisabled()
@@ -140,6 +147,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
         Window(MonitorWords.table?.settingsTitle ?? "", id: WindowID.settings) {
             SettingsWindowView(navigation: navigation)
                 .environmentObject(model)
+                .environment(\.locale, Localization.current.locale)
+                .environment(\.layoutDirection, Localization.current.isRightToLeft ? .rightToLeft : .leftToRight)
                 .environment(compute)
                 .tint(GlassTokens.Color.purpleSoft.color)
                 // No focus ring drawn round controls (owner, 2026-10-11).
@@ -192,9 +201,11 @@ struct MonitorScene: Scene {
     let missionDrafts: MissionDraftsModel
 
     var body: some Scene {
-        Window("Monitor", id: WindowID.monitor) {
+        Window(Localization.current.text("monitor_screens_copy.shell.tabs_label"), id: WindowID.monitor) {
             MonitorWindowView(navigation: navigation, insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts)
                 .environmentObject(model)
+                .environment(\.locale, Localization.current.locale)
+                .environment(\.layoutDirection, Localization.current.isRightToLeft ? .rightToLeft : .leftToRight)
                 // The monitor reads the daemon, so it starts services on
                 // appear (D-11).
                 .onAppear { navigation.activateServicesForWindow() }

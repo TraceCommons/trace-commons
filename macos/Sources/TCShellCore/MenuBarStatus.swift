@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// What the status item shows, in the order the shared design fixes: a
 /// count of decisions owed, then unhealthy, then paused, then idle.
@@ -34,7 +35,9 @@ public enum MenuBarStatus {
     /// produce a number. `state` distinguishes those cases.
     public static func badgeText(decisionsOwed: Int?) -> String? {
         guard let decisionsOwed, decisionsOwed > 0 else { return nil }
-        return decisionsOwed > badgeCap ? "\(badgeCap)+" : "\(decisionsOwed)"
+        return decisionsOwed > badgeCap
+            ? Localization.current.text("app.menu.badge_overflow", parameters: ["count": Localization.current.number(Int64(badgeCap))])
+            : Localization.current.number(Int64(decisionsOwed))
     }
 
     /// Precedence: count, then unhealthy, then paused, then idle. A paused
@@ -51,15 +54,15 @@ public enum MenuBarStatus {
 
 public extension MenuBarStatus {
     static func accessibilityLabel(decisionsOwed: Int?, unhealthy: Bool, paused: Bool, available: Bool = true) -> String {
-        guard available else { return "Near.ai. Watcher unavailable. Needs attention." }
+        guard available else { return Localization.current.text("app.menu.unavailable") }
         guard let decisionsOwed else {
-            return "Near.ai. Decisions owed unavailable." + (paused ? " Paused." : "")
+            return Localization.current.text(paused ? "app.menu.decisions_unavailable_paused" : "app.menu.decisions_unavailable")
         }
         let detail: String
         if decisionsOwed > 0 {
-            detail = "\(decisionsOwed) \(decisionsOwed == 1 ? "trace" : "traces") waiting for your decision."
-        } else if unhealthy { detail = "Needs attention." }
-        else { detail = "Nothing waiting." }
-        return "Near.ai. " + detail + (paused ? " Paused." : "")
+            detail = Localization.current.text("app.menu.waiting", count: Int64(decisionsOwed))
+        } else if unhealthy { detail = Localization.current.text("app.menu.attention") }
+        else { detail = Localization.current.text("monitor_screens_copy.flow_map.tool_nothing_waiting") }
+        return Localization.current.text(paused ? "app.menu.status_paused" : "app.menu.status", parameters: ["detail": detail])
     }
 }

@@ -3,6 +3,40 @@
 
 use serde::Serialize;
 
+/// Named presentation is canonical. Legacy positional formats are generated
+/// from these same segments for clients that still consume the copy table.
+pub struct SkillLearningTemplate {
+    pub key: &'static str,
+    pub english: &'static str,
+}
+
+macro_rules! named_and_printf {
+    ($named:ident, $legacy:ident, $key:literal; $($part:literal $(=> $printf:literal)?),+ $(,)?) => {
+        pub const $named: SkillLearningTemplate = SkillLearningTemplate {
+            key: $key,
+            english: concat!($($part),+),
+        };
+        const $legacy: &str = concat!($(named_and_printf!(@legacy $part $(=> $printf)?)),+);
+    };
+    (@legacy $part:literal => $printf:literal) => { $printf };
+    (@legacy $part:literal) => { $part };
+}
+
+named_and_printf!(SKILL_CONTRACT_SUMMARY, CONTRACT_SUMMARY_FORMAT, "message.skill_learning_contract_summary_line";
+    "{tasks}" => "%1$d", " tasks across ", "{cases}" => "%2$d",
+    " debugging cases. ", "{requests}" => "%3$d",
+    " requests compare the baseline, a simple instruction, and this candidate. Each request allows ",
+    "{output_tokens}" => "%4$d", " output tokens and ", "{seconds}" => "%5$d", " seconds.",
+);
+named_and_printf!(SKILL_REVIEW_BUDGET, REVIEW_BUDGET_FORMAT, "message.skill_learning_review_budget_line";
+    "{requests}" => "%1$d", " model requests; ", "{output_tokens}" => "%2$d",
+    " output tokens per request; model owner must be ", "{owner}" => "%3$@", ".",
+);
+named_and_printf!(SKILL_MODEL_BUDGET, MODEL_BUDGET_FORMAT, "message.skill_learning_model_budget_line";
+    "Owner ", "{owner}" => "%1$@", " · ", "{tasks}" => "%2$d",
+    " tasks · ", "{output_tokens}" => "%3$d", " output tokens per run",
+);
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SkillLearningCopy {
     pub heading: &'static str,
@@ -95,13 +129,13 @@ pub fn skill_learning_copy() -> SkillLearningCopy {
         source_evidence: "Source evidence",
         manual_instruction: "Simple instruction control",
         test_contract: "Held-out plan test",
-        contract_summary_format: "%1$d tasks across %2$d debugging cases. %3$d requests compare the baseline, a simple instruction, and this candidate. Each request allows %4$d output tokens and %5$d seconds.",
+        contract_summary_format: CONTRACT_SUMMARY_FORMAT,
         review_action: "Review skill",
         reviewing: "Reviewing…",
         exact_package: "Exact installable package",
         digest: "SHA-256",
         evaluation_disclosure: "Approving starts the disclosed NEAR AI Cloud requests. Every arm uses the same private model and output limit. Requests contain public repository fixtures and the exact skill package shown above. Source correction and evidence fields stay on this device; remove anything private you copied into the package before approving.",
-        review_budget_format: "%1$d model requests; %2$d output tokens per request; model owner must be %3$@.",
+        review_budget_format: REVIEW_BUDGET_FORMAT,
         approve_and_test: "Approve & test",
         edit_skill: "Edit skill",
         testing: "Scoring held-out plans…",
@@ -114,7 +148,7 @@ pub fn skill_learning_copy() -> SkillLearningCopy {
         no_regressions: "No control-passing repository plan regressed.",
         inspect_runs: "Inspect all runs",
         model_and_budget: "Model and budget",
-        model_budget_format: "Owner %1$@ · %2$d tasks · %3$d output tokens per run",
+        model_budget_format: MODEL_BUDGET_FORMAT,
         open_fixture_source: "View source",
         model_output: "Full model output",
         edits: "Direct source edits",
@@ -273,6 +307,31 @@ pub fn skill_learning_error_line(label: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_templates_generate_the_unchanged_legacy_printf_contract() {
+        let copy = skill_learning_copy();
+        assert_eq!(
+            copy.contract_summary_format,
+            "%1$d tasks across %2$d debugging cases. %3$d requests compare the baseline, a simple instruction, and this candidate. Each request allows %4$d output tokens and %5$d seconds."
+        );
+        assert_eq!(
+            copy.review_budget_format,
+            "%1$d model requests; %2$d output tokens per request; model owner must be %3$@."
+        );
+        assert_eq!(
+            copy.model_budget_format,
+            "Owner %1$@ · %2$d tasks · %3$d output tokens per run"
+        );
+        for template in [
+            SKILL_CONTRACT_SUMMARY,
+            SKILL_REVIEW_BUDGET,
+            SKILL_MODEL_BUDGET,
+        ] {
+            assert!(!template.english.contains('%'));
+            assert!(template.english.contains('{'));
+        }
+    }
 
     #[test]
     fn skill_copy_is_complete_and_unknown_errors_are_actionable() {

@@ -3,8 +3,8 @@ import XCTest
 @testable import TCShellCore
 
 /// Adding Train coding models to sent traces: the pure logic, without the
-/// dylib. The words are placeholders ("T:" prefixed) so a test passes only
-/// by reading the payload; `TCBridgeTests` checks the live export's keys.
+/// dylib. Fixed fields use placeholders; counted messages come from the
+/// native plural catalog. `TCBridgeTests` checks the live export's keys.
 final class SentTracesTrainingSurfaceTests: XCTestCase {
     private static func copyJSON(_ override: [String: String] = [:]) -> String {
         var object = [String: String]()
@@ -28,10 +28,10 @@ final class SentTracesTrainingSurfaceTests: XCTestCase {
     }
 
     func testOneTraceReadsTheOneSentenceAndMoreReadTheCountedOne() {
-        XCTAssertEqual(copy.body(count: 1), "T:body_one {count}")
-        XCTAssertEqual(copy.body(count: 7), "T:body_other 7")
-        XCTAssertEqual(copy.line(count: 1), "T:line_one {count}")
-        XCTAssertEqual(copy.line(count: 12), "T:line_other 12")
+        XCTAssertEqual(copy.body(count: 1), "1 sent trace doesn't have Train consent.")
+        XCTAssertEqual(copy.body(count: 7), "7 sent traces don't have Train consent.")
+        XCTAssertEqual(copy.line(count: 1), "1 trace needs Train consent")
+        XCTAssertEqual(copy.line(count: 12), "12 traces need Train consent")
         XCTAssertEqual(copy.allowAccessibilityName(count: 1), "T:allow_accessibility_name 1")
     }
 

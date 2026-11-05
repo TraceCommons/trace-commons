@@ -235,10 +235,16 @@ fn no_shell_maps_a_harness_state_or_outcome_to_a_sentence_itself() {
 fn every_shell_reaches_the_shared_table_and_the_when_line() {
     let root = repo_root();
     for shell in SHELLS {
-        let code = code_only(&read(&root, shell.path));
+        let source = read(&root, shell.path);
+        let code = code_only(&source);
         for token in shell.must_reach {
+            let reached = if shell.path == "macos/Sources/TCBridge/TCHarness.swift" {
+                super::swift_copy_surface_is_central::reaches_core(&source, token)
+            } else {
+                code.contains(token)
+            };
             assert!(
-                code.contains(token),
+                reached,
                 "{} no longer reaches `{token}`. All three shells render this \
                  surface, and each one that stops asking is one that has \
                  started deciding.",

@@ -4,6 +4,7 @@
 use super::{
     ComputeCommand, ComputeSettings, ComputeSettingsStore, ComputeSnapshot, ComputeState,
     LocalWorkerConfig, ResourceEvent, ResourceTicket,
+    presentation::{self as prose, Message},
     process::{StopReport, WorkerProcess},
     resource::ResourceChannel,
     worker_protocol as wire,
@@ -51,9 +52,9 @@ impl LiveController {
         snapshot.available = true;
         snapshot.local_development = true;
         snapshot.reason = "local-development";
-        snapshot.title = "Local compute development";
+        snapshot.set_title(prose::LOCAL);
         // Approved by the owner 2026-11-04 (Settings copy pass 2, P324).
-        snapshot.detail = "Local test worker only. No pool, no earnings.";
+        snapshot.set_detail(prose::LOCAL_ONLY);
         snapshot.can_enable = !settings.consent_granted();
         snapshot.can_resume = settings.consent_granted();
         let view = Arc::new(Mutex::new(View {
@@ -133,7 +134,7 @@ impl LiveController {
         {
             if let Some(reason) = decision.reason {
                 snapshot.reason = reason.label();
-                snapshot.detail = reason.detail();
+                snapshot.set_detail(prose::policy(reason));
             }
         }
         snapshot.telemetry_age_ms = view
@@ -146,10 +147,10 @@ impl LiveController {
         if let Some(stop) = decision.stop {
             if !snapshot.worker_stopped && snapshot.state != ComputeState::Error {
                 snapshot.state = ComputeState::Draining;
-                snapshot.title = "Stopping compute";
+                snapshot.set_title(prose::STOPPING);
                 snapshot.reason = stop.reason.label();
                 // Approved by the owner 2026-11-04 (Settings copy pass 2, P312).
-                snapshot.detail = "Waiting for the worker to stop.";
+                snapshot.set_detail(prose::WAITING_FOR_STOP);
             }
         }
         if !snapshot.worker_stopped
@@ -160,9 +161,9 @@ impl LiveController {
             && snapshot.telemetry_age_ms.is_none_or(|age| age > 6000)
         {
             snapshot.state = ComputeState::Stale;
-            snapshot.title = "Compute status is stale";
+            snapshot.set_title(prose::STALE);
             // Approved by the owner 2026-11-04 (Settings copy pass 2, P306).
-            snapshot.detail = "Progress unknown.";
+            snapshot.set_detail(prose::UNKNOWN_PROGRESS);
         }
         snapshot
     }
@@ -205,8 +206,8 @@ impl LiveController {
             if !decision.may_run {
                 if let Some(reason) = decision.reason {
                     view.snapshot.reason = reason.label();
-                    view.snapshot.title = "Compute cannot start";
-                    view.snapshot.detail = reason.detail();
+                    view.snapshot.set_title(prose::CANNOT_START);
+                    view.snapshot.set_detail(prose::policy(reason));
                 }
                 drop(view);
                 return self.snapshot();
@@ -333,24 +334,76 @@ mod tests {
         assert_eq!(stale.state, ComputeState::Stale);
         assert!(stale.telemetry_age_ms.unwrap() >= 7000);
         assert_eq!(stale.detail, "Progress unknown.");
+        prose::assert_snapshot(&stale);
+        assert_eq!(stale.title_key, prose::STALE.key);
+        assert_eq!(stale.detail_key, prose::UNKNOWN_PROGRESS.key);
+    }
+
+    #[test]
+    fn policy_and_reason_only_transitions_keep_independent_message_identities() {
+        let root = tempfile::tempdir().unwrap();
+        let initial = super::super::ComputeController::open(root.path())
+            .unwrap()
+            .snapshot();
+        let live = LiveController::open(
+            root.path(),
+            LocalWorkerConfig {
+                binary: "/usr/bin/true".into(),
+                expected_sha256: "00".repeat(32),
+                coordinator: "ws://127.0.0.1:9999".into(),
+                startup_timeout_secs: 1,
+            },
+            initial,
+        )
+        .unwrap();
+        let observed = live.snapshot();
+        prose::assert_snapshot(&observed);
+        assert_eq!(observed.title_key, prose::LOCAL.key);
+        assert_eq!(
+            observed.detail_key,
+            super::super::policy::PolicyReason::MissingObservation.label()
+        );
+
+        let refused = live.command(ComputeCommand::Resume {});
+        prose::assert_snapshot(&refused);
+        assert_eq!(refused.title_key, prose::CANNOT_START.key);
+        assert_eq!(refused.detail_key, observed.detail_key);
+
+        // Hold the bounded-command seam pending without scheduling worker I/O.
+        live.view.lock().unwrap().snapshot.command_pending = true;
+        let busy = live.command(ComputeCommand::Resume {});
+        prose::assert_snapshot(&busy);
+        assert_eq!(busy.reason, "command-busy");
+        assert_eq!(
+            (busy.title_key, busy.detail_key),
+            (refused.title_key, refused.detail_key)
+        );
+        assert_eq!((busy.title, busy.detail), (refused.title, refused.detail));
+
+        live.view.lock().unwrap().shutdown_requested = true;
+        let shutting_down = live.command(ComputeCommand::Resume {});
+        prose::assert_snapshot(&shutting_down);
+        assert_eq!(shutting_down.reason, "controller-shutting-down");
+        assert_eq!(
+            (shutting_down.title_key, shutting_down.detail_key),
+            (busy.title_key, busy.detail_key)
+        );
+        assert_eq!(
+            (shutting_down.title, shutting_down.detail),
+            (busy.title, busy.detail)
+        );
     }
 }
 impl Actor {
     fn update(&self, f: impl FnOnce(&mut View)) {
         f(&mut self.view.lock().unwrap_or_else(|e| e.into_inner()));
     }
-    fn message(
-        &self,
-        state: ComputeState,
-        reason: &'static str,
-        title: &'static str,
-        detail: &'static str,
-    ) {
+    fn message(&self, state: ComputeState, reason: &'static str, title: Message, detail: Message) {
         self.update(|view| {
             view.snapshot.state = state;
             view.snapshot.reason = reason;
-            view.snapshot.title = title;
-            view.snapshot.detail = detail;
+            view.snapshot.set_title(title);
+            view.snapshot.set_detail(detail);
         });
     }
     fn controls(&self) {
@@ -380,16 +433,16 @@ impl Actor {
             "authenticated-status",
             match state {
                 // Approved by the owner 2026-11-04 (Settings copy pass 2, P332).
-                ComputeState::Training => "Training",
+                ComputeState::Training => prose::TRAINING,
                 // Approved by the owner 2026-11-04 (Settings copy pass 2, P333).
-                ComputeState::Serving => "Serving",
-                ComputeState::Draining => "Compute is draining",
+                ComputeState::Serving => prose::SERVING,
+                ComputeState::Draining => prose::DRAINING,
                 // Approved by the owner 2026-11-04 (Settings copy pass 2, P342).
-                _ => "Waiting for work",
+                _ => prose::WAITING,
             },
             // Approved by the owner 2026-11-04 (Settings copy pass 2, P303).
             // Cut: the shells draw this detail unconditionally, so it renders as an empty line.
-            "",
+            prose::EMPTY,
         );
         self.update(|view| {
             view.last_seen = Some(Instant::now());
@@ -403,9 +456,9 @@ impl Actor {
         self.message(
             ComputeState::Draining,
             "draining",
-            "Stopping compute",
+            prose::STOPPING,
             // Approved by the owner 2026-11-04 (Settings copy pass 2, P327).
-            "Waiting for the worker to stop.",
+            prose::WAITING_FOR_STOP,
         );
         let report = self.worker.stop_with_urgency(self.resource.urgency()).await;
         self.running = !report.stopped;
@@ -431,18 +484,18 @@ impl Actor {
                     ComputeState::Disabled
                 },
                 "worker-stopped",
-                "Compute is stopped",
+                prose::STOPPED,
                 // Approved by the owner 2026-11-04 (Settings copy pass 2, P304).
-                "The worker has exited.",
+                prose::WORKER_EXITED,
             );
         } else {
             self.message(
                 ComputeState::Error,
                 "worker-stop-failed",
                 // Approved by the owner 2026-11-04 (Settings copy pass 2, P334).
-                "Couldn't stop compute",
+                prose::STOP_FAILED,
                 // Approved by the owner 2026-11-04 (Settings copy pass 2, P308).
-                "Keep the app open.",
+                prose::KEEP_OPEN,
             );
         }
         report
@@ -459,9 +512,9 @@ impl Actor {
                         self.message(
                             ComputeState::Error,
                             "settings-invalid-or-unsaved",
-                            "Compute settings could not be saved",
+                            prose::SETTINGS_UNSAVED,
                             // Approved by the owner 2026-11-04 (Settings copy pass 2, P346).
-                            "The RAM allowance is invalid or wasn't saved.",
+                            prose::INVALID_OR_UNSAVED,
                         );
                         return;
                     }
@@ -473,10 +526,10 @@ impl Actor {
                     self.message(
                         ComputeState::Disabled,
                         "consent-required",
-                        "Compute is disabled",
+                        prose::DISABLED,
                         // Approved by the owner 2026-11-04 (Settings copy pass 2, P313).
                         // Cut: the shells draw this detail unconditionally, so it renders as an empty line.
-                        "",
+                        prose::EMPTY,
                     );
                 } else if !self.running {
                     self.start().await;
@@ -497,18 +550,18 @@ impl Actor {
                         self.message(
                             ComputeState::Disabled,
                             "consent-revoked",
-                            "Compute is disabled",
+                            prose::DISABLED,
                             // Approved by the owner 2026-11-04 (Settings copy pass 2, P328).
-                            "Consent withdrawn.",
+                            prose::CONSENT_WITHDRAWN,
                         );
                     }
                 } else {
                     self.message(
                         ComputeState::Error,
                         "settings-write-failed",
-                        "Compute settings could not be saved",
+                        prose::SETTINGS_UNSAVED,
                         // Approved by the owner 2026-11-04 (Settings copy pass 2, P318).
-                        "Nothing changed.",
+                        prose::NOTHING_CHANGED,
                     );
                 }
             }
@@ -531,9 +584,9 @@ impl Actor {
         self.message(
             ComputeState::Starting,
             "starting",
-            "Starting local compute",
+            prose::STARTING,
             // Approved by the owner 2026-11-04 (Settings copy pass 2, P319).
-            "Checking the worker.",
+            prose::CHECKING_WORKER,
         );
         self.update(|view| {
             view.last_seen = None;
@@ -568,25 +621,25 @@ impl Actor {
                         self.message(
                             ComputeState::Paused,
                             stop.reason.label(),
-                            "Compute is stopped",
-                            stop.reason.detail(),
+                            prose::STOPPED,
+                            prose::policy(stop.reason),
                         );
                     } else if already_running {
                         self.message(
                             ComputeState::Error,
                             "worker-already-running",
                             // Approved by the owner 2026-11-04 (Settings copy pass 2, P335).
-                            "Another worker is running",
+                            prose::ALREADY_RUNNING,
                             // Approved by the owner 2026-11-04 (Settings copy pass 2, P302).
-                            "Stop it from the app that started it, or restart the computer.",
+                            prose::STOP_OTHER,
                         );
                     } else {
                         self.message(
                             ComputeState::Error,
                             "worker-start-failed",
-                            "Compute could not start",
+                            prose::START_FAILED,
                             // Approved by the owner 2026-11-04 (Settings copy pass 2, P307).
-                            "The worker failed its checks and was stopped.",
+                            prose::FAILED_CHECKS,
                         );
                     }
                 }
@@ -652,9 +705,9 @@ impl Actor {
                             self.message(
                                 ComputeState::Stale,
                                 "worker-status-unavailable",
-                                "Compute status is stale",
+                                prose::STALE,
                                 // Approved by the owner 2026-11-04 (Settings copy pass 2, P310).
-                                "Progress unknown.",
+                                prose::UNKNOWN_PROGRESS,
                             );
                             if failures >= 3 {
                                 let report = self.stop().await;
@@ -662,9 +715,9 @@ impl Actor {
                                     self.message(
                                         ComputeState::Error,
                                         "worker-status-lost",
-                                        "Compute stopped after losing status",
+                                        prose::STATUS_LOST,
                                         // Approved by the owner 2026-11-04 (Settings copy pass 2, P325).
-                                        "Check the worker setup.",
+                                        prose::CHECK_SETUP,
                                     );
                                 }
                                 self.controls();

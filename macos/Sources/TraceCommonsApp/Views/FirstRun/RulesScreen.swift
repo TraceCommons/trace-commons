@@ -2,6 +2,7 @@ import SwiftUI
 import TCBridge
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// Where Customize on Tools reads the repos and their past sessions (Ron's
 /// #1030 Rules screen, folded into Tools on 2026-10-21). Nil is a refusal or
@@ -242,7 +243,7 @@ enum RulesScreenLayout {
         else { return "" }
         return FirstRunCopy.fill(
             copy.sessionDate,
-            ["weekday": copy.weekdays[weekday - 1], "day": String(day), "month": copy.months[month - 1]])
+            ["weekday": copy.weekdays[weekday - 1], "day": Localization.current.number(Int64(day)), "month": copy.months[month - 1]])
     }
 
     /// "52 min", "1 h 18 min", "2 h 04 min" (Ron's `formatDuration`): whole
@@ -251,12 +252,13 @@ enum RulesScreenLayout {
     static func durationText(_ seconds: Int, copy: FirstRunCopy.Rules) -> String {
         let total = max(0, Int((Double(seconds) / 60).rounded()))
         guard total >= 60 else {
-            return FirstRunCopy.fill(copy.durationMinutes, ["minutes": String(total)])
+            return FirstRunCopy.fill(copy.durationMinutes, ["minutes": Localization.current.number(Int64(total))])
         }
         let hours = total / 60
         let rest = total % 60
-        let minutes = hours >= 2 && rest < 10 ? "0\(rest)" : String(rest)
-        return FirstRunCopy.fill(copy.durationHours, ["hours": String(hours), "minutes": minutes])
+        let minutes = rest.formatted(.number.precision(.integerLength(hours >= 2 ? 2 : 1))
+            .locale(Localization.current.locale))
+        return FirstRunCopy.fill(copy.durationHours, ["hours": Localization.current.number(Int64(hours)), "minutes": minutes])
     }
 
     static func sizeText(_ bytes: Int) -> String {

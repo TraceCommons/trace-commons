@@ -286,24 +286,17 @@ pub fn digest_due_for_schedule<Tz: chrono::TimeZone>(
 /// Built from labels only. A notification is rendered by a desktop
 /// environment, may be logged by it, and must never contain a path.
 pub fn digest_text(pending: &[&QueueEntry]) -> String {
-    let count = pending.len();
-    let noun = if count == 1 { "trace" } else { "traces" };
-    let projects: BTreeSet<&str> = pending
+    crate::localized_copy::english(&digest_presentation(pending))
+}
+
+/// The same selected message, alongside English for older subscribers.
+pub fn digest_presentation(pending: &[&QueueEntry]) -> serde_json::Value {
+    let projects: BTreeSet<String> = pending
         .iter()
-        .map(|e| e.project_label.as_str())
+        .map(|e| e.project_label.clone())
         .filter(|l| !l.is_empty())
         .collect();
-    if projects.is_empty() {
-        return format!("{count} {noun} ready to contribute");
-    }
-    let named: Vec<&str> = projects.iter().take(3).copied().collect();
-    let more = projects.len().saturating_sub(named.len());
-    let list = named.join(", ");
-    if more > 0 {
-        format!("{count} {noun} ready to contribute from {list} and {more} more")
-    } else {
-        format!("{count} {noun} ready to contribute from {list}")
-    }
+    crate::localized_copy::notifications::pending(pending.len() as u64, &projects)
 }
 
 /// The contribution half of the digest: what went out without being asked
@@ -344,15 +337,12 @@ pub fn contribution_text(
     credit_final: f64,
     credit_pending: f64,
 ) -> String {
-    let noun = if count == 1 { "trace" } else { "traces" };
-    let mut line = format!("{count} {noun} contributed");
-    let mut named = projects.iter().filter(|p| !p.trim().is_empty());
-    if let (Some(only), None) = (named.next(), named.next()) {
-        line.push_str(&format!(" from {only}"));
-    }
-    line.push('.');
-    line.push_str(&credit_sentences(credit_final, credit_pending));
-    line
+    crate::localized_copy::english(&crate::localized_copy::notifications::contribution(
+        count as u64,
+        projects,
+        credit_final,
+        credit_pending,
+    ))
 }
 
 /// The digest's credit sentence for credit the server has decided. Owned by

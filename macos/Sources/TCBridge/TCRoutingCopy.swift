@@ -1,5 +1,6 @@
 import CTraceCommons
 import Foundation
+import TCLocalization
 
 /// The routing surface's words, read from the Rust rather than written here.
 ///
@@ -21,7 +22,14 @@ public enum TCRoutingCopy {
     public static func copyJSON() -> String? {
         guard let raw = tc_routing_copy() else { return nil }
         defer { tc_string_free(raw) }
-        return String(cString: raw)
+        guard let fixed = Localization.current.copyJSON(String(cString: raw), namespace: "routing_copy"),
+              var table = try? JSONSerialization.jsonObject(with: Data(fixed.utf8)) as? [String: Any],
+              let folderNote = LocalizedPresentation.line("routing_folder_note") else { return nil }
+        // This field contains the actual resolved home folder, not fixed copy.
+        // All other fields keep their existing namespace-based localization.
+        table["folder_note"] = folderNote
+        guard let data = try? JSONSerialization.data(withJSONObject: table) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     /// One tool's word, chosen by the shared branch table.
@@ -34,11 +42,8 @@ public enum TCRoutingCopy {
     /// `switch` in Swift is what let the branching drift in three places
     /// while every string it returned stayed identical.
     public static func toolWord(sourceMode: String, wiring: Int32) -> String? {
-        guard let raw = sourceMode.withCString({ tc_routing_tool_word($0, wiring) }) else {
-            return nil
-        }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_routing_tool_word.
+        LocalizedPresentation.line("routing_tool_word", parameters: ["source_mode": sourceMode, "wiring": wiring])
     }
 
     /// How that word is painted, from the same two inputs: `TC_TOOL_TONE_*`.
@@ -54,9 +59,8 @@ public enum TCRoutingCopy {
     /// The daemon's routing state, in words. Nil only on a caught panic; a
     /// state this build has never heard of reads as the off line.
     public static func stateLine(state: String) -> String? {
-        guard let raw = state.withCString({ tc_routing_state_line($0) }) else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_routing_state_line.
+        LocalizedPresentation.line("routing_state_line", parameters: ["state": state])
     }
 
     /// How firmly that sentence reads: `TC_ROUTING_TONE_*`.
@@ -73,23 +77,15 @@ public enum TCRoutingCopy {
     /// `path` is nil when nothing resolved at all, which is a different
     /// sentence and not an error.
     public static func tokenLine(path: String?) -> String? {
-        let raw: UnsafeMutablePointer<CChar>?
-        if let path {
-            raw = path.withCString { tc_routing_token_line($0) }
-        } else {
-            raw = tc_routing_token_line(nil)
-        }
-        guard let raw else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_routing_token_line.
+        LocalizedPresentation.line("routing_token_line", parameters: ["path": path as Any? ?? NSNull()])
     }
 
     /// "Nothing answered", assembled on the Rust side. `port` is nil when no
     /// port was tried; the sentence for that names none.
     public static func unreachableLine(port: UInt16?) -> String? {
-        guard let raw = tc_routing_unreachable_line(Int32(port ?? 0)) else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_routing_unreachable_line.
+        LocalizedPresentation.line("routing_unreachable_line", parameters: ["port": Int32(port ?? 0)])
     }
 
     /// What discovery found, assembled on the Rust side.
@@ -98,9 +94,8 @@ public enum TCRoutingCopy {
     /// is a real sentence and not an error: it is the ordinary machine, and
     /// the screen has to say what to do on it.
     public static func discoveryLine(port: UInt16?) -> String? {
-        guard let raw = tc_routing_discovery_line(Int32(port ?? 0)) else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_routing_discovery_line.
+        LocalizedPresentation.line("routing_discovery_line", parameters: ["port": Int32(port ?? 0)])
     }
 
     /// "Last checked ...", assembled on the Rust side around this shell's own
@@ -112,8 +107,7 @@ public enum TCRoutingCopy {
     /// than no line at all.
     public static func lastChecked(when: String) -> String? {
         guard !when.isEmpty else { return nil }
-        guard let raw = when.withCString({ tc_routing_last_checked($0) }) else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_routing_last_checked.
+        return LocalizedPresentation.line("routing_last_checked", parameters: ["when": when])
     }
 }

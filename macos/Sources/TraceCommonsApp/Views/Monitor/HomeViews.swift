@@ -2,6 +2,7 @@ import SwiftUI
 import TCBridge
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// The Home tab (R9 of #1173, in Ron's #1146 shape): the status card with
 /// its way into Traces, the counts, Missions, and the way into History
@@ -1935,12 +1936,10 @@ enum HomeFormat {
     }
 
     /// A count, or a dash when the core did not say. Zero is a number.
-    /// Grouped by the core's rule (`tc_count_figure`, "1,234"), the same
-    /// comma as the credit figures beside it.
+    /// Grouped using the app's presentation locale, never a protocol locale.
     static func count(_ value: Int?) -> String {
         guard let value else { return "—" }
-        guard let count = UInt64(exactly: value) else { return String(value) }
-        return TCCredit.count(count) ?? String(value)
+        return Localization.current.number(Int64(value))
     }
 
     /// The payout link's "session ended" line from the core (the same
@@ -2090,16 +2089,16 @@ enum HomeFormat {
 
     /// What a previous account's row says in its meta line.
     /// DRAFT copy, pending the owner's approval.
-    static let previousAccount = "Previous account"
+    static let previousAccount = Localization.current.text("app.history.previous_account")
 
     /// The community's accept rate as a whole percentage, or a dash when
     /// the commons did not say.
     static func rate(_ value: Double?) -> String {
-        value.map { $0.formatted(.percent.precision(.fractionLength(0))) } ?? "—"
+        value.map { $0.formatted(.percent.precision(.fractionLength(0)).locale(Localization.current.locale)) } ?? "—"
     }
 
     static func day(_ date: Date) -> String {
-        date.formatted(.dateTime.month(.abbreviated).day())
+        date.formatted(.dateTime.month(.abbreviated).day().locale(Localization.current.locale))
     }
 
     /// What Home's watching row says when the screen is ready.

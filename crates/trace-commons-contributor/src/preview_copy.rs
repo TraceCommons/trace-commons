@@ -24,6 +24,29 @@ pub fn redaction_row_counts(occurrences: u32, distinct: u32) -> String {
     }
 }
 
+/// A presentation message, not a preformatted English sentence. The core
+/// still chooses whether a scan was unchecked; clients only render it.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(tag = "key", content = "parameters")]
+pub enum ResidualSecretMessage {
+    #[serde(rename = "privacy.residual.unchecked")]
+    Unchecked,
+    #[serde(rename = "privacy.residual.secrets")]
+    Secrets { count: u32 },
+}
+
+pub fn residual_secret_message(count: u32, sites: &[String]) -> ResidualSecretMessage {
+    if !sites.is_empty()
+        && sites
+            .iter()
+            .all(|site| site == crate::envelope::RESIDUAL_SCAN_UNAVAILABLE_SITE)
+    {
+        ResidualSecretMessage::Unchecked
+    } else {
+        ResidualSecretMessage::Secrets { count }
+    }
+}
+
 /// A detection that survived scrubbing remains in the outgoing envelope.
 /// `count` measures detection sites, not the number of secret values.
 ///
@@ -33,18 +56,17 @@ pub fn redaction_row_counts(occurrences: u32, distinct: u32) -> String {
 /// fail-closed survivor at [`crate::envelope::RESIDUAL_SCAN_UNAVAILABLE_SITE`]
 /// is not a secret anyone found.
 pub fn residual_secret_line(count: u32, sites: &[String]) -> String {
-    let unchecked = !sites.is_empty()
-        && sites
-            .iter()
-            .all(|site| site == crate::envelope::RESIDUAL_SCAN_UNAVAILABLE_SITE);
-    if unchecked {
-        return "This trace could not be checked for leftover secrets, so treat it as holding one."
-            .to_string();
-    }
-    if count == 1 {
-        "1 secret is still in this trace".to_string()
-    } else {
-        format!("{count} secrets are still in this trace")
+    match residual_secret_message(count, sites) {
+        ResidualSecretMessage::Unchecked => {
+            "This trace could not be checked for leftover secrets, so treat it as holding one."
+                .to_string()
+        }
+        ResidualSecretMessage::Secrets { count: 1 } => {
+            "1 secret is still in this trace".to_string()
+        }
+        ResidualSecretMessage::Secrets { count } => {
+            format!("{count} secrets are still in this trace")
+        }
     }
 }
 

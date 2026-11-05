@@ -2,6 +2,7 @@ import SwiftUI
 import TCBridge
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// The Inference tab (R8 of #1173): the model calls IronWire recorded,
 /// newest first, with what each was priced at and its proof label.
@@ -285,7 +286,7 @@ struct InferenceTabView: View {
 
     private func callRow(_ call: DaemonData.InferenceCall) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
-            Text(call.at.formatted(.dateTime.hour().minute()))
+            Text(call.at.formatted(.dateTime.hour().minute().locale(Localization.current.locale)))
                 .glassType(GlassTokens.TypeScale.caption.monospaced)
                 .foregroundStyle(GlassColor.textTertiary)
                 .lineLimit(1)
@@ -347,7 +348,7 @@ struct InferenceTabView: View {
     }
 
     private static func formattedUSD(_ usd: Double) -> String {
-        usd.formatted(.currency(code: "USD").precision(.fractionLength(2 ... 4)))
+        usd.formatted(.currency(code: "USD").precision(.fractionLength(2 ... 4)).locale(Localization.current.locale))
     }
 
     static func tone(_ label: DaemonData.ProofLabel) -> GlassTag.Tone {

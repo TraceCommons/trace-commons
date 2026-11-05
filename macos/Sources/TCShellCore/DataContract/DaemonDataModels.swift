@@ -632,12 +632,15 @@ extension DaemonData {
         public let body: String
         public let actions: [NudgeAction]
         public let panelRow: String
+        /// Explicit keyed prose alongside backward-compatible English.
+        public let presentation: CoreJSON?
 
         public enum CodingKeys: String, CodingKey {
             case title
             case body
             case actions
             case panelRow = "panel_row"
+            case presentation
         }
     }
 
@@ -675,6 +678,7 @@ extension DaemonData {
     public struct NudgeMarkText: Codable, Equatable, Sendable {
         public let accessibility: String
         public let tooltip: String
+        public let presentation: CoreJSON?
     }
 
     /// `status.idle_sessions` (nudge U4). The idle card's words arrive on
@@ -1263,6 +1267,8 @@ extension DaemonData {
         /// attention arbiter folded a re-engagement sentence in, it already
         /// ends with `fold.text`.
         public let text: String?
+        /// The entire body, including any folded sentence, selected by core.
+        public let presentation: CoreJSON?
         /// The re-engagement sentence folded into this digest, and its kind;
         /// nil when nothing was folded, and from an older daemon.
         public let fold: DigestFold?
@@ -1270,7 +1276,7 @@ extension DaemonData {
         public init(
             pending: Int?, contributed: Int? = nil, contributedProjects: [String]? = nil,
             creditFinal: Double? = nil, creditPending: Double? = nil, contribution: String? = nil, text: String?,
-            fold: DigestFold? = nil
+            fold: DigestFold? = nil, presentation: CoreJSON? = nil
         ) {
             self.pending = pending
             self.contributed = contributed
@@ -1280,10 +1286,11 @@ extension DaemonData {
             self.contribution = contribution
             self.text = text
             self.fold = fold
+            self.presentation = presentation
         }
 
         public enum CodingKeys: String, CodingKey {
-            case pending, contributed, contribution, text, fold
+            case pending, contributed, contribution, text, fold, presentation
             case contributedProjects = "contributed_projects"
             case creditFinal = "credit_final"
             case creditPending = "credit_pending"
@@ -1304,12 +1311,14 @@ extension DaemonData {
         public let title: String
         public let body: String
         public let actions: [NudgeAction]
+        public let presentation: CoreJSON?
 
-        public init(kind: String, title: String, body: String, actions: [NudgeAction]) {
+        public init(kind: String, title: String, body: String, actions: [NudgeAction], presentation: CoreJSON? = nil) {
             self.kind = kind
             self.title = title
             self.body = body
             self.actions = actions
+            self.presentation = presentation
         }
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// Copy for the correction control, shared with the other two shells.
 ///
@@ -13,11 +14,11 @@ import Foundation
 public enum CorrectionCopy {
     /// The field's prompt. Shown only under `Partly` and `Failed` -- a run
     /// the contributor has just called successful has nothing to correct.
-    public static let question = "What did it get wrong?"
+    public static let question = Localization.current.text("contributor_disclosure_copy.outcome.correction_question")
 
     /// The placeholder inside the box, so the caption below can spend all of
     /// its words on the thing that actually matters.
-    public static let placeholder = "Optional"
+    public static let placeholder = Localization.current.text("contributor_disclosure_copy.outcome.correction_placeholder")
 
     /// **The disclosure, and the most load-bearing string in this module.**
     ///
@@ -33,7 +34,7 @@ public enum CorrectionCopy {
     /// contributor gets that their own words are stored verbatim. Do not
     /// shorten it for layout; change the layout.
     public static let caption =
-        "Stored exactly as you write it. Unlike the rest of the trace, a correction is not scrubbed here or on the server -- so leave out anything you would not want in the corpus: someone else's personal information, employer-confidential material, or anything you are not free to share."
+        Localization.current.text("contributor_disclosure_copy.outcome.correction_caption")
 
     /// The credential refusal, headline and body.
     ///
@@ -45,10 +46,10 @@ public enum CorrectionCopy {
     ///
     /// Neither string quotes the correction, and neither names what matched.
     public static let credentialHeadline =
-        "Nothing was sent. Your correction looks like it contains a credential."
+        Localization.current.text("contributor_disclosure_copy.outcome.correction_credential_headline")
 
     public static let credentialBody =
-        "A correction is stored as you write it, so this one was refused rather than masked. Take the credential out and submit again -- and rotate it, because it has already been typed here."
+        Localization.current.text("contributor_disclosure_copy.outcome.correction_credential_body")
 
     /// The daemon's fixed label for that refusal.
     ///

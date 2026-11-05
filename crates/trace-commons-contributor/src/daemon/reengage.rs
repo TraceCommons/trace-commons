@@ -47,6 +47,8 @@ pub(crate) struct TickResult {
     pub digest_posts: bool,
     /// The sentence folded into it, and the kind it announces.
     pub fold: Option<(Kind, String)>,
+    /// The exact selected message, from the same snapshot as `fold_covers`.
+    pub fold_presentation: Option<serde_json::Value>,
     /// The submissions whose newly final credit the folded sentence states,
     /// from the same snapshot as the sentence. Empty without a verdicts fold,
     /// and when the fold states no credit (its finals add to under 0.05).
@@ -87,16 +89,16 @@ struct Prepared {
 }
 
 impl Prepared {
-    fn fold_text(&self, kind: Kind) -> Option<String> {
+    fn fold_presentation(&self, kind: Kind) -> Option<serde_json::Value> {
         match kind {
             Kind::IdleSessions => self
                 .idle
                 .as_ref()
-                .map(|i| nudge_render::digest_idle_sentence(&i.batch)),
+                .map(|i| crate::localized_copy::notifications::idle_sentence(&i.batch, true)),
             Kind::VerdictsLanded => self
                 .verdicts
                 .as_ref()
-                .map(nudge_render::digest_verdict_sentence),
+                .map(crate::localized_copy::notifications::verdict_sentence),
             Kind::InsightsTip
             | Kind::WeeklyRecap
             | Kind::SettlementEstimate
@@ -449,10 +451,15 @@ fn apply(
         );
     }
     let mut announced: Vec<(Kind, Route)> = Vec::new();
-    let fold = outcome
-        .fold
-        .filter(|_| digest_posts)
-        .and_then(|kind| prepared.fold_text(kind).map(|text| (kind, text)));
+    let selected_fold = outcome.fold.filter(|_| digest_posts).and_then(|kind| {
+        prepared
+            .fold_presentation(kind)
+            .map(|message| (kind, message))
+    });
+    let fold = selected_fold
+        .as_ref()
+        .map(|(kind, message)| (*kind, crate::localized_copy::english(message)));
+    let fold_presentation = selected_fold.map(|(_, message)| message);
     if let Some((kind, _)) = &fold {
         announced.push((*kind, Route::Folded));
     }
@@ -466,6 +473,7 @@ fn apply(
                     "title": text.title,
                     "body": text.body,
                     "actions": text.actions,
+                    "presentation": text.presentation,
                 }),
             );
         };
@@ -528,6 +536,7 @@ fn apply(
     TickResult {
         digest_posts,
         fold,
+        fold_presentation,
         fold_covers,
         standalone,
     }

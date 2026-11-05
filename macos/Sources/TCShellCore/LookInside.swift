@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import TCLocalization
 
 /// The arithmetic behind Look inside (Ron's `PreviewInspector`, #1241):
 /// which review actions it offers, how much of the body a page shows, where
@@ -111,6 +112,6 @@ public enum LookInside {
 
     /// Ron's count line for a search of the original session.
     public static func originalMatches(_ count: Int, words: MonitorLookInsideCopy) -> String {
-        count == 1 ? words.originalMatchOne : FirstRunCopy.fill(words.originalMatches, ["count": "\(count)"])
+        Localization.current.text("plural.preview.matches", count: Int64(count))
     }
 }

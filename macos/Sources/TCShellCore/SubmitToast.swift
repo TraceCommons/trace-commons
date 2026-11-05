@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// The submit toast: the daemon's counts, said in one sentence.
 ///
@@ -72,9 +73,9 @@ public struct SubmitToast: Equatable, Sendable {
     /// "Sent." while still offering Undo contradicted itself.
     static func approvedClause(_ approved: UInt64) -> String {
         switch approved {
-        case 0: return "Nothing approved."
-        case 1: return "Approved."
-        default: return "Approved \(approved)."
+        case 0: return Localization.current.text("app.toast.nothing")
+        case 1: return Localization.current.text("app.toast.approved_one")
+        default: return Localization.current.text("app.toast.approved", parameters: ["count": Localization.current.number(Int64(clamping: approved))])
         }
     }
 
@@ -89,9 +90,8 @@ public struct SubmitToast: Equatable, Sendable {
     /// contributor sees which detector fired.
     static func scrubClause(_ totalRedactions: UInt64) -> String {
         switch totalRedactions {
-        case 0: return "Scrubbing matched nothing."
-        case 1: return "1 redaction applied."
-        default: return "\(totalRedactions) redactions applied."
+        case 0: return Localization.current.text("app.toast.scrub_none")
+        default: return Localization.current.text("app.toast.scrub", count: Int64(clamping: totalRedactions))
         }
     }
 
@@ -114,7 +114,8 @@ public struct SubmitToast: Equatable, Sendable {
     /// positionally -- otherwise a batch mixing `not-pinned` and an
     /// unrecognised label would print "could not be prepared" twice.
     static func flaggedAndSkippedClause(_ flagged: UInt64, _ skipped: [String]) -> String? {
-        let flaggedHalf: String? = flagged > 0 ? "\(flagged) flagged" : nil
+        let flaggedHalf: String? = flagged > 0 ? Localization.current.text("app.toast.flagged", parameters: [
+            "count": Localization.current.number(Int64(clamping: flagged))]) : nil
 
         let skippedHalf: String?
         if skipped.isEmpty {
@@ -129,18 +130,19 @@ public struct SubmitToast: Equatable, Sendable {
                 && skipped.contains(where: { reasonLabel($0) == skipReasonUnknown }) {
                 reasons.append(skipReasonUnknown)
             }
-            skippedHalf = "\(skipped.count) not approved: \(reasons.joined(separator: ", "))"
+            skippedHalf = Localization.current.text("app.toast.skipped", parameters: [
+                "count": Localization.current.number(Int64(skipped.count)), "reasons": reasons.joined(separator: ", ")])
         }
 
         switch (flaggedHalf, skippedHalf) {
         case (nil, nil):
             return nil
         case let (f?, nil):
-            return "\(f)."
+            return Localization.current.text("app.toast.single_clause", parameters: ["clause": f])
         case let (nil, s?):
-            return "\(s)."
+            return Localization.current.text("app.toast.single_clause", parameters: ["clause": s])
         case let (f?, s?):
-            return "\(f), \(s)."
+            return Localization.current.text("app.toast.both_clauses", parameters: ["flagged": f, "skipped": s])
         }
     }
 
@@ -158,12 +160,12 @@ public struct SubmitToast: Equatable, Sendable {
     /// An array of pairs rather than a dictionary, because the order is
     /// part of the contract and a dictionary has none.
     public static let skipReasons: [(wire: String, human: String)] = [
-        ("not-enrolled", "not connected to a commons"),
-        ("not-pending", "already decided"),
-        ("not-pinned", "could not be prepared"),
-        ("envelope-too-large", "too large to send"),
-        ("session-file-vanished", "the trace file is gone"),
-        ("preview-failed", "could not be read"),
+        ("not-enrolled", Localization.current.text("app.toast.not_enrolled")),
+        ("not-pending", Localization.current.text("app.toast.not_pending")),
+        ("not-pinned", Localization.current.text("app.toast.not_pinned")),
+        ("envelope-too-large", Localization.current.text("app.toast.too_large")),
+        ("session-file-vanished", Localization.current.text("app.toast.vanished")),
+        ("preview-failed", Localization.current.text("app.toast.preview_failed")),
     ]
 
     /// What an unrecognised wire label is called instead of itself.
@@ -179,7 +181,7 @@ public struct SubmitToast: Equatable, Sendable {
     /// that must not then happen is the shell echoing protocol vocabulary
     /// at a contributor. So an unknown label degrades to the least specific
     /// true statement available, and is listed last.
-    public static let skipReasonUnknown = "could not be prepared"
+    public static let skipReasonUnknown = Localization.current.text("app.toast.not_pinned")
 
     /// Translate one wire reason label. Never returns its argument.
     public static func reasonLabel(_ wire: String) -> String {

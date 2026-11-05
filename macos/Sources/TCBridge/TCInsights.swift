@@ -1,5 +1,6 @@
 import CTraceCommons
 import Foundation
+import TCLocalization
 
 /// Local, handle-free service. Call off the UI thread; mutations already in
 /// progress finish even if the presentation is closed.
@@ -7,7 +8,7 @@ public enum TCInsights {
     public static func copy() -> [String: String]? {
         guard let result = tc_insights_copy_json() else { return nil }
         defer { tc_string_free(result) }
-        guard let text = String(validatingCString: result) else { return nil }
+        guard let text = Localization.current.copyJSON(String(validatingCString: result), namespace: "insights_copy") else { return nil }
         return try? JSONDecoder().decode([String: String].self, from: Data(text.utf8))
     }
 

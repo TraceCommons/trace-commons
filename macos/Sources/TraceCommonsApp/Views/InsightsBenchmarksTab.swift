@@ -1,6 +1,7 @@
 import SwiftUI
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// Benchmarks (product owner, 2026-10-29): like openrouter.ai/benchmarks,
 /// but from the person's own traces. One card per kind of work, each with
@@ -230,7 +231,7 @@ enum InsightsBenchmarkWords {
             let ratio = Double(tip.ratioPermille ?? 0) / 1_000
             return InsightsOverviewWords.fill(text("analytics_bench_tip_fewer_undos", copy), [
                 "first": tip.better ?? "", "second": tip.worse ?? "",
-                "x": ratio.formatted(.number.precision(.fractionLength(0...1))),
+                "x": ratio.formatted(.number.precision(.fractionLength(0...1)).locale(Localization.current.locale)),
             ])
         default:
             return nil

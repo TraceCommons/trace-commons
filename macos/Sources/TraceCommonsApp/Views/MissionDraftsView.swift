@@ -1,6 +1,7 @@
 import SwiftUI
 import TCDesign
 import TCBridge
+import TCLocalization
 import UniformTypeIdentifiers
 
 struct MissionDraftsView: View {
@@ -115,7 +116,8 @@ struct MissionDraftsView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(model.text(draft.status))
                                 .insightsHeading()
-                            Text("\(model.text("source_count")): \(draft.source_count.formatted())")
+                            Text(Localization.current.text("app.mission.fact", parameters: [
+                                "label": model.text("source_count"), "value": Localization.current.number(Int64(clamping: draft.source_count))]))
                                 .glassType(GlassTokens.TypeScale.caption)
                             Text(draft.id)
                                 .insightsMono()
@@ -155,9 +157,12 @@ struct MissionDraftDetailView: View {
             values("allowed_tools", detail.proposal.allowed_tools)
             VStack(alignment: .leading, spacing: 4) {
                 Text(text("proposed_budget")).insightsHeading()
-                Text("\(text("duration_seconds")): \(detail.proposal.budget.max_duration_seconds.formatted())")
-                Text("\(text("input_tokens")): \(detail.proposal.budget.max_input_tokens.formatted())")
-                Text("\(text("output_tokens")): \(detail.proposal.budget.max_output_tokens.formatted())")
+                Text(Localization.current.text("app.mission.fact", parameters: ["label": text("duration_seconds"),
+                    "value": Localization.current.number(Int64(clamping: detail.proposal.budget.max_duration_seconds))]))
+                Text(Localization.current.text("app.mission.fact", parameters: ["label": text("input_tokens"),
+                    "value": Localization.current.number(Int64(clamping: detail.proposal.budget.max_input_tokens))]))
+                Text(Localization.current.text("app.mission.fact", parameters: ["label": text("output_tokens"),
+                    "value": Localization.current.number(Int64(clamping: detail.proposal.budget.max_output_tokens))]))
             }
             field("author_unverified", detail.proposal.author_id)
             field("evaluator_unverified", detail.proposal.evaluator_id)

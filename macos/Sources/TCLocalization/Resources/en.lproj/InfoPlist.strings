@@ -1,0 +1,2 @@
+/* Generated; copy into the main app bundle for OS permission UI. */
+"NSAppleEventsUsageDescription" = "Near.ai opens Private AI sessions in Terminal.";

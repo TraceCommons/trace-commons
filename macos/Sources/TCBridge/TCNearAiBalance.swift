@@ -31,11 +31,8 @@ public enum TCNearAiBalance {
     /// sentence above them announcing the read succeeded is this app
     /// narrating itself.
     public static func stateLine(state: String) -> String? {
-        guard let raw = state.withCString({ tc_near_ai_balance_state_line($0) }) else {
-            return nil
-        }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_near_ai_balance_state_line.
+        LocalizedPresentation.line("near_ai_balance_state_line", parameters: ["state": state])
     }
 
     /// How firmly that sentence reads, as a raw `TC_PRIVATE_INFERENCE_TONE_*`
@@ -72,7 +69,8 @@ public enum TCNearAiBalance {
     ///
     /// `scale` is the wire's own field. Pass what arrived.
     public static func amount(present: Int32, nanos: Int64, scale: UInt8) -> String? {
-        owned(tc_near_ai_balance_amount(present, nanos, scale))
+        // Legacy equivalent: tc_near_ai_balance_amount.
+        LocalizedPresentation.line("near_ai_balance_amount", parameters: ["present": present, "nanos": nanos, "scale": scale])
     }
 
     /// What is left, as a finished sentence.
@@ -82,14 +80,16 @@ public enum TCNearAiBalance {
     /// case for an account nobody has capped, and a contributor in it must
     /// not be told they have `$0.00` left.
     public static func remainingLine(present: Int32, nanos: Int64, scale: UInt8) -> String? {
-        owned(tc_near_ai_balance_remaining_line(present, nanos, scale))
+        // Legacy equivalent: tc_near_ai_balance_remaining_line.
+        LocalizedPresentation.line("near_ai_balance_remaining_line", parameters: ["present": present, "nanos": nanos, "scale": scale])
     }
 
     /// The configured ceiling, or the empty string -- which is what an absent
     /// limit gets, because `remainingLine` has already said the part that
     /// matters about an uncapped account.
     public static func limitLine(present: Int32, nanos: Int64, scale: UInt8) -> String? {
-        owned(tc_near_ai_balance_limit_line(present, nanos, scale))
+        // Legacy equivalent: tc_near_ai_balance_limit_line.
+        LocalizedPresentation.line("near_ai_balance_limit_line", parameters: ["present": present, "nanos": nanos, "scale": scale])
     }
 
     /// What the account has spent -- the WHOLE account, not this computer.
@@ -100,7 +100,8 @@ public enum TCNearAiBalance {
     /// figure is present: beside one Spent rounds up to the cent so Limit,
     /// Spent and what is left add up; without one it is floored.
     public static func spentLine(present: Int32, nanos: Int64, scale: UInt8, remainingPresent: Int32) -> String? {
-        owned(tc_near_ai_balance_spent_line(present, nanos, scale, remainingPresent))
+        // Legacy equivalent: tc_near_ai_balance_spent_line.
+        LocalizedPresentation.line("near_ai_balance_spent_line", parameters: ["present": present, "nanos": nanos, "scale": scale, "remaining_present": remainingPresent])
     }
 
     /// How long ago this computer asked.
@@ -109,13 +110,38 @@ public enum TCNearAiBalance {
     /// gives the empty string. The sentence says when the QUESTION WAS PUT,
     /// never that anything was updated then.
     public static func observedLine(secondsAgo: Int64) -> String? {
-        owned(tc_near_ai_balance_observed_line(secondsAgo))
+        // Legacy equivalent: tc_near_ai_balance_observed_line.
+        LocalizedPresentation.line("near_ai_balance_observed_line", parameters: ["seconds_ago": secondsAgo])
     }
 
-    /// One owned C string into Swift, freed on the way out.
-    private static func owned(_ raw: UnsafeMutablePointer<CChar>?) -> String? {
-        guard let raw else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+    /// Signed movement at the core's displayed precision. Nil selects the
+    /// canonical unavailable explanation, never a zero change.
+    public static func changeLine(nanos: Int64?, scale: UInt8) -> String? {
+        LocalizedPresentation.line("near_ai_balance_change_line", parameters: [
+            "nanos": nanos.map { $0 as Any } ?? NSNull(), "scale": scale
+        ])
+    }
+
+    /// Incoming transfers are distinct from net balance movement.
+    public static func receivedLine(nanos: Int64?, scale: UInt8) -> String? {
+        LocalizedPresentation.line("near_ai_credit_received_24h_line", parameters: [
+            "nanos": nanos.map { $0 as Any } ?? NSNull(), "scale": scale
+        ])
+    }
+
+    /// Only the spending-organization prose tree, selected from the current
+    /// listed name. IDs, selection, and authorization never enter this tree.
+    public static func spendOrganizationViewJSON(currentName: String?) -> String? {
+        LocalizedPresentation.json("spend_org_view", parameters: [
+            "current_name": currentName.map { $0 as Any } ?? NSNull()
+        ])
+    }
+
+    /// A validated funding report's state and display name, not its URL or
+    /// credential binding. Localization cannot authorize a destination.
+    public static func fundingMessage(state: String, organizationName: String?) -> String? {
+        LocalizedPresentation.line("funding_message", parameters: [
+            "state": state, "organization_name": organizationName ?? ""
+        ])
     }
 }

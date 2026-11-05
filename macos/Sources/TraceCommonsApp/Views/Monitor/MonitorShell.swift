@@ -1,6 +1,7 @@
 import SwiftUI
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// What the monitor shell adds around the tabs, after #1146's
 /// `monitor-shell.tsx` and `monitor-toolbar.tsx`: the View menu, the Traces
@@ -173,14 +174,14 @@ enum TracesGraphModel {
 
     /// "Sat": the short weekday.
     static func weekday(_ date: Date, calendar: Calendar = .current) -> String {
-        var style = Date.FormatStyle.dateTime.weekday(.abbreviated)
+        var style = Date.FormatStyle.dateTime.weekday(.abbreviated).locale(Localization.current.locale)
         style.timeZone = calendar.timeZone
         return date.formatted(style)
     }
 
     /// "Monday, October 5": a hovered bar's day (#1146 `formatDay`).
     static func day(_ date: Date, calendar: Calendar = .current) -> String {
-        var style = Date.FormatStyle.dateTime.weekday(.wide).month(.wide).day()
+        var style = Date.FormatStyle.dateTime.weekday(.wide).month(.wide).day().locale(Localization.current.locale)
         style.timeZone = calendar.timeZone
         return date.formatted(style)
     }

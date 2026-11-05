@@ -20,11 +20,8 @@ public enum TCNearAiCredential {
     /// says that no key is kept here -- that is a claim about the machine,
     /// and the Rust decides it, not this shell.
     public static func stateLine(state: String) -> String? {
-        guard let raw = state.withCString({ tc_near_ai_credential_state_line($0) }) else {
-            return nil
-        }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_near_ai_credential_state_line.
+        LocalizedPresentation.line("near_ai_credential_state_line", parameters: ["state": state])
     }
 
     /// How firmly that sentence reads, as a raw `TC_PRIVATE_INFERENCE_TONE_*`
@@ -54,8 +51,7 @@ public enum TCNearAiCredential {
     /// true. Drawn once beside the connect controls, because the fact is
     /// about the destination and not about any one tool.
     public static func harnessNotice(credentialed: Int32) -> String? {
-        guard let raw = tc_harness_credential_notice(credentialed) else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_harness_credential_notice.
+        LocalizedPresentation.line("harness_credential_notice", parameters: ["credentialed": credentialed])
     }
 }

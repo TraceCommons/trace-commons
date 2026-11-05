@@ -1,4 +1,5 @@
 import SwiftUI
+import TCLocalization
 import TCBridge
 import TCDesign
 import TCShellCore
@@ -21,7 +22,7 @@ enum PrivateAIScreenLayout {
 
     /// The line after the figure: "of {total} tools can connect".
     static func ofTotal(_ total: Int, copy: FirstRunCopy.PrivateAi) -> String {
-        FirstRunCopy.fill(total == 1 ? copy.canConnectOne : copy.canConnect, ["total": total.formatted()])
+        Localization.current.text("plural.first_run.connect", count: Int64(clamping: total))
     }
 
     /// The figure counts up one tool at a time, from 0.9s, 0.24s apart.
@@ -146,7 +147,7 @@ struct PrivateAIScreen: View {
                 tools.count, after: date.timeIntervalSince(openedAt), reduceMotion: reduceMotion)
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
-                    Text(shown.formatted())
+                    Text(Localization.current.number(Int64(shown)))
                         .glassType(GlassTokens.TypeScale.number)
                         .foregroundStyle(GlassColor.textPrimary)
                     Text(PrivateAIScreenLayout.ofTotal(PrivateAIScreenLayout.found(memory.discovered), copy: copy.privateAi))

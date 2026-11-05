@@ -397,7 +397,10 @@ final class NativeWitnessReviewTests: XCTestCase {
             "view": ["state": "Refused", "message": "The privacy check took too long."],
         ]))
         XCTAssertEqual(failure.message, "witness_timeout")
-        XCTAssertEqual(DaemonClient.refusalSentence(from: failure), "The privacy check took too long.")
+        let copyJSON = try XCTUnwrap(TCWitness.copyJSON())
+        let copy = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(copyJSON.utf8)) as? [String: Any])
+        let review = try XCTUnwrap(copy["review"] as? [String: Any])
+        XCTAssertEqual(DaemonClient.refusalSentence(from: failure), try XCTUnwrap(review["failed_unreachable"] as? String))
         let busy = try XCTUnwrap(DaemonClient.witnessReviewFailure(from: [
             "entry_id": "entry", "status": "busy", "code": "unavailable",
             "label": "witness_saturated",

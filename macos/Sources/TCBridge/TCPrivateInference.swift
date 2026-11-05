@@ -1,5 +1,6 @@
 import CTraceCommons
 import Foundation
+import TCLocalization
 
 /// The private-inference surface, across the C ABI.
 ///
@@ -22,7 +23,7 @@ public enum TCPrivateInference {
     public static func copyJSON() -> String? {
         guard let raw = tc_private_inference_copy() else { return nil }
         defer { tc_string_free(raw) }
-        return String(cString: raw)
+        return Localization.current.copyJSON(String(cString: raw), namespace: "private_inference_copy")
     }
 
     /// The sentence for one `private_inference_state` label.
@@ -30,11 +31,8 @@ public enum TCPrivateInference {
     /// An unfamiliar nonempty label reads as unavailable,
     /// which claims nothing. The Rust decides that, not this shell.
     public static func stateLine(state: String) -> String? {
-        guard let raw = state.withCString({ tc_private_inference_state_line($0) }) else {
-            return nil
-        }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_private_inference_state_line.
+        LocalizedPresentation.line("private_inference_state_line", parameters: ["state": state])
     }
 
     /// The runtime tile's word for one `private_inference_state` label, as
@@ -42,11 +40,8 @@ public enum TCPrivateInference {
     /// stopped one off, and an unreported or unfamiliar label unknown,
     /// never off. Nil only on a caught panic.
     public static func runtimeWord(state: String) -> String? {
-        guard let raw = state.withCString({ tc_private_inference_runtime_word($0) }) else {
-            return nil
-        }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_private_inference_runtime_word.
+        LocalizedPresentation.line("private_inference_runtime_word", parameters: ["state": state])
     }
 
     /// The menu-bar popover's one word for one `private_inference_state`
@@ -54,11 +49,8 @@ public enum TCPrivateInference {
     /// "Not working", or "Unknown" for an unreported or unfamiliar label.
     /// The sentence stays `stateLine`. Nil only on a caught panic.
     public static func menuWord(state: String) -> String? {
-        guard let raw = state.withCString({ tc_private_inference_menu_word($0) }) else {
-            return nil
-        }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_private_inference_menu_word.
+        LocalizedPresentation.line("private_inference_menu_word", parameters: ["state": state])
     }
 
     /// The dot beside `menuWord`, as a raw `TC_PRIVATE_INFERENCE_TONE_*`
@@ -81,9 +73,8 @@ public enum TCPrivateInference {
     /// Where the listener is answering, or the empty string when there is
     /// no port. A `nil` port crosses as `0`, which is the same case.
     public static func servingLine(port: UInt16?) -> String? {
-        guard let raw = tc_private_inference_serving_line(Int32(port ?? 0)) else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_private_inference_serving_line.
+        LocalizedPresentation.line("private_inference_serving_line", parameters: ["port": Int32(port ?? 0)])
     }
 
     /// Whether to put the offer in front of the contributor.

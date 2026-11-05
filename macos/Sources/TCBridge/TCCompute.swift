@@ -1,5 +1,6 @@
 import CTraceCommons
 import Foundation
+import TCLocalization
 
 /// App-owned compute controller. It requires neither a trace daemon nor enrollment.
 /// Calls perform synchronous settings I/O: invoke them on a background queue.
@@ -97,7 +98,9 @@ public final class TCCompute: @unchecked Sendable {
     }
 
     /// Handle-free fixed vocabulary remains available when settings cannot open.
-    public static func copyJSON() -> String? { take(tc_compute_copy_json()) }
+    public static func copyJSON() -> String? {
+        Localization.current.copyJSON(take(tc_compute_copy_json()), namespace: "compute_copy")
+    }
 
     /// Bounded controller stop. The caller must inspect worker_stopped before
     /// freeing this handle; drain_outcome separately describes acknowledgement.
@@ -105,8 +108,8 @@ public final class TCCompute: @unchecked Sendable {
         try withHandle { try Self.result(tc_compute_shutdown($0, timeoutMilliseconds)) }
     }
 
-    /// Return Rust's snapshot unchanged, including shared wording and capability
-    /// gates. Neither a successful call nor an open handle implies availability.
+    /// Return Rust's snapshot with only explicit canonical prose localized.
+    /// Capability gates stay unchanged: an open handle implies no availability.
     public func statusJSON() throws -> String {
         try withHandle { try Self.result(tc_compute_status_json($0)) }
     }
@@ -178,7 +181,10 @@ public final class TCCompute: @unchecked Sendable {
             let label = tc_last_error().map { String(cString: $0) } ?? "panic"
             throw Failure.refused(label)
         }
-        return value
+        guard let localized = LocalizedPresentation.json("compute_snapshot_json", inputJSON: value) else {
+            throw Failure.refused("compute-presentation-unavailable")
+        }
+        return localized
     }
 
     private static func take(_ pointer: UnsafeMutablePointer<CChar>?) -> String? {

@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// Which agent's session store a candidate describes.
 ///
@@ -86,8 +87,7 @@ public struct SourceCandidate: Equatable, Sendable {
         } else if sessionCount == 0 {
             line = words.empty
         } else {
-            line = sessionCount == 1
-                ? words.countOne : Self.fill(words.count, ["count": String(sessionCount)])
+            line = Localization.current.text("plural.source.traces", count: Int64(clamping: sessionCount))
             if let mostRecent {
                 line = Self.fill(words.mostRecent, ["traces": line, "age": Self.age(of: mostRecent, at: now, words: words)])
             }
@@ -107,16 +107,15 @@ public struct SourceCandidate: Equatable, Sendable {
         let seconds = max(0, now.timeIntervalSince(date))
         switch seconds {
         case ..<120: return words.ageJustNow
-        case ..<3600: return fill(words.ageMinutes, ["n": String(Int(seconds / 60))])
-        case ..<7200: return words.ageHour
-        case ..<86400: return fill(words.ageHours, ["n": String(Int(seconds / 3600))])
+        case ..<3600: return Localization.current.text("plural.source.minutes", count: Int64(seconds / 60))
+        case ..<86400: return Localization.current.text("plural.source.hours", count: Int64(seconds / 3600))
         case ..<172_800: return words.ageYesterday
-        default: return fill(words.ageDays, ["n": String(Int(seconds / 86400))])
+        default: return Localization.current.text("plural.source.days", count: Int64(seconds / 86400))
         }
     }
 
     private static func fill(_ template: String, _ values: [String: String]) -> String {
-        values.reduce(template) { $0.replacingOccurrences(of: "{\($1.key)}", with: $1.value) }
+        Localization.fill(template, values)
     }
 
     /// Decode the JSON array `tc_discover_sources` returns.

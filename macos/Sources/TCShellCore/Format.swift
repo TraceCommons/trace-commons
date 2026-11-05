@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// Sizes and times as the shell prints them, beside the core's words.
 ///
@@ -44,6 +45,7 @@ public enum Format {
             bytes.allowedUnits = [.useKB, .useMB, .useGB]
             byteFormatter = bytes
             let relative = RelativeDateTimeFormatter()
+            relative.locale = Localization.current.locale
             relative.unitsStyle = .full
             relativeFormatter = relative
             built = 2

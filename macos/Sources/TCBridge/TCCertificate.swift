@@ -31,15 +31,13 @@ public enum TCCertificate {
     /// filling the hole in: a row in this list with no sentence is a row
     /// claiming something unstated.
     public static func rowLine(evidenceAdmitted: Bool) -> String? {
-        guard let raw = tc_certificate_row_line(evidenceAdmitted ? 1 : 0) else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_certificate_row_line.
+        LocalizedPresentation.line("certificate_row_line", parameters: ["evidence_admitted": evidenceAdmitted])
     }
 
     /// The heading over that list, on the same split and the same argument.
     public static func listTitle(evidenceAdmitted: Bool) -> String? {
-        guard let raw = tc_certificate_list_title(evidenceAdmitted ? 1 : 0) else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_certificate_list_title.
+        LocalizedPresentation.line("certificate_list_title", parameters: ["evidence_admitted": evidenceAdmitted])
     }
 }

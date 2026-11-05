@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 // Changing the NEAR AI login an account uses (F10). Spec:
 // `docs/superpowers/specs/2026-11-03-f10-change-account-design.md`,
@@ -137,13 +138,13 @@ public struct AccountChangeCopy: Decodable, Equatable, Sendable {
     public func render(
         _ template: String, provider: String? = nil, old: String? = nil, new: String? = nil
     ) -> String? {
-        var text = template
-        for (placeholder, tag) in [("{provider}", provider), ("{old_provider}", old), ("{new_provider}", new)]
-        where text.contains(placeholder) {
+        var values: [String: String] = [:]
+        for (parameter, tag) in [("provider", provider), ("old_provider", old), ("new_provider", new)]
+        where template.contains("{\(parameter)}") {
             guard let title = providerTitle(tag) else { return nil }
-            text = text.replacingOccurrences(of: placeholder, with: title)
+            values[parameter] = title
         }
-        return text
+        return Localization.fill(template, values)
     }
 }
 

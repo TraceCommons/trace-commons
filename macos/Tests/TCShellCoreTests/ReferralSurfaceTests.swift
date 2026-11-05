@@ -36,6 +36,10 @@ final class ReferralSurfaceTests: XCTestCase {
         XCTAssertEqual(ReferralCopy.render("a {code} b {n}", ["code": "TC-1", "n": "2"]), "a TC-1 b 2")
     }
 
+    func testRenderDoesNotInterpretPlaceholdersInsideUserValues() {
+        XCTAssertEqual(ReferralCopy.render("{code} / {n}", ["code": "TC-{n} %@", "n": "4"]), "TC-{n} %@ / 4")
+    }
+
     func testListingDecodesAndReadsAMissingCreateAsNo() throws {
         let json = #"""
         {"codes":[{"code_id":"c1","code":"TC-7K3M9-QX2RD","state":"live","referee_count":2,"bonus_owed_nano_usd":5,"future":1},
@@ -115,9 +119,11 @@ final class ReferralSurfaceTests: XCTestCase {
         XCTAssertEqual(surface.shownCode(hidden), "T:code_hidden")
         XCTAssertEqual(surface.copyAccessibilityName(live), "T:copy TC-AAAAA-BBBBB")
         XCTAssertEqual(surface.disableAccessibilityName(live), "T:off TC-AAAAA-BBBBB")
-        XCTAssertEqual(surface.joinedLine(1), "T:one 1")
-        XCTAssertEqual(surface.joinedLine(0), "T:many 0")
-        XCTAssertEqual(surface.joinedLine(4), "T:many 4")
+        // Plural rendering now reads the native catalog, not the two
+        // translated fixed-table fragments in this synthetic payload.
+        XCTAssertEqual(surface.joinedLine(1), "1 person joined")
+        XCTAssertEqual(surface.joinedLine(0), "0 people joined")
+        XCTAssertEqual(surface.joinedLine(4), "4 people joined")
     }
 
     func testListingLines() {

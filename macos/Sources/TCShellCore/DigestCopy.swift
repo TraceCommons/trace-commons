@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// The digest's words.
 ///
@@ -27,15 +28,15 @@ public enum DigestCopy {
         creditPending: Double
     ) -> String? {
         guard count > 0 else { return nil }
-        let noun = count == 1 ? "trace" : "traces"
-        var line = "\(count) \(noun) contributed"
         // Labels only, never a path: a notification is rendered by the
         // desktop environment and may be logged by it.
         let named = Set(projects.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+        var key = "app.digest.contributed"
+        var parameters: [String: String] = [:]
         if named.count == 1, let only = named.first {
-            line += " from \(only)"
+            key += "_project"
+            parameters["project"] = only
         }
-        line += "."
         // Stated only when there is some. "0 credit pending" reads as a
         // failure rather than as a fresh start, and the first digest after
         // arming a project is exactly when that would show. Always
@@ -50,8 +51,10 @@ public enum DigestCopy {
             // contribution, a different figure depending which machine the
             // contributor read it on.
             let rounded = (creditPending * 10).rounded() / 10
-            line += String(format: " %.1f credit pending.", rounded)
+            key += "_credit"
+            parameters["credit"] = rounded.formatted(.number.precision(.fractionLength(1))
+                .locale(Localization.current.locale))
         }
-        return line
+        return Localization.current.text(key, parameters: parameters, count: Int64(count))
     }
 }

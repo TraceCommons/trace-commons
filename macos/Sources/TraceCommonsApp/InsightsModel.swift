@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 import Observation
 import TCBridge
 import TCShellCore
@@ -233,25 +234,23 @@ enum InsightsOverviewWords {
     static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
 
     static func fill(_ template: String, _ values: [String: String]) -> String {
-        values.reduce(template) { result, hole in
-            result.replacingOccurrences(of: "{" + hole.key + "}", with: hole.value)
-        }
+        Localization.fill(template, values)
     }
 
     /// The figure, or the dash for unknown. A measured zero stays zero.
     static func figure(_ value: UInt64?, copy: [String: String]) -> String {
         guard let value else { return text("analytics_unavailable", copy) }
-        return value.formatted(.number.notation(.compactName))
+        return value.formatted(.number.notation(.compactName).locale(Localization.current.locale))
     }
 
     /// Whole percent from the core's per mille, rounded half up.
     static func share(_ share: InsightsShareFigure?, copy: [String: String]) -> String {
         guard let share else { return text("analytics_unavailable", copy) }
-        return String((share.permille + 5) / 10)
+        return Localization.current.number(Int64(clamping: (share.permille + 5) / 10))
     }
 
     /// Whole percent from a per mille, rounded half up.
-    static func percent(_ permille: UInt64) -> String { String((permille + 5) / 10) }
+    static func percent(_ permille: UInt64) -> String { Localization.current.number(Int64(clamping: (permille + 5) / 10)) }
 
     /// "vs last week". The core sends a figure only under feed T; any
     /// unavailable reason is the dash.
@@ -287,7 +286,7 @@ enum InsightsOverviewWords {
     /// The trace count alone (owner, 2026-10-29); what is known of them is
     /// `coverageInfo`, behind the line's "i".
     static func coverageLine(_ coverage: InsightsWeekCoverage, copy: [String: String]) -> String {
-        fill(text("analytics_coverage_line", copy), ["n": String(coverage.sessions)])
+        fill(text("analytics_coverage_line", copy), ["n": Localization.current.number(Int64(coverage.sessions))])
     }
 
     /// One sentence per count that is not 0: full details, some missing,
@@ -297,7 +296,7 @@ enum InsightsOverviewWords {
             ("analytics_coverage_info_known", "k", coverage.known),
             ("analytics_coverage_info_partial", "p", coverage.partial),
             ("analytics_coverage_info_unknown", "u", coverage.unknown),
-        ].filter { $0.2 > 0 }.map { fill(text($0.0, copy), [$0.1: String($0.2)]) }
+        ].filter { $0.2 > 0 }.map { fill(text($0.0, copy), [$0.1: Localization.current.number(Int64($0.2))]) }
         return sentences.isEmpty ? nil : sentences.joined(separator: " ")
     }
 
@@ -349,6 +348,7 @@ enum InsightsOverviewWords {
             return start
         }
         let style = Date.FormatStyle(timeZone: TimeZone(secondsFromGMT: 0) ?? .current).month(.abbreviated).day()
+            .locale(Localization.current.locale)
         return first.formatted(style) + " \u{2013} " + last.formatted(style)
     }
 }
@@ -387,7 +387,7 @@ struct InsightsDayPick: Equatable {
     /// The day dated `date` among the week's `days`; `nil` when none is.
     /// The weekday is in `locale`, the person's own outside the tests.
     static func pick(_ date: String?, days: [InsightsDayTokens]?,
-                     locale: Locale = .autoupdatingCurrent) -> InsightsDayPick? {
+                     locale: Locale = Localization.current.locale) -> InsightsDayPick? {
         guard let date, let index = days?.firstIndex(where: { $0.date == date }) else { return nil }
         let parse = Date.ISO8601FormatStyle().year().month().day()
         let wide = Date.FormatStyle(locale: locale, calendar: Calendar(identifier: .gregorian),
@@ -590,7 +590,7 @@ enum InsightsPatternsWords {
     static func claudeOnlyLine(_ patterns: InsightsWeekPatterns, copy: [String: String]) -> String? {
         guard patterns.claude_only else { return nil }
         return InsightsOverviewWords.fill(text("analytics_claude_sessions_only", copy), [
-            "k": String(patterns.claude_sessions), "n": String(patterns.sessions),
+            "k": Localization.current.number(Int64(patterns.claude_sessions)), "n": Localization.current.number(Int64(patterns.sessions)),
         ])
     }
 }
@@ -636,9 +636,10 @@ enum InsightsSessionsWords {
             var calendar = Calendar(identifier: .gregorian)
             calendar.timeZone = timeZone
             let startStyle = Date.FormatStyle(timeZone: timeZone).month(.abbreviated).day().hour().minute()
+                .locale(Localization.current.locale)
             let end: String
             if calendar.isDate(first, inSameDayAs: last) {
-                end = last.formatted(Date.FormatStyle(timeZone: timeZone).hour().minute())
+                end = last.formatted(Date.FormatStyle(timeZone: timeZone).hour().minute().locale(Localization.current.locale))
             } else if calendar.component(.year, from: first) == calendar.component(.year, from: last) {
                 end = last.formatted(startStyle)
             } else {
@@ -662,8 +663,8 @@ enum InsightsSessionsWords {
                                               ["harness": harness, "t": figure])
         }
         return InsightsOverviewWords.fill(text("analytics_session_label", copy), [
-            "date": first.formatted(Date.FormatStyle(timeZone: timeZone).month(.abbreviated).day()),
-            "time": first.formatted(Date.FormatStyle(timeZone: timeZone).hour().minute()),
+            "date": first.formatted(Date.FormatStyle(timeZone: timeZone).month(.abbreviated).day().locale(Localization.current.locale)),
+            "time": first.formatted(Date.FormatStyle(timeZone: timeZone).hour().minute().locale(Localization.current.locale)),
             "harness": harness,
             "t": figure,
         ])
@@ -819,7 +820,7 @@ enum InsightsGoalsWords {
     /// "Goals met {n} of {m}".
     static func metOf(_ goals: DaemonData.InsightsWeekGoals, copy: [String: String]) -> String {
         InsightsOverviewWords.fill(text("analytics_goals_met_of", copy), [
-            "n": String(goals.met), "m": String(goals.total),
+            "n": Localization.current.number(Int64(goals.met)), "m": Localization.current.number(Int64(goals.total)),
         ])
     }
 
@@ -845,7 +846,7 @@ enum InsightsGoalsWords {
     /// Hours and minutes the tool reported; the dash when it reported none.
     static func span(_ seconds: Int64?, copy: [String: String]) -> String {
         guard let seconds else { return dash(copy) }
-        return Duration.seconds(max(seconds, 0)).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))
+        return Duration.seconds(max(seconds, 0)).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated).locale(Localization.current.locale))
     }
 }
 
@@ -875,7 +876,7 @@ enum InsightsComparisonsWords {
     static func recapChange(_ source: InsightsRecapSource, sessions: UInt32, copy: [String: String]) -> String? {
         guard let permille = source.change_permille else { return nil }
         let key = permille < 0 ? "analytics_recap_fewer" : "analytics_recap_more"
-        return fill(text(key, copy), ["n": String(sessions), "p": InsightsOverviewWords.percent(permille.magnitude)])
+        return fill(text(key, copy), ["n": Localization.current.number(Int64(sessions)), "p": InsightsOverviewWords.percent(permille.magnitude)])
     }
 
     /// One item's line, by its rule; `nil` for a kind this build does not know.
@@ -898,7 +899,7 @@ enum InsightsComparisonsWords {
     static func recapThreshold(_ recap: InsightsRecap, copy: [String: String]) -> String? {
         guard let past = recap.past_threshold else { return nil }
         return fill(text("analytics_recap_threshold", copy), [
-            "n": String(past.sessions), "threshold": InsightsOverviewWords.figure(past.threshold, copy: copy),
+            "n": Localization.current.number(Int64(past.sessions)), "threshold": InsightsOverviewWords.figure(past.threshold, copy: copy),
         ])
     }
 }

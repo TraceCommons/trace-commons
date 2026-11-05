@@ -332,9 +332,18 @@ pub const QUIT_ALSO_STOPS: &str = "Quitting also ends any model calls still hand
 /// above it has already said everything that is true.
 #[must_use]
 pub fn serving_line(port: Option<u16>) -> String {
+    crate::localized_copy::english(&serving_message(port))
+}
+
+pub(crate) fn serving_message(port: Option<u16>) -> serde_json::Value {
+    use crate::localized_copy::text;
     match port {
-        Some(port) if port != 0 => format!("Port {port}"),
-        _ => String::new(),
+        Some(port) if port != 0 => text(
+            "inference.serving.port",
+            "Port {port}",
+            serde_json::json!({"port": port}),
+        ),
+        _ => text("inference.serving.empty", "", serde_json::json!({})),
     }
 }
 
@@ -1192,23 +1201,7 @@ pub fn harness_outcome_line(outcome: &str) -> &'static str {
 /// is settling whether anything has ever come through.
 #[must_use]
 pub fn harness_last_call_line(seconds_ago: Option<u64>) -> String {
-    let Some(seconds) = seconds_ago else {
-        return String::new();
-    };
-    let minutes = seconds / 60;
-    let hours = minutes / 60;
-    let days = hours / 24;
-    let (count, unit) = if seconds < 60 {
-        return "Last call: just now".to_string();
-    } else if minutes < 60 {
-        (minutes, "minute")
-    } else if hours < 24 {
-        (hours, "hour")
-    } else {
-        (days, "day")
-    };
-    let plural = if count == 1 { "" } else { "s" };
-    format!("Last call: {count} {unit}{plural} ago")
+    crate::localized_copy::english(&age_message(seconds_ago, false))
 }
 
 /// What the calls answered here have cost since midnight, assembled on this
@@ -1241,8 +1234,13 @@ pub fn harness_last_call_line(seconds_ago: Option<u64>) -> String {
 /// beside this sentence and only when this sentence is drawn at all.
 #[must_use]
 pub fn harness_spend_line(micros: Option<u64>) -> String {
+    crate::localized_copy::english(&harness_spend_message(micros))
+}
+
+pub(crate) fn harness_spend_message(micros: Option<u64>) -> serde_json::Value {
+    use crate::localized_copy::text;
     let Some(micros) = micros else {
-        return String::new();
+        return text("harness_spend_line.empty", "", serde_json::json!({}));
     };
     // Rounded to cents ONCE, before splitting. Dividing first and rounding
     // the remainder separately carries into a third digit -- 1_999_999
@@ -1253,12 +1251,17 @@ pub fn harness_spend_line(micros: Option<u64>) -> String {
         // Too small to show, and not nothing. Rounding it down into the
         // sentence a day with no calls gets would say something false about
         // a day that had them.
-        return "Today on this computer: under $0.01".to_string();
+        return text(
+            "harness_spend_line.subcent",
+            "Today on this computer: under {amount}",
+            serde_json::json!({"amount": currency_parameter("$0.01")}),
+        );
     }
-    format!(
-        "Today on this computer: ${}.{:02}",
-        cents / 100,
-        cents % 100
+    let amount = format!("${}.{:02}", cents / 100, cents % 100);
+    text(
+        "harness_spend_line.amount",
+        "Today on this computer: {amount}",
+        serde_json::json!({"amount": currency_parameter(&amount)}),
     )
 }
 
@@ -1719,10 +1722,24 @@ pub const ELIGIBILITY_REASON_RECEIPT_NOT_ISSUED: &str = "The model that answered
 /// submit and a whole-queue one, and only one of those is a folder.
 #[must_use]
 pub fn group_withheld_line(withheld: u64) -> String {
+    crate::localized_copy::english(&group_withheld_message(withheld))
+}
+
+pub(crate) fn group_withheld_message(withheld: u64) -> serde_json::Value {
+    use crate::localized_copy::{plural, text};
     match withheld {
-        0 => String::new(),
-        1 => "1 trace here cannot be sent, so it is not included.".to_string(),
-        n => format!("{n} traces here cannot be sent, so they are not included."),
+        0 => text(
+            "contribution_withheld_line.empty",
+            "",
+            serde_json::json!({}),
+        ),
+        n => plural(
+            "contribution_withheld_line.count",
+            "1 trace here cannot be sent, so it is not included.",
+            "{count} traces here cannot be sent, so they are not included.",
+            n,
+            serde_json::json!({}),
+        ),
     }
 }
 
@@ -2005,30 +2022,72 @@ pub const SPEND_ORG_PROMPT_DISMISS_ACCESSIBILITY_UNNAMED: &str =
 /// `current_name` is the current organization's name, when listed.
 #[must_use]
 pub fn spend_org_view(current_name: Option<&str>) -> serde_json::Value {
-    let prompt_line = match current_name {
-        Some(name) => SPEND_ORG_PROMPT_LINE.replace("{organization}", name),
-        None => SPEND_ORG_PROMPT_LINE_UNNAMED.to_owned(),
-    };
-    let dismiss_accessibility = match current_name {
-        Some(name) => SPEND_ORG_PROMPT_DISMISS_ACCESSIBILITY.replace("{organization}", name),
-        None => SPEND_ORG_PROMPT_DISMISS_ACCESSIBILITY_UNNAMED.to_owned(),
-    };
-    serde_json::json!({
-        "title": SPEND_ORG_TITLE,
-        "what": SPEND_ORG_WHAT,
-        "picker": SPEND_ORG_PICKER,
-        "switching": SPEND_ORG_SWITCHING,
-        "failed": SPEND_ORG_FAILED,
-        "session_expired": SPEND_ORG_SESSION_EXPIRED,
-        "refused": SPEND_ORG_REFUSED,
-        "revoke_pending": SPEND_ORG_REVOKE_PENDING,
-        "prompt_title": SPEND_ORG_PROMPT_TITLE,
-        "prompt_line": prompt_line,
-        "prompt_action": SPEND_ORG_PROMPT_ACTION,
-        "prompt_action_accessibility": SPEND_ORG_PROMPT_ACTION_ACCESSIBILITY,
-        "prompt_dismiss": SPEND_ORG_PROMPT_DISMISS,
-        "prompt_dismiss_accessibility": dismiss_accessibility,
-    })
+    let mut view = spend_org_messages(current_name);
+    for value in view
+        .as_object_mut()
+        .expect("view is an object")
+        .values_mut()
+    {
+        *value = serde_json::json!(crate::localized_copy::english(value));
+    }
+    view
+}
+
+pub(crate) fn spend_org_messages(current_name: Option<&str>) -> serde_json::Value {
+    use crate::localized_copy::text;
+    let mut fields = serde_json::Map::new();
+    for (field, english) in [
+        ("title", SPEND_ORG_TITLE),
+        ("what", SPEND_ORG_WHAT),
+        ("picker", SPEND_ORG_PICKER),
+        ("switching", SPEND_ORG_SWITCHING),
+        ("failed", SPEND_ORG_FAILED),
+        ("session_expired", SPEND_ORG_SESSION_EXPIRED),
+        ("refused", SPEND_ORG_REFUSED),
+        ("revoke_pending", SPEND_ORG_REVOKE_PENDING),
+        ("prompt_title", SPEND_ORG_PROMPT_TITLE),
+        ("prompt_action", SPEND_ORG_PROMPT_ACTION),
+        (
+            "prompt_action_accessibility",
+            SPEND_ORG_PROMPT_ACTION_ACCESSIBILITY,
+        ),
+        ("prompt_dismiss", SPEND_ORG_PROMPT_DISMISS),
+    ] {
+        fields.insert(
+            field.into(),
+            text(
+                &format!("spend_org_view.{field}"),
+                english,
+                serde_json::json!({}),
+            ),
+        );
+    }
+    for (field, named, unnamed) in [
+        (
+            "prompt_line",
+            SPEND_ORG_PROMPT_LINE,
+            SPEND_ORG_PROMPT_LINE_UNNAMED,
+        ),
+        (
+            "prompt_dismiss_accessibility",
+            SPEND_ORG_PROMPT_DISMISS_ACCESSIBILITY,
+            SPEND_ORG_PROMPT_DISMISS_ACCESSIBILITY_UNNAMED,
+        ),
+    ] {
+        let (variant, english, parameters) = match current_name {
+            Some(name) => ("named", named, serde_json::json!({"organization": name})),
+            None => ("unnamed", unnamed, serde_json::json!({})),
+        };
+        fields.insert(
+            field.into(),
+            text(
+                &format!("spend_org_view.{field}.{variant}"),
+                english,
+                parameters,
+            ),
+        );
+    }
+    serde_json::Value::Object(fields)
 }
 
 /// Canonical wording for the organization handoff; no shell chooses a payer.
@@ -2036,19 +2095,49 @@ pub fn funding_message(
     report: &crate::daemon::nearai_credential::funding::FundingReport,
 ) -> String {
     use crate::daemon::nearai_credential::funding::FundingReport;
-    match report {
+    let (state, name) = match report {
         FundingReport::Ready {
             organization_name, ..
-        } => format!("Organization: {organization_name}"),
-        FundingReport::NoSession | FundingReport::SessionExpired => {
-            "Sign in to manage billing.".into()
+        } => ("ready", organization_name.as_str()),
+        FundingReport::NoSession => ("no_session", ""),
+        FundingReport::SessionExpired => ("session_expired", ""),
+        FundingReport::NoInferenceKey => ("no_inference_key", ""),
+        FundingReport::NoOrganization => ("no_organization", ""),
+        FundingReport::Changed => ("changed", ""),
+        FundingReport::InvalidRequest => ("invalid_request", ""),
+        FundingReport::Unavailable => ("unavailable", ""),
+    };
+    crate::localized_copy::english(&funding_presentation(state, name))
+}
+
+pub(crate) fn funding_presentation(state: &str, organization_name: &str) -> serde_json::Value {
+    use crate::localized_copy::text;
+    let english = match state {
+        "ready" => {
+            return text(
+                "funding_message.ready",
+                "Organization: {organization}",
+                serde_json::json!({"organization": organization_name}),
+            );
         }
-        FundingReport::NoInferenceKey => "Sign in to NEAR AI to set up billing.".into(),
-        FundingReport::NoOrganization => "Couldn't find your organization. Sign in again.".into(),
-        // Approved by the owner 2026-11-04 (Settings copy pass 2, P208).
-        FundingReport::Changed => "Your account changed.".into(),
-        FundingReport::InvalidRequest | FundingReport::Unavailable => FUNDING_UNAVAILABLE.into(),
-    }
+        "no_session" | "session_expired" => "Sign in to manage billing.",
+        "no_inference_key" => "Sign in to NEAR AI to set up billing.",
+        "no_organization" => "Couldn't find your organization. Sign in again.",
+        "changed" => "Your account changed.",
+        "invalid_request" | "unavailable" => FUNDING_UNAVAILABLE,
+        _ => {
+            return text(
+                "funding_message.fallback",
+                FUNDING_UNAVAILABLE,
+                serde_json::json!({}),
+            );
+        }
+    };
+    text(
+        &format!("funding_message.{state}"),
+        english,
+        serde_json::json!({}),
+    )
 }
 
 /// What the figure covers, and what it therefore is not.
@@ -2168,24 +2257,48 @@ pub const BALANCE_NO_REMAINING: &str = "No spending limit set.";
 /// sentence for it on the remaining figure is [`BALANCE_NO_REMAINING`].
 #[must_use]
 pub fn format_amount(nanos: i64, scale: u8) -> String {
+    crate::localized_copy::english(&amount_message(nanos, scale, false))
+}
+
+/// Currency is already rounded here; the native renderer must not round the
+/// original ledger amount again. This helper only receives numeric amounts.
+fn currency_parameter(amount: &str) -> serde_json::Value {
+    serde_json::json!({"currency": amount.replace('$', ""), "code": "USD", "english": amount})
+}
+
+pub(crate) fn amount_message(nanos: i64, scale: u8, ceil: bool) -> serde_json::Value {
+    use crate::localized_copy::text;
     // 10^scale in the smallest unit per dollar. A scale past what a u128
     // holds is not a scale this build can honour, and saturating would
     // silently render every amount as sub-cent; refuse instead, which the
     // callers turn into "no figure" rather than a wrong one.
     let Some(divisor) = 10i128.checked_pow(u32::from(scale)) else {
-        return String::new();
+        return text("near_ai_balance_amount.empty", "", serde_json::json!({}));
     };
     let scaled = i128::from(nanos) * 100;
     // Euclidean division floors for a positive divisor, which is what makes
     // the rounding rule hold for a negative amount as well: an overdrawn
     // account rounds further into the red, never back toward zero.
-    let cents = scaled.div_euclid(divisor);
-    if cents == 0 && nanos > 0 {
-        return "less than $0.01".to_string();
+    let cents = if ceil {
+        -(-scaled).div_euclid(divisor)
+    } else {
+        scaled.div_euclid(divisor)
+    };
+    if nanos > 0 && scaled < divisor {
+        return text(
+            "near_ai_balance_amount.subcent",
+            "less than {amount}",
+            serde_json::json!({"amount": currency_parameter("$0.01")}),
+        );
     }
     let sign = if cents < 0 { "-" } else { "" };
     let magnitude = cents.unsigned_abs();
-    format!("{sign}${}.{:02}", magnitude / 100, magnitude % 100)
+    let amount = format!("{sign}${}.{:02}", magnitude / 100, magnitude % 100);
+    text(
+        "near_ai_balance_amount.amount",
+        "{amount}",
+        serde_json::json!({"amount": currency_parameter(&amount)}),
+    )
 }
 
 /// The NEAR AI balance's change over the last 24 hours, under the Balance
@@ -2199,11 +2312,19 @@ pub const CREDIT_RECEIVED_24H_UNAVAILABLE: &str = "Amount received in 24 hours u
 /// Incoming transfers only; a known empty ledger is explicitly zero.
 #[must_use]
 pub fn credit_received_24h_line(nanos: i64, scale: u8) -> String {
-    let amount = format_amount(nanos, scale);
-    if nanos < 0 || amount.is_empty() {
-        return String::new();
+    crate::localized_copy::english(&credit_received_message(nanos, scale))
+}
+
+pub(crate) fn credit_received_message(nanos: i64, scale: u8) -> serde_json::Value {
+    use crate::localized_copy::text;
+    if nanos < 0 || 10i128.checked_pow(u32::from(scale)).is_none() {
+        return text("near_ai_received_24h_line.empty", "", serde_json::json!({}));
     }
-    format!("{amount} received in the last 24 hours")
+    text(
+        "near_ai_received_24h_line.amount",
+        "{amount} received in the last 24 hours",
+        serde_json::json!({"amount": amount_message(nanos, scale, false)}),
+    )
 }
 
 /// [`BALANCE_CHANGE_24H`] for a change of `nanos`, or the EMPTY STRING for a
@@ -2211,16 +2332,43 @@ pub fn credit_received_24h_line(nanos: i64, scale: u8) -> String {
 /// the line never claims more movement, either way, than happened.
 #[must_use]
 pub fn balance_change_line(nanos: i64, scale: u8) -> String {
+    crate::localized_copy::english(&balance_change_message(nanos, scale))
+}
+
+pub(crate) fn balance_change_message(nanos: i64, scale: u8) -> serde_json::Value {
+    use crate::localized_copy::text;
     let magnitude = i64::try_from(nanos.unsigned_abs()).unwrap_or(i64::MAX);
+    let Some(divisor) = 10i128.checked_pow(u32::from(scale)) else {
+        return text(
+            "near_ai_balance_change_line.empty",
+            "",
+            serde_json::json!({}),
+        );
+    };
+    if i128::from(magnitude) * 100 < divisor {
+        return text(
+            "near_ai_balance_change_line.neutral",
+            BALANCE_CHANGE_24H,
+            serde_json::json!({"amount": currency_parameter("$0.00")}),
+        );
+    }
     let amount = format_amount(magnitude, scale);
-    if amount.is_empty() {
-        return String::new();
-    }
-    if nanos == 0 || amount == "$0.00" || amount == "less than $0.01" {
-        return BALANCE_CHANGE_24H.replace("{amount}", "$0.00");
-    }
-    let sign = if nanos > 0 { "+" } else { "-" };
-    BALANCE_CHANGE_24H.replace("{amount}", &format!("{sign}{amount}"))
+    let amount = if nanos > 0 {
+        // A currency formatter does not preserve an explicit positive sign.
+        // Keep the change's sign in a message, not in the decimal payload.
+        text(
+            "near_ai_balance_change_amount.positive",
+            "+{amount}",
+            serde_json::json!({"amount": currency_parameter(&amount)}),
+        )
+    } else {
+        currency_parameter(&format!("-{amount}"))
+    };
+    text(
+        "near_ai_balance_change_line.amount",
+        BALANCE_CHANGE_24H,
+        serde_json::json!({"amount": amount}),
+    )
 }
 
 /// What is left, as a sentence, or the sentence for there being no figure.
@@ -2231,14 +2379,12 @@ pub fn balance_change_line(nanos: i64, scale: u8) -> String {
 /// decision every shell eventually makes is `$0.00`.
 #[must_use]
 pub fn balance_remaining_line(nanos: Option<i64>, scale: u8) -> String {
-    let Some(nanos) = nanos else {
-        return BALANCE_NO_REMAINING.to_string();
-    };
-    let amount = format_amount(nanos, scale);
-    if amount.is_empty() {
-        return BALANCE_UNKNOWN.to_string();
-    }
-    format!("{amount} left")
+    crate::localized_copy::english(&balance_figure_message(
+        "near_ai_balance_remaining_line",
+        nanos,
+        None,
+        scale,
+    ))
 }
 
 /// The configured ceiling, or nothing at all.
@@ -2248,14 +2394,12 @@ pub fn balance_remaining_line(nanos: Option<i64>, scale: u8) -> String {
 /// an account with no ceiling. Two sentences saying it is one too many.
 #[must_use]
 pub fn balance_limit_line(nanos: Option<i64>, scale: u8) -> String {
-    let Some(nanos) = nanos else {
-        return String::new();
-    };
-    let amount = format_amount(nanos, scale);
-    if amount.is_empty() {
-        return String::new();
-    }
-    format!("Limit: {amount}")
+    crate::localized_copy::english(&balance_figure_message(
+        "near_ai_balance_limit_line",
+        nanos,
+        None,
+        scale,
+    ))
 }
 
 /// Spent, as [`balance_spent_line`] draws it beside a remaining figure:
@@ -2274,29 +2418,53 @@ pub fn balance_limit_line(nanos: Option<i64>, scale: u8) -> String {
 /// "less than $0.01", never "$0.01": that would be a cent nobody spent. In
 /// that one case the three do not add up on the cents shown, because one
 /// of them is not a figure.
-fn format_spent_beside_remaining(nanos: i64, scale: u8) -> String {
-    let Some(divisor) = 10i128.checked_pow(u32::from(scale)) else {
-        return String::new();
+pub(crate) fn balance_figure_message(
+    operation: &str,
+    nanos: Option<i64>,
+    remaining: Option<i64>,
+    scale: u8,
+) -> serde_json::Value {
+    use crate::localized_copy::text;
+    let Some(nanos) = nanos else {
+        return text(
+            &format!("{operation}.absent"),
+            if operation == "near_ai_balance_remaining_line" {
+                BALANCE_NO_REMAINING
+            } else {
+                ""
+            },
+            serde_json::json!({}),
+        );
     };
-    let scaled = i128::from(nanos) * 100;
-    if nanos > 0 && scaled < divisor {
-        return "less than $0.01".to_string();
+    if 10i128.checked_pow(u32::from(scale)).is_none() {
+        return text(
+            &format!("{operation}.invalid_scale"),
+            if operation == "near_ai_balance_remaining_line" {
+                BALANCE_UNKNOWN
+            } else {
+                ""
+            },
+            serde_json::json!({}),
+        );
     }
-    // `-(-a).div_euclid(b)` is the ceiling for a positive divisor, for
-    // either sign of `a`: a refund larger than the spend (a negative
-    // figure) rounds toward zero, which is what keeps
-    // `limit - spent == left` when it does.
-    let cents = -(-scaled).div_euclid(divisor);
-    let sign = if cents < 0 { "-" } else { "" };
-    let magnitude = cents.unsigned_abs();
-    format!("{sign}${}.{:02}", magnitude / 100, magnitude % 100)
+    let template = match operation {
+        "near_ai_balance_remaining_line" => "{amount} left",
+        "near_ai_balance_limit_line" => "Limit: {amount}",
+        _ => "Spent: {amount}",
+    };
+    let ceil = operation == "near_ai_balance_spent_line" && remaining.is_some();
+    text(
+        &format!("{operation}.amount"),
+        template,
+        serde_json::json!({"amount": amount_message(nanos, scale, ceil)}),
+    )
 }
 
 /// What the account has spent, all of it, everywhere.
 ///
 /// `remaining` is the same reading's remaining figure, passed so this can
 /// choose its rounding: beside a remaining figure Spent rounds UP to the
-/// cent ([`format_spent_beside_remaining`], the one exception to
+/// cent ([`amount_message`], the one exception to
 /// [`format_amount`]'s rule), so Limit, Spent and what is left add up.
 /// With no remaining figure (an account nobody capped) there is nothing to
 /// add up with, and Spent is [`format_amount`] like every other amount.
@@ -2307,18 +2475,12 @@ fn format_spent_beside_remaining(nanos: i64, scale: u8) -> String {
 /// true.
 #[must_use]
 pub fn balance_spent_line(nanos: Option<i64>, remaining: Option<i64>, scale: u8) -> String {
-    let Some(nanos) = nanos else {
-        return String::new();
-    };
-    let amount = if remaining.is_some() {
-        format_spent_beside_remaining(nanos, scale)
-    } else {
-        format_amount(nanos, scale)
-    };
-    if amount.is_empty() {
-        return String::new();
-    }
-    format!("Spent: {amount}")
+    crate::localized_copy::english(&balance_figure_message(
+        "near_ai_balance_spent_line",
+        nanos,
+        remaining,
+        scale,
+    ))
 }
 
 /// How long ago THIS COMPUTER asked, assembled on this side.
@@ -2338,23 +2500,88 @@ pub fn balance_spent_line(nanos: Option<i64>, remaining: Option<i64>, scale: u8)
 /// rather than with "just now" invented under it.
 #[must_use]
 pub fn balance_observed_line(seconds_ago: Option<u64>) -> String {
+    crate::localized_copy::english(&age_message(seconds_ago, true))
+}
+
+pub(crate) fn age_message(seconds_ago: Option<u64>, balance: bool) -> serde_json::Value {
+    use crate::localized_copy::{plural, text};
+    let operation = if balance {
+        "near_ai_balance_observed_line"
+    } else {
+        "harness_last_call_line"
+    };
     let Some(seconds) = seconds_ago else {
-        return String::new();
+        return text(&format!("{operation}.empty"), "", serde_json::json!({}));
     };
     let minutes = seconds / 60;
     let hours = minutes / 60;
     let days = hours / 24;
-    let (count, unit) = if seconds < 60 {
-        return "Checked just now".to_string();
+    let (count, unit, one, other) = if seconds < 60 {
+        return text(
+            &format!("{operation}.now"),
+            if balance {
+                "Checked just now"
+            } else {
+                "Last call: just now"
+            },
+            serde_json::json!({}),
+        );
     } else if minutes < 60 {
-        (minutes, "minute")
+        if balance {
+            (
+                minutes,
+                "minute",
+                "Checked {count} minute ago",
+                "Checked {count} minutes ago",
+            )
+        } else {
+            (
+                minutes,
+                "minute",
+                "Last call: {count} minute ago",
+                "Last call: {count} minutes ago",
+            )
+        }
     } else if hours < 24 {
-        (hours, "hour")
+        if balance {
+            (
+                hours,
+                "hour",
+                "Checked {count} hour ago",
+                "Checked {count} hours ago",
+            )
+        } else {
+            (
+                hours,
+                "hour",
+                "Last call: {count} hour ago",
+                "Last call: {count} hours ago",
+            )
+        }
     } else {
-        (days, "day")
+        if balance {
+            (
+                days,
+                "day",
+                "Checked {count} day ago",
+                "Checked {count} days ago",
+            )
+        } else {
+            (
+                days,
+                "day",
+                "Last call: {count} day ago",
+                "Last call: {count} days ago",
+            )
+        }
     };
-    let plural = if count == 1 { "" } else { "s" };
-    format!("Checked {count} {unit}{plural} ago")
+    plural(
+        &format!("{operation}.{unit}"),
+        one,
+        other,
+        count,
+        serde_json::json!({}),
+    )
 }
 
 /// The sentence for one `near_ai_balance` `state`.

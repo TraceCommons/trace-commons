@@ -5399,6 +5399,37 @@ fn the_residual_secret_line_crosses_the_abi_with_its_sites() {
         take_owned(unsafe { tc_residual_secret_line_text(3, not_a_list.as_ptr()) }),
         residual_secret_line(3, &[])
     );
+
+    // Localization carries facts, never a preselected English plural. A
+    // failed scan is a different claim, not zero (or one) detected secret.
+    use trace_commons_contributor_ffi::tc_residual_secret_message_json;
+    for count in [0, 1, 2, u32::MAX] {
+        assert_eq!(
+            json_owned(unsafe { tc_residual_secret_message_json(count, std::ptr::null()) }),
+            serde_json::json!({"key": "privacy.residual.secrets", "parameters": {"count": count}})
+        );
+    }
+    let unchecked = cstr_str(
+        &serde_json::to_string(&[
+            trace_commons_contributor::envelope::RESIDUAL_SCAN_UNAVAILABLE_SITE,
+        ])
+        .unwrap(),
+    );
+    assert_eq!(
+        json_owned(unsafe { tc_residual_secret_message_json(7, unchecked.as_ptr()) }),
+        serde_json::json!({"key": "privacy.residual.unchecked"})
+    );
+    let mixed = cstr_str(
+        &serde_json::to_string(&[
+            trace_commons_contributor::envelope::RESIDUAL_SCAN_UNAVAILABLE_SITE,
+            "events.3.correction",
+        ])
+        .unwrap(),
+    );
+    assert_eq!(
+        json_owned(unsafe { tc_residual_secret_message_json(2, mixed.as_ptr()) }),
+        serde_json::json!({"key": "privacy.residual.secrets", "parameters": {"count": 2}})
+    );
 }
 
 #[test]
