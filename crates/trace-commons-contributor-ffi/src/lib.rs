@@ -4997,6 +4997,11 @@ pub extern "C" fn tc_near_ai_balance_limit_line(
 /// no line at all. A zero is NOT that: an account that has spent nothing
 /// renders "$0.00", which is true.
 ///
+/// `remaining_present` is whether the same reading's `remaining_nanos` is
+/// non-null. Beside a remaining figure Spent rounds UP to the cent, so
+/// Limit, Spent and what is left add up; with none it is floored like every
+/// other amount. See `private_inference_copy::balance_spent_line`.
+///
 /// The figure is the WHOLE ACCOUNT, not this computer -- the payload's
 /// `balance_what` says so, and it belongs beside this sentence.
 ///
@@ -5007,11 +5012,34 @@ pub extern "C" fn tc_near_ai_balance_spent_line(
     present: i32,
     nanos: i64,
     scale: u8,
+    remaining_present: i32,
 ) -> *mut c_char {
     guarded_string_no_err(|| {
         let nanos = (present != 0).then_some(nanos);
+        // Only whether there is one decides the rounding, not its value.
+        let remaining = (remaining_present != 0).then_some(0);
         Ok(to_owned_cstring(
-            &trace_commons_contributor::private_inference_copy::balance_spent_line(nanos, scale),
+            &trace_commons_contributor::private_inference_copy::balance_spent_line(
+                nanos, remaining, scale,
+            ),
+        ))
+    })
+}
+
+/// A credit figure as every shell draws it, from
+/// `history_copy::credit_figure`: tenths rounded half away from zero, whole
+/// figures whole ("48"), one decimal otherwise ("12.5"), "<0.1" above zero
+/// and under 0.05, no thousands separator, and a dash for a value that is
+/// not finite. Pass the wire's figure; a shell with no figure draws its own
+/// dash and does not call this.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_credit_figure(value: f64) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::history_copy::credit_figure(value),
         ))
     })
 }

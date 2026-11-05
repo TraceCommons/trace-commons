@@ -247,11 +247,11 @@ public sealed class HistoryViewModel : INotifyPropertyChanged
     // unadorned, no symbol, nothing that could read as a score. The prose
     // beside it is what stops the number being mistaken for one.
 
-    public string CreditRecordedText =>
-        string.Format(CultureInfo.CurrentCulture, "{0:0.0}", _rollup.CreditFinal);
+    // The core's credit figure, so 4.25 reads 4.3 and a whole figure reads
+    // whole here as it does on every other shell.
+    public string CreditRecordedText => HistoryCopy.CreditFigure(_rollup.CreditFinal);
 
-    public string CreditPendingText =>
-        string.Format(CultureInfo.CurrentCulture, "{0:0.0}", _rollup.CreditPending);
+    public string CreditPendingText => HistoryCopy.CreditFigure(_rollup.CreditPending);
 
     public string CreditBody => HistoryCopy.CreditBody;
 
@@ -304,7 +304,7 @@ public sealed class HistoryViewModel : INotifyPropertyChanged
 
     public string CommunityCreditText =>
         _rollup.Community is { } standing
-            ? string.Format(CultureInfo.CurrentCulture, "{0:0.0}", standing.NoveltyCredit)
+            ? HistoryCopy.CreditFigure(standing.NoveltyCredit)
             : "—";
 
     public string CommunityAcceptedText =>

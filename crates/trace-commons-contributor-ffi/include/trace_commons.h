@@ -1401,13 +1401,31 @@ char*       tc_near_ai_balance_limit_line(int32_t present, int64_t nanos, uint8_
  * line at all. A zero is NOT that: an account that has spent nothing renders
  * "$0.00", which is true.
  *
+ * remaining_present is whether the same reading's remaining_nanos is
+ * non-null. Beside a remaining figure Spent rounds UP to the cent, so Limit,
+ * Spent and what is left add up; with none it is floored like every other
+ * amount. A spend above zero and under a cent is "less than $0.01" either
+ * way.
+ *
  * The figure is the WHOLE ACCOUNT, not this computer -- the payload's
  * balance_what says so, and it belongs beside this sentence.
  *
  * Returns an owned string; free it with tc_string_free. NULL only on a caught
  * panic.
  */
-char*       tc_near_ai_balance_spent_line(int32_t present, int64_t nanos, uint8_t scale);
+char*       tc_near_ai_balance_spent_line(int32_t present, int64_t nanos, uint8_t scale,
+                                          int32_t remaining_present);
+
+/* A credit figure as every shell draws it: tenths rounded half away from
+ * zero, whole figures whole ("48"), one decimal otherwise ("12.5"), "<0.1"
+ * above zero and under 0.05, no thousands separator, and a dash for a value
+ * that is not finite. A shell with no figure draws its own dash and does not
+ * call this.
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_credit_figure(double value);
 
 /* How long ago THIS COMPUTER asked, assembled.
  *

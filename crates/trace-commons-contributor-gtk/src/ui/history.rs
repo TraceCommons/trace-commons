@@ -258,10 +258,14 @@ fn render(
             // the one being reported, and colouring it would make the pair
             // read as good news and bad news rather than as one ledger.
             for (label, value, muted) in [
-                ("Recorded", format!("{:.1}", rollup.credit_final), false),
+                (
+                    "Recorded",
+                    copy::credit_figure(f64::from(rollup.credit_final)),
+                    false,
+                ),
                 (
                     "Still being scored",
-                    format!("{:.1}", rollup.credit_pending),
+                    copy::credit_figure(f64::from(rollup.credit_pending)),
                     true,
                 ),
             ] {
@@ -873,10 +877,14 @@ fn withdraw(app: &Rc<App>, submission_id: &str) {
 /// what the action achieved.
 fn credit_line(record: &HistoryRecord) -> Option<String> {
     match (record.credit_points_final, record.credit_points_pending) {
-        (Some(final_points), _) => Some(format!("credit {final_points:.1}")),
-        (None, pending) if pending > 0.0 => {
-            Some(format!("credit {pending:.1}, still being scored"))
-        }
+        (Some(final_points), _) => Some(format!(
+            "credit {}",
+            copy::credit_figure(f64::from(final_points))
+        )),
+        (None, pending) if pending > 0.0 => Some(format!(
+            "credit {}, still being scored",
+            copy::credit_figure(f64::from(pending))
+        )),
         _ => None,
     }
 }

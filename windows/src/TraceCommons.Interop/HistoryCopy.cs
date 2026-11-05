@@ -279,17 +279,20 @@ public static class HistoryCopy
     {
         if (creditFinal is { } settled)
         {
-            return string.Format(
-                System.Globalization.CultureInfo.CurrentCulture,
-                "credit {0:0.0}",
-                settled);
+            return "credit " + CreditFigure(settled);
         }
 
         return pending > 0f
-            ? string.Format(
-                System.Globalization.CultureInfo.CurrentCulture,
-                "credit {0:0.0}, still being scored",
-                pending)
+            ? "credit " + CreditFigure(pending) + ", still being scored"
             : null;
     }
+
+    /// <summary>
+    /// A credit figure in the core's one rule, the same on every shell:
+    /// tenths rounded half away from zero (4.25 is 4.3), whole figures whole
+    /// ("48", "0"), one decimal otherwise, "&lt;0.1" above zero and under 0.05,
+    /// no thousands separator.
+    /// </summary>
+    public static string CreditFigure(double value) =>
+        NativeMethods.TakeOwnedString(NativeMethods.tc_credit_figure(value)) ?? "\u2014";
 }
