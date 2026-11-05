@@ -238,8 +238,9 @@ public sealed class TrayMenuModel
         string week = string.Format(
             CultureInfo.CurrentCulture,
             "This week: {0} contributed, {1} held for privacy review",
-            rollup.Week.Submitted,
-            rollup.Week.Quarantined);
+            // The core's Contributed figure; a dash when it was not sent.
+            rollup.Week.Contributed is { } contributed ? HistoryCopy.CountFigure(contributed) : "\u2014",
+            HistoryCopy.CountFigure(rollup.Week.Quarantined));
 
         return new TrayMenuModel(
             status.Paused,

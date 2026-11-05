@@ -601,10 +601,13 @@ fn render_week(app: &Rc<App>) {
         .spacing(space::M)
         .homogeneous(true)
         .build();
+    // The core's Contributed figure (accepted plus waiting to be scored),
+    // the one every shell shows under this word. `submitted` alone is only
+    // the waiting part of it.
     cards.append(&stat_card(
         Tone::Clear,
         copy::CONTRIBUTED,
-        rollup.week.submitted,
+        rollup.week.contributed,
     ));
     cards.append(&stat_card(
         Tone::Held,
@@ -638,7 +641,8 @@ fn stat_card(tone: Tone, label: &str, value: u32) -> gtk::Box {
     card.append(&head);
 
     let figure = gtk::Label::builder()
-        .label(value.to_string())
+        // The core's grouping ("1,234"), as every shell draws a count.
+        .label(copy::count_figure(u64::from(value)))
         .xalign(0.0)
         .build();
     figure.add_css_class("tc-figure");

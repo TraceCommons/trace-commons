@@ -1416,6 +1416,10 @@ extension DaemonData {
         public let quarantined: Int?
         public let withdrawn: Int?
         public let other: Int?
+        /// The core's Contributed figure: accepted plus waiting to be
+        /// scored, never held (held is its own figure). Read, never re-added
+        /// from the buckets; nil from an older daemon, drawn as a dash.
+        public let contributed: Int?
     }
 
     public struct Community: Codable, Equatable, Sendable {

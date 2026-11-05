@@ -888,7 +888,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     public bool HasBalanceLimitText => BalanceLimitText.Length > 0;
 
     public string BalanceSpentText =>
-        NearAiBalanceSurface.SpentLine(_balance.TotalSpentNanos, _balance.Scale);
+        NearAiBalanceSurface.SpentLine(_balance.TotalSpentNanos, _balance.RemainingNanos, _balance.Scale);
 
     public bool HasBalanceSpentText => BalanceSpentText.Length > 0;
 

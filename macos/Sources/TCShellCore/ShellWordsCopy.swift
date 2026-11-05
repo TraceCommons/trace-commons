@@ -158,10 +158,11 @@ public struct ShellWordsCopy: Decodable, Equatable, Sendable {
     public let scrubbing: Scrubbing
     public let settings: Settings
     public let pausedNotice: PausedNotice
-    /// Settings > Projects' summary and Manage sheet (approved by the owner
-    /// 2026-11-04, #1952). Optional so an older core still decodes; the
-    /// card and the sheet draw nothing that needs a word it lacks.
-    public let projectsManager: ProjectsManager?
+    /// Settings > Projects' summary and Manage sheet (#1952). Required: the
+    /// core is bundled with the app, so it never lacks them, and an
+    /// optional table let a missing one remove every mode control from
+    /// Settings > Projects.
+    public let projectsManager: ProjectsManager
 
     /// `shell_words_copy::ProjectsManagerWords`.
     public struct ProjectsManager: Decodable, Equatable, Sendable {
@@ -180,6 +181,18 @@ public struct ShellWordsCopy: Decodable, Equatable, Sendable {
         public let groupAccessibility: String
         /// `Select {title}`: a project's checkbox's accessible name.
         public let selectAccessibility: String
+        /// The search field's prompt, apart from its label (`search`).
+        public let searchPrompt: String
+        /// The checkbox above the list that selects every project shown.
+        public let selectAll: String
+        /// `Select {title} projects`: a group header's checkbox.
+        public let selectGroupAccessibility: String
+        /// `Set {title} projects`: a group header's mode menu.
+        public let groupMenuAccessibility: String
+        /// `Set {count} selected projects`: the bulk menu.
+        public let bulkMenuAccessibility: String
+        /// `{count} of {total} changed.`: a bulk change stopped part way.
+        public let changedSome: String
     }
 
     /// The Traces tab's resume notice (approved 2026-11-04): Settings'

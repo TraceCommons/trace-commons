@@ -550,11 +550,18 @@ public struct GlassLegendCell: View {
     private let dot: Dot
     private let label: String
     private let value: String
+    /// The first answer has not come: a placeholder bar in the value's
+    /// place, neither a zero nor a dash (a dash says no value was given).
+    private var loading = false
 
-    public init(_ label: String, value: String, status: GlassStatus) {
+    /// The loading placeholder: about two figures wide.
+    public static let loadingWidth: CGFloat = 24
+
+    public init(_ label: String, value: String, status: GlassStatus, loading: Bool = false) {
         self.label = label
         self.value = value
         self.dot = .status(status)
+        self.loading = loading
     }
 
     /// How far a long label may shrink before it truncates.
@@ -570,9 +577,13 @@ public struct GlassLegendCell: View {
                     .truncationMode(.tail)
             }
             Spacer(minLength: GlassTokens.Space.s4)
-            Text(value).monospacedDigit().fontWeight(.semibold).foregroundStyle(GlassColor.textPrimary)
-                .lineLimit(1)
-                .fixedSize()
+            if loading {
+                GlassSkeleton(width: Self.loadingWidth)
+            } else {
+                Text(value).monospacedDigit().fontWeight(.semibold).foregroundStyle(GlassColor.textPrimary)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
         }
         .glassType(GlassTokens.TypeScale.label.weight(.regular))
         .padding(.horizontal, 10)

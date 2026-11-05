@@ -90,11 +90,17 @@ const DEFAULT_MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 /// concurrency that collapsed. So the bound is set strictly under the 8 that
 /// is known to fail, not at some number that merely sounds safe.
 ///
+/// In `full-pipeline` the classifier overlap is no longer set by this number:
+/// `--max-classify-in-flight` bounds classify calls across all requests, and
+/// one request may use all of it. This bounds requests, and so memory.
+///
 /// The other constraint is memory, and it is what rules out a much larger
 /// value: a request at the 64 MiB body cap is buffered whole, parsed into an
 /// owned transcript, redacted into another, and serialised again -- several
 /// tens of megabytes each, so a couple of hundred megabytes per slot at the
-/// cap. Four slots is on the order of a gigabyte in the worst case, which a
+/// cap. In `full-pipeline` the contribution path holds one more copy of the
+/// raw contribution while it runs, for the pass that records what to
+/// classify. Four slots is on the order of a gigabyte in the worst case, which a
 /// modestly provisioned CVM survives and sixteen would not.
 ///
 /// In `full-pipeline` a request is IO-bound -- a serial chain of network calls
@@ -182,6 +188,19 @@ struct Args {
         default_value_t = DEFAULT_MAX_CONCURRENT_REQUESTS
     )]
     max_concurrent_requests: usize,
+
+    /// Prose-classifier calls in flight at once, across every request this
+    /// process serves. Only `full-pipeline` makes such calls. A contribution's
+    /// text leaves are classified concurrently up to this bound instead of one
+    /// at a time. See
+    /// [`trace_commons_server::witness_service::prefetch::DEFAULT_MAX_CLASSIFY_IN_FLIGHT`]
+    /// for why the default is what it is.
+    #[arg(
+        long,
+        env = "TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT",
+        default_value_t = trace_commons_server::witness_service::prefetch::DEFAULT_MAX_CLASSIFY_IN_FLIGHT
+    )]
+    max_classify_in_flight: usize,
 
     /// Slots left available to ordinary calls when background calls fill
     /// their cooperative budget. Defaults to one, or zero for a one-slot
@@ -359,6 +378,9 @@ async fn main() -> Result<()> {
     if args.max_concurrent_requests == 0 {
         bail!("TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS must be greater than zero");
     }
+    if args.max_classify_in_flight == 0 {
+        bail!("TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT must be greater than zero");
+    }
     let reserved_interactive_slots = resolved_reserved_interactive_slots(
         args.max_concurrent_requests,
         args.reserved_interactive_slots,
@@ -421,6 +443,7 @@ async fn main() -> Result<()> {
         max_request_bytes = args.max_request_bytes,
         max_concurrent_requests = args.max_concurrent_requests,
         request_timeout_secs = args.request_timeout_secs,
+        max_classify_in_flight = args.max_classify_in_flight,
         "witness ready"
     );
 
@@ -453,7 +476,7 @@ async fn main() -> Result<()> {
             "witness redaction pipeline"
         );
         (Arc::new(FullPipelineRedaction::new(known_path_prefixes.clone(), adapter.clone(), backend)),
-         Arc::new(trace_commons_server::witness_service::PipelineContributionRedaction::with_privacy_filter(known_path_prefixes, adapter, backend)))
+         Arc::new(trace_commons_server::witness_service::prefetch::PrefetchingContributionRedaction::new(known_path_prefixes, adapter, backend, args.max_classify_in_flight)))
     } else {
         (Arc::new(DeterministicRedaction::new(known_path_prefixes.clone())),
          Arc::new(trace_commons_server::witness_service::PipelineContributionRedaction::deterministic_only(known_path_prefixes)))

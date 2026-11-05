@@ -26,7 +26,7 @@ final class ShellWordsCopyExportTests: XCTestCase {
             ("withdrawal", copy.withdrawal), ("public_profile", copy.publicProfile), ("queue", copy.queue),
             ("history", copy.history), ("scrubbing", copy.scrubbing), ("settings", copy.settings),
             ("paused_notice", copy.pausedNotice),
-            ("projects_manager", try XCTUnwrap(copy.projectsManager)),
+            ("projects_manager", copy.projectsManager),
         ]
         for (name, decoded) in tables {
             let nested = try XCTUnwrap(object[name] as? [String: Any], name)
@@ -48,8 +48,12 @@ final class ShellWordsCopyExportTests: XCTestCase {
     /// is titled through the one Never confirmation's words.
     func testTheProjectsManagerWordsDecode() throws {
         let copy = try XCTUnwrap(ShellWordsCopy.decode(fromJSON: TCCoreCopy.shellWordsCopyJSON()))
-        let words = try XCTUnwrap(copy.projectsManager)
+        let words = copy.projectsManager
         XCTAssertEqual(words.manage, "Manage\u{2026}")
+        XCTAssertEqual(ShellWordsCopy.fill(words.changedSome, ["count": "3", "total": "5"]), "3 of 5 changed.")
+        XCTAssertEqual(
+            ShellWordsCopy.fill(words.bulkMenuAccessibility, ["count": "4"]), "Set 4 selected projects")
+        XCTAssertNotEqual(words.searchPrompt, words.search)
         XCTAssertEqual(ShellWordsCopy.fill(words.selected, ["count": "2"]), "2 selected")
         let many = ShellWordsCopy.fill(words.projectsCount, ["count": "3"])
         let ignore = try XCTUnwrap(ProjectIgnoreCopy.decode(fromJSON: TCCoreCopy.projectIgnoreCopyJSON(project: many, pending: 4)))

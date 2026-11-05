@@ -561,7 +561,11 @@ pub const NOT_SYNCED_YET: &str = "Not synced yet";
 // The status words are the core's (`history_copy::STATUS_LABELS`), the
 // table every shell reads; the tallies and headings here reuse them.
 pub use trace_commons_contributor::history_copy::IN_THE_COMMONS as HISTORY_IN_THE_COMMONS;
+// Every credit figure on History, the core's rule (half away from zero,
+// whole is whole, "<0.1" for a sliver), so this shell reads 4.3 where the
+// others do.
 pub use trace_commons_contributor::history_copy::WAITING_TO_BE_SCORED as HISTORY_WAITING_TO_BE_SCORED;
+pub use trace_commons_contributor::history_copy::{count_figure, credit_figure};
 
 /// §5.3's section heading over the record rows.
 pub const EVERYTHING_CONTRIBUTED: &str = "Everything you've contributed";

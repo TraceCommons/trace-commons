@@ -68,6 +68,7 @@
 pub mod enclave;
 pub mod http;
 pub mod inference;
+pub mod prefetch;
 pub mod surface;
 
 use async_trait::async_trait;

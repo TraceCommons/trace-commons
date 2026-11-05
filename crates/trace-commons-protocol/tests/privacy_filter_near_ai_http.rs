@@ -4,15 +4,15 @@ use std::time::Duration;
 
 use serde_json::json;
 use trace_commons_protocol::privacy_filter_near_ai::{
-    MAX_CLASSIFY_ATTEMPTS, MAX_CLASSIFY_INPUT_TOKENS, MAX_CLASSIFY_REQUEST_BODY_BYTES,
+    MAX_CLASSIFY_413_SPLITS, MAX_CLASSIFY_ATTEMPTS, MAX_CLASSIFY_REQUEST_BODY_BYTES,
     MAX_CONCURRENT_CLASSIFY_WINDOWS as CLASSIFY_CONCURRENCY, NearAiPrivacyFilterAdapter,
 };
 use trace_commons_protocol::trace_contribution::TraceContributionError;
 
-/// Roughly the byte span of one full window for this filler, at the sparse
-/// (prose-like) end of token density. Windows are budgeted in TOKENS now, so
-/// tests size their filler from the token budget rather than a byte constant.
-const APPROX_BYTES_PER_WINDOW: usize = MAX_CLASSIFY_INPUT_TOKENS * 4;
+/// Roughly the byte span of one full window. Windows are sized by request
+/// body, and plain filler escapes to little more than its length, so a field
+/// this long fills about one window.
+const APPROX_BYTES_PER_WINDOW: usize = MAX_CLASSIFY_REQUEST_BODY_BYTES;
 use trace_commons_protocol::trace_contribution::{PrivacyFilterAdapter, run_privacy_filter_canary};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -811,4 +811,148 @@ async fn a_span_without_text_fails_closed() {
             .to_string()
             .contains("privacy_filter_span_text_mismatch")
     );
+}
+
+fn adapter_with_cap(base_url: String, cap: usize) -> NearAiPrivacyFilterAdapter {
+    NearAiPrivacyFilterAdapter::with_max_request_body_bytes(
+        base_url,
+        "openai/privacy-filter",
+        "test-api-key-do-not-leak",
+        Duration::from_secs(5),
+        1_000_000,
+        cap,
+    )
+    .expect("adapter builds")
+}
+
+/// A stand-in for an endpoint whose body limit has fallen to `limit`: a 413
+/// above it, and below it a span on every "bob@example.com" at the window's
+/// own codepoint offsets -- derived from the request, so a split window is
+/// asked a different question and answered for it.
+fn emails_under_body_limit(
+    limit: usize,
+) -> impl Fn(&wiremock::Request) -> ResponseTemplate + Send + Sync + 'static {
+    move |req: &wiremock::Request| {
+        if req.body.len() > limit {
+            return ResponseTemplate::new(413)
+                .set_body_string("Failed to buffer the request body: length limit exceeded");
+        }
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        let input = body["input"].as_str().unwrap();
+        let spans: Vec<serde_json::Value> = input
+            .match_indices("bob@example.com")
+            .map(|(byte, needle)| {
+                let start = input[..byte].chars().count();
+                json!({
+                    "category": "private_email",
+                    "start": start,
+                    "end": start + needle.chars().count(),
+                    "score": 0.99,
+                    "text": needle,
+                })
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({ "data": [{ "spans": spans }] }))
+    }
+}
+
+/// Escape-heavy multibyte filler with the email scattered through it.
+fn escape_heavy_field_with_emails(lines: usize) -> String {
+    (0..lines)
+        .map(|i| {
+            if i % 997 == 0 {
+                format!("{i} \"caf\u{e9}\" \u{4e2d}\u{1f600} mail bob@example.com\\x\n")
+            } else {
+                format!("{i} \"caf\u{e9}\" \u{4e2d}\u{1f600} C:\\dir\\f{i}\t\\\"\n")
+            }
+        })
+        .collect()
+}
+
+/// The endpoint's limit falls under the cap: every full window is answered
+/// with a 413, is halved -- twice, here -- and the field still redacts to
+/// exactly what an adapter whose cap was under the limit all along produces.
+#[tokio::test]
+async fn a_413_halves_the_window_and_redacts_identically() {
+    const LIMIT: usize = 70 * 1024;
+    let text = escape_heavy_field_with_emails(12_000);
+
+    let reference_server = server_with(emails_under_body_limit(LIMIT)).await;
+    let reference = adapter_with_cap(reference_server.uri(), LIMIT)
+        .redact_text(&text)
+        .await
+        .expect("under the limit throughout")
+        .expect("spans found");
+    let reference_requests = reference_server.received_requests().await.unwrap();
+    assert!(reference_requests.iter().all(|r| r.body.len() <= LIMIT));
+
+    let server = server_with(emails_under_body_limit(LIMIT)).await;
+    let split = adapter_with_cap(server.uri(), MAX_CLASSIFY_REQUEST_BODY_BYTES)
+        .redact_text(&text)
+        .await
+        .expect("413s are split, not fatal")
+        .expect("spans found");
+    let requests = server.received_requests().await.unwrap();
+    let refused = requests.iter().filter(|r| r.body.len() > LIMIT).count();
+    assert!(refused > 0, "the fixture must actually draw 413s");
+
+    assert_eq!(split.redacted_text, reference.redacted_text);
+    assert_eq!(split.summary.span_count, reference.summary.span_count);
+    assert_eq!(
+        split.summary.span_count,
+        text.matches("bob@example.com").count() as u32,
+        "every email redacted, none twice"
+    );
+    assert!(!split.redacted_text.contains("bob@example.com"));
+}
+
+/// An endpoint that refuses everything as too large is not bisected
+/// forever: after `MAX_CLASSIFY_413_SPLITS` halvings the field is refused,
+/// permanently -- retrying the same text later meets the same limit.
+#[tokio::test]
+async fn a_413_at_every_size_refuses_after_bounded_splits() {
+    let server = server_with(emails_under_body_limit(0)).await;
+    let text = "line of text\n".repeat(4_000);
+    let err = adapter(server.uri())
+        .redact_text(&text)
+        .await
+        .expect_err("refused");
+    assert!(
+        !err.is_transient(),
+        "a 413 that survives splitting is permanent: {err}"
+    );
+    let requests = server.received_requests().await.unwrap().len();
+    assert!(
+        requests <= MAX_CLASSIFY_413_SPLITS + 1,
+        "{requests} requests: the first refused half must stop the field"
+    );
+    assert!(
+        !err.to_string().contains("line of text"),
+        "no content in the error"
+    );
+}
+
+/// A body is never sent over the adapter's cap, whatever the content, and
+/// windows cover the field exactly -- measured on the bodies the server
+/// actually received.
+#[tokio::test]
+async fn escape_heavy_bodies_arrive_under_the_cap() {
+    let server = server_with(emails_under_body_limit(usize::MAX)).await;
+    let text = escape_heavy_field_with_emails(20_000);
+    adapter(server.uri())
+        .redact_text(&text)
+        .await
+        .expect("classified")
+        .expect("spans found");
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests.len() > 1);
+    let inputs: String = requests
+        .iter()
+        .map(|r| {
+            assert!(r.body.len() <= MAX_CLASSIFY_REQUEST_BODY_BYTES);
+            let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+            body["input"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert_eq!(inputs, text);
 }

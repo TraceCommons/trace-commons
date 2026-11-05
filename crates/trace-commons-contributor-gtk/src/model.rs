@@ -872,6 +872,10 @@ pub struct Counts {
     pub quarantined: u32,
     #[serde(default)]
     pub other: u32,
+    /// The core's Contributed figure: accepted plus waiting to be scored,
+    /// never held. Read, never re-added here.
+    #[serde(default)]
+    pub contributed: u32,
 }
 
 impl Counts {

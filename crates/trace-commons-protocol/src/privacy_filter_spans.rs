@@ -154,11 +154,13 @@ pub(crate) fn apply_spans(
 /// repeated characters, from 5 bytes to 8 KB. `cl100k_base` matched only 6 of
 /// 9 on the same short set, so the choice is not arbitrary and should not be
 /// changed without re-running that comparison.
+#[cfg(feature = "self-hosted-privacy-filter")]
 pub(crate) fn classifier_bpe() -> Option<&'static tiktoken_rs::CoreBPE> {
     static BPE: std::sync::OnceLock<Option<tiktoken_rs::CoreBPE>> = std::sync::OnceLock::new();
     BPE.get_or_init(|| tiktoken_rs::o200k_base().ok()).as_ref()
 }
 /// Count the tokens the classifier will charge for `text`.
+#[cfg(feature = "self-hosted-privacy-filter")]
 pub(crate) fn classifier_token_count(text: &str) -> Option<usize> {
     classifier_bpe().map(|bpe| bpe.encode_ordinary(text).len())
 }
@@ -173,6 +175,7 @@ pub(crate) fn classifier_token_count(text: &str) -> Option<usize> {
 /// Falls back to a conservative byte split if the tokenizer is unavailable:
 /// under-filling requests costs throughput, over-filling costs 502s, so the
 /// safe direction is down.
+#[cfg(feature = "self-hosted-privacy-filter")]
 pub(crate) fn chunk_token_ranges(text: &str, max_tokens: usize) -> Vec<std::ops::Range<usize>> {
     if classifier_bpe().is_none() {
         // No tokenizer: fall back to the dense-content byte equivalent, which
@@ -252,6 +255,7 @@ pub(crate) fn chunk_token_ranges(text: &str, max_tokens: usize) -> Vec<std::ops:
 /// always on char boundaries and covering the whole input. Windows prefer to
 /// end at a newline within the limit (PII rarely spans lines); a run with no
 /// newline under the limit is hard-split at the nearest lower char boundary.
+#[cfg(feature = "self-hosted-privacy-filter")]
 pub(crate) fn chunk_byte_ranges(text: &str, max_bytes: usize) -> Vec<std::ops::Range<usize>> {
     let max_bytes = max_bytes.max(1);
     let mut ranges = Vec::new();
@@ -417,5 +421,190 @@ mod tests {
             let label = safe_privacy_filter_label(Some(raw), &mut r);
             assert_eq!(label, raw, "{raw} should pass through allow-list");
         }
+    }
+}
+
+/// The tokenizer windowing the self-hosted backend uses. These tests lived
+/// with the NEAR AI adapter until it stopped windowing by tokens (it sizes
+/// windows by request body now); the fixtures are sized for the 32,000-token
+/// budget that backend used, which is why that number appears here.
+#[cfg(all(test, feature = "self-hosted-privacy-filter"))]
+mod tokenizer_window_tests {
+    use super::*;
+
+    const MAX_CLASSIFY_INPUT_TOKENS: usize = 32_000;
+
+    /// The tokenizer must be the one the endpoint actually charges against.
+    /// These counts are the endpoint's own `usage.input_tokens`, recorded
+    /// 2026-08-27; `cl100k_base` disagrees on several of them.
+    #[test]
+    fn tokenizer_reproduces_the_endpoints_own_counts() {
+        let cases: &[(&str, usize)] = &[
+            ("hello", 1),
+            ("hello world", 2),
+            ("The quick brown fox jumps over the lazy dog.", 10),
+            ("alice@example.com", 3),
+            ("/usr/local/lib/python3.11/site-packages/", 11),
+            ("a7f3c9d2e1b48856f0c1d2e3a4b5c6d7", 29),
+            ("tenant_id submission_id auth_principal_ref", 8),
+            ("supercalifragilisticexpialidocious", 10),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(
+                classifier_token_count(text),
+                Some(*expected),
+                "token count drifted from the endpoint's accounting for {text:?}"
+            );
+        }
+    }
+
+    /// The property the whole change exists for: no window may exceed the
+    /// budget, whatever the content's token density.
+    #[test]
+    fn every_window_fits_the_token_budget() {
+        let prose = "Please email alice@example.com about invoice 12345. ".repeat(600);
+        let dense = (0..600)
+            .map(|i| format!("user{i:04}@example.com /home/u{i:04}/src/f{i:04}.rs"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let hex = "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7".repeat(400);
+
+        for (label, text) in [("prose", &prose), ("dense", &dense), ("hex", &hex)] {
+            let ranges = chunk_token_ranges(text, MAX_CLASSIFY_INPUT_TOKENS);
+            for range in &ranges {
+                let tokens = classifier_token_count(&text[range.clone()]).expect("tokenizer");
+                assert!(
+                    tokens <= MAX_CLASSIFY_INPUT_TOKENS,
+                    "{label}: window of {tokens} tokens exceeds the budget of {}",
+                    MAX_CLASSIFY_INPUT_TOKENS
+                );
+            }
+        }
+    }
+
+    /// Ranges must be contiguous and cover the whole field: a gap would drop
+    /// text from classification entirely, which is a silent privacy hole
+    /// rather than a performance bug.
+    #[test]
+    fn token_windows_cover_the_whole_field_without_gaps() {
+        let text = (0..300)
+            .map(|i| format!("line {i} with alice@example.com and /var/log/f{i}.log"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let ranges = chunk_token_ranges(&text, MAX_CLASSIFY_INPUT_TOKENS);
+
+        assert_eq!(ranges.first().expect("at least one window").start, 0);
+        assert_eq!(ranges.last().expect("at least one window").end, text.len());
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start, "gap or overlap between windows");
+        }
+        let rebuilt: String = ranges.iter().map(|r| &text[r.clone()]).collect();
+        assert_eq!(rebuilt, text, "windows must reconstruct the field exactly");
+    }
+
+    /// Budgeting in tokens is what lets sparse content travel in FEWER
+    /// requests than dense content of the same size -- the thing a byte
+    /// budget structurally cannot do, and the reason dense windows used to
+    /// 502 while prose windows of identical size were fine.
+    #[test]
+    fn sparse_content_packs_into_fewer_windows_than_dense() {
+        // Line-delimited on purpose. The greedy packer this test is about
+        // works on line segments; an UNBROKEN run takes the bisection path
+        // instead, which halves until each piece fits and so quantises the
+        // window count to a power of two. Two inputs of very different token
+        // density then land on the same count -- prose at 149k tokens and
+        // dense at 250k both produced 8 windows -- and the comparison says
+        // nothing. The original fixtures were single lines and passed only
+        // because, at the old 1,000-token budget, they happened to fall in
+        // different bisection bands.
+        // Sized from measurement: at 16,000 lines prose is ~176k tokens (~6
+        // windows) and dense ~256k (~8), a margin of two. At 4,000 both round
+        // to 2 and tie; a margin of one is fragile to packing slack.
+        let lines = 16_000;
+        let prose = "The agent reviewed the report and summarised the findings.\n".repeat(lines);
+        let dense = (0..lines)
+            .map(|i| format!("user{i:04}@example.com /home/u{i:04}/src/f{i:04}.rs\n"))
+            .collect::<String>();
+
+        let prose_tokens = classifier_token_count(&prose).expect("tokenizer");
+        let dense_tokens = classifier_token_count(&dense).expect("tokenizer");
+        assert!(
+            prose_tokens > MAX_CLASSIFY_INPUT_TOKENS && dense_tokens > MAX_CLASSIFY_INPUT_TOKENS,
+            "both fixtures must exceed the budget or neither splits"
+        );
+        assert!(
+            dense_tokens > prose_tokens,
+            "the dense fixture must actually be denser: prose {prose_tokens}, dense {dense_tokens}"
+        );
+
+        let prose_windows = chunk_token_ranges(&prose, MAX_CLASSIFY_INPUT_TOKENS).len();
+        let dense_windows = chunk_token_ranges(&dense, MAX_CLASSIFY_INPUT_TOKENS).len();
+        assert!(
+            prose_windows < dense_windows,
+            "prose took {prose_windows} windows and dense took {dense_windows}; \
+             token budgeting should give sparse content larger windows"
+        );
+    }
+
+    /// A single line longer than the budget still has to be split, or one
+    /// base64 blob or long log line stalls its whole field.
+    #[test]
+    fn an_oversized_single_line_is_split() {
+        // Size the fixture FROM the budget. A literal repeat count was sized
+        // for a 1,000-token budget and silently stopped exceeding it when the
+        // budget rose to 32,000 -- the test still passed its inner assertion
+        // while no longer testing splitting at all.
+        let unit = "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7";
+        let unit_tokens = classifier_token_count(unit).expect("tokenizer");
+        let repeats = (MAX_CLASSIFY_INPUT_TOKENS / unit_tokens) * 2 + 8;
+        let one_line = unit.repeat(repeats);
+        assert!(!one_line.contains('\n'));
+        assert!(
+            classifier_token_count(&one_line).expect("tokenizer") > MAX_CLASSIFY_INPUT_TOKENS,
+            "fixture must exceed the budget or this test proves nothing"
+        );
+        let ranges = chunk_token_ranges(&one_line, MAX_CLASSIFY_INPUT_TOKENS);
+        assert!(ranges.len() > 1, "an oversized single line must be split");
+        for range in &ranges {
+            let tokens = classifier_token_count(&one_line[range.clone()]).expect("tokenizer");
+            assert!(tokens <= MAX_CLASSIFY_INPUT_TOKENS);
+        }
+    }
+
+    #[test]
+    fn chunk_byte_ranges_cover_text_and_respect_limit() {
+        let text = "line one\nline two\nline three\n";
+        let ranges = chunk_byte_ranges(text, 12);
+        assert_eq!(ranges.first().unwrap().start, 0);
+        assert_eq!(ranges.last().unwrap().end, text.len());
+        let mut prev = 0;
+        for r in &ranges {
+            assert_eq!(r.start, prev, "ranges must be contiguous");
+            assert!(r.end - r.start <= 12, "range {r:?} exceeds limit");
+            assert!(text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
+            prev = r.end;
+        }
+        let joined: String = ranges.iter().map(|r| &text[r.clone()]).collect();
+        assert_eq!(joined, text, "windows must reconstruct the input");
+        // Newline-preferring: no window splits mid-line here.
+        for r in &ranges {
+            assert!(text[r.clone()].ends_with('\n') || r.end == text.len());
+        }
+    }
+
+    #[test]
+    fn chunk_byte_ranges_hard_splits_a_long_unbroken_run() {
+        // A single line longer than the limit must still be split, on a
+        // char boundary, into covering windows.
+        let text = "café".repeat(10); // 50 bytes, no newline, multibyte
+        let ranges = chunk_byte_ranges(&text, 8);
+        let mut prev = 0;
+        for r in &ranges {
+            assert_eq!(r.start, prev);
+            assert!(r.end - r.start <= 8);
+            assert!(text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
+            prev = r.end;
+        }
+        assert_eq!(prev, text.len());
     }
 }

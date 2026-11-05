@@ -121,6 +121,47 @@ final class HomeTests: XCTestCase {
         XCTAssertEqual(HomeFormat.points(12.5), "12.5")
     }
 
+    /// History's Contributed and Held cards, together, from one rollup in
+    /// the daemon's shape: 56 accepted, 1 waiting and 3 held read
+    /// Contributed 57 beside Held 3, which add up to the 60 traces there
+    /// are, with nothing counted twice. The cards draw exactly these
+    /// (`HistoryParityTests` pins the calls).
+    func test_historyContributedAndHeldCardsDoNotOverlap() throws {
+        let rollup = try recorded(DaemonData.HistoryRollup.self, "history_rollup") {
+            $0["all_time"] = ["submitted": 1, "accepted": 56, "quarantined": 3, "withdrawn": 0, "other": 0,
+                              "contributed": 57]
+            $0["quarantined"] = 3
+        }
+        let contributed = HomeFormat.contributed(rollup)
+        let held = HomeFormat.count(rollup.quarantined)
+        XCTAssertEqual(contributed, "57")
+        XCTAssertEqual(held, "3")
+        XCTAssertEqual(try XCTUnwrap(Int(contributed)) + (try XCTUnwrap(Int(held))), 60)
+        // Its credit card is not Final while the waiting one is unscored.
+        let tile = HomeFormat.creditTile(
+            final: 48, pending: 0, accepted: rollup.allTime?.accepted, submitted: rollup.allTime?.submitted,
+            credit: nil)
+        XCTAssertEqual(tile.detail, MonitorWords.pending)
+    }
+
+    /// The review's cases, through the core's formatter: half away from
+    /// zero as the digest and Windows round (4.25 is 4.3, never 4.2), a
+    /// sliver above zero is "<0.1" (never "0" beside "credit pending"),
+    /// no "-0", and the same thousands comma as `count` (owner, #1962).
+    func test_pointsFollowTheCoresRuleAtTheEdges() {
+        XCTAssertEqual(HomeFormat.points(0.05), "0.1")
+        XCTAssertEqual(HomeFormat.points(0.04), "<0.1")
+        XCTAssertEqual(HomeFormat.points(-0.04), "0")
+        XCTAssertEqual(HomeFormat.points(4.25), "4.3")
+        XCTAssertEqual(HomeFormat.points(12.25), "12.3")
+        XCTAssertEqual(HomeFormat.points(1234.5), "1,234.5")
+        XCTAssertEqual(HomeFormat.count(1234), "1,234")
+        XCTAssertEqual(HomeFormat.count(999), "999")
+        // The pending accessory guards on a figure above zero and now never
+        // prints a zero for one.
+        XCTAssertFalse(HomeFormat.points(0.04).hasPrefix("0"))
+    }
+
     /// A recorded reply, decoded after `edit` is applied to its JSON object
     /// (the K2 recordings carry an unknown commons posture).
     private func recorded<T: Decodable>(

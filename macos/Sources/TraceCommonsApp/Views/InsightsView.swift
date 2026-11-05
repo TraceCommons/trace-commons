@@ -144,7 +144,8 @@ struct InsightsView: View {
     private var creditTile: (value: String, detail: String)? {
         guard let home, home.rollup != nil || home.credit != nil else { return nil }
         return HomeFormat.creditTile(final: home.rollup?.creditFinal, pending: home.rollup?.creditPending,
-                                     accepted: home.rollup?.allTime?.accepted, credit: home.credit)
+                                     accepted: home.rollup?.allTime?.accepted,
+                                     submitted: home.rollup?.allTime?.submitted, credit: home.credit)
     }
 
     /// Whether the week's first answers are in: the daemon's week (or no

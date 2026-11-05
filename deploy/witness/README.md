@@ -140,6 +140,7 @@ is:
 | `TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS` | `4` | How many witness requests run at once. Over it, the witness answers `503` with `witness_saturated` and a `Retry-After`, immediately. It does not queue. |
 | `TRACE_COMMONS_WITNESS_RESERVED_INTERACTIVE_SLOTS` | `1` when max is greater than 1; otherwise `0` | Keeps this many of the global slots available when cooperating automatic clients mark witness POSTs with `x-trace-witness-workload: background`. The background budget is max minus reserved. An explicit `0` restores the shared pool; a value at or above max is refused at startup. |
 | `TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS` | `300` | How long one request may take. Over it, `504` with `witness_request_timed_out`, and the slot is released. |
+| `TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT` | `2` (binary default; not yet in the compose) | Prose-classifier calls in flight at once across all requests in `full-pipeline`. A contribution's text leaves are classified concurrently up to this bound instead of one at a time. Every replica spends the same NEAR AI key unless given its own, so the key-wide overlap is replicas times this. See `docs/superpowers/specs/2026-11-05-witness-scaling-design.md`. Zero is refused at startup. |
 
 The saturation response is exactly `503 {"error":"witness_saturated"}` with
 `Retry-After: 30` seconds and no certificate or signature. The witness does
