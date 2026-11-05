@@ -2997,9 +2997,14 @@ final class AppModel: ObservableObject {
     }
 
     /// What the launch's own request opens (`LaunchRouting.launchOpening`).
+    /// Whether the launch is the person's is read when this is: the app
+    /// being frontmost once the core has answered.
     var launchOpening: LaunchRouting.LaunchOpening {
-        LaunchRouting.launchOpening(startup: startup, statusAnswered: status.answered, requiresOnboarding: requiresOnboarding,
-                                    background: LaunchRouting.isBackgroundLaunch(CommandLine.arguments))
+        LaunchRouting.launchOpening(
+            startup: startup, statusAnswered: status.answered, requiresOnboarding: requiresOnboarding,
+            kind: LaunchRouting.launchKind(
+                arguments: CommandLine.arguments, launchedAsLoginItem: LaunchRouting.launchedAsLoginItem,
+                active: NSApplication.shared.isActive))
     }
 
     /// Whether the first run has been finished (Start on the Uses screen)

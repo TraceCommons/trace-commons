@@ -13,8 +13,9 @@ import TCShellCore
 /// menu bar it is assigned a frame that never draws, and there was no other
 /// door.
 ///
-/// The launch is quiet (R-44): an onboarded install puts no window on
-/// screen. SwiftUI opens the first `Window` scene, the Monitor, on a normal
+/// A quiet launch (R-44: at login, `open -g`) puts no window on screen for
+/// an onboarded install; a launch the person started opens the Monitor in
+/// front (`LaunchRouting.LaunchKind`). SwiftUI opens the first `Window` scene, the Monitor, on a normal
 /// launch; from macOS 15 that scene's launch is suppressed, and the launch
 /// opens what it needs itself (`Launcher.openAtLaunch`). A scene modifier
 /// cannot be applied under `if #available` without dropping the scene on
@@ -477,7 +478,8 @@ private struct Launcher: View {
     }
 
     /// The launch's window (`LaunchRouting.launchOpening`), once, when the
-    /// core has said enough. An onboarded install opens nothing (R-44).
+    /// core has said enough. An onboarded install opens nothing on a quiet
+    /// launch (R-44), and the Monitor, in front, on one the person started.
     /// First run opens activated, alone: the Monitor SwiftUI may have
     /// opened at launch (macOS 14), or that an opener opened before the
     /// core answered (a cold-start invite link or notification), is
@@ -495,6 +497,15 @@ private struct Launcher: View {
             OpenMonitor.request()
         case .monitor:
             OpenMonitor.request(activate: false)
+        case .focusedMonitor:
+            // The person launched the app and is looking at it. The first
+            // activation's request (`AppDelegate`) can be lost at a cold
+            // launch, so the Monitor is asked for again here, once the
+            // core has answered, unless a titled window (the Monitor,
+            // first run, Settings) is already up. The status item and the
+            // edge rail are borderless, so they do not count.
+            guard !NSApp.windows.contains(where: { $0.isVisible && $0.styleMask.contains(.titled) }) else { return }
+            OpenMonitor.request()
         case .nothing, .wait:
             break
         }

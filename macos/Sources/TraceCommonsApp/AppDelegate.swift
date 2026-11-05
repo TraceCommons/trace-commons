@@ -41,6 +41,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let quitCoordinator = QuitCoordinator()
     private var openedForInitialActivation = false
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // The launch's open-application event is current here (not yet in
+        // willFinishLaunching): a login-item launch says so in it, and
+        // stays in the menu bar (`LaunchRouting.launchKind`).
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        LaunchRouting.launchedAsLoginItem = LaunchRouting.isLoginItemLaunch(
+            eventClass: event?.eventClass, eventID: event?.eventID,
+            propData: event?.paramDescriptor(forKeyword: LaunchRouting.keyAEPropDataCode)?.enumCodeValue)
+
         // Explicit rather than inherited. Removing LSUIElement already makes
         // this the default, but the default is invisible in the source: a
         // reader of this file cannot see the plist, and the app's shape is
