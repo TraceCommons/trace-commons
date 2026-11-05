@@ -801,11 +801,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
     // HistoryViewModel records: x:Bind is strongly typed and performs no
     // implicit ToString for TextBlock.Text, so an int bound straight to a
     // figure is a compile error on Windows and nowhere else.
+    // The core's Contributed figure (accepted plus waiting to be scored),
+    // the one every shell shows under this word; `Submitted` alone is only
+    // the waiting part of it. A dash from a daemon that did not send it.
     public string ContributedCountText =>
-        _rollup.Week.Submitted.ToString(CultureInfo.CurrentCulture);
+        _rollup.Week.Contributed is { } contributed ? HistoryCopy.CountFigure(contributed) : "\u2014";
 
-    public string HeldCountText =>
-        _rollup.Week.Quarantined.ToString(CultureInfo.CurrentCulture);
+    public string HeldCountText => HistoryCopy.CountFigure(_rollup.Week.Quarantined);
 
     /// <summary>
     /// In the commons: all time, not this week.
@@ -817,8 +819,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// a contributor looks for evidence that their work went somewhere. The
     /// Linux shell takes all_time here and says the same thing.
     /// </remarks>
-    public string InTheCommonsCountText =>
-        _rollup.AllTime.Accepted.ToString(CultureInfo.CurrentCulture);
+    public string InTheCommonsCountText => HistoryCopy.CountFigure(_rollup.AllTime.Accepted);
 
     /// <summary>
     /// A short, human-readable status line. Fixed labels only -- everything

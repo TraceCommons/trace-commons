@@ -710,8 +710,8 @@ final class HistoryParityTests: XCTestCase {
         let card = Self.flat(String(home[period.lowerBound..<periodEnd.lowerBound]))
         for needle in [
             #"SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])"#,
-            ".init(MonitorWords.week, HomeFormat.count(rollup?.week?.accepted))",
-            ".init(MonitorWords.month, HomeFormat.count(rollup?.month?.accepted))",
+            ".init(MonitorWords.week, HomeFormat.count(rollup?.week?.contributed))",
+            ".init(MonitorWords.month, HomeFormat.count(rollup?.month?.contributed))",
             ".init(MonitorWords.withdrawn, HomeFormat.count(rollup?.takenBack))",
         ] {
             XCTAssertTrue(card.contains(needle), "the record by period lacks \(needle)")
@@ -720,7 +720,7 @@ final class HistoryParityTests: XCTestCase {
         let end = try XCTUnwrap(home[start.upperBound...].range(of: "\n}\n"))
         let stats = Self.flat(String(home[start.lowerBound..<end.lowerBound]))
         for needle in [
-            "let creditTile = HomeFormat.creditTile(final: rollup?.creditFinal, pending: rollup?.creditPending, accepted: rollup?.allTime?.accepted, credit: credit)",
+            "let creditTile = HomeFormat.creditTile(final: rollup?.creditFinal, pending: rollup?.creditPending, accepted: rollup?.allTime?.accepted, submitted: rollup?.allTime?.submitted, credit: credit)",
             "HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value, detail: creditTile.detail,",
             "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(rollup),",
             "HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined),",

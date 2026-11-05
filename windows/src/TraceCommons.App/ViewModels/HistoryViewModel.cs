@@ -206,13 +206,13 @@ public sealed class HistoryViewModel : INotifyPropertyChanged
     // performs no implicit ToString for TextBlock.Text, so an int bound
     // straight to a figure is a compile error on Windows and nowhere else --
     // exactly the class of break this project cannot see from macOS.
-    public string InTheCommonsCountText =>
-        _rollup.AllTime.Accepted.ToString(CultureInfo.CurrentCulture);
+    // Counts in the core's rule ("1,234"), the same comma as the credit
+    // figures on this page.
+    public string InTheCommonsCountText => HistoryCopy.CountFigure(_rollup.AllTime.Accepted);
 
-    public string HeldCountText => _rollup.Quarantined.ToString(CultureInfo.CurrentCulture);
+    public string HeldCountText => HistoryCopy.CountFigure(_rollup.Quarantined);
 
-    public string WaitingCountText =>
-        _rollup.WaitingToBeScored.ToString(CultureInfo.CurrentCulture);
+    public string WaitingCountText => HistoryCopy.CountFigure(_rollup.WaitingToBeScored);
 
     public string InTheCommonsLabel => HistoryCopy.InTheCommons;
 
@@ -230,7 +230,7 @@ public sealed class HistoryViewModel : INotifyPropertyChanged
         CultureInfo.CurrentCulture,
         "{0} — {1} {2}",
         HistoryCopy.QuarantineHeading,
-        _rollup.Quarantined,
+        HistoryCopy.CountFigure(_rollup.Quarantined),
         _rollup.Quarantined == 1 ? "trace" : "traces");
 
     public string QuarantineBody => HistoryCopy.QuarantineBody;
@@ -247,11 +247,11 @@ public sealed class HistoryViewModel : INotifyPropertyChanged
     // unadorned, no symbol, nothing that could read as a score. The prose
     // beside it is what stops the number being mistaken for one.
 
-    public string CreditRecordedText =>
-        string.Format(CultureInfo.CurrentCulture, "{0:0.0}", _rollup.CreditFinal);
+    // The core's credit figure, so 4.25 reads 4.3 and a whole figure reads
+    // whole here as it does on every other shell.
+    public string CreditRecordedText => HistoryCopy.CreditFigure(_rollup.CreditFinal);
 
-    public string CreditPendingText =>
-        string.Format(CultureInfo.CurrentCulture, "{0:0.0}", _rollup.CreditPending);
+    public string CreditPendingText => HistoryCopy.CreditFigure(_rollup.CreditPending);
 
     public string CreditBody => HistoryCopy.CreditBody;
 
@@ -304,7 +304,7 @@ public sealed class HistoryViewModel : INotifyPropertyChanged
 
     public string CommunityCreditText =>
         _rollup.Community is { } standing
-            ? string.Format(CultureInfo.CurrentCulture, "{0:0.0}", standing.NoveltyCredit)
+            ? HistoryCopy.CreditFigure(standing.NoveltyCredit)
             : "—";
 
     public string CommunityAcceptedText =>

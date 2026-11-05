@@ -605,10 +605,29 @@ public sealed class HistoryCopyTests
         // Recorded credit is final; anything still being scored is stated as
         // such rather than added to it, and neither carries a symbol.
         Assert.Equal("credit 4.5", HistoryCopy.CreditLine(4.5f, 9f));
-        Assert.Equal("credit 2.0, still being scored", HistoryCopy.CreditLine(null, 2f));
+        Assert.Equal("credit 2, still being scored", HistoryCopy.CreditLine(null, 2f));
 
         // Nothing to state is stated as nothing, not as a zero.
         Assert.Null(HistoryCopy.CreditLine(null, 0f));
+    }
+
+    /// <summary>
+    /// The core's credit figure, the same on every shell: half away from
+    /// zero, whole is whole, a sliver is "&lt;0.1", never "0" or "0.0".
+    /// </summary>
+    [Fact]
+    public void CreditFiguresFollowTheCoresOneRule()
+    {
+        Assert.Equal("0", HistoryCopy.CreditFigure(0));
+        Assert.Equal("48", HistoryCopy.CreditFigure(48));
+        Assert.Equal("4.3", HistoryCopy.CreditFigure(4.25));
+        Assert.Equal("4.3", HistoryCopy.CreditFigure(4.25f));
+        Assert.Equal("0.1", HistoryCopy.CreditFigure(0.05));
+        Assert.Equal("<0.1", HistoryCopy.CreditFigure(0.04));
+        Assert.Equal("1,234.5", HistoryCopy.CreditFigure(1234.5));
+        Assert.Equal("1,234", HistoryCopy.CountFigure(1234));
+        Assert.Equal("999", HistoryCopy.CountFigure(999));
+        Assert.Equal("0", HistoryCopy.CountFigure(-1));
     }
 
     [Fact]

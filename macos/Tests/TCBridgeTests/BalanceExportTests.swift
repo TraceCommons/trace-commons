@@ -36,7 +36,7 @@ final class BalanceExportTests: XCTestCase {
             amount: { TCNearAiBalance.amount(present: $0, nanos: $1, scale: $2) },
             remainingLine: { TCNearAiBalance.remainingLine(present: $0, nanos: $1, scale: $2) },
             limitLine: { TCNearAiBalance.limitLine(present: $0, nanos: $1, scale: $2) },
-            spentLine: { TCNearAiBalance.spentLine(present: $0, nanos: $1, scale: $2) },
+            spentLine: { TCNearAiBalance.spentLine(present: $0, nanos: $1, scale: $2, remainingPresent: $3) },
             observedLine: { TCNearAiBalance.observedLine(secondsAgo: $0) })
     }
 
@@ -135,6 +135,33 @@ final class BalanceExportTests: XCTestCase {
         let spent = try XCTUnwrap(BalanceSurface.spentLine(nothingSpent, calls: calls()))
         XCTAssertTrue(spent.contains("$0.00"), "a zero spend is a real $0.00: \(spent)")
     }
+
+    /// Through the shipped closures and the dylib, from the balance wire's
+    /// shape: limit $130.00, spent $18.185 and $111.815 left read $130.00,
+    /// $18.19 and $111.81, which add up. With no remaining figure Spent is
+    /// floored, and a sub-cent spend is the phrase, never a cent.
+    func testLimitSpentAndLeftAddUpFromTheWire() throws {
+        // $130.00 - $18.19 = $111.81: the three add up on the cents shown.
+        let capped = BalanceStatus.parse(fromJSON: Self.capped)
+        XCTAssertEqual(BalanceSurface.limitLine(capped, calls: calls()), "Limit: $130.00")
+        XCTAssertEqual(BalanceSurface.spentLine(capped, calls: calls()), "Spent: $18.19")
+        XCTAssertEqual(
+            BalanceSurface.remaining(capped, copy: try payload(), calls: calls()),
+            .figure("$111.81"))
+
+        let uncapped = status("known", remaining: nil, limit: nil, spent: 18_185_000_000)
+        XCTAssertEqual(BalanceSurface.spentLine(uncapped, calls: calls()), "Spent: $18.18")
+        let sliver = status("known", remaining: 111_815_000_000, limit: 130_000_000_000, spent: 1)
+        XCTAssertEqual(BalanceSurface.spentLine(sliver, calls: calls()), "Spent: less than $0.01")
+    }
+
+    /// A `private_inference_balance` reply for a capped account, in the
+    /// daemon's wire shape.
+    private static let capped = """
+        {"state":"known","currency":"USD","scale":9,"remaining_nanos":111815000000,
+         "spend_limit_nanos":130000000000,"total_spent_nanos":18185000000,
+         "total_requests":12,"total_tokens":3456,"observed_at":null}
+        """
 
     // MARK: - The sentences
 

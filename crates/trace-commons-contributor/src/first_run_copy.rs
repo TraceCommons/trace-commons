@@ -767,8 +767,8 @@ mod tests {
         );
     }
 
-    /// Every `{...}` in the table is one the module doc lists, so a shell
-    /// knows every hole it has to fill.
+    /// One session reads "1 trace", not "1 traces": the singular has no
+    /// hole, and the plural keeps its `{count}`.
     #[test]
     fn a_single_session_reads_in_the_singular() {
         let frame = &first_run_copy().frame;
@@ -777,6 +777,8 @@ mod tests {
         assert!(frame.session_count.contains("{count}"));
     }
 
+    /// Every `{...}` in the table is one the module doc lists, so a shell
+    /// knows every hole it has to fill.
     #[test]
     fn every_placeholder_is_a_documented_one() {
         let json = serde_json::to_string(&first_run_copy()).unwrap();
