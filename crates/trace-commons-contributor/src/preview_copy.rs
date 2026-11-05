@@ -2016,10 +2016,11 @@ mod tests {
             assert_eq!(monitor_failure_line(label), None, "{label}");
         }
         // The copy rules: short, and none of the words a person is never
-        // shown.
+        // shown. (The commons' own name is checked across every source by
+        // `tests/no_commons_name_in_copy.rs`.)
         for line in [copy.needs_privacy_check, copy.privacy_check_no_answer] {
             assert!(line.chars().count() <= 60, "{line}");
-            for banned in ["Trace Commons", "daemon", "passkey", "witness"] {
+            for banned in ["daemon", "passkey", "witness"] {
                 assert!(!line.contains(banned), "{line} says {banned}");
             }
         }

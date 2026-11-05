@@ -538,7 +538,11 @@ pub(crate) async fn within_deadline<T>(
     deadline: std::time::Duration,
     build: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
-    match tokio::time::timeout(deadline, build).await {
+    // Boxed: a build is a large future, and this wrapper sits inside the
+    // daemon's request dispatch, whose own future is as large as the largest
+    // handler's. Inline, the deadline's timer and the build together pushed
+    // a request future past a test thread's stack.
+    match tokio::time::timeout(deadline, Box::pin(build)).await {
         Ok(result) => result,
         Err(_) => Err(anyhow::anyhow!(REASON_PREVIEW_TIMED_OUT)),
     }

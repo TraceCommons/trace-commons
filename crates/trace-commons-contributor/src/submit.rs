@@ -6343,7 +6343,9 @@ mod tests {
         assert_eq!(
             labels,
             vec![
-                "witness_attestation_unavailable",
+                // The projected session fits, so it gets as far as the
+                // network and meets the closed port: no connection at all.
+                "witness_unreachable",
                 "witness_payload_too_large"
             ],
             "the admission profile must reach the witness carrying only the bound call, \
