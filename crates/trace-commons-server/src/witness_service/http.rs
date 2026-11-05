@@ -1,10 +1,14 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The witness's HTTP surface: two routes, and deliberately nothing else.
+//! The witness's HTTP surface, and deliberately nothing else.
 //!
-//! - `POST /v1/witness` -- raw transcript in, redacted artifact and
-//!   certificate out.
+//! - `POST /v1/witness/jobs` -- raw session in, `202` with a job id out;
+//!   `GET` / `DELETE /v1/witness/jobs/{job_id}` -- poll for the redacted
+//!   artifact and certificate, or cancel. See [`super::jobs`].
+//!   (`POST /v1/witness`, the single long request this replaced, is retired.)
+//! - `POST /v1/witness/admission`, `POST /v1/witness/token-bundle` -- the
+//!   admission-evidence and token-bundle reviews, still single requests.
 //! - `GET /v1/attestation?nonce=<64 hex chars>` -- a nonce-bound quote and the
 //!   signing address, so a contributor can pin the enclave *before* sending
 //!   anything.
@@ -55,7 +59,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -65,6 +69,12 @@ use tokio::sync::Semaphore;
 use trace_commons_protocol::trace_contribution::{
     ConsentMetadata, ConsentScope, RawTraceContribution, ResidualPiiRisk, TraceAllowedUse,
 };
+use trace_commons_protocol::witness_jobs::{
+    WITNESS_FETCH_SECRET_HEADER, WITNESS_FETCH_SECRET_LEN, WITNESS_FETCH_SECRET_MALFORMED_ERROR,
+    WITNESS_FETCH_SECRET_SHA256_HEADER, WITNESS_JOB_GONE_ERROR, WITNESS_JOB_ID_LEN,
+    WITNESS_JOB_PENDING_STATE, WITNESS_JOBS_PATH, WitnessJobAccepted, WitnessJobPending,
+    is_hex_of_len,
+};
 use trace_commons_protocol::witness_pacing::{
     WITNESS_BACKGROUND_WORKLOAD, WITNESS_SATURATED_ERROR, WITNESS_SATURATED_RETRY_AFTER_SECS,
     WITNESS_WORKLOAD_HEADER,
@@ -73,6 +83,7 @@ use trace_commons_protocol::witness_pacing::{
 use crate::near_attestation::receipt::{ReceiptAlgo, ReceiptPayload, ReceiptSignatureKind};
 use crate::redaction_witness::certificate::WitnessCertificate;
 
+use super::jobs::{AdmitRefusal, JobResult, PollOutcome, WitnessJobs, sha256};
 use super::surface::{
     AttestationError, ContributionPathUnavailable, ContributorNonce, NonceMalformed, WitnessService,
 };
@@ -86,14 +97,39 @@ pub const WITNESS_CERTIFICATE_HEADER: &str = "x-trace-witness-certificate";
 /// The header the signature travels in. Same rule.
 pub const WITNESS_SIGNATURE_HEADER: &str = "x-trace-witness-signature";
 
-/// The two routes, and nothing else.
+/// The witness's routes, and nothing else.
 ///
 /// Built here rather than in the binary so that route wiring is covered by the
 /// library test suite. A handler can be correct and unreachable; the tests
 /// below drive this exact `Router`.
-pub fn witness_router(service: Arc<WitnessService>, load: WitnessLoadBound) -> Router {
+///
+/// `POST /v1/witness` is not among them: it was retired in favour of the job
+/// routes (`docs/superpowers/specs/2026-11-05-witness-submit-then-poll.md`).
+/// Its handler survives as what a job's task runs, under the same bound
+/// (`run_bounded`), and no route reaches it.
+pub fn witness_router(
+    service: Arc<WitnessService>,
+    load: WitnessLoadBound,
+    jobs: Arc<WitnessJobs>,
+) -> Router {
+    let job_state = JobState {
+        service: service.clone(),
+        load: load.clone(),
+        jobs,
+    };
+    // Outside the load bound, like `/v1/attestation`: a submit does no
+    // redaction itself (its job's task runs under the bound), and a poll or a cancel must keep answering while every slot
+    // is busy. The body limit is lifted for the submit for the reason it is
+    // lifted below; `submit_job` reads at most the configured bound.
+    let job_routes = Router::new()
+        .route(WITNESS_JOBS_PATH, post(submit_job))
+        .route(
+            "/v1/witness/jobs/{job_id}",
+            get(poll_job).delete(cancel_job),
+        )
+        .layer(DefaultBodyLimit::disable())
+        .with_state(job_state);
     Router::new()
-        .route("/v1/witness", post(witness_handler))
         .route("/v1/witness/token-bundle", post(token_bundle_handler))
         .route("/v1/witness/admission", post(admission_witness_handler))
         // Axum's default 2 MiB body cap would refuse an oversized transcript
@@ -104,25 +140,23 @@ pub fn witness_router(service: Arc<WitnessService>, load: WitnessLoadBound) -> R
         //
         // The position of this line is load-bearing: `Router::layer` applies
         // to the routes added *above* it, so the default cap is lifted for
-        // `/v1/witness` and still guards `/v1/attestation`, which has no body
-        // to read and should not be able to be sent one.
+        // the witness routes and still guards `/v1/attestation`, which has no
+        // body to read and should not be able to be sent one.
         .layer(DefaultBodyLimit::disable())
-        // Applied to `/v1/witness` and not to `/v1/attestation`, for the same
-        // reason as the line above: `Router::layer` applies to the routes
-        // added before it. The expensive route is the one that redacts a body
-        // and, in `full-pipeline`, spends a metered classifier; the
-        // attestation route reads no body and does one enclave round trip, and
-        // it is what a contributor uses to pin this witness *before* trusting
-        // it. Bounding that one too would let a load spike on the expensive
-        // route make the enclave unpinnable.
+        // Applied to the witness routes and not to `/v1/attestation`, for the
+        // same reason as the line above. The expensive routes are the ones
+        // that redact a body and, in `full-pipeline`, spend a metered
+        // classifier; the attestation route reads no body and does one
+        // enclave round trip, and it is what a contributor uses to pin this
+        // witness *before* trusting it. Bounding that one too would let a
+        // load spike on the expensive routes make the enclave unpinnable.
         //
         // Outside the body limit rather than inside it, so a permit covers the
-        // body read as well as the redaction. A caller who dribbles out 64 MiB
-        // is spending the same slot as one who sends it at once, and the
-        // timeout is what bounds both.
+        // body read as well as the redaction.
         .layer(middleware::from_fn_with_state(load, bound_witness_load))
         .route("/v1/attestation", get(attestation_handler))
         .with_state(service)
+        .merge(job_routes)
 }
 
 /// How many `POST /v1/witness` requests may run at once, and how long one may
@@ -156,6 +190,7 @@ pub struct WitnessLoadBound {
     background_permits: Arc<Semaphore>,
     request_timeout: Duration,
     max_concurrent_requests: usize,
+    max_background: usize,
     /// The classify queue admitted requests wait in, when the witness has
     /// one; see [`Self::with_classify_queue`].
     classify_queue: Option<Arc<super::prefetch::ClassifyQueue>>,
@@ -195,6 +230,7 @@ impl WitnessLoadBound {
             )),
             request_timeout,
             max_concurrent_requests,
+            max_background: max_concurrent_requests - reserved_interactive_slots,
             classify_queue: None,
             early_busy: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
@@ -209,6 +245,21 @@ impl WitnessLoadBound {
     pub fn with_classify_queue(mut self, queue: Arc<super::prefetch::ClassifyQueue>) -> Self {
         self.classify_queue = Some(queue);
         self
+    }
+
+    /// The concurrency bound.
+    pub fn max_concurrent_requests(&self) -> usize {
+        self.max_concurrent_requests
+    }
+
+    /// How many of the slots background work may hold.
+    pub fn max_background_requests(&self) -> usize {
+        self.max_background
+    }
+
+    /// The per-request deadline.
+    pub fn request_timeout(&self) -> Duration {
+        self.request_timeout
     }
 
     /// Requests in a slot right now.
@@ -237,26 +288,45 @@ fn saturated_refusal() -> Response {
         .into_response()
 }
 
+/// Whether a request declares itself background work. One exact value or
+/// none; anything else is refused rather than guessed at.
+fn declared_background(headers: &HeaderMap) -> Result<bool, Refusal> {
+    match headers
+        .get_all(WITNESS_WORKLOAD_HEADER)
+        .iter()
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [] => Ok(false),
+        [value] if value.as_bytes() == WITNESS_BACKGROUND_WORKLOAD.as_bytes() => Ok(true),
+        _ => Err(Refusal::new(
+            StatusCode::BAD_REQUEST,
+            "witness_workload_malformed",
+        )),
+    }
+}
+
 /// The bound itself: acquire or refuse, then run under a deadline.
 async fn bound_witness_load(
     State(load): State<WitnessLoadBound>,
     request: Request,
     next: Next,
 ) -> Response {
-    let background = match request
-        .headers()
-        .get_all(WITNESS_WORKLOAD_HEADER)
-        .iter()
-        .collect::<Vec<_>>()
-        .as_slice()
-    {
-        [] => false,
-        [value] if value.as_bytes() == WITNESS_BACKGROUND_WORKLOAD.as_bytes() => true,
-        _ => {
-            return Refusal::new(StatusCode::BAD_REQUEST, "witness_workload_malformed")
-                .into_response();
-        }
+    let background = match declared_background(request.headers()) {
+        Ok(background) => background,
+        Err(refusal) => return refusal.into_response(),
     };
+    run_bounded(&load, background, next.run(request)).await
+}
+
+/// Run `work` under the bound: a permit or an immediate busy, then a
+/// deadline. Shared by the middleware and by a job's task, so a job is held
+/// to exactly what a request was.
+async fn run_bounded(
+    load: &WitnessLoadBound,
+    background: bool,
+    work: impl std::future::Future<Output = Response>,
+) -> Response {
     // `try_acquire_owned`, not `acquire_owned`. Waiting for a permit is a
     // queue, an unbounded queue in front of a bounded worker turns a load
     // problem into a memory problem, and it does it while telling the caller
@@ -284,7 +354,7 @@ async fn bound_witness_load(
         return saturated_refusal();
     };
 
-    match tokio::time::timeout(load.request_timeout, next.run(request)).await {
+    match tokio::time::timeout(load.request_timeout, work).await {
         Ok(response) => response,
         // Dropping the timed-out future is what makes this a bound rather than
         // a message: the handler, its redaction pass and any classifier call
@@ -630,7 +700,7 @@ fn refusal_for(error: WitnessError) -> Refusal {
     }
 }
 
-/// `POST /v1/witness`.
+/// The retired `POST /v1/witness`, now what a job runs.
 async fn witness_handler(
     State(service): State<Arc<WitnessService>>,
     request: Request,
@@ -672,6 +742,229 @@ async fn witness_handler(
                 .map_err(refusal_for)?;
             Ok(contribution_response(response))
         }
+    }
+}
+
+/// What the job routes hold.
+#[derive(Clone)]
+struct JobState {
+    service: Arc<WitnessService>,
+    load: WitnessLoadBound,
+    jobs: Arc<WitnessJobs>,
+}
+
+/// The only answer a job route gives for a miss of any kind.
+fn job_gone() -> Refusal {
+    Refusal::new(StatusCode::NOT_FOUND, WITNESS_JOB_GONE_ERROR)
+}
+
+/// One header value, exactly `bytes` bytes of hex, decoded. `None` for an
+/// absent, repeated or malformed header.
+fn hex_header<const N: usize>(headers: &HeaderMap, name: &str) -> Option<[u8; N]> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next()?.to_str().ok()?;
+    if values.next().is_some() || !is_hex_of_len(value, N) {
+        return None;
+    }
+    hex::decode(value).ok()?.try_into().ok()
+}
+
+/// The digest a `GET` or `DELETE` presents: the hash of its secret.
+fn presented_secret_hash(headers: &HeaderMap) -> Option<[u8; 32]> {
+    hex_header::<WITNESS_FETCH_SECRET_LEN>(headers, WITNESS_FETCH_SECRET_HEADER)
+        .map(|secret| sha256(&secret))
+}
+
+/// `sha256(job_id)`, when the path is a job id at all.
+fn job_id_hash(job_id: &str) -> Option<[u8; 32]> {
+    is_hex_of_len(job_id, WITNESS_JOB_ID_LEN)
+        .then(|| sha256(job_id.to_ascii_lowercase().as_bytes()))
+}
+
+/// The headers a finished answer keeps. Everything a client reads, and
+/// nothing a transport layer added.
+const KEPT_RESULT_HEADERS: [&str; 4] = [
+    "content-type",
+    WITNESS_CERTIFICATE_HEADER,
+    WITNESS_SIGNATURE_HEADER,
+    "retry-after",
+];
+
+/// Take a finished answer apart for sealing. A body past the store's bound
+/// becomes the redaction-failed refusal; nothing is truncated.
+async fn job_result(response: Response, max_bytes: usize) -> JobResult {
+    let status = response.status().as_u16();
+    let headers = KEPT_RESULT_HEADERS
+        .iter()
+        .filter_map(|name| {
+            response
+                .headers()
+                .get(*name)
+                .map(|value| (name.to_string(), value.as_bytes().to_vec()))
+        })
+        .collect();
+    match axum::body::to_bytes(response.into_body(), max_bytes).await {
+        Ok(body) => JobResult {
+            status,
+            headers,
+            body: body.to_vec(),
+        },
+        Err(_) => JobResult {
+            status: 503,
+            headers: vec![("content-type".to_string(), b"application/json".to_vec())],
+            body: br#"{"error":"witness_redaction_failed"}"#.to_vec(),
+        },
+    }
+}
+
+/// A sealed answer, back on the wire exactly as it was produced.
+fn served_result(result: JobResult) -> Response {
+    let mut response = Response::new(axum::body::Body::from(result.body));
+    *response.status_mut() =
+        StatusCode::from_u16(result.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    for (name, value) in result.headers {
+        if let (Ok(name), Ok(value)) = (
+            header::HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_bytes(&value),
+        ) {
+            response.headers_mut().insert(name, value);
+        }
+    }
+    response
+}
+
+/// `POST /v1/witness/jobs`.
+///
+/// Validates everything a refusal can be given for at once -- the workload
+/// header, the secret hash, the size, the shape -- so a job that is accepted
+/// is one the old route would have run. The raw body is held in memory and
+/// moved into the job's task; it is never written anywhere.
+async fn submit_job(State(state): State<JobState>, request: Request) -> Result<Response, Refusal> {
+    let background = declared_background(request.headers())?;
+    let secret_hash = hex_header::<32>(request.headers(), WITNESS_FETCH_SECRET_SHA256_HEADER)
+        .ok_or_else(|| {
+            Refusal::new(
+                StatusCode::BAD_REQUEST,
+                WITNESS_FETCH_SECRET_MALFORMED_ERROR,
+            )
+        })?;
+    // Refused before the body is read when the table is already full, so a
+    // busy witness does not buffer a megabyte to say so.
+    if state.jobs.is_full(background) {
+        return Err(
+            Refusal::new(StatusCode::SERVICE_UNAVAILABLE, WITNESS_SATURATED_ERROR)
+                .retry_after(SATURATED_RETRY_AFTER_SECS),
+        );
+    }
+    let body = axum::body::to_bytes(request.into_body(), state.service.max_request_bytes())
+        .await
+        .map_err(|_| Refusal::new(StatusCode::PAYLOAD_TOO_LARGE, "witness_request_too_large"))?;
+    {
+        let parsed: WitnessRequestBody = serde_json::from_slice(&body)
+            .map_err(|_| Refusal::new(StatusCode::BAD_REQUEST, "witness_request_malformed"))?;
+        shape_of(parsed)?;
+    }
+    let admitted = state
+        .jobs
+        .admit(secret_hash, background)
+        .map_err(|refusal| {
+            if refusal == AdmitRefusal::WouldExpire {
+                tracing::info!("witness job refused busy: the queue ahead would outlast it");
+            }
+            Refusal::new(StatusCode::SERVICE_UNAVAILABLE, WITNESS_SATURATED_ERROR)
+                .retry_after(SATURATED_RETRY_AFTER_SECS)
+        })?;
+
+    // A job is the retired `POST /v1/witness`, run here instead of over the
+    // wire: the same handler, under the same bound and deadline, and its
+    // answer -- certificate or refusal -- is the job's result.
+    let inner = axum::http::Request::builder()
+        .method(axum::http::Method::POST)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(body))
+        .map_err(|_| {
+            Refusal::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "witness_request_malformed",
+            )
+        })?;
+    let jobs = state.jobs.clone();
+    let service = state.service.clone();
+    let load = state.load.clone();
+    let id_hash = admitted.id_hash;
+    let max_result_bytes = jobs.limits().max_result_bytes;
+    let task = tokio::spawn(async move {
+        let response = run_bounded(&load, background, async move {
+            witness_handler(State(service), inner).await.into_response()
+        })
+        .await;
+        let result = job_result(response, max_result_bytes).await;
+        let status_class = result.status / 100;
+        match jobs.finish(&id_hash, result) {
+            Ok(()) => tracing::info!(status_class, "witness job finished"),
+            Err(_) => tracing::warn!("witness job result could not be sealed; dropped"),
+        }
+    });
+    state.jobs.set_abort(&id_hash, task.abort_handle());
+    tracing::info!(background, "witness job accepted");
+
+    Ok((
+        StatusCode::ACCEPTED,
+        axum::Json(WitnessJobAccepted {
+            job_id: admitted.job_id,
+            poll_after_secs: admitted.poll_after_secs,
+            queue_position: admitted.queue_position,
+            instance_id: state.jobs.instance_id().map(str::to_string),
+        }),
+    )
+        .into_response())
+}
+
+/// `GET /v1/witness/jobs/{job_id}`.
+async fn poll_job(
+    State(state): State<JobState>,
+    Path(job_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Refusal> {
+    let (Some(id_hash), Some(secret_hash)) =
+        (job_id_hash(&job_id), presented_secret_hash(&headers))
+    else {
+        return Err(job_gone());
+    };
+    match state.jobs.poll(&id_hash, &secret_hash) {
+        PollOutcome::Pending {
+            queue_position,
+            poll_after_secs,
+        } => Ok((
+            StatusCode::ACCEPTED,
+            axum::Json(WitnessJobPending {
+                state: WITNESS_JOB_PENDING_STATE.to_string(),
+                poll_after_secs,
+                queue_position,
+            }),
+        )
+            .into_response()),
+        PollOutcome::Done(result) => Ok(served_result(result)),
+        PollOutcome::Gone => Err(job_gone()),
+    }
+}
+
+/// `DELETE /v1/witness/jobs/{job_id}`.
+async fn cancel_job(
+    State(state): State<JobState>,
+    Path(job_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Refusal> {
+    let (Some(id_hash), Some(secret_hash)) =
+        (job_id_hash(&job_id), presented_secret_hash(&headers))
+    else {
+        return Err(job_gone());
+    };
+    if state.jobs.cancel(&id_hash, &secret_hash) {
+        tracing::info!("witness job cancelled");
+        Ok(StatusCode::NO_CONTENT.into_response())
+    } else {
+        Err(job_gone())
     }
 }
 
@@ -1102,13 +1395,35 @@ mod tests {
         (status, String::from_utf8_lossy(&body).into_owned())
     }
 
-    /// `send_bounded`, keeping the headers as well.
-    async fn send_bounded_full(
-        service: Arc<WitnessService>,
-        load: WitnessLoadBound,
+    /// A job table sized from `load`, as the binary sizes it, over a fresh
+    /// directory that lives as long as the returned guard.
+    fn test_jobs(load: &WitnessLoadBound) -> (Arc<WitnessJobs>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let sealer =
+            super::super::jobs::ResultSealer::open(dir.path(), zeroize::Zeroizing::new([0x42; 32]))
+                .expect("a writable temp dir");
+        let jobs = WitnessJobs::new(
+            sealer,
+            super::super::jobs::JobLimits {
+                max_active: load.max_concurrent_requests(),
+                max_active_background: load.max_background_requests(),
+                max_stored: 64,
+                max_result_bytes: 8 * 1024 * 1024,
+                result_ttl: super::super::jobs::RESULT_TTL,
+            },
+            load.request_timeout(),
+        );
+        (Arc::new(jobs), dir)
+    }
+
+    /// The fetch secret every test job is submitted with.
+    const TEST_FETCH_SECRET: [u8; 32] = [0x5a; 32];
+
+    async fn oneshot_full(
+        router: Router,
         request: HttpRequest<Body>,
     ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
-        let response = witness_router(service, load)
+        let response = router
             .oneshot(request)
             .await
             .expect("the router is infallible");
@@ -1118,6 +1433,62 @@ mod tests {
             .await
             .expect("the test bodies are small");
         (status, headers, body.to_vec())
+    }
+
+    fn job_request(method: Method, job_id: &str, secret: &[u8; 32]) -> HttpRequest<Body> {
+        HttpRequest::builder()
+            .method(method)
+            .uri(format!("{WITNESS_JOBS_PATH}/{job_id}"))
+            .header(WITNESS_FETCH_SECRET_HEADER, hex::encode(secret))
+            .body(Body::empty())
+            .expect("a well formed test request")
+    }
+
+    /// Submit what used to be a `POST /v1/witness` as a job, and poll it to
+    /// its answer. An immediate refusal at submit is returned as is.
+    async fn through_jobs(
+        router: Router,
+        request: HttpRequest<Body>,
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let (mut parts, body) = request.into_parts();
+        parts.uri = WITNESS_JOBS_PATH.parse().expect("a path");
+        parts.headers.insert(
+            WITNESS_FETCH_SECRET_SHA256_HEADER,
+            HeaderValue::from_str(&hex::encode(sha256(&TEST_FETCH_SECRET))).unwrap(),
+        );
+        let (status, headers, body) =
+            oneshot_full(router.clone(), HttpRequest::from_parts(parts, body)).await;
+        if status != StatusCode::ACCEPTED {
+            return (status, headers, body);
+        }
+        let accepted: WitnessJobAccepted =
+            serde_json::from_slice(&body).expect("a 202 names the job");
+        loop {
+            let (status, headers, body) = oneshot_full(
+                router.clone(),
+                job_request(Method::GET, &accepted.job_id, &TEST_FETCH_SECRET),
+            )
+            .await;
+            if status != StatusCode::ACCEPTED {
+                return (status, headers, body);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// `send_bounded`, keeping the headers as well. A `POST /v1/witness`
+    /// goes through the job routes that replaced it.
+    async fn send_bounded_full(
+        service: Arc<WitnessService>,
+        load: WitnessLoadBound,
+        request: HttpRequest<Body>,
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let (jobs, _dir) = test_jobs(&load);
+        let router = witness_router(service, load, jobs);
+        if request.method() == Method::POST && request.uri().path() == "/v1/witness" {
+            return through_jobs(router, request).await;
+        }
+        oneshot_full(router, request).await
     }
 
     fn post_witness(body: String) -> HttpRequest<Body> {
@@ -1387,10 +1758,10 @@ mod tests {
         );
     }
 
-    /// Nothing but the two routes exists, and the two exist only under the
-    /// methods they are documented for.
+    /// Nothing but the documented routes exists, each only under its
+    /// documented methods, and the retired `POST /v1/witness` is gone.
     #[tokio::test]
-    async fn no_route_other_than_the_two_exists() {
+    async fn no_route_other_than_the_documented_ones_exists() {
         let probes = [
             (Method::GET, "/healthz", StatusCode::NOT_FOUND),
             (Method::GET, "/health", StatusCode::NOT_FOUND),
@@ -1398,7 +1769,19 @@ mod tests {
             (Method::GET, "/v1/source", StatusCode::NOT_FOUND),
             (Method::GET, "/v1/witnesses", StatusCode::NOT_FOUND),
             (Method::GET, "/", StatusCode::NOT_FOUND),
-            (Method::GET, "/v1/witness", StatusCode::METHOD_NOT_ALLOWED),
+            // Retired: no longer routed at all.
+            (Method::GET, "/v1/witness", StatusCode::NOT_FOUND),
+            (Method::POST, "/v1/witness", StatusCode::NOT_FOUND),
+            (
+                Method::GET,
+                "/v1/witness/jobs",
+                StatusCode::METHOD_NOT_ALLOWED,
+            ),
+            (
+                Method::POST,
+                "/v1/witness/jobs/00000000000000000000000000000000",
+                StatusCode::METHOD_NOT_ALLOWED,
+            ),
             (
                 Method::POST,
                 "/v1/attestation",
@@ -1409,12 +1792,16 @@ mod tests {
         let mut wrong: Vec<(&str, StatusCode)> = Vec::new();
         for (method, path, expected) in probes {
             let (service, _) = healthy_service(TEST_LIMIT);
+            let load = unconstrained_load();
+            let (jobs, _dir) = test_jobs(&load);
             let request = HttpRequest::builder()
                 .method(method)
                 .uri(path)
                 .body(Body::empty())
                 .expect("a well formed test request");
-            let (status, _) = send(service, request).await;
+            // Straight at the router: `send` would translate the retired
+            // route into the job routes.
+            let (status, _, _) = oneshot_full(witness_router(service, load, jobs), request).await;
             if status != expected {
                 wrong.push((path, status));
             }
@@ -1585,16 +1972,7 @@ mod tests {
         service: Arc<WitnessService>,
         request: HttpRequest<Body>,
     ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
-        let response = witness_router(service, unconstrained_load())
-            .oneshot(request)
-            .await
-            .expect("the router is infallible");
-        let status = response.status();
-        let headers = response.headers().clone();
-        let body = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
-            .await
-            .expect("the test bodies are small");
-        (status, headers, body.to_vec())
+        send_bounded_full(service, unconstrained_load(), request).await
     }
 
     #[tokio::test]
@@ -1856,7 +2234,7 @@ mod tests {
             let request = HttpRequest::builder()
                 .method(Method::POST)
                 .uri(path)
-                .body(Body::empty())
+                .body(Body::from(witness_body("content")))
                 .unwrap();
             let (status, headers, body) =
                 send_bounded_full(service.clone(), load.clone(), request).await;
@@ -1929,20 +2307,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelling_background_request_releases_both_permits() {
+    async fn cancelling_a_background_job_releases_both_permits() {
         let entered = Arc::new(tokio::sync::Notify::new());
         let service = service_with_redactor(Arc::new(ParkingRedactor {
             entered: entered.clone(),
             release: Arc::new(tokio::sync::Notify::new()),
         }));
         let load = WitnessLoadBound::with_reservation(2, 1, Duration::from_secs(30)).unwrap();
-        let held = tokio::spawn({
-            let (service, load) = (service.clone(), load.clone());
-            async move { send_bounded(service, load, background_request("cancel")).await }
-        });
+        let (jobs, _dir) = test_jobs(&load);
+        let router = witness_router(service, load.clone(), jobs.clone());
+        let mut submit = background_request("cancel");
+        *submit.uri_mut() = WITNESS_JOBS_PATH.parse().unwrap();
+        submit.headers_mut().insert(
+            WITNESS_FETCH_SECRET_SHA256_HEADER,
+            HeaderValue::from_str(&hex::encode(sha256(&TEST_FETCH_SECRET))).unwrap(),
+        );
+        let (status, _, body) = oneshot_full(router.clone(), submit).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let accepted: WitnessJobAccepted = serde_json::from_slice(&body).unwrap();
         entered.notified().await;
-        held.abort();
-        held.await.expect_err("request was cancelled");
+        assert_eq!(load.in_use(), 1);
+
+        let (status, _, _) = oneshot_full(
+            router.clone(),
+            job_request(Method::DELETE, &accepted.job_id, &TEST_FETCH_SECRET),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        until_in_use_at_most(&load, 0).await;
+        assert_eq!(jobs.counts(), super::super::jobs::JobCounts::default());
+
         let (healthy, _) = healthy_service(TEST_LIMIT);
         assert_eq!(
             send_bounded(healthy, load, background_request("next"))
@@ -1950,6 +2344,16 @@ mod tests {
                 .0,
             StatusCode::OK
         );
+    }
+
+    async fn until_in_use_at_most(load: &WitnessLoadBound, n: usize) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while load.in_use() > n {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the slots were released");
     }
 
     /// A witness at its concurrency bound REFUSES the next request. It does
@@ -2202,6 +2606,213 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK, "attempt {attempt}: {body}");
         }
+    }
+
+    // ---------------------------------------------------------------
+    // The job routes themselves.
+    // ---------------------------------------------------------------
+
+    fn submit_request(body: String, secret_hash: Option<String>) -> HttpRequest<Body> {
+        let mut builder = HttpRequest::builder()
+            .method(Method::POST)
+            .uri(WITNESS_JOBS_PATH)
+            .header("content-type", "application/json");
+        if let Some(hash) = secret_hash {
+            builder = builder.header(WITNESS_FETCH_SECRET_SHA256_HEADER, hash);
+        }
+        builder.body(Body::from(body)).unwrap()
+    }
+
+    fn test_secret_hash() -> String {
+        hex::encode(sha256(&TEST_FETCH_SECRET))
+    }
+
+    async fn poll_until_done(router: &Router, job_id: &str) -> (StatusCode, Vec<u8>) {
+        loop {
+            let (status, _, body) = oneshot_full(
+                router.clone(),
+                job_request(Method::GET, job_id, &TEST_FETCH_SECRET),
+            )
+            .await;
+            if status != StatusCode::ACCEPTED {
+                return (status, body);
+            }
+            let pending: WitnessJobPending =
+                serde_json::from_slice(&body).expect("a pending answer has the pending shape");
+            assert_eq!(pending.state, "pending");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_job_is_accepted_at_once_and_its_result_is_served_exactly_once() {
+        let (service, _) = healthy_service(TEST_LIMIT);
+        let load = unconstrained_load();
+        let (jobs, dir) = test_jobs(&load);
+        let router = witness_router(service, load, jobs);
+        let (status, _, body) = oneshot_full(
+            router.clone(),
+            submit_request(
+                witness_body(&format!("deploy {SURVIVOR} with {SECRET}")),
+                Some(test_secret_hash()),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let accepted: WitnessJobAccepted = serde_json::from_slice(&body).unwrap();
+        assert!(is_hex_of_len(&accepted.job_id, 16), "a 128-bit hex id");
+        assert!(accepted.poll_after_secs >= 1);
+        assert_eq!(accepted.instance_id, None);
+
+        let (status, body) = poll_until_done(&router, &accepted.job_id).await;
+        assert_eq!(status, StatusCode::OK);
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let artifact = value["redacted_artifact"].as_str().unwrap();
+        assert!(artifact.contains(SURVIVOR) && !artifact.contains(SECRET));
+
+        let (status, _, body) = oneshot_full(
+            router.clone(),
+            job_request(Method::GET, &accepted.job_id, &TEST_FETCH_SECRET),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            error_code(&String::from_utf8_lossy(&body)),
+            "witness_job_gone"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "the result outlived its fetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wrong_or_absent_secret_and_a_malformed_id_are_all_simply_gone() {
+        let (service, _) = healthy_service(TEST_LIMIT);
+        let load = unconstrained_load();
+        let (jobs, _dir) = test_jobs(&load);
+        let router = witness_router(service, load, jobs.clone());
+        let (_, _, body) = oneshot_full(
+            router.clone(),
+            submit_request(witness_body("content"), Some(test_secret_hash())),
+        )
+        .await;
+        let accepted: WitnessJobAccepted = serde_json::from_slice(&body).unwrap();
+        while jobs.counts().done_unfetched == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let no_secret = HttpRequest::builder()
+            .method(Method::GET)
+            .uri(format!("{WITNESS_JOBS_PATH}/{}", accepted.job_id))
+            .body(Body::empty())
+            .unwrap();
+        let probes = [
+            job_request(Method::GET, &accepted.job_id, &[0x01; 32]),
+            job_request(Method::DELETE, &accepted.job_id, &[0x01; 32]),
+            no_secret,
+            job_request(Method::GET, "not-a-job", &TEST_FETCH_SECRET),
+            job_request(Method::GET, &"0".repeat(32), &TEST_FETCH_SECRET),
+        ];
+        for probe in probes {
+            let (status, _, body) = oneshot_full(router.clone(), probe).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(
+                String::from_utf8_lossy(&body),
+                "{\"error\":\"witness_job_gone\"}"
+            );
+        }
+        // None of those consumed the result.
+        let (status, _) = poll_until_done(&router, &accepted.job_id).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_submit_without_a_well_formed_secret_hash_is_refused_and_queues_nothing() {
+        let (service, _) = healthy_service(TEST_LIMIT);
+        let load = unconstrained_load();
+        let (jobs, _dir) = test_jobs(&load);
+        let router = witness_router(service, load, jobs.clone());
+        for hash in [None, Some("ab".to_string()), Some("zz".repeat(32))] {
+            let (status, _, body) =
+                oneshot_full(router.clone(), submit_request(witness_body("x"), hash)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_code(&String::from_utf8_lossy(&body)),
+                "witness_fetch_secret_malformed"
+            );
+        }
+        let (status, _, _) = oneshot_full(
+            router,
+            submit_request("{not json".to_string(), Some(test_secret_hash())),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(jobs.counts(), super::super::jobs::JobCounts::default());
+    }
+
+    #[tokio::test]
+    async fn a_full_job_table_is_busy_at_submit() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let service = service_with_redactor(Arc::new(ParkingRedactor {
+            entered: entered.clone(),
+            release: release.clone(),
+        }));
+        let load = WitnessLoadBound::new(1, Duration::from_secs(30));
+        let (jobs, _dir) = test_jobs(&load);
+        let router = witness_router(service, load, jobs);
+        let (status, _, body) = oneshot_full(
+            router.clone(),
+            submit_request(witness_body("first"), Some(test_secret_hash())),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let accepted: WitnessJobAccepted = serde_json::from_slice(&body).unwrap();
+        entered.notified().await;
+        let (status, headers, body) = oneshot_full(
+            router.clone(),
+            submit_request(witness_body("second"), Some(test_secret_hash())),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            error_code(&String::from_utf8_lossy(&body)),
+            "witness_saturated"
+        );
+        assert_eq!(headers.get(header::RETRY_AFTER).unwrap(), "30");
+        // Polls keep answering while the table is full.
+        let (status, _, _) = oneshot_full(
+            router.clone(),
+            job_request(Method::GET, &accepted.job_id, &TEST_FETCH_SECRET),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        release.notify_one();
+        assert_eq!(
+            poll_until_done(&router, &accepted.job_id).await.0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn the_accepted_answer_names_the_instance_when_it_is_known() {
+        let (service, _) = healthy_service(TEST_LIMIT);
+        let load = unconstrained_load();
+        let (jobs, _dir) = test_jobs(&load);
+        let jobs = Arc::new(
+            Arc::into_inner(jobs)
+                .unwrap()
+                .with_instance_id(Some("0123456789abcdef".to_string())),
+        );
+        let router = witness_router(service, load, jobs);
+        let (_, _, body) = oneshot_full(
+            router,
+            submit_request(witness_body("x"), Some(test_secret_hash())),
+        )
+        .await;
+        let accepted: WitnessJobAccepted = serde_json::from_slice(&body).unwrap();
+        assert_eq!(accepted.instance_id.as_deref(), Some("0123456789abcdef"));
     }
 
     // ---------------------------------------------------------------

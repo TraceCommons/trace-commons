@@ -41,12 +41,10 @@
 
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::{Method, Request, StatusCode};
+use axum::http::StatusCode;
 use k256::ecdsa::SigningKey;
 use sha2::{Digest as _, Sha256};
 use sha3::Keccak256;
-use tower::ServiceExt as _;
 
 use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
 use trace_commons_server::near_attestation::receipt::{
@@ -205,21 +203,14 @@ struct FromTheWire {
 
 /// Drive the witness's own router and keep what it put on the wire.
 async fn witness_over_the_wire(service: Arc<WitnessService>, text: &str) -> FromTheWire {
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri("/v1/witness")
-        .header("content-type", "application/json")
-        .body(Body::from(contribution_body(text)))
-        .expect("a well formed request");
-
-    let response = witness_router(
-        service,
-        // Not what this test is about: wide enough that the bound never fires.
-        WitnessLoadBound::new(8, std::time::Duration::from_secs(30)),
+    // Not what this test is about: wide enough that the bound never fires.
+    let load = WitnessLoadBound::new(8, std::time::Duration::from_secs(30));
+    let (jobs, _dir) = crate::witness_jobs_support::test_jobs(&load);
+    let response = crate::witness_jobs_support::witness_through_jobs(
+        witness_router(service, load, jobs),
+        contribution_body(text).into_bytes(),
     )
-    .oneshot(request)
-    .await
-    .expect("the router is infallible");
+    .await;
     assert_eq!(
         response.status(),
         StatusCode::OK,
@@ -744,19 +735,13 @@ fn requiring_service() -> (Arc<WitnessService>, TestSigner) {
 
 /// Drive the real router with a raw body and keep the status and the label.
 async fn post_witness(service: Arc<WitnessService>, body: Vec<u8>) -> (StatusCode, String) {
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri("/v1/witness")
-        .header("content-type", "application/json")
-        .body(Body::from(body))
-        .expect("a well formed request");
-    let response = witness_router(
-        service,
-        WitnessLoadBound::new(8, std::time::Duration::from_secs(30)),
+    let load = WitnessLoadBound::new(8, std::time::Duration::from_secs(30));
+    let (jobs, _dir) = crate::witness_jobs_support::test_jobs(&load);
+    let response = crate::witness_jobs_support::witness_through_jobs(
+        witness_router(service, load, jobs),
+        body,
     )
-    .oneshot(request)
-    .await
-    .expect("the router is infallible");
+    .await;
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), TEST_LIMIT)
         .await

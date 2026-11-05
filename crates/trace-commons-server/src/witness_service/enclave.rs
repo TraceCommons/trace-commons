@@ -317,7 +317,25 @@ pub trait GuestAgent: Send + Sync {
     /// envelope to msgpack, and this workspace has no decoder for it. The raw
     /// quote is what `dcap_qvl` verifies anyway.
     async fn quote(&self, report_data: &[u8; REPORT_DATA_LEN]) -> Result<Vec<u8>, EnclaveError>;
+
+    /// `GetKey(path)`: 32 bytes derived from the app key for `path`.
+    ///
+    /// Defaults to a refusal, so an agent that cannot derive keys can never
+    /// stand in for one that can: the caller fails closed.
+    async fn derived_secret(&self, _path: &str) -> Result<Zeroizing<[u8; 32]>, EnclaveError> {
+        Err(EnclaveError::Transport)
+    }
+
+    /// `Info`'s `instance_id`, as lowercase hex. Defaults to a refusal.
+    async fn instance_id(&self) -> Result<String, EnclaveError> {
+        Err(EnclaveError::Transport)
+    }
 }
+
+/// The `GetKey` path the sealed-results key derives from. Distinct from
+/// [`SIGNING_KEY_PATH`]: the path is the only input that separates
+/// dstack-derived keys (see the module docs).
+pub const RESULTS_KEY_PATH: &str = "trace-commons-witness-results-v1";
 
 /// Lay a signing address and a contributor nonce into the 64 bytes TDX signs.
 ///
@@ -458,6 +476,27 @@ impl DstackEnclave {
     /// The two-link `GetKey` chain, captured and unverified. See module docs.
     pub fn signing_key_chain(&self) -> &[Vec<u8>] {
         &self.key_chain
+    }
+
+    /// The key sealed job results are encrypted under: a `GetKey` secret at
+    /// [`RESULTS_KEY_PATH`], bound to this witness's boot measurement by
+    /// [`super::jobs::results_key`]. `GetKey` alone is per app id; the
+    /// measurement is what makes a redeployed image unable to open the old
+    /// image's results.
+    pub async fn results_key(&self) -> Result<Zeroizing<[u8; 32]>, EnclaveError> {
+        let secret = self.agent.derived_secret(RESULTS_KEY_PATH).await?;
+        Ok(super::jobs::results_key(&secret, &self.measurement))
+    }
+
+    /// This instance's id, as the gateway names it. Refused unless it is a
+    /// bounded lowercase hex string, so nothing else can reach a host name.
+    pub async fn instance_id(&self) -> Result<String, EnclaveError> {
+        let id = self.agent.instance_id().await?.to_ascii_lowercase();
+        if trace_commons_protocol::witness_jobs::is_instance_id(&id) {
+            Ok(id)
+        } else {
+            Err(EnclaveError::MalformedResponse)
+        }
     }
 }
 
@@ -728,6 +767,44 @@ impl GuestAgent for DstackSocketAgent {
             scalar: Zeroizing::new(scalar),
             chain,
         })
+    }
+
+    async fn derived_secret(&self, path: &str) -> Result<Zeroizing<[u8; 32]>, EnclaveError> {
+        // The path is one of this crate's constants, never caller input; it
+        // is still refused unless it is query-safe, so it cannot reshape
+        // the request line.
+        if path.is_empty()
+            || !path
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(EnclaveError::MalformedResponse);
+        }
+        let response = self
+            .get_either(
+                &format!(
+                    "{GET_KEY_PATH}?path={path}&purpose=encryption&algorithm={SIGNING_KEY_ALGORITHM}"
+                ),
+                &format!(
+                    "{GET_KEY_PATH_UNVERSIONED}?path={path}&purpose=encryption&algorithm={SIGNING_KEY_ALGORITHM}"
+                ),
+            )
+            .await?;
+        let key = Zeroizing::new(hex_field(&response, "key")?);
+        let secret: [u8; 32] = key
+            .as_slice()
+            .try_into()
+            .map_err(|_| EnclaveError::MalformedResponse)?;
+        Ok(Zeroizing::new(secret))
+    }
+
+    async fn instance_id(&self) -> Result<String, EnclaveError> {
+        let response = self.get_either("/v0/Info", "/Info").await?;
+        let id = hex_field(&response, "instance_id")?;
+        if id.is_empty() {
+            return Err(EnclaveError::MalformedResponse);
+        }
+        Ok(hex::encode(id))
     }
 
     async fn quote(&self, report_data: &[u8; REPORT_DATA_LEN]) -> Result<Vec<u8>, EnclaveError> {
