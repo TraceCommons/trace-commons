@@ -25,8 +25,8 @@ and reads its failures as its own (memory note on NEAR AI classify limits,
   # per-request latency across body sizes, with a fitted base + per-KiB
   near_ai_probe.py latency --yes
 
-  # how many requests may overlap: bursts of 2, then 4, then 8, a minute
-  # apart, stopping at the first burst with any failure. This is the probe
+  # how many requests may overlap: a burst of 2, then 4, a minute apart,
+  # stopping at the first burst with any failure; 8 requests in all. This is the probe
   # that poisoned the key for minutes on 2026-08-28: run it last, on its own
   # key, and expect serial traffic on that key to fail for a while after a
   # failed burst.
@@ -252,6 +252,8 @@ def run_overlap(client, args, rng):
     if not args.i_understand_overlap:
         raise SystemExit("overlap bursts can poison the key for minutes; add --i-understand-overlap")
     levels = [int(value) for value in args.overlap_levels.split(",")]
+    if not levels or any(level not in (2, 4) for level in levels):
+        raise SystemExit("--overlap-levels takes 2 and/or 4 (owner decision 2026-11-05)")
     report(mode="overlap", levels=args.overlap_levels, body_kib=args.overlap_body_kib,
            pause_s=args.overlap_pause)
     body = body_for(client.model, text_with_body_size(client.model, rng, args.overlap_body_kib * 1024))
@@ -285,13 +287,14 @@ def run_overlap(client, args, rng):
         slowest = max(seconds for _, _, seconds in results)
         report(phase="burst", in_flight=level, statuses=json.dumps(statuses, separators=(",", ":")),
                slowest_s=f"{slowest:.2f}")
-        # Serial follow-up after the same pause: did the burst poison the key?
-        time.sleep(args.overlap_pause)
-        status, _, seconds = client.post(body)
-        report(phase="after_burst", in_flight=level, status=status, seconds=f"{seconds:.2f}")
-        if set(statuses) != {"200"} or status != 200:
+        if set(statuses) != {"200"}:
             report(stop=f"failures at {level} in flight; not escalating")
             break
+    # One serial request after the last burst and the same pause: did the
+    # bursts poison the key for ordinary traffic?
+    time.sleep(args.overlap_pause)
+    status, _, seconds = client.post(body)
+    report(phase="after_bursts", status=status, seconds=f"{seconds:.2f}")
 
 
 def main():
@@ -311,7 +314,7 @@ def main():
     parser.add_argument("--batch-item-kib", type=int, default=0,
                         help="pad each batch input to about this size (0: short texts)")
     parser.add_argument("--sizes-kib", default="1,4,16,32,64,96,128,160,200")
-    parser.add_argument("--overlap-levels", default="2,4,8")
+    parser.add_argument("--overlap-levels", default="2,4")
     parser.add_argument("--overlap-body-kib", type=int, default=8)
     parser.add_argument("--overlap-pause", type=float, default=60.0,
                         help="seconds before each burst and before each follow-up")
@@ -330,9 +333,9 @@ def main():
         raise SystemExit("TRACE_NEAR_AI_PRIVACY_API_KEY is not set")
     rng = random.Random(args.seed)
     if args.mode == "overlap":
-        # 1 baseline + per level (burst + follow-up); the default 12 is too
-        # few for 2,4,8, so size the cap to the plan and no larger.
-        client.max_requests = 1 + sum(int(v) + 1 for v in args.overlap_levels.split(","))
+        # 1 baseline + the bursts + 1 follow-up: 8 for the default 2,4, and
+        # never more than 8.
+        client.max_requests = min(8, 2 + sum(int(v) for v in args.overlap_levels.split(",")))
     {"limit": run_limit, "batch": run_batch, "latency": run_latency,
      "overlap": run_overlap}[args.mode](client, args, rng)
     report(requests_sent=client.sent)

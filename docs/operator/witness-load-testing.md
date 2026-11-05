@@ -89,7 +89,7 @@ python3 -I scripts/witness-load/near_ai_probe.py limit --yes      # body limit, 
 python3 -I scripts/witness-load/near_ai_probe.py batch --yes      # arrays of 4, 16, 64 short texts
 python3 -I scripts/witness-load/near_ai_probe.py batch --yes --batch-sizes 64 --batch-item-kib 3
 python3 -I scripts/witness-load/near_ai_probe.py latency --yes    # 1 to 200 KiB bodies, fitted
-# Last, on its own key: bursts of 2, 4, 8 overlapping requests, a minute apart
+# Last, on its own key: bursts of 2 then 4 overlapping requests, a minute apart, 8 in all
 python3 -I scripts/witness-load/near_ai_probe.py overlap --yes --i-understand-overlap
 ```
 
@@ -105,8 +105,8 @@ slowest measured request as a fraction of the default timeout for its size.
 Above about 0.5, there is less than 2x headroom: raise the timeout or lower
 the window cap.
 
-Read `overlap` as the largest `in_flight` whose burst and `after_burst` were
-all `200`. That is the most `TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT`
+Read `overlap` as the largest `in_flight` whose burst was all `200`, with
+`after_bursts` also `200`. That is the most `TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT`
 should be, summed across every witness replica sharing the key. The mode
 sends a serial baseline first and stops at the first burst with any
 failure. A failed burst has poisoned this key for minutes before (2026-08-28),

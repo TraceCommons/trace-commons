@@ -166,9 +166,23 @@ so the in-flight bound counts requests, not texts. Tests show each batched
 answer equals the unbatched one, and that the witness's envelope and edit
 maps are unchanged with batching on.
 
-Turning it on waits for `scripts/witness-load/near_ai_probe.py batch` to
-show, against the live endpoint, that an array returns one entry per input
-and that those entries match the same inputs sent one at a time.
+**Measured 2026-11-05, owner's key, synthetic text: correct, not faster.**
+An array returns one entry per input, and each entry's spans match the same
+input sent alone. But the endpoint appears to work through the array one
+item at a time:
+
+| inputs per request | time | per input |
+|---|---|---|
+| 1 (small, alone) | ~2.0 s | 2.0 s |
+| 4 | 6.41 s | 1.6 s |
+| 16 | 25.50 s | 1.6 s |
+| 64 | 87.00 s | 1.4 s |
+
+Batching saves about 0.5 s per input, and it lengthens each call, which
+works against the per-call timeout and the request budget. **It stays off**
+(owner decision). The levers left are parallel calls (the `overlap`
+probe), more keys or replicas, and not classifying leaves that cannot
+carry prose (#1977).
 
 ### 2.4 Known gap: the window cache stops filling
 
@@ -290,18 +304,126 @@ not throughput, unless each brings its own classifier capacity. This spec
 gives no dollar figures: Phala's CVM pricing and NEAR AI's per-call pricing
 are not in this repository, and nobody has measured them.
 
-## 5. Order of work
+## 5. Submit-then-poll witness API (design sketch, owner request 2026-11-05)
+
+Today a review is one long HTTP request: the client sends the raw session
+and waits, with nothing on the wire, for up to 540 s. That couples the
+review's length to every timeout between client and witness (the dstack
+gateway's 10-minute idle close is the binding one), and a dropped
+connection loses the work. Submit-then-poll decouples them.
+
+**Routes.**
+
+- `POST /v1/witness/jobs` takes the same body as `POST /v1/witness`, plus
+  the contributor nonce and a fetch-secret hash (below). It answers at
+  once with `202 {job_id, poll_after_secs, queue_position}`, or the
+  existing immediate busy when the queue is full or the queued wait would
+  pass the job's lifetime.
+- `GET /v1/witness/jobs/{job_id}` answers `pending` with the queue
+  position, `done` with the same response body and certificate headers
+  `POST /v1/witness` returns today, or a refusal label.
+- `DELETE /v1/witness/jobs/{job_id}` cancels.
+
+**The nonce still binds the result to this client's request.** The client
+sends its nonce in the POST, exactly as it sends it now. The witness binds
+it into the certificate it signs when the job finishes; nothing about the
+certificate format changes. Two requests do not weaken the binding: the
+certificate covers the nonce and the redacted bytes whichever response
+carries it. The attestation quote is still fetched separately by nonce
+(`/v1/attestation`), unchanged.
+
+**Who may fetch.** `job_id` is 128 random bits, but an id travels in URLs
+and logs, so it is not the only capability. The POST carries
+`sha256(fetch_secret)`, where the secret is 32 random bytes the client
+keeps. The GET and DELETE carry the secret itself, in a header. The witness
+compares hashes. A leaked job id alone fetches nothing.
+
+**Retention and one-time fetch.**
+
+- The raw session is held only until its job is processed, then dropped.
+- The redacted result is held until its first successful fetch, then
+  deleted.
+- An unfetched result expires after a short time (proposal: 15 minutes),
+  as does a job that never ran.
+- A fetch after deletion answers `gone`. The client then resubmits; the
+  approval covers the same send to the same witness.
+
+**Storage: memory only.** A raw session never touches disk, sealed or not.
+Sealed disk would let jobs survive a restart, at the cost of raw transcripts
+at rest inside the CVM and a deletion story for them. A restart losing
+in-flight jobs costs a resubmission, and the client already retries. Memory
+is bounded by the job limit times the 1 MiB body cap.
+
+**Limits and backpressure.**
+
+- A bounded job table (proposal: 64 jobs, about 400 MiB worst case at six
+  copies per job; or count result bytes and drop raw bytes as each job
+  runs).
+- Jobs run in arrival order through the same classify queue and permits as
+  today (#1973).
+- A POST is refused busy when the table is full or the estimated wait
+  would pass the job lifetime, so a job is never accepted only to expire.
+- `poll_after_secs` comes from queue position times the recent per-job
+  time, so clients do not poll hot.
+- `GET` is cheap and outside the job bound, like `/v1/attestation`.
+
+**Cancellation.** `DELETE` with the secret drops the raw session at once,
+if the job has not started. A running job is cancelled at its next
+classifier call: no further calls start, and in-flight ones are dropped.
+Its result is never produced.
+
+**Replicas.** The gateway routes the app-id URL to any instance (3.2), so a
+GET can land on a replica that does not hold the job. Two options:
+
+- **Instance-addressed polling (recommended).** The 202 names the
+  instance; the client polls `<instance_id>-8088.<gateway>`, which the
+  gateway routes to that instance directly. Every replica shares the
+  measurement and signing key (3.1), so the client's checks are unchanged.
+  If the instance is gone, the poll fails, and the client resubmits through
+  the app-id URL.
+- **Shared job state across replicas.** This would move raw sessions
+  between CVMs or into a store outside them. Not proposed.
+
+**Privacy.**
+
+- Raw text is held only in the CVM's memory, only until processed.
+- The redacted result is held only until fetched or expired.
+- Job ids and fetch secrets are never logged.
+- `/v1/diagnostics` gains label-only queue counts (jobs pending, running,
+  done-unfetched, expired), never ids.
+
+**Client changes.** The witness worker (#1967) submits, keeps the job id
+and secret in memory, and polls on `poll_after_secs` with jitter. Its
+existing transient-retry path covers `busy`, `gone` and an unreachable
+instance. The interactive preview can use the same path, so a person
+waiting sees "Running privacy check..." with no 540 s connection
+underneath. `POST /v1/witness` stays for older clients until they age out.
+
+**Open questions for the owner.**
+
+1. Result lifetime: is 15 minutes right? Longer helps a sleeping laptop
+   and costs memory.
+2. Memory only (lost on restart), or sealed disk for results only (never
+   raw)?
+3. Should the queue position be shown to the person, or kept internal?
+4. Instance-addressed polling ties a job to one CVM. Is losing jobs when
+   that CVM restarts acceptable?
+5. Keep `POST /v1/witness` indefinitely, or set a date to retire it?
+
+## 6. Order of work
 
 1. Find why the live witness's classifier calls failed on 2026-11-05 (CVM
    logs, `near-ai privacy classify failed` labels, key status).
 2. Re-measure the endpoint with synthetic text, at low volume, on a key no
-   driver is using: `scripts/witness-load/near_ai_probe.py limit`, `batch`
-   and `latency` (body limit by binary search with escape-heavy text, array
-   batching, per-call latency), then `overlap` (bursts of 2/4/8, a minute
-   apart, stopping at the first failure). Overlap is the measurement that
+   driver is using (`scripts/witness-load/near_ai_probe.py`). Done
+   2026-11-05: `latency` (dense text ~3 s + 0.4 s/KiB; it set #1973's
+   64 KiB cap and 15 s + 600 ms/KiB timeout) and `batch` (correct, not
+   faster; see 2.3). Still to run: `limit`, and `overlap` (2 then 4
+   requests at once, 8 requests in all). Overlap is the measurement that
    poisoned the key last time, so it runs last, deliberately, on its own key.
-3. Set `TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT` and the body cap from
-   step 2. Ship with the redeploy the companion spec already sequences.
-4. Turn batching on (2.3) if step 2 shows it holds.
+3. Raise `TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT` above 2 only if
+   `overlap` shows 4 holds. Ship with the redeploy the companion spec
+   already sequences.
+4. Batching (2.3) stays off; the numbers say it does not pay.
 5. Replicas (section 3), when availability matters or when per-replica
    keys are available.
