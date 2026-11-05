@@ -1,6 +1,6 @@
 # Run the redaction witness at submission, not at preview
 
-Status: APPROVED design, except the three questions still open in 9.2.
+Status: APPROVED design, except the four questions still open in 9.2.
 The owner approved Q1-Q8 and the section 3 strings on 2026-11-05 ("go
 with recs"). No code changes.
 Date: 2026-11-05.
