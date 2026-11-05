@@ -2089,6 +2089,30 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Sets several projects to Ask or Never at once (Settings > Projects'
+    /// Manage sheet): one `set_project_mode` call each, in order, with the
+    /// list refreshed once at the end. Never Automatic: arming is a grant,
+    /// made one project at a time through the arming confirmation, so a
+    /// mode outside `ProjectsManager.bulkModes` sends nothing. The first
+    /// refusal stops the rest and lands in `lastActionError`; the list is
+    /// refreshed either way, so it shows what did change.
+    func setProjectModes(_ projectIDs: [String], mode: ProjectMode) {
+        guard ProjectsManager.bulkModes.contains(mode), !projectIDs.isEmpty else { return }
+        perform(
+            "set_project_mode",
+            work: { client in
+                for id in projectIDs { try client.setProjectMode(projectID: id, mode: mode) }
+            },
+            onFailure: {
+                self.refreshProjects()
+                self.refreshAudit()
+            }
+        ) { _ in
+            self.refreshProjects()
+            self.refreshAudit()
+        }
+    }
+
     /// Decline a whole project from the Waiting screen.
     ///
     /// The daemon clears what that project has waiting as part of setting the

@@ -26,6 +26,7 @@ final class ShellWordsCopyExportTests: XCTestCase {
             ("withdrawal", copy.withdrawal), ("public_profile", copy.publicProfile), ("queue", copy.queue),
             ("history", copy.history), ("scrubbing", copy.scrubbing), ("settings", copy.settings),
             ("paused_notice", copy.pausedNotice),
+            ("projects_manager", try XCTUnwrap(copy.projectsManager)),
         ]
         for (name, decoded) in tables {
             let nested = try XCTUnwrap(object[name] as? [String: Any], name)
@@ -41,6 +42,18 @@ final class ShellWordsCopyExportTests: XCTestCase {
         XCTAssertEqual(copy.withdrawal.confirmTitle, "Confirm withdrawal")
         XCTAssertNotNil(copy.publicProfile.failureReasons["handle-too-short"])
         XCTAssertNotNil(copy.settings.auditActions["armed-auto-upload"])
+    }
+
+    /// Settings > Projects' Manage sheet words arrive, and a bulk Never
+    /// is titled through the one Never confirmation's words.
+    func testTheProjectsManagerWordsDecode() throws {
+        let copy = try XCTUnwrap(ShellWordsCopy.decode(fromJSON: TCCoreCopy.shellWordsCopyJSON()))
+        let words = try XCTUnwrap(copy.projectsManager)
+        XCTAssertEqual(words.manage, "Manage\u{2026}")
+        XCTAssertEqual(ShellWordsCopy.fill(words.selected, ["count": "2"]), "2 selected")
+        let many = ShellWordsCopy.fill(words.projectsCount, ["count": "3"])
+        let ignore = try XCTUnwrap(ProjectIgnoreCopy.decode(fromJSON: TCCoreCopy.projectIgnoreCopyJSON(project: many, pending: 4)))
+        XCTAssertEqual(ignore.title, "Set 3 projects to Never?")
     }
 
     /// The Traces tab's resume notice says Settings' own paused sentence.
