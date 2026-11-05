@@ -640,6 +640,10 @@ fn record(
                 &observed_at,
                 None,
             );
+            if super::note_witness_blocked(shared, &applied) {
+                let mut state = shared.state.lock().expect("state lock");
+                let _ = state.save(&shared.store);
+            }
             // A busy witness is asked once, not once per waiting session:
             // everything queued behind this job is held until the witness's
             // own delay, with the same per-session spread the pass used.
