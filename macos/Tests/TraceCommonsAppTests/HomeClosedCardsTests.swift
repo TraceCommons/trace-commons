@@ -70,9 +70,9 @@ final class HomeClosedCardsTests: XCTestCase {
         XCTAssertTrue(home.contains("@AppStorage(HomeClosedCards.insightsKey) private var insightsClosedOn = \"\""))
         XCTAssertTrue(home.contains("@AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true"))
         XCTAssertTrue(home.contains("@AppStorage(HomeClosedCards.tracesHeroKey) private var tracesHeroClosed = false"))
-        XCTAssertTrue(home.contains("onClose: { closedCampaign = HomeClosedCards.fingerprint(campaign) }"))
+        XCTAssertFalse(home.contains("onClose: { closedCampaign"), "the campaign has no X (Ron, 2026-11-05)")
         XCTAssertTrue(home.contains("onClose: { insightsClosedOn = HomeClosedCards.day(Date()) }"))
-        XCTAssertTrue(home.contains("close: GetStartedCard.Close(label: MonitorWords.close) { tracesHeroClosed = true })"))
+        XCTAssertTrue(home.contains("close: GetStartedCard.Close(label: MonitorWords.close) { tracesHeroClosed = true },"))
         let general = try HistoryParityTests.text("Views/Settings/GeneralSection.swift")
         XCTAssertTrue(general.contains("@AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true"))
         XCTAssertTrue(general.contains("Toggle(words.promotionsToggle, isOn: $promotionsOn)"))
@@ -88,8 +88,8 @@ final class HomeClosedCardsTests: XCTestCase {
         XCTAssertFalse(words.promotionsCaption.isEmpty)
     }
 
-    /// The hero card draws an X only when given one: the campaign and
-    /// Insights have one; Missions has none. The Traces walkthrough is the
+    /// The hero card draws an X only when given one: Insights has one; the
+    /// campaign (Ron, 2026-11-05) and Missions have none. The Traces walkthrough is the
     /// getting-started card since 2026-11-02 (owner), with its own X.
     func testOnlyCardsGivenACloseDrawAnX() throws {
         let hero = try String(contentsOf: Self.packageRoot
@@ -97,7 +97,7 @@ final class HomeClosedCardsTests: XCTestCase {
         XCTAssertTrue(hero.contains("if let onClose {\n                GlassHeroClose(label: closeLabel ?? \"\", action: onClose)"))
         XCTAssertTrue(hero.contains(".foregroundStyle(GlassTokens.Color.heroInk.color"))
         let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
-        XCTAssertEqual(home.components(separatedBy: "onClose:").count - 1, 2)
+        XCTAssertEqual(home.components(separatedBy: "onClose:").count - 1, 1)
         XCTAssertEqual(home.components(separatedBy: "GetStartedCard.Close(").count - 1, 1)
     }
 

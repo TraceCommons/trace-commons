@@ -69,7 +69,7 @@ final class HomeTracesHeroTests: XCTestCase {
             "@AppStorage(HomeClosedCards.tracesHeroKey) private var tracesHeroClosed = false"))
         let body = try Self.hero()
         XCTAssertTrue(body.contains("if let words, !tracesHeroClosed {"))
-        XCTAssertTrue(body.contains("close: GetStartedCard.Close(label: MonitorWords.close) { tracesHeroClosed = true })"))
+        XCTAssertTrue(body.contains("close: GetStartedCard.Close(label: MonitorWords.close) { tracesHeroClosed = true },"))
     }
 
     /// No gradient, ring or first-run pictures any more: the card is plain

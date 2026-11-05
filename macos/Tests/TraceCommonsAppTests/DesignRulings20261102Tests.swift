@@ -137,15 +137,16 @@ final class DesignRulings20261102Tests: XCTestCase {
         XCTAssertEqual(NudgeGlassCard.style(.notNow(.idleSessions)), .link)
     }
 
-    /// The pixel field is tried on the Private AI tab's card only, out to
-    /// the card's edges and corners, behind its words.
-    func test_thePixelFieldIsOnThePrivateAIGuideOnly() throws {
+    /// The pixel field is on every getting-started card (Ron, 2026-11-05; it
+    /// was tried on the Private AI tab's first), out to the card's edges and
+    /// corners, behind its words. Home's rolls as waves, to tell it apart.
+    func test_thePixelFieldIsOnEveryGettingStartedCard() throws {
         XCTAssertTrue(try Self.text("Views/Monitor/InferenceViews.swift").contains("pixelField: true"))
-        XCTAssertFalse(try Self.text("Views/Monitor/HomeViews.swift").contains("pixelField"))
-        XCTAssertFalse(try Self.text("Views/InsightsGetStarted.swift").contains("pixelField"))
+        XCTAssertTrue(try Self.text("Views/Monitor/HomeViews.swift").contains("pixelField: true, fieldPattern: .waves)"))
+        XCTAssertTrue(try Self.text("Views/InsightsGetStarted.swift").contains("pixelField: true"))
         let card = try Self.text("Views/GetStartedCard.swift")
         XCTAssertTrue(card.contains("var pixelField = false"))
-        XCTAssertTrue(card.contains(".background { if pixelField { GetStartedCardField() } }\n        .insightsSection()"))
+        XCTAssertTrue(card.contains(".background { if pixelField { GetStartedCardField(pattern: fieldPattern) } }\n        .insightsSection()"))
         XCTAssertTrue(card.contains(".clipShape(RoundedRectangle(cornerRadius: GlassTokens.Radius.card, style: .continuous))"))
         XCTAssertTrue(card.contains(".padding(.horizontal, -GlassTokens.Space.cardPaddingHorizontal)"))
     }
