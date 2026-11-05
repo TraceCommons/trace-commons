@@ -774,6 +774,10 @@ struct TickState {
     /// Whether this process has re-read the witness-risk holds under the
     /// current rule (`release_witness_risk_holds_once`).
     witness_risk_holds_rechecked: bool,
+    /// Whether this process has skipped queued sessions with no message from
+    /// the person and re-read the nothing-matched holds under the witness
+    /// rule (`recheck_second_look_holds_once`).
+    second_look_holds_rechecked: bool,
 }
 
 impl TickState {
@@ -786,6 +790,7 @@ impl TickState {
                 now,
             ),
             witness_risk_holds_rechecked: false,
+            second_look_holds_rechecked: false,
         }
     }
 }
@@ -849,6 +854,14 @@ async fn run_tick(shared: &Arc<ipc::DaemonShared>, dry_run: bool, state: &mut Ti
     guards
         .run(shared, "witness-risk-holds", async {
             let _ = release_witness_risk_holds_once(shared, now, witness_risk_holds_rechecked);
+        })
+        .await;
+    // The same, for the Scrub check's nothing-matched holds on a witness
+    // device, after skipping what has nothing to contribute.
+    let second_look_holds_rechecked = &mut state.second_look_holds_rechecked;
+    guards
+        .run(shared, "second-look-holds", async {
+            let _ = recheck_second_look_holds_once(shared, now, second_look_holds_rechecked);
         })
         .await;
     // What ingest says about account admission, read before every full pass
@@ -2764,6 +2777,72 @@ pub(crate) fn release_witness_risk_holds(
     }
     shared.publish_if_decisions_owed_changed(decisions_owed_before);
     released
+}
+
+/// What [`recheck_second_look_holds`] moved: sessions skipped for having no
+/// message from the person, and nothing-matched holds released.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SecondLookRecheck {
+    pub skipped: usize,
+    pub released: usize,
+}
+
+/// Once per daemon process, as [`release_witness_risk_holds_once`] and for
+/// the same reason: the rules live in the binary. The flag is set before the
+/// pass runs, so a pass that fails or panics is not retried.
+pub(crate) fn recheck_second_look_holds_once(
+    shared: &ipc::DaemonShared,
+    now: chrono::DateTime<Utc>,
+    done: &mut bool,
+) -> SecondLookRecheck {
+    if std::mem::replace(done, true) {
+        return SecondLookRecheck::default();
+    }
+    recheck_second_look_holds(shared, now)
+}
+
+/// Two rules from the owner's 2026-11-05 decision, applied to what was
+/// queued before them:
+///
+/// - A waiting or unattended-approved session with no message from the
+///   person is skipped (`Queue::skip_entries_without_user_messages`), so it
+///   never goes to the witness or upload and does not wait on anyone.
+/// - On a device with a redaction witness, a session held by the Scrub
+///   check only because nothing matched goes back to waiting
+///   (`Queue::release_nothing_matched_holds`); the standing opt-in
+///   re-approves it and it goes through the witness as any unattended
+///   session does, verdict hold included. Without a witness, or when the
+///   config cannot be read, nothing is released.
+pub(crate) fn recheck_second_look_holds(
+    shared: &ipc::DaemonShared,
+    now: chrono::DateTime<Utc>,
+) -> SecondLookRecheck {
+    let witness = shared.redaction_witness();
+    let decisions_owed_before = shared.decisions_owed_value();
+    let moved = {
+        let mut q = shared.queue.lock().expect("queue lock");
+        let skipped = q.skip_entries_without_user_messages();
+        let released = if witness == second_look::RedactionWitness::Present {
+            q.release_nothing_matched_holds(now)
+        } else {
+            0
+        };
+        let moved = SecondLookRecheck { skipped, released };
+        if moved != SecondLookRecheck::default() && q.save(&shared.store).is_err() {
+            tracing::warn!("could not save the queue after rechecking second-look holds");
+        }
+        moved
+    };
+    if moved != SecondLookRecheck::default() {
+        tracing::info!(
+            skipped = moved.skipped,
+            released = moved.released,
+            "rechecked second-look holds under the current rule"
+        );
+        shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+    shared.publish_if_decisions_owed_changed(decisions_owed_before);
+    moved
 }
 
 /// Whether the review `entry_id` is pinned to (`pin`) is stored intact and
