@@ -63,13 +63,10 @@ enum SettingsLegacyWords {
     /// Each card's re-read button's accessible name and tooltip, naming
     /// what it re-reads; the pill still shows `refresh` (rule 5).
     static var refreshDesktop: String { MonitorWords.table?.shell.settingsRefreshDesktop ?? "" }
-    static var refreshDiscovery: String { MonitorWords.table?.shell.settingsRefreshDiscovery ?? "" }
     static var refreshUses: String { MonitorWords.table?.shell.settingsRefreshUses ?? "" }
     static var consentEyebrow: String { MonitorWords.table?.shell.consentEyebrow ?? "" }
     static var desktopEyebrow: String { MonitorWords.table?.shell.desktopEyebrow ?? "" }
     static var desktopTitle: String { MonitorWords.table?.shell.desktopTitle ?? "" }
-    static var discoveryEyebrow: String { MonitorWords.table?.shell.discoveryEyebrow ?? "" }
-    static var discoveryTitle: String { MonitorWords.table?.shell.discoveryTitle ?? "" }
     static var watcherEyebrow: String { MonitorWords.table?.shell.watcherEyebrow ?? "" }
     static var watcherTitle: String { MonitorWords.table?.shell.watcherTitle ?? "" }
     static var watcherWatching: String { MonitorWords.table?.shell.watcherWatching ?? "" }

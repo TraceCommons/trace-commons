@@ -1654,6 +1654,64 @@ fn end_gone(shared: &DaemonShared, quiet: Vec<crate::managed::sessions::QuietToo
     }
 }
 
+/// Start [`collect_abandoned_rows`] on its own task, unless one is already
+/// running in this daemon; `None` then, and the plans are read again at a
+/// later lease tick. Detached, so a long collection holds back no lease tick.
+pub(crate) fn spawn_abandoned_collection(
+    shared: &std::sync::Arc<DaemonShared>,
+    plans: Vec<PlanRow>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let held = std::sync::Arc::clone(shared);
+    spawn_single_collection(shared, async move {
+        collect_abandoned_rows(&held, plans, now).await;
+    })
+}
+
+/// Run `collection` on its own task while holding the daemon's one
+/// collection slot (`DaemonShared::abandoned_collection`), or return `None`
+/// without running it when the slot is taken.
+///
+/// The slot lives on the shared state, not in the pass loop, so a loop
+/// restarted after a panic sees a collection the old loop left running. It
+/// is released when the task ends however it ends: finished, panicked, or
+/// dropped with the runtime.
+fn spawn_single_collection<F>(
+    shared: &std::sync::Arc<DaemonShared>,
+    collection: F,
+) -> Option<tokio::task::JoinHandle<()>>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let slot = CollectionSlot::claim(shared)?;
+    Some(tokio::spawn(async move {
+        let _slot = slot;
+        collection.await;
+    }))
+}
+
+/// The held collection slot; released on drop, unwinding included.
+struct CollectionSlot(std::sync::Arc<DaemonShared>);
+
+impl CollectionSlot {
+    fn claim(shared: &std::sync::Arc<DaemonShared>) -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        shared
+            .abandoned_collection
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self(std::sync::Arc::clone(shared)))
+    }
+}
+
+impl Drop for CollectionSlot {
+    fn drop(&mut self) {
+        self.0
+            .abandoned_collection
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// Collect the trace of a collecting session whose launcher went quiet
 /// (terminal window closed, force quit, logout), once its tool has exited,
 /// from the collection plan the launcher left (`managed::collection_plan`).
@@ -1847,6 +1905,64 @@ fn label(error: ManagedError) -> &'static str {
 mod tests {
     use super::*;
     use crate::managed::{sessions::PreparedLaunch, terminal::TerminalHandle};
+
+    fn collection_shared(dir: &std::path::Path) -> std::sync::Arc<DaemonShared> {
+        let store = crate::config::ConfigStore::open(dir.join("state")).unwrap();
+        std::sync::Arc::new(DaemonShared::load(store).unwrap())
+    }
+
+    /// A collection still running when the pass loop restarts (its local
+    /// state gone, as after a panic) is not started a second time; once it
+    /// ends, the next one starts.
+    #[tokio::test]
+    async fn a_running_abandoned_collection_is_not_started_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = collection_shared(dir.path());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let start = |release: std::sync::Arc<tokio::sync::Notify>| {
+            let runs = std::sync::Arc::clone(&runs);
+            spawn_single_collection(&shared, async move {
+                runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                release.notified().await;
+            })
+        };
+        let first = start(std::sync::Arc::clone(&release)).expect("the first starts");
+        tokio::task::yield_now().await;
+        assert!(
+            start(std::sync::Arc::clone(&release)).is_none(),
+            "a second is refused while the first runs"
+        );
+        assert!(
+            spawn_abandoned_collection(&shared, Vec::new(), chrono::Utc::now()).is_none(),
+            "the loop's own entry point is refused too"
+        );
+        release.notify_one();
+        first.await.unwrap();
+        let next = start(std::sync::Arc::clone(&release)).expect("the slot is free again");
+        release.notify_one();
+        next.await.unwrap();
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A collection that panicked gives the slot back, so a later one runs.
+    #[tokio::test]
+    async fn a_panicked_abandoned_collection_releases_the_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = collection_shared(dir.path());
+        let panicked = spawn_single_collection(&shared, async { panic!("collection panics") })
+            .expect("starts");
+        assert!(panicked.await.unwrap_err().is_panic());
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mark = std::sync::Arc::clone(&ran);
+        spawn_single_collection(&shared, async move {
+            mark.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .expect("the slot was released by the panic")
+        .await
+        .unwrap();
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     fn known(remaining_nanos: Option<i64>) -> BalanceReport {
         BalanceReport::Known(balance::BalanceReading {

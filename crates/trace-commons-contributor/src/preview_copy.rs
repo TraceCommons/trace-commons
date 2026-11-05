@@ -1294,7 +1294,6 @@ pub struct MonitorShellCopy {
     /// naming what it re-reads, so the repeated "Refresh" buttons are told
     /// apart (copy-guide rule 5). DRAFT, NEEDS APPROVAL (2026-11-04).
     pub settings_refresh_desktop: &'static str,
-    pub settings_refresh_discovery: &'static str,
     pub settings_refresh_uses: &'static str,
     /// Startup's updates card's eyebrow. It was spelled in the macOS shell
     /// (copy-guide rule 8). General's words stay the shell's: General never
@@ -1303,8 +1302,6 @@ pub struct MonitorShellCopy {
     pub consent_eyebrow: &'static str,
     pub desktop_eyebrow: &'static str,
     pub desktop_title: &'static str,
-    pub discovery_eyebrow: &'static str,
-    pub discovery_title: &'static str,
     /// The Watching section's watcher card (#1146 `settings-page.tsx`):
     /// its eyebrow and title, the chip for each state, and what pausing
     /// does. The buttons are `pause_watcher` and `resume_watcher`.
@@ -1631,16 +1628,12 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             settings_refresh: "Refresh",
             // DRAFT, NEEDS APPROVAL (2026-11-04).
             settings_refresh_desktop: "Refresh system integrations",
-            settings_refresh_discovery: "Refresh trace discovery",
             settings_refresh_uses: "Refresh data uses",
             updates_eyebrow: "Updates",
             // Approved by the owner 2026-11-04 (Settings copy pass 2, P140).
             consent_eyebrow: "",
             desktop_eyebrow: "Desktop",
             desktop_title: "System integrations",
-            // Approved by the owner 2026-11-04 (Settings copy pass 2, P84).
-            discovery_eyebrow: "",
-            discovery_title: "Trace discovery",
             // Approved by the owner 2026-11-04 (Settings copy pass 2, P79).
             watcher_eyebrow: "",
             // Approved by the owner 2026-11-04 (Settings copy pass 2, P85).
@@ -1877,13 +1870,9 @@ mod tests {
     }
 
     /// The Settings card eyebrows the owner cut 2026-11-04 (Settings copy
-    /// pass 2, P140, P84, P79): each is empty, and the only words allowed
+    /// pass 2, P140, P79): each is empty, and the only words allowed
     /// to be.
-    const OWNER_CUT_KEYS: [&str; 3] = [
-        "/shell/consent_eyebrow",
-        "/shell/discovery_eyebrow",
-        "/shell/watcher_eyebrow",
-    ];
+    const OWNER_CUT_KEYS: [&str; 2] = ["/shell/consent_eyebrow", "/shell/watcher_eyebrow"];
 
     /// Whether `key` (a path from [`words_of`] over the whole screens
     /// table) is one of [`OWNER_CUT_KEYS`]; asserts that it is empty if so.
@@ -1900,7 +1889,6 @@ mod tests {
     fn the_owner_cut_eyebrows_are_empty() {
         let shell = monitor_screens_copy().shell;
         assert_eq!(shell.consent_eyebrow, "");
-        assert_eq!(shell.discovery_eyebrow, "");
         assert_eq!(shell.watcher_eyebrow, "");
     }
 

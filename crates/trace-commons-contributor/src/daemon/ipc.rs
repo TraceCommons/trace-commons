@@ -1191,6 +1191,11 @@ pub struct DaemonShared {
     /// spend its bound on them again. In memory only: a restart tries them
     /// once more.
     pub(crate) backfill_tried: Mutex<std::collections::HashSet<Uuid>>,
+    /// Whether an abandoned-session collection is running: at most one per
+    /// daemon, held on the shared state so a pass loop restarted after a
+    /// panic (`pass_supervisor`) cannot start a second beside the first.
+    /// See `managed::spawn_abandoned_collection`.
+    pub(crate) abandoned_collection: std::sync::atomic::AtomicBool,
 }
 
 /// Counts one preview build on [`DaemonShared`] for as long as it lives.
@@ -1515,6 +1520,11 @@ impl DaemonShared {
         if queue.release_in_flight() {
             queue.save(&store)?;
         }
+        // A trace refused because redacting it panicked was refused for a
+        // defect in the build that ran it. A newer build offers it again.
+        if queue.reoffer_panicked_refusals(env!("CARGO_PKG_VERSION")) {
+            queue.save(&store)?;
+        }
         // One-time upgrade: retire entries that stand for a single subagent
         // transcript.
         //
@@ -1677,6 +1687,7 @@ impl DaemonShared {
             settlement: Mutex::new(Default::default()),
             preview_builds: std::sync::atomic::AtomicUsize::new(0),
             backfill_tried: Mutex::new(std::collections::HashSet::new()),
+            abandoned_collection: std::sync::atomic::AtomicBool::new(false),
         })
     }
 

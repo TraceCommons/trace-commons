@@ -639,9 +639,6 @@ async fn supervise_passes(
     // the lease plus one of these ticks.
     let mut managed_lease_tick = tokio::time::interval(std::time::Duration::from_secs(15));
     managed_lease_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // At most one abandoned-collection pass at a time; a slow one is not
-    // started again until it finished.
-    let mut collection_pass: Option<tokio::task::JoinHandle<()>> = None;
     let mut lease_pass = tokio::task::JoinSet::new();
     let mut token_cleanup_tasks = tokio::task::JoinSet::new();
     // The published estimate table's fetch schedule (OWNER DECISION E11).
@@ -706,15 +703,12 @@ async fn supervise_passes(
             }
             Some(done) = lease_pass.join_next(), if !lease_pass.is_empty() => {
                 // Detached too: a collection is recorded when it finishes,
-                // and a long one holds back no later lease tick.
+                // and a long one holds back no later lease tick. At most one
+                // runs per daemon, across a restart of this loop as well; a
+                // slow one is not started again until it finished.
                 let plans = done.unwrap_or_default();
-                if !plans.is_empty()
-                    && collection_pass.as_ref().is_none_or(|pass| pass.is_finished())
-                {
-                    let shared = Arc::clone(shared);
-                    collection_pass = Some(tokio::spawn(async move {
-                        managed::collect_abandoned_rows(&shared, plans, Utc::now()).await;
-                    }));
+                if !plans.is_empty() {
+                    let _ = managed::spawn_abandoned_collection(shared, plans, Utc::now());
                 }
             }
             _ = shared.upload_due_changed.notified() => {
@@ -1581,6 +1575,9 @@ async fn drain_approved(
                     queue::QueueState::Refused,
                     Some(reason_label),
                 );
+                // A no-op unless the refusal was a caught panic, which a
+                // newer build offers again.
+                q.note_refusal_version(entry.entry_id, env!("CARGO_PKG_VERSION"));
             }
             uploader::UploadDecision::ApprovalStale { reason_label } => {
                 // The same re-offer path the consent-scope guard above
