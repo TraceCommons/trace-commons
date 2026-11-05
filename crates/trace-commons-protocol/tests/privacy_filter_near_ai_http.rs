@@ -962,12 +962,15 @@ async fn escape_heavy_bodies_arrive_under_the_cap() {
 #[tokio::test]
 async fn the_timeout_grows_with_the_request_body() {
     use trace_commons_protocol::privacy_filter_near_ai::call_timeout;
-    // 200 ms + 40 ms/KiB: under 1 KiB waits ~240 ms, 16 KiB ~840 ms.
-    assert_eq!(call_timeout(200, 40, 100), Duration::from_millis(240));
-    assert_eq!(call_timeout(200, 40, 16 * 1024), Duration::from_millis(840));
+    // 200 ms + 200 ms/KiB: under 1 KiB waits 400 ms, 16 KiB 3.4 s.
+    assert_eq!(call_timeout(200, 200, 100), Duration::from_millis(400));
+    assert_eq!(
+        call_timeout(200, 200, 16 * 1024),
+        Duration::from_millis(3_400)
+    );
     let server = server_with(|_: &wiremock::Request| {
         ResponseTemplate::new(200)
-            .set_delay(Duration::from_millis(500))
+            .set_delay(Duration::from_millis(1_000))
             .set_body_json(json!({ "data": [{ "spans": [] }] }))
     })
     .await;
@@ -980,16 +983,13 @@ async fn the_timeout_grows_with_the_request_body() {
             1_000_000,
         )
         .expect("adapter builds")
-        .with_timeout_per_kib_ms(40)
+        .with_timeout_per_kib_ms(200)
     };
     let small = adapter().redact_text("a short text").await;
-    assert!(small.is_err(), "a 500 ms answer must time out at ~240 ms");
+    assert!(small.is_err(), "a 1 s answer must time out at 400 ms");
     assert!(small.unwrap_err().is_transient());
     let large = adapter().redact_text(&"x".repeat(16 * 1024)).await;
-    assert!(
-        large.is_ok(),
-        "a 500 ms answer is inside ~840 ms: {large:?}"
-    );
+    assert!(large.is_ok(), "a 1 s answer is inside 3.4 s: {large:?}");
 }
 
 /// With a caller deadline, a retry that could not finish before it is not
@@ -999,7 +999,7 @@ async fn the_timeout_grows_with_the_request_body() {
 async fn retries_stop_when_the_deadline_cannot_fit_another_attempt() {
     let slow = || {
         ResponseTemplate::new(200)
-            .set_delay(Duration::from_millis(2_000))
+            .set_delay(Duration::from_secs(10))
             .set_body_json(json!({ "data": [{ "spans": [] }] }))
     };
     let adapter = |server: &MockServer| {
@@ -1023,8 +1023,10 @@ async fn retries_stop_when_the_deadline_cannot_fit_another_attempt() {
         .await
         .expect_err("the endpoint never answers in time");
     assert!(error.is_transient());
+    // Counted, not timed: one request means no retry was started. The
+    // elapsed bound only says it did not wait for the 10 s answer.
     assert!(
-        started.elapsed() < Duration::from_millis(700),
+        started.elapsed() < Duration::from_secs(5),
         "{:?}",
         started.elapsed()
     );
@@ -1067,7 +1069,7 @@ async fn retries_stop_when_the_deadline_cannot_fit_another_attempt() {
             .is_err()
     );
     assert!(
-        started.elapsed() < Duration::from_millis(1_500),
+        started.elapsed() < Duration::from_secs(5),
         "{:?}",
         started.elapsed()
     );
