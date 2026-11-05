@@ -990,6 +990,14 @@ its `was` and `now` claims are unchanged. The shared formatter selects the
 upgrade wording, including the existing Ask me first action. An upgrade and
 a claim-narrowing notice can coexist and are acknowledged by their own ids.
 
+Every element also carries `redaction_witness` (bool): whether this device
+sends every session through a redaction witness before it is sent. The
+shared formatter uses it for the upgrade notice's `scope`: `true` selects
+`SCRUB_CHECK_AUTOMATIC_HELP_WITNESS` ("Sent once the privacy check passes.
+Anything that still looks personal, or was trimmed, waits for you."); any
+other value, or none, keeps `SCRUB_CHECK_AUTOMATIC_HELP`. Pass the element
+through whole; a shell never words it itself.
+
 #### `automatic_contribution_held`
 
 Additive. What the automatic-contribution gate held at the last **full**
@@ -1707,6 +1715,10 @@ The reasons:
   absolute paths, so counting them would make the reason almost never fire,
   and a session whose only marks were paths has had nothing personal found
   in it.
+  **Not published on a device with a redaction witness**, where every
+  session goes through the witness before it is sent and the Scrub check
+  does not hold for this reason (owner decision, 2026-11-05). The counts are
+  published either way; `looks-unsure` and `trimmed-to-fit` are unchanged.
 - **`looks-unsure`**: the unsure-span detector found at least one span (an
   email, phone number or key shape the scrubber did not mark), or could not
   index the body at all, which counts as unsure.
@@ -1743,6 +1755,26 @@ envelope with its counts when it holds the session, so a held entry reads
 `scrubbed` with the reasons that held it.
 
 Neither state is a colour: a shell renders the reason.
+
+### Sessions with no messages: `no-user-messages`
+
+A session in which the person typed nothing (`user_turns` is `0`) has
+nothing to contribute. The watcher records it `refused` under
+`no-user-messages` on sight, in an armed folder too, so it is never offered,
+witnessed or uploaded and never waits on anyone. The upload and the witness
+worker refuse the same way whoever approved it. Once per daemon start, a
+waiting or unattended-approved entry queued before this is moved to the same
+state. An entry with no recorded shape is unknown, not zero, and is not
+skipped. Like `envelope-too-large`, this is a verdict on one set of bytes: a
+session that later gains a message is offered again. Render it with
+`queue_outcome_line` (`tc_queue_outcome_line`): "No messages to share."
+
+Also once per daemon start, on a device with a redaction witness, an entry
+held under `second-look-review-required` whose recorded scrub gives no
+reason under the witness rule (it was held only because nothing matched) goes
+back to `pending` without the label. A local preview pin is cleared so the
+session goes through the witness; a witness pin is kept. Any other hold, or
+one with no readable scrub record, stays held.
 
 ### Explicit witnessed review
 

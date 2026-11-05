@@ -4026,8 +4026,7 @@ mod tests {
         let report = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
         assert_eq!(report.auto_ready, 1, "{report:?}");
 
-        let queue = f.shared.queue.lock().unwrap();
-        let mut entries = queue.all().to_vec();
+        let mut entries = f.shared.queue.lock().unwrap().all().to_vec();
         entries.sort_by_key(|e| e.state == QueueState::Approved);
         assert_eq!(entries.len(), 2, "{entries:?}");
         let skipped = &entries[0];
@@ -4039,8 +4038,10 @@ mod tests {
         assert!(!skipped.approved_unattended);
         assert!(skipped.has_no_user_messages());
         assert_eq!(entries[1].state, QueueState::Approved);
-        assert!(queue.pending().is_empty(), "nothing waits on anyone");
-        drop(queue);
+        assert!(
+            f.shared.queue.lock().unwrap().pending().is_empty(),
+            "nothing waits on anyone"
+        );
 
         // A later pass leaves it skipped.
         f.settle(Utc::now() + chrono::Duration::hours(31)).await;

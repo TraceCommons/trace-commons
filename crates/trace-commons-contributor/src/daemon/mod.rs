@@ -5954,11 +5954,13 @@ mod tests {
         {
             let mut q = h.shared.queue.lock().unwrap();
             for (index, entry) in entries.iter().enumerate() {
+                // Only the start moves; the recorded prompts stay, so the
+                // sessions still have something to contribute.
                 q.entry_mut_for_test(entry.entry_id).unwrap().shape = Some(queue::SessionShape {
                     started_at: Some(
                         at("2026-08-08T10:00:00Z") - chrono::Duration::days(index as i64),
                     ),
-                    ..Default::default()
+                    ..entry.shape.clone().expect("the watcher records a shape")
                 });
             }
         }
