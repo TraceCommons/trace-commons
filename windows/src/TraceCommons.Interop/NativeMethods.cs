@@ -630,12 +630,19 @@ internal static class NativeMethods
 
     /// <summary>
     /// A credit figure as every shell draws it: tenths rounded half away from
-    /// zero, whole figures whole, "&lt;0.1" for a sliver, no thousands
-    /// separator, a dash for a value that is not finite. Owned string; free
+    /// zero, whole figures whole, "&lt;0.1" for a sliver, a comma between
+    /// thousands, a dash for a value that is not finite. Owned string; free
     /// with <see cref="tc_string_free"/>.
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_credit_figure(double value);
+
+    /// <summary>
+    /// A count beside a credit figure: a comma between thousands ("1,234").
+    /// Owned string; free with <see cref="tc_string_free"/>.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_count_figure(ulong count);
 
     /// <summary>
     /// How long ago THIS COMPUTER asked, assembled.

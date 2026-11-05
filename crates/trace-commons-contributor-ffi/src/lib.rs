@@ -5029,8 +5029,8 @@ pub extern "C" fn tc_near_ai_balance_spent_line(
 /// A credit figure as every shell draws it, from
 /// `history_copy::credit_figure`: tenths rounded half away from zero, whole
 /// figures whole ("48"), one decimal otherwise ("12.5"), "<0.1" above zero
-/// and under 0.05, no thousands separator, and a dash for a value that is
-/// not finite. Pass the wire's figure; a shell with no figure draws its own
+/// and under 0.05, a comma between thousands ("1,234.5"), and a dash for a
+/// value that is not finite. Pass the wire's figure; a shell with no figure draws its own
 /// dash and does not call this.
 ///
 /// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
@@ -5040,6 +5040,20 @@ pub extern "C" fn tc_credit_figure(value: f64) -> *mut c_char {
     guarded_string_no_err(|| {
         Ok(to_owned_cstring(
             &trace_commons_contributor::history_copy::credit_figure(value),
+        ))
+    })
+}
+
+/// A count as every shell draws it beside a credit figure, from
+/// `history_copy::count_figure`: a comma between thousands ("1,234").
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_count_figure(count: u64) -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(
+            &trace_commons_contributor::history_copy::count_figure(count),
         ))
     })
 }

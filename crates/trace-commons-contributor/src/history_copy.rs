@@ -208,7 +208,7 @@ pub fn credit_outcome_label(reason: &str) -> &'static str {
 
 /// What a credit figure above zero and under 0.05 reads as: it rounds to
 /// zero tenths, and a "0" beside "credit pending" says nothing is pending
-/// when something is. DRAFT, awaiting owner approval.
+/// when something is. Approved by the owner 2026-11-04 (#1962).
 pub const CREDIT_UNDER_A_TENTH: &str = "<0.1";
 
 /// A credit figure as every shell's History and Home tiles draw it, so one
@@ -223,7 +223,9 @@ pub const CREDIT_UNDER_A_TENTH: &str = "<0.1";
 ///   ("12.5"): "Pending 0.0" and "48.0" beside a "48" are what this
 ///   replaces.
 /// - Above zero and under 0.05 is [`CREDIT_UNDER_A_TENTH`], never "0".
-/// - No thousands separator ("1234.5"), the same as every count beside it.
+/// - A comma between thousands ("1,234.5"), the same as every count beside
+///   it ([`count_figure`]): owner-approved 2026-11-04 (#1962). A fixed
+///   comma, not the reader's locale, so every shell reads alike.
 /// - Credit is never negative; a figure below zero that rounds to zero is
 ///   "0", never "-0".
 /// - Not finite is a dash, the sign every shell uses for a figure it was
@@ -249,11 +251,28 @@ pub fn credit_figure(value: f64) -> String {
         };
     }
     let sign = if millionths < 0 { "-" } else { "" };
+    let whole = count_figure(magnitude / 10);
     if magnitude.is_multiple_of(10) {
-        format!("{sign}{}", magnitude / 10)
+        format!("{sign}{whole}")
     } else {
-        format!("{sign}{}.{}", magnitude / 10, magnitude % 10)
+        format!("{sign}{whole}.{}", magnitude % 10)
     }
+}
+
+/// A count as every shell draws it beside a credit figure: a comma between
+/// thousands ("1,234"), the same grouping [`credit_figure`] uses, so the
+/// tiles side by side read alike. Owner-approved 2026-11-04 (#1962).
+#[must_use]
+pub fn count_figure(count: u64) -> String {
+    let digits = count.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -276,8 +295,11 @@ mod tests {
             (0.35, "0.4"),
             // The float just below 0.35, as a sum can land.
             (f64::from_bits(0.35_f64.to_bits() - 1), "0.4"),
-            (1234.5, "1234.5"),
-            (1234.0, "1234"),
+            (1234.5, "1,234.5"),
+            (1234.0, "1,234"),
+            (999.95, "1,000"),
+            (1_234_567.25, "1,234,567.3"),
+            (-1234.5, "-1,234.5"),
             (9.96, "10"),
             (-1.25, "-1.3"),
         ] {
@@ -292,6 +314,24 @@ mod tests {
     fn credit_figure_reads_a_widened_f32_as_its_decimal() {
         assert_eq!(credit_figure(f64::from(0.35_f32)), "0.4");
         assert_eq!(credit_figure(f64::from(4.25_f32)), "4.3");
+    }
+
+    /// Counts group the same way as credit, so "1,234" sits beside
+    /// "1,234.5".
+    #[test]
+    fn count_figure_groups_thousands_with_a_comma() {
+        for (count, want) in [
+            (0, "0"),
+            (7, "7"),
+            (999, "999"),
+            (1000, "1,000"),
+            (1234, "1,234"),
+            (123_456, "123,456"),
+            (1_234_567, "1,234,567"),
+            (u64::MAX, "18,446,744,073,709,551,615"),
+        ] {
+            assert_eq!(count_figure(count), want, "{count}");
+        }
     }
 
     #[test]

@@ -8,7 +8,6 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use trace_commons_contributor_ffi::tc_credit_figure;
 use trace_commons_contributor_ffi::{
     TC_CONTRIBUTION_CONTROL_CONTRIBUTE, TC_CONTRIBUTION_CONTROL_NONE, TC_CREDENTIAL_ACTION_CANCEL,
     TC_CREDENTIAL_ACTION_FORGET, TC_CREDENTIAL_ACTION_MIGRATE, TC_CREDENTIAL_ACTION_NONE,
@@ -50,6 +49,7 @@ use trace_commons_contributor_ffi::{
     tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
     tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
 };
+use trace_commons_contributor_ffi::{tc_count_figure, tc_credit_figure};
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
     tc_harness_plan_outcome_code, tc_harness_spend_line, tc_harness_state_code,
@@ -4778,11 +4778,13 @@ fn credit_figure_crosses_the_abi() {
         (48.0, "48"),
         (4.25, "4.3"),
         (0.04, "<0.1"),
-        (1234.5, "1234.5"),
+        (1234.5, "1,234.5"),
         (f64::NAN, "\u{2014}"),
     ] {
         assert_eq!(take_owned(tc_credit_figure(value)), want, "{value}");
     }
+    assert_eq!(take_owned(tc_count_figure(0)), "0");
+    assert_eq!(take_owned(tc_count_figure(1234)), "1,234");
 }
 
 /// A state this build has never heard of borrows nobody's sentence, and is

@@ -147,15 +147,16 @@ final class HomeTests: XCTestCase {
     /// The review's cases, through the core's formatter: half away from
     /// zero as the digest and Windows round (4.25 is 4.3, never 4.2), a
     /// sliver above zero is "<0.1" (never "0" beside "credit pending"),
-    /// no "-0", and no thousands separator, as `count` has none.
+    /// no "-0", and the same thousands comma as `count` (owner, #1962).
     func test_pointsFollowTheCoresRuleAtTheEdges() {
         XCTAssertEqual(HomeFormat.points(0.05), "0.1")
         XCTAssertEqual(HomeFormat.points(0.04), "<0.1")
         XCTAssertEqual(HomeFormat.points(-0.04), "0")
         XCTAssertEqual(HomeFormat.points(4.25), "4.3")
         XCTAssertEqual(HomeFormat.points(12.25), "12.3")
-        XCTAssertEqual(HomeFormat.points(1234.5), "1234.5")
-        XCTAssertEqual(HomeFormat.count(1234), "1234")
+        XCTAssertEqual(HomeFormat.points(1234.5), "1,234.5")
+        XCTAssertEqual(HomeFormat.count(1234), "1,234")
+        XCTAssertEqual(HomeFormat.count(999), "999")
         // The pending accessory guards on a figure above zero and now never
         // prints a zero for one.
         XCTAssertFalse(HomeFormat.points(0.04).hasPrefix("0"))

@@ -641,7 +641,8 @@ fn stat_card(tone: Tone, label: &str, value: u32) -> gtk::Box {
     card.append(&head);
 
     let figure = gtk::Label::builder()
-        .label(value.to_string())
+        // The core's grouping ("1,234"), as every shell draws a count.
+        .label(copy::count_figure(u64::from(value)))
         .xalign(0.0)
         .build();
     figure.add_css_class("tc-figure");

@@ -290,7 +290,7 @@ enum SummaryFacts {
 
     /// Sessions waiting in the tree; a dash before it is read.
     static func kept(loaded: Bool, sessions: [DaemonData.QueueEntry]) -> String {
-        loaded ? String(sessions.count) : "—"
+        loaded ? HomeFormat.count(sessions.count) : "—"
     }
 
     /// A value the store holds, or nil when its last read failed: the
@@ -360,7 +360,7 @@ enum SummaryFacts {
         }
         return ranked.prefix(2).map { folder, contributed in
             var parts = [
-                FirstRunCopy.fill(counts.waitingCount, ["count": String(folder.sessions.count)]),
+                FirstRunCopy.fill(counts.waitingCount, ["count": HomeFormat.count(folder.sessions.count)]),
                 FirstRunCopy.fill(counts.contributedCount, ["count": HomeFormat.count(contributed)]),
             ]
             if let mode = folder.mode {
@@ -395,7 +395,7 @@ enum SummaryFacts {
                 sub: [
                     FirstRunCopy.fill(counts.waitingCount, ["count": String(waiting[tool] ?? 0)]),
                     FirstRunCopy.fill(counts.contributedCount, [
-                        "count": history == nil ? "—" : String(contributed[tool] ?? 0),
+                        "count": history == nil ? "—" : HomeFormat.count(contributed[tool] ?? 0),
                     ]),
                 ].joined(separator: " · "),
                 tile: (SourceKind(rawValue: tool) ?? SourceKind(rawValue: tool.replacingOccurrences(of: "_", with: "-")))

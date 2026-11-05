@@ -565,7 +565,9 @@ fn stat_card(glyph: Glyph, label: &str, count: u32) -> gtk::Box {
     head.append(&caption);
     card.append(&head);
     let figure = gtk::Label::builder()
-        .label(format!("{count}"))
+        // The core's grouping ("1,234"), the same comma as the credit
+        // figures on this page.
+        .label(copy::count_figure(u64::from(count)))
         .xalign(0.0)
         .build();
     figure.add_css_class("tc-figure");
@@ -582,7 +584,7 @@ fn held_group(quarantined: u32) -> gtk::Expander {
     let heading = gtk::Label::new(Some(&format!(
         "{} \u{2014} {} {}",
         copy::QUARANTINE_HEADING,
-        quarantined,
+        copy::count_figure(u64::from(quarantined)),
         if quarantined == 1 { "trace" } else { "traces" }
     )));
     heading.add_css_class("tc-card-title");

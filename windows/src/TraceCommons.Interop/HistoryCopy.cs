@@ -291,8 +291,17 @@ public static class HistoryCopy
     /// A credit figure in the core's one rule, the same on every shell:
     /// tenths rounded half away from zero (4.25 is 4.3), whole figures whole
     /// ("48", "0"), one decimal otherwise, "&lt;0.1" above zero and under 0.05,
-    /// no thousands separator.
+    /// a comma between thousands ("1,234.5").
     /// </summary>
     public static string CreditFigure(double value) =>
         NativeMethods.TakeOwnedString(NativeMethods.tc_credit_figure(value)) ?? "\u2014";
+
+    /// <summary>
+    /// A count in the core's rule, the same comma as the credit figures
+    /// beside it ("1,234"), on every shell rather than this reader's locale.
+    /// A negative count (a cache gone wrong) is drawn as zero.
+    /// </summary>
+    public static string CountFigure(long count) =>
+        NativeMethods.TakeOwnedString(NativeMethods.tc_count_figure((ulong)Math.Max(0, count)))
+            ?? count.ToString(System.Globalization.CultureInfo.InvariantCulture);
 }

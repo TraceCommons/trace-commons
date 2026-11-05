@@ -1418,14 +1418,22 @@ char*       tc_near_ai_balance_spent_line(int32_t present, int64_t nanos, uint8_
 
 /* A credit figure as every shell draws it: tenths rounded half away from
  * zero, whole figures whole ("48"), one decimal otherwise ("12.5"), "<0.1"
- * above zero and under 0.05, no thousands separator, and a dash for a value
- * that is not finite. A shell with no figure draws its own dash and does not
+ * above zero and under 0.05, a comma between thousands ("1,234.5"), and a
+ * dash for a value that is not finite. A shell with no figure draws its own dash and does not
  * call this.
  *
  * Returns an owned string; free it with tc_string_free. NULL only on a caught
  * panic.
  */
 char*       tc_credit_figure(double value);
+
+/* A count as every shell draws it beside a credit figure: a comma between
+ * thousands ("1,234").
+ *
+ * Returns an owned string; free it with tc_string_free. NULL only on a caught
+ * panic.
+ */
+char*       tc_count_figure(uint64_t count);
 
 /* How long ago THIS COMPUTER asked, assembled.
  *

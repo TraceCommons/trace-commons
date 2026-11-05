@@ -1955,8 +1955,12 @@ enum HomeFormat {
     }
 
     /// A count, or a dash when the core did not say. Zero is a number.
+    /// Grouped by the core's rule (`tc_count_figure`, "1,234"), the same
+    /// comma as the credit figures beside it.
     static func count(_ value: Int?) -> String {
-        value.map(String.init) ?? "—"
+        guard let value else { return "—" }
+        guard let count = UInt64(exactly: value) else { return String(value) }
+        return TCCredit.count(count) ?? String(value)
     }
 
     /// The payout link's "session ended" line from the core (the same
@@ -1977,8 +1981,8 @@ enum HomeFormat {
     }
 
     /// A credit figure in the core's one rule (`tc_credit_figure`): half
-    /// away from zero, whole is whole, "<0.1" for a sliver, no thousands
-    /// separator (as `count`), the same on every shell. A dash for none.
+    /// away from zero, whole is whole, "<0.1" for a sliver, a comma between
+    /// thousands (as `count`), the same on every shell. A dash for none.
     static func points(_ value: Double?) -> String {
         value.flatMap(TCCredit.figure) ?? "—"
     }

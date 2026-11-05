@@ -239,8 +239,8 @@ public sealed class TrayMenuModel
             CultureInfo.CurrentCulture,
             "This week: {0} contributed, {1} held for privacy review",
             // The core's Contributed figure; a dash when it was not sent.
-            rollup.Week.Contributed?.ToString(CultureInfo.CurrentCulture) ?? "\u2014",
-            rollup.Week.Quarantined);
+            rollup.Week.Contributed is { } contributed ? HistoryCopy.CountFigure(contributed) : "\u2014",
+            HistoryCopy.CountFigure(rollup.Week.Quarantined));
 
         return new TrayMenuModel(
             status.Paused,

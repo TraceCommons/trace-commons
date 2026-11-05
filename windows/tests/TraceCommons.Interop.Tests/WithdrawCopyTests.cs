@@ -624,7 +624,10 @@ public sealed class HistoryCopyTests
         Assert.Equal("4.3", HistoryCopy.CreditFigure(4.25f));
         Assert.Equal("0.1", HistoryCopy.CreditFigure(0.05));
         Assert.Equal("<0.1", HistoryCopy.CreditFigure(0.04));
-        Assert.Equal("1234.5", HistoryCopy.CreditFigure(1234.5));
+        Assert.Equal("1,234.5", HistoryCopy.CreditFigure(1234.5));
+        Assert.Equal("1,234", HistoryCopy.CountFigure(1234));
+        Assert.Equal("999", HistoryCopy.CountFigure(999));
+        Assert.Equal("0", HistoryCopy.CountFigure(-1));
     }
 
     [Fact]
