@@ -49,5 +49,6 @@ mod no_commons_name_in_copy;
 mod queue_fixture_default_guard;
 mod release_pipeline;
 mod settings_copy_flags;
+mod test_home_isolation;
 mod update_conformance;
 mod update_manifest_roundtrip;

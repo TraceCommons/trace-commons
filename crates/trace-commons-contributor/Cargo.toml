@@ -27,6 +27,10 @@ autotests = false
 # `cargo build`/`--release` of a shipped binary.
 # `tests/credential_store_isolation.rs` fails if the wiring is lost.
 #
+# Also forwarded to the sources crate, where it points the conventional-root
+# home fallback at an empty folder, so a test that forgets to declare its
+# sources never reads the developer's real ~/.claude or ~/.codex.
+#
 # Forwarded to the Insights and platform crates, which now hold the digest-key
 # custody and the OS credential store. Under it the platform store refuses to
 # open from every build but that crate's own unit tests, so this crate's unit
@@ -34,7 +38,7 @@ autotests = false
 # here.
 # One line, so scripts/ci/check-release-credential-store.sh can permit this
 # exact definition.
-test-credential-store = ["trace-commons-contributor-insights/test-credential-store", "trace-commons-contributor-platform/test-credential-store"]
+test-credential-store = ["trace-commons-contributor-insights/test-credential-store", "trace-commons-contributor-platform/test-credential-store", "trace-commons-contributor-sources/test-credential-store"]
 
 # The staging channel (`src/channel.rs`): NEAR AI staging, the staging
 # server, staging identity values, and NEAR AI measurement pins taken only

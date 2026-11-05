@@ -1191,6 +1191,11 @@ pub struct DaemonShared {
     /// spend its bound on them again. In memory only: a restart tries them
     /// once more.
     pub(crate) backfill_tried: Mutex<std::collections::HashSet<Uuid>>,
+    /// Whether an abandoned-session collection is running: at most one per
+    /// daemon, held on the shared state so a pass loop restarted after a
+    /// panic (`pass_supervisor`) cannot start a second beside the first.
+    /// See `managed::spawn_abandoned_collection`.
+    pub(crate) abandoned_collection: std::sync::atomic::AtomicBool,
 }
 
 /// Counts one preview build on [`DaemonShared`] for as long as it lives.
@@ -1677,6 +1682,7 @@ impl DaemonShared {
             settlement: Mutex::new(Default::default()),
             preview_builds: std::sync::atomic::AtomicUsize::new(0),
             backfill_tried: Mutex::new(std::collections::HashSet::new()),
+            abandoned_collection: std::sync::atomic::AtomicBool::new(false),
         })
     }
 

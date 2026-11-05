@@ -15,6 +15,15 @@ description = "Session-store parsers and routing overlay for the Trace Commons c
 # not recompile the session parsers and their unit tests. Every dependency
 # below repeats the contributor's own declaration of it, so this crate adds
 # no package and no feature to the graph.
+[features]
+# TEST-ONLY. Forwarded from trace-commons-contributor's `test-credential-store`,
+# which only test dev-dependencies enable. Points `source::home_dir` at an
+# empty per-process folder and hides the environment from conventional
+# roots, so no test reads the developer's real session stores. Never enable
+# it for a shipped build; scripts/ci/check-release-credential-store.sh
+# refuses one that does.
+test-credential-store = []
+
 [dependencies]
 trace-commons-protocol = { path = "../trace-commons-protocol" }
 anyhow = "1"
