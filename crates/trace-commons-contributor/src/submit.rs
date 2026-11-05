@@ -667,14 +667,16 @@ pub fn outcome_progress_label(outcome: &SubmitOutcome) -> String {
     }
 }
 
-/// [`submit_sessions`], calling `progress(done, total, outcome)` after each
-/// session so a person running a long batch sees it move.
+/// [`submit_sessions`], calling `progress(n, total, None)` as session `n`
+/// starts and `progress(n, total, Some(outcome))` when it ends, so a person
+/// running a batch -- or one session that waits minutes on a witness --
+/// sees it move.
 pub async fn submit_sessions_with_progress(
     store: &ConfigStore,
     cfg: &ContributorConfig,
     sessions: Vec<(Box<dyn TraceSource>, SessionRef)>,
     opts: &SubmitOptions,
-    mut progress: impl FnMut(usize, usize, &SubmitOutcome),
+    mut progress: impl FnMut(usize, usize, Option<&SubmitOutcome>),
 ) -> Result<Vec<SubmitOutcome>> {
     if opts.unenrolled_preview && !opts.dry_run {
         anyhow::bail!("unenrolled preview requires dry-run");
@@ -703,7 +705,7 @@ pub async fn submit_sessions_with_progress(
 async fn run_batch<S>(
     sessions: Vec<S>,
     mut submit: impl AsyncFnMut(S) -> Result<SubmitOutcome>,
-    progress: &mut impl FnMut(usize, usize, &SubmitOutcome),
+    progress: &mut impl FnMut(usize, usize, Option<&SubmitOutcome>),
 ) -> Result<Vec<SubmitOutcome>> {
     let total = sessions.len();
     let mut outcomes = Vec::with_capacity(total);
@@ -716,12 +718,13 @@ async fn run_batch<S>(
                 reason_label: label.to_string(),
             },
             None => {
+                progress(outcomes.len() + 1, total, None);
                 let outcome = submit(session).await?;
                 stopped = witness_batch_stop(&outcome);
                 outcome
             }
         };
-        progress(outcomes.len() + 1, total, &outcome);
+        progress(outcomes.len() + 1, total, Some(&outcome));
         outcomes.push(outcome);
     }
     Ok(outcomes)
@@ -4562,6 +4565,7 @@ mod tests {
         for stop in WITNESS_BATCH_STOP_LABELS {
             let mut attempted = Vec::new();
             let mut seen = Vec::new();
+            let mut started = Vec::new();
             let outcomes = run_batch(
                 vec![1, 2, 3, 4],
                 async |n: u32| {
@@ -4574,8 +4578,12 @@ mod tests {
                         }
                     })
                 },
-                &mut |done, total, outcome: &SubmitOutcome| {
-                    seen.push((done, total, outcome_progress_label(outcome)));
+                &mut |done, total, outcome: Option<&SubmitOutcome>| {
+                    if let Some(outcome) = outcome {
+                        seen.push((done, total, outcome_progress_label(outcome)));
+                    } else {
+                        started.push(done);
+                    }
                 },
             )
             .await
@@ -4596,6 +4604,11 @@ mod tests {
                 seen.iter().map(|(d, t, _)| (*d, *t)).collect::<Vec<_>>(),
                 vec![(1, 4), (2, 4), (3, 4), (4, 4)],
                 "every session reports progress"
+            );
+            assert_eq!(
+                started,
+                vec![1, 2],
+                "a session announces itself before it waits, and a skipped one never starts"
             );
         }
     }

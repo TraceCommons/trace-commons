@@ -1886,11 +1886,16 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     let quiet = sel.json;
     let outcomes =
         submit::submit_sessions_with_progress(store, &cfg, pairs, &opts, |done, total, outcome| {
-            if !quiet && total > 1 {
-                eprintln!(
-                    "{done} of {total}: {}",
-                    submit::outcome_progress_label(outcome)
-                );
+            // One session too: a lone witnessed session can wait minutes,
+            // so each says it has started before it waits.
+            if !quiet {
+                match outcome {
+                    None => eprintln!("{done} of {total}..."),
+                    Some(outcome) => eprintln!(
+                        "{done} of {total}: {}",
+                        submit::outcome_progress_label(outcome)
+                    ),
+                }
             }
         })
         .await?;
