@@ -1857,6 +1857,13 @@ final class AppModel: ObservableObject {
             publishIfChanged(\.status, status)
         case .previewReady(let result):
             applyPreviewOutcome(result)
+        case .witnessReviewReady(let entryID, let failure):
+            if let waiter = witnessReviewWaiters.removeValue(forKey: entryID) {
+                waiter.resume(returning: failure)
+            } else {
+                // Arrived before the request's answer was read: kept for it.
+                witnessReviewEarly[entryID] = .some(failure)
+            }
         case .queueChanged:
             // Coalesced: one Submit all over a hundred traces is hundreds of
             // `queue_changed`, and five reads per event, each redrawing on
@@ -4131,20 +4138,66 @@ final class AppModel: ObservableObject {
     /// every refusal -- a receipt the reviewer declined, a reviewer that was
     /// simply down, one that could not prove itself -- rendered the same
     /// single sentence.
+    ///
+    /// The review runs in the daemon's background (`background: true`): the
+    /// request returns at once and this waits for the `witness_review_ready`
+    /// event, so no socket is held for the minutes a witness can take. A
+    /// review whose event never arrives (the daemon restarted) ends after
+    /// `witnessReviewEventWait` as a failure with no sentence.
     func witnessReviewOutcome(entryID: String) async -> WitnessReviewOutcome {
         guard let client else { return WitnessReviewOutcome(succeeded: false, sentence: nil) }
-        return await Task.detached(priority: .userInitiated) {
-            do {
-                try client.requestWitnessReview(entryID: entryID)
-                return WitnessReviewOutcome(succeeded: true, sentence: nil)
-            } catch {
-                return WitnessReviewOutcome(
-                    succeeded: false,
-                    sentence: DaemonClient.refusalSentence(from: error),
-                    retryLine: DaemonClient.busyRetryLine(from: error)
+        witnessReviewEarly.removeValue(forKey: entryID)
+        let started: Result<Bool, Error> = await Task.detached(priority: .userInitiated) {
+            Result { try client.requestWitnessReview(entryID: entryID) }
+        }.value
+        let failure: Error?
+        switch started {
+        case .failure(let error):
+            failure = error
+        case .success(false):
+            failure = nil
+        case .success(true):
+            failure = await witnessReviewEvent(entryID: entryID)
+        }
+        guard let failure else { return WitnessReviewOutcome(succeeded: true, sentence: nil) }
+        return WitnessReviewOutcome(
+            succeeded: false,
+            sentence: DaemonClient.refusalSentence(from: failure),
+            retryLine: DaemonClient.busyRetryLine(from: failure)
+        )
+    }
+
+    /// Reviews started in the background, by entry, waiting for their
+    /// `witness_review_ready` event.
+    private var witnessReviewWaiters: [String: CheckedContinuation<DaemonClient.Failure?, Never>] = [:]
+
+    /// A `witness_review_ready` that arrived before its request's answer
+    /// was read, by entry.
+    private var witnessReviewEarly: [String: DaemonClient.Failure?] = [:]
+
+    /// The longest a background review is waited for: the daemon's own
+    /// review deadline (seven minutes) with room to spare.
+    private static let witnessReviewEventWait: Duration = .seconds(10 * 60)
+
+    private func witnessReviewEvent(entryID: String) async -> DaemonClient.Failure? {
+        if let early = witnessReviewEarly.removeValue(forKey: entryID) {
+            return early
+        }
+        return await withCheckedContinuation { continuation in
+            // One waiter per entry: a second request for the same entry
+            // shares the daemon's one review, so the earlier waiter is
+            // answered as if it ended unknown rather than left hanging.
+            witnessReviewWaiters.removeValue(forKey: entryID)?.resume(
+                returning: DaemonClient.Failure(code: "unavailable", message: "witness-review-incomplete")
+            )
+            witnessReviewWaiters[entryID] = continuation
+            Task { [weak self] in
+                try? await Task.sleep(for: Self.witnessReviewEventWait)
+                self?.witnessReviewWaiters.removeValue(forKey: entryID)?.resume(
+                    returning: DaemonClient.Failure(code: "unavailable", message: "witness-review-incomplete")
                 )
             }
-        }.value
+        }
     }
 
     func openPreview(entryID: String) async -> PreviewOutcome {

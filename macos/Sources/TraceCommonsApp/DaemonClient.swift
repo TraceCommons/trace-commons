@@ -9,7 +9,7 @@ import TCShellCore
 /// of UI: the views own that. Calls block (the ABI is synchronous), so
 /// callers run them off the main actor.
 final class DaemonClient: Sendable {
-    struct Failure: Error, CustomStringConvertible {
+    struct Failure: Error, CustomStringConvertible, Equatable {
         let code: String
         let message: String
         /// The sentence the daemon chose for this refusal, when it sent one.
@@ -188,13 +188,32 @@ final class DaemonClient: Sendable {
         return (hello["methods"] as? [String])?.contains("witness_preview_request") == true
     }
 
-    func requestWitnessReview(entryID: String) throws {
+    /// Starts a witness review in the background (`background: true`), so
+    /// the call returns at once rather than holding the socket for the
+    /// minutes the witness can take. Returns `true` when the review is
+    /// still running and a `witness_review_ready` event will end it, and
+    /// `false` when it already finished (an older daemon that ignores the
+    /// flag answers synchronously with `ready`).
+    func requestWitnessReview(entryID: String) throws -> Bool {
         let result = try resultObject("witness_preview_request", params: [
-            "entry_id": entryID, "raw_session_confirmed": true
+            "entry_id": entryID, "raw_session_confirmed": true, "background": true
         ])
-        guard result["status"] as? String == "ready" else {
-            throw Failure(code: "unavailable", message: "witness-review-incomplete")
+        switch result["status"] as? String {
+        case "in_progress": return true
+        case "ready": return false
+        default: throw Failure(code: "unavailable", message: "witness-review-incomplete")
         }
+    }
+
+    /// The `witness_review_ready` payload's outcome: `nil` when the review
+    /// was pinned, else the failure a synchronous call would have thrown.
+    static func witnessReviewFailure(from payload: [String: Any]) -> Failure? {
+        if payload["status"] as? String == "ready" { return nil }
+        return failure(
+            code: payload["code"] as? String ?? "unavailable",
+            message: payload["label"] as? String ?? "witness-review-failed",
+            view: payload["view"] as? [String: Any]
+        )
     }
 
     /// The daemon's sentence for a refused review, or `nil` if it sent none.
@@ -1188,6 +1207,12 @@ enum DaemonEventParser {
                       .decode(PreviewRequestResult.self, from: payloadData)
             else { return .unknown(name) }
             return .previewReady(result)
+        case "witness_review_ready":
+            guard let entryID = payload["entry_id"] as? String else { return .unknown(name) }
+            return .witnessReviewReady(
+                entryID: entryID,
+                failure: DaemonClient.witnessReviewFailure(from: payload)
+            )
         default:
             return .unknown(name)
         }
