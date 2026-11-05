@@ -171,8 +171,9 @@ Every runbook in this directory, with a one-line description.
   monitor: a one-minute poll of the witness's `/v1/diagnostics` that records
   label-only rows and raises an alert on rising saturated refusals or
   timeouts, slots held full, or an unreachable page; the stateless
-  `WitnessHealthOK` check for a witness deploy; thresholds; alert delivery
-  options, none yet chosen.
+  `WitnessHealthOK` check for a witness deploy; thresholds; email alerts
+  through Cloud Monitoring (a gauge policy plus an uptime check) and the
+  owner's setup commands.
 - [`./drills.md`](./drills.md) — the full set of `/v1/admin/*-drill`
   endpoints, what each validates, and cadence guidance.
 - [`./near-attestation-drill.md`](./near-attestation-drill.md) — the NEAR AI

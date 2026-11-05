@@ -33,6 +33,16 @@ REQUEST_FIELDS = (
     "timed_out",
 )
 MAX_BODY_BYTES = 1 << 20
+ALERT_LABELS = (
+    "unreachable",
+    "schema_mismatch",
+    "saturated_refusals_rose",
+    "timed_out_rose",
+    "slots_full_sustained",
+)
+METRIC_PREFIX = "custom.googleapis.com/trace_commons/witness_monitor/"
+METADATA_BASE = "http://metadata.google.internal/computeMetadata/v1"
+MONITORING_BASE = "https://monitoring.googleapis.com"
 
 
 class ConfigError(Exception):
@@ -50,6 +60,9 @@ class Config:
         records_path,
         state_path,
         max_records_bytes,
+        export_metrics=False,
+        metadata_base=METADATA_BASE,
+        monitoring_base=MONITORING_BASE,
     ):
         self.url = url
         self.timeout_secs = timeout_secs
@@ -59,6 +72,9 @@ class Config:
         self.records_path = records_path
         self.state_path = state_path
         self.max_records_bytes = max_records_bytes
+        self.export_metrics = export_metrics
+        self.metadata_base = metadata_base
+        self.monitoring_base = monitoring_base
 
 
 def _int(env, name, default, minimum=1):
@@ -80,6 +96,9 @@ def config_from_env(env):
         raise ConfigError("config_missing:url")
     if not (url.startswith("https://") or url.startswith("http://")):
         raise ConfigError("config_invalid:url")
+    export = env.get(PREFIX + "EXPORT_METRICS", "")
+    if export not in ("", "0", "1"):
+        raise ConfigError("config_invalid:export_metrics")
     state_dir = pathlib.Path(
         env.get(PREFIX + "STATE_DIR", "/var/lib/tracecommons/witness-monitor")
     )
@@ -92,6 +111,10 @@ def config_from_env(env):
         records_path=state_dir / "records.jsonl",
         state_path=state_dir / "state.json",
         max_records_bytes=_int(env, "MAX_RECORDS_BYTES", 10 * 1024 * 1024),
+        export_metrics=export == "1",
+        # Test hooks; the defaults are the real GCE and Google endpoints.
+        metadata_base=env.get(PREFIX + "METADATA_URL", METADATA_BASE),
+        monitoring_base=env.get(PREFIX + "MONITORING_URL", MONITORING_BASE),
     )
 
 
@@ -194,6 +217,79 @@ def _load_state(path):
         return None
 
 
+class ExportError(Exception):
+    """The message is a fixed label."""
+
+
+def _gce_get(cfg, path):
+    request = urllib.request.Request(
+        cfg.metadata_base + path, headers={"Metadata-Flavor": "Google"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=cfg.timeout_secs) as response:
+            return response.read(MAX_BODY_BYTES).decode("utf-8", "replace")
+    except urllib.error.HTTPError:
+        raise ExportError("metadata_bad_response") from None
+    except Exception:
+        raise ExportError("metadata_unreachable") from None
+
+
+def export_metrics(cfg, alerts, now):
+    """Writes one 0/1 gauge per alert label plus an overall flag to Cloud
+    Monitoring, as the host's service account. Raises ExportError(label)."""
+    try:
+        token = json.loads(_gce_get(cfg, "/instance/service-accounts/default/token"))[
+            "access_token"
+        ]
+    except (ValueError, KeyError, TypeError):
+        raise ExportError("metadata_bad_response") from None
+    project = _gce_get(cfg, "/project/project-id").strip()
+    if not project or not token:
+        raise ExportError("metadata_bad_response")
+    resource = {"type": "global", "labels": {"project_id": project}}
+
+    def series(metric_type, labels, value):
+        metric = {"type": METRIC_PREFIX + metric_type}
+        if labels:
+            metric["labels"] = labels
+        return {
+            "metric": metric,
+            "resource": resource,
+            "points": [
+                {
+                    "interval": {"endTime": now},
+                    "value": {"int64Value": str(value)},
+                }
+            ],
+        }
+
+    body = {
+        "timeSeries": [
+            series("alert", {"alert": label}, 1 if label in alerts else 0)
+            for label in ALERT_LABELS
+        ]
+        + [series("overall_alert", None, 1 if alerts else 0)]
+    }
+    request = urllib.request.Request(
+        "%s/v3/projects/%s/timeSeries" % (cfg.monitoring_base, project),
+        data=json.dumps(body).encode(),
+        headers={
+            "Authorization": "Bearer " + token,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=cfg.timeout_secs):
+            pass
+    except urllib.error.HTTPError as err:
+        if err.code in (401, 403):
+            raise ExportError("api_denied") from None
+        raise ExportError("api_http_5xx" if err.code >= 500 else "api_http_4xx") from None
+    except Exception:
+        raise ExportError("api_unreachable") from None
+
+
 def _write_state(path, state):
     path = pathlib.Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -240,9 +336,22 @@ def poll(cfg, fetcher=fetch, now=None):
             _write_state(cfg.state_path, state)
     record["alerts"] = alerts
     record["status"] = "alert" if alerts else "ok"
+    export_failure = None
+    if cfg.export_metrics:
+        # A failed export fails the unit, so a broken pipeline to the alert
+        # policy stays visible on the host instead of reading as healthy.
+        try:
+            export_metrics(cfg, alerts, now)
+            record["export"] = "ok"
+        except ExportError as err:
+            export_failure = str(err)
+            record["export"] = export_failure
     _append_record(cfg, record)
-    print("WitnessMonitor %s%s" % (record["status"], "".join(" " + a for a in alerts)))
-    return 1 if alerts else 0
+    line = "WitnessMonitor %s%s" % (record["status"], "".join(" " + a for a in alerts))
+    if export_failure:
+        line += " metrics_export_failed:" + export_failure
+    print(line)
+    return 1 if alerts or export_failure else 0
 
 
 def check(cfg, fetcher=fetch):

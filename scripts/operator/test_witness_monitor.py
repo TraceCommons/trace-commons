@@ -341,5 +341,189 @@ class ConfigFromEnv(unittest.TestCase):
             self.assertNotIn("passwd", str(ctx.exception))
 
 
+class FakeGcp:
+    """One loopback server standing in for the metadata server and the
+    Monitoring API. `metadata_status` / `api_status` force failures."""
+
+    TOKEN = "fake-token-marker"
+
+    def __init__(self):
+        self.metadata_status = 200
+        self.api_status = 200
+        self.writes = []
+        self.metadata_headers = []
+        outer = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def _send(self, status, body):
+                data = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                outer.metadata_headers.append(self.headers.get("Metadata-Flavor"))
+                if outer.metadata_status != 200:
+                    return self._send(outer.metadata_status, {})
+                if self.path.endswith("/service-accounts/default/token"):
+                    return self._send(200, {"access_token": outer.TOKEN})
+                if self.path.endswith("/project/project-id"):
+                    # The real server returns text/plain, not JSON.
+                    data = b"fake-project"
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    return self.wfile.write(data)
+                self._send(404, {})
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length))
+                outer.writes.append(
+                    (self.path, self.headers.get("Authorization"), body)
+                )
+                self._send(outer.api_status, {})
+
+            def log_message(self, *a):
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = "http://127.0.0.1:%d" % self.server.server_address[1]
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class Export(unittest.TestCase):
+    def setUp(self):
+        self.gcp = FakeGcp()
+        self.addCleanup(self.gcp.close)
+        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp))
+        self.cfg = cfg(
+            url="http://witness.invalid/secret-path-marker",
+            records_path=self.tmp / "records.jsonl",
+            state_path=self.tmp / "state.json",
+            export_metrics=True,
+            metadata_base=self.gcp.base,
+            monitoring_base=self.gcp.base,
+        )
+
+    def poll(self, fetcher):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = wm.poll(self.cfg, fetcher=fetcher, now="2026-11-05T00:00:00Z")
+        return code, out.getvalue()
+
+    def series(self):
+        path, auth, body = self.gcp.writes[-1]
+        by_alert = {}
+        overall = None
+        for ts in body["timeSeries"]:
+            value = int(ts["points"][0]["value"]["int64Value"])
+            if ts["metric"]["type"].endswith("/overall_alert"):
+                overall = value
+            else:
+                by_alert[ts["metric"]["labels"]["alert"]] = value
+        return path, auth, by_alert, overall
+
+    def test_healthy_poll_writes_all_zeros(self):
+        code, _ = self.poll(lambda u, t: (None, diagnostics()))
+        self.assertEqual(code, 0)
+        path, auth, by_alert, overall = self.series()
+        self.assertEqual(path, "/v3/projects/fake-project/timeSeries")
+        self.assertEqual(auth, "Bearer " + FakeGcp.TOKEN)
+        self.assertEqual(set(by_alert), set(wm.ALERT_LABELS))
+        self.assertEqual(sum(by_alert.values()), 0)
+        self.assertEqual(overall, 0)
+        self.assertEqual(set(self.gcp.metadata_headers), {"Google"})
+
+    def test_an_alert_sets_its_label_and_the_overall_flag(self):
+        self.poll(lambda u, t: (None, diagnostics()))
+        self.poll(
+            lambda u, t: (
+                None,
+                diagnostics(requests={"timed_out": 2}, uptime_secs=1060),
+            )
+        )
+        _, _, by_alert, overall = self.series()
+        self.assertEqual(by_alert["timed_out_rose"], 1)
+        self.assertEqual(by_alert["unreachable"], 0)
+        self.assertEqual(overall, 1)
+
+    def test_an_unreachable_witness_is_still_exported(self):
+        code, _ = self.poll(lambda u, t: ("timeout", None))
+        self.assertEqual(code, 1)
+        _, _, by_alert, overall = self.series()
+        self.assertEqual(by_alert["unreachable"], 1)
+        self.assertEqual(overall, 1)
+
+    def test_points_are_int64_gauges_with_an_end_time_and_no_ids(self):
+        self.poll(lambda u, t: (None, diagnostics()))
+        _, _, body = self.gcp.writes[-1]
+        ts = body["timeSeries"][0]
+        self.assertEqual(ts["resource"], {"type": "global", "labels": {"project_id": "fake-project"}})
+        self.assertEqual(ts["points"][0]["interval"]["endTime"], "2026-11-05T00:00:00Z")
+        self.assertTrue(ts["metric"]["type"].startswith("custom.googleapis.com/trace_commons/witness_monitor/"))
+        blob = json.dumps(body)
+        for forbidden in ("secret-path-marker", "witness.invalid", "mrtd", FakeGcp.TOKEN):
+            self.assertNotIn(forbidden, blob)
+
+    def test_metadata_failure_fails_the_unit_but_keeps_the_alert_state(self):
+        self.gcp.metadata_status = 500
+        code, out = self.poll(lambda u, t: (None, diagnostics()))
+        self.assertEqual(code, 1)
+        self.assertIn("metrics_export_failed:metadata_bad_response", out)
+        rec = json.loads(self.cfg.records_path.read_text().splitlines()[0])
+        self.assertEqual(rec["alerts"], [])
+        self.assertEqual(rec["export"], "metadata_bad_response")
+        self.assertEqual(self.gcp.writes, [])
+
+    def test_metadata_unreachable(self):
+        self.cfg.metadata_base = "http://127.0.0.1:1"
+        code, out = self.poll(lambda u, t: (None, diagnostics()))
+        self.assertEqual(code, 1)
+        self.assertIn("metadata_unreachable", out)
+
+    def test_api_refusals_are_labelled_and_fail_the_unit(self):
+        for status, label in ((403, "api_denied"), (400, "api_http_4xx"), (503, "api_http_5xx")):
+            self.gcp.api_status = status
+            code, out = self.poll(lambda u, t: (None, diagnostics()))
+            self.assertEqual(code, 1, status)
+            self.assertIn("metrics_export_failed:" + label, out)
+
+    def test_api_unreachable(self):
+        self.cfg.monitoring_base = "http://127.0.0.1:1"
+        code, out = self.poll(lambda u, t: (None, diagnostics()))
+        self.assertEqual(code, 1)
+        self.assertIn("api_unreachable", out)
+
+    def test_export_off_makes_no_gcp_calls(self):
+        self.cfg.export_metrics = False
+        code, _ = self.poll(lambda u, t: (None, diagnostics()))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.gcp.writes, [])
+        self.assertEqual(self.gcp.metadata_headers, [])
+
+    def test_failure_text_never_carries_the_token(self):
+        self.gcp.api_status = 500
+        _, out = self.poll(lambda u, t: (None, diagnostics()))
+        blob = out + self.cfg.records_path.read_text()
+        self.assertNotIn(FakeGcp.TOKEN, blob)
+
+    def test_env_switch(self):
+        base = {"TRACE_COMMONS_WITNESS_MONITOR_URL": "https://w.example/x"}
+        self.assertFalse(wm.config_from_env(base).export_metrics)
+        on = dict(base, TRACE_COMMONS_WITNESS_MONITOR_EXPORT_METRICS="1")
+        self.assertTrue(wm.config_from_env(on).export_metrics)
+        bad = dict(base, TRACE_COMMONS_WITNESS_MONITOR_EXPORT_METRICS="yes-secret")
+        with self.assertRaises(wm.ConfigError) as ctx:
+            wm.config_from_env(bad)
+        self.assertNotIn("secret", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

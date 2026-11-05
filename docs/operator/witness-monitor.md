@@ -60,6 +60,7 @@ rather than falling back.
 | `TIMED_OUT_DELTA` | `1` | Rise in `timed_out` per poll that alerts. |
 | `FULL_POLLS` | `3` | Consecutive full-slot polls that alert (three minutes at the one-minute timer). |
 | `STATE_DIR` | `/var/lib/tracecommons/witness-monitor` | Holds `records.jsonl` and `state.json`. The unit sets it. |
+| `EXPORT_METRICS` | `0` | `1` writes the Cloud Monitoring gauge each poll (see "Cloud Monitoring email alerts"). Off by default so a laptop or CI run makes no GCP calls. |
 | `MAX_RECORDS_BYTES` | `10485760` | `records.jsonl` is renamed to `records.jsonl.1` (one generation) when it reaches this size. |
 
 The defaults alert on any single refusal or timeout. That is deliberate for a
@@ -107,28 +108,210 @@ It is not a rollout-smoke check: rollout-smoke evidence is tenant-scoped and
 written through the ingest admin API, and the witness has no tenant and no
 operator credential by design.
 
-## Alert delivery: not chosen
+## Cloud Monitoring email alerts
 
-Delivery is an owner decision. What the repo already has:
+Decision (owner): alerts go out as email through Cloud Monitoring. Two
+independent signals share one email notification channel:
 
-- **Failed systemd units.** The only alert surface in use today
-  (`systemctl --failed`). The staging README says of its backup timers "there is
-  no alert yet". This monitor works with it as shipped.
-- **systemd `OnFailure=`.** Not used anywhere in the repo, but a drop-in naming
-  a delivery unit turns a failed monitor run into a message without changing
-  the monitor.
-- **Cloud Logging.** `pilot-dashboard.md` suggests it as the log aggregator for
-  hash-only error classes. Nothing in the repo configures it or an alerting
-  policy, notification channel or uptime check, and no mail or chat sender
-  exists in the scripts.
-- **Prometheus text at `/v1/admin/operational-metrics`.** Ingest only; nothing
-  scrapes it from this repo, and it does not cover the witness.
+1. **The gauge.** With `TRACE_COMMONS_WITNESS_MONITOR_EXPORT_METRICS=1`, each
+   poll writes custom metrics as the host's service account, using only the
+   metadata server's token and the Monitoring REST API (no library, no key
+   file, no secret on the host):
+   - `custom.googleapis.com/trace_commons/witness_monitor/alert`, one series per
+     alert label (label `alert` = `unreachable`, `schema_mismatch`,
+     `saturated_refusals_rose`, `timed_out_rose`, `slots_full_sustained`), value
+     0 or 1;
+   - `custom.googleapis.com/trace_commons/witness_monitor/overall_alert`, 1 when
+     any alert is raised.
 
-Recommendation: ship with the failed-unit surface first, then add one
-`OnFailure=` drop-in that posts to the channel the owner already watches. A
-Cloud Monitoring policy on a log-based metric is the better long-term fit if
-Cloud Logging is adopted for the pilot dashboard, but it needs cloud resources
-and is not worth building before that choice.
+   The resource is `global` with the project id only. If the metadata server or
+   the API is unreachable or refuses (`metadata_unreachable`,
+   `metadata_bad_response`, `api_unreachable`, `api_denied`, `api_http_4xx`,
+   `api_http_5xx`), the poll prints `metrics_export_failed:<label>`, records it
+   as `export`, and exits 1: the unit fails and `systemctl --failed` shows it.
+   Export failures never hide an alert, and an alert never hides an export
+   failure.
+2. **The uptime check.** Google probes `/v1/diagnostics` from outside, so a
+   dead host, a dead monitor or a revoked IAM grant cannot silence the witness
+   alarm. It sees only reachable or not, which is why the gauge exists.
+
+The gauge policy also has an absence condition: if the monitor stops reporting
+for 5 minutes, that opens an incident too. A silent monitor is not a healthy
+one.
+
+**Nothing below has been run.** Every command is for the owner. Each carries
+`--project tracecommons-pilot-2026 --account zaki@iqlusion.io`. The recipient is
+the placeholder `<ALERT_EMAIL>`; do not put an address in the repo.
+
+The service account is `tc-pilot-runtime@tracecommons-pilot-2026.iam.gserviceaccount.com`,
+from "Prereqs to provision per pilot" and the `TC_RUNTIME_SA` export in
+[`pilot-gcp-deployment.md`](./pilot-gcp-deployment.md). That document names the
+account for a pilot provisioned from it; step 0 confirms that it is the one
+attached to `tc-pilot-host`.
+
+Order matters: the policies reference the custom metric, and Cloud Monitoring
+creates a custom metric on its first write, so the monitor must write once
+before step 5.
+
+```sh
+P=tracecommons-pilot-2026
+A=zaki@iqlusion.io
+SA=tc-pilot-runtime@${P}.iam.gserviceaccount.com
+
+# 0. Read-only: confirm the host's service account and that its scopes allow
+#    Monitoring writes (cloud-platform or monitoring/monitoring.write).
+gcloud compute instances list --project "$P" --account "$A" \
+  --filter='name=tc-pilot-host' \
+  --format='value(serviceAccounts[].email,serviceAccounts[].scopes)'
+# If the email differs from $SA, set SA to what it printed. If the scopes lack
+# monitoring.write and cloud-platform, the VM must be stopped to change them;
+# stop here and decide.
+
+# 1. Enable the Monitoring API (a no-op if already on).
+gcloud services enable monitoring.googleapis.com --project "$P" --account "$A"
+
+# 2. The minimal grant: write metrics, nothing else.
+gcloud projects add-iam-policy-binding "$P" --account "$A" \
+  --member="serviceAccount:${SA}" --role=roles/monitoring.metricWriter
+
+# 3. The email channel. Note the printed channel name,
+#    projects/<project>/notificationChannels/<id>. Google emails the address a
+#    verification link; the channel delivers only after it is verified.
+gcloud beta monitoring channels create --project "$P" --account "$A" \
+  --display-name="Witness alerts (email)" --type=email \
+  --channel-labels=email_address=<ALERT_EMAIL>
+CHANNEL=projects/${P}/notificationChannels/<ID from the line above>
+
+# 4. On the host: install the monitor (see "Installing it"), set
+#    TRACE_COMMONS_WITNESS_MONITOR_EXPORT_METRICS=1 in the env file, then run it
+#    once by hand so the metric exists, and expect exit status 0:
+sudo systemctl start trace-commons-witness-monitor.service
+systemctl status trace-commons-witness-monitor.service
+# An `api_denied` here means step 2 has not taken effect or the VM scopes are
+# too narrow (step 0). Wait a minute after step 2 and retry once.
+
+# 5. The gauge policy, with email when an incident opens and when it closes.
+cat > witness-gauge-policy.json <<'EOF'
+{
+  "displayName": "Witness overloaded, unreachable or unmonitored",
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "overall_alert is 1",
+      "conditionThreshold": {
+        "filter": "metric.type=\"custom.googleapis.com/trace_commons/witness_monitor/overall_alert\" AND resource.type=\"global\"",
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "aggregations": [{"alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_MAX"}],
+        "trigger": {"count": 1}
+      }
+    },
+    {
+      "displayName": "monitor stopped reporting",
+      "conditionAbsent": {
+        "filter": "metric.type=\"custom.googleapis.com/trace_commons/witness_monitor/overall_alert\" AND resource.type=\"global\"",
+        "duration": "300s",
+        "aggregations": [{"alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_MAX"}]
+      }
+    }
+  ],
+  "alertStrategy": {
+    "notificationPrompts": ["OPENED", "CLOSED"],
+    "autoClose": "1800s"
+  },
+  "documentation": {
+    "content": "Witness overload monitor. Runbook: docs/operator/witness-monitor.md. The alert label is on the alert metric series; the host's records.jsonl has the counts.",
+    "mimeType": "text/markdown"
+  }
+}
+EOF
+gcloud monitoring policies create --project "$P" --account "$A" \
+  --policy-from-file=witness-gauge-policy.json \
+  --notification-channels="$CHANNEL"
+
+# 6. The uptime check on the witness's diagnostics page. <WITNESS_HOST> is the
+#    witness's public hostname (no scheme, no path). Defaults: every minute,
+#    2xx passes, probes from all regions.
+gcloud monitoring uptime create "Witness diagnostics" \
+  --project "$P" --account "$A" \
+  --resource-type=uptime-url \
+  --resource-labels=host=<WITNESS_HOST>,project_id="$P" \
+  --protocol=https --port=443 --path=/v1/diagnostics --status-classes=2xx
+CHECK_ID=$(gcloud monitoring uptime list-configs --project "$P" --account "$A" \
+  --filter='displayName="Witness diagnostics"' --format='value(name.basename())')
+
+# 7. The uptime policy on the same channel. It opens when the check fails from
+#    more than one region for a minute, so one regional blip does not email.
+cat > witness-uptime-policy.json <<EOF
+{
+  "displayName": "Witness diagnostics page not answering",
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "uptime check failing",
+      "conditionThreshold": {
+        "filter": "metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND metric.label.check_id=\"${CHECK_ID}\" AND resource.type=\"uptime_url\"",
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 1,
+        "duration": "60s",
+        "aggregations": [
+          {
+            "alignmentPeriod": "1200s",
+            "perSeriesAligner": "ALIGN_NEXT_OLDER",
+            "crossSeriesReducer": "REDUCE_COUNT_FALSE",
+            "groupByFields": ["resource.label.*"]
+          }
+        ],
+        "trigger": {"count": 1}
+      }
+    }
+  ],
+  "alertStrategy": {"notificationPrompts": ["OPENED", "CLOSED"]}
+}
+EOF
+gcloud monitoring policies create --project "$P" --account "$A" \
+  --policy-from-file=witness-uptime-policy.json \
+  --notification-channels="$CHANNEL"
+
+# 8. Confirm what exists (read-only).
+gcloud monitoring policies list --project "$P" --account "$A" \
+  --format='value(displayName,enabled)'
+gcloud beta monitoring channels list --project "$P" --account "$A" \
+  --format='value(displayName,type,verificationStatus)'
+```
+
+The 1200 s alignment in step 7 is Google's standard form for uptime-check
+policies and is why that email can lag the failure by a few minutes; the gauge
+policy is the fast one.
+
+### Test alert (run once, after step 8)
+
+Cloud Monitoring has no "send a test" for a policy, so make the monitor raise a
+real `unreachable` against an address nothing listens on, then clear it. This
+exercises the whole path: token, API write, policy, channel, close email.
+
+```sh
+# Raise: one poll against a dead local port. Expect exit 1 and
+# "WitnessMonitor alert unreachable". Give it two polls (about two minutes) to
+# open an incident; the "opened" email arrives within a few minutes.
+sudo systemd-run --wait --collect --pipe -p User=tracecommons \
+  -p EnvironmentFile=/etc/tracecommons/witness-monitor.env \
+  -p Environment=TRACE_COMMONS_WITNESS_MONITOR_URL=http://127.0.0.1:9/ \
+  -p Environment=TRACE_COMMONS_WITNESS_MONITOR_STATE_DIR=/var/tmp/witness-monitor-test \
+  /usr/bin/python3 /opt/tracecommons/bin/witness_monitor.py poll
+# Repeat the command once after a minute, then let the real timer run: the next
+# real poll writes 0 and the incident closes, which sends the "closed" email.
+```
+
+The test run uses its own state directory so it cannot disturb the real
+baseline. Remove `/var/tmp/witness-monitor-test` afterwards.
+
+Tradeoffs to know: the gauge is written every minute whether or not anything
+changed (one series per alert label, six series in all, well inside the free
+custom-metric allowance); and the email is sent by Google, so its subject and
+sender are Google's, with the policy documentation text in the body. The
+recipient address lives only in the notification channel, not in this repo.
 
 ## Troubleshooting
 
