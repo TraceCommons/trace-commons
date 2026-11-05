@@ -335,34 +335,30 @@ private struct HomeOverview: View {
         // Three groups, each under its title: Private AI first (owner,
         // 2026-11-02: back at the top, where it was before 2026-10-28), then
         // Traces (the tiles and what is not contributed across both columns),
-        // then Account (Credit and the NEAR AI balance). The Traces
-        // walkthrough leads the Traces section for everyone, every time,
-        // over the Traces cards, with no X (owner, 2026-11-04; from
-        // 2026-11-02 it stood in for the cards until a folder was watched,
-        // and closed for good).
+        // then Account (Credit and the NEAR AI balance). The Traces hero
+        // leads Home, over every section, for everyone, every time, with no
+        // X (product owner, 2026-10-28, 2026-10-29; restored 2026-11-05).
         return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            tracesHero
             privateAI
             HomeSection(words?.sectionTraces) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                    tracesHero
-                    Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
+                Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
+                    GridRow {
+                        HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
+                                     systemImage: HomeStatIcons.waiting, loading: traces.phase == .loading,
+                                     action: openTraces)
+                        HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(freshRollup),
+                                     systemImage: HomeStatIcons.contributed,
+                                     loading: store.isLoading("history_rollup"), action: openHistory)
+                    }
+                    if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) {
                         GridRow {
-                            HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
-                                         systemImage: HomeStatIcons.waiting, loading: traces.phase == .loading,
-                                         action: openTraces)
-                            HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(freshRollup),
-                                         systemImage: HomeStatIcons.contributed,
-                                         loading: store.isLoading("history_rollup"), action: openHistory)
-                        }
-                        if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) {
-                            GridRow {
-                                notContributed(uncontributed, title: title)
-                                    .gridCellColumns(2)
-                            }
+                            notContributed(uncontributed, title: title)
+                                .gridCellColumns(2)
                         }
                     }
-                    .fixedSize(horizontal: false, vertical: true)
                 }
+                .fixedSize(horizontal: false, vertical: true)
             }
             HomeSection(words?.sectionAccount, accessory: accountSignIn) {
                 HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)
@@ -373,28 +369,12 @@ private struct HomeOverview: View {
         }
     }
 
-    /// Home's Traces walkthrough (owner, 2026-10-28): saying that traces
-    /// earn credit, with the way into Traces, where the person shares;
-    /// three steps, contribute, earn, use Private AI (owner, 2026-10-29).
-    /// Condensed on 2026-11-02 (owner): no line under the title. Shown to
-    /// everyone, every time, with no X (owner, 2026-11-04). Drawn as the Insights empty
-    /// state's card is (owner, 2026-11-02, `GetStartedCard`): a plain card,
-    /// no gradient or pictures, numbered steps, and two text links, each
-    /// under its step: Start earning to Traces and Open Private AI to
-    /// Private AI (owner, 2026-11-04). Drawn once the core's words have
-    /// loaded.
+    /// Home's Traces hero, the product owner's design (`HomeTracesHero`).
+    /// Drawn once the core's words have loaded.
     @ViewBuilder
     private var tracesHero: some View {
         if let words {
-            GetStartedCard(
-                title: words.tracesHeroTitle,
-                steps: [
-                    .init(title: words.tracesHeroStepContribute, detail: words.tracesHeroStepContributeDetail,
-                          link: GetStartedCard.Link(title: words.tracesHeroAction, action: openTraces)),
-                    .init(title: words.tracesHeroStepEarn, detail: words.tracesHeroStepEarnDetail),
-                    .init(title: words.tracesHeroStepUse, detail: words.tracesHeroStepUseDetail,
-                          link: GetStartedCard.Link(title: words.tracesHeroUseAction, action: openPrivateAI)),
-                ])
+            HomeTracesHero(words: words, openTraces: openTraces, openPrivateAI: openPrivateAI)
         }
     }
 

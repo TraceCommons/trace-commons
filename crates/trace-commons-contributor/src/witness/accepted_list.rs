@@ -239,6 +239,9 @@ fn accepted_pins(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListRefreshSchedule {
     next_at: DateTime<Utc>,
+    /// The stored list's version when last looked at, so a change is seen
+    /// whichever path installed it.
+    seen_version: Option<u64>,
 }
 
 impl ListRefreshSchedule {
@@ -246,7 +249,20 @@ impl ListRefreshSchedule {
     pub fn starting(started_at: DateTime<Utc>) -> Self {
         Self {
             next_at: started_at,
+            seen_version: None,
         }
+    }
+
+    /// Record the stored list's `version` and say whether it is a list this
+    /// schedule has not seen: a newer one, or the first one seen since the
+    /// daemon started (a list installed while it was stopped, by the `submit`
+    /// command, counts). `None`, no verified list, is never a change.
+    pub fn list_version_changed(&mut self, version: Option<u64>) -> bool {
+        let changed = version.is_some() && version != self.seen_version;
+        if version.is_some() {
+            self.seen_version = version;
+        }
+        changed
     }
 
     #[must_use]
@@ -722,6 +738,20 @@ mod tests {
         assert!(schedule.due(at(3) + ACCEPTED_LIST_REFRESH_JITTER));
         schedule.attempted(at(3), f64::NAN);
         assert!(schedule.due(at(4)));
+    }
+
+    /// The schedule remembers the stored list's version so the daemon can
+    /// tell a list changed, whichever path installed it (the daily fetch, or
+    /// a fetch on a refusal inside a submit). The first sight of a stored
+    /// list counts as a change; seeing the same version again does not.
+    #[test]
+    fn the_schedule_reports_a_changed_list_version_once() {
+        let mut schedule = ListRefreshSchedule::starting(at(1));
+        assert!(!schedule.list_version_changed(None), "no list, nothing new");
+        assert!(schedule.list_version_changed(Some(3)));
+        assert!(!schedule.list_version_changed(Some(3)));
+        assert!(schedule.list_version_changed(Some(4)));
+        assert!(!schedule.list_version_changed(Some(4)));
     }
 
     #[test]

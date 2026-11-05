@@ -117,8 +117,8 @@ with synthetic text, never with a key a live driver is using.
 ### 2.2 Size NEAR AI windows by the encoded request body
 
 Owner decision, 2026-11-05. NEAR AI windows are now cut so that each request
-body, as serialised, fits 240 KiB, under the ~256 KiB limit measured on
-2026-09-03. The 32,000-token budget is removed and
+body, as serialised, fits a cap under the ~256 KiB limit measured on
+2026-09-03 (240 KiB at first, 128 KiB since; see below). The 32,000-token budget is removed and
 `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS` is refused at startup; the
 replacement is `TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES`. When a body
 is over the cap or draws a 413, the window is halved, at most four levels
@@ -128,7 +128,37 @@ caller (contributor, ingest backstop, witness). The tokenizer windowing now
 compiles only for the self-hosted backend.
 
 This saves calls only on fields over about 120 KB. For the traces in
-section 1, 2.1 and 2.3 are the levers. The feature still lists
+section 1, 2.1 and 2.3 are the levers.
+
+**Revised the same day: a 128 KiB cap and a timeout that grows with the
+body.** The owner's live measurement (20 KiB 11.3 s, 103 KiB 14.8 s,
+205 KiB 36.5 s) put a 240 KiB window past the adapter's flat 30 s per-call
+timeout. Every full window would then have run four timed-out attempts and
+been refused. That is the 122 s `witness_redaction_failed` the live witness
+returns, reproduced locally with the stand-in at the measured curve.
+
+Two settings changed together:
+
+- **The window cap is now 128 KiB.** Past ~100 KiB the endpoint gets
+  slower per byte (two 103 KiB requests take 29.6 s, one 205 KiB request
+  takes 36.5 s), so smaller windows cost no time.
+- **Each request's timeout is 15 s + 250 ms per KiB of body**
+  (`TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS`, `TRACE_NEAR_AI_PRIVACY_TIMEOUT_PER_KIB_MS`).
+  That is 47 s at the cap, about 2x the expected time, and 20 s at 20 KiB.
+
+A full window's worst case, four timed-out attempts plus backoff, is
+189.75 s. A compile-time assert keeps it at or under 240 s, and a witness
+test keeps it under the 300 s request limit, which stays under the client's
+330 s deadline.
+
+Measured with the stand-in at the 2026-11-05 curve, one 241 KB field:
+
+| settings | result |
+|---|---|
+| old: 240 KiB windows, flat 30 s | 503 `witness_redaction_failed` at 127 s |
+| new | 200 in 39.5 s |
+
+A 900 KB field: 200 in 133 s. The feature still lists
 `dep:tiktoken-rs`, now unused on this path, because removing it would change
 the separate GTK and Tauri lockfiles; drop it together with a refresh of
 those lockfiles.

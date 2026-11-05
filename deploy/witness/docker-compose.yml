@@ -200,14 +200,16 @@ services:
       # verbatim and is uploaded to the deployer.
       TRACE_NEAR_AI_PRIVACY_API_KEY: ${TRACE_NEAR_AI_PRIVACY_API_KEY:?set at deploy time}
 
-      # 64 MiB. The redacted-envelope cap is 16 MiB and the measured
-      # raw-to-envelope ratio on this pilot is about 3.4:1.
-      TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES: "67108864"
+      # 1 MiB. The client refuses a trace over 256 KB of raw contribution
+      # before sending it (owner decision 2026-11-05); 1 MiB holds that as
+      # JSON, escaping included, with room. Sixteen slots at this cap are on
+      # the order of 100 MiB of memory.
+      TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES: "1048576"
 
       # THE BOUND ON UNAUTHENTICATED WORK. Both routes are unauthenticated, so
       # anyone who can reach `POST /v1/witness` can spend this CVM's cores and,
       # in `full-pipeline`, the NEAR AI capacity billed to the key above. The
-      # 64 MiB cap above is per request; it says nothing about how many arrive
+      # 1 MiB cap above is per request; it says nothing about how many arrive
       # at once. These two say that.
       #
       # Both are MEASURED, like everything else here: a contributor who has
@@ -215,28 +217,28 @@ services:
       # raw transcript to has a bound at all, and what it is. An operator
       # cannot quietly widen it without moving the measurement.
       #
-      # Four at once. #456 established that 8 concurrent classify windows
-      # collapse NEAR AI throughput, which is why the filter serialises windows
-      # within a request; N concurrent requests put N windows back in flight at
-      # the same endpoint, so the bound is set strictly under the 8 that is
-      # known to fail. Memory is the other constraint: a request at the 64 MiB
-      # cap is buffered, parsed, redacted and re-serialised, so a slot costs a
-      # couple of hundred megabytes at the cap.
-      TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS: "4"
+      # Sixteen at once (owner decision 2026-11-05; was four). Classifier
+      # calls are bounded separately, process-wide, at two
+      # (TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT, binary default), and
+      # admitted requests take turns at them in arrival order, so a slot is a
+      # place in line, not more load on the key. Past sixteen, or when the
+      # requests ahead would outlast the request timeout at the recent pace,
+      # the answer is an immediate busy.
+      TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS: "16"
 
-      # Five minutes, and the number is measured rather than round. The
-      # classifier's largest proven success is a 243 KiB window in 9.3 s, so a
-      # request classifies on the order of 25 KiB/s serially: five minutes is
-      # several megabytes of transcript. It is also above the ~2 minutes a
-      # single window can legitimately take when it retries against the 30 s
-      # per-call timeout, so a healthy slow request is not abandoned.
+      # Nine minutes. The owner asked for about ten (2026-11-05); the
+      # dstack gateway closes a connection after 10 minutes with no data, and
+      # the witness sends nothing until it answers, so the budget sits a
+      # minute under that. The classifier was measured at ~3 s + 0.4 s/KiB on
+      # 2026-11-05, and the witness passes this deadline to it, so no retry
+      # starts that could not finish inside it.
       #
       # A bound with no deadline is not a bound: one request whose classifier
       # call never returns would hold its slot for the life of the process, and
       # four of those would wedge the witness at full occupancy with nothing
       # running. A timed-out request is refused with 504 and its slot is
       # released.
-      TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS: "300"
+      TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS: "540"
 
       # Path prefixes the deterministic pass treats as known, so they are not
       # reported as findings. Empty reports more, never less.

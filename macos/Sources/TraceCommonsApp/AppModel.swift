@@ -4203,8 +4203,9 @@ final class AppModel: ObservableObject {
     private var witnessReviewEarly: [String: DaemonClient.Failure?] = [:]
 
     /// The longest a background review is waited for: the daemon's own
-    /// review deadline (seven minutes) with room to spare.
-    private static let witnessReviewEventWait: Duration = .seconds(10 * 60)
+    /// review deadline (eleven minutes since 2026-11-05) with room to spare,
+    /// and under the daemon's 15-minute backstop on a background review.
+    private static let witnessReviewEventWait: Duration = .seconds(14 * 60)
 
     private func witnessReviewEvent(entryID: String) async -> DaemonClient.Failure? {
         if let early = witnessReviewEarly.removeValue(forKey: entryID) {

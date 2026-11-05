@@ -115,7 +115,10 @@ impl LoadCounters {
             completed_4xx: self.completed_4xx.load(Ordering::Relaxed),
             completed_5xx: self.completed_5xx.load(Ordering::Relaxed),
             saturated_refusals: self.saturated.load(Ordering::Relaxed),
+            early_busy: 0,
             timed_out: self.timed_out.load(Ordering::Relaxed),
+            classify_queue_waiting: None,
+            classify_queue_mean_turn_ms: None,
         }
     }
 }
@@ -128,8 +131,18 @@ pub struct LoadSnapshot {
     pub completed_2xx: u64,
     pub completed_4xx: u64,
     pub completed_5xx: u64,
+    /// Busy answers of every kind: all slots taken, or (counted again in
+    /// `early_busy`) the queue ahead would outlast the request timeout.
     pub saturated_refusals: u64,
+    /// Busy answers given at admission because the classify queue ahead
+    /// would have outlasted the request timeout.
+    pub early_busy: u64,
     pub timed_out: u64,
+    /// Requests admitted and waiting for their turn at the classifier, when
+    /// the witness classifies through a queue.
+    pub classify_queue_waiting: Option<usize>,
+    /// The recent time a request spends classifying, once one has.
+    pub classify_queue_mean_turn_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -257,9 +270,12 @@ mod tests {
         assert_eq!(
             requests,
             [
+                "classify_queue_mean_turn_ms",
+                "classify_queue_waiting",
                 "completed_2xx",
                 "completed_4xx",
                 "completed_5xx",
+                "early_busy",
                 "in_use",
                 "max_concurrent",
                 "saturated_refusals",
