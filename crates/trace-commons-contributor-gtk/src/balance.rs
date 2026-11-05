@@ -495,6 +495,9 @@ mod tests {
         fn amount(nanos: Option<i64>, _: u8) -> String {
             nanos.map_or_else(|| "absent".to_string(), |n| n.to_string())
         }
+        fn spent(nanos: Option<i64>, _: Option<i64>, scale: u8) -> String {
+            amount(nanos, scale)
+        }
         fn age(_: Option<u64>) -> String {
             "age".to_string()
         }
@@ -504,7 +507,7 @@ mod tests {
             action: inverted_action,
             remaining_line: amount,
             limit_line: amount,
-            spent_line: amount,
+            spent_line: spent,
             observed_line: age,
         };
         // `known` now has a sentence, so its row is NOT figures.

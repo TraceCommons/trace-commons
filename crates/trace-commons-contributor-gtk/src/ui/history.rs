@@ -1536,7 +1536,19 @@ mod tests {
         };
         assert_eq!(
             credit_line(&record).as_deref(),
-            Some("credit 3.0, still being scored")
+            Some("credit 3, still being scored")
+        );
+        // The core's rule, as every shell draws it: half away from zero,
+        // and a sliver is "<0.1", never a zero.
+        record.credit_points_pending = 4.25;
+        assert_eq!(
+            credit_line(&record).as_deref(),
+            Some("credit 4.3, still being scored")
+        );
+        record.credit_points_pending = 0.04;
+        assert_eq!(
+            credit_line(&record).as_deref(),
+            Some("credit <0.1, still being scored")
         );
         record.credit_points_pending = 0.0;
         assert_eq!(credit_line(&record), None);
