@@ -823,6 +823,9 @@ struct TracesTreeView: View, Equatable {
             onSubmit: store.maySubmitSession(entry, folderIgnored: off)
                 ? { Task { await store.submitSession(entry, folderIgnored: off) } } : nil,
             onMenu: { rowMenu = Self.toggled(.session(entry.entryId), current: rowMenu) },
+            // A refused Submit is said under the row it was pressed on. A
+            // selected row's review card says it already (`TracesRefusal`).
+            refusal: selected ? nil : TracesStore.rowRefusal(store, entryId: entry.entryId),
             spoken: $spoken
         )
         .equatable()
@@ -1255,6 +1258,9 @@ struct TracesSessionRow: View, Equatable {
     /// Nil while the session cannot be sent: the pill is drawn turned off.
     let onSubmit: (() -> Void)?
     let onMenu: () -> Void
+    /// Why the last Submit on this row did not go through, in the core's
+    /// words, or nil. Drawn under the row, where the press was.
+    var refusal: String? = nil
     /// As `TracesFolderRow.spoken`.
     let spoken: AccessibilityFocusState<String?>.Binding
 
@@ -1264,7 +1270,7 @@ struct TracesSessionRow: View, Equatable {
                 && lhs.flag == rhs.flag && lhs.selected == rhs.selected && lhs.off == rhs.off && lhs.acting == rhs.acting
                 && lhs.pill == rhs.pill && lhs.menuLabel == rhs.menuLabel && lhs.menuOpen == rhs.menuOpen
                 && lhs.help == rhs.help && lhs.toolName == rhs.toolName && lhs.tags == rhs.tags
-                && (lhs.onSubmit == nil) == (rhs.onSubmit == nil)
+                && (lhs.onSubmit == nil) == (rhs.onSubmit == nil) && lhs.refusal == rhs.refusal
         }
     }
 
@@ -1300,6 +1306,9 @@ struct TracesSessionRow: View, Equatable {
             }
             if let tags {
                 NudgeRowTags(tags: tags)
+            }
+            if let refusal {
+                GlassAlert(refusal)
             }
         }
     }

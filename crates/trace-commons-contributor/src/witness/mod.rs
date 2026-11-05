@@ -217,6 +217,19 @@ pub enum WitnessTrustError {
     /// the witness's own `Retry-After`, bounded -- never refused.
     #[error("the witness is busy")]
     WitnessSaturated { retry_after_secs: u32 },
+    /// The witness did not answer within this client's deadline, or told
+    /// this client its own request deadline ran out
+    /// (`504 witness_request_timed_out`). Nothing was certified.
+    ///
+    /// Apart from [`Self::WitnessAttestationUnavailable`] because the two
+    /// read differently in a log: that one is the quote endpoint; this one
+    /// is any witness call that was waited on and never answered.
+    #[error("the witness did not answer in time")]
+    WitnessTimeout,
+    /// The witness could not be connected to at all: DNS, refused or reset
+    /// connection, or a TLS handshake that failed. Nothing was sent.
+    #[error("the witness could not be reached")]
+    WitnessUnreachable,
 }
 
 impl std::fmt::Debug for WitnessTrustError {
@@ -258,6 +271,8 @@ impl WitnessTrustError {
             Self::WitnessResponseMalformed => "witness_response_malformed",
             Self::WitnessClaimUnavailable => "witness_claim_unavailable",
             Self::WitnessBodyNotStripped => "witness_body_not_stripped",
+            Self::WitnessTimeout => "witness_timeout",
+            Self::WitnessUnreachable => "witness_unreachable",
             // The wire label itself, like the admission refusal below.
             Self::WitnessSaturated { .. } => {
                 trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR
@@ -277,7 +292,7 @@ impl WitnessTrustError {
     /// derivation would have to construct a variant to read it.
     /// `every_refusal_label_is_recognised` walks the enum and fails if this
     /// list falls behind.
-    pub const ALL_REFUSAL_LABELS: [&'static str; 15] = [
+    pub const ALL_REFUSAL_LABELS: [&'static str; 17] = [
         "witness_host_not_allowed",
         "witness_attestation_unavailable",
         "witness_collateral_unavailable",
@@ -293,6 +308,8 @@ impl WitnessTrustError {
         "witness_body_not_stripped",
         "admission_evidence_refused",
         trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR,
+        "witness_timeout",
+        "witness_unreachable",
     ];
 
     /// Recognise a refusal label that has been through a `String`.

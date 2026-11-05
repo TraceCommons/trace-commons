@@ -8145,11 +8145,23 @@ fn witness_review_busy(id: u64, retry_after_secs: u32) -> Response {
 /// the closed set and returns that crate's own constant, so the only strings
 /// that can cross are ones a shell has words for.
 fn witness_review_refusal(error: &anyhow::Error) -> &'static str {
+    let label = witness_review_refusal_label(error);
+    super::preview::report_failure_label(label);
+    label
+}
+
+fn witness_review_refusal_label(error: &anyhow::Error) -> &'static str {
     if let Some(witness) = error.downcast_ref::<crate::witness::WitnessTrustError>() {
         return witness.refusal_label();
     }
-    crate::witness::WitnessTrustError::refusal_label_from(&error.to_string())
-        .unwrap_or("witness-review-failed")
+    let text = error.to_string();
+    // The whole review ran past `PREVIEW_BUILD_DEADLINE`. To the person it
+    // is the reviewer not answering in time, so it takes that label and
+    // that sentence rather than the generic one.
+    if text == super::preview::REASON_PREVIEW_TIMED_OUT {
+        return crate::witness::WitnessTrustError::WitnessTimeout.refusal_label();
+    }
+    crate::witness::WitnessTrustError::refusal_label_from(&text).unwrap_or("witness-review-failed")
 }
 
 async fn handle_witness_preview_request_inner(
@@ -8409,7 +8421,11 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
             value["entry"] = entry_value(&entry, shared.admission_evidence());
             Response::ok(req.id, value)
         }
-        Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "preview-failed"),
+        Err(error) => Response::err(
+            req.id,
+            ERR_UNAVAILABLE,
+            super::preview::reported_failure_label(&error),
+        ),
     }
 }
 
@@ -8676,10 +8692,14 @@ async fn build_and_pin_preview(
         // shell can say what happened and what to do about it. Compared
         // against the fixed label `redact_to_envelope` produces, never
         // rendered from the error, so no text can ride out on this path.
+        //
+        // Everything else is a fixed label from the build's own closed set
+        // (`preview::preview_failure_label`), `preview-failed` when nothing
+        // more specific is known, and is logged by label.
         if e.to_string() == REASON_CORRECTION_CREDENTIAL {
             (ERR_BAD_PARAMS, REASON_CORRECTION_CREDENTIAL)
         } else {
-            (ERR_UNAVAILABLE, "preview-failed")
+            (ERR_UNAVAILABLE, super::preview::reported_failure_label(&e))
         }
     })?;
     // An unenrolled preview is never pinned: it was built from a placeholder
@@ -10767,6 +10787,41 @@ mod tests {
     /// its own -- all three views substitute the constant and never read it --
     /// so the daemon selects the words the way it already does for admission
     /// preparation.
+    /// A review that ran past the build deadline, or met a witness that
+    /// timed out or could not be reached, reaches the shell under its own
+    /// label and the "did not answer" sentence, never the generic one.
+    #[test]
+    fn a_review_that_timed_out_is_reported_as_a_timeout() {
+        use crate::witness::WitnessTrustError;
+        let review = crate::witness_copy::witness_copy().review;
+        for (error, label) in [
+            (
+                anyhow::anyhow!(super::super::preview::REASON_PREVIEW_TIMED_OUT),
+                "witness_timeout",
+            ),
+            (
+                anyhow::Error::new(WitnessTrustError::WitnessTimeout),
+                "witness_timeout",
+            ),
+            (
+                anyhow::Error::new(WitnessTrustError::WitnessUnreachable),
+                "witness_unreachable",
+            ),
+        ] {
+            assert_eq!(witness_review_refusal(&error), label);
+            let response = witness_review_response(Response::err(1, ERR_UNAVAILABLE, label));
+            assert_eq!(
+                response
+                    .result
+                    .as_ref()
+                    .and_then(|value| value.get("view"))
+                    .and_then(|view| view.get("message"))
+                    .and_then(|message| message.as_str()),
+                Some(review.failed_unreachable)
+            );
+        }
+    }
+
     #[test]
     fn a_refused_review_carries_the_sentence_for_its_own_refusal() {
         use crate::witness::WitnessTrustError;

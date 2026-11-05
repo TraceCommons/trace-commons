@@ -33,6 +33,30 @@ final class MonitorTracesCopyExportTests: XCTestCase {
         XCTAssertNotEqual(copy.line(for: .unreachable), DaemonDataError.unreachable.description)
     }
 
+    /// A preview or Submit that failed because the trace needs the privacy
+    /// check first, or because the check did not answer, is said in its own
+    /// line -- from the IPC error and from a skipped approve alike -- and
+    /// every other failure keeps the generic one.
+    func testPreviewFailuresWithTheirOwnLineSayIt() throws {
+        let copy = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
+        XCTAssertFalse(copy.needsPrivacyCheck.isEmpty)
+        XCTAssertFalse(copy.privacyCheckNoAnswer.isEmpty)
+        XCTAssertNotEqual(copy.needsPrivacyCheck, copy.requestFailed)
+        XCTAssertNotEqual(copy.privacyCheckNoAnswer, copy.requestFailed)
+        XCTAssertEqual(
+            copy.line(for: .daemon(code: "unavailable", message: "witness-review-required")), copy.needsPrivacyCheck)
+        XCTAssertEqual(copy.line(for: .notApproved(reasonLabel: "witness-review-required")), copy.needsPrivacyCheck)
+        for label in ["preview-timed-out", "witness_timeout", "witness_unreachable"] {
+            XCTAssertEqual(copy.line(for: .daemon(code: "unavailable", message: label)), copy.privacyCheckNoAnswer, label)
+            XCTAssertEqual(copy.line(for: .notApproved(reasonLabel: label)), copy.privacyCheckNoAnswer, label)
+        }
+        for label in ["preview-failed", "not-pending", "witness_quote_unverified"] {
+            XCTAssertNil(copy.failureLine(forLabel: label), label)
+            XCTAssertEqual(copy.line(for: .daemon(code: "unavailable", message: label)), copy.requestFailed, label)
+        }
+        XCTAssertNil(copy.failureLine(for: .notApproved(reasonLabel: nil)))
+    }
+
     /// The badge's text equivalent: unknown is never zero, zero says nothing.
     func testTheBadgeTextNeverReadsUnknownAsZero() throws {
         let unknown = try XCTUnwrap(TCCoreCopy.decisionsOwedText(nil))

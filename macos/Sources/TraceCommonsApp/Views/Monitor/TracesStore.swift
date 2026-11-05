@@ -334,7 +334,7 @@ final class TracesStore {
     /// map and tab (`MapTransferFeed`); nil until one is.
     private(set) var lastDismissed: String?
     /// The last review action the core refused, by entry id.
-    private(set) var actionError: (entryId: String, error: DaemonDataError)?
+    private(set) var actionError: (entryId: String, error: DaemonDataError, action: ReviewAction)?
 
     /// The Traces badge: decisions owed, unknown (a dash) when the core did
     /// not say, never a count derived from the queue.
@@ -805,10 +805,24 @@ final class TracesStore {
         await perform(.contribute, on: live.entryId)
     }
 
+    /// The line under a session row for its refused Submit, or nil. Only
+    /// a refused Submit: a refused Keep or Dismiss is said where it was
+    /// pressed (the inspector, the Dismiss confirmation).
+    static func rowRefusal(_ store: TracesStore, entryId: String) -> String? {
+        guard let refused = store.actionError, refused.entryId == entryId,
+              refused.action == .contribute
+        else { return nil }
+        return store.message(for: refused.error)
+    }
+
     /// What the tab says for a refused action: a skipped approve in the
     /// submit toast's words, anything else in the core's line. Never the
     /// error's fixed label.
     func message(for error: DaemonDataError) -> String? {
+        // A refusal with a line of its own -- the trace needs the privacy
+        // check first, or the check did not answer -- says that line rather
+        // than the toast's least specific reason.
+        if let line = words?.failureLine(for: error) { return line }
         if case .notApproved(let reason) = error {
             return SubmitToast.render(
                 approved: 0, redactions: 0, flagged: 0, skipped: reason.map { [$0] } ?? []
@@ -880,7 +894,7 @@ final class TracesStore {
                 correctionRefused = entryId
                 return
             }
-            actionError = (entryId, error)
+            actionError = (entryId, error, action)
             return
         }
         await load()

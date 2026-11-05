@@ -1580,8 +1580,9 @@ Additive; a client that ignores it behaves exactly as before and learns at
 ```
 
 `preview` requires an entry currently in the queue (`bad_params` /
-`unknown-entry-id` otherwise) and a working privacy filter (`unavailable` /
-`preview-failed` on failure). Neither `redactions` nor `pii_labels_present`
+`unknown-entry-id` otherwise) and a working privacy filter. A build that fails
+is `unavailable` with one of the labels in "Preview build failures" below
+(`preview-failed` when nothing more specific is known). Neither `redactions` nor `pii_labels_present`
 in the response ever contains the actual matched text, only counts and
 category labels.
 
@@ -1702,7 +1703,18 @@ Neither state is a colour: a shell renders the reason.
 The daemon exposes `witness_preview_request` through authenticated local IPC.
 Clients must not offer it unless the daemon advertises that method. Existing `preview`, `preview_request`, card summaries, and background
 refresh never invoke this builder. A configured witness still refuses ordinary
-preview with `witness_claim_unavailable`, rather than building a local substitute.
+preview, rather than building a local substitute. `preview`, `preview_request`
+(its `preview_ready` event) and `approve` (its `skipped[].reason_label`) report
+that refusal as `witness-review-required`: the entry needs this explicit review
+first. (Before this revision it reached them as `preview-failed`.)
+
+A review that does not finish within the preview build deadline (seven
+minutes, below) is abandoned and refused as `witness_timeout`. A witness that
+does not answer within its own request bound, or answers
+`504 witness_request_timed_out`, is also `witness_timeout`; one that cannot be
+connected to is `witness_unreachable`. Both carry the `failed_unreachable`
+sentence in `result.view`. Nothing is pinned and nothing falls back to local
+redaction.
 
 The handler enforces these conditions:
 
@@ -3452,7 +3464,10 @@ This is the whole signal a one-click submit needs: a client that never calls
   |---|---|---|
   | `not-enrolled` | No config was readable when the build ran | Retry after enrolling |
   | `session-file-vanished` | The session file behind the entry is gone | Will not succeed for this entry |
-  | `preview-failed` | The redaction pipeline itself failed | May be transient |
+  | `preview-failed` | The redaction pipeline itself failed, and no more specific label below applies | May be transient |
+  | `witness-review-required` | A witness is configured and the entry has no certified review pinned; ordinary approval never builds a local substitute | Succeeds after `witness_preview_request` pins a review |
+  | `preview-timed-out` | The build did not finish within the preview build deadline (seven minutes) and was abandoned; nothing was pinned | May be transient |
+  | `parse-failed`, `pii-filter-unavailable`, `redaction-panicked`, `trace-redaction-failed`, `secret-leak-detected`, `metadata-key-collision` | See "Preview build failures" | See there |
   | `envelope-too-large` | The built envelope exceeds the size the daemon will store, even though the build succeeded. The entry is moved to `refused` with this same string as its `reason_label`, so it stops being offered | **Never** succeeds for this entry -- do not offer retry |
   | `not-pinned` | The pin did not stick even though the build succeeded, and the entry is still `pending` (a concurrent write, or the entry vanished from the queue mid-call) | Transient -- retry is expected to work |
   | `correction-credential-detected` | The `correction` sent with this call contains something credential-shaped. Nothing was built, pinned or sent; the entry stays `pending` | Retry succeeds once the credential is out of the text. Surface this distinctly and tell the contributor to rotate it -- never echo the correction or the match |
@@ -9209,6 +9224,37 @@ wait out. An application should not attempt to infer or reconstruct this
 order itself; treat `status.health.last_error_label` as the one label to
 render, and use `queue_outcome_counts` / `list_audit` for supplementary
 detail, not for picking a different label to show instead.
+
+## Preview build failures
+
+`preview`, `preview_request`'s `preview_ready` event, `approve`'s
+`skipped[].reason_label` and the C ABI's preview open report a failed
+redaction build under one fixed label from this closed set. The daemon
+matches the build's own error against the set and never forwards its text;
+anything else is `preview-failed`.
+
+| Label | Meaning |
+|---|---|
+| `preview-failed` | Fallback: the build failed for a reason not listed here |
+| `witness-review-required` | A witness is configured and the entry has no certified review; see "Explicit witnessed review" |
+| `preview-timed-out` | The build ran past the preview build deadline and was abandoned |
+| `parse-failed` | The session file could not be read or parsed |
+| `pii-filter-unavailable` | The configured privacy filter could not be built or reached |
+| `redaction-panicked` | The redaction pipeline panicked on this session; a retry in this build meets the same panic |
+| `trace-redaction-failed` | The redaction pipeline failed, possibly transiently |
+| `secret-leak-detected` | A credential was found in metadata the redactor cannot rewrite |
+| `metadata-key-collision` | The redactor rewrote two metadata keys into one |
+| `correction-credential-detected` | `approve` only, `bad_params`: see the `approve` table |
+
+**Deadline.** One interactive build -- a card, a pinning build, or a witness
+review -- is given seven minutes. The bound is sized from the slowest
+legitimate build, a witness review: the quote and the collateral (30 s
+each) and the review request (330 s: the witness's own 300 s request bound
+plus room for its answer).
+
+**Log.** Each failure is written to `daemon-errors.log` as one label line,
+`preview_build_failed reason=<label>` with hyphens written as underscores, at
+most once a minute per label. No entry id, path, URL or trace text.
 
 ## Error codes
 
