@@ -229,12 +229,12 @@ the tightening, a public IPv4 address, a bare hostname, an IPv6 address and
 an unformatted phone number were skipped as well; they are classified now.
 
 **Savings.** Measured on the load harness's synthetic contributions, a
-fresh witness each way, zero-latency stand-in classifier (first rule; see
-the PR for the tightened rule's numbers):
+fresh witness each way, zero-latency stand-in classifier, the tightened
+rule, 64 KiB windows:
 
 | contribution | calls, skip off | calls, skip on |
 |---|---|---|
-| 241 KB in one tool result | 13 | 5 (-62%) |
+| 241 KB in one tool result | 16 | 9 (-44%) |
 | 241 KB over 120 tool results | 358 | 239 (-33%) |
 
 Most of the remaining calls are synthetic tool output with whitespace in
