@@ -35,6 +35,7 @@ pub mod upload_allowance;
 pub mod usage_analytics;
 pub mod witness_accepted_list;
 pub mod witness_blocked;
+pub mod witness_jobs;
 pub mod witness_pacing;
 pub mod witness_provenance;
 

@@ -175,10 +175,13 @@ fn witness(trust: Option<AdmissionProviderTrust>) -> (axum::Router, String) {
         service = service.with_admission_provider_trust(trust);
     }
     (
-        witness_router(
-            Arc::new(service),
-            WitnessLoadBound::new(4, std::time::Duration::from_secs(30)),
-        ),
+        {
+            let load = WitnessLoadBound::new(4, std::time::Duration::from_secs(30));
+            // The admission route never writes a job result, so the
+            // directory may go when this block ends.
+            let (jobs, _dir) = crate::witness_jobs_support::test_jobs(&load);
+            witness_router(Arc::new(service), load, jobs)
+        },
         address,
     )
 }

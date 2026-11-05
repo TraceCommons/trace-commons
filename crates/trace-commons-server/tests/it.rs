@@ -68,4 +68,7 @@ mod trace_session_identity;
 mod versioned_pipeline_remote_restore;
 mod witness_admission_chain;
 mod witness_certificate_cross_implementation;
+#[allow(dead_code)]
+#[path = "support/witness_jobs.rs"]
+mod witness_jobs_support;
 mod witness_manifest_matches_compose;

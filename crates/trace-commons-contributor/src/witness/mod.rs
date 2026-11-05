@@ -44,6 +44,8 @@
 pub mod accepted_list;
 pub mod inference_record;
 pub mod status;
+#[cfg(test)]
+pub(crate) mod test_jobs;
 pub mod transport;
 pub mod verify;
 

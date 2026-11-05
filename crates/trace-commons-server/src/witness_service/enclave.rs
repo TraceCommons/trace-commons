@@ -317,7 +317,25 @@ pub trait GuestAgent: Send + Sync {
     /// envelope to msgpack, and this workspace has no decoder for it. The raw
     /// quote is what `dcap_qvl` verifies anyway.
     async fn quote(&self, report_data: &[u8; REPORT_DATA_LEN]) -> Result<Vec<u8>, EnclaveError>;
+
+    /// `GetKey(path)`: 32 bytes derived from the app key for `path`.
+    ///
+    /// Defaults to a refusal, so an agent that cannot derive keys can never
+    /// stand in for one that can: the caller fails closed.
+    async fn derived_secret(&self, _path: &str) -> Result<Zeroizing<[u8; 32]>, EnclaveError> {
+        Err(EnclaveError::Transport)
+    }
+
+    /// `Info`'s `instance_id`, as lowercase hex. Defaults to a refusal.
+    async fn instance_id(&self) -> Result<String, EnclaveError> {
+        Err(EnclaveError::Transport)
+    }
 }
+
+/// The `GetKey` path the sealed-results key derives from. Distinct from
+/// [`SIGNING_KEY_PATH`]: the path is the only input that separates
+/// dstack-derived keys (see the module docs).
+pub const RESULTS_KEY_PATH: &str = "trace-commons-witness-results-v1";
 
 /// Lay a signing address and a contributor nonce into the 64 bytes TDX signs.
 ///
@@ -458,6 +476,27 @@ impl DstackEnclave {
     /// The two-link `GetKey` chain, captured and unverified. See module docs.
     pub fn signing_key_chain(&self) -> &[Vec<u8>] {
         &self.key_chain
+    }
+
+    /// The key sealed job results are encrypted under: a `GetKey` secret at
+    /// [`RESULTS_KEY_PATH`], bound to this witness's boot measurement by
+    /// [`super::jobs::results_key`]. `GetKey` alone is per app id; the
+    /// measurement is what makes a redeployed image unable to open the old
+    /// image's results.
+    pub async fn results_key(&self) -> Result<Zeroizing<[u8; 32]>, EnclaveError> {
+        let secret = self.agent.derived_secret(RESULTS_KEY_PATH).await?;
+        Ok(super::jobs::results_key(&secret, &self.measurement))
+    }
+
+    /// This instance's id, as the gateway names it. Refused unless it is a
+    /// bounded lowercase hex string, so nothing else can reach a host name.
+    pub async fn instance_id(&self) -> Result<String, EnclaveError> {
+        let id = self.agent.instance_id().await?.to_ascii_lowercase();
+        if trace_commons_protocol::witness_jobs::is_instance_id(&id) {
+            Ok(id)
+        } else {
+            Err(EnclaveError::MalformedResponse)
+        }
     }
 }
 
@@ -730,6 +769,44 @@ impl GuestAgent for DstackSocketAgent {
         })
     }
 
+    async fn derived_secret(&self, path: &str) -> Result<Zeroizing<[u8; 32]>, EnclaveError> {
+        // The path is one of this crate's constants, never caller input; it
+        // is still refused unless it is query-safe, so it cannot reshape
+        // the request line.
+        if path.is_empty()
+            || !path
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(EnclaveError::MalformedResponse);
+        }
+        let response = self
+            .get_either(
+                &format!(
+                    "{GET_KEY_PATH}?path={path}&purpose=encryption&algorithm={SIGNING_KEY_ALGORITHM}"
+                ),
+                &format!(
+                    "{GET_KEY_PATH_UNVERSIONED}?path={path}&purpose=encryption&algorithm={SIGNING_KEY_ALGORITHM}"
+                ),
+            )
+            .await?;
+        let key = Zeroizing::new(hex_field(&response, "key")?);
+        let secret: [u8; 32] = key
+            .as_slice()
+            .try_into()
+            .map_err(|_| EnclaveError::MalformedResponse)?;
+        Ok(Zeroizing::new(secret))
+    }
+
+    async fn instance_id(&self) -> Result<String, EnclaveError> {
+        let response = self.get_either("/v0/Info", "/Info").await?;
+        let id = hex_field(&response, "instance_id")?;
+        if id.is_empty() {
+            return Err(EnclaveError::MalformedResponse);
+        }
+        Ok(hex::encode(id))
+    }
+
     async fn quote(&self, report_data: &[u8; REPORT_DATA_LEN]) -> Result<Vec<u8>, EnclaveError> {
         let response = self
             .get_either(
@@ -892,6 +969,72 @@ mod tests {
             let mr_td = self.after_boot.mr_td.unwrap_or(self.mr_td);
             Ok(quote_with(&signed, &mr_td, &self.mr_config_id))
         }
+    }
+
+    /// An agent that derives only the results secret; its measurement is
+    /// set by `mr_td`.
+    struct KeyingAgent {
+        inner: StubAgent,
+    }
+
+    #[async_trait]
+    impl GuestAgent for KeyingAgent {
+        async fn signing_key(&self) -> Result<DerivedSigningKey, EnclaveError> {
+            self.inner.signing_key().await
+        }
+        async fn quote(
+            &self,
+            report_data: &[u8; REPORT_DATA_LEN],
+        ) -> Result<Vec<u8>, EnclaveError> {
+            self.inner.quote(report_data).await
+        }
+        async fn derived_secret(&self, path: &str) -> Result<Zeroizing<[u8; 32]>, EnclaveError> {
+            assert_eq!(path, RESULTS_KEY_PATH);
+            Ok(Zeroizing::new([0x51; 32]))
+        }
+        async fn instance_id(&self) -> Result<String, EnclaveError> {
+            Ok("not hex at all".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_results_key_differs_when_the_measurement_does() {
+        let first = DstackEnclave::connect(Box::new(KeyingAgent {
+            inner: StubAgent::new(),
+        }))
+        .await
+        .unwrap();
+        let mut moved = StubAgent::new();
+        moved.mr_td = [0xEE; 48];
+        let second = DstackEnclave::connect(Box::new(KeyingAgent { inner: moved }))
+            .await
+            .unwrap();
+        let a = first.results_key().await.unwrap();
+        let b = second.results_key().await.unwrap();
+        assert_ne!(*a, *b, "a new measurement must not open old results");
+        assert_eq!(*a, *first.results_key().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn an_agent_that_cannot_derive_keys_or_name_itself_is_refused() {
+        let enclave = connected().await;
+        assert_eq!(
+            enclave.results_key().await.err(),
+            Some(EnclaveError::Transport)
+        );
+        assert_eq!(
+            enclave.instance_id().await.err(),
+            Some(EnclaveError::Transport)
+        );
+        let malformed = DstackEnclave::connect(Box::new(KeyingAgent {
+            inner: StubAgent::new(),
+        }))
+        .await
+        .unwrap();
+        assert_eq!(
+            malformed.instance_id().await.err(),
+            Some(EnclaveError::MalformedResponse)
+        );
     }
 
     async fn connected() -> DstackEnclave {
@@ -1288,6 +1431,55 @@ mod tests {
     mod socket {
         use super::super::*;
         use super::{SCALAR_ONE, serve_404_then, serve_response};
+
+        /// The results key's `GetKey` asks for its own path, never the
+        /// signing key's, and reads the 32 bytes back.
+        #[tokio::test]
+        async fn the_results_secret_is_asked_for_at_its_own_path() {
+            let (_dir, path, handle) = serve_response(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{{\"key\":\"0x{}\"}}",
+                hex::encode([0x33u8; 32])
+            ))
+            .await;
+            let secret = DstackSocketAgent::at(&path)
+                .derived_secret(RESULTS_KEY_PATH)
+                .await
+                .expect("the agent answered");
+            assert_eq!(*secret, [0x33u8; 32]);
+            let request = handle.await.expect("served");
+            assert!(
+                request.starts_with(&format!("GET {GET_KEY_PATH}?path={RESULTS_KEY_PATH}&")),
+                "{request}"
+            );
+            assert!(!request.contains("path=vms"));
+        }
+
+        #[tokio::test]
+        async fn a_path_that_could_reshape_the_request_is_refused_unsent() {
+            let agent = DstackSocketAgent::at("/nonexistent/dstack.sock");
+            for path in ["", "a b", "a&path=vms", "a\r\nX: y"] {
+                assert_eq!(
+                    agent.derived_secret(path).await.err(),
+                    Some(EnclaveError::MalformedResponse),
+                    "{path:?}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn the_instance_id_is_read_from_info_as_hex() {
+            let (_dir, path, handle) = serve_response(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"app_id\":\"aa\",\"instance_id\":\"0123456789ABCDEF\"}"
+                    .to_string(),
+            )
+            .await;
+            let id = DstackSocketAgent::at(&path)
+                .instance_id()
+                .await
+                .expect("the agent answered");
+            assert_eq!(id, "0123456789abcdef");
+            assert!(handle.await.unwrap().starts_with("GET /v0/Info "));
+        }
 
         /// A 404 on the versioned path falls through to the unversioned one.
         ///

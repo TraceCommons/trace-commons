@@ -180,7 +180,9 @@ pub trait WitnessTransport: Send + Sync {
     /// `POST /v1/attestation-collateral` against **ingest**, not the witness.
     async fn collateral(&self, quote: &[u8]) -> Result<Collateral, WitnessTrustError>;
 
-    /// `POST /v1/witness` with the raw contribution.
+    /// Review the raw contribution: submit it as a job to
+    /// `POST /v1/witness/jobs` and poll for the answer, or, on the
+    /// admission-evidence profile, `POST /v1/witness/admission`.
     ///
     /// Takes `&VerifiedWitness` rather than a URL, and that is the whole
     /// point: an implementation cannot be called without one, and only
@@ -480,7 +482,8 @@ fn verify_admission_context(
     Ok(())
 }
 
-/// The `POST /v1/witness` request document.
+/// The witness request document (`POST /v1/witness/jobs`, and the body the
+/// retired `POST /v1/witness` took).
 ///
 /// Split out of [`witness_contribution`] so that the AGPL crate's
 /// `witness_certificate_cross_implementation` test can drive the server's real
@@ -853,6 +856,73 @@ pub(crate) async fn fetch_collateral(
     parse_collateral(body).map_err(|_| CollateralUnavailable)
 }
 
+/// Read a non-success witness answer as the refusal it names.
+///
+/// The status alone cannot separate "declined your receipt" from
+/// "answered nonsense", and those are opposite instructions to a
+/// contributor. The body is attacker-influenceable, so it selects
+/// nothing: it is matched against the protocol's closed set, must
+/// agree with the status, and anything else -- an unknown label, a
+/// body that is not JSON, no body at all -- keeps the answer this
+/// client gave before.
+///
+/// Only the head of the body is read. A refusal envelope is a few
+/// dozen bytes, and a witness that answers a refusal with megabytes
+/// is not one whose body should be buffered whole.
+async fn refusal_from(response: reqwest::Response) -> WitnessTrustError {
+    let status = response.status().as_u16();
+    let retry_after_secs = saturation_retry_after(response.headers());
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        // A body that never finishes is the witness not answering in time.
+        Err(error) => return send_failure(&error, WitnessTrustError::WitnessResponseMalformed),
+    };
+    refusal_from_parts(status, retry_after_secs, refusal_label(&body).as_deref())
+}
+
+/// The bound on how much of a refusal body is read.
+const REFUSAL_BODY_BOUND: usize = 4096;
+
+/// The `error` label at the head of a refusal body, if it has one.
+fn refusal_label(body: &[u8]) -> Option<String> {
+    let head = &body[..body.len().min(REFUSAL_BODY_BOUND)];
+    serde_json::from_slice::<serde_json::Value>(head)
+        .ok()
+        .and_then(|value| value.get("error")?.as_str().map(str::to_string))
+}
+
+/// [`refusal_from`], once the status, the delay and the label are read.
+fn refusal_from_parts(
+    status: u16,
+    retry_after_secs: u32,
+    label: Option<&str>,
+) -> WitnessTrustError {
+    // Capacity first, and only on the exact pair: a witness that is
+    // busy judged nothing, so this is the one refusal a session is
+    // held through rather than refused on.
+    if label.is_some_and(|label| {
+        trace_commons_protocol::witness_pacing::is_witness_saturation(status, label)
+    }) {
+        return WitnessTrustError::WitnessSaturated { retry_after_secs };
+    }
+    // The witness's own deadline ran out and it certified nothing.
+    // The same instruction to a person as this client's deadline
+    // running out, so the same label.
+    if status == 504 && label == Some(WITNESS_REQUEST_TIMED_OUT) {
+        return WitnessTrustError::WitnessTimeout;
+    }
+    match label.and_then(|label| {
+        trace_commons_protocol::admission::AdmissionRefusal::from_response(status, label)
+    }) {
+        Some(trace_commons_protocol::admission::AdmissionRefusal::EvidenceRefused) => {
+            WitnessTrustError::WitnessAdmissionEvidenceRefused
+        }
+        // Every other refusal in that set belongs to the ingest gate,
+        // which is not what answered here.
+        _ => WitnessTrustError::WitnessResponseMalformed,
+    }
+}
+
 /// The HTTP implementation.
 pub struct HttpWitnessTransport {
     http: reqwest::Client,
@@ -868,10 +938,13 @@ pub struct HttpWitnessTransport {
     /// The per-request deadline for the quote and the collateral: the
     /// smaller of the transport's timeout and [`WITNESS_PROBE_TIMEOUT`].
     probe_timeout: Duration,
+    /// The deadline for a whole job review, submit to answer.
+    review_timeout: Duration,
 }
 
-/// The whole-request deadline for a witness review (`/v1/witness`,
-/// `/v1/witness/admission`, the token-bundle route), body included.
+/// The deadline for a whole witness review: a job from submit to answer
+/// (`/v1/witness/jobs`), or one admission or token-bundle request, body
+/// included.
 ///
 /// Derived from the witness's own bound, not chosen beside it: the witness
 /// abandons a request after `DEFAULT_REQUEST_TIMEOUT_SECS` (540 s since
@@ -980,6 +1053,7 @@ impl HttpWitnessTransport {
             background_workload: false,
             envelope_limit: MAX_ENVELOPE_BYTES,
             probe_timeout: timeout.min(WITNESS_PROBE_TIMEOUT),
+            review_timeout: timeout,
         })
     }
 
@@ -1086,63 +1160,13 @@ impl WitnessTransport for HttpWitnessTransport {
         witness: &VerifiedWitness,
         body: &[u8],
     ) -> Result<WitnessedEnvelope, WitnessTrustError> {
-        /// Read a non-success witness answer as the refusal it names.
-        ///
-        /// The status alone cannot separate "declined your receipt" from
-        /// "answered nonsense", and those are opposite instructions to a
-        /// contributor. The body is attacker-influenceable, so it selects
-        /// nothing: it is matched against the protocol's closed set, must
-        /// agree with the status, and anything else -- an unknown label, a
-        /// body that is not JSON, no body at all -- keeps the answer this
-        /// client gave before.
-        ///
-        /// Only the head of the body is read. A refusal envelope is a few
-        /// dozen bytes, and a witness that answers a refusal with megabytes
-        /// is not one whose body should be buffered whole.
-        async fn refusal_from(response: reqwest::Response) -> WitnessTrustError {
-            const REFUSAL_BODY_BOUND: usize = 4096;
-            let status = response.status().as_u16();
-            let retry_after_secs = saturation_retry_after(response.headers());
-            let Ok(body) = response.bytes().await else {
-                return WitnessTrustError::WitnessResponseMalformed;
-            };
-            let head = &body[..body.len().min(REFUSAL_BODY_BOUND)];
-            let label = serde_json::from_slice::<serde_json::Value>(head)
-                .ok()
-                .and_then(|value| value.get("error")?.as_str().map(str::to_string));
-            // Capacity first, and only on the exact pair: a witness that is
-            // busy judged nothing, so this is the one refusal a session is
-            // held through rather than refused on.
-            if label.as_deref().is_some_and(|label| {
-                trace_commons_protocol::witness_pacing::is_witness_saturation(status, label)
-            }) {
-                return WitnessTrustError::WitnessSaturated { retry_after_secs };
-            }
-            // The witness's own deadline ran out and it certified nothing.
-            // The same instruction to a person as this client's deadline
-            // running out, so the same label.
-            if status == 504 && label.as_deref() == Some(WITNESS_REQUEST_TIMED_OUT) {
-                return WitnessTrustError::WitnessTimeout;
-            }
-            match label.as_deref().and_then(|label| {
-                trace_commons_protocol::admission::AdmissionRefusal::from_response(status, label)
-            }) {
-                Some(trace_commons_protocol::admission::AdmissionRefusal::EvidenceRefused) => {
-                    WitnessTrustError::WitnessAdmissionEvidenceRefused
-                }
-                // Every other refusal in that set belongs to the ingest gate,
-                // which is not what answered here.
-                _ => WitnessTrustError::WitnessResponseMalformed,
-            }
-        }
-
         let base = self.allowed(witness.url())?;
+        if !self.admission_evidence {
+            return self.witness_job(&base, body).await;
+        }
+        // The admission-evidence review is still one long request.
         let url = base
-            .join(if self.admission_evidence {
-                "/v1/witness/admission"
-            } else {
-                "/v1/witness"
-            })
+            .join("/v1/witness/admission")
             .map_err(|_| WitnessTrustError::WitnessHostNotAllowed)?;
         let mut request = self
             .http
@@ -1166,38 +1190,342 @@ impl WitnessTransport for HttpWitnessTransport {
         if !response.status().is_success() {
             return Err(refusal_from(response).await);
         }
-        let headers = response.headers().clone();
-        let read = |name: &str| {
-            headers
-                .get(name)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string)
-                .ok_or(WitnessTrustError::WitnessResponseMalformed)
-        };
-        let certificate_json = read(WITNESS_CERTIFICATE_HEADER)?;
-        let signature_hex = read(WITNESS_SIGNATURE_HEADER)?;
-        let admission = if self.admission_evidence {
-            Some(AdmissionHeaders {
-                evidence_json: read(trace_commons_protocol::admission::EVIDENCE_HEADER)?,
-                signature_hex: read(trace_commons_protocol::admission::SIGNATURE_HEADER)?,
-            })
-        } else {
-            None
-        };
-        // `bytes()`, never `json()`: the certificate covers these exact bytes
-        // and a parse-then-reserialise here would break the digest before the
-        // client ever checked it.
-        let envelope_bytes = response
-            .bytes()
-            .await
-            .map_err(|e| send_failure(&e, WitnessTrustError::WitnessResponseMalformed))?
-            .to_vec();
-        Ok(WitnessedEnvelope {
-            envelope_bytes,
-            certificate_json,
-            signature_hex,
-            admission,
+        certified_answer(response, true).await
+    }
+}
+
+/// A `200` witness answer, read as the envelope and its certificate.
+///
+/// `bytes()`, never `json()`: the certificate covers these exact bytes and
+/// a parse-then-reserialise here would break the digest before the client
+/// ever checked it.
+async fn certified_answer(
+    response: reqwest::Response,
+    admission: bool,
+) -> Result<WitnessedEnvelope, WitnessTrustError> {
+    let headers = response.headers().clone();
+    let read = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .ok_or(WitnessTrustError::WitnessResponseMalformed)
+    };
+    let certificate_json = read(WITNESS_CERTIFICATE_HEADER)?;
+    let signature_hex = read(WITNESS_SIGNATURE_HEADER)?;
+    let admission = if admission {
+        Some(AdmissionHeaders {
+            evidence_json: read(trace_commons_protocol::admission::EVIDENCE_HEADER)?,
+            signature_hex: read(trace_commons_protocol::admission::SIGNATURE_HEADER)?,
         })
+    } else {
+        None
+    };
+    let envelope_bytes = response
+        .bytes()
+        .await
+        .map_err(|e| send_failure(&e, WitnessTrustError::WitnessResponseMalformed))?
+        .to_vec();
+    Ok(WitnessedEnvelope {
+        envelope_bytes,
+        certificate_json,
+        signature_hex,
+        admission,
+    })
+}
+
+/// Where to poll a job: the witness URL with its gateway id swapped for the
+/// instance that holds the job, or the witness URL itself.
+///
+/// The dstack gateway routes the first label of a host, `<id>[-<port>...]`,
+/// to one instance when `id` is an instance id and to any instance of an app
+/// when it is an app id. So when the witness URL's first label starts with
+/// an app id (lowercase hex), only that id is replaced; the port suffix and
+/// the gateway's domain are kept. The instance id comes from the witness's
+/// answer and is used only if it is 8 to 64 lowercase hex characters, so it
+/// cannot reshape the host. Any other URL is polled as it is.
+///
+/// The derived host is deliberately not checked against the configured
+/// allowlist, which is exact-match: it is the allowlisted host with one
+/// label's id swapped for a validated hex id, and only the fetch secret
+/// goes there, never a session. The answer is still verified against the
+/// pinned signing key, which every instance of the app shares.
+pub(crate) fn instance_poll_base(base: &url::Url, instance_id: Option<&str>) -> url::Url {
+    use trace_commons_protocol::witness_jobs::is_instance_id;
+    let Some(instance_id) = instance_id.filter(|id| is_instance_id(id)) else {
+        return base.clone();
+    };
+    let Some((first, domain)) = base.host_str().and_then(|host| host.split_once('.')) else {
+        return base.clone();
+    };
+    let (app_id, port_suffix) = match first.split_once('-') {
+        Some((app_id, suffix)) => (app_id, Some(suffix)),
+        None => (first, None),
+    };
+    if !is_instance_id(app_id) {
+        return base.clone();
+    }
+    let label = match port_suffix {
+        Some(suffix) => format!("{instance_id}-{suffix}"),
+        None => instance_id.to_string(),
+    };
+    let mut polled = base.clone();
+    if polled.set_host(Some(&format!("{label}.{domain}"))).is_err() {
+        return base.clone();
+    }
+    polled
+}
+
+/// A submitted job, as this client holds it: in memory, for one review.
+struct SubmittedJob {
+    job_id: String,
+    secret_hex: String,
+    poll_base: url::Url,
+    poll_after_secs: u32,
+}
+
+impl std::fmt::Debug for SubmittedJob {
+    /// Withholds the id and the secret.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SubmittedJob { .. }")
+    }
+}
+
+/// Why polling stopped without an answer that can be returned as is.
+enum PollMiss {
+    /// The witness no longer has the job (restarted, expired, cancelled,
+    /// unreadable). Resubmit.
+    Gone,
+    /// The instance holding the job could not be reached, or something
+    /// other than the witness answered. Resubmit.
+    InstanceUnreachable,
+    /// A final answer from the witness, or a deadline.
+    Final(WitnessTrustError),
+}
+
+/// One second of `poll_after_secs`, in milliseconds. Ten in this crate's
+/// own tests, so the many witness doubles that answer at once do not each
+/// cost a second of wall clock; the clamping and jitter are the same.
+#[cfg(not(test))]
+const POLL_UNIT_MS: u64 = 1000;
+#[cfg(test)]
+const POLL_UNIT_MS: u64 = 10;
+
+/// `poll_after_secs` as a wait: clamped to the contract's range, with
+/// +/-20% jitter so clients that submitted together do not poll together.
+fn poll_wait(poll_after_secs: u32) -> Duration {
+    use ring::rand::SecureRandom as _;
+    use trace_commons_protocol::witness_jobs::{MAX_POLL_AFTER_SECS, MIN_POLL_AFTER_SECS};
+    let base_ms =
+        u64::from(poll_after_secs.clamp(MIN_POLL_AFTER_SECS, MAX_POLL_AFTER_SECS)) * POLL_UNIT_MS;
+    let mut byte = [0u8; 1];
+    // No randomness is a wait without jitter, not a failure.
+    let jitter = if ring::rand::SystemRandom::new().fill(&mut byte).is_ok() {
+        f64::from(byte[0]) / 255.0 * 0.4 - 0.2
+    } else {
+        0.0
+    };
+    Duration::from_millis((base_ms as f64 * (1.0 + jitter)) as u64)
+}
+
+impl HttpWitnessTransport {
+    /// Submit-then-poll (`/v1/witness/jobs`): the review a person or the
+    /// daemon asked for, without a connection held open for its length.
+    ///
+    /// One resubmit through the witness URL when the job is gone or its
+    /// instance cannot be reached; a second miss is `witness_unreachable`,
+    /// which the daemon already retries. The whole review keeps the
+    /// transport's deadline; when it runs out the job is cancelled, best
+    /// effort, and the answer is `witness_timeout`.
+    async fn witness_job(
+        &self,
+        base: &url::Url,
+        body: &[u8],
+    ) -> Result<WitnessedEnvelope, WitnessTrustError> {
+        let deadline = tokio::time::Instant::now() + self.review_timeout;
+        let mut resubmitted = false;
+        loop {
+            // A resubmit is held to the same deadline as the first submit:
+            // the review's budget does not restart.
+            let job = tokio::time::timeout_at(deadline, self.submit_job(base, body))
+                .await
+                .map_err(|_| WitnessTrustError::WitnessTimeout)??;
+            match self.poll_job(&job, deadline).await {
+                Ok(envelope) => return Ok(envelope),
+                Err(PollMiss::Final(error)) => return Err(error),
+                Err(PollMiss::Gone | PollMiss::InstanceUnreachable) if !resubmitted => {
+                    resubmitted = true;
+                }
+                Err(PollMiss::Gone | PollMiss::InstanceUnreachable) => {
+                    return Err(WitnessTrustError::WitnessUnreachable);
+                }
+            }
+        }
+    }
+
+    async fn submit_job(
+        &self,
+        base: &url::Url,
+        body: &[u8],
+    ) -> Result<SubmittedJob, WitnessTrustError> {
+        use ring::rand::SecureRandom as _;
+        use sha2::Digest as _;
+        use trace_commons_protocol::witness_jobs::{
+            WITNESS_FETCH_SECRET_LEN, WITNESS_FETCH_SECRET_SHA256_HEADER, WITNESS_JOBS_PATH,
+            WitnessJobAccepted, is_hex_of_len,
+        };
+        let mut secret = [0u8; WITNESS_FETCH_SECRET_LEN];
+        ring::rand::SystemRandom::new()
+            .fill(&mut secret)
+            .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
+        let secret_hash = hex::encode(sha2::Sha256::digest(secret));
+        let url = base
+            .join(WITNESS_JOBS_PATH)
+            .map_err(|_| WitnessTrustError::WitnessHostNotAllowed)?;
+        let mut request = self
+            .http
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(WITNESS_FETCH_SECRET_SHA256_HEADER, secret_hash);
+        if self.background_workload {
+            use trace_commons_protocol::witness_pacing::{
+                WITNESS_BACKGROUND_WORKLOAD, WITNESS_WORKLOAD_HEADER,
+            };
+            request = request.header(WITNESS_WORKLOAD_HEADER, WITNESS_BACKGROUND_WORKLOAD);
+        }
+        // A send that fails is the witness call failing, not the quote
+        // endpoint: a deadline is `witness_timeout`, no connection is
+        // `witness_unreachable`. Anything else keeps the label this call
+        // always reported.
+        let response = request
+            .body(body.to_vec())
+            .send()
+            .await
+            .map_err(|e| send_failure(&e, WitnessTrustError::WitnessAttestationUnavailable))?;
+        if response.status() != reqwest::StatusCode::ACCEPTED {
+            return Err(refusal_from(response).await);
+        }
+        let accepted: WitnessJobAccepted = serde_json::from_slice(
+            &response
+                .bytes()
+                .await
+                .map_err(|e| send_failure(&e, WitnessTrustError::WitnessResponseMalformed))?,
+        )
+        .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+        if !is_hex_of_len(
+            &accepted.job_id,
+            trace_commons_protocol::witness_jobs::WITNESS_JOB_ID_LEN,
+        ) {
+            return Err(WitnessTrustError::WitnessResponseMalformed);
+        }
+        Ok(SubmittedJob {
+            job_id: accepted.job_id,
+            secret_hex: hex::encode(secret),
+            poll_base: instance_poll_base(base, accepted.instance_id.as_deref()),
+            poll_after_secs: accepted.poll_after_secs,
+        })
+    }
+
+    fn job_url(job: &SubmittedJob) -> Result<url::Url, WitnessTrustError> {
+        job.poll_base
+            .join(&format!(
+                "{}/{}",
+                trace_commons_protocol::witness_jobs::WITNESS_JOBS_PATH,
+                job.job_id
+            ))
+            .map_err(|_| WitnessTrustError::WitnessHostNotAllowed)
+    }
+
+    async fn poll_job(
+        &self,
+        job: &SubmittedJob,
+        deadline: tokio::time::Instant,
+    ) -> Result<WitnessedEnvelope, PollMiss> {
+        use trace_commons_protocol::witness_jobs::{
+            WITNESS_FETCH_SECRET_HEADER, WITNESS_JOB_GONE_ERROR, WitnessJobPending,
+        };
+        let url = Self::job_url(job).map_err(PollMiss::Final)?;
+        let mut wait = poll_wait(job.poll_after_secs);
+        loop {
+            let now = tokio::time::Instant::now();
+            if now + wait >= deadline {
+                tokio::time::sleep_until(deadline).await;
+                self.cancel_job(job).await;
+                return Err(PollMiss::Final(WitnessTrustError::WitnessTimeout));
+            }
+            tokio::time::sleep(wait).await;
+            let response = match self
+                .http
+                .get(url.clone())
+                .header(WITNESS_FETCH_SECRET_HEADER, job.secret_hex.as_str())
+                .timeout(self.probe_timeout)
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                // A poll that cannot reach the instance, or times out, is
+                // the instance gone as far as this job is concerned.
+                Err(_) => return Err(PollMiss::InstanceUnreachable),
+            };
+            let status = response.status();
+            if status == reqwest::StatusCode::OK {
+                return certified_answer(response, false)
+                    .await
+                    .map_err(PollMiss::Final);
+            }
+            if status == reqwest::StatusCode::ACCEPTED {
+                let pending: WitnessJobPending = match response.bytes().await {
+                    Ok(body) => serde_json::from_slice(&body).map_err(|_| {
+                        PollMiss::Final(WitnessTrustError::WitnessResponseMalformed)
+                    })?,
+                    Err(_) => return Err(PollMiss::InstanceUnreachable),
+                };
+                wait = poll_wait(pending.poll_after_secs);
+                continue;
+            }
+            let retry_after_secs = saturation_retry_after(response.headers());
+            let Ok(body) = response.bytes().await else {
+                return Err(PollMiss::InstanceUnreachable);
+            };
+            return match refusal_label(&body).as_deref() {
+                Some(WITNESS_JOB_GONE_ERROR) if status == reqwest::StatusCode::NOT_FOUND => {
+                    Err(PollMiss::Gone)
+                }
+                // The witness's own answer for this job: the same refusal
+                // the single request used to give.
+                Some(label) => Err(PollMiss::Final(refusal_from_parts(
+                    status.as_u16(),
+                    retry_after_secs,
+                    Some(label),
+                ))),
+                // No label: an answer this client cannot read, as it was
+                // for the single request. A gateway that no longer routes
+                // to the instance drops the connection, which is the
+                // send failure above.
+                None => Err(PollMiss::Final(refusal_from_parts(
+                    status.as_u16(),
+                    retry_after_secs,
+                    None,
+                ))),
+            };
+        }
+    }
+
+    /// Best effort: tell the witness to drop a job this client gave up on.
+    async fn cancel_job(&self, job: &SubmittedJob) {
+        let Ok(url) = Self::job_url(job) else {
+            return;
+        };
+        let _ = self
+            .http
+            .delete(url)
+            .header(
+                trace_commons_protocol::witness_jobs::WITNESS_FETCH_SECRET_HEADER,
+                job.secret_hex.as_str(),
+            )
+            .timeout(self.probe_timeout)
+            .send()
+            .await;
     }
 }
 
@@ -1574,7 +1902,7 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let _ = axum::serve(listener, app)
+            let _ = axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
                 .with_graceful_shutdown(async {
                     let _ = rx.await;
                 })
@@ -2407,7 +2735,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                .await
+                .unwrap();
         });
         (url, seen, task)
     }
@@ -2551,7 +2881,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                .await
+                .unwrap();
         });
         let source = r#"{"metadata":{"trace_commons_admission":"tcad1:malformed"}}"#;
         let profile = crate::submit::admission_profile_for_request(true, Some(source)).unwrap();
@@ -3020,7 +3352,11 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::spawn(async move {
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                .await
+                .unwrap()
+        });
 
         let store = crate::config::ConfigStore::open(state.path().to_path_buf()).expect("store");
         let shared = std::sync::Arc::new(
@@ -3109,7 +3445,11 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let task = tokio::spawn(async move {
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                .await
+                .unwrap()
+        });
         let transport = transport_for(&url, permissive()).with_admission_evidence(true);
         let key = test_signer("isolated-call");
         let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
@@ -3189,7 +3529,11 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let task = tokio::spawn(async move {
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                .await
+                .unwrap()
+        });
         let transport = transport_for(&url, permissive()).with_admission_evidence(true);
         let key = test_signer("isolated-call");
         let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
@@ -3279,7 +3623,11 @@ mod tests {
             );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
-            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let task = tokio::spawn(async move {
+                axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                    .await
+                    .unwrap()
+            });
             let transport = transport_for(&url, permissive())
                 .with_admission_evidence(true)
                 .with_background_workload(true);
@@ -3370,7 +3718,11 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let task = tokio::spawn(async move {
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                .await
+                .unwrap()
+        });
         let transport = transport_for(&url, permissive()).with_admission_evidence(true);
         let key = test_signer("declaration");
         let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
@@ -3991,7 +4343,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(app))
+                .await
+                .unwrap();
         });
         let verified = crate::witness::verify::verified_witness_for_test(
             &base,
@@ -4020,5 +4374,269 @@ mod tests {
         assert!(WITNESS_REVIEW_TIMEOUT.as_secs() > WITNESS_SERVER_REQUEST_TIMEOUT_SECS);
         assert!(WITNESS_PROBE_TIMEOUT < WITNESS_REVIEW_TIMEOUT);
         assert!(WITNESS_CONNECT_TIMEOUT <= WITNESS_PROBE_TIMEOUT);
+    }
+
+    // ---------------------------------------------------------------
+    // Submit-then-poll, against a hand-written job witness.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn the_poll_host_swaps_only_the_gateway_id_for_a_valid_instance_id() {
+        let base = url::Url::parse(
+            "https://f1654b0beac2ac2afae4235ee3d907096cd8f3de-8088.dstack-pha-prod9.phala.network",
+        )
+        .unwrap();
+        let instance = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            instance_poll_base(&base, Some(instance)).as_str(),
+            format!("https://{instance}-8088.dstack-pha-prod9.phala.network/")
+        );
+        let bare = url::Url::parse("https://f1654b0beac2ac2a.gateway.example").unwrap();
+        assert_eq!(
+            instance_poll_base(&bare, Some(instance)).host_str(),
+            Some(format!("{instance}.gateway.example").as_str())
+        );
+        for hostile in [
+            None,
+            Some("short"),
+            Some("ABCDEF0123456789"),
+            Some("abcdef01.evil.example"),
+            Some("abcdef01-443"),
+            Some("abcdef01/../x"),
+        ] {
+            assert_eq!(instance_poll_base(&base, hostile), base, "{hostile:?}");
+        }
+        for not_a_gateway in [
+            "http://127.0.0.1:8088",
+            "http://localhost:8088",
+            "https://witness.example",
+            "https://witness-8088.example",
+        ] {
+            let url = url::Url::parse(not_a_gateway).unwrap();
+            assert_eq!(instance_poll_base(&url, Some(instance)), url);
+        }
+    }
+
+    /// What a hand-written job witness does on each poll.
+    #[derive(Clone, Copy)]
+    enum PollScript {
+        /// `pending` this many times, then the certified answer.
+        PendingThenDone(usize),
+        /// `gone` for the first job, then serve the next normally.
+        GoneOnce,
+        /// `gone` for every job.
+        AlwaysGone,
+        /// The connection drops without an answer for the first job, as the
+        /// gateway does for an instance it no longer routes to.
+        DropsConnectionOnce,
+        /// `pending` forever.
+        NeverDone,
+    }
+
+    #[derive(Default)]
+    struct JobLog {
+        submits: usize,
+        polls: usize,
+        deletes: usize,
+        bad_secrets: usize,
+        legacy_posts: usize,
+    }
+
+    async fn job_witness(
+        script: PollScript,
+        answer: WitnessedEnvelope,
+    ) -> (String, Arc<Mutex<JobLog>>, tokio::task::JoinHandle<()>) {
+        use axum::extract::Path;
+        use sha2::Digest as _;
+        use trace_commons_protocol::witness_jobs::{
+            WITNESS_FETCH_SECRET_HEADER, WITNESS_FETCH_SECRET_SHA256_HEADER,
+        };
+        let log = Arc::new(Mutex::new(JobLog::default()));
+        let secrets: Arc<Mutex<HashMap<String, String>>> = Arc::default();
+        let app = Router::new()
+            .route(
+                "/v1/witness",
+                post({
+                    let log = log.clone();
+                    move || {
+                        log.lock().unwrap().legacy_posts += 1;
+                        async { StatusCode::NOT_FOUND }
+                    }
+                }),
+            )
+            .route(
+                "/v1/witness/jobs",
+                post({
+                    let (log, secrets) = (log.clone(), secrets.clone());
+                    move |headers: HeaderMap| {
+                        let mut log = log.lock().unwrap();
+                        log.submits += 1;
+                        let job_id = format!("{:032x}", log.submits);
+                        let hash = headers
+                            .get(WITNESS_FETCH_SECRET_SHA256_HEADER)
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_string();
+                        secrets.lock().unwrap().insert(job_id.clone(), hash);
+                        async move {
+                            (
+                                StatusCode::ACCEPTED,
+                                axum::Json(serde_json::json!({
+                                    "job_id": job_id,
+                                    "poll_after_secs": 1,
+                                    "queue_position": 0
+                                })),
+                            )
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/witness/jobs/{job_id}",
+                axum::routing::get({
+                    let (log, secrets, answer) = (log.clone(), secrets.clone(), answer.clone());
+                    move |Path(job_id): Path<String>, headers: HeaderMap| {
+                        let mut log = log.lock().unwrap();
+                        log.polls += 1;
+                        let presented = headers
+                            .get(WITNESS_FETCH_SECRET_HEADER)
+                            .and_then(|v| hex::decode(v.to_str().ok()?).ok())
+                            .map(|secret| hex::encode(sha2::Sha256::digest(secret)));
+                        let expected = secrets.lock().unwrap().get(&job_id).cloned();
+                        let gone = (
+                            StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({"error": "witness_job_gone"})),
+                        )
+                            .into_response();
+                        let pending = (
+                            StatusCode::ACCEPTED,
+                            axum::Json(serde_json::json!({
+                                "state": "pending", "poll_after_secs": 1, "queue_position": 0
+                            })),
+                        )
+                            .into_response();
+                        let first_job = job_id == format!("{:032x}", 1);
+                        let response = if presented.is_none() || presented != expected {
+                            log.bad_secrets += 1;
+                            gone
+                        } else {
+                            match script {
+                                PollScript::PendingThenDone(n) if log.polls <= n => pending,
+                                PollScript::GoneOnce if first_job => gone,
+                                PollScript::AlwaysGone => gone,
+                                PollScript::DropsConnectionOnce if first_job => {
+                                    // A panicking handler drops the
+                                    // connection with no response at all.
+                                    drop(log);
+                                    panic!("test double: drop the connection");
+                                }
+                                PollScript::NeverDone => pending,
+                                _ => witness_answer(Some((
+                                    answer.certificate_json.clone(),
+                                    answer.signature_hex.clone(),
+                                    answer.envelope_bytes.clone(),
+                                ))),
+                            }
+                        };
+                        async move { response }
+                    }
+                })
+                .delete({
+                    let log = log.clone();
+                    move || {
+                        log.lock().unwrap().deletes += 1;
+                        async { StatusCode::NO_CONTENT }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (url, log, task)
+    }
+
+    async fn review_against(
+        script: PollScript,
+        timeout: Duration,
+    ) -> (
+        Result<WitnessedEnvelope, WitnessTrustError>,
+        Arc<Mutex<JobLog>>,
+    ) {
+        let key = test_signer("job-witness");
+        let (certificate_json, signature_hex, envelope_bytes) =
+            signed_answer(&key, &envelope_bytes());
+        let answer = WitnessedEnvelope {
+            certificate_json,
+            signature_hex,
+            envelope_bytes,
+            admission: None,
+        };
+        let (url, log, task) = job_witness(script, answer).await;
+        let transport =
+            HttpWitnessTransport::new(url.clone(), url.clone(), Arc::new(permissive()), timeout)
+                .unwrap();
+        let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+        let result =
+            witness_contribution(&transport, &witness, raw_with_secret(), None, &granted()).await;
+        task.abort();
+        (result, log)
+    }
+
+    #[tokio::test]
+    async fn a_job_is_polled_until_done_with_the_secret_its_hash_was_submitted_with() {
+        let (result, log) =
+            review_against(PollScript::PendingThenDone(2), Duration::from_secs(5)).await;
+        result.expect("the certified answer after two pending polls");
+        let log = log.lock().unwrap();
+        assert_eq!(log.submits, 1);
+        assert_eq!(log.polls, 3);
+        assert_eq!(log.bad_secrets, 0);
+        assert_eq!(log.legacy_posts, 0, "the retired route was called");
+    }
+
+    #[tokio::test]
+    async fn a_gone_job_is_resubmitted_once() {
+        let (result, log) = review_against(PollScript::GoneOnce, Duration::from_secs(5)).await;
+        result.expect("the resubmitted job's answer");
+        assert_eq!(log.lock().unwrap().submits, 2);
+    }
+
+    #[tokio::test]
+    async fn an_instance_that_drops_the_poll_is_resubmitted_once() {
+        let (result, log) =
+            review_against(PollScript::DropsConnectionOnce, Duration::from_secs(5)).await;
+        result.expect("the resubmitted job's answer");
+        assert_eq!(log.lock().unwrap().submits, 2);
+    }
+
+    #[tokio::test]
+    async fn a_job_gone_twice_is_unreachable_which_the_daemon_retries() {
+        let (result, log) = review_against(PollScript::AlwaysGone, Duration::from_secs(5)).await;
+        assert_eq!(result.unwrap_err(), WitnessTrustError::WitnessUnreachable);
+        assert_eq!(log.lock().unwrap().submits, 2);
+    }
+
+    #[tokio::test]
+    async fn a_job_past_the_review_deadline_is_cancelled_and_times_out() {
+        let (result, log) = review_against(PollScript::NeverDone, Duration::from_millis(400)).await;
+        assert_eq!(result.unwrap_err(), WitnessTrustError::WitnessTimeout);
+        let log = log.lock().unwrap();
+        assert_eq!(log.submits, 1);
+        assert_eq!(log.deletes, 1, "the abandoned job was not cancelled");
+    }
+
+    #[test]
+    fn a_submitted_job_renders_neither_its_id_nor_its_secret() {
+        let job = SubmittedJob {
+            job_id: "a1b2c3".repeat(5),
+            secret_hex: "d4e5f6".repeat(10),
+            poll_base: url::Url::parse("http://127.0.0.1").unwrap(),
+            poll_after_secs: 1,
+        };
+        let rendered = format!("{job:?}");
+        assert!(!rendered.contains("a1b2c3") && !rendered.contains("d4e5f6"));
     }
 }

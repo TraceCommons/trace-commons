@@ -557,7 +557,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
+            axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(router))
+                .await
+                .unwrap();
         });
         let cfg:crate::config::ContributorConfig=serde_json::from_value(serde_json::json!({
             "schema_version":crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,"issuer_url":"http://issuer.invalid","ingest_url":"http://ingest.invalid","audience":"upload","tenant_id":tenant,"instance_id":"","user_subject":device.device_key_id,"device_key_id":device.device_key_id,"consent_scopes":["debugging_evaluation"],

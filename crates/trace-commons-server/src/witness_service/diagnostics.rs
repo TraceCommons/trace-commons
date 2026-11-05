@@ -21,6 +21,8 @@
 //! - uptime;
 //! - request-slot occupancy and how requests ended: completed by status class,
 //!   refused as saturated, abandoned at the timeout;
+//! - witness jobs by state: pending, running, finished and unfetched, and
+//!   results that expired unfetched (counts only, never a job id);
 //! - for the NEAR AI classifier: requests by outcome kind (ok, timeout,
 //!   transport, 401/403, 402/429, 5xx, 413, other 4xx, body shape), requests
 //!   on the wire now, and recent successful latencies by body-size bucket.
@@ -154,6 +156,7 @@ struct Diagnostics<'a> {
     redaction_pipeline: &'a str,
     uptime_secs: u64,
     requests: LoadSnapshot,
+    jobs: super::jobs::JobCounts,
     classifier: Option<Classifier>,
 }
 
@@ -167,18 +170,24 @@ struct Classifier {
 struct DiagnosticsState {
     info: WitnessDiagnosticsInfo,
     load: WitnessLoadBound,
+    jobs: Arc<super::jobs::WitnessJobs>,
     started: Instant,
 }
 
 /// The diagnostics route, to merge beside
 /// [`super::http::witness_router`]. `load` must be the same bound that router
-/// was given, or the counts describe nothing.
-pub fn diagnostics_router(load: WitnessLoadBound, info: WitnessDiagnosticsInfo) -> Router {
+/// was given, and `jobs` the same table, or the counts describe nothing.
+pub fn diagnostics_router(
+    load: WitnessLoadBound,
+    jobs: Arc<super::jobs::WitnessJobs>,
+    info: WitnessDiagnosticsInfo,
+) -> Router {
     Router::new()
         .route("/v1/diagnostics", get(diagnostics_handler))
         .with_state(Arc::new(DiagnosticsState {
             info,
             load,
+            jobs,
             started: Instant::now(),
         }))
 }
@@ -197,6 +206,7 @@ async fn diagnostics_handler(State(state): State<Arc<DiagnosticsState>>) -> Resp
         redaction_pipeline: &info.redaction_pipeline,
         uptime_secs: state.started.elapsed().as_secs(),
         requests: state.load.snapshot(),
+        jobs: state.jobs.counts(),
         classifier,
     };
     ([(header::CACHE_CONTROL, "no-store")], axum::Json(body)).into_response()
@@ -209,6 +219,25 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use std::time::Duration;
     use tower::ServiceExt;
+
+    fn jobs(load: &WitnessLoadBound) -> (Arc<super::super::jobs::WitnessJobs>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let sealer =
+            super::super::jobs::ResultSealer::open(dir.path(), zeroize::Zeroizing::new([0x11; 32]))
+                .unwrap();
+        let jobs = super::super::jobs::WitnessJobs::new(
+            sealer,
+            super::super::jobs::JobLimits {
+                max_active: load.max_concurrent_requests(),
+                max_active_background: load.max_background_requests(),
+                max_stored: 8,
+                max_result_bytes: 1024,
+                result_ttl: super::super::jobs::RESULT_TTL,
+            },
+            load.request_timeout(),
+        );
+        (Arc::new(jobs), dir)
+    }
 
     fn info() -> WitnessDiagnosticsInfo {
         WitnessDiagnosticsInfo {
@@ -242,7 +271,8 @@ mod tests {
     #[tokio::test]
     async fn serves_the_documented_fields_and_nothing_else() {
         let load = WitnessLoadBound::new(4, Duration::from_secs(300));
-        let (status, json, cache) = get_json(diagnostics_router(load, info())).await;
+        let (jobs, _dir) = jobs(&load);
+        let (status, json, cache) = get_json(diagnostics_router(load, jobs, info())).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(cache.as_deref(), Some("no-store"));
         // Sorted: `serde_json/preserve_order` is on in this graph, so maps
@@ -258,6 +288,7 @@ mod tests {
             [
                 "build",
                 "classifier",
+                "jobs",
                 "redaction_pipeline",
                 "requests",
                 "schema",
@@ -302,6 +333,11 @@ mod tests {
                 "transport",
             ]
         );
+        let job_keys = sorted(&json["jobs"]);
+        assert_eq!(
+            job_keys,
+            ["done_unfetched", "expired", "pending", "running"]
+        );
         assert_eq!(json["requests"]["max_concurrent"], 4);
         assert_eq!(json["requests"]["in_use"], 0);
     }
@@ -309,8 +345,10 @@ mod tests {
     #[tokio::test]
     async fn a_witness_without_the_near_ai_classifier_reports_none() {
         let load = WitnessLoadBound::new(1, Duration::from_secs(300));
+        let (jobs, _dir) = jobs(&load);
         let (_, json, _) = get_json(diagnostics_router(
             load,
+            jobs,
             WitnessDiagnosticsInfo {
                 near_ai_classifier: false,
                 ..info()

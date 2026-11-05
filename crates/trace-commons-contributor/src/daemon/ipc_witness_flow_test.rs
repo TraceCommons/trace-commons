@@ -138,7 +138,7 @@ async fn provisioned_near_window_review_builds_over_http_and_uploads_exact_appro
             calls.lock().unwrap().push("upload".into()); uploads.lock().unwrap().push(body.to_vec());
             Json(serde_json::json!({"status":"accepted","credit_points_pending":0.0,"explanation":[]}))
         }}}));
-    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let server = tokio::spawn(async move { axum::serve(listener, crate::witness::test_jobs::serve_as_jobs(router)).await.unwrap() });
     let response = handle_request_async(
         &s,
         &req(

@@ -46,6 +46,9 @@ use trace_commons_server::witness_service::inference::{
     DEFAULT_MAX_BODY_BYTES, InferenceAttestationPolicy, parse_gateway_key_pins,
     parse_model_key_pins,
 };
+use trace_commons_server::witness_service::jobs::{
+    JobLimits, RESULT_TTL, ResultSealer, WitnessJobs,
+};
 use trace_commons_server::witness_service::surface::WitnessService;
 use trace_commons_server::witness_service::{
     DeterministicRedaction, Enclave, FullPipelineRedaction, Signer, TranscriptRedactor,
@@ -132,6 +135,16 @@ const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 16;
 /// one a person gets.
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 540;
 
+/// Where sealed job results live: the compose's `witness-results` volume.
+const DEFAULT_RESULTS_DIR: &str = "/var/lib/trace-commons-witness/results";
+
+/// 256 results at 4 MiB is 1 GiB of disk at worst.
+const DEFAULT_MAX_STORED_RESULTS: usize = 256;
+
+/// Four times the request cap: a redacted envelope is about the size of the
+/// session it came from.
+const DEFAULT_MAX_RESULT_BYTES: usize = 4 * DEFAULT_MAX_REQUEST_BYTES;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "trace-commons-witness",
@@ -211,14 +224,44 @@ struct Args {
     #[arg(long, env = "TRACE_COMMONS_WITNESS_RESERVED_INTERACTIVE_SLOTS")]
     reserved_interactive_slots: Option<usize>,
 
-    /// How long one `POST /v1/witness` request may take before it is
-    /// abandoned and its slot released. See [`DEFAULT_REQUEST_TIMEOUT_SECS`].
+    /// How long one witness job (or admission / token-bundle request) may
+    /// take, from acceptance, before it is abandoned and its slot released. See [`DEFAULT_REQUEST_TIMEOUT_SECS`].
     #[arg(
         long,
         env = "TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS",
         default_value_t = DEFAULT_REQUEST_TIMEOUT_SECS
     )]
     request_timeout_secs: u64,
+
+    /// Where finished job results are sealed. Encrypted under a key derived
+    /// inside the CVM from the dstack key service and this witness's
+    /// measurement; raw sessions are never written here or anywhere. Must be
+    /// writable at startup, or the witness does not start.
+    #[arg(
+        long,
+        env = "TRACE_COMMONS_WITNESS_RESULTS_DIR",
+        default_value = DEFAULT_RESULTS_DIR
+    )]
+    results_dir: std::path::PathBuf,
+
+    /// The most finished, unfetched results kept at once. With
+    /// `TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES`, this bounds the disk the
+    /// results can use. A full store answers busy.
+    #[arg(
+        long,
+        env = "TRACE_COMMONS_WITNESS_MAX_STORED_RESULTS",
+        default_value_t = DEFAULT_MAX_STORED_RESULTS
+    )]
+    max_stored_results: usize,
+
+    /// The largest finished answer that is sealed. A larger one is kept as
+    /// `witness_redaction_failed` instead.
+    #[arg(
+        long,
+        env = "TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES",
+        default_value_t = DEFAULT_MAX_RESULT_BYTES
+    )]
+    max_result_bytes: usize,
 
     /// Comma-separated filesystem path prefixes the deterministic pass treats
     /// as known, so they are not reported as findings. Empty is a safe
@@ -392,6 +435,12 @@ async fn main() -> Result<()> {
     if args.request_timeout_secs == 0 {
         bail!("TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS must be greater than zero");
     }
+    if args.max_stored_results == 0 {
+        bail!("TRACE_COMMONS_WITNESS_MAX_STORED_RESULTS must be greater than zero");
+    }
+    if args.max_result_bytes == 0 {
+        bail!("TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES must be greater than zero");
+    }
 
     // The retired gateway pin. It is no longer read, and a witness that
     // silently ignored it would start, pin nothing, and leave an operator
@@ -439,6 +488,19 @@ async fn main() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("the enclave could not report its own measurement"))?;
     let enclave_signing_address = enclave.signing_address().to_string();
 
+    // The sealed-results store, before the listener binds. A witness that
+    // cannot derive its results key or write its results directory must not
+    // start: there is no plaintext fallback.
+    let results_key = enclave
+        .results_key()
+        .await
+        .context("could not derive the job results key from the dstack guest agent")?;
+    let sealer = ResultSealer::open(&args.results_dir, results_key)
+        .map_err(|_| anyhow::anyhow!("TRACE_COMMONS_WITNESS_RESULTS_DIR is not usable"))?;
+    // Optional: without it a `202` names no instance and the client polls
+    // the app URL, which is correct for a single instance.
+    let instance_id = enclave.instance_id().await.ok();
+
     // Both are hash-only, and both are what an operator pins. Nothing else
     // about a request is ever logged by this process.
     tracing::info!(
@@ -448,6 +510,9 @@ async fn main() -> Result<()> {
         max_concurrent_requests = args.max_concurrent_requests,
         request_timeout_secs = args.request_timeout_secs,
         max_classify_in_flight = args.max_classify_in_flight,
+        max_stored_results = args.max_stored_results,
+        max_result_bytes = args.max_result_bytes,
+        instance_addressed = instance_id.is_some(),
         "witness ready"
     );
 
@@ -646,14 +711,34 @@ async fn main() -> Result<()> {
         Duration::from_secs(args.request_timeout_secs),
     )
     .map_err(anyhow::Error::msg)?;
+    let mut jobs = WitnessJobs::new(
+        sealer,
+        JobLimits {
+            max_active: load.max_concurrent_requests(),
+            max_active_background: load.max_background_requests(),
+            max_stored: args.max_stored_results,
+            max_result_bytes: args.max_result_bytes,
+            result_ttl: RESULT_TTL,
+        },
+        load.request_timeout(),
+    )
+    .with_instance_id(instance_id);
     if let Some(queue) = classify_queue {
+        jobs = jobs.with_classify_queue(queue.clone());
         load = load.with_classify_queue(queue);
     }
+    let jobs = Arc::new(jobs);
+    tracing::info!(
+        recovered_results = jobs.counts().done_unfetched,
+        "witness job store ready"
+    );
+    let _sweeper = jobs.spawn_sweeper();
     let listener = TcpListener::bind(&args.bind)
         .await
         .with_context(|| format!("could not bind {}", args.bind))?;
     let diagnostics = diagnostics_router(
         load.clone(),
+        jobs.clone(),
         WitnessDiagnosticsInfo {
             build: trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION")).to_string(),
             witness_measurement: measurement.to_string(),
@@ -662,9 +747,12 @@ async fn main() -> Result<()> {
             near_ai_classifier,
         },
     );
-    axum::serve(listener, witness_router(service, load).merge(diagnostics))
-        .await
-        .context("the witness listener stopped")?;
+    axum::serve(
+        listener,
+        witness_router(service, load, jobs).merge(diagnostics),
+    )
+    .await
+    .context("the witness listener stopped")?;
     Ok(())
 }
 

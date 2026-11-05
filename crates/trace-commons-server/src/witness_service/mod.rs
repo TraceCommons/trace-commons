@@ -69,6 +69,7 @@ pub mod diagnostics;
 pub mod enclave;
 pub mod http;
 pub mod inference;
+pub mod jobs;
 pub mod prefetch;
 pub mod surface;
 

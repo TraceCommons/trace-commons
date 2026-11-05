@@ -29,7 +29,9 @@ witness's "busy" answer and is counted, not retried.
 """
 
 import argparse
+import hashlib
 import json
+import os
 import random
 import sys
 import threading
@@ -183,20 +185,55 @@ def percentile(sorted_values, fraction):
 
 
 def send(url, payload, timeout):
-    request = urllib.request.Request(
-        url, data=payload, method="POST", headers={"content-type": "application/json"}
-    )
+    """Submit one job and poll it to its answer.
+
+    `url` is the jobs route. The latency is submit to final answer, which is
+    what a contributor waits. A refusal at submit (busy, malformed) is
+    reported with its status, as before.
+    """
+    secret = os.urandom(32)
     started = time.monotonic()
+    deadline = started + timeout
+    submit = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "content-type": "application/json",
+            "x-trace-witness-fetch-secret-sha256": hashlib.sha256(secret).hexdigest(),
+        },
+    )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            response.read()
-            status = response.status
+        with urllib.request.urlopen(submit, timeout=timeout) as response:
+            accepted = json.loads(response.read())
+            if response.status != 202:
+                return response.status, time.monotonic() - started
     except urllib.error.HTTPError as error:
         error.read()
-        status = error.code
+        return error.code, time.monotonic() - started
     except (urllib.error.URLError, TimeoutError, ConnectionError):
-        status = "transport"
-    return status, time.monotonic() - started
+        return "transport", time.monotonic() - started
+    job_url = url.rstrip("/") + "/" + accepted["job_id"]
+    wait = accepted.get("poll_after_secs", 1)
+    while True:
+        if time.monotonic() + wait > deadline:
+            return "timeout", time.monotonic() - started
+        time.sleep(max(1, min(wait, 60)))
+        poll = urllib.request.Request(
+            job_url, method="GET", headers={"x-trace-witness-fetch-secret": secret.hex()}
+        )
+        try:
+            with urllib.request.urlopen(poll, timeout=30) as response:
+                body = response.read()
+                if response.status == 202:
+                    wait = json.loads(body).get("poll_after_secs", 1)
+                    continue
+                return response.status, time.monotonic() - started
+        except urllib.error.HTTPError as error:
+            error.read()
+            return error.code, time.monotonic() - started
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            return "transport", time.monotonic() - started
 
 
 def run(args):
@@ -270,7 +307,7 @@ def main():
         command.add_argument("--seed", type=int, default=1)
     run_command = sub.choices["run"]
     run_command.add_argument("--url", default="http://127.0.0.1:8088")
-    run_command.add_argument("--path", default="/v1/witness")
+    run_command.add_argument("--path", default="/v1/witness/jobs")
     run_command.add_argument("--concurrency", type=int, default=1)
     run_command.add_argument("--requests", type=int, default=1)
     run_command.add_argument("--timeout", type=float, default=600.0)

@@ -28,7 +28,7 @@ The design this informs is
 | `fake_dstack_agent.py` | Serves `GET /v0/GetKey` and `/v0/GetQuote` on a unix socket in the shape `DstackSocketAgent` reads. The quote is the attestation crate's real fixture TDX quote, with `report_data` spliced in at the offset the witness parses. |
 | `stub_classifier.py` | A NEAR AI `privacy/classify` stand-in. Latency is `--base-ms + --per-kib-ms x body KiB`, default 1300 + 32, fitted to the 2026-09-03 live measurements. A body over `--max-body-bytes` gets a 413. `--curve measured-2026-11-05` uses the owner's measured latency for that day instead. `--trip-above N` fails with a 502 any request that arrives while N are already in flight. Spans every `Alice Example` at codepoint offsets. Logs body size, in-flight count, status and seconds per request, never content. `GET /stats` and `GET /stats/reset` serve the totals. |
 | `near_ai_probe.py` | For the key holder: measures the live endpoint's body limit, array batching and latency with synthetic text (below). |
-| `witness_load.py` | `run` sends synthetic contributions to `POST /v1/witness` from N workers and prints status counts, latency p50/p90/p99/max, requests/s and KB/s as JSON. `body` writes one body to stdout. |
+| `witness_load.py` | `run` submits synthetic contributions to `POST /v1/witness/jobs` from N workers, polls each to its answer, and prints status counts, latency (submit to answer) p50/p90/p99/max, requests/s and KB/s as JSON. `body` writes one body to stdout. |
 
 ## Run it
 
