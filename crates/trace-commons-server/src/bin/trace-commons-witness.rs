@@ -90,11 +90,17 @@ const DEFAULT_MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 /// concurrency that collapsed. So the bound is set strictly under the 8 that
 /// is known to fail, not at some number that merely sounds safe.
 ///
+/// In `full-pipeline` the classifier overlap is no longer set by this number:
+/// `--max-classify-in-flight` bounds classify calls across all requests, and
+/// one request may use all of it. This bounds requests, and so memory.
+///
 /// The other constraint is memory, and it is what rules out a much larger
 /// value: a request at the 64 MiB body cap is buffered whole, parsed into an
 /// owned transcript, redacted into another, and serialised again -- several
 /// tens of megabytes each, so a couple of hundred megabytes per slot at the
-/// cap. Four slots is on the order of a gigabyte in the worst case, which a
+/// cap. In `full-pipeline` the contribution path holds one more copy of the
+/// raw contribution while it runs, for the pass that records what to
+/// classify. Four slots is on the order of a gigabyte in the worst case, which a
 /// modestly provisioned CVM survives and sixteen would not.
 ///
 /// In `full-pipeline` a request is IO-bound -- a serial chain of network calls

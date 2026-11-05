@@ -93,6 +93,23 @@ the stand-in:
 | 50 KB / 20 results | 77.3 s | 38.7 s | 20.0 s |
 | 241 KB / 60 results | 190.2 s | 95.2 s | 47.7 s |
 
+Under load the default costs something. Four 50 KB / 20-result requests
+sent at once, cold, measured:
+
+| binary | each request | peak classify calls in flight |
+|---|---|---|
+| sequential (main's wiring) | 93.0 s | 4 |
+| this branch, in flight 2 | 119.1 s | 2 |
+| this branch, in flight 4 | 86.4 s | 4 |
+
+Main already puts up to four calls in flight when four requests coincide.
+At 2, a lone request runs twice as fast as on main, but a saturated witness
+runs slower than main, because four requests share two permits. At 4,
+neither case regresses, and key-wide overlap is no higher than main's worst
+case. The catch is that one large request now reaches that worst case on
+its own, where on main it took four users at once. **Owner decision: 2 or
+4.** The binary ships 2 until the endpoint is re-measured.
+
 The stand-in scales linearly because it does not model the endpoint's
 overlap trip. Raise the default only after re-measuring the real endpoint
 with synthetic text, never with a key a live driver is using.
@@ -107,11 +124,14 @@ replacement is `TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES`. When a body
 is over the cap or draws a 413, the window is halved, at most four levels
 deep, and each half is classified. Spans are mapped back in codepoints, and
 no cut falls inside a codepoint. This change applies to every NEAR AI
-caller (contributor, ingest backstop, witness). The `near-ai-privacy-filter`
-feature no longer compiles the tokenizer; self-hosted keeps it.
+caller (contributor, ingest backstop, witness). The tokenizer windowing now
+compiles only for the self-hosted backend.
 
 This saves calls only on fields over about 120 KB. For the traces in
-section 1, 2.1 and 2.3 are the levers.
+section 1, 2.1 and 2.3 are the levers. The feature still lists
+`dep:tiktoken-rs`, now unused on this path, because removing it would change
+the separate GTK and Tauri lockfiles; drop it together with a refresh of
+those lockfiles.
 
 ### 2.3 Not done: batching small leaves
 
