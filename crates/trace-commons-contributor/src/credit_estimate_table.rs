@@ -284,6 +284,18 @@ impl EstimateTableClient {
         SettlementEstimateTable::from_slice(&body).map_err(|_| EstimateTableClientError::Refused)
     }
 
+    /// Fetch the signed witness accepted-measurements list, as the exact
+    /// bytes served (`GET /v1/public/witness-accepted-list`). Nothing here
+    /// judges it: the caller verifies the signature before anything is used
+    /// or stored (`witness::accepted_list::install`).
+    pub async fn fetch_witness_accepted_list(&self) -> Result<Vec<u8>, EstimateTableClientError> {
+        self.get_bounded(
+            trace_commons_protocol::witness_accepted_list::WITNESS_ACCEPTED_LIST_PATH,
+            trace_commons_protocol::witness_accepted_list::WITNESS_ACCEPTED_LIST_MAX_BYTES,
+        )
+        .await
+    }
+
     /// Fetch the first run's dollar estimate per accepted trace
     /// (`GET /v1/public/first-run-estimate`): `None` when the commons
     /// publishes none. A range [`UsdMicrosRange::is_valid`] would not accept,

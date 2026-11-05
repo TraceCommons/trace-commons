@@ -179,6 +179,14 @@ path = "src/bin/trace-commons-smoke-envelope.rs"
 name = "trace-commons-witness"
 path = "src/bin/trace-commons-witness.rs"
 
+# Build, sign (through Google Cloud KMS) and verify the signed witness
+# accepted-measurements list that ingest serves at
+# /v1/public/witness-accepted-list. Runbook:
+# docs/operator/witness-accepted-list.md.
+[[bin]]
+name = "trace-commons-witness-list"
+path = "src/bin/trace-commons-witness-list.rs"
+
 # The staging NEAR AI pin re-sign tool: observes NEAR AI staging's enclave
 # measurements and signs the pin set a staging app trusts. Operators run it;
 # nothing ships it. `observe` also needs `near-attestation-collateral` to
