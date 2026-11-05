@@ -19,6 +19,10 @@ futures = { version = "0.3", optional = true }
 hex = "0.4"
 regex = "1"
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls-native-roots"] }
+# Ed25519 verification of the signed witness accepted-measurements list
+# (`witness_accepted_list`). Already in every graph that builds a client:
+# trace-commons-attestation, the contributor and the server depend on it.
+ring = "0.17"
 rust_decimal = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

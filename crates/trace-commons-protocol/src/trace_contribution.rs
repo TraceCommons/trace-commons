@@ -2691,6 +2691,34 @@ pub trait PrivacyFilterAdapter: Send + Sync {
         }
         answers
     }
+
+    /// As [`Self::redact_text`], for a caller that will give up at
+    /// `deadline`: a backend that retries starts no retry that could not
+    /// finish by then, and fails transiently instead. The answer for a text
+    /// is otherwise the same. The default ignores the deadline.
+    async fn redact_text_before(
+        &self,
+        text: &str,
+        deadline: std::time::Instant,
+    ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+        let _ = deadline;
+        self.redact_text(text).await
+    }
+
+    /// [`Self::redact_texts`] for a caller that will give up at `deadline`,
+    /// as [`Self::redact_text_before`] is to [`Self::redact_text`]. The
+    /// default asks about each text in turn with the deadline.
+    async fn redact_texts_before(
+        &self,
+        texts: &[&str],
+        deadline: std::time::Instant,
+    ) -> Vec<Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>> {
+        let mut answers = Vec::with_capacity(texts.len());
+        for text in texts {
+            answers.push(self.redact_text_before(text, deadline).await);
+        }
+        answers
+    }
 }
 
 pub struct NoopPrivacyFilterAdapter;

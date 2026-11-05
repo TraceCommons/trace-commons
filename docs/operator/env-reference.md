@@ -465,10 +465,11 @@ audit-relevant and is included in gate version hash derivation.
 | `TRACE_NEAR_AI_PRIVACY_API_KEY` | when `near-ai` | (none) | NEAR AI Cloud bearer token. Never logged; rotation is restart-only. |
 | `TRACE_NEAR_AI_PRIVACY_BASE_URL` | optional | `https://cloud-api.near.ai/v1` | Hosted endpoint; supports the `https://privacy-filter.completions.near.ai/v1` faster path. Must include the scheme and must be `https`, or `http` against loopback (local sidecars, tests) -- the API key rides on every request as a bearer token, so a plaintext non-loopback endpoint is refused at construction. |
 | `TRACE_NEAR_AI_PRIVACY_MODEL` | optional | `openai/privacy-filter` | Model slug. |
-| `TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS` | optional | `10000` | HTTP request timeout. |
+| `TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS` | optional | `15000` | The fixed part of each classify request's timeout; the whole is this plus `TRACE_NEAR_AI_PRIVACY_TIMEOUT_PER_KIB_MS` per KiB of request body (53.4 s for a full 64 KiB window at the defaults). Was a flat timeout before 2026-11-05. Each request is attempted up to three times on transport errors, timeouts, 429/408 and 5xx; a caller with a deadline (the witness) starts no retry that could not finish before it. |
+| `TRACE_NEAR_AI_PRIVACY_TIMEOUT_PER_KIB_MS` | optional | `600` | The part of each classify request's timeout that grows with the body. Owner decision 2026-11-05, from that day's dense-text measurement (~3 s + 0.4 s/KiB: 32 KiB 19.4 s, 128 KiB 64.0 s). |
 | `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_BYTES` | optional | (sidecar default) | Refuses inputs above this size. |
-| `TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS` | optional | `1` (off) | Most texts sent in one `privacy/classify` request as an input array, when a caller hands the adapter several (the witness does). Each answer is mapped back by index; a request that fails, or whose entry count differs from its input count, fails every text it carried. Unmeasured against the live endpoint: run `scripts/witness-load/near_ai_probe.py batch` before raising it. Zero is refused. |
-| `TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES` | optional | `245760` (240 KiB) | Largest serialized `privacy/classify` request body. Windows are cut so each body fits; a body over it or a 413 halves the window (at most four times) before the field is refused. Must be above zero and under the 262144-byte limit measured 2026-09-03. Replaces the retired `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS`, which is now refused at startup if set. |
+| `TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS` | optional | `1` (off) | Most texts sent in one `privacy/classify` request as an input array, when a caller hands the adapter several (the witness does). Each answer is mapped back by index; a request that fails, or whose entry count differs from its input count, fails every text it carried. Measured 2026-11-05: answers are correct but not faster (~1.4-1.6 s per input against ~2.0 s alone), so leave it at 1. Zero is refused. |
+| `TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES` | optional | `65536` (64 KiB) | Largest serialized `privacy/classify` request body. 64 KiB rather than the ~240 KiB the body limit allows (owner decision 2026-11-05): dense text takes ~29 s at 64 KiB and 64 s at 128 KiB, and a full window and its retries must fit the request budget. Windows are cut so each body fits; a body over it or a 413 halves the window (at most four times) before the field is refused. Must be above zero and under the 262144-byte limit measured 2026-09-03. Replaces the retired `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS`, which is now refused at startup if set. |
 
 ---
 
@@ -620,6 +621,14 @@ See [legacy invite migration](./legacy-invite-migration.md).
 | `TRACE_COMMONS_USAGE_REGION_MMDB` | optional | (unset) | Path to a MaxMind-format country database (`.mmdb`, for example GeoLite2 Country) that `GET /v1/public/usage-region` reads to tell a client whether it may send anonymous usage counts (United States only). Unset, or a file that does not open, answers `{"analytics_allowed": false}` to everyone and logs `control=usage_region_mmdb` once; it never fails startup. The address is looked up and dropped: nothing about it is stored or logged. Refresh the file monthly. `POST /v1/usage-events` (the weekly totals, each with an anonymous random install id) needs no variable: it stores into V152's `trace_usage_event_weeks` through the guard-owned `trace_usage_events_record()`, and answers 503 without a database. |
 
 See the [usage analytics design](../superpowers/specs/2026-11-04-us-only-usage-analytics.md).
+
+## Witness accepted-measurements list (default off)
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_WITNESS_ACCEPTED_LIST_PATH` | optional | (unset) | Path to the signed witness accepted-measurements list that `GET /v1/public/witness-accepted-list` serves, unauthenticated and byte for byte. The server does not sign; the operator installs a file signed with the commons' Cloud KMS list-signing key. Read on every request, so a new list needs no restart. Unset or blank: 404 `witness_accepted_list_not_published`. Set, but the file is missing, unreadable, over 64 KiB, or not a well-formed signed list: 503 `witness_accepted_list_unavailable`, logged as that label only; an unsigned list is never served. Never fails startup. Changes nothing ingest itself verifies (`TRACE_COMMONS_WITNESS_EXPECTED_MEASUREMENTS` still governs certificates). |
+
+See [the accepted-list runbook](./witness-accepted-list.md).
 
 ## Payout rails (default off)
 

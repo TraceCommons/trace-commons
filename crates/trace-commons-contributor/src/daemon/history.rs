@@ -249,6 +249,14 @@ pub struct HistoryCounts {
     #[serde(default)]
     pub withdrawn: u32,
     pub other: u32,
+    /// What every shell's Contributed figure shows: accepted plus waiting to
+    /// be scored (`submitted`). Held for privacy review (`quarantined`) is
+    /// NOT in it -- it is its own figure beside Contributed, and counting it
+    /// in both made one page read as more traces than there are. Computed
+    /// here, once, so no shell re-adds the buckets its own way.
+    /// `#[serde(default)]` for a rollup serialised before this existed.
+    #[serde(default)]
+    pub contributed: u32,
 }
 
 impl HistoryCounts {
@@ -258,13 +266,21 @@ impl HistoryCounts {
             return;
         }
         match status_bucket(&rec.status) {
-            STATUS_ACCEPTED => self.accepted += 1,
+            STATUS_ACCEPTED => {
+                self.accepted += 1;
+                self.contributed += 1;
+            }
             STATUS_QUARANTINED => self.quarantined += 1,
-            STATUS_SUBMITTED => self.submitted += 1,
+            STATUS_SUBMITTED => {
+                self.submitted += 1;
+                self.contributed += 1;
+            }
             _ => self.other += 1,
         }
     }
 
+    /// Every record counted, once: `contributed` is a sum of two buckets,
+    /// not a bucket of its own, so it is not added here.
     pub fn total(&self) -> u32 {
         self.submitted + self.accepted + self.quarantined + self.withdrawn + self.other
     }
@@ -1364,6 +1380,48 @@ mod tests {
         assert_eq!(r.all_time.accepted, 1);
         assert_eq!(r.all_time.quarantined, 2);
         assert_eq!(r.all_time.other, 0, "quarantine is not an 'other' status");
+    }
+
+    /// Contributed is accepted plus waiting to be scored, in every window,
+    /// and leaves out held and taken back: 56 accepted, 1 waiting and 3
+    /// held is Contributed 57 beside Held 3, never 60 or 56.
+    #[test]
+    fn rollup_contributed_is_accepted_plus_waiting_in_every_window() {
+        let mut recs = Vec::new();
+        for _ in 0..56 {
+            recs.push(record("accepted", "2026-08-07T10:00:00Z"));
+        }
+        recs.push(record("submitted", "2026-08-08T10:00:00Z"));
+        for _ in 0..3 {
+            recs.push(record("quarantined", "2026-08-08T10:00:00Z"));
+        }
+        recs.push(record("rejected", "2026-08-08T10:00:00Z"));
+        let mut gone = record("accepted", "2026-08-08T10:00:00Z");
+        gone.withdrawn_at = Some(at("2026-08-08T11:00:00Z"));
+        recs.push(gone);
+        // Outside the week, inside the month: in month and all time only.
+        recs.push(record("submitted", "2026-07-20T10:00:00Z"));
+
+        let r = rollup(&recs, at("2026-08-08T12:00:00Z"));
+        assert_eq!(r.all_time.contributed, 58);
+        assert_eq!(r.month.contributed, 58);
+        assert_eq!(r.week.contributed, 57);
+        assert_eq!(r.quarantined, 3);
+        assert_eq!(
+            r.all_time.contributed,
+            r.all_time.accepted + r.all_time.submitted
+        );
+        assert_eq!(r.all_time.total(), 63, "contributed is not counted twice");
+    }
+
+    /// A rollup cached or sent before `contributed` existed still loads.
+    #[test]
+    fn counts_without_contributed_load_as_zero() {
+        let c: HistoryCounts = serde_json::from_value(serde_json::json!({
+            "submitted": 1, "accepted": 2, "quarantined": 0, "other": 0
+        }))
+        .unwrap();
+        assert_eq!(c.contributed, 0);
     }
 
     #[test]

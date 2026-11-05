@@ -82,6 +82,7 @@ the link.
 | Counting legacy invite tenants, accounts, links and readiness blockers before account admission | [`./legacy-invite-counts.md`](./legacy-invite-counts.md) |
 | Deploying the redaction witness on dstack (this project's first CVM) | [`../../deploy/witness/README.md`](../../deploy/witness/README.md) |
 | Load-testing the redaction witness locally | [`./witness-load-testing.md`](./witness-load-testing.md) |
+| Seeing when the redaction witness is overloaded and blocking uploads | [`./witness-monitor.md`](./witness-monitor.md) |
 | Looking up an env var | [`./env-reference.md`](./env-reference.md) |
 | Driving review / admin / worker / tenant workflows from a CLI | [`./operator-binaries.md`](./operator-binaries.md) |
 | Working the quarantine queue (review, release, contributor notification) | [`./quarantine-review.md`](./quarantine-review.md) |
@@ -166,6 +167,13 @@ Every runbook in this directory, with a one-line description.
   classifier with the measured latency, and a driver that sends synthetic
   contributions and reports latency percentiles and throughput. Synthetic
   text only, loopback by default.
+- [`./witness-monitor.md`](./witness-monitor.md) — the witness overload
+  monitor: a one-minute poll of the witness's `/v1/diagnostics` that records
+  label-only rows and raises an alert on rising saturated refusals or
+  timeouts, slots held full, or an unreachable page; the stateless
+  `WitnessHealthOK` check for a witness deploy; thresholds; email alerts
+  through Cloud Monitoring (a gauge policy plus an uptime check) and the
+  owner's setup commands.
 - [`./drills.md`](./drills.md) — the full set of `/v1/admin/*-drill`
   endpoints, what each validates, and cadence guidance.
 - [`./near-attestation-drill.md`](./near-attestation-drill.md) — the NEAR AI
@@ -287,6 +295,10 @@ Every runbook in this directory, with a one-line description.
   symptom, with hash-only signatures and fixes.
 - [`./vector-replay.md`](./vector-replay.md) — operator reference for the
   `trace-commons-vector-replay` recovery binary.
+- [`./witness-accepted-list.md`](./witness-accepted-list.md) — the signed
+  list of witness measurements clients accept beside their sign-up pins:
+  the Cloud KMS list-signing key, `trace-commons-witness-list`, publishing,
+  witness rollover and key rotation.
 
 ## Doc lifecycle and freshness
 

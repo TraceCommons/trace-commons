@@ -800,7 +800,7 @@ final class AppModel: ObservableObject {
         amount: { TCNearAiBalance.amount(present: $0, nanos: $1, scale: $2) },
         remainingLine: { TCNearAiBalance.remainingLine(present: $0, nanos: $1, scale: $2) },
         limitLine: { TCNearAiBalance.limitLine(present: $0, nanos: $1, scale: $2) },
-        spentLine: { TCNearAiBalance.spentLine(present: $0, nanos: $1, scale: $2) },
+        spentLine: { TCNearAiBalance.spentLine(present: $0, nanos: $1, scale: $2, remainingPresent: $3) },
         observedLine: { TCNearAiBalance.observedLine(secondsAgo: $0) }
     )
 
@@ -1857,6 +1857,13 @@ final class AppModel: ObservableObject {
             publishIfChanged(\.status, status)
         case .previewReady(let result):
             applyPreviewOutcome(result)
+        case .witnessReviewReady(let entryID, let failure):
+            if let waiter = witnessReviewWaiters.removeValue(forKey: entryID) {
+                waiter.resume(returning: failure)
+            } else {
+                // Arrived before the request's answer was read: kept for it.
+                witnessReviewEarly[entryID] = .some(failure)
+            }
         case .queueChanged:
             // Coalesced: one Submit all over a hundred traces is hundreds of
             // `queue_changed`, and five reads per event, each redrawing on
@@ -2089,27 +2096,54 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Sets several projects to Ask or Never at once (Settings > Projects'
-    /// Manage sheet): one `set_project_mode` call each, in order, with the
-    /// list refreshed once at the end. Never Automatic: arming is a grant,
-    /// made one project at a time through the arming confirmation, so a
-    /// mode outside `ProjectsManager.bulkModes` sends nothing. The first
-    /// refusal stops the rest and lands in `lastActionError`; the list is
-    /// refreshed either way, so it shows what did change.
-    func setProjectModes(_ projectIDs: [String], mode: ProjectMode) {
-        guard ProjectsManager.bulkModes.contains(mode), !projectIDs.isEmpty else { return }
-        perform(
-            "set_project_mode",
-            work: { client in
-                for id in projectIDs { try client.setProjectMode(projectID: id, mode: mode) }
-            },
-            onFailure: {
-                self.refreshProjects()
-                self.refreshAudit()
+    /// What a bulk or group change would do (Settings > Projects' Manage
+    /// sheet), as the daemon plans it from its live policy and queue. Nil
+    /// without a daemon or on a refusal, which changes nothing.
+    func planProjectModes(_ projectIDs: [String], mode: ProjectMode) async -> ProjectsBulkPlan? {
+        guard let client else { return nil }
+        let outcome = await DaemonWork.run {
+            Result { try client.planProjectModes(projectIDs: projectIDs, mode: mode) }
+        }
+        guard case .success(let plan) = outcome else { return nil }
+        return plan
+    }
+
+    /// How a bulk change ended.
+    enum BulkChange: Equatable {
+        /// It ran; `result.changed` may be fewer than `result.total`.
+        case ran(ProjectsBulkResult)
+        /// The live counts grew past what was agreed: plan and ask again.
+        case stale
+        /// Refused or unreachable; nothing is known to have changed.
+        case failed
+    }
+
+    /// Sets several projects to Ask or Never at once, in one
+    /// `set_project_modes` call: the daemon refuses Automatic, re-plans
+    /// from its live state, and runs only when `agreed` (the plan whose
+    /// confirmation was accepted) still covers it. The list is refreshed
+    /// whatever the answer, so it shows what did change. A change stopped
+    /// part way says how many of how many changed.
+    func setProjectModes(_ projectIDs: [String], mode: ProjectMode, agreed: ProjectsBulkPlan?) async -> BulkChange {
+        guard let client, !projectIDs.isEmpty else { return .failed }
+        let outcome = await DaemonWork.run {
+            Result { try client.setProjectModes(projectIDs: projectIDs, mode: mode, agreed: agreed) }
+        }
+        refreshProjects()
+        refreshAudit()
+        switch outcome {
+        case .success(let result):
+            if result.changed.count < result.total {
+                let words = ShellWords.table?.projectsManager.changedSome
+                lastActionError = words.map {
+                    ShellWordsCopy.fill($0, ["count": String(result.changed.count), "total": String(result.total)])
+                } ?? ShellWords.table?.settings.projectModeFailed
             }
-        ) { _ in
-            self.refreshProjects()
-            self.refreshAudit()
+            return .ran(result)
+        case .failure(let error):
+            if (error as? DaemonClient.Failure)?.message == "bulk-confirmation-stale" { return .stale }
+            lastActionError = ShellWords.table?.settings.projectModeFailed ?? "set_project_modes: failed"
+            return .failed
         }
     }
 
@@ -4131,20 +4165,67 @@ final class AppModel: ObservableObject {
     /// every refusal -- a receipt the reviewer declined, a reviewer that was
     /// simply down, one that could not prove itself -- rendered the same
     /// single sentence.
+    ///
+    /// The review runs in the daemon's background (`background: true`): the
+    /// request returns at once and this waits for the `witness_review_ready`
+    /// event, so no socket is held for the minutes a witness can take. A
+    /// review whose event never arrives (the daemon restarted) ends after
+    /// `witnessReviewEventWait` as a failure with no sentence.
     func witnessReviewOutcome(entryID: String) async -> WitnessReviewOutcome {
         guard let client else { return WitnessReviewOutcome(succeeded: false, sentence: nil) }
-        return await Task.detached(priority: .userInitiated) {
-            do {
-                try client.requestWitnessReview(entryID: entryID)
-                return WitnessReviewOutcome(succeeded: true, sentence: nil)
-            } catch {
-                return WitnessReviewOutcome(
-                    succeeded: false,
-                    sentence: DaemonClient.refusalSentence(from: error),
-                    retryLine: DaemonClient.busyRetryLine(from: error)
+        witnessReviewEarly.removeValue(forKey: entryID)
+        let started: Result<Bool, Error> = await Task.detached(priority: .userInitiated) {
+            Result { try client.requestWitnessReview(entryID: entryID) }
+        }.value
+        let failure: Error?
+        switch started {
+        case .failure(let error):
+            failure = error
+        case .success(false):
+            failure = nil
+        case .success(true):
+            failure = await witnessReviewEvent(entryID: entryID)
+        }
+        guard let failure else { return WitnessReviewOutcome(succeeded: true, sentence: nil) }
+        return WitnessReviewOutcome(
+            succeeded: false,
+            sentence: DaemonClient.refusalSentence(from: failure),
+            retryLine: DaemonClient.busyRetryLine(from: failure)
+        )
+    }
+
+    /// Reviews started in the background, by entry, waiting for their
+    /// `witness_review_ready` event.
+    private var witnessReviewWaiters: [String: CheckedContinuation<DaemonClient.Failure?, Never>] = [:]
+
+    /// A `witness_review_ready` that arrived before its request's answer
+    /// was read, by entry.
+    private var witnessReviewEarly: [String: DaemonClient.Failure?] = [:]
+
+    /// The longest a background review is waited for: the daemon's own
+    /// review deadline (eleven minutes since 2026-11-05) with room to spare,
+    /// and under the daemon's 15-minute backstop on a background review.
+    private static let witnessReviewEventWait: Duration = .seconds(14 * 60)
+
+    private func witnessReviewEvent(entryID: String) async -> DaemonClient.Failure? {
+        if let early = witnessReviewEarly.removeValue(forKey: entryID) {
+            return early
+        }
+        return await withCheckedContinuation { continuation in
+            // One waiter per entry: a second request for the same entry
+            // shares the daemon's one review, so the earlier waiter is
+            // answered as if it ended unknown rather than left hanging.
+            witnessReviewWaiters.removeValue(forKey: entryID)?.resume(
+                returning: DaemonClient.Failure(code: "unavailable", message: "witness-review-incomplete")
+            )
+            witnessReviewWaiters[entryID] = continuation
+            Task { [weak self] in
+                try? await Task.sleep(for: Self.witnessReviewEventWait)
+                self?.witnessReviewWaiters.removeValue(forKey: entryID)?.resume(
+                    returning: DaemonClient.Failure(code: "unavailable", message: "witness-review-incomplete")
                 )
             }
-        }.value
+        }
     }
 
     func openPreview(entryID: String) async -> PreviewOutcome {

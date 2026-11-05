@@ -44,7 +44,9 @@
 //! in three shells, because three shells rounding money three ways is three
 //! answers to one question.
 //!
-//! Two rules govern it, and both are about not inventing a figure. The
+//! Two rules govern it, and both are about not inventing a figure. (The
+//! rounding has one stated exception, Spent beside a remaining figure; see
+//! [`format_amount`].) The
 //! `scale` is read off the wire and never assumed, so a daemon that changes
 //! it cannot make three shells wrong by a factor of a thousand. And a `null`
 //! remaining figure -- which is what an account nobody capped reports -- is
@@ -2145,6 +2147,13 @@ pub const BALANCE_NO_REMAINING: &str = "No spending limit set.";
 /// directions. One rule for every amount, because two rules is a rule
 /// somebody applies to the wrong field.
 ///
+/// With ONE exception, owner-approved, and it lives in
+/// [`balance_spent_line`] alone: Spent printed beside a Limit and a
+/// remaining figure rounds UP to the cent, so the three add up on the
+/// cents shown. Flooring both Spent and what is left made them disagree by
+/// a cent. Without a remaining figure there is nothing to reconcile with,
+/// and Spent takes this rule like every other amount.
+///
 /// # A nonzero amount below a cent is a phrase, not `$0.00`
 ///
 /// [`harness_spend_line`]'s rule, for the same reason: an account with a
@@ -2249,22 +2258,34 @@ pub fn balance_limit_line(nanos: Option<i64>, scale: u8) -> String {
     format!("Limit: {amount}")
 }
 
-/// [`format_amount`] rounded UP to the cent, for the one figure that is
-/// subtracted: what has been spent.
+/// Spent, as [`balance_spent_line`] draws it beside a remaining figure:
+/// rounded UP to the cent, or the empty string for a scale this build
+/// cannot honour.
 ///
 /// The row shows Limit, Spent and what is left, and the left figure is
 /// floored. With the limit in whole cents, `floor(limit - spent)` equals
-/// `limit - ceil(spent)`, so flooring Spent as well made the three
-/// disagree by a cent (limit $130.00, spent $18.185 left $111.81, and
-/// $130.00 - $18.18 is $111.82). Rounding Spent up keeps the three adding
-/// up, and overstates spend by under a cent: the same direction as
-/// understating what is left. A nonzero sub-cent amount is $0.01 here.
-fn format_amount_ceil(nanos: i64, scale: u8) -> String {
+/// `limit - ceil(spent)` for a spend of either sign, so flooring Spent as
+/// well made the three disagree by a cent (limit $130.00 and spent $18.185
+/// leave $111.81, and $130.00 - $18.18 is $111.82). Rounding Spent up keeps
+/// them adding up, and overstates spend by under a cent: the same direction
+/// as understating what is left.
+///
+/// A spend above zero and under a cent is still [`format_amount`]'s phrase,
+/// "less than $0.01", never "$0.01": that would be a cent nobody spent. In
+/// that one case the three do not add up on the cents shown, because one
+/// of them is not a figure.
+fn format_spent_beside_remaining(nanos: i64, scale: u8) -> String {
     let Some(divisor) = 10i128.checked_pow(u32::from(scale)) else {
         return String::new();
     };
     let scaled = i128::from(nanos) * 100;
-    // `-(-a).div_euclid(b)` is the ceiling for a positive divisor.
+    if nanos > 0 && scaled < divisor {
+        return "less than $0.01".to_string();
+    }
+    // `-(-a).div_euclid(b)` is the ceiling for a positive divisor, for
+    // either sign of `a`: a refund larger than the spend (a negative
+    // figure) rounds toward zero, which is what keeps
+    // `limit - spent == left` when it does.
     let cents = -(-scaled).div_euclid(divisor);
     let sign = if cents < 0 { "-" } else { "" };
     let magnitude = cents.unsigned_abs();
@@ -2273,19 +2294,27 @@ fn format_amount_ceil(nanos: i64, scale: u8) -> String {
 
 /// What the account has spent, all of it, everywhere.
 ///
-/// Rounded up to the cent (see [`format_amount_ceil`]), so that Limit minus
-/// Spent equals the floored amount left.
+/// `remaining` is the same reading's remaining figure, passed so this can
+/// choose its rounding: beside a remaining figure Spent rounds UP to the
+/// cent ([`format_spent_beside_remaining`], the one exception to
+/// [`format_amount`]'s rule), so Limit, Spent and what is left add up.
+/// With no remaining figure (an account nobody capped) there is nothing to
+/// add up with, and Spent is [`format_amount`] like every other amount.
 ///
 /// `None` is the empty string, drawn as no line at all -- the rule
 /// [`harness_spend_line`] follows for a figure nobody could read. Zero is
 /// NOT that: an account that has spent nothing renders "$0.00", which is
 /// true.
 #[must_use]
-pub fn balance_spent_line(nanos: Option<i64>, scale: u8) -> String {
+pub fn balance_spent_line(nanos: Option<i64>, remaining: Option<i64>, scale: u8) -> String {
     let Some(nanos) = nanos else {
         return String::new();
     };
-    let amount = format_amount_ceil(nanos, scale);
+    let amount = if remaining.is_some() {
+        format_spent_beside_remaining(nanos, scale)
+    } else {
+        format_amount(nanos, scale)
+    };
     if amount.is_empty() {
         return String::new();
     }
@@ -3226,6 +3255,16 @@ pub fn queue_outcome_line(label: &str) -> &'static str {
         crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED => {
             "The privacy scan kept failing; not sent. Approve it again to retry"
         }
+        // The witness's evidence did not verify (`submit::witness_trust_hold`).
+        // Owner-approved wording, 2026-11-05.
+        crate::submit::REASON_WITNESS_NOT_TRUSTED => {
+            "The privacy check couldn't be verified. Nothing was sent."
+        }
+        // The witness reports a measurement outside the accepted list; a
+        // newer list releases the hold. Owner-approved wording, 2026-11-05.
+        crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED => {
+            "The privacy check was updated and isn't trusted yet. Nothing was sent."
+        }
         _ => "Status unavailable",
     }
 }
@@ -3469,6 +3508,15 @@ mod tests {
             assert_ne!(line, "Status unavailable", "{label}");
             assert!(!line.contains(label), "raw label: {label}");
         }
+        // The witness holds, in the owner's approved words (2026-11-05).
+        assert_eq!(
+            queue_outcome_line(crate::submit::REASON_WITNESS_NOT_TRUSTED),
+            "The privacy check couldn't be verified. Nothing was sent."
+        );
+        assert_eq!(
+            queue_outcome_line(crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED),
+            "The privacy check was updated and isn't trusted yet. Nothing was sent."
+        );
         // A rate-limited entry is still approved and goes on its own; the
         // line says so and does not read as a refusal.
         let paused = queue_outcome_line(crate::submit::REASON_RATE_LIMITED);
@@ -5247,35 +5295,92 @@ mod tests {
         assert_ne!(balance_remaining_line(Some(0), 9), none);
     }
 
-    /// Limit, Spent and what is left add up on the cents shown: limit $130.00
-    /// and spent $18.185 leave $111.815, which is "$111.81 left" and so
-    /// must read "Spent: $18.19", not $18.18.
+    /// Beside a remaining figure, Limit, Spent and what is left add up on
+    /// the cents shown, for a spend of either sign: limit $130.00 and spent
+    /// $18.185 leave $111.815, which is "$111.81 left", so Spent reads
+    /// $18.19, not $18.18. The service's own `remaining` is checked in
+    /// `nearai_credential::balance`'s tests, from its reply.
     #[test]
-    fn limit_spent_and_left_agree_to_the_cent() {
+    fn beside_a_remaining_figure_limit_spent_and_left_agree_to_the_cent() {
         let scale = 9;
-        let (limit, spent) = (130_000_000_000_i64, 18_185_000_000_i64);
-        assert_eq!(
-            balance_remaining_line(Some(limit - spent), scale),
-            "$111.81 left"
-        );
+        let limit = 130_000_000_000_i64;
+        let spent = 18_185_000_000_i64;
+        let left = Some(limit - spent);
+        assert_eq!(balance_remaining_line(left, scale), "$111.81 left");
         assert_eq!(balance_limit_line(Some(limit), scale), "Limit: $130.00");
-        assert_eq!(balance_spent_line(Some(spent), scale), "Spent: $18.19");
-        // Whole cents are unchanged, and a sub-cent spend is a cent.
         assert_eq!(
-            balance_spent_line(Some(18_180_000_000), scale),
-            "Spent: $18.18"
+            balance_spent_line(Some(spent), left, scale),
+            "Spent: $18.19"
         );
-        assert_eq!(balance_spent_line(Some(1), scale), "Spent: $0.01");
-        for spent in (0..2_000_000_000_i64).step_by(7_654_321) {
-            let left = format_amount(limit - spent, scale);
-            let shown = format_amount_ceil(spent, scale);
-            let cents = |s: &str| {
-                s.trim_start_matches('$')
-                    .replace('.', "")
-                    .parse::<i64>()
-                    .unwrap()
+        assert_eq!(
+            balance_spent_line(Some(18_180_000_000), left, scale),
+            "Spent: $18.18",
+            "whole cents are unchanged"
+        );
+        let cents = |s: &str| -> i64 {
+            let (sign, rest) = match s.strip_prefix('-') {
+                Some(rest) => (-1, rest),
+                None => (1, s),
             };
-            assert_eq!(cents("$130.00") - cents(&shown), cents(&left), "{spent}");
+            sign * rest
+                .trim_start_matches('$')
+                .replace('.', "")
+                .parse::<i64>()
+                .unwrap()
+        };
+        // Every figure a cent or more, in both directions: a refund larger
+        // than the spend is a negative figure, and it adds up too.
+        for spent in (-2_000_000_000_i64..2_000_000_000).step_by(7_654_321) {
+            if spent > 0 && spent < 10_000_000 {
+                continue; // the sub-cent phrase, below
+            }
+            let left = format_amount(limit - spent, scale);
+            let shown = balance_spent_line(Some(spent), Some(limit - spent), scale);
+            let shown = shown.trim_start_matches("Spent: ");
+            assert_eq!(
+                cents("$130.00") - cents(shown),
+                cents(&left),
+                "{spent}: {shown} beside {left}"
+            );
+        }
+    }
+
+    /// A spend above zero and under a cent is the sub-cent phrase whether
+    /// or not there is a remaining figure, never "$0.01", a cent nobody
+    /// spent.
+    #[test]
+    fn a_sub_cent_spend_is_the_phrase_never_a_cent() {
+        for remaining in [None, Some(130_000_000_000_i64)] {
+            for spent in [1_i64, 9_999_999] {
+                assert_eq!(
+                    balance_spent_line(Some(spent), remaining, 9),
+                    "Spent: less than $0.01",
+                    "{spent} beside {remaining:?}"
+                );
+            }
+            assert_eq!(
+                balance_spent_line(Some(10_000_000), remaining, 9),
+                "Spent: $0.01"
+            );
+        }
+    }
+
+    /// With no remaining figure (nobody set a limit) there is nothing to add
+    /// up with, and Spent is floored like every other amount, either sign.
+    #[test]
+    fn without_a_remaining_figure_spent_takes_the_one_rule() {
+        let spent = 18_185_000_000_i64;
+        assert_eq!(balance_spent_line(Some(spent), None, 9), "Spent: $18.18");
+        assert_eq!(
+            balance_spent_line(Some(-18_185_000_000), None, 9),
+            "Spent: -$18.19"
+        );
+        for spent in (-2_000_000_000_i64..2_000_000_000).step_by(7_654_321) {
+            assert_eq!(
+                balance_spent_line(Some(spent), None, 9),
+                format!("Spent: {}", format_amount(spent, 9)),
+                "{spent}"
+            );
         }
     }
 
@@ -5284,12 +5389,17 @@ mod tests {
     #[test]
     fn absence_and_zero_differ_on_every_figure() {
         assert_eq!(balance_limit_line(None, 9), "");
-        assert_eq!(balance_spent_line(None, 9), "");
+        for remaining in [None, Some(1)] {
+            assert_eq!(balance_spent_line(None, remaining, 9), "");
+            assert!(balance_spent_line(Some(0), remaining, 9).contains("$0.00"));
+            assert_ne!(
+                balance_spent_line(Some(0), remaining, 9),
+                balance_spent_line(None, remaining, 9)
+            );
+        }
         assert_eq!(balance_observed_line(None), "");
         assert!(balance_limit_line(Some(0), 9).contains("$0.00"));
-        assert!(balance_spent_line(Some(0), 9).contains("$0.00"));
         assert_ne!(balance_limit_line(Some(0), 9), balance_limit_line(None, 9));
-        assert_ne!(balance_spent_line(Some(0), 9), balance_spent_line(None, 9));
     }
 
     /// Rounding is down, in both directions, and never invents money.
@@ -5692,7 +5802,8 @@ mod tests {
         ] {
             strings.push(balance_remaining_line(nanos, 9));
             strings.push(balance_limit_line(nanos, 9));
-            strings.push(balance_spent_line(nanos, 9));
+            strings.push(balance_spent_line(nanos, None, 9));
+            strings.push(balance_spent_line(nanos, nanos, 9));
         }
         for seconds in [None, Some(0), Some(60), Some(3_600), Some(86_400)] {
             strings.push(balance_observed_line(seconds));

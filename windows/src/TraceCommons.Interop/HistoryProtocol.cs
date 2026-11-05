@@ -116,6 +116,15 @@ public sealed class HistoryCounts
     /// </summary>
     [JsonPropertyName("other")]
     public int Other { get; set; }
+
+    /// <summary>
+    /// The core's Contributed figure: accepted plus waiting to be scored,
+    /// never held (held is its own figure beside it). Read, never re-added
+    /// from the buckets here. Null from a daemon too old to send it, which
+    /// is drawn as a dash, not as a sum this shell made up.
+    /// </summary>
+    [JsonPropertyName("contributed")]
+    public int? Contributed { get; set; }
 }
 
 /// <summary>

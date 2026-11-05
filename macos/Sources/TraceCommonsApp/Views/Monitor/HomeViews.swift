@@ -8,7 +8,7 @@ import TCShellCore
 /// (spec, "Screens": History is Home, then History).
 ///
 /// Counts come from the core: waiting is `decisions_owed` (a dash when the
-/// core did not say), contributed is `HomeFormat.contributed`. Pending
+/// core did not say), contributed is the core's `contributed`. Pending
 /// credit is shown only beside the commons' own statement of what it waits
 /// on (D6), and never as earned.
 ///
@@ -316,8 +316,8 @@ private struct HomeOverview: View {
     }
 
     /// Waiting, contributed and pending credit (#1146 `home-view.tsx`), each
-    /// from the core: waiting is decisions owed, contributed
-    /// `HomeFormat.contributed`. Pending credit is a figure only beside the commons'
+    /// from the core: waiting is decisions owed, contributed the core's
+    /// `contributed`. Pending credit is a figure only beside the commons'
     /// statement of what it waits on (D6), drawn under the tiles; without
     /// that statement it is a dash, never a bare number that reads as owed.
     ///
@@ -335,34 +335,30 @@ private struct HomeOverview: View {
         // Three groups, each under its title: Private AI first (owner,
         // 2026-11-02: back at the top, where it was before 2026-10-28), then
         // Traces (the tiles and what is not contributed across both columns),
-        // then Account (Credit and the NEAR AI balance). The Traces
-        // walkthrough leads the Traces section for everyone, every time,
-        // over the Traces cards, with no X (owner, 2026-11-04; from
-        // 2026-11-02 it stood in for the cards until a folder was watched,
-        // and closed for good).
+        // then Account (Credit and the NEAR AI balance). The Traces hero
+        // leads Home, over every section, for everyone, every time, with no
+        // X (product owner, 2026-10-28, 2026-10-29; restored 2026-11-05).
         return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            tracesHero
             privateAI
             HomeSection(words?.sectionTraces) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                    tracesHero
-                    Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
+                Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
+                    GridRow {
+                        HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
+                                     systemImage: HomeStatIcons.waiting, loading: traces.phase == .loading,
+                                     action: openTraces)
+                        HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(freshRollup),
+                                     systemImage: HomeStatIcons.contributed,
+                                     loading: store.isLoading("history_rollup"), action: openHistory)
+                    }
+                    if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) {
                         GridRow {
-                            HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
-                                         systemImage: HomeStatIcons.waiting, loading: traces.phase == .loading,
-                                         action: openTraces)
-                            HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(freshRollup),
-                                         systemImage: HomeStatIcons.contributed,
-                                         loading: store.isLoading("history_rollup"), action: openHistory)
-                        }
-                        if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) {
-                            GridRow {
-                                notContributed(uncontributed, title: title)
-                                    .gridCellColumns(2)
-                            }
+                            notContributed(uncontributed, title: title)
+                                .gridCellColumns(2)
                         }
                     }
-                    .fixedSize(horizontal: false, vertical: true)
                 }
+                .fixedSize(horizontal: false, vertical: true)
             }
             HomeSection(words?.sectionAccount, accessory: accountSignIn) {
                 HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)
@@ -373,28 +369,12 @@ private struct HomeOverview: View {
         }
     }
 
-    /// Home's Traces walkthrough (owner, 2026-10-28): saying that traces
-    /// earn credit, with the way into Traces, where the person shares;
-    /// three steps, contribute, earn, use Private AI (owner, 2026-10-29).
-    /// Condensed on 2026-11-02 (owner): no line under the title. Shown to
-    /// everyone, every time, with no X (owner, 2026-11-04). Drawn as the Insights empty
-    /// state's card is (owner, 2026-11-02, `GetStartedCard`): a plain card,
-    /// no gradient or pictures, numbered steps, and two text links, each
-    /// under its step: Start earning to Traces and Open Private AI to
-    /// Private AI (owner, 2026-11-04). Drawn once the core's words have
-    /// loaded.
+    /// Home's Traces hero, the product owner's design (`HomeTracesHero`).
+    /// Drawn once the core's words have loaded.
     @ViewBuilder
     private var tracesHero: some View {
         if let words {
-            GetStartedCard(
-                title: words.tracesHeroTitle,
-                steps: [
-                    .init(title: words.tracesHeroStepContribute, detail: words.tracesHeroStepContributeDetail,
-                          link: GetStartedCard.Link(title: words.tracesHeroAction, action: openTraces)),
-                    .init(title: words.tracesHeroStepEarn, detail: words.tracesHeroStepEarnDetail),
-                    .init(title: words.tracesHeroStepUse, detail: words.tracesHeroStepUseDetail,
-                          link: GetStartedCard.Link(title: words.tracesHeroUseAction, action: openPrivateAI)),
-                ])
+            HomeTracesHero(words: words, openTraces: openTraces, openPrivateAI: openPrivateAI)
         }
     }
 
@@ -1461,11 +1441,18 @@ private struct HistoryStats: View {
                 // never disagree once credit is decided.
                 let creditTile = HomeFormat.creditTile(final: rollup?.creditFinal, pending: rollup?.creditPending,
                                                        accepted: rollup?.allTime?.accepted,
+                                                       submitted: rollup?.allTime?.submitted,
                                                        credit: credit)
                 let loadingRollup = store.isLoading("history_rollup")
+                // A decided figure needs only the rollup; the pending one
+                // waits on the commons' statement too (D6).
+                let finalKnown = HomeFormat.showsFinalFigure(
+                    final: rollup?.creditFinal, pending: rollup?.creditPending,
+                    accepted: rollup?.allTime?.accepted, submitted: rollup?.allTime?.submitted)
                 HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value,
                              detail: creditTile.detail,
-                             loading: store.isLoading("history_rollup", "commons_credit_summary"))
+                             loading: loadingRollup
+                                 || (!finalKnown && store.isLoading("commons_credit_summary")))
                 HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(rollup),
                              loading: loadingRollup)
                 HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined),
@@ -1696,8 +1683,9 @@ struct HistoryCreditCard: View {
     }
 }
 
-/// The record by period: the week's and month's accepted counts and the
-/// withdrawn count, from the rollup. #1146's History has no place for it,
+/// The record by period: the week's and month's Contributed counts (the
+/// core's figure, as the Contributed card above) and the withdrawn count,
+/// from the rollup. #1146's History has no place for it,
 /// so it closes the page, quietly, rather than sitting among Ron's stat
 /// cards.
 private struct HistoryPeriodCard: View {
@@ -1708,8 +1696,8 @@ private struct HistoryPeriodCard: View {
         let rollup = SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])
         GlassEyebrowCard(MonitorWords.summary) {
             GlassKeyValueList([
-                .init(MonitorWords.week, HomeFormat.count(rollup?.week?.accepted)),
-                .init(MonitorWords.month, HomeFormat.count(rollup?.month?.accepted)),
+                .init(MonitorWords.week, HomeFormat.count(rollup?.week?.contributed)),
+                .init(MonitorWords.month, HomeFormat.count(rollup?.month?.contributed)),
                 .init(MonitorWords.withdrawn, HomeFormat.count(rollup?.takenBack)),
             ])
         }
@@ -1937,19 +1925,22 @@ enum HomeFormat {
         return word
     }
 
-    /// Contributed, all time, as Ron's `isContributed` counts it: accepted,
-    /// waiting to be scored and held for privacy review. The one definition
-    /// behind Home's tile, History's card and the Traces summary. A part the
-    /// core did not give is a dash.
+    /// Contributed, all time: the core's own figure (`contributed`,
+    /// accepted plus waiting to be scored, never held), read and never
+    /// re-added here, so every shell shows the same number. Behind Home's
+    /// tile, History's card and the Traces summary. A dash when the core
+    /// did not give it.
     static func contributed(_ rollup: DaemonData.HistoryRollup?) -> String {
-        let all = rollup?.allTime
-        let parts = [all?.accepted, all?.submitted, all?.quarantined]
-        return count(parts.contains(nil) ? nil : parts.compactMap { $0 }.reduce(0, +))
+        count(rollup?.allTime?.contributed)
     }
 
     /// A count, or a dash when the core did not say. Zero is a number.
+    /// Grouped by the core's rule (`tc_count_figure`, "1,234"), the same
+    /// comma as the credit figures beside it.
     static func count(_ value: Int?) -> String {
-        value.map(String.init) ?? "—"
+        guard let value else { return "—" }
+        guard let count = UInt64(exactly: value) else { return String(value) }
+        return TCCredit.count(count) ?? String(value)
     }
 
     /// The payout link's "session ended" line from the core (the same
@@ -1969,8 +1960,11 @@ enum HomeFormat {
         return FirstRunCopy.fill(template, ["amount": points(Double(lifetime))])
     }
 
+    /// A credit figure in the core's one rule (`tc_credit_figure`): half
+    /// away from zero, whole is whole, "<0.1" for a sliver, a comma between
+    /// thousands (as `count`), the same on every shell. A dash for none.
     static func points(_ value: Double?) -> String {
-        value.map { $0.formatted(.number.precision(.fractionLength(0...1))) } ?? "—"
+        value.flatMap(TCCredit.figure) ?? "—"
     }
 
     /// Home's pending-credit tile: the figure only with the commons'
@@ -2008,14 +2002,30 @@ enum HomeFormat {
     /// `accepted` is the rollup's accepted count: with traces accepted and
     /// nothing pending, every one is decided, so the tile reads Final even
     /// at 0 (traces scored with no award, #1703), never Pending.
-    static func creditTile(final: Double?, pending: Double?, accepted: Int?,
+    /// `submitted` is the rollup's waiting-to-be-scored count: while any
+    /// contributed trace is still waiting, nothing is Final, even with no
+    /// pending figure from the server yet; an unknown count is not zero.
+    static func creditTile(final: Double?, pending: Double?, accepted: Int?, submitted: Int?,
                            credit: DaemonData.CommonsCreditSummary?) -> (value: String, detail: String) {
-        let allDecided = (accepted ?? 0) > 0 && (pending ?? 0) == 0 && final != nil
-        guard let final, final > 0 || allDecided else {
+        guard let final, showsFinalFigure(final: final, pending: pending, accepted: accepted,
+                                          submitted: submitted) else {
             return (pendingFigure(pending, credit: credit), MonitorWords.pending)
         }
+        let waiting = (submitted ?? 1) > 0
         return (points(final),
-                creditPendingAccessory(pending, condition: pendingCondition(credit)) ?? MonitorWords.final)
+                creditPendingAccessory(pending, condition: pendingCondition(credit))
+                    ?? (waiting ? MonitorWords.pending : MonitorWords.final))
+    }
+
+    /// Whether the Credit tile's figure is the decided one, which the
+    /// rollup alone says; otherwise it is the pending figure, which needs
+    /// the commons' statement (D6). So the tile waits on the network read
+    /// only in that case, and a known decided figure shows as soon as the
+    /// rollup does.
+    static func showsFinalFigure(final: Double?, pending: Double?, accepted: Int?, submitted: Int?) -> Bool {
+        guard let final else { return false }
+        let allDecided = (accepted ?? 0) > 0 && (pending ?? 0) == 0 && submitted == 0
+        return final > 0 || allDecided
     }
 
     /// Home's pending-credit tile and status-card link, in the core's words.

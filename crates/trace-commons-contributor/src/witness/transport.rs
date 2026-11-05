@@ -874,15 +874,16 @@ pub struct HttpWitnessTransport {
 /// `/v1/witness/admission`, the token-bundle route), body included.
 ///
 /// Derived from the witness's own bound, not chosen beside it: the witness
-/// abandons a request after `DEFAULT_REQUEST_TIMEOUT_SECS` (300 s,
-/// `trace-commons-witness`), measured as several megabytes of transcript
-/// through its classifier, and answers `504 witness_request_timed_out`. A
-/// client that gave up first (this was 120 s) abandoned healthy work the
+/// abandons a request after `DEFAULT_REQUEST_TIMEOUT_SECS` (540 s since
+/// 2026-11-05, `trace-commons-witness`) and answers
+/// `504 witness_request_timed_out`. A client that gave up first (this was
+/// 120 s, then 330 s against a 300 s witness) abandoned healthy work the
 /// witness was still doing, kept a witness slot busy for nothing, and
 /// reported it as the quote endpoint being down. Thirty seconds over the
 /// witness's bound leaves room for its 504 to arrive, so the witness's own
-/// answer is the one a person normally gets.
-pub const WITNESS_REVIEW_TIMEOUT: Duration = Duration::from_secs(330);
+/// answer is the one a person normally gets. 570 s also stays under the
+/// dstack gateway's 10-minute idle close in front of the witness.
+pub const WITNESS_REVIEW_TIMEOUT: Duration = Duration::from_secs(570);
 
 /// The deadline for the small witness-path calls: the quote
 /// (`/v1/attestation`) and the collateral ingest serves for it. Neither does
@@ -899,14 +900,31 @@ pub const WITNESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 ///
 /// Read from `reqwest`'s own classification, never from the error's text,
 /// which can carry the URL.
+///
+/// The connect phase is asked first. A connection that never opened is
+/// `witness_unreachable` however it failed -- refused at once, or a SYN
+/// nobody answered until the connect deadline ran out. `reqwest` reports
+/// that second case as both a connect error and a timeout; on Windows it is
+/// what a closed port looks like, because the stack retries the SYN for
+/// about two seconds instead of refusing. Only a deadline that ran out once
+/// connected -- the request, the headers, the body -- is `witness_timeout`.
 fn send_failure(error: &reqwest::Error, otherwise: WitnessTrustError) -> WitnessTrustError {
-    if error.is_timeout() {
-        WitnessTrustError::WitnessTimeout
-    } else if error.is_connect() {
+    if error.is_connect() {
         WitnessTrustError::WitnessUnreachable
+    } else if error.is_timeout() {
+        WitnessTrustError::WitnessTimeout
     } else {
         otherwise
     }
+}
+
+/// The connect deadline for a transport whose whole-request deadline is
+/// `timeout`: [`WITNESS_CONNECT_TIMEOUT`], and never more than half of
+/// `timeout`, so a connection that never opens always meets the connect
+/// deadline first and is reported as unreachable rather than as the whole
+/// request timing out.
+fn connect_deadline(timeout: Duration) -> Duration {
+    WITNESS_CONNECT_TIMEOUT.min(timeout / 2)
 }
 
 /// The longest a witness's `Retry-After` may hold a session, in seconds. One
@@ -949,7 +967,7 @@ impl HttpWitnessTransport {
         let http = reqwest::Client::builder()
             // Raw sessions are authorized for this attested endpoint only.
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(timeout.min(WITNESS_CONNECT_TIMEOUT))
+            .connect_timeout(connect_deadline(timeout))
             .timeout(timeout)
             .build()
             .map_err(|_| WitnessTrustError::WitnessAttestationUnavailable)?;
@@ -2122,6 +2140,7 @@ mod tests {
                     .unwrap()
                     .unwrap(),
             ],
+            accepted: Vec::new(),
         }
     }
 
@@ -2223,6 +2242,7 @@ mod tests {
         let unpinned = crate::witness::WitnessTrust {
             signing_address: address_of(&test_signer("witness")),
             measurements: Vec::new(),
+            accepted: Vec::new(),
         };
 
         let err = crate::witness::witness_session(
@@ -3911,6 +3931,54 @@ mod tests {
         );
     }
 
+    /// A connection that never opens -- no refusal, just no answer to the
+    /// SYN -- is unreachable, not a timeout. TEST-NET-1 (RFC 5737) is never
+    /// routed: the connect either hangs until the connect deadline or fails
+    /// at once with no route, and both must read the same. This is the case
+    /// a closed loopback port takes on Windows.
+    #[tokio::test]
+    async fn a_witness_whose_connection_never_opens_is_unreachable() {
+        let base = "http://192.0.2.1:9";
+        let transport = deadline_transport(base, base);
+        let error = tokio::time::timeout(
+            TEST_CEILING,
+            transport.attestation(&WitnessNonce::fresh().unwrap()),
+        )
+        .await
+        .expect("the attestation call returned instead of hanging")
+        .unwrap_err();
+        assert_eq!(error, WitnessTrustError::WitnessUnreachable);
+        let verified = crate::witness::verify::verified_witness_for_test(
+            base,
+            "0x1111111111111111111111111111111111111111",
+        );
+        let error = tokio::time::timeout(
+            TEST_CEILING,
+            transport.witness(&verified, b"private-test-transcript"),
+        )
+        .await
+        .expect("the witness call returned instead of hanging")
+        .err();
+        assert_eq!(error, Some(WitnessTrustError::WitnessUnreachable));
+    }
+
+    #[test]
+    fn the_connect_deadline_always_comes_before_the_request_deadline() {
+        for timeout in [
+            TEST_DEADLINE,
+            WITNESS_PROBE_TIMEOUT,
+            WITNESS_REVIEW_TIMEOUT,
+            Duration::from_secs(5),
+        ] {
+            assert!(connect_deadline(timeout) < timeout, "{timeout:?}");
+            assert!(connect_deadline(timeout) < timeout.min(WITNESS_PROBE_TIMEOUT));
+        }
+        assert_eq!(
+            connect_deadline(WITNESS_REVIEW_TIMEOUT),
+            WITNESS_CONNECT_TIMEOUT
+        );
+    }
+
     #[tokio::test]
     async fn the_witness_own_deadline_reads_as_a_timeout() {
         let app = Router::new().fallback(|| async {
@@ -3948,7 +4016,7 @@ mod tests {
         // out because this crate cannot depend on the server's; moving that
         // default means moving this, or a slow redaction the witness would
         // still finish is abandoned by the client first.
-        const WITNESS_SERVER_REQUEST_TIMEOUT_SECS: u64 = 300;
+        const WITNESS_SERVER_REQUEST_TIMEOUT_SECS: u64 = 540;
         assert!(WITNESS_REVIEW_TIMEOUT.as_secs() > WITNESS_SERVER_REQUEST_TIMEOUT_SECS);
         assert!(WITNESS_PROBE_TIMEOUT < WITNESS_REVIEW_TIMEOUT);
         assert!(WITNESS_CONNECT_TIMEOUT <= WITNESS_PROBE_TIMEOUT);

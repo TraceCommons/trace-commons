@@ -128,6 +128,15 @@ final class MenuBarPanelTests: XCTestCase {
         XCTAssertTrue(GlassMenuBarStrip.showsAttention(.unavailable))
         XCTAssertTrue(GlassMenuBarStrip.grey(.unavailable))
 
+        // Before the first reply: nothing drawn from data, no badge, grey,
+        // and no attention mark, since nothing has gone wrong.
+        let loading = GlassMenuBarStrip.steps(traces: columns, privateAI: columns, condition: .loading)
+        XCTAssertTrue(loading.allSatisfy { $0 == GlassMenuBarStrip.Step() })
+        XCTAssertNil(GlassMenuBarStrip.shownPrivateAI(columns, condition: .loading))
+        XCTAssertNil(GlassMenuBarStrip.shownBadge(4, condition: .loading))
+        XCTAssertFalse(GlassMenuBarStrip.showsAttention(.loading))
+        XCTAssertTrue(GlassMenuBarStrip.grey(.loading))
+
         let live = GlassMenuBarStrip.steps(traces: columns, privateAI: columns, condition: .live)
         XCTAssertTrue(live.contains { $0.shared > 0 && $0.verified > 0 })
         XCTAssertEqual(GlassMenuBarStrip.shownBadge(4, condition: .live), 4)

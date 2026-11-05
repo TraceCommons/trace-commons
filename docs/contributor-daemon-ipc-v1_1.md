@@ -21,6 +21,26 @@ old behaviour, because no application has shipped against `v1` yet. See
 
 **New in this revision (additive, no existing field or shape changed):**
 
+- The witness no longer blocks anything. The upload pass hands an approved
+  entry that needs a witness review to the daemon's witness worker and moves
+  on; the worker pins the certified review on the still-approved entry and a
+  later pass uploads it. `status.witness_capacity` gains
+  `privacy_check_sessions` and `checking_sessions`. A witness that could not
+  be reached or did not answer is retried by the worker as before (see the
+  transient-upload backoff), and the worker rests until that retry.
+  `witness_preview_request` takes an optional
+  `background: true` that answers `in_progress` at once and ends with a new
+  `witness_review_ready` event. See [`witness_capacity`](#witness_capacity)
+  and "Explicit witnessed review".
+- `list_projects` rows whose label carries the daemon's disambiguating
+  suffix carry `collision` (`group`, `base_label`, `suffix`), so a client
+  groups rows by the daemon's own collision test rather than by parsing a
+  label. Absent on every other row. See
+  [`collision`](#collision-1952-review).
+- `plan_project_modes` and `set_project_modes` plan and make a bulk or
+  group mode change (Ask or Never only), asking first when it turns off
+  Automatic or removes waiting traces, from the daemon's live state. See
+  [`plan_project_modes` and `set_project_modes`](#plan_project_modes-and-set_project_modes).
 - The daily upload limit is retired. `set_settings` accepts
   `max_uploads_per_day` and `max_bytes_per_day` and ignores them, so a
   shell built while the limit existed can still save its other settings;
@@ -653,7 +673,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `referral_codes_disable` | `code_id` (**required**, a UUID the list answered) | `code_id`, `state` | asynchronous only; account session. People who joined with the code keep earning its owner a bonus. `referral_code_not_found` for a code this account does not hold. Audit row `referral-code-disabled` |
 | `referral_apply` | `code` (**required**, as typed) | `outcome: "applied"`, `applied_at`, `earn_until` | asynchronous only; account session. Text that is not a code is refused here with `referral-code-invalid` and never sent; a code is sent only in canonical form. Every refusal by the commons is the one label `referral_not_applied`, whatever the reason. Audit row `referral-applied` |
 | `referral_status` | — | `applied`, `applied_at`, `applied_via` (`signup` or `later`), `earn_until`, `apply_until`, `can_apply` | asynchronous only; account session. The referee sees that a code is applied, never whose. `can_apply` is true while none is applied and `apply_until` has not passed |
-| `witness_preview_request` | `entry_id`, `raw_session_confirmed: true`; optional `outcome`, `correction` | `status: "ready"`, `summary` | awaits explicit remote review; saves and pins certified bytes without approval or upload |
+| `witness_preview_request` | `entry_id`, `raw_session_confirmed: true`; optional `outcome`, `correction`, `background` | `status: "ready"`, `summary`; with `background: true`, `status: "in_progress"`, `entry_id` | awaits explicit remote review (or, in the background, returns at once and ends with a `witness_review_ready` event); saves and pins certified bytes without approval or upload |
 | `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
 | `preview_cancel` | `entry_id` | `entry_id`, `dropped` | drops a queued preview, or discards a running one's result; `dropped: false` is a no-op, not an error |
@@ -669,6 +689,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `resume` | — | `paused: false` | |
 | `list_projects` | `include_found` (optional boolean) | `projects[]` of `{project_id, project_label, mode, folder_mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now`, `overridden_by` (`null` or the override's mode) | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
+| `plan_project_modes` | `project_ids` (array), `mode` | `outcome`, `project_ids`, `turns_off_automatic`, `pending`, `confirmation` (when `outcome` is `confirm`), `bulk_modes` | reads only; see "`plan_project_modes` and `set_project_modes`" below |
+| `set_project_modes` | `project_ids` (array), `mode` (`notify_only` or `ignore`), `agreed` (optional `{turns_off_automatic, pending}`) | `changed`, `total`, `purged`, `refused` (only when stopped part way) | `auto_upload` refused with `bulk-automatic-refused`; `bulk-confirmation-stale` when the live counts outgrow `agreed`; see below |
 | `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208) and with `consent-scopes-not-chosen` while the enrollment's scopes were never chosen; see "The contribution override" below |
 | `clear_contribution_override` | — | `cleared`, `returned: <count>` | every folder back on its own mode; see "The contribution override" below |
 | `mission_matches` | `catalogue` (a contribution mission catalogue; PROVISIONAL, shape owned by Z7/Z8) | `matches[]` of mission ids, `read: {tools, folders}` (counts) | K16 (#1173): which contribution missions this Mac's work fits, worked out on this Mac only; read-only; refused with `catalogue-required`, `catalogue-invalid` or `catalogue-schema-unsupported`; see "`mission_matches`" below |
@@ -760,7 +782,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   "health": { "last_error_label": null, "since": null },
   "routing": { "state": "not_declared", "last_refresh_at": null },
   "grant_voids": [],
-  "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null },
+  "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null, "privacy_check_sessions": 0, "checking_sessions": 0 },
   "arming_rewordings": [],
   "automatic_contribution_held": { "held_sessions": 0, "reasons": [], "projects": [] },
   "contribution_override": null,
@@ -872,17 +894,41 @@ tried again. Always present; `waiting_sessions` is `0` and `next_retry_at`
 | --- | --- |
 | `waiting_sessions` | approved entries whose `reason_label` is `witness-saturated` |
 | `next_retry_at` | the earliest `retry_after` among them (RFC 3339), or `null` |
+| `privacy_check_sessions` | additive: approved entries still waiting on, or in, the privacy check -- a witness is configured and no certified review is pinned yet, whether queued for the witness worker, being checked, or waiting out a retry. `0` without a witness |
+| `checking_sessions` | additive: witness calls running now (background and a person's own review) |
 
-The upload pass marks its witness requests
+**The witness never blocks the upload pass.** Since this revision the
+upload pass does not await the witness. An approved entry that still needs
+a witness review is handed to the daemon's witness worker and the pass
+moves on; the worker runs at most one background witness call at a time
+(and a person's own review on a lane of its own), pins the certified review
+on the entry, which stays `approved`, and a later upload pass sends exactly
+those bytes. Watching, expiry, history and other uploads are never held up
+by a witness call. A restart mid-call loses only the call: the entry is
+still approved with no pin and is sent to the witness again; a result that
+arrived is pinned before anything else happens and is never re-requested.
+
+The worker marks its witness requests
 `x-trace-witness-workload: background`; a review a contributor asked for
 sends no header. On a saturation refusal the entry keeps its approval, is
 labelled `witness-saturated`, and is not claimed again before the witness's
 own `Retry-After` (bounded to an hour; an unreadable value is the contract's
 30 seconds), doubling while the witness stays busy, capped at an hour, plus
-up to half the witness's delay of per-session jitter. Every later entry in
-the same pass that would need the witness is held until the same time
-without being sent, so a busy witness is asked once per pass, not once per
-session. There is no attempt limit: a busy witness never costs a session.
+up to half the witness's delay of per-session jitter. Every other entry
+waiting for the worker is held until the same time without being sent, so a
+busy witness is asked once, not once per session. There is no attempt
+limit: a busy witness never costs a session.
+
+A witness whose evidence could not be fetched (`witness_timeout`,
+`witness_unreachable`, `witness_attestation_unavailable`,
+`witness_collateral_unavailable`) also keeps the approval: the entry stays
+`approved` under that label and is retried on the transient-upload backoff,
+and the worker takes no other session until that retry, since the next
+would meet the same witness. Once that budget is spent the entry returns to
+`pending` under the same label, held for a person; it is never `refused`
+for it. Evidence that was fetched and did not verify is never retried: the
+entry returns to `pending` under `witness-not-trusted` or
+`witness-measurement-not-accepted`.
 
 It is beside `health` because the daemon also
 sets `witness-saturated` in the health slot, set and retracted from the
@@ -1761,6 +1807,27 @@ ingest receives the original bytes. The envelope remains bounded by the existing
 size limit; the record including encoding/certificate overhead is limited to twice
 that size, under the existing aggregate approved-artifact storage ceiling.
 
+**Background mode.** `witness_preview_request` also takes
+`background: true`. The same checks that need no network (consent, the id,
+an entry that is `pending` and not already pinned) are answered at once,
+as above; otherwise the call returns immediately with
+`{status: "in_progress", entry_id}` and the review runs on the witness
+worker's interactive lane. Asking again for the same entry while it runs
+answers `in_progress` again and starts nothing. A second entry while one
+review runs is `busy` / `witness-review-in-progress`. When the review ends
+the daemon publishes one `witness_review_ready` event:
+
+| `status` | Also carries |
+|---|---|
+| `ready` | `summary`, as the synchronous call returns it; `queue_changed` follows |
+| `busy` | `code`, `label` (`witness_saturated`), and the `view` the synchronous call carries |
+| `failed` | `code`, `label`, and `view` -- the same refusal labels and sentence as the synchronous call |
+
+Without the flag the call is synchronous exactly as before. Unenroll stops
+a review in flight (`failed`, `witness-review-stale`). A daemon with no
+runtime of its own (a one-shot command) answers synchronously even when the
+flag is set.
+
 This enables a local implementation seam, not a deployed capability claim.
 Live acceptance still requires configured trusted witness deployment, usable
 provider receipt retrieval, and an invited end-to-end artifact check.
@@ -1947,6 +2014,70 @@ What it is not:
 cancels any scheduled preview for the entry, as `dismiss` does. Neither
 method writes an audit row, as `dismiss` does not: they are decisions about
 one session, not autonomy changes.
+
+### `plan_project_modes` and `set_project_modes`
+
+A bulk or group mode change (Settings > Projects' Manage sheet), planned
+and made by the daemon so no client decides when it asks first. The rules
+(owner decisions 2026-11-04 on #1952):
+
+- A bulk change sets `notify_only` (Ask) or `ignore` (Never), never
+  `auto_upload`. Arming is a grant, made one project at a time through the
+  arming confirmation. `bulk_modes` on every plan names the two, and a
+  client's bulk menus offer those only.
+- It asks first when it turns off Automatic on one or more projects
+  (`turns_off_automatic`), or when a Never removes waiting traces
+  (`pending`; always 0 for Ask).
+- Projects already in the mode, or unable to take it, are skipped and not
+  counted. An id the daemon does not know is skipped. Repeated ids count
+  once. At most 10,000 ids.
+
+`plan_project_modes` changes nothing:
+
+```json
+{
+  "outcome": "confirm",
+  "project_ids": ["proj_9f2c1ab30d4e5f60", "proj_0d4e5f609f2c1ab3"],
+  "turns_off_automatic": 1,
+  "pending": 3,
+  "confirmation": {
+    "title": "Set 2 projects to Never?",
+    "body": "This turns off Automatic for 1 project. This removes 3 waiting traces. Traces already sent aren't affected.",
+    "button": "Never",
+    "keep": "Keep",
+    "help": "Setting it back to Ask can offer the removed traces again.",
+    "destructive": true
+  },
+  "bulk_modes": ["notify_only", "ignore"]
+}
+```
+
+`outcome` is `nothing` (no project changes), `apply` (change straight
+away), `confirm` (ask first, in `confirmation`'s words, rendered whole), or
+`refused` (`auto_upload`). `help` is present only when a Never removes
+waiting traces. A plan for no ids answers `nothing` with `bulk_modes`,
+which is how a client learns the menus' modes.
+
+`set_project_modes` plans again from the live policy and queue, then runs
+one `set_project_mode` per project the plan reaches, in order, with that
+method's audit records and purge. `auto_upload` is refused with
+`bulk-automatic-refused` before anything is read. A change whose plan asks
+first runs only when `agreed` carries the counts the person was shown and
+neither live count is larger; otherwise it is refused with
+`bulk-confirmation-stale` and nothing changes, and the client plans and
+asks again. That closes the window between the confirmation and the
+call; the plan and the per-project changes are not under one lock, so a
+trace arriving during the change itself is removed as one project's Never
+would remove it, and `purged` reports what was actually removed. The first
+refusal stops the rest:
+
+```json
+{ "changed": ["proj_9f2c1ab30d4e5f60"], "total": 2, "purged": 1, "refused": "project-key-unrecognized" }
+```
+
+`refused` is present only when the change stopped part way; `changed` is
+what did change, so a client keeps the others selected and can say "1 of 2
+changed."
 
 ### `set_project_mode` and the ignore purge
 
@@ -2964,6 +3095,24 @@ Until 2026-10-29 a row under that grant carried only
 `["auto_upload", "ignore"]` and `set_project_mode` refused `notify_only` with
 `automatic-sharing-requires-ignore`; both are gone.
 
+#### `collision` (#1952 review)
+
+Present only on a row whose `project_label` carries the four-hex-digit
+suffix the daemon adds when two known projects' folded basenames are the
+same, and absent (never null) on every other row:
+
+```json
+"collision": { "group": "api", "base_label": "Api", "suffix": "57b3" }
+```
+
+`group` is the folded basename the collision test compared: every row in
+one group has the same value, and it says no more than the label already
+does. `base_label` is the label without its suffix, spelled from the
+unfolded path; `suffix` is the four hex digits, from `sha256(key)`. A
+client groups rows by `group` and never by parsing `project_label`: a
+folder whose own name is `notes (beef)` has no `collision` and is not
+grouped. The unresolved bucket never carries one.
+
 #### `unpurposed_traces` (K7)
 
 A top-level count beside `projects[]`, for the design's suggestion: "27 scrubbed
@@ -3385,6 +3534,23 @@ reason no unattended approval can satisfy:
   behalf that the Automatic Scrub check held because the envelope built for
   it is worth a second look -- nothing matched, it looks unsure, or it was
   trimmed to fit. See `scrub_check` under `set_settings`.
+- `witness_timeout`, `witness_unreachable`, `witness_attestation_unavailable`
+  or `witness_collateral_unavailable`, on a `pending` entry: the witness's
+  evidence could not be fetched (no answer in time, no connection, no
+  attestation or no collateral) through every retry. Nothing was judged and
+  nothing was sent. While it is still being retried the entry stays
+  `approved` under the same label, with `retry_after` set, and is not held.
+  Earlier builds refused such a session as `witness_attestation_unavailable`;
+  a newer build offers that refusal again.
+- `witness-measurement-not-accepted`: the witness's evidence was fetched and
+  verified, but it reports a measurement outside the accepted set. It is not
+  retried, and nothing was sent. A person decides; a newer accepted list can
+  make the same witness valid.
+- `witness-not-trusted`: the witness's evidence was fetched and did not
+  verify -- the quote is not genuine, it is not bound to this client's nonce,
+  it names another signer than the pinned one, or the certificate on the
+  witness's answer does not verify or does not match its bytes. It is not
+  retried, and nothing was sent. A person decides.
 
 A group control is by definition not a review of one
 session, so held entries are left out for every contributor, invited or not,
@@ -7454,9 +7620,9 @@ loads (`#[serde(default)]`).
 
 ```json
 {
-  "week":     {"submitted": 0, "accepted": 0, "quarantined": 0, "other": 0},
-  "month":    {"submitted": 0, "accepted": 0, "quarantined": 0, "other": 0},
-  "all_time": {"submitted": 0, "accepted": 0, "quarantined": 0, "other": 0},
+  "week":     {"submitted": 0, "accepted": 0, "quarantined": 0, "withdrawn": 0, "other": 0, "contributed": 0},
+  "month":    {"submitted": 0, "accepted": 0, "quarantined": 0, "withdrawn": 0, "other": 0, "contributed": 0},
+  "all_time": {"submitted": 0, "accepted": 0, "quarantined": 0, "withdrawn": 0, "other": 0, "contributed": 0},
   "credit_pending": 0.0,
   "credit_final": 0.0,
   "quarantined": 0,
@@ -7468,6 +7634,15 @@ loads (`#[serde(default)]`).
 `quarantined` is reported separately and must be rendered separately.
 Quarantine means **held for operator privacy review**, not rejected. A
 contributor who sees it grouped with failures reads it as rejection.
+
+`contributed` (in each of `week`, `month` and `all_time`) is what every
+shell's Contributed figure shows: `accepted + submitted`, accepted plus
+waiting to be scored. Held (`quarantined`) is **not** in it; it is its own
+figure beside Contributed, and counting it in both made one page read as
+more traces than there are. A shell reads this field and never re-adds the
+buckets itself. It is a sum of two buckets, not a bucket, so it is not part
+of a window's total. A daemon older than this field omits it; a shell draws
+a dash for it then, never a figure it added up.
 
 `taken_back` (K7) is how many history records have been taken back -- the
 design's third tile, "2 taken back": withdrawn from this daemon (a local
@@ -7856,7 +8031,7 @@ sentence, and it does not divide by `10^scale` itself.
 | `tc_near_ai_balance_amount` | `present`, `nanos`, `scale` | The bare amount, e.g. `$8.50`. |
 | `tc_near_ai_balance_remaining_line` | `present`, `nanos`, `scale` | `Left to spend: $8.50.`, or the no-limit sentence when `present == 0`. |
 | `tc_near_ai_balance_limit_line` | `present`, `nanos`, `scale` | The ceiling, or `""`. |
-| `tc_near_ai_balance_spent_line` | `present`, `nanos`, `scale` | What the account has spent, or `""`. |
+| `tc_near_ai_balance_spent_line` | `present`, `nanos`, `scale`, `remaining_present` | What the account has spent, or `""`. `remaining_present` is whether `remaining_nanos` is non-null; it picks the rounding (below). |
 | `tc_near_ai_balance_observed_line` | `seconds_ago` | How long ago **this daemon** asked. Negative gives `""`. |
 
 `present` is `0` for a `null` on the wire and non-zero otherwise. It is a
@@ -7868,6 +8043,13 @@ debt as no figure at all.
 The rounding is **down**, toward minus infinity, so a printed figure is never
 larger than the one that arrived; a nonzero amount under a cent is
 `less than $0.01` and not `$0.00`.
+
+One exception: Spent drawn beside a remaining figure (`remaining_present`
+non-zero) rounds **up** to the cent, so Limit, Spent and what is left add up
+on the cents shown (limit $130.00 and spent $18.185 leave $111.81, so Spent
+reads $18.19). With no remaining figure there is nothing to add up with, and
+Spent rounds down like every other amount. A spend above zero and under a
+cent is `less than $0.01` either way, never `$0.01`.
 
 #### Three neighbouring fields, three different meanings for a missing key
 
@@ -8997,6 +9179,7 @@ deletes that file when it starts.
 | `digest_due` | batching interval elapsed with pending work, and the master and digest notification switches are on and no standalone re-engagement notification posted in the last hour | `{pending, contributed, contributed_projects, contribution, credit_final, credit_pending, text, fold?}` -- `contribution` is the contribution sentence as the core worded it (credit included, e.g. "2 traces contributed from api. 4.3 credit earned."), or `null` when nothing was contributed; it states every earned figure, and a shell that builds its own digest (Windows) posts it as the contribution half. `text` states the same sentence but, when the digest folds in verdict news, leaves out the credit of the traces that fold already states ("is now final"), so each earned figure appears once on each surface. The fold states a folded trace's credit as it was when the trace went final (a later revision is not stated again), and each part is rounded on its own, so the fold's figure plus `text`'s earned figure can differ from `contribution` by a rounding step; a fold that states no credit (its finals add to under 0.05) covers none. `credit_final` and `credit_pending` are rounded once to tenths and decimal-clean (0 when they round to nothing); `credit_final` is the final credit (a decided figure, 0 included) of those contributions and `credit_pending` the credit still being scored; the digest says the first as "earned" and the second as "pending", and a daemon that predates `credit_final` omits it (read as 0) -- `fold` is `{kind, text}` when the attention arbiter folded a re-engagement sentence in as the digest's third sentence; `text` already ends with it |
 | `resync_required` | this client fell behind the event buffer | `{}` |
 | `preview_ready` | a scheduled preview finished and was delivered | the same object `preview_request` returns for a cache hit -- see "Scheduled previews" |
+| `witness_review_ready` | additive: a `witness_preview_request {background: true}` review finished | `{entry_id, status, summary?, code?, label?, view?}` -- see "Explicit witnessed review" |
 | `inference_call_added` | the poll tick read a call from IronWire's log that no earlier tick had (K14) | `{id, tool, model, proof}` -- see below |
 | `managed_changed` | a saved model account or managed session changed (see `docs/managed-sessions.md`) | `{revision}` |
 | `usage_changed` | additive: the poll tick's ledger read added at least one call while the `insights_ledger_feed` setting is on | `{}` -- see below |

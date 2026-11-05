@@ -800,10 +800,14 @@ impl QueueEntry {
                     | crate::submit::REASON_INGEST_UNREACHABLE
                     | super::health::LABEL_CLAIM_MINT_FAILED
             )
-        ) || self.reason_label.as_deref().is_some_and(|label| {
-            trace_commons_protocol::admission::AdmissionRefusal::from_label(label)
-                == Some(trace_commons_protocol::admission::AdmissionRefusal::InProgress)
-        })
+        ) || self
+            .reason_label
+            .as_deref()
+            .is_some_and(crate::submit::witness_failure_is_transient)
+            || self.reason_label.as_deref().is_some_and(|label| {
+                trace_commons_protocol::admission::AdmissionRefusal::from_label(label)
+                    == Some(trace_commons_protocol::admission::AdmissionRefusal::InProgress)
+            })
     }
 
     /// Whether this entry is approved and held because the witness is at
@@ -990,6 +994,34 @@ pub const REASONS_NEEDING_A_PERSON: &[&str] = &[
     // The Automatic Scrub check's hold (K4 of #1118): the scrubber was
     // unsure about the session, and an unsure session never moves on its own.
     super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
+    // A witness whose evidence could not be fetched through the whole
+    // transient-upload budget (`submit::witness_failure_is_transient`).
+    // While retrying, the entry is `Approved` under the same label and is
+    // not held; only the spent budget leaves it `Pending` under it.
+    "witness_timeout",
+    "witness_unreachable",
+    REASON_WITNESS_ATTESTATION_UNAVAILABLE,
+    "witness_collateral_unavailable",
+    // A witness whose evidence did not verify (`submit::witness_trust_hold`):
+    // a person decides rather than the session being refused. A new accepted
+    // list may cure the measurement case, and clears only that hold.
+    crate::submit::REASON_WITNESS_NOT_TRUSTED,
+    crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED,
+];
+
+/// `witness_attestation_unavailable`, as `witness::WitnessTrustError` spells
+/// it.
+const REASON_WITNESS_ATTESTATION_UNAVAILABLE: &str = "witness_attestation_unavailable";
+
+/// Refusals a newer build offers again
+/// ([`Queue::reoffer_panicked_refusals`]): each may be the build's fault
+/// rather than the trace's. A redaction that panicked is a defect in the
+/// build; `witness_attestation_unavailable` was also what earlier builds
+/// recorded when the witness merely ran past its deadline, a terminal
+/// refusal for a session nothing had judged.
+pub const REOFFERED_ON_A_NEWER_BUILD: &[&str] = &[
+    crate::envelope::REASON_REDACTION_PANICKED,
+    REASON_WITNESS_ATTESTATION_UNAVAILABLE,
 ];
 
 /// Strip an entry back to a fresh offer, keeping only provenance.
@@ -1684,6 +1716,29 @@ impl Queue {
         true
     }
 
+    /// Release every session held because the witness reported a measurement
+    /// outside the accepted set (`submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED`),
+    /// for a newly installed accepted list that may now include it. Each goes
+    /// back to waiting as a fresh offer dated `now`, like
+    /// [`Self::return_to_waiting`]: a standing opt-in applies to it again on
+    /// the next pass, and the next send asks the witness again under the new
+    /// list. `witness-not-trusted` holds stay: a list does not change whether
+    /// a quote, nonce, signer or certificate verifies. Returns how many moved.
+    pub fn release_measurement_holds(&mut self, now: DateTime<Utc>) -> usize {
+        let mut released = 0;
+        for e in self.entries.iter_mut() {
+            if e.state == QueueState::Pending
+                && e.reason_label.as_deref()
+                    == Some(crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED)
+            {
+                e.reason_label = None;
+                e.discovered_at = now;
+                released += 1;
+            }
+        }
+        released
+    }
+
     /// Whether `entry_id` is still an approval made on the contributor's
     /// behalf. For a caller that chose it earlier and let the lock go: in
     /// between, the contributor may have dismissed it or approved it
@@ -1889,6 +1944,45 @@ impl Queue {
         true
     }
 
+    /// Pin the witness's certified review on an entry that is already
+    /// approved, without touching the approval: the witness worker's result
+    /// (`daemon::witness_worker`). The next upload pass sends exactly these
+    /// bytes through the witness-pin path.
+    ///
+    /// Refused unless the entry is `Approved` with no pin of its own, so a
+    /// result that arrives after a cancel, a revoke or a person's own review
+    /// changes nothing. A retry label the witness left on the entry is
+    /// cleared with its deadline, and so is the run of transient failures:
+    /// the check has now answered.
+    pub fn pin_witnessed_approval(
+        &mut self,
+        entry_id: Uuid,
+        digest: &str,
+        attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
+        would_send_bytes: Option<u64>,
+    ) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.state != QueueState::Approved || e.previewed_envelope_digest.is_some() {
+            return false;
+        }
+        e.previewed_envelope_digest = Some(digest.to_string());
+        e.attested_inference = attested_inference;
+        e.would_send_bytes = would_send_bytes;
+        if e.reason_label
+            .as_deref()
+            .is_some_and(crate::submit::witness_failure_is_transient)
+            || e.reason_label.as_deref() == Some(crate::submit::REASON_WITNESS_SATURATED)
+        {
+            e.reason_label = None;
+            e.retry_after = None;
+        }
+        e.transient_upload_failures = 0;
+        e.transient_upload_run_started_at = None;
+        true
+    }
+
     /// Record what the scrubber found in the envelope `entry_id` is pinned
     /// to. Returns whether anything changed, so a caller saves the queue
     /// only when it has to.
@@ -1995,34 +2089,46 @@ impl Queue {
         changed
     }
 
-    /// Record the build a refusal happened on, when it was a
-    /// `redaction-panicked` refusal; any other refusal is left as it is.
+    /// Record the build a refusal happened on, when it is one a newer build
+    /// offers again ([`REOFFERED_ON_A_NEWER_BUILD`]); any other refusal is
+    /// left as it is.
     pub fn note_refusal_version(&mut self, entry_id: Uuid, version: &str) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id)
             && e.state == QueueState::Refused
-            && e.reason_label.as_deref() == Some(crate::envelope::REASON_REDACTION_PANICKED)
+            && e.reason_label
+                .as_deref()
+                .is_some_and(|r| REOFFERED_ON_A_NEWER_BUILD.contains(&r))
         {
             e.refused_on_version = Some(version.to_string());
         }
     }
 
-    /// Offer again every trace refused because its redaction panicked on a
-    /// build older than `current_version`: back to `Approved` if it was
-    /// approved (the drain's usual checks then decide whether that approval
-    /// still holds), otherwise back to `Pending`. Returns whether anything
-    /// moved. A refusal with no recorded build, or one recorded on this
-    /// build or a newer one, stays refused.
+    /// Offer again every trace refused under one of
+    /// [`REOFFERED_ON_A_NEWER_BUILD`] on a build older than
+    /// `current_version`: back to `Approved` if it was approved (the drain's
+    /// usual checks then decide whether that approval still holds),
+    /// otherwise back to `Pending`, where a standing opt-in is applied again
+    /// by the watcher's usual rules. Returns whether anything moved. A
+    /// refusal recorded on this build or a newer one stays refused. One with
+    /// no recorded build stays refused too, except
+    /// `witness_attestation_unavailable`: no build recorded one before this
+    /// rule, and those builds also gave that label to a witness that only
+    /// ran out of time, so an unrecorded one is from an older build.
     pub fn reoffer_panicked_refusals(&mut self, current_version: &str) -> bool {
         let mut changed = false;
         for e in self.entries.iter_mut() {
-            if e.state != QueueState::Refused
-                || e.reason_label.as_deref() != Some(crate::envelope::REASON_REDACTION_PANICKED)
-            {
+            let Some(reason) = e.reason_label.as_deref() else {
+                continue;
+            };
+            if e.state != QueueState::Refused || !REOFFERED_ON_A_NEWER_BUILD.contains(&reason) {
                 continue;
             }
-            let newer = e.refused_on_version.as_deref().is_some_and(|refused_on| {
-                crate::update::version::is_newer(refused_on, current_version).unwrap_or(false)
-            });
+            let newer = match e.refused_on_version.as_deref() {
+                Some(refused_on) => {
+                    crate::update::version::is_newer(refused_on, current_version).unwrap_or(false)
+                }
+                None => reason == REASON_WITNESS_ATTESTATION_UNAVAILABLE,
+            };
             if !newer {
                 continue;
             }
@@ -3097,6 +3203,112 @@ mod tests {
     /// a newer build runs: approved again if it was approved, pending if it
     /// was not. The same build, an older one, or any other refusal leaves
     /// it where it is.
+    /// Builds before the witness timeout was told apart refused a session
+    /// `witness_attestation_unavailable` when the witness merely ran out of
+    /// time, and recorded no build. Such a refusal is offered again; one
+    /// recorded on this build waits for a newer one, like a panic's. A
+    /// panic's refusal with no recorded build still stays refused.
+    #[test]
+    fn a_witness_unavailable_refusal_from_an_older_build_is_offered_again() {
+        let unavailable = REASON_WITNESS_ATTESTATION_UNAVAILABLE;
+        let old = entry("old", "2026-11-04T00:00:00Z");
+        let current = entry("current", "2026-11-04T00:00:00Z");
+        let panicked = entry("panicked", "2026-11-04T00:00:00Z");
+        let mut q = Queue::new();
+        for e in [&old, &current, &panicked] {
+            q.upsert(e.clone(), 5000).unwrap();
+        }
+        q.set_state(old.entry_id, QueueState::Refused, Some(unavailable.into()));
+        q.set_state(
+            current.entry_id,
+            QueueState::Refused,
+            Some(unavailable.into()),
+        );
+        q.note_refusal_version(current.entry_id, "0.24.4");
+        q.set_state(
+            panicked.entry_id,
+            QueueState::Refused,
+            Some(crate::envelope::REASON_REDACTION_PANICKED.into()),
+        );
+
+        assert!(q.reoffer_panicked_refusals("0.24.4"));
+        let back = q.get(old.entry_id).unwrap();
+        assert_eq!(back.state, QueueState::Pending);
+        assert_eq!(back.reason_label, None);
+        assert_eq!(q.get(current.entry_id).unwrap().state, QueueState::Refused);
+        assert_eq!(q.get(panicked.entry_id).unwrap().state, QueueState::Refused);
+        assert!(
+            !q.reoffer_panicked_refusals("0.24.4"),
+            "nothing left to move"
+        );
+
+        assert!(q.reoffer_panicked_refusals("0.24.5"));
+        assert_eq!(q.get(current.entry_id).unwrap().state, QueueState::Pending);
+    }
+
+    /// A new accepted list can cure a measurement that was not accepted, so
+    /// it releases those holds back to waiting -- and only those: a quote,
+    /// nonce, signer or certificate that did not verify is not something a
+    /// list changes.
+    #[test]
+    fn a_new_accepted_list_releases_only_measurement_holds() {
+        let measurement = crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED;
+        let untrusted = crate::submit::REASON_WITNESS_NOT_TRUSTED;
+        let mut q = Queue::new();
+        let held = entry("measurement", "2026-11-01T00:00:00Z");
+        let other = entry("untrusted", "2026-11-01T00:00:00Z");
+        let refused = entry("refused", "2026-11-01T00:00:00Z");
+        for e in [&held, &other, &refused] {
+            q.upsert(e.clone(), 5000).unwrap();
+        }
+        q.set_state(held.entry_id, QueueState::Pending, Some(measurement.into()));
+        q.set_state(other.entry_id, QueueState::Pending, Some(untrusted.into()));
+        q.set_state(
+            refused.entry_id,
+            QueueState::Refused,
+            Some(measurement.into()),
+        );
+        assert!(q.get(held.entry_id).unwrap().held_for_review());
+
+        let now = at("2026-11-05T00:00:00Z");
+        assert_eq!(q.release_measurement_holds(now), 1);
+        let released = q.get(held.entry_id).unwrap();
+        assert_eq!(released.state, QueueState::Pending);
+        assert_eq!(released.reason_label, None);
+        assert!(!released.held_for_review());
+        assert_eq!(released.discovered_at, now, "a fresh offer, dated now");
+        let kept = q.get(other.entry_id).unwrap();
+        assert_eq!(kept.reason_label.as_deref(), Some(untrusted));
+        assert!(kept.held_for_review());
+        assert_eq!(q.get(refused.entry_id).unwrap().state, QueueState::Refused);
+        assert_eq!(
+            q.release_measurement_holds(now),
+            0,
+            "nothing left to release"
+        );
+    }
+
+    /// The witness labels that hold a session for a person hold it only
+    /// once it is `Pending` under them: while retrying it stays approved.
+    #[test]
+    fn a_witness_no_answer_label_holds_only_a_pending_entry() {
+        let mut q = Queue::new();
+        let e = entry("w", "2026-11-04T00:00:00Z");
+        q.upsert(e.clone(), 5000).unwrap();
+        q.set_state(
+            e.entry_id,
+            QueueState::Approved,
+            Some("witness_timeout".into()),
+        );
+        assert!(!q.get(e.entry_id).unwrap().held_for_review());
+        q.set_state(
+            e.entry_id,
+            QueueState::Pending,
+            Some("witness_timeout".into()),
+        );
+        assert!(q.get(e.entry_id).unwrap().held_for_review());
+    }
+
     #[test]
     fn a_panicked_refusal_is_offered_again_on_a_newer_build_only() {
         let panicked = crate::envelope::REASON_REDACTION_PANICKED;

@@ -1214,6 +1214,22 @@ A malformed nonce is rejected rather than padded — `parse_hex` accepts exactly
 64 bare hex characters, no `0x` prefix — so a `400` here is usually your nonce,
 not the witness.
 
+Then check the witness's own load and reachability. Once a build with
+`GET /v1/diagnostics` is deployed (witness-diagnostics-v1), run the witness
+health check, which prints `WitnessHealthOK` or
+`WitnessHealthFailure:<labels>` and exits 0 or 1. A build without the route
+fails it as `unreachable:http_4xx`, deliberately: an unobservable witness is
+not a healthy one.
+
+```sh
+TRACE_COMMONS_WITNESS_MONITOR_URL="https://<witness-host>/v1/diagnostics" \
+  python3 scripts/operator/witness_monitor.py check
+```
+
+Run it as the last step of every witness deploy and record its one output line
+with the deploy evidence. The standing one-minute poll is described in
+[`docs/operator/witness-monitor.md`](../../docs/operator/witness-monitor.md).
+
 ---
 
 ## The deployment that exists

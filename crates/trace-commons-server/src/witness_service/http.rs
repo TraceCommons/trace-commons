@@ -155,6 +155,11 @@ pub struct WitnessLoadBound {
     permits: Arc<Semaphore>,
     background_permits: Arc<Semaphore>,
     request_timeout: Duration,
+    max_concurrent_requests: usize,
+    /// The classify queue admitted requests wait in, when the witness has
+    /// one; see [`Self::with_classify_queue`].
+    classify_queue: Option<Arc<super::prefetch::ClassifyQueue>>,
+    early_busy: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl WitnessLoadBound {
@@ -189,7 +194,33 @@ impl WitnessLoadBound {
                 max_concurrent_requests - reserved_interactive_slots,
             )),
             request_timeout,
+            max_concurrent_requests,
+            classify_queue: None,
+            early_busy: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
+    }
+
+    /// Answer busy at once, instead of admitting a request, when the
+    /// requests already admitted would -- at the recent pace of the classify
+    /// queue -- keep it waiting past the request timeout. A request admitted
+    /// only to time out holds a slot, spends classifier calls and still
+    /// fails; a busy answer tells the client to retry later while it still
+    /// can.
+    pub fn with_classify_queue(mut self, queue: Arc<super::prefetch::ClassifyQueue>) -> Self {
+        self.classify_queue = Some(queue);
+        self
+    }
+
+    /// Requests in a slot right now.
+    pub fn in_use(&self) -> usize {
+        self.max_concurrent_requests
+            .saturating_sub(self.permits.available_permits())
+    }
+
+    /// Requests answered busy at admission because the queue ahead of them
+    /// would outlast the request timeout.
+    pub fn early_busy(&self) -> u64 {
+        self.early_busy.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -240,6 +271,15 @@ async fn bound_witness_load(
     } else {
         None
     };
+    if load
+        .classify_queue
+        .as_ref()
+        .is_some_and(|queue| queue.would_exceed(load.in_use(), load.request_timeout))
+    {
+        load.early_busy
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return saturated_refusal();
+    }
     let Ok(_global_permit) = Arc::clone(&load.permits).try_acquire_owned() else {
         return saturated_refusal();
     };
@@ -2035,6 +2075,115 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "the witness wedged: {body}");
         let value: serde_json::Value = serde_json::from_str(&body).expect("a JSON response");
         assert!(value["certificate"]["redacted_sha256"].is_string());
+    }
+
+    /// Waits until `n` requests hold a slot.
+    async fn until_in_use(load: &WitnessLoadBound, n: usize) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while load.in_use() < n {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the requests took their slots");
+    }
+
+    /// Sixteen requests hold the sixteen slots; the seventeenth is answered
+    /// busy at once, not queued and not left to time out.
+    #[tokio::test]
+    async fn the_seventeenth_request_is_busy_at_once() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let service = service_with_redactor(Arc::new(ParkingRedactor {
+            entered,
+            release: release.clone(),
+        }));
+        let load = WitnessLoadBound::new(16, Duration::from_secs(30));
+        let held: Vec<_> = (0..16)
+            .map(|i| {
+                let (service, load) = (service.clone(), load.clone());
+                tokio::spawn(async move {
+                    send_bounded(
+                        service,
+                        load,
+                        post_witness(witness_body(&format!("held {i}"))),
+                    )
+                    .await
+                })
+            })
+            .collect();
+        until_in_use(&load, 16).await;
+
+        let started = std::time::Instant::now();
+        let (status, body) = send_bounded(
+            service,
+            load.clone(),
+            post_witness(witness_body("seventeenth")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
+        assert_eq!(error_code(&body), "witness_saturated");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+
+        release.notify_waiters();
+        for request in held {
+            let (status, body) = request.await.expect("no panic");
+            assert_eq!(status, StatusCode::OK, "body: {body}");
+        }
+    }
+
+    /// A request is answered busy at admission when the requests ahead of it
+    /// would, at the classify queue's recent pace, outlast the request
+    /// timeout -- before it takes a slot it could only time out in.
+    #[tokio::test]
+    async fn a_request_that_would_wait_past_the_timeout_is_busy_at_once() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let service = service_with_redactor(Arc::new(ParkingRedactor {
+            entered,
+            release: release.clone(),
+        }));
+        let queue = Arc::new(crate::witness_service::prefetch::ClassifyQueue::new());
+        // Each request recently spent 100 s classifying; the budget is 300 s.
+        queue.record_turn(Duration::from_secs(100));
+        let load = WitnessLoadBound::new(16, Duration::from_secs(300)).with_classify_queue(queue);
+        let held: Vec<_> = (0..2)
+            .map(|i| {
+                let (service, load) = (service.clone(), load.clone());
+                tokio::spawn(async move {
+                    send_bounded(
+                        service,
+                        load,
+                        post_witness(witness_body(&format!("held {i}"))),
+                    )
+                    .await
+                })
+            })
+            .collect();
+        until_in_use(&load, 2).await;
+        // Two ahead and its own turn: 300 s, which fits.
+        let third = tokio::spawn({
+            let (service, load) = (service.clone(), load.clone());
+            async move { send_bounded(service, load, post_witness(witness_body("third"))).await }
+        });
+        until_in_use(&load, 3).await;
+        assert_eq!(load.early_busy(), 0);
+        // Three ahead: 400 s, which does not.
+        let (status, body) =
+            send_bounded(service, load.clone(), post_witness(witness_body("fourth"))).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
+        assert_eq!(error_code(&body), "witness_saturated");
+        assert_eq!(load.early_busy(), 1);
+
+        release.notify_waiters();
+        for request in held.into_iter().chain([third]) {
+            let (status, _) = request.await.expect("no panic");
+            assert_eq!(status, StatusCode::OK);
+        }
     }
 
     /// A slot is returned when its request finishes, so a witness serves an
