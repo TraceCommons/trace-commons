@@ -109,6 +109,6 @@ final class SharingChoiceTests: XCTestCase {
 
     func testTheCardIsAtTheTopOfProjects() throws {
         let source = try InsightsGlassConventionsTests.text("Views/Settings/ProjectsSection.swift")
-        XCTAssertTrue(source.contains("SharingChoiceCard()\n            GlassEyebrowCard(SettingsWords.projects)"))
+        XCTAssertTrue(source.contains("SharingChoiceCard()\n            GlassEyebrowCard(SettingsWords.projects, accessory: {"))
     }
 }

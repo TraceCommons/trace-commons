@@ -690,8 +690,9 @@ mod tests {
     use super::*;
 
     /// Settings > Projects' Manage sheet: short words that never name the
-    /// product, the background service or a passkey, with only the holes
-    /// the shells fill.
+    /// background service, a passkey or a NEAR AI subject, with only the
+    /// holes the shells fill. The commons' name is
+    /// `tests/no_commons_name_in_copy.rs`'s to refuse.
     #[test]
     fn the_projects_manager_words_are_short_and_plain() {
         let words = serde_json::to_value(projects_manager_words()).unwrap();
@@ -701,14 +702,7 @@ mod tests {
             let text = value.as_str().unwrap();
             assert!(!text.is_empty(), "{key}");
             assert!(text.chars().count() <= 30, "{key} is long: {text}");
-            for banned in [
-                "Trace Commons",
-                "TraceCommons",
-                "daemon",
-                "passkey",
-                "Near.ai",
-                "NEAR AI",
-            ] {
+            for banned in ["daemon", "passkey", "Near.ai", "NEAR AI"] {
                 assert!(
                     !text.to_lowercase().contains(&banned.to_lowercase()),
                     "{key} says {banned}"
