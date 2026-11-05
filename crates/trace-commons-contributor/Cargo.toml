@@ -863,13 +863,14 @@ keyring-core = "=1.0.0"
 # `panic_hook::install_location_only`; its own diagnostics_log hook stays in
 # charge. Each lock (root, GTK, Tauri) moves only the eleven `ironwire_*`
 # source strings; `cargo-sources.json` was regenerated the same way as above.
-# Claude Desktop Code foundation: add IronWire's Vertex input facade, which
-# normalizes into the existing Messages pipeline. No public embedding API or
-# dependency graph change. Count-tokens is terminal unsupported (400), never a
-# guessed count. Native Messages remains unchanged. This enables the protocol
-# only; Desktop preset setup, durable route lifecycle and live compatibility
-# remain explicit gates in the 2026-11-05 design/plan.
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "e84e3cf198031bf267dec22d6b05c793826dbd26" }
+# Claude Desktop Code: IronWire's Vertex input facade
+# normalizes into the existing Messages pipeline. VertexGateway binds the
+# dedicated listener to a capability and fixed models; no dependency packages
+# change. Count-tokens is terminal unsupported (400), never a
+# guessed count. Native Messages remains unchanged. The daemon owns the
+# durable Desktop connection and the native app exports its manual preset;
+# remaining promotion gates are recorded in the 2026-11-05 design/plan.
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "e6b4fecd92d07a1cb8df63ee2abaf92b97464681" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -883,8 +884,8 @@ ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "e84e3cf198
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "e84e3cf198031bf267dec22d6b05c793826dbd26" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "e84e3cf198031bf267dec22d6b05c793826dbd26" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "e6b4fecd92d07a1cb8df63ee2abaf92b97464681" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "e6b4fecd92d07a1cb8df63ee2abaf92b97464681" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"

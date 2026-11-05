@@ -12,8 +12,10 @@ use uuid::Uuid;
 /// launcher maps its tool's model names onto [`ManagedRoute::models`].
 pub struct ManagedRoute {
     port: u16,
-    shutdown: tokio::sync::oneshot::Sender<()>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     owner: tokio::task::JoinHandle<()>,
+    listener_stopped: tokio::sync::watch::Receiver<bool>,
+    runtime: tokio::runtime::Handle,
     home: PathBuf,
     /// NEAR AI's chat models, as read when the route started.
     models: Vec<super::models::ChatModel>,
@@ -46,6 +48,53 @@ pub fn home_for(store: &ConfigStore, id: Uuid) -> PathBuf {
 /// How long a route waits for NEAR AI's catalogue and then for its proxy
 /// to serve the selected model.
 const READY_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
+
+async fn stop_desktop_proxy(
+    mut proxy: embed::EmbeddedProxy,
+    completion: Option<Arc<crate::daemon::claude_desktop::StartCompletion>>,
+) {
+    let (closed, wait) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        proxy.stop_accepting().await;
+        drop(completion);
+        let _ = closed.send(());
+        proxy.shutdown().await;
+    });
+    let _ = wait.await;
+}
+
+struct DesktopRoute<'a> {
+    binding: &'a crate::daemon::claude_desktop::Binding,
+    cancelled: tokio::sync::watch::Receiver<u64>,
+    completion: Arc<crate::daemon::claude_desktop::StartCompletion>,
+}
+
+struct StartingProxy {
+    proxy: Option<embed::EmbeddedProxy>,
+    completion: Option<Arc<crate::daemon::claude_desktop::StartCompletion>>,
+}
+impl Drop for StartingProxy {
+    fn drop(&mut self) {
+        if let (Some(mut proxy), Some(completion)) = (self.proxy.take(), self.completion.take()) {
+            // A cancelled caller cannot acknowledge cleanup before the socket
+            // is released. The completion guard outlives the request future.
+            tokio::spawn(async move {
+                proxy.stop_accepting().await;
+                drop(completion);
+                proxy.shutdown().await;
+            });
+        }
+    }
+}
+
+async fn cancelled(receiver: &mut Option<tokio::sync::watch::Receiver<u64>>) {
+    match receiver {
+        Some(receiver) => {
+            let _ = receiver.changed().await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
 
 impl ManagedRoute {
     /// Start a proxy for one session of `tool`, pinned to the NEAR AI
@@ -86,6 +135,55 @@ impl ManagedRoute {
         tool: ToolId,
         requested: Option<&str>,
     ) -> Result<Self, ManagedError> {
+        Self::start_with_binding(store, id, key, base_url, tool, requested, None).await
+    }
+
+    /// Dedicated Desktop route: only capability-bound Vertex inference is mounted.
+    pub(crate) async fn start_desktop(
+        store: &ConfigStore,
+        key: ApiKey,
+        base_url: &str,
+        binding: &crate::daemon::claude_desktop::Binding,
+        cancelled: tokio::sync::watch::Receiver<u64>,
+        completion: Arc<crate::daemon::claude_desktop::StartCompletion>,
+    ) -> Result<Self, ManagedError> {
+        tokio::time::timeout(
+            READY_WITHIN,
+            Self::start_with_binding(
+                store,
+                binding.id,
+                key,
+                base_url,
+                ToolId::Claude,
+                Some(&binding.model),
+                Some(DesktopRoute {
+                    binding,
+                    cancelled,
+                    completion,
+                }),
+            ),
+        )
+        .await
+        .map_err(|_| ManagedError::LaunchUnknown)?
+    }
+
+    async fn start_with_binding(
+        store: &ConfigStore,
+        id: Uuid,
+        key: ApiKey,
+        base_url: &str,
+        tool: ToolId,
+        requested: Option<&str>,
+        desktop: Option<DesktopRoute<'_>>,
+    ) -> Result<Self, ManagedError> {
+        let (desktop, mut cancellation, completion) = match desktop {
+            Some(options) => (
+                Some(options.binding),
+                Some(options.cancelled),
+                Some(options.completion),
+            ),
+            None => (None, None, None),
+        };
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(std::time::Duration::from_secs(2))
@@ -95,8 +193,12 @@ impl ManagedRoute {
         // Choose first: a default that is not listed starts no proxy. An
         // empty catalogue is read again, as an unreadable one is.
         let (models, selected_model) = loop {
-            if let Some(models) = super::models::fetch(&client, base_url)
-                .await
+            let fetched = tokio::select! {
+                biased;
+                _ = cancelled(&mut cancellation) => return Err(ManagedError::LaunchUnknown),
+                fetched = super::models::fetch(&client, base_url) => fetched,
+            };
+            if let Some(models) = fetched
                 .map(|models| super::models::offered(tool, models))
                 .filter(|models| !models.is_empty())
             {
@@ -108,14 +210,50 @@ impl ManagedRoute {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         };
+        if let Some(binding) = desktop {
+            let background = super::models::background_for(
+                tool,
+                &selected_model,
+                Some(&binding.background_model),
+                &models,
+            )
+            .ok_or(ManagedError::ModelUnavailable)?;
+            let budget = crate::daemon::claude_desktop::context_budget(
+                &selected_model,
+                &binding.background_model,
+                &models,
+            );
+            if background.id != binding.background_model
+                || budget.is_none()
+                || (binding.port != 0
+                    && budget.is_some_and(|(compact, output)| {
+                        compact < binding.compact_window || output < binding.output_tokens
+                    }))
+            {
+                return Err(ManagedError::ModelUnavailable);
+            }
+        }
         let home = home_for(store, id);
         if let Some(root) = home.parent() {
             super::profiles::private_directory(root)?;
         }
         super::profiles::private_directory(&home)?;
-        let bodies = crate::daemon::settings::DaemonSettings::load(store)
-            .map_err(|_| ManagedError::StorageUnavailable)?
-            .ironwire_attested_bodies;
+        if desktop.is_some() {
+            for entry in std::fs::read_dir(&home).map_err(|_| ManagedError::StorageUnavailable)? {
+                let entry = entry.map_err(|_| ManagedError::StorageUnavailable)?;
+                if std::fs::symlink_metadata(entry.path())
+                    .map_err(|_| ManagedError::StorageUnavailable)?
+                    .file_type()
+                    .is_symlink()
+                {
+                    return Err(ManagedError::StorageUnavailable);
+                }
+            }
+        }
+        let bodies = desktop.is_none()
+            && crate::daemon::settings::DaemonSettings::load(store)
+                .map_err(|_| ManagedError::StorageUnavailable)?
+                .ironwire_attested_bodies;
         let config =
             ConfigStore::open(home.clone()).map_err(|_| ManagedError::StorageUnavailable)?;
         config
@@ -167,63 +305,114 @@ responses_via_chat = {responses_via_chat}
         if let Some(attestor) = attestor {
             options = options.with_signer_attestor(attestor);
         }
-        let proxy = embed::start_with_options(&home, Some(0), options, |_, _| {})
-            .await
-            .map_err(|_| ManagedError::LaunchUnknown)?;
-        // The proxy is ready, and its key accepted, once it serves the
-        // default model.
-        let deadline = tokio::time::Instant::now() + READY_WITHIN;
-        loop {
-            let response = client
-                .get(format!(
-                    "http://127.0.0.1:{}/openai/v1/models",
-                    proxy.port()
-                ))
-                .send()
-                .await;
-            if let Ok(response) = response {
-                if let Ok(value) = response.json::<serde_json::Value>().await {
-                    if value["data"].as_array().is_some_and(|models| {
-                        models
-                            .iter()
-                            .any(|model| model["id"].as_str() == Some(selected_model.as_str()))
-                    }) {
-                        break;
+        if let Some(binding) = desktop {
+            options = options.with_vertex_gateway(
+                embed::VertexGateway::new(
+                    binding.project.clone(),
+                    "nearai".into(),
+                    binding.model.clone(),
+                    Some(binding.background_model.clone()),
+                )
+                .map_err(|_| ManagedError::InvalidRequest)?,
+            );
+        }
+        let proxy = tokio::select! {
+            biased;
+            _ = cancelled(&mut cancellation) => return Err(ManagedError::LaunchUnknown),
+            proxy = embed::start_with_options(&home, Some(desktop.map_or(0, |b| b.port)), options, |_, _| {}) => {
+                proxy.map_err(|_| ManagedError::LaunchUnknown)?
+            }
+        };
+        let mut starting = StartingProxy {
+            proxy: Some(proxy),
+            completion,
+        };
+        let proxy = starting.proxy.as_ref().expect("starting proxy");
+        let ready: Result<(), ManagedError> = async {
+            let token = std::fs::read_to_string(home.join("control.token"))
+                .map_err(|_| ManagedError::StorageUnavailable)?;
+            let deadline = tokio::time::Instant::now() + READY_WITHIN;
+            loop {
+                let response = tokio::select! {
+                    biased;
+                    _ = cancelled(&mut cancellation) => return Err(ManagedError::LaunchUnknown),
+                    response = client.get(format!("http://127.0.0.1:{}/{}", proxy.port(),
+                        if desktop.is_some() { "_ironwire/status" } else { "openai/v1/models" }))
+                        .bearer_auth(token.trim()).send() => response,
+                };
+                if let Ok(response) = response {
+                    if let Ok(value) = response.json::<serde_json::Value>().await {
+                        let bound_ready = desktop.is_some()
+                            && value["backends"].as_array().is_some_and(|backends| {
+                                backends.iter().any(|backend| {
+                                    backend["id"] == "nearai"
+                                        && backend["models"].as_array().is_some_and(|models| {
+                                            models.iter().any(|model| {
+                                                model.as_str() == Some(selected_model.as_str())
+                                            })
+                                        })
+                                })
+                            });
+                        if bound_ready
+                            || value["data"].as_array().is_some_and(|models| {
+                                models.iter().any(|model| {
+                                    model["id"].as_str() == Some(selected_model.as_str())
+                                })
+                            })
+                        {
+                            break;
+                        }
                     }
                 }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(ManagedError::SignInRequired);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            if tokio::time::Instant::now() >= deadline {
+            // Ordinary CLI routes pin the backend only. Desktop's scoped
+            // gateway independently enforces both selected model bindings.
+            let pin = client
+                .post(format!("http://127.0.0.1:{}/_ironwire/pin", proxy.port()))
+                .bearer_auth(token.trim())
+                .json(&serde_json::json!({"backend":"nearai"}))
+                .send();
+            let pinned = tokio::select! {
+                biased;
+                _ = cancelled(&mut cancellation) => return Err(ManagedError::LaunchUnknown),
+                pinned = pin => pinned.map_err(|_| ManagedError::LaunchUnknown)?,
+            };
+            if pinned.status().is_success() {
+                Ok(())
+            } else {
+                Err(ManagedError::LaunchUnknown)
+            }
+        }
+        .await;
+        if let Err(error) = ready {
+            let proxy = starting.proxy.take().expect("starting proxy");
+            if desktop.is_some() {
+                stop_desktop_proxy(proxy, starting.completion.take()).await;
+            } else {
                 proxy.shutdown().await;
                 let _ = std::fs::remove_dir_all(&home);
-                return Err(ManagedError::SignInRequired);
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            return Err(error);
         }
-        let token = std::fs::read_to_string(home.join("control.token"))
-            .map_err(|_| ManagedError::StorageUnavailable)?;
-        let pinned = client
-            .post(format!("http://127.0.0.1:{}/_ironwire/pin", proxy.port()))
-            .bearer_auth(token.trim())
-            // The backend only: a model here would replace every model a
-            // tool asks for with this one.
-            .json(&serde_json::json!({"backend":"nearai"}))
-            .send()
-            .await
-            .map_err(|_| ManagedError::LaunchUnknown)?;
-        if !pinned.status().is_success() {
-            return Err(ManagedError::LaunchUnknown);
-        }
+        let proxy = starting.proxy.take().expect("starting proxy");
         let port = proxy.port();
+        let (listener_closed, listener_stopped) = tokio::sync::watch::channel(false);
         let (shutdown, mut requested) = tokio::sync::oneshot::channel();
         let consent_store = store.clone();
         let retained_home = home.clone();
         let owner = tokio::spawn(async move {
+            let mut proxy = proxy;
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
             loop {
                 tokio::select! {
                     // Dropping a route also closes the sender and stops its
                     // listener. Reenabling consent never revives this route.
                     _ = &mut requested => break,
+                    _ = proxy.wait() => break,
                     _ = interval.tick(), if bodies => {
                         if !crate::daemon::settings::DaemonSettings::load(&consent_store)
                             .is_ok_and(|settings| settings.ironwire_attested_bodies)
@@ -233,6 +422,8 @@ responses_via_chat = {responses_via_chat}
                     }
                 }
             }
+            proxy.stop_accepting().await;
+            listener_closed.send_replace(true);
             // Stop accepting calls before draining previously consented ones.
             // Proof workers may stop with pending rows; never invent settlement.
             proxy.shutdown().await;
@@ -240,8 +431,10 @@ responses_via_chat = {responses_via_chat}
         });
         Ok(Self {
             port,
-            shutdown,
+            shutdown: Some(shutdown),
             owner,
+            listener_stopped,
+            runtime: tokio::runtime::Handle::current(),
             home,
             models,
             default_model: selected_model,
@@ -269,8 +462,45 @@ responses_via_chat = {responses_via_chat}
         &self.models
     }
 
-    pub async fn shutdown(self) {
-        let _ = self.shutdown.send(());
+    /// Stop accepting Desktop calls while retaining the graceful drain task.
+    /// CLI routes continue to use `shutdown`, which waits for complete drain.
+    pub(crate) async fn stop_desktop(
+        mut self,
+        completion: Option<Arc<crate::daemon::claude_desktop::StartCompletion>>,
+    ) -> (bool, tokio::task::JoinHandle<()>) {
+        self.request_shutdown();
+        let (closed, wait) = tokio::sync::oneshot::channel();
+        // Own the listener barrier even if the IPC future waiting on it is
+        // cancelled. Keep draining accepted requests afterward.
+        let runtime = self.runtime.clone();
+        let draining = runtime.spawn(async move {
+            let stopped = loop {
+                if *self.listener_stopped.borrow_and_update() {
+                    break true;
+                }
+                if self.listener_stopped.changed().await.is_err() {
+                    break false;
+                }
+            };
+            drop(completion);
+            let _ = closed.send(stopped);
+            self.shutdown().await;
+        });
+        (wait.await.unwrap_or(false), draining)
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.owner.is_finished()
+    }
+
+    pub(crate) fn request_shutdown(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+    }
+
+    pub async fn shutdown(mut self) {
+        self.request_shutdown();
         let _ = self.owner.await;
     }
 }

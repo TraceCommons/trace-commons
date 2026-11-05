@@ -4818,3 +4818,108 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod desktop_withdrawal_tests {
+    use super::*;
+    use crate::daemon::claude_desktop::tests::{held_stream_fixture, shared};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn withdrawn_key_closes_desktop_before_a_managed_cli_stream_finishes() {
+        let (base, reached, server) = held_stream_fixture().await;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let shared = Arc::new(shared(store.clone(), &base));
+        let configured = crate::daemon::ipc::handle_request_async(
+            &shared,
+            &Request {
+                id: 1,
+                method: "claude_desktop_configure".into(),
+                params: json!({"model":"fixture-main","background_model":"fixture-background"}),
+            },
+        )
+        .await;
+        assert!(configured.error.is_none(), "{configured:?}");
+        let configured = configured.result.unwrap();
+        let environment = configured["environment"].as_str().unwrap();
+        let desktop_address = environment
+            .lines()
+            .find_map(|line| line.strip_prefix("ANTHROPIC_VERTEX_BASE_URL="))
+            .unwrap()
+            .trim_start_matches("http://")
+            .trim_end_matches("/vertex")
+            .to_owned();
+        assert!(
+            tokio::net::TcpStream::connect(&desktop_address)
+                .await
+                .is_ok()
+        );
+
+        // Host a real CLI proxy, without starting an external terminal. Its
+        // accepted SSE call keeps graceful shutdown pending until we release it.
+        let id = Uuid::new_v4();
+        let route = ManagedRoute::start_against(
+            &store,
+            id,
+            ApiKey::new("sk-desktop-fixture".into()).unwrap(),
+            &base,
+            ToolId::Claude,
+            Some("fixture-main"),
+        )
+        .await
+        .unwrap();
+        let port = route.port();
+        shared
+            .managed
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .routes
+            .insert(id, route);
+        let held=reqwest::Client::new().post(format!("http://127.0.0.1:{port}/openai/v1/chat/completions"))
+            .json(&json!({"model":"fixture-main","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"hello"}]}))
+            .send().await.unwrap();
+        assert!(held.status().is_success());
+        reached.notified().await;
+        shared.settings.lock().unwrap().near_ai_inference = None;
+        let withdrawing = tokio::spawn({
+            let shared = shared.clone();
+            async move { shared.reconcile_private_inference().await }
+        });
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if tokio::net::TcpStream::connect(&desktop_address)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        let still_draining = !withdrawing.is_finished();
+        let preset_revoked = !store
+            .daemon_path(crate::config::DAEMON_CLAUDE_DESKTOP_CONNECTION_FILE)
+            .exists();
+        // Never proceed to the unrelated global proxy in this synthetic test.
+        withdrawing.abort();
+        let _ = withdrawing.await;
+        drop(held);
+        crate::daemon::claude_desktop::stop(&shared, true).await;
+        server.abort();
+        assert!(
+            closed.is_ok(),
+            "Desktop withdrawal waited for the managed CLI stream"
+        );
+        assert!(
+            still_draining,
+            "the CLI call must remain held at the revocation boundary"
+        );
+        assert!(
+            preset_revoked,
+            "withdrawing the key must revoke the saved Desktop preset"
+        );
+    }
+}
