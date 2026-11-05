@@ -347,6 +347,8 @@ char*       tc_settings_ranges_json(void);
  * string; free it with tc_string_free. NULL only on a caught panic.
  */
 char*       tc_build_channel_json(void);
+/* Immutable feature profile; free with tc_string_free. */
+char*       tc_feature_profile_json(void);
 
 /* The command-line tool's state for the app at bundle_path, as a JSON
  * object:

@@ -10060,3 +10060,21 @@ Claude uses fixed OAuth profile/usage endpoints, stable account/organization evi
 Codex remains file-backed and refuses native-running/ambiguous-process or unsupported-storage cases. Its successful native renewal still requires a matching final identity/revision witness. Both providers use bounded sanitized failures and in-memory snapshots, limited to 128 logins. No credential, filesystem path, raw provider account identifier or raw provider error crosses IPC.
 
 Unenroll and managed-registry binding changes invalidate pending generations and held readings. A late native permission result cannot continue to HTTP after cancellation. Claude remains available for a future explicit Refresh; the absence of a Commons enrollment does not turn its usage reader into a background action. See [subscription usage](operator/subscription-usage.md).
+
+## Environment feature snapshots
+
+`feature_flags_snapshot` (empty parameters) returns the daemon-owned schema-1
+feature snapshot: environment, profile digest, daemon-instance UUID, increasing
+snapshot generation, sampled time, source, manifest revision/expiry/freshness,
+and flag decisions (`enabled`, `pending`, `capability_blocked`, `timing`).
+It does no networking or disk writes. `feature_flags_refresh` (empty parameters)
+returns `{"requested":true}` and schedules a coalesced anonymous refresh; it
+cannot accept a URL or flag values. Developer dry runs allow the snapshot read
+but refuse refresh. Neither method grants any operation authorization.
+
+`feature_flags_changed` is an opt-in event, carrying `instance_id` and
+`generation`; subscribers declare that event in `accepts` and re-read the complete
+snapshot. It does not represent notification permission. Consumers also read on
+attach/start and after a subscription delivery gap. Missing methods on an older
+daemon mean unavailable flags; native clients must not invent local enables.
+See [feature flags](operator/feature-flags.md) for lifetime and offline behavior.

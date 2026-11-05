@@ -85,6 +85,8 @@ jobs:
       # Seconds, no build. The macOS Info.plist per bundle channel: a
       # production plist byte-identical to the one before the channel files,
       # a staging plist with only staging identity and feed.
+      - name: Feature profiles and manifest publisher
+        run: scripts/ci/test-feature-profiles.sh
       - name: macOS Info.plist per bundle channel
         run: scripts/ci/test-macos-channel-plist.sh
       # Seconds, no build. The release workflows scan the shipped dylib and

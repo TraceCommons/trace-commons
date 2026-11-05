@@ -418,3 +418,27 @@ pub fn refuse_other_channel_origin(url: &str) -> Result<(), OtherChannelOrigin> 
     }
     Ok(())
 }
+
+/// Fixed anonymous feature feed; feature environments never select service identity.
+pub fn feature_flags_url(
+    environment: trace_commons_protocol::feature_flags::Environment,
+) -> anyhow::Result<&'static str> {
+    use trace_commons_protocol::feature_flags::Environment;
+    #[cfg(not(feature = "near-ai-staging"))]
+    match environment {
+        Environment::Production => {
+            Ok("https://storage.googleapis.com/tracecommons-flatpak/feature-flags/production.json")
+        }
+        _ => anyhow::bail!("feature-environment-channel-mismatch"),
+    }
+    #[cfg(feature = "near-ai-staging")]
+    match environment {
+        Environment::Staging => Ok(
+            "https://storage.googleapis.com/tc-staging-updates-20261022/feature-flags/staging.json",
+        ),
+        Environment::Testing => Ok(
+            "https://storage.googleapis.com/tc-staging-updates-20261022/feature-flags/testing.json",
+        ),
+        _ => anyhow::bail!("feature-environment-channel-mismatch"),
+    }
+}
