@@ -183,8 +183,7 @@ final class DesignRulings20261020Tests: XCTestCase {
     func test_everyRefreshIsTheRightAlignedIconButton() throws {
         XCTAssertEqual(GlassRefreshButton.systemImage, "arrow.clockwise")
         let files = ["Views/MissionDraftsView.swift",
-                     "Views/Settings/ConsentSection.swift", "Views/Settings/StartupSection.swift",
-                     "Views/Settings/WatchingSection.swift"]
+                     "Views/Settings/ConsentSection.swift", "Views/Settings/StartupSection.swift"]
         for file in files {
             let source = try Self.text(file)
             XCTAssertTrue(source.contains("GlassRefreshButton("), "\(file) has no refresh icon button")

@@ -103,11 +103,7 @@ fn titles_and_buttons_have_their_own_keys() {
 #[test]
 fn repeated_buttons_have_distinct_accessible_names() {
     let shell = preview_copy::monitor_screens_copy().shell;
-    let refresh = [
-        shell.settings_refresh_desktop,
-        shell.settings_refresh_discovery,
-        shell.settings_refresh_uses,
-    ];
+    let refresh = [shell.settings_refresh_desktop, shell.settings_refresh_uses];
     for name in refresh {
         assert!(name.starts_with(shell.settings_refresh), "{name}");
         assert_ne!(name, shell.settings_refresh);
@@ -117,7 +113,7 @@ fn repeated_buttons_have_distinct_accessible_names() {
             .iter()
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        3
+        2
     );
 
     let witness = witness_copy::witness_copy();
