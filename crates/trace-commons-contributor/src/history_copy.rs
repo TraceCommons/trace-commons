@@ -249,7 +249,7 @@ pub fn credit_figure(value: f64) -> String {
         };
     }
     let sign = if millionths < 0 { "-" } else { "" };
-    if magnitude % 10 == 0 {
+    if magnitude.is_multiple_of(10) {
         format!("{sign}{}", magnitude / 10)
     } else {
         format!("{sign}{}.{}", magnitude / 10, magnitude % 10)
@@ -274,7 +274,8 @@ mod tests {
             (4.25, "4.3"),
             (12.25, "12.3"),
             (0.35, "0.4"),
-            (0.34999999999999998, "0.4"),
+            // The float just below 0.35, as a sum can land.
+            (f64::from_bits(0.35_f64.to_bits() - 1), "0.4"),
             (1234.5, "1234.5"),
             (1234.0, "1234"),
             (9.96, "10"),
