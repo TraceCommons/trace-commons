@@ -463,7 +463,11 @@ submission is necessary but not sufficient for large sessions.
   throughput inside the enclave, and window concurrency for the
   self-hosted backend, whose window concurrency is a setting its own
   comment says is kept sequential on purpose
-  (`privacy_filter_self_hosted.rs:163-166`, `:193`).
+  (`privacy_filter_self_hosted.rs:163-166`, `:193`). The measurements, the in-process
+  changes and the replica design are in
+  [2026-11-05-witness-scaling-design.md](2026-11-05-witness-scaling-design.md):
+  a request's time is classifier round trips, one per text leaf, not
+  bytes.
 - **Labels only**, as everywhere on this path: `witness-timeout`,
   `witness-too-large`, `witness_saturated`. No content, no host.
 
