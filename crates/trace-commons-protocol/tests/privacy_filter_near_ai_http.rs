@@ -957,6 +957,49 @@ async fn escape_heavy_bodies_arrive_under_the_cap() {
     assert_eq!(inputs, text);
 }
 
+/// Every request is counted by outcome in the adapter's diagnostics
+/// recorder -- retries included -- and successful ones contribute latency.
+#[tokio::test]
+async fn requests_are_counted_by_outcome() {
+    use std::sync::Arc;
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::{Outcome, Recorder};
+
+    let counted = |server: &MockServer, recorder: &Arc<Recorder>| {
+        adapter(server.uri()).with_diagnostics(recorder.clone())
+    };
+    let recorder = Arc::new(Recorder::default());
+    let ok = server_with(|_: &wiremock::Request| {
+        ResponseTemplate::new(200).set_body_json(json!({ "data": [{ "spans": [] }] }))
+    })
+    .await;
+    counted(&ok, &recorder).redact_text("one").await.unwrap();
+    counted(&ok, &recorder).redact_text("two").await.unwrap();
+    for status in [401, 429, 400] {
+        let server = server_with(move |_: &wiremock::Request| ResponseTemplate::new(status)).await;
+        let _ = counted(&server, &recorder).redact_text("three").await;
+    }
+    let down = server_with(|_: &wiremock::Request| ResponseTemplate::new(503)).await;
+    let _ = counted(&down, &recorder).redact_text("four").await;
+    let garbled =
+        server_with(|_: &wiremock::Request| ResponseTemplate::new(200).set_body_string("not json"))
+            .await;
+    let _ = counted(&garbled, &recorder).redact_text("five").await;
+
+    assert_eq!(recorder.count(Outcome::Ok), 2);
+    assert_eq!(recorder.count(Outcome::Auth), 1);
+    // 429 is retried like a 5xx, so every attempt counts.
+    assert_eq!(recorder.count(Outcome::Quota), MAX_CLASSIFY_ATTEMPTS as u64);
+    assert_eq!(recorder.count(Outcome::OtherClientError), 1);
+    assert_eq!(
+        recorder.count(Outcome::ServerError),
+        MAX_CLASSIFY_ATTEMPTS as u64
+    );
+    assert_eq!(recorder.count(Outcome::BodyShape), 1);
+    let snapshot = recorder.snapshot();
+    assert_eq!(snapshot.in_flight, 0);
+    assert_eq!(snapshot.latency_ms["under_4_kib"].samples, 2);
+}
+
 /// The timeout grows with the body: a slow answer to a small request is
 /// abandoned, the same delay on a larger request is waited for.
 #[tokio::test]
