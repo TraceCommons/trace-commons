@@ -517,6 +517,8 @@ public struct MonitorUndoCopy: MonitorWordTable {
     public let unavailable: String
     public let within: String
     public let mayHaveStarted: String
+    public let heldForReviewOne: String
+    public let heldForReview: String
     public let undoing: String
     /// "Data redaction has begun.": said once per app run, under the first
     /// Submit a person makes that goes to the privacy witness. See
@@ -529,6 +531,8 @@ public struct MonitorUndoCopy: MonitorWordTable {
         case unavailable
         case within
         case mayHaveStarted = "may_have_started"
+        case heldForReviewOne = "held_for_review_one"
+        case heldForReview = "held_for_review"
         case undoing
         case redactionBegun = "redaction_begun"
     }
@@ -804,6 +808,9 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let tracesHeroStepEarnDetail: String
     public let tracesHeroStepUse: String
     public let tracesHeroStepUseDetail: String
+    /// Under the hero while Train coding models is off (owner, 2026-11-05).
+    public let noCreditBody: String
+    public let noCreditOpenSettings: String
     /// Home's Credit earned tile: the account's whole total, `{amount}`
     /// (product owner, 2026-10-29).
     public let creditAccountTotal: String
@@ -869,6 +876,8 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case tracesHeroStepEarnDetail = "traces_hero_step_earn_detail"
         case tracesHeroStepUse = "traces_hero_step_use"
         case tracesHeroStepUseDetail = "traces_hero_step_use_detail"
+        case noCreditBody = "no_credit_body"
+        case noCreditOpenSettings = "no_credit_open_settings"
         case creditAccountTotal = "credit_account_total"
         case insightsToday = "insights_today"
         case insightsTeaser = "insights_teaser"

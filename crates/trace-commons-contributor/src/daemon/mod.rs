@@ -611,7 +611,7 @@ async fn supervise(
     // it for the life of the process; see `pass_supervisor`. The catch is
     // inline, so `run`'s cancel-safety (its doc) holds.
     let passes_shared = Arc::clone(&shared);
-    let result = pass_supervisor::run_restarting(
+    let passes = pass_supervisor::run_restarting(
         &shared,
         &mut signal,
         pass_supervisor::Backoff::daemon(),
@@ -619,8 +619,11 @@ async fn supervise(
             let shared = Arc::clone(&passes_shared);
             Box::pin(async move { supervise_passes(&shared, dry_run, signal).await })
         },
-    )
-    .await;
+    );
+    let result = tokio::select! {
+        result = passes => result,
+        _ = crate::feature_flags::run(&shared, dry_run) => Ok(()),
+    };
     // However the loop ended (a signal included, which sets nothing else),
     // so work running off the loop stops at its next check: the Insights
     // counter pass between files, the settlement scan between traces.
@@ -771,6 +774,13 @@ struct TickState {
     /// The signed witness accepted-measurements list's fetch schedule: due
     /// at start, then about daily (`witness::accepted_list`).
     witness_list_schedule: crate::witness::accepted_list::ListRefreshSchedule,
+    /// Whether this process has re-read the witness-risk holds under the
+    /// current rule (`release_witness_risk_holds_once`).
+    witness_risk_holds_rechecked: bool,
+    /// Whether this process has skipped queued sessions with no message from
+    /// the person and re-read the nothing-matched holds under the witness
+    /// rule (`recheck_second_look_holds_once`).
+    second_look_holds_rechecked: bool,
 }
 
 impl TickState {
@@ -782,6 +792,8 @@ impl TickState {
             witness_list_schedule: crate::witness::accepted_list::ListRefreshSchedule::starting(
                 now,
             ),
+            witness_risk_holds_rechecked: false,
+            second_look_holds_rechecked: false,
         }
     }
 }
@@ -836,6 +848,23 @@ async fn run_tick(shared: &Arc<ipc::DaemonShared>, dry_run: bool, state: &mut Ti
     guards
         .run(shared, "near-ai-notice", async {
             settle_near_ai_notice(shared, now);
+        })
+        .await;
+    // Once per process, and ahead of the watcher for the same reason: a
+    // hold the current rule no longer makes goes back to waiting, and the
+    // watcher re-approves it in this same pass. Sends nothing.
+    let witness_risk_holds_rechecked = &mut state.witness_risk_holds_rechecked;
+    guards
+        .run(shared, "witness-risk-holds", async {
+            let _ = release_witness_risk_holds_once(shared, now, witness_risk_holds_rechecked);
+        })
+        .await;
+    // The same, for the Scrub check's nothing-matched holds on a witness
+    // device, after skipping what has nothing to contribute.
+    let second_look_holds_rechecked = &mut state.second_look_holds_rechecked;
+    guards
+        .run(shared, "second-look-holds", async {
+            let _ = recheck_second_look_holds_once(shared, now, second_look_holds_rechecked);
         })
         .await;
     // What ingest says about account admission, read before every full pass
@@ -2602,7 +2631,8 @@ async fn refresh_estimate_table(
 }
 
 /// Fetch the signed witness accepted-measurements list when its schedule is
-/// due. Whatever the outcome, the stored list stays unless a newer verified
+/// due, or early (spaced 10 minutes) while a session is held for a measurement
+/// refusal; a failed fetch retries after the same spacing, not a day. Whatever the outcome, the stored list stays unless a newer verified
 /// one replaced it; `witness::accepted_list::refresh` logs one fixed label.
 ///
 /// Then, on every tick and not only after a fetch, release the measurement
@@ -2617,11 +2647,21 @@ async fn refresh_witness_accepted_list(
     now: chrono::DateTime<Utc>,
     schedule: &mut crate::witness::accepted_list::ListRefreshSchedule,
 ) {
-    if schedule.due(now) {
-        schedule.attempted(now, crate::credit_estimate_table::random_draw());
-        if let Ok(Some(cfg)) = shared.store.load_config() {
-            let _ = crate::witness::accepted_list::refresh(&cfg, shared.store.dir()).await;
-        }
+    let holds = shared
+        .queue
+        .lock()
+        .expect("queue lock")
+        .has_measurement_holds();
+    if let Ok(Some(cfg)) = shared.store.load_config() {
+        let _ = crate::witness::accepted_list::refresh_for_tick(
+            &cfg,
+            shared.store.dir(),
+            schedule,
+            now,
+            crate::credit_estimate_table::random_draw(),
+            holds,
+        )
+        .await;
     }
     let dir = shared.store.dir();
     let version = crate::witness::accepted_list::load_verified(
@@ -2662,6 +2702,166 @@ fn note_accepted_list_version(
         shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
     }
     shared.publish_if_decisions_owed_changed(decisions_owed_before);
+}
+
+/// Re-read, once per daemon process, the sessions an unattended approval
+/// parked under `submit::REASON_WITNESS_RISK_REVIEW_REQUIRED`, and release
+/// the ones the current rule lets go (`release_witness_risk_holds`).
+///
+/// Once per process is enough. The rule lives in the binary, so it changes
+/// only with a new daemon process, and every hold the current binary makes
+/// is one its own rule kept; re-reading them every tick would reach the same
+/// answer at the cost of a file read per held session. The flag is set
+/// before the pass runs, so a pass that fails or panics is not retried and
+/// its holds stay held.
+pub(crate) fn release_witness_risk_holds_once(
+    shared: &ipc::DaemonShared,
+    now: chrono::DateTime<Utc>,
+    done: &mut bool,
+) -> usize {
+    if std::mem::replace(done, true) {
+        return 0;
+    }
+    release_witness_risk_holds(shared, now)
+}
+
+/// Release every witness-risk hold whose own pinned certificate now lets an
+/// unattended session go (`submit::verdict_allows_unattended`), for holds
+/// parked under the older rule that held `medium` (owner decision,
+/// 2026-11-05). Returns how many moved.
+///
+/// Only an unattended approval is ever held under this label (the uploader
+/// arms the hold only for `approved_unattended` entries; a person's approve
+/// and the CLI never do), so the label is the marker. The verdict is read
+/// from the review the entry is pinned to, which is exactly what its upload
+/// would carry: the stored artifact must exist, parse, and hash to the pin.
+/// Anything else -- no pin (released after `PIN_MAX_AGE`), a missing or
+/// unreadable artifact, a digest that does not match, a `high` or
+/// unreadable verdict -- stays held for a person.
+///
+/// A released entry keeps its pin and goes back to waiting dated `now`. The
+/// standing opt-in re-approves it, and the upload pass sends the certified
+/// bytes after the same verdict check and the Scrub check, with no second
+/// witness run. In a folder no longer set to Automatic it waits for a
+/// person, as any offer there does.
+pub(crate) fn release_witness_risk_holds(
+    shared: &ipc::DaemonShared,
+    now: chrono::DateTime<Utc>,
+) -> usize {
+    let held = shared
+        .queue
+        .lock()
+        .expect("queue lock")
+        .witness_risk_holds();
+    // The artifacts are read with the queue lock released; the release below
+    // re-checks each entry's state and pin under the lock.
+    let allowed: Vec<(uuid::Uuid, String)> = held
+        .into_iter()
+        .filter(|(entry_id, pin)| pinned_verdict_allows_unattended(&shared.store, *entry_id, pin))
+        .collect();
+    if allowed.is_empty() {
+        return 0;
+    }
+    let decisions_owed_before = shared.decisions_owed_value();
+    let released = {
+        let mut q = shared.queue.lock().expect("queue lock");
+        let released = q.release_witness_risk_holds(&allowed, now);
+        if released > 0 && q.save(&shared.store).is_err() {
+            tracing::warn!("could not save the queue after releasing witness-risk holds");
+        }
+        released
+    };
+    if released > 0 {
+        tracing::info!(
+            released,
+            "released witness-risk holds the current rule lets go unattended"
+        );
+        shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+    shared.publish_if_decisions_owed_changed(decisions_owed_before);
+    released
+}
+
+/// What [`recheck_second_look_holds`] moved: sessions skipped for having no
+/// message from the person, and nothing-matched holds released.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SecondLookRecheck {
+    pub skipped: usize,
+    pub released: usize,
+}
+
+/// Once per daemon process, as [`release_witness_risk_holds_once`] and for
+/// the same reason: the rules live in the binary. The flag is set before the
+/// pass runs, so a pass that fails or panics is not retried.
+pub(crate) fn recheck_second_look_holds_once(
+    shared: &ipc::DaemonShared,
+    now: chrono::DateTime<Utc>,
+    done: &mut bool,
+) -> SecondLookRecheck {
+    if std::mem::replace(done, true) {
+        return SecondLookRecheck::default();
+    }
+    recheck_second_look_holds(shared, now)
+}
+
+/// Two rules from the owner's 2026-11-05 decision, applied to what was
+/// queued before them:
+///
+/// - A waiting or unattended-approved session with no message from the
+///   person is skipped (`Queue::skip_entries_without_user_messages`), so it
+///   never goes to the witness or upload and does not wait on anyone.
+/// - On a device with a redaction witness, a session held by the Scrub
+///   check only because nothing matched goes back to waiting
+///   (`Queue::release_nothing_matched_holds`); the standing opt-in
+///   re-approves it and it goes through the witness as any unattended
+///   session does, verdict hold included. Without a witness, or when the
+///   config cannot be read, nothing is released.
+pub(crate) fn recheck_second_look_holds(
+    shared: &ipc::DaemonShared,
+    now: chrono::DateTime<Utc>,
+) -> SecondLookRecheck {
+    let witness = shared.redaction_witness();
+    let decisions_owed_before = shared.decisions_owed_value();
+    let moved = {
+        let mut q = shared.queue.lock().expect("queue lock");
+        let skipped = q.skip_entries_without_user_messages();
+        let released = if witness == second_look::RedactionWitness::Present {
+            q.release_nothing_matched_holds(now)
+        } else {
+            0
+        };
+        let moved = SecondLookRecheck { skipped, released };
+        if moved != SecondLookRecheck::default() && q.save(&shared.store).is_err() {
+            tracing::warn!("could not save the queue after rechecking second-look holds");
+        }
+        moved
+    };
+    if moved != SecondLookRecheck::default() {
+        tracing::info!(
+            skipped = moved.skipped,
+            released = moved.released,
+            "rechecked second-look holds under the current rule"
+        );
+        shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+    shared.publish_if_decisions_owed_changed(decisions_owed_before);
+    moved
+}
+
+/// Whether the review `entry_id` is pinned to (`pin`) is stored intact and
+/// certifies a verdict that lets an unattended session go. Fails closed.
+fn pinned_verdict_allows_unattended(
+    store: &crate::config::ConfigStore,
+    entry_id: uuid::Uuid,
+    pin: &str,
+) -> bool {
+    match approved_envelope::load_witnessed(store, entry_id) {
+        Ok(Some(artifact)) => {
+            artifact.digest().is_ok_and(|digest| digest == pin)
+                && crate::submit::verdict_allows_unattended(artifact.response())
+        }
+        _ => false,
+    }
 }
 
 /// How long after an upload the server is asked for verdicts.
@@ -5757,11 +5957,13 @@ mod tests {
         {
             let mut q = h.shared.queue.lock().unwrap();
             for (index, entry) in entries.iter().enumerate() {
+                // Only the start moves; the recorded prompts stay, so the
+                // sessions still have something to contribute.
                 q.entry_mut_for_test(entry.entry_id).unwrap().shape = Some(queue::SessionShape {
                     started_at: Some(
                         at("2026-08-08T10:00:00Z") - chrono::Duration::days(index as i64),
                     ),
-                    ..Default::default()
+                    ..entry.shape.clone().expect("the watcher records a shape")
                 });
             }
         }

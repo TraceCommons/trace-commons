@@ -751,12 +751,13 @@ struct UsesScreen: View {
             Toggle(isOn: scope(option.name)) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                     Text(option.title).glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                    // The use that earns credit says so, in the required
-                    // use's inline style, no louder.
+                    // The use that earns credit says so, as an amber
+                    // heads-up with its icon (product owner, 2026-11-05;
+                    // it was the required use's green inline style).
                     if option.name == copy.uses.creditScope {
-                        Text(copy.uses.creditRequired)
-                            .glassType(GlassTokens.TypeScale.mono)
-                            .foregroundStyle(GlassTokens.Color.statusOnText.color)
+                        Label(copy.uses.creditRequired, systemImage: "exclamationmark.circle.fill")
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassTokens.Color.statusAskText.color)
                     }
                 }
             }

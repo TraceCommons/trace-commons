@@ -520,6 +520,8 @@ pub struct MonitorUndoCopy {
     pub unavailable: &'static str,
     pub within: &'static str,
     pub may_have_started: &'static str,
+    pub held_for_review_one: &'static str,
+    pub held_for_review: &'static str,
     pub undoing: &'static str,
     /// See [`REDACTION_BEGUN`].
     pub redaction_begun: &'static str,
@@ -771,6 +773,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             unavailable: "Undo unavailable",
             within: "Undo within {seconds}s before upload starts.",
             may_have_started: "Upload may already have started.",
+            held_for_review_one: "1 trace needs individual review.",
+            held_for_review: "{count} traces need individual review.",
             undoing: "Undoing\u{2026}",
             redaction_begun: REDACTION_BEGUN,
         },
@@ -1437,6 +1441,11 @@ pub struct MonitorHomeHistoryCopy {
     pub traces_hero_step_earn_detail: &'static str,
     pub traces_hero_step_use: &'static str,
     pub traces_hero_step_use_detail: &'static str,
+    /// Under the Traces hero while Train coding models is off (product
+    /// owner, 2026-11-05): `NO_CREDIT_REMINDER` from `consent_copy`, and
+    /// its one click to Settings.
+    pub no_credit_body: &'static str,
+    pub no_credit_open_settings: &'static str,
     /// Home's Credit earned tile: the account's whole total under this
     /// Mac's figure, `{amount}` the commons' lifetime points (product
     /// owner, 2026-10-29: show the account-wide total, and leave the change
@@ -1790,6 +1799,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             traces_hero_step_earn_detail: "Each accepted trace earns you credit",
             traces_hero_step_use: "Use Private AI",
             traces_hero_step_use_detail: "Spend your credit on Private AI",
+            no_credit_body: crate::consent_copy::NO_CREDIT_REMINDER,
+            no_credit_open_settings: "Open Settings",
             credit_account_total: "{amount} across your account",
             insights_today: "{total} tokens today",
             insights_teaser: "See where your agents spend their tokens.",

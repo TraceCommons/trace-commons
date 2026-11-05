@@ -92,7 +92,9 @@ public class ShellWordingTests
             { "TraceCommons.App/ViewModels/HistoryViewModel.cs", 4 },
             { "TraceCommons.App/ViewModels/MainViewModel.cs", 18 },
             { "TraceCommons.App/ViewModels/OnboardingViewModel.cs", 2 },
-            { "TraceCommons.App/ViewModels/PreviewSheetViewModel.cs", 10 },
+            // The approval failure sentence is shared with the tested decision factory.
+            { "TraceCommons.App/ViewModels/PreviewSheetViewModel.cs", 9 },
+            { "TraceCommons.App/ViewModels/PreviewDecision.cs", 2 },
             { "TraceCommons.App/ViewModels/QueueGroupViewModel.cs", 1 },
             { "TraceCommons.App/ViewModels/SessionRootsViewModel.cs", 2 },
 

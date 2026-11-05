@@ -39,7 +39,15 @@ enum BuildChannelGate {
     }
 
     /// This launch's verdict.
-    static var current: Verdict { verdict(plistChannel: plistChannel) }
+    static var current: Verdict {
+        guard let json = TCFeatureFlags.buildProfileJSON(),
+              let profile = try? JSONDecoder().decode(BuildFeatureProfile.self, from: Data(json.utf8)),
+              profile.agrees(
+                environment: Bundle.main.object(forInfoDictionaryKey: "TCFeatureEnvironment") as? String,
+                digest: Bundle.main.object(forInfoDictionaryKey: "TCFeatureProfileDigest") as? String)
+        else { return .refused("feature-profile-mismatch") }
+        return verdict(plistChannel: plistChannel)
+    }
 
     /// The agreed channel, or nil when this launch refused.
     static var agreedChannel: BuildChannel? {

@@ -341,6 +341,8 @@ const QUIESCE_POLL_MS: u64 = 200;
 /// until #777. Four members (`arming_suggestion`, `decline_arming`,
 /// `probe_routed_tools`, `search_original`) appear nowhere in it.
 pub const METHODS: &[&str] = &[
+    "feature_flags_snapshot",
+    "feature_flags_refresh",
     "managed_snapshot",
     "managed_tool_setup",
     "managed_cli_options_set",
@@ -557,6 +559,7 @@ pub const METHODS: &[&str] = &[
 /// `skill_install_*` writes and `insights_analyze_session` (with `save` it
 /// writes the person's real Insights store, and can make its digest key).
 pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
+    "feature_flags_snapshot",
     "hello",
     "status",
     "subscribe",
@@ -661,6 +664,7 @@ fn dev_dry_run_refusal(shared: &DaemonShared, req: &Request) -> Option<Response>
     None
 }
 
+pub const EVENT_FEATURE_FLAGS_CHANGED: &str = "feature_flags_changed";
 pub const EVENT_SNAPSHOT: &str = "snapshot";
 pub const EVENT_QUEUE_CHANGED: &str = "queue_changed";
 pub const EVENT_STATUS_CHANGED: &str = "status_changed";
@@ -720,7 +724,7 @@ pub const EVENT_REENGAGE_DUE: &str = "reengage_due";
 
 /// Events a subscriber receives only after naming them in `subscribe`'s
 /// `accepts`. Every other event goes to every subscriber, as it always has.
-pub const OPT_IN_EVENTS: &[&str] = &[EVENT_REENGAGE_DUE];
+pub const OPT_IN_EVENTS: &[&str] = &[EVENT_REENGAGE_DUE, EVENT_FEATURE_FLAGS_CHANGED];
 
 /// Whether `event` is withheld from a subscriber that did not accept it.
 pub fn event_is_opt_in(event: &str) -> bool {
@@ -948,6 +952,7 @@ pub struct GateHeld {
 /// `status_value`, `publish_if_decisions_owed_changed`), or a
 /// temporary in a `match` scrutinee, which lives for the whole `match`.
 pub struct DaemonShared {
+    pub feature_flags: crate::feature_flags::Runtime,
     /// NEAR AI's chat-model catalogue, shared by every reader (a leaf lock).
     /// See `managed::catalogue_cache`.
     pub(crate) model_catalogue: crate::managed::catalogue_cache::CatalogueCache,
@@ -1631,6 +1636,7 @@ impl DaemonShared {
             crate::managed::catalogue_cache::CatalogueCache::open(Some(store.dir()));
         let insights_counter = super::insights_week::CounterPass::for_store(&store);
         Ok(Self {
+            feature_flags: crate::feature_flags::Runtime::for_store(&store)?,
             managed,
             model_catalogue,
             store,
@@ -2320,6 +2326,15 @@ impl DaemonShared {
     pub(crate) fn admission_evidence(&self) -> Option<bool> {
         let cfg = self.store.load_config().ok()?;
         Some(super::contribution_eligibility::evidence_flag(cfg.as_ref()))
+    }
+
+    /// Whether this device sends every session through a redaction witness
+    /// before it is sent (`second_look::RedactionWitness`). A config that
+    /// cannot be read is `Absent`, which keeps every second-look reason.
+    pub(crate) fn redaction_witness(&self) -> super::second_look::RedactionWitness {
+        super::second_look::RedactionWitness::of_config(
+            self.store.load_config().ok().flatten().as_ref(),
+        )
     }
 
     /// Source roots with the daemon's live routing ledger attached.
@@ -3201,6 +3216,10 @@ impl DaemonShared {
         if policy.arming_rewordings.is_empty() {
             return serde_json::json!([]);
         }
+        // Which Automatic sentence the shared copy uses for the Scrub check
+        // default notice (`consent_copy::SCRUB_CHECK_AUTOMATIC_HELP_WITNESS`).
+        let redaction_witness =
+            self.redaction_witness() == super::second_look::RedactionWitness::Present;
         let queue = self.queue.lock().expect("queue lock");
         let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
         let notices: Vec<serde_json::Value> = policy
@@ -3221,6 +3240,7 @@ impl DaemonShared {
                         "was": notice.was,
                         "now": notice.now,
                         "scrub_check_defaulted": notice.scrub_check_defaulted,
+                    "redaction_witness": redaction_witness,
                     });
                 }
                 serde_json::json!({
@@ -3235,6 +3255,7 @@ impl DaemonShared {
                     "was": notice.was,
                     "now": notice.now,
                     "scrub_check_defaulted": notice.scrub_check_defaulted,
+                    "redaction_witness": redaction_witness,
                 })
             })
             .collect();
@@ -3415,12 +3436,13 @@ impl DaemonShared {
 
     fn snapshot_value(&self) -> serde_json::Value {
         let admission_evidence = self.admission_evidence();
+        let witness = self.redaction_witness();
         let pending: Vec<serde_json::Value> = {
             let queue = self.queue.lock().expect("queue lock");
             queue
                 .pending()
                 .iter()
-                .map(|e| entry_value(e, admission_evidence))
+                .map(|e| entry_value_with(e, admission_evidence, witness))
                 .collect()
         };
         serde_json::json!({
@@ -3572,9 +3594,27 @@ pub fn display_path(project_key: &str) -> String {
     }
 }
 
+/// [`entry_value_with`] on a device with no redaction witness. Tests only:
+/// every daemon surface says which it is.
+#[cfg(test)]
 pub fn entry_value(
     e: &super::queue::QueueEntry,
     admission_evidence: Option<bool>,
+) -> serde_json::Value {
+    entry_value_with(
+        e,
+        admission_evidence,
+        super::second_look::RedactionWitness::Absent,
+    )
+}
+
+/// One queue entry as every surface publishes it. `witness` is the
+/// device's (`DaemonShared::redaction_witness`): on a witness device the
+/// published `second_look` leaves out nothing matched.
+pub fn entry_value_with(
+    e: &super::queue::QueueEntry,
+    admission_evidence: Option<bool>,
+    witness: super::second_look::RedactionWitness,
 ) -> serde_json::Value {
     let mut value = serde_json::json!({
         "entry_id": e.entry_id,
@@ -3734,7 +3774,7 @@ pub fn entry_value(
     // `second_look::second_look_reasons`, the one predicate every surface
     // shares; `trimmed-to-fit` is known from discovery and can appear before
     // any preview.
-    super::second_look::insert_fields(&mut value, e.scrub(), e.subagents_dropped);
+    super::second_look::insert_fields(&mut value, e.scrub(), e.subagents_dropped, witness);
     value
 }
 
@@ -4088,6 +4128,15 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 "max_line_bytes": MAX_LINE_BYTES,
             }),
         ),
+        "feature_flags_snapshot" => Response::ok(
+            req.id,
+            serde_json::to_value(shared.feature_flags.snapshot())
+                .expect("feature snapshot serialization"),
+        ),
+        "feature_flags_refresh" => {
+            shared.feature_flags.request_refresh();
+            Response::ok(req.id, serde_json::json!({"requested":true}))
+        }
         "status" => Response::ok(req.id, shared.status_value()),
         "certificate_detail" => handle_certificate_detail(shared, req),
         "route_disclosure" => handle_route_disclosure(shared, req),
@@ -4250,7 +4299,11 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 Some(e) => Response::ok(
                     req.id,
                     serde_json::json!({
-                        "entry": entry_value(e, shared.admission_evidence()),
+                        "entry": entry_value_with(
+                            e,
+                            shared.admission_evidence(),
+                            shared.redaction_witness(),
+                        ),
                         "preview_requires_async": true,
                     }),
                 ),
@@ -4574,6 +4627,7 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
     // config file, and holding the queue across that would put a file read
     // in front of every other queue caller.
     let admission_evidence = shared.admission_evidence();
+    let witness = shared.redaction_witness();
     // How many matched contribution missions each pending entry fits, worked
     // out before any lock below is taken: it reads the history file and
     // may look at folder roots, neither of which belongs under the queue
@@ -4698,7 +4752,7 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
             // Inserted after `entry_value` returns, so its signature and its
             // other callers stay as they are: every other rendering of an
             // entry omits the field, which reads as unknown.
-            let mut value = entry_value(e, admission_evidence);
+            let mut value = entry_value_with(e, admission_evidence, witness);
             if let Some(fit) = mission_fit.as_ref().and_then(|fits| fits.get(&e.entry_id)) {
                 value["mission_fit"] = serde_json::json!(fit);
             }
@@ -4825,11 +4879,12 @@ async fn handle_include_past_sessions(shared: &DaemonShared, req: &Request) -> R
 /// so a shell can show them and offer the undo. See `queue::REASON_KEPT`.
 fn handle_list_kept(shared: &DaemonShared, req: &Request) -> Response {
     let admission_evidence = shared.admission_evidence();
+    let witness = shared.redaction_witness();
     let queue = shared.queue.lock().expect("queue lock");
     let entries: Vec<serde_json::Value> = queue
         .kept()
         .iter()
-        .map(|e| entry_value(e, admission_evidence))
+        .map(|e| entry_value_with(e, admission_evidence, witness))
         .collect();
     Response::ok(req.id, serde_json::json!({ "kept": entries }))
 }
@@ -8745,11 +8800,12 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
                 let dropped = summary.subagents_dropped;
                 let mut value =
                     serde_json::to_value(summary).expect("preview summary serialization");
-                super::second_look::insert_fields(&mut value, scrub, dropped);
+                let witness = shared.redaction_witness();
+                super::second_look::insert_fields(&mut value, scrub, dropped, witness);
                 // Re-read: the build above recorded its counts on the pinned
                 // entry, and the entry this response describes should say so.
                 let entry = entry_by_id(shared, req, id).unwrap_or(entry);
-                value["entry"] = entry_value(&entry, shared.admission_evidence());
+                value["entry"] = entry_value_with(&entry, shared.admission_evidence(), witness);
                 Response::ok(req.id, value)
             }
             Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
@@ -8796,8 +8852,9 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
             // scheduler's ready event so the two cannot drift. `entry` is
             // added only here: this response describes an entry the caller
             // just named, while a cached summary outlives that state.
-            let mut value = preview_card_value(&summary);
-            value["entry"] = entry_value(&entry, shared.admission_evidence());
+            let witness = shared.redaction_witness();
+            let mut value = preview_card_value(&summary, witness);
+            value["entry"] = entry_value_with(&entry, shared.admission_evidence(), witness);
             Response::ok(req.id, value)
         }
         Err(error) => Response::err(
@@ -8829,6 +8886,7 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
 /// never produces one. See `preview::build_preview_card`.
 pub(crate) fn preview_card_value(
     summary: &super::preview::PreviewCardSummary,
+    witness: super::second_look::RedactionWitness,
 ) -> serde_json::Value {
     let mut value = preview_card_fields(summary);
     // The same scrub fields `entry_value` carries, describing THIS build: a
@@ -8839,6 +8897,7 @@ pub(crate) fn preview_card_value(
         &mut value,
         super::second_look::Scrub::Scrubbed(summary.scrub_counts),
         summary.subagents_dropped,
+        witness,
     );
     value
 }
@@ -12036,7 +12095,10 @@ mod tests {
             reason_label: None,
             scrub_counts: super::super::second_look::ScrubCounts::default(),
         };
-        let value = preview_card_value(&summary);
+        let value = preview_card_value(
+            &summary,
+            super::super::second_look::RedactionWitness::Absent,
+        );
         assert_eq!(
             value["redactions_distinct"],
             serde_json::to_value(&redactions_distinct).unwrap(),
@@ -12073,10 +12135,16 @@ mod tests {
             scrub_counts: super::super::second_look::ScrubCounts::default(),
         };
         let max = crate::envelope::MAX_ENVELOPE_BYTES;
-        let over = preview_card_value(&card(max + 1));
+        let over = preview_card_value(
+            &card(max + 1),
+            super::super::second_look::RedactionWitness::Absent,
+        );
         assert_eq!(over["reason_label"], "envelope-too-large", "{over}");
         assert_eq!(over["reason_label"], super::super::queue::REASON_TOO_LARGE);
-        let at_limit = preview_card_value(&card(max));
+        let at_limit = preview_card_value(
+            &card(max),
+            super::super::second_look::RedactionWitness::Absent,
+        );
         assert!(at_limit.get("reason_label").is_none(), "{at_limit}");
     }
 
@@ -13688,6 +13756,326 @@ mod tests {
         }))
         .unwrap();
         s.store.save_config(&cfg).unwrap();
+    }
+
+    /// On a witness device, a session where nothing matched publishes no
+    /// `second_look` reason (and so no line) on the snapshot, `list_pending`
+    /// and `preview_request`; without one, it publishes `nothing-matched` as
+    /// before. The counts themselves are published either way.
+    #[tokio::test]
+    async fn a_witness_device_publishes_no_nothing_matched_reason() {
+        use super::super::second_look::{REASON_NOTHING_MATCHED, ScrubCounts};
+        for witness in [false, true] {
+            let s = shared();
+            if witness {
+                configure_witness(&s);
+            }
+            let id = seed_entry_with_eligibility(&s, "/tmp/nothing-matched", None);
+            {
+                let mut q = s.queue.lock().unwrap();
+                assert!(q.record_previewed_envelope(id, "sha256:pinned", None, None));
+                q.record_scrub(
+                    id,
+                    "sha256:pinned",
+                    ScrubCounts {
+                        marks: 2,
+                        content_marks: 0,
+                        unsure_spans: 0,
+                        unsure_unreadable: false,
+                    },
+                );
+            }
+            let expected = if witness {
+                serde_json::json!([])
+            } else {
+                serde_json::json!([REASON_NOTHING_MATCHED])
+            };
+            let snapshot = s.snapshot_value();
+            let row = snapshot["pending"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["entry_id"] == id.to_string())
+                .unwrap()
+                .clone();
+            assert_eq!(row["second_look"], expected, "snapshot, witness={witness}");
+            assert_eq!(
+                row["second_look_lines"].as_array().unwrap().len(),
+                expected.as_array().unwrap().len()
+            );
+            assert_eq!(row["content_marks"], 0);
+
+            let listed = handle_request_async(&s, &req("list_pending", serde_json::json!({})))
+                .await
+                .result
+                .unwrap();
+            let row = listed["pending"]
+                .as_array()
+                .expect("list_pending lists entries")
+                .iter()
+                .find(|e| e["entry_id"] == id.to_string())
+                .unwrap()
+                .clone();
+            assert_eq!(
+                row["second_look"], expected,
+                "list_pending, witness={witness}"
+            );
+        }
+    }
+
+    /// Once per daemon start: sessions with no message from the person are
+    /// skipped in any configuration; on a witness device, holds whose record
+    /// says only nothing matched go back to waiting (a local pin cleared, a
+    /// witness pin kept); every other hold, and one with no readable record,
+    /// stays held.
+    #[test]
+    fn the_start_recheck_releases_only_nothing_matched_holds_on_a_witness_device() {
+        use super::super::queue::{QueueEntry, QueueState, REASON_NO_USER_MESSAGES, SessionShape};
+        use super::super::second_look::{
+            REASON_SECOND_LOOK_REVIEW_REQUIRED, ScrubCounts, ScrubRecord,
+        };
+        let witness_pin = format!(
+            "{}{}",
+            super::super::approved_envelope::WITNESS_PIN_PREFIX,
+            "11".repeat(32)
+        );
+        let turns = |n: u32| {
+            Some(SessionShape {
+                user_turns: n,
+                ..Default::default()
+            })
+        };
+        let entry = |tag: &str,
+                     state: QueueState,
+                     label: Option<&str>,
+                     pin: Option<&str>,
+                     counts: Option<(u32, u32, u32)>,
+                     dropped: u32,
+                     shape: Option<SessionShape>| {
+            QueueEntry {
+                entry_id: uuid::Uuid::new_v4(),
+                session_hash: format!("sha256:{tag}"),
+                source: "claude-code".to_string(),
+                project_key: "/tmp/recheck".to_string(),
+                path: std::path::PathBuf::from(format!("/tmp/{tag}.jsonl")),
+                size_bytes: 1,
+                discovered_at: Utc::now() - chrono::Duration::days(1),
+                state,
+                reason_label: label.map(str::to_string),
+                previewed_envelope_digest: pin.map(str::to_string),
+                would_send_bytes: pin.map(|_| 10),
+                scrub: pin
+                    .zip(counts)
+                    .map(|(pin, (marks, content, unsure))| ScrubRecord {
+                        envelope_digest: pin.to_string(),
+                        counts: ScrubCounts {
+                            marks,
+                            content_marks: content,
+                            unsure_spans: unsure,
+                            unsure_unreadable: false,
+                        },
+                    }),
+                subagents_dropped: dropped,
+                shape,
+                ..Default::default()
+            }
+        };
+        let held = Some(REASON_SECOND_LOOK_REVIEW_REQUIRED);
+        let pending = QueueState::Pending;
+        let local = Some("sha256:local");
+        let nm = Some((2, 0, 0));
+        for witness in [false, true] {
+            let s = shared();
+            if witness {
+                configure_witness(&s);
+            }
+            let local_nm = entry("local-nm", pending, held, local, nm, 0, turns(2));
+            let witness_nm = entry(
+                "witness-nm",
+                pending,
+                held,
+                Some(&witness_pin),
+                Some((0, 0, 0)),
+                0,
+                turns(1),
+            );
+            let unsure = entry("unsure", pending, held, local, Some((0, 0, 1)), 0, turns(2));
+            let trimmed = entry("trimmed", pending, held, local, nm, 1, turns(2));
+            let no_record = entry("no-record", pending, held, None, None, 0, turns(2));
+            let other = entry(
+                "other",
+                pending,
+                Some(crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED),
+                local,
+                nm,
+                0,
+                turns(2),
+            );
+            let held_zero = entry("held-zero", pending, held, local, nm, 0, turns(0));
+            let waiting_zero = entry("waiting-zero", pending, None, None, None, 0, turns(0));
+            let auto_zero = QueueEntry {
+                approved_unattended: true,
+                ..entry(
+                    "auto-zero",
+                    QueueState::Approved,
+                    None,
+                    None,
+                    None,
+                    0,
+                    turns(0),
+                )
+            };
+            let person_zero = entry(
+                "person-zero",
+                QueueState::Approved,
+                None,
+                None,
+                None,
+                0,
+                turns(0),
+            );
+            let unknown_shape = entry("unknown-shape", pending, None, None, None, 0, None);
+            let all = [
+                &local_nm,
+                &witness_nm,
+                &unsure,
+                &trimmed,
+                &no_record,
+                &other,
+                &held_zero,
+                &waiting_zero,
+                &auto_zero,
+                &person_zero,
+                &unknown_shape,
+            ];
+            {
+                let mut q = s.queue.lock().unwrap();
+                for e in all {
+                    q.upsert((*e).clone(), 100).unwrap();
+                }
+            }
+            let now = Utc::now();
+            let mut done = false;
+            let moved = crate::daemon::recheck_second_look_holds_once(&s, now, &mut done);
+            assert!(done);
+            assert_eq!(moved.skipped, 3, "witness={witness}");
+            assert_eq!(moved.released, if witness { 2 } else { 0 });
+
+            let q = s.queue.lock().unwrap();
+            let get = |e: &QueueEntry| q.get(e.entry_id).unwrap().clone();
+            if witness {
+                let released = get(&local_nm);
+                assert_eq!(
+                    (released.state, released.reason_label.as_deref()),
+                    (pending, None)
+                );
+                assert_eq!(released.discovered_at, now);
+                assert_eq!(
+                    released.previewed_envelope_digest, None,
+                    "local pin cleared"
+                );
+                assert_eq!(released.would_send_bytes, None);
+                assert_eq!(released.scrub, None);
+                assert!(
+                    super::super::witness_worker::needs_witness_job(
+                        &s.store.load_config().unwrap().unwrap(),
+                        &released
+                    ),
+                    "it goes back through the witness"
+                );
+                let released = get(&witness_nm);
+                assert_eq!(released.reason_label, None);
+                assert_eq!(
+                    released.previewed_envelope_digest.as_deref(),
+                    Some(witness_pin.as_str()),
+                    "the certified review stays pinned"
+                );
+            } else {
+                for e in [&local_nm, &witness_nm] {
+                    assert_eq!(
+                        get(e).reason_label.as_deref(),
+                        held,
+                        "no witness: still held"
+                    );
+                }
+            }
+            for e in [&unsure, &trimmed, &no_record] {
+                let kept = get(e);
+                assert_eq!(kept.reason_label.as_deref(), held, "{kept:?}");
+                assert!(kept.held_for_review());
+            }
+            assert_eq!(
+                get(&other).reason_label.as_deref(),
+                Some(crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED)
+            );
+            for e in [&held_zero, &waiting_zero, &auto_zero] {
+                let skipped = get(e);
+                assert_eq!(skipped.state, QueueState::Refused, "{skipped:?}");
+                assert_eq!(
+                    skipped.reason_label.as_deref(),
+                    Some(REASON_NO_USER_MESSAGES)
+                );
+                assert!(!skipped.approved_unattended);
+            }
+            assert_eq!(
+                get(&person_zero).state,
+                QueueState::Approved,
+                "a person's approval is left to the upload, which refuses it"
+            );
+            assert_eq!(get(&unknown_shape).state, pending, "no shape is not zero");
+            drop(q);
+
+            // Once per process.
+            {
+                let mut q = s.queue.lock().unwrap();
+                q.upsert(
+                    QueueEntry {
+                        entry_id: uuid::Uuid::new_v4(),
+                        ..entry("later", pending, held, local, nm, 0, turns(0))
+                    },
+                    100,
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                crate::daemon::recheck_second_look_holds_once(&s, now, &mut done),
+                crate::daemon::SecondLookRecheck::default()
+            );
+        }
+    }
+
+    /// The Scrub check default notice's element says whether the device has
+    /// a witness, so the shared copy can choose the Automatic sentence.
+    #[test]
+    fn an_arming_rewording_says_whether_the_device_has_a_witness() {
+        use super::super::arming_wording::ArmingClaim;
+        for witness in [false, true] {
+            let s = shared();
+            if witness {
+                configure_witness(&s);
+            }
+            s.policy.lock().unwrap().arming_rewordings.push(
+                super::super::policy::ArmingRewordNotice {
+                    id: 3,
+                    reworded_at: Utc::now(),
+                    project_key: "/tmp/reworded".to_string(),
+                    was: ArmingClaim::ModelScrubbed,
+                    now: ArmingClaim::PatternsOnly,
+                    scrub_check_defaulted: true,
+                },
+            );
+            let element = s.status_value()["arming_rewordings"][0].clone();
+            assert_eq!(element["redaction_witness"], witness, "{element}");
+            let copy = crate::consent_copy::arming_reworded_notice_for_wire(&element).unwrap();
+            assert_eq!(
+                copy.scope,
+                if witness {
+                    crate::consent_copy::SCRUB_CHECK_AUTOMATIC_HELP_WITNESS
+                } else {
+                    crate::consent_copy::SCRUB_CHECK_AUTOMATIC_HELP
+                }
+            );
+        }
     }
 
     /// An approval that hands a trace to the privacy witness says so, so a
@@ -20090,7 +20478,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 111, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 113, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 84, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
@@ -21715,8 +22103,12 @@ mod tests {
         }
 
         #[test]
-        fn opt_in_events_are_exactly_reengage_due() {
-            assert_eq!(OPT_IN_EVENTS, &[EVENT_REENGAGE_DUE]);
+        fn opt_in_events_include_declared_feature_changes() {
+            assert_eq!(
+                OPT_IN_EVENTS,
+                &[EVENT_REENGAGE_DUE, EVENT_FEATURE_FLAGS_CHANGED]
+            );
+            assert!(event_is_opt_in(EVENT_FEATURE_FLAGS_CHANGED));
             assert!(event_is_opt_in(EVENT_REENGAGE_DUE));
             assert!(!event_is_opt_in(EVENT_QUEUE_CHANGED));
             assert!(!event_is_opt_in(EVENT_DIGEST_DUE));

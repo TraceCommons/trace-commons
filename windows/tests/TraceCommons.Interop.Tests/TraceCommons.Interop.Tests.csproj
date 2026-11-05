@@ -19,6 +19,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/TraceCommons.Interop/TraceCommons.Interop.csproj" />
+    <Compile Include="../../src/TraceCommons.App/ViewModels/PreviewDecision.cs" Link="PreviewDecision.cs" />
     <Compile Include="../../src/TraceCommons.App/ViewModels/InsightsViewModel.cs" Link="InsightsViewModel.cs" />
     <Compile Include="../../src/TraceCommons.App/ViewModels/MissionDraftsViewModel.cs" Link="MissionDraftsViewModel.cs" />
     <Compile Include="../../src/TraceCommons.App/ViewModels/CredentialBrowser.cs" Link="CredentialBrowser.cs" />

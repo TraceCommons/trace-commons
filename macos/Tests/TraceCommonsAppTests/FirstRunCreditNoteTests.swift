@@ -38,7 +38,11 @@ final class FirstRunCreditNoteTests: XCTestCase {
         let source = try Self.source("UsesScreen.swift")
         XCTAssertTrue(source.contains("ForEach(UsesScreenLayout.shownOptionalScopes(options, uses: copy.uses))"))
         XCTAssertTrue(source.contains("if option.name == copy.uses.creditScope {"))
-        XCTAssertTrue(source.contains("Text(copy.uses.creditRequired)"))
+        // An amber heads-up with its icon (product owner, 2026-11-05).
+        XCTAssertTrue(source.contains(
+            "Label(copy.uses.creditRequired, systemImage: \"exclamationmark.circle.fill\")\n"
+                + "                            .glassType(GlassTokens.TypeScale.caption)\n"
+                + "                            .foregroundStyle(GlassTokens.Color.statusAskText.color)"))
     }
 
     func testTracesNotesNoCreditOnlyWhileTrainCodingModelsIsOff() throws {

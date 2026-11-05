@@ -997,7 +997,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 // No hold, or one that had already expired by the time the
                 // response arrived. Saying so is the honest option; a button
                 // that would be refused is not.
-                Notice = ApprovedNoUndo;
+                Notice = decision.Hold?.Toast.Line
+                    ?? PreviewDecision.ApprovalUnconfirmedMessage;
                 break;
 
             case PreviewOutcome.Failed:
@@ -1216,11 +1217,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         ApprovalHold? hold = ApprovalHold.Parse(response);
         if (hold is null)
         {
-            // A malformed result and a bad_params refusal look identical here
-            // on purpose: neither carries counts to build a toast from, and
-            // an unrecognised entry_id or project_id must read as a refusal,
-            // never as "0 sessions sent" dressed up as success.
-            Notice = "That couldn't be sent just now. Nothing has been sent.";
+            // An explicit refusal and an unreadable answer are different:
+            // the latter cannot establish whether approval took effect.
+            Notice = response.IsError
+                ? "That couldn't be sent just now. Nothing has been sent."
+                : PreviewDecision.ApprovalUnconfirmedMessage;
             return;
         }
 

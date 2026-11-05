@@ -2002,6 +2002,11 @@ fn visit_session(
         from_trajectory,
         returned_from_keep,
     );
+    // A session with no message from the person has nothing to contribute:
+    // it is recorded skipped, never offered, armed, witnessed or sent. See
+    // `queue::REASON_NO_USER_MESSAGES`.
+    let no_user_messages = super::queue::SessionShape::of(&transcript).user_turns == 0;
+    let would_arm = would_arm && !no_user_messages;
     let armed = would_arm && !ctx.gate.blocks();
     // What the gate held back, counted so that enforcing it cannot stop an
     // armed folder without saying so.
@@ -2013,7 +2018,7 @@ fn visit_session(
         project_path,
         cwd,
     };
-    let entry = new_entry(
+    let mut entry = new_entry(
         ctx,
         session_ref,
         &obs,
@@ -2022,6 +2027,10 @@ fn visit_session(
         armed,
         returned_from_keep,
     );
+    if no_user_messages {
+        entry.state = QueueState::Refused;
+        entry.reason_label = Some(super::queue::REASON_NO_USER_MESSAGES.to_string());
+    }
     let entry_id = entry.entry_id;
 
     let mut queue = shared.queue.lock().expect("queue lock");
@@ -2037,11 +2046,13 @@ fn visit_session(
     // the cap (see `over_cap`). One that was let past the cap for being
     // armed but has since come to wait -- the arming hold above found it
     // older than an arming -- is held to the cap again here.
-    let cap = if armed && unattended_lane_has_room(&queue, ctx.max_queue_entries) {
-        usize::MAX
-    } else {
-        ctx.max_queue_entries
-    };
+    // A skipped session takes no place in the queue.
+    let cap =
+        if no_user_messages || (armed && unattended_lane_has_room(&queue, ctx.max_queue_entries)) {
+            usize::MAX
+        } else {
+            ctx.max_queue_entries
+        };
     match queue.replace_live_at_path(entry, cap) {
         Ok(outcome) => {
             if outcome.superseded > 0 {
@@ -2051,7 +2062,9 @@ fn visit_session(
             if outcome.inserted {
                 out.changed = true;
                 out.sessions_changed = true;
-                if armed {
+                if no_user_messages {
+                    // Recorded, not offered: nothing waits on anyone.
+                } else if armed {
                     out.report.auto_ready += 1;
                     if ctx.gate.would_refuse() {
                         out.report.gate_would_refuse += 1;
@@ -3985,6 +3998,64 @@ mod tests {
         let e = f.shared.queue.lock().unwrap().all()[0].clone();
         assert_eq!(e.state, QueueState::Pending, "held, not re-approved");
         assert!(e.held_for_review());
+    }
+
+    /// A session with no message from the person is recorded skipped on
+    /// sight, in an armed folder too: never offered, never approved, not
+    /// waiting on anyone. A session with a message beside it is armed as
+    /// usual.
+    #[tokio::test]
+    async fn a_session_with_no_user_messages_is_skipped_not_offered() {
+        let f = WatcherFixture::new();
+        let project_dir = f.claude_root.join("-Users-testuser-code-proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let cwd = abs_json("Users/testuser/code/proj");
+        let name = "22222222-2222-2222-2222-222222222222";
+        std::fs::write(
+            project_dir.join(format!("{name}.jsonl")),
+            format!(
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\
+                 \"content\":\"<system-reminder>setup</system-reminder>\"}},\
+                 \"cwd\":\"{cwd}\",\"timestamp\":\"2026-08-08T10:00:00Z\",\
+                 \"version\":\"2.0.1\",\"sessionId\":\"{name}\",\"uuid\":\"a1\"}}\n"
+            ),
+        )
+        .unwrap();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        let report = f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(report.auto_ready, 1, "{report:?}");
+
+        let mut entries = f.shared.queue.lock().unwrap().all().to_vec();
+        entries.sort_by_key(|e| e.state == QueueState::Approved);
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        let skipped = &entries[0];
+        assert_eq!(skipped.state, QueueState::Refused);
+        assert_eq!(
+            skipped.reason_label.as_deref(),
+            Some(crate::daemon::queue::REASON_NO_USER_MESSAGES)
+        );
+        assert!(!skipped.approved_unattended);
+        assert!(skipped.has_no_user_messages());
+        assert_eq!(entries[1].state, QueueState::Approved);
+        assert!(
+            f.shared.queue.lock().unwrap().pending().is_empty(),
+            "nothing waits on anyone"
+        );
+
+        // A later pass leaves it skipped.
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        assert!(
+            f.shared
+                .queue
+                .lock()
+                .unwrap()
+                .all()
+                .iter()
+                .any(|e| e.reason_label.as_deref()
+                    == Some(crate::daemon::queue::REASON_NO_USER_MESSAGES)
+                    && e.state == QueueState::Refused)
+        );
     }
 
     /// The Manual Scrub check (K4 of #1118): an armed, settled session is

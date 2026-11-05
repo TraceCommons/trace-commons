@@ -79,7 +79,7 @@ final class HomeTracesHeroTests: XCTestCase {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains(
             "        return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n"
-                + "            tracesHero\n            privateAI\n            HomeSection(words?.sectionTraces) {\n"))
+                + "            tracesHero\n            noCredit\n            privateAI\n            HomeSection(words?.sectionTraces) {\n"))
         XCTAssertEqual(home.components(separatedBy: "            tracesHero\n").count - 1, 1, "drawn once")
     }
 

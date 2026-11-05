@@ -1136,7 +1136,7 @@ final class TracesStore {
                 projectId: folder.id, verdict: verdict, filter: idleOnly ? .idleSessions : nil)
             guard mine == attachment else { return }
             lastContributedFolder = ContributedFolder(
-                projectId: folder.id, toast: response.toast, label: folder.label,
+                projectId: folder.id, toast: response.toast(undoCopy: words?.undo), label: folder.label,
                 // A person pressed the folder's Submit: a foreground submission.
                 redactionBegun: redactionNotice.line(
                     .foreground, witnessReview: response.witnessReview == true, words: words?.undo))

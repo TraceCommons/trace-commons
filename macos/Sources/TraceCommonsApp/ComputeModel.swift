@@ -31,6 +31,7 @@ final class ComputeModel {
     func noteQuitRefused() { quitWasRefused = true }
 
     func start() async {
+        if case .refused(let line) = BuildChannelGate.current { refusalSentence = line; failureLabel = "feature-profile-mismatch"; return }
         await start(plistChannel: BuildChannelGate.plistChannel)
     }
 

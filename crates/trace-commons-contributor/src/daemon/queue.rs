@@ -747,10 +747,23 @@ impl QueueEntry {
         }
     }
 
-    /// [`super::second_look::second_look_reasons`] for this entry: the
-    /// recorded scrub and the discovery-time trim.
+    /// [`super::second_look::second_look_reasons`] for this entry with no
+    /// witness: every reason the recorded scrub and the discovery-time trim
+    /// give.
     pub fn second_look_reasons(&self) -> Vec<&'static str> {
-        super::second_look::second_look_reasons(self.scrub(), self.subagents_dropped)
+        super::second_look::second_look_reasons(
+            self.scrub(),
+            self.subagents_dropped,
+            super::second_look::RedactionWitness::Absent,
+        )
+    }
+
+    /// Whether the session is known to have no message from the person
+    /// ([`REASON_NO_USER_MESSAGES`]). `false` when no shape was recorded.
+    pub fn has_no_user_messages(&self) -> bool {
+        self.shape
+            .as_ref()
+            .is_some_and(|shape| shape.user_turns == 0)
     }
 
     /// Whether this entry is waiting on a person and must not be approved on
@@ -955,6 +968,17 @@ pub const REASON_RETURNED_FROM_KEEP: &str = "returned-from-keep";
 /// bytes under one set of consent scopes, not a decision about the
 /// conversation.
 pub const REASON_TOO_LARGE: &str = "envelope-too-large";
+
+/// A session with no message from the person in it (`SessionShape::user_turns`
+/// is zero): nothing to contribute. Owner decision, 2026-11-05.
+///
+/// Recorded as `Refused`, the shape of [`REASON_TOO_LARGE`]: a verdict on one
+/// set of bytes, terminal, not waiting for anyone and not counted against the
+/// cap, never sent to the witness or uploaded. Deliberately not
+/// [`REASON_DISMISSED`], which suppresses the conversation forever: a session
+/// that gains a message is a new set of bytes and is offered again. An entry
+/// with no recorded shape is unknown, never zero, and is not skipped.
+pub const REASON_NO_USER_MESSAGES: &str = "no-user-messages";
 
 /// A project the contributor has chosen to ignore; its waiting sessions are
 /// cleared when the mode is set.
@@ -1716,6 +1740,15 @@ impl Queue {
         true
     }
 
+    /// Whether any session is held for a measurement outside the accepted set.
+    pub fn has_measurement_holds(&self) -> bool {
+        self.entries.iter().any(|e| {
+            e.state == QueueState::Pending
+                && e.reason_label.as_deref()
+                    == Some(crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED)
+        })
+    }
+
     /// Release every session held because the witness reported a measurement
     /// outside the accepted set (`submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED`),
     /// for a newly installed accepted list that may now include it. Each goes
@@ -1735,6 +1768,130 @@ impl Queue {
                 e.discovered_at = now;
                 released += 1;
             }
+        }
+        released
+    }
+
+    /// The `Pending` entries held under
+    /// `submit::REASON_WITNESS_RISK_REVIEW_REQUIRED` that carry a witness
+    /// pin, with the pin: what [`Self::release_witness_risk_holds`] may
+    /// release. A hold with no pin has no certificate left to read, so it is
+    /// not listed and stays held.
+    pub fn witness_risk_holds(&self) -> Vec<(Uuid, String)> {
+        self.entries
+            .iter()
+            .filter(|e| {
+                e.state == QueueState::Pending
+                    && e.reason_label.as_deref()
+                        == Some(crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED)
+                    && e.holds_witness_certificate()
+            })
+            .filter_map(|e| Some((e.entry_id, e.previewed_envelope_digest.clone()?)))
+            .collect()
+    }
+
+    /// Release the witness-risk holds in `allowed`, each named with the pin
+    /// its verdict was read from, back to waiting as a fresh offer dated
+    /// `now`, like [`Self::release_measurement_holds`]. The pin stays, so the
+    /// standing opt-in re-approves the entry and the upload pass sends the
+    /// certified bytes it was held with, under the same verdict check, with
+    /// no second witness run.
+    ///
+    /// An entry moves only if it is still `Pending` under that label and
+    /// still pinned to the same review: between reading the certificates and
+    /// taking this lock a person may have approved it, dismissed it, or
+    /// opened a fresh review, and none of those is undone. Returns how many
+    /// moved.
+    pub fn release_witness_risk_holds(
+        &mut self,
+        allowed: &[(Uuid, String)],
+        now: DateTime<Utc>,
+    ) -> usize {
+        let mut released = 0;
+        for e in self.entries.iter_mut() {
+            let still_held = e.state == QueueState::Pending
+                && e.reason_label.as_deref()
+                    == Some(crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED);
+            let same_pin = allowed.iter().any(|(id, pin)| {
+                *id == e.entry_id && e.previewed_envelope_digest.as_deref() == Some(pin.as_str())
+            });
+            if still_held && same_pin {
+                e.reason_label = None;
+                e.discovered_at = now;
+                released += 1;
+            }
+        }
+        released
+    }
+
+    /// Skip every entry with no message from the person
+    /// ([`QueueEntry::has_no_user_messages`]) that is waiting, or approved on
+    /// the contributor's behalf and not yet sending: `Refused` under
+    /// [`REASON_NO_USER_MESSAGES`]. For entries queued before the watcher
+    /// skipped them on sight. A person's own approval is left to the upload,
+    /// which refuses it the same way. Returns how many moved.
+    pub fn skip_entries_without_user_messages(&mut self) -> usize {
+        let mut skipped = 0;
+        for e in self.entries.iter_mut() {
+            let waiting = e.state == QueueState::Pending
+                || (e.state == QueueState::Approved && e.approved_unattended);
+            if waiting && e.has_no_user_messages() {
+                e.state = QueueState::Refused;
+                e.reason_label = Some(REASON_NO_USER_MESSAGES.to_string());
+                e.approved_unattended = false;
+                e.approved_scopes = None;
+                e.approved_inputs = None;
+                e.approved_at = None;
+                e.retry_after = None;
+                skipped += 1;
+            }
+        }
+        skipped
+    }
+
+    /// On a device with a redaction witness, release every entry held under
+    /// `second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED` whose recorded
+    /// scrub says it was held only because nothing matched: back to waiting
+    /// as a fresh offer dated `now`, like [`Self::release_witness_risk_holds`].
+    /// The caller decides that the device has a witness.
+    ///
+    /// Released only when the scrub record is readable (`QueueEntry::scrub`
+    /// is `Scrubbed`) and the witness rule gives no reason at all
+    /// (`second_look_reasons` under `RedactionWitness::Present`): nothing
+    /// unsure, nothing trimmed. No record, or any other reason, stays held,
+    /// and so does an entry with no message from the person.
+    ///
+    /// A local preview pin is cleared with its counts, so the entry goes
+    /// through the witness again (an upload refuses a local pin on a witness
+    /// device). A witness pin is kept: its upload re-checks the verdict and
+    /// the Scrub check without a second witness run. Returns how many moved.
+    pub fn release_nothing_matched_holds(&mut self, now: DateTime<Utc>) -> usize {
+        use super::second_look::{self, RedactionWitness, Scrub};
+        let mut released = 0;
+        for e in self.entries.iter_mut() {
+            let held = e.state == QueueState::Pending
+                && e.reason_label.as_deref()
+                    == Some(second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED);
+            let scrub = e.scrub();
+            let only_nothing_matched = matches!(scrub, Scrub::Scrubbed(_))
+                && second_look::second_look_reasons(
+                    scrub,
+                    e.subagents_dropped,
+                    RedactionWitness::Present,
+                )
+                .is_empty();
+            if !held || !only_nothing_matched || e.has_no_user_messages() {
+                continue;
+            }
+            e.reason_label = None;
+            e.discovered_at = now;
+            if !e.holds_witness_certificate() {
+                e.previewed_envelope_digest = None;
+                e.would_send_bytes = None;
+                e.attested_inference = None;
+                e.scrub = None;
+            }
+            released += 1;
         }
         released
     }
@@ -3149,6 +3306,77 @@ mod tests {
             user_turns: 0,
         };
         assert_eq!(backwards.duration_secs(), None, "no negative lengths");
+    }
+
+    /// The queue half of releasing holds the old rule parked: only a
+    /// `Pending` witness-risk hold with a witness pin is listed, and only one
+    /// still held under that label and pinned to the same review is
+    /// released. It keeps its pin and is dated `now`; other holds and other
+    /// labels are untouched.
+    #[test]
+    fn a_witness_risk_hold_is_released_only_while_still_held_on_the_same_pin() {
+        let now = at("2026-11-05T12:00:00Z");
+        let pin = |b: &str| format!("{WITNESS_PIN_PREFIX}{}", b.repeat(32));
+        let mut q = Queue::default();
+        let mut held = |path: &str, label: &str, p: Option<String>| {
+            let e = QueueEntry {
+                approved_unattended: true,
+                ..entry_in(path, QueueState::Approved)
+            };
+            let id = e.entry_id;
+            q.push_for_test(e);
+            match p {
+                Some(p) => assert!(q.hold_with_witness_pin(id, label, &p, None, None)),
+                None => assert!(q.revoke_approval(id, label)),
+            }
+            id
+        };
+        let risk = crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED;
+        let released = held("/w/a", risk, Some(pin("aa")));
+        let repinned = held("/w/b", risk, Some(pin("bb")));
+        let unpinned = held("/w/c", risk, None);
+        let other_label = held(
+            "/w/d",
+            crate::submit::REASON_WITNESS_NOT_TRUSTED,
+            Some(pin("dd")),
+        );
+
+        let listed = q.witness_risk_holds();
+        assert_eq!(
+            listed,
+            vec![(released, pin("aa")), (repinned, pin("bb"))],
+            "an unpinned hold and another label are not listed"
+        );
+        // Between the read and the release, `repinned` was opened again.
+        q.entries
+            .iter_mut()
+            .find(|e| e.entry_id == repinned)
+            .unwrap()
+            .previewed_envelope_digest = Some(pin("cc"));
+        let asked = [
+            (released, pin("aa")),
+            (repinned, pin("bb")),
+            (unpinned, pin("ee")),
+            (other_label, pin("dd")),
+        ];
+        assert_eq!(q.release_witness_risk_holds(&asked, now), 1);
+        let e = q.get(released).unwrap();
+        assert_eq!(e.state, QueueState::Pending);
+        assert_eq!(e.reason_label, None);
+        assert_eq!(e.discovered_at, now);
+        assert_eq!(
+            e.previewed_envelope_digest.as_deref(),
+            Some(pin("aa").as_str())
+        );
+        assert!(!e.held_for_review());
+        for id in [repinned, unpinned, other_label] {
+            assert!(q.get(id).unwrap().held_for_review(), "{id}");
+        }
+        assert_eq!(
+            q.release_witness_risk_holds(&asked, now),
+            0,
+            "already released"
+        );
     }
 
     /// R5, the queue half: an unattended approval held after the witness

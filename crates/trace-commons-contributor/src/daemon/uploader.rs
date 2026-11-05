@@ -540,6 +540,14 @@ impl Uploader<'_, '_> {
         entry: &QueueEntry,
         now: DateTime<Utc>,
     ) -> Option<UploadDecision> {
+        // A session with no message from the person has nothing to
+        // contribute. Skipped, whoever approved it, before anything is read,
+        // built, witnessed or sent. See `queue::REASON_NO_USER_MESSAGES`.
+        if entry.has_no_user_messages() {
+            return Some(UploadDecision::Refused {
+                reason_label: super::queue::REASON_NO_USER_MESSAGES.to_string(),
+            });
+        }
         // The Manual Scrub check (K4 of #1118): nothing goes without a
         // person. The watcher approves nothing on anyone's behalf while it
         // is set; this catches an approval made before the switch, and
@@ -773,14 +781,14 @@ impl Uploader<'_, '_> {
                     }
                     // A pinned review is not a person's approve. A contributor
                     // can open a review on a waiting session in an automatic
-                    // project, see a verdict that is not `low`, and close it;
+                    // project, see a `high` verdict, and close it;
                     // the watcher then approves the entry on their behalf with
                     // the pin still in place. The same hold as a fresh witness
                     // run, read from the certificate `approved_witness_for`
                     // has just validated, and before anything is handed to
                     // the pipeline.
                     if entry.approved_unattended
-                        && !crate::submit::verdict_is_low(artifact.response())
+                        && !crate::submit::verdict_allows_unattended(artifact.response())
                     {
                         if let Some(pin) = entry.previewed_envelope_digest.clone() {
                             return Ok(UploadDecision::HeldForReview {
@@ -830,9 +838,10 @@ impl Uploader<'_, '_> {
             }
             // Nobody has looked at this session. If the witness is what
             // builds it, its verdict is the first point at which the risk is
-            // known, and one that is not `low` stops here for a person.
+            // known, and one that does not let it go unattended (`high`, or
+            // unreadable) stops here for a person.
             if entry.approved_unattended {
-                self.ctx.hold_witnessed_unless_low_risk();
+                self.ctx.hold_witnessed_unless_unattended_allowed();
             }
         }
 
@@ -1082,7 +1091,7 @@ mod tests {
         let witnessed = crate::witness::transport::WitnessedEnvelope {
             admission: None,
             envelope_bytes: b"{}".to_vec(),
-            certificate_json: r#"{"residual_risk_verdict":"medium"}"#.into(),
+            certificate_json: r#"{"residual_risk_verdict":"high"}"#.into(),
             signature_hex: format!("0x{}", "ab".repeat(65)),
         };
         let record = crate::witness::inference_record::InferenceAttestationRecord::uncertified(
@@ -1623,6 +1632,51 @@ mod tests {
         );
         assert!(pin.is_some(), "the built envelope is pinned");
         assert_eq!(uploads_recorded(&state), 0, "nothing was sent");
+    }
+
+    /// A session with no message from the person is refused before anything
+    /// is read, built, witnessed or sent, whoever approved it, in any Scrub
+    /// check mode. One whose shape is unknown is not.
+    #[tokio::test]
+    async fn a_session_with_no_user_messages_is_skipped_whoever_approved_it() {
+        let session = session_saying(ONE_EMAIL);
+        let no_messages = |approved_unattended: bool| {
+            move |session: &GrowingSession, cfg: &crate::config::ContributorConfig| QueueEntry {
+                approved_unattended,
+                shape: Some(crate::daemon::queue::SessionShape {
+                    user_turns: 0,
+                    ..Default::default()
+                }),
+                ..session.entry_for(&session.current_hash(), cfg)
+            }
+        };
+        for (unattended, settings) in [(true, automatic()), (true, manual()), (false, automatic())]
+        {
+            let (decision, state) = upload_under(&session, no_messages(unattended), settings).await;
+            assert!(
+                matches!(
+                    &decision,
+                    UploadDecision::Refused { reason_label }
+                        if reason_label == crate::daemon::queue::REASON_NO_USER_MESSAGES
+                ),
+                "{decision:?}"
+            );
+            assert_eq!(uploads_recorded(&state), 0);
+        }
+        let (decision, _) = upload_under(
+            &session,
+            |session: &GrowingSession, cfg: &crate::config::ContributorConfig| QueueEntry {
+                shape: None,
+                ..session.entry_for(&session.current_hash(), cfg)
+            },
+            automatic(),
+        )
+        .await;
+        assert!(
+            !matches!(&decision, UploadDecision::Refused { reason_label }
+                if reason_label == crate::daemon::queue::REASON_NO_USER_MESSAGES),
+            "no recorded shape is unknown, not zero: {decision:?}"
+        );
     }
 
     /// A hold under `reason`, decided on `expected` second-look labels.
