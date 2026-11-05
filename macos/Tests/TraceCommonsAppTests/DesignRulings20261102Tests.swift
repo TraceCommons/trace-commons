@@ -57,13 +57,14 @@ final class DesignRulings20261102Tests: XCTestCase {
         XCTAssertTrue(card.contains("disclosure = SharingDisclosureFlow()"))
     }
 
-    /// One card for all three: Insights' empty state, the Private AI guide
-    /// and Home's Traces walkthrough draw the same view, which has no
-    /// gradient, graphic or pill, and an X only when given one.
+    /// One card for both: Insights' empty state and the Private AI guide
+    /// draw the same view, which has no gradient, graphic or pill, and an X
+    /// only when given one. Home's Traces hero is the owner's own design
+    /// again (2026-11-05, `HomeTracesHeroTests`).
     func test_theThreeGettingStartedCardsAreOneDesign() throws {
         XCTAssertTrue(try Self.text("Views/InsightsGetStarted.swift").contains("GetStartedCard("))
         XCTAssertTrue(try Self.text("Views/Monitor/InferenceViews.swift").contains("GetStartedCard("))
-        XCTAssertTrue(try Self.text("Views/Monitor/HomeViews.swift").contains("GetStartedCard("))
+        XCTAssertFalse(try Self.text("Views/Monitor/HomeViews.swift").contains("GetStartedCard("))
         let card = try Self.text("Views/GetStartedCard.swift")
         for absent in ["Gradient", "GlassHeroCard(", "GlassHeroSymbol(", "heroInk", "actionOnPill"] {
             XCTAssertFalse(card.contains(absent), absent)
