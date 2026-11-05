@@ -37,13 +37,36 @@ TLS-ALPN routing names the **instance**, not the app. Update TXT after an instan
 4. Check CAA through multiple public resolvers; its account URI must match the published ACME account. Check for unexpected certificates through Certificate Transparency.
 5. Run a synthetic attestation, job submission and fetch on both endpoints. This checks the witness protocol; it does not prove a contributor has migrated or an ingest submission has been admitted.
 
-Observed on 2026-11-05: valid Let's Encrypt leaf for the custom hostname, expiry 2027-02-03; evidence hashes and served leaf match; report-data and configuration measurement bindings match; Phala verification API reports `quote.verified: true`. CAA was confirmed through Cloudflare and Google public DNS. Synthetic job submission/fetch succeeded on both hostnames with the new measurement and unchanged signer. The larger custom-host fixture completed after 55.5 seconds, returned the v2 pipeline and medium residual-risk verdict, and removed the synthetic host marker. Subsequent small-fixture attempts and repeated diagnostics checks failed TLS handshakes before HTTP. Python failed 12/12 and curl failed 5/5 on the custom hostname while corresponding legacy checks passed. The failure reproduced from the GCP pilot host. Direct instance TLS passthrough and nested certificate-validated TLS through the gateway both reached the ingress; nested checks passed 3/3. Public Cloudflare/Google DNS and both authoritative nameservers returned the expected records. Brief CAA removal, app-ID TXT routing and a legacy TXT alias did not resolve the failure; each test was reverted. This isolates the blocker to the gateway custom-domain path, without establishing its internal cause.
+Observed on 2026-11-05: valid Let's Encrypt leaf for the custom hostname, expiry 2027-02-03; evidence hashes and served leaf match; report-data and configuration measurement bindings match; Phala verification API reports `quote.verified: true`. A fresh nonce-bound witness quote also verified with the unchanged pinned signing address and deployed measurement. CAA was confirmed through Cloudflare and Google public DNS. Synthetic job submission/fetch succeeded on both hostnames with the new measurement and unchanged signer. The larger custom-host fixture completed after 55.5 seconds, returned the v2 pipeline and medium residual-risk verdict, and removed the synthetic host marker. Subsequent small-fixture attempts and repeated diagnostics checks failed TLS handshakes before HTTP. Python failed 12/12 and curl failed 5/5 on the custom hostname while corresponding legacy checks passed. The failure reproduced from the GCP pilot host. Direct instance TLS passthrough and nested certificate-validated TLS through the gateway both reached the ingress; nested checks passed 3/3. Public Cloudflare/Google DNS and both authoritative nameservers returned the expected records. Brief CAA removal, app-ID TXT routing and a legacy TXT alias did not resolve the failure; each test was reverted. This isolates the blocker to the gateway custom-domain path, without establishing its internal cause.
+
+## Gateway routing reproduction
+
+These read-only checks isolate the current provider blocker. Both connect to
+`66.220.6.109:443`. The first uses the public custom SNI and currently fails
+before HTTP. The second selects the known instance's TLS passthrough route
+while still validating the certificate against the custom hostname:
+
+```bash
+openssl s_client -connect 66.220.6.109:443 \
+  -servername witness.tracecommons.ai \
+  -verify_hostname witness.tracecommons.ai -verify_return_error </dev/null
+
+openssl s_client -connect 66.220.6.109:443 \
+  -servername aebf544394423a3ed2b83d924387c34be7a432c1-443s.dstack-pha-prod9.phala.network \
+  -verify_hostname witness.tracecommons.ai -verify_return_error </dev/null
+```
+
+Use the verifier machine's normal CA trust bundle. A custom-SNI failure with
+a successful direct passthrough handshake demonstrates that the ingress and
+certificate work; it does not identify which gateway resolver or routing
+component failed. The provider must diagnose that boundary before cutover.
+The reproduction is prepared here; no external support message was sent.
 
 ## Client transition
 
 Discovery still advertises the original Phala URL. Existing clients do not automatically adopt this hostname. Witness URL changes require explicit contributor confirmation and void the old automatic grants.
 
-Accepted-list V1 has exactly one URL. Clients fetch one fixed ingest route and reject a list for any other URL. Do not replace the legacy list with a new-domain list or flip discovery until URL-specific list delivery is implemented and its client support is released. Keep the legacy route and URL available during that transition. Both legacy provisioning and the connected-inference catalog need coordinated updates; an installed older catalog selection is not automatically replaced.
+Accepted-list V1 has exactly one URL. Clients fetch one fixed ingest route and reject a list for any other URL. URL-specific query delivery and client support are implemented in this branch. Do not replace the legacy list or flip discovery until that server support is deployed, its client support is released and the custom-domain gateway fault is resolved. Custom-domain signed V3 is staged, not enabled, at `/etc/tracecommons/witness/accepted-lists/e2b3d84969c4681419afdd98023a53db98edc87e4509dc5f0d1bea70bfd8fd6f.json`. Keep legacy V2 and the old URL available during that transition. Both legacy provisioning and the connected-inference catalog need coordinated updates; an installed older catalog selection is not automatically replaced.
 
 ## Future host moves and rollback
 

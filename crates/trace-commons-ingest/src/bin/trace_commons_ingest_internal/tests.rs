@@ -6669,6 +6669,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         referral_network_mark_key: None,
         first_run_estimate: Default::default(),
         witness_accepted_list_path: None,
+        witness_accepted_list_directory: None,
         first_run_copy: Default::default(),
         first_run_stats: None,
         witness_blocked: None,
@@ -31409,6 +31410,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         referral_network_mark_key: None,
         first_run_estimate: Default::default(),
         witness_accepted_list_path: None,
+        witness_accepted_list_directory: None,
         first_run_copy: Default::default(),
         first_run_stats: None,
         witness_blocked: None,
@@ -103267,13 +103269,17 @@ mod witness_accepted_list_tests {
     };
 
     async fn get_list(state: Arc<AppState>) -> axum::response::Response {
+        get_list_at(state, "/v1/public/witness-accepted-list").await
+    }
+
+    async fn get_list_at(state: Arc<AppState>, uri: &str) -> axum::response::Response {
         app(state)
             .oneshot(
                 axum::http::Request::builder()
                     .method("GET")
                     // The literal, so the route inventory's `^/v1/public/`
                     // rule is the one that classifies it.
-                    .uri("/v1/public/witness-accepted-list")
+                    .uri(uri)
                     .body(Body::empty())
                     .expect("request builds"),
             )
@@ -103283,6 +103289,10 @@ mod witness_accepted_list_tests {
 
     /// A list signed with a throwaway key made here; never a real key.
     fn signed_list(version: u64) -> Vec<u8> {
+        signed_list_for(version, "https://witness.example")
+    }
+
+    fn signed_list_for(version: u64, witness_url: &str) -> Vec<u8> {
         let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
         let key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
         let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
@@ -103290,7 +103300,7 @@ mod witness_accepted_list_tests {
             schema: WITNESS_ACCEPTED_LIST_SCHEMA.into(),
             version,
             issued_at: chrono::Utc::now(),
-            witness_url: "https://witness.example".into(),
+            witness_url: witness_url.into(),
             entries: vec![AcceptedEntry {
                 measurements: format!("mrtd={}", "aa".repeat(48)),
                 signing_address: format!("0x{}", "11".repeat(20)),
@@ -103404,6 +103414,209 @@ mod witness_accepted_list_tests {
             .await
             .unwrap();
         assert_eq!(body.as_ref(), second.as_slice());
+    }
+
+    const LEGACY_FILE: &str =
+        "0e7c422b71d746acc93644f48a5c0f036c04dc0463f24b6e91130a69b5e593e9.json";
+    const NEW_FILE: &str = "dee9e24acd9bc27323748bf363040752a27c9d82cf7b0b0b5f23744dd60d0a30.json";
+    const LEGACY_QUERY: &str =
+        "/v1/public/witness-accepted-list?witness_url=https%3A%2F%2Fwitness.example";
+    const NEW_QUERY: &str =
+        "/v1/public/witness-accepted-list?witness_url=https%3A%2F%2Fwitness-new.example";
+
+    fn state_serving_directory(
+        path: Option<std::path::PathBuf>,
+        directory: &std::path::Path,
+    ) -> Arc<AppState> {
+        let mut state = state_serving(path);
+        Arc::make_mut(&mut state).witness_accepted_list_directory =
+            Some(Arc::new(directory.to_path_buf()));
+        state
+    }
+
+    #[tokio::test]
+    async fn explicit_urls_select_independent_signed_files_and_unqualified_stays_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.json");
+        let legacy = signed_list(1);
+        let old_dedicated = signed_list(2);
+        let new = signed_list_for(1, "https://witness-new.example");
+        std::fs::write(&legacy_path, &legacy).unwrap();
+        std::fs::write(dir.path().join(LEGACY_FILE), &old_dedicated).unwrap();
+        std::fs::write(dir.path().join(NEW_FILE), &new).unwrap();
+        let state = state_serving_directory(Some(legacy_path), dir.path());
+        for (uri, expected) in [
+            ("/v1/public/witness-accepted-list", &legacy),
+            (LEGACY_QUERY, &old_dedicated),
+            (NEW_QUERY, &new),
+            (
+                "/v1/public/witness-accepted-list?witness_url=https%3A%2F%2Fwitness-new.example%2F%2F",
+                &new,
+            ),
+        ] {
+            let response = get_list_at(Arc::clone(&state), uri).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(body.as_ref(), expected.as_slice());
+        }
+        // A directory alone must not change the legacy route's 404 behavior.
+        let response = get_list(state_serving_directory(None, dir.path())).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn legacy_fallback_requires_the_requested_witness_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.json");
+        let legacy = signed_list(1);
+        std::fs::write(&legacy_path, &legacy).unwrap();
+        // Exercise both absence of the directory setting and absence of a
+        // dedicated file in a configured directory.
+        for state in [
+            state_serving(Some(legacy_path.clone())),
+            state_serving_directory(Some(legacy_path), dir.path()),
+        ] {
+            let response = get_list_at(Arc::clone(&state), LEGACY_QUERY).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                legacy.as_slice()
+            );
+            let response = get_list_at(state, NEW_QUERY).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(
+                label_of(response).await,
+                witness_accepted_list::LABEL_NOT_PUBLISHED
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn wrong_witness_or_malformed_dedicated_files_never_fall_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.json");
+        std::fs::write(
+            &legacy_path,
+            signed_list_for(1, "https://witness-new.example"),
+        )
+        .unwrap();
+        let state = state_serving_directory(Some(legacy_path), dir.path());
+        for document in [signed_list(1), b"malformed".to_vec()] {
+            std::fs::write(dir.path().join(NEW_FILE), document).unwrap();
+            let response = get_list_at(Arc::clone(&state), NEW_QUERY).await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                label_of(response).await,
+                witness_accepted_list::LABEL_UNAVAILABLE
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_selected_file_never_falls_back_to_a_matching_legacy_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.json");
+        std::fs::write(&legacy_path, signed_list(1)).unwrap();
+        // A directory at the selected file path cannot be read as JSON on
+        // any supported platform, without relying on user-specific mode bits.
+        std::fs::create_dir(dir.path().join(LEGACY_FILE)).unwrap();
+        let response = get_list_at(
+            state_serving_directory(Some(legacy_path), dir.path()),
+            LEGACY_QUERY,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            label_of(response).await,
+            witness_accepted_list::LABEL_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_or_oversize_queries_are_fixed_bad_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.json");
+        std::fs::write(&legacy_path, signed_list(1)).unwrap();
+        let state = state_serving_directory(Some(legacy_path), dir.path());
+        let mut queries = vec![
+            "witness_url=".to_string(),
+            "&".into(),
+            "witness_url=..%2F..%2Flegacy.json".into(),
+            "witness_url=http%3A%2F%2Fwitness.example".into(),
+            "witness_url=https%3A%2F%2Fu%3Ap%40witness.example".into(),
+            "witness_url=https%3A%2F%2F%40witness.example".into(),
+            "witness_url=https%3A%2F%2Fwitness.example%23fragment".into(),
+            "witness_url=https%3A%2F%2Fwitness.example%3Fx%3Dy".into(),
+            "witness_url=https%3A%2F%2Fwitness.example%5Cother".into(),
+            "witness_url=https%3A%2F%2Fwitness.example%0A".into(),
+            "witness_url=https%3A%2F%2F".into(),
+            "witness_url=https%3A%2F%2F%2Fwitness.example".into(),
+            "witness_url=%GG".into(),
+            "witness_url=%FF".into(),
+            "witness_url=%".into(),
+            "witness_url=https%3A%2F%2Fwitness.example&witness_url=https%3A%2F%2Fwitness-new.example".into(),
+            "unexpected=value".into(),
+        ];
+        queries.push(format!(
+            "witness_url=https%3A%2F%2Fwitness.example%2F{}",
+            "x".repeat(2048)
+        ));
+        queries.push(format!("witness_url={}", "%61".repeat(2049)));
+        queries.push(format!("witness_url={}", "%61".repeat(4096)));
+        for query in queries {
+            let uri = format!("/v1/public/witness-accepted-list?{query}");
+            let response = get_list_at(Arc::clone(&state), &uri).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                label_of(response).await,
+                "witness_accepted_list_query_invalid"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn both_legacy_and_dedicated_reads_keep_the_document_size_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.json");
+        let mut bytes = signed_list(1);
+        // Trailing whitespace leaves valid JSON, so the byte bound itself
+        // must refuse this otherwise well-formed signed document.
+        bytes.resize(
+            trace_commons_protocol::witness_accepted_list::WITNESS_ACCEPTED_LIST_MAX_BYTES,
+            b' ',
+        );
+        let state = state_serving_directory(Some(legacy_path.clone()), dir.path());
+        for (extra, expected) in [
+            (false, StatusCode::OK),
+            (true, StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            if extra {
+                bytes.push(b' ');
+            }
+            std::fs::write(&legacy_path, &bytes).unwrap();
+            std::fs::write(dir.path().join(LEGACY_FILE), &bytes).unwrap();
+            for uri in ["/v1/public/witness-accepted-list", LEGACY_QUERY] {
+                let response = get_list_at(Arc::clone(&state), uri).await;
+                assert_eq!(response.status(), expected);
+                if expected == StatusCode::OK {
+                    assert_eq!(
+                        to_bytes(response.into_body(), usize::MAX)
+                            .await
+                            .unwrap()
+                            .as_ref(),
+                        bytes.as_slice()
+                    );
+                } else {
+                    assert_eq!(
+                        label_of(response).await,
+                        witness_accepted_list::LABEL_UNAVAILABLE
+                    );
+                }
+            }
+        }
     }
 }
 

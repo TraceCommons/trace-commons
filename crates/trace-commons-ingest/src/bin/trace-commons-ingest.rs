@@ -1886,6 +1886,9 @@ struct AppState {
     /// (`TRACE_COMMONS_WITNESS_ACCEPTED_LIST_PATH`), read per request. `None`
     /// when unset: the route answers 404.
     witness_accepted_list_path: Option<Arc<std::path::PathBuf>>,
+    /// Optional directory of signed lists keyed by SHA-256 of witness URL.
+    /// Used only for explicit `witness_url` queries; never changes the legacy route.
+    witness_accepted_list_directory: Option<Arc<std::path::PathBuf>>,
     /// What `POST /v1/public/first-run-copy` answers: the default lines, or
     /// the operator's dollar line, validated at boot.
     first_run_copy: Arc<first_run_copy::FirstRunCopyConfig>,
@@ -5373,6 +5376,7 @@ impl AppState {
             referral_network_mark_key,
             first_run_estimate: credit_estimate::first_run_estimate_from_env()?,
             witness_accepted_list_path: witness_accepted_list::path_from_env(),
+            witness_accepted_list_directory: witness_accepted_list::directory_from_env(),
             first_run_copy: first_run_copy::config_from_env()?,
             first_run_stats: db_connections.as_ref().map(|connections| {
                 connections.postgres.clone()

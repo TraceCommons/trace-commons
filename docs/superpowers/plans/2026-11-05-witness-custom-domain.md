@@ -11,3 +11,10 @@ Spec: ../specs/2026-11-05-witness-custom-domain-design.md
 - [ ] Resolve Phala custom-SNI routing failure before enabling discovery. Initial custom-domain synthetic succeeded, but repeated TLS checks now fail before reaching the healthy ingress. Keep legacy discovery and list URL unchanged.
 
 Review focus: old-client trust/list availability; retained sealed API key; no external TLS termination; authoritative measurement; DNS instance id on each redeploy; forward-only list versions during rollback.
+
+## Client transition
+
+- [x] Ingest: add optional URL-specific directory to state; explicit URL query validates and selects hash-named signed V1 file, with same-URL legacy fallback. Test both URL variants, default-byte compatibility, unknown/malformed/mismatched/oversized rejection and bounded reads.
+- [x] Contributor: add `fetch_witness_accepted_list_for(witness_url: &str)` through existing allowlisted bounded client, URL encode parameter, update refresh. Test request encoding, signed URL rejection, older-server behavior and global monotonic version behavior across URLs.
+- [x] Run final contributor accepted-list and estimate-client tests, ingest witness-list tests, license boundary, manifest check, formatting and scoped clippy; independently review the diff.
+- [x] Stage custom-domain signed V3 list alongside legacy V2, document release-first ordering, reconsent and forward-version rollback. Keep discovery unchanged while gateway is unhealthy.
