@@ -74,6 +74,19 @@ fn permits_closed() -> TraceContributionError {
     }
 }
 
+/// Poll `future` once: `Some` if it is ready, `None` if it is pending (and
+/// so, for a fair lock, now registered in its wait queue).
+async fn futures_poll_once<F: std::future::Future + Unpin>(future: F) -> Option<F::Output> {
+    let mut future = future;
+    std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(match std::pin::Pin::new(&mut future).poll(cx) {
+            std::task::Poll::Ready(value) => Some(value),
+            std::task::Poll::Pending => None,
+        })
+    })
+    .await
+}
+
 /// Records every text the pipeline asks about, in order, and finds nothing.
 #[derive(Default)]
 struct RecordingAdapter {
@@ -132,6 +145,126 @@ pub struct PrefetchingContributionRedaction {
     policy_version: String,
     permits: Arc<Semaphore>,
     per_request: usize,
+    /// How long a request's classify pass may take; see
+    /// [`Self::with_classify_budget`].
+    budget: Option<std::time::Duration>,
+    /// Whose turn it is to classify; see [`ClassifyQueue`].
+    queue: Arc<ClassifyQueue>,
+}
+
+/// Requests take turns at the classifier, first come first served.
+///
+/// One request classifies at a time, using every classify permit it can;
+/// the next waits its turn. That keeps admitted requests in arrival order,
+/// so the first request to arrive is the first to finish, and it makes the
+/// wait ahead of a new request predictable: roughly the requests ahead of it
+/// times the recent time a request spends classifying. The witness's
+/// admission check ([`super::http::WitnessLoadBound::with_classify_queue`])
+/// uses that estimate to answer busy at once rather than admit a request
+/// that would only time out.
+///
+/// `tokio::sync::Mutex` is fair: waiters are woken in the order they asked.
+pub struct ClassifyQueue {
+    turn: tokio::sync::Mutex<()>,
+    waiting: std::sync::atomic::AtomicUsize,
+    /// Requests that have joined the queue since start.
+    joined: std::sync::atomic::AtomicU64,
+    /// Exponentially weighted mean of a request's turn, in milliseconds; 0
+    /// until a request has finished one.
+    mean_turn_ms: std::sync::atomic::AtomicU64,
+}
+
+impl Default for ClassifyQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ClassifyQueue {
+    pub fn new() -> Self {
+        Self {
+            turn: tokio::sync::Mutex::new(()),
+            waiting: std::sync::atomic::AtomicUsize::new(0),
+            joined: std::sync::atomic::AtomicU64::new(0),
+            mean_turn_ms: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Requests waiting for their turn right now.
+    pub fn waiting(&self) -> usize {
+        self.waiting.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Requests that have joined the queue since the process started.
+    pub fn joined(&self) -> u64 {
+        self.joined.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The recent time a request spends classifying, once one has.
+    pub fn mean_turn(&self) -> Option<std::time::Duration> {
+        match self.mean_turn_ms.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            ms => Some(std::time::Duration::from_millis(ms)),
+        }
+    }
+
+    /// Whether a request arriving behind `ahead` others would, at the recent
+    /// pace, still be waiting when `budget` runs out. Unknown pace: no.
+    pub fn would_exceed(&self, ahead: usize, budget: std::time::Duration) -> bool {
+        self.mean_turn()
+            .is_some_and(|turn| turn.saturating_mul(ahead as u32 + 1) > budget)
+    }
+
+    /// Seed the pace, for tests.
+    pub fn record_turn(&self, took: std::time::Duration) {
+        let took_ms = u64::try_from(took.as_millis()).unwrap_or(u64::MAX).max(1);
+        // Weight 1/4 on the newest turn: recent enough to follow the
+        // endpoint slowing down, smooth enough that one fast request does
+        // not open the gate for a queue of slow ones.
+        let mut mean = self.mean_turn_ms.load(std::sync::atomic::Ordering::Relaxed);
+        loop {
+            let next = if mean == 0 {
+                took_ms
+            } else {
+                (mean.saturating_mul(3).saturating_add(took_ms)) / 4
+            };
+            match self.mean_turn_ms.compare_exchange_weak(
+                mean,
+                next,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => mean = current,
+            }
+        }
+    }
+
+    async fn take_turn(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.waiting
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Join the lock's wait list before counting the arrival, so a
+        // request counted as joined is already in line behind every earlier
+        // one.
+        let lock = self.turn.lock();
+        tokio::pin!(lock);
+        let guard = match futures_poll_once(lock.as_mut()).await {
+            Some(guard) => guard,
+            None => {
+                self.joined
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let guard = lock.await;
+                self.waiting
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                return guard;
+            }
+        };
+        self.joined
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.waiting
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        guard
+    }
 }
 
 impl PrefetchingContributionRedaction {
@@ -152,7 +285,24 @@ impl PrefetchingContributionRedaction {
             policy_version: redaction_pipeline_version(backend),
             permits: Arc::new(Semaphore::new(max_in_flight)),
             per_request: max_in_flight,
+            budget: None,
+            queue: Arc::new(ClassifyQueue::new()),
         }
+    }
+
+    /// The queue requests take turns in, to share with the admission check.
+    pub fn classify_queue(&self) -> Arc<ClassifyQueue> {
+        self.queue.clone()
+    }
+
+    /// Give each request's classify pass a deadline this long after it
+    /// starts, waiting for permits included. Classifier calls are made with
+    /// [`PrivacyFilterAdapter::redact_text_before`], so a retry that could not
+    /// finish by then is not started and the request refuses instead of
+    /// running into the witness's request timeout.
+    pub fn with_classify_budget(mut self, budget: std::time::Duration) -> Self {
+        self.budget = Some(budget);
+        self
     }
 
     fn pipeline(&self, adapter: Arc<dyn PrivacyFilterAdapter>) -> DeterministicTraceRedactor {
@@ -172,6 +322,11 @@ impl PrefetchingContributionRedaction {
             .redact_trace_with_edits(raw.clone())
             .await;
         let texts = recorder.distinct();
+        let deadline = self.budget.map(|budget| std::time::Instant::now() + budget);
+        // Waiting for the turn counts against the deadline, as it should:
+        // the caller's clock is running.
+        let _turn = self.queue.take_turn().await;
+        let turn_started = std::time::Instant::now();
 
         // Bounded and ordered: at most `per_request` calls are started ahead
         // of the earliest unanswered text, and answers are taken in pipeline
@@ -194,7 +349,10 @@ impl PrefetchingContributionRedaction {
                 let permits = self.permits.clone();
                 pending.spawn(async move {
                     let answer = match permits.acquire_owned().await {
-                        Ok(_permit) => adapter.redact_text(&text).await,
+                        Ok(_permit) => match deadline {
+                            Some(deadline) => adapter.redact_text_before(&text, deadline).await,
+                            None => adapter.redact_text(&text).await,
+                        },
                         Err(_) => Err(permits_closed()),
                     };
                     (index, text, answer)
@@ -227,6 +385,7 @@ impl PrefetchingContributionRedaction {
                 break;
             }
         }
+        self.queue.record_turn(turn_started.elapsed());
         AnsweringAdapter {
             answers,
             inner: self.adapter.clone(),
@@ -595,5 +754,88 @@ mod tests {
             calls < distinct,
             "{calls} of {distinct} texts classified: classification continued past the failure"
         );
+    }
+
+    /// A stand-in classifier that logs which request each call served, and
+    /// the overlap.
+    struct Tagged {
+        log: Mutex<Vec<String>>,
+        now: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl PrivacyFilterAdapter for Tagged {
+        async fn redact_text(&self, text: &str) -> Answer {
+            let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            self.now.fetch_sub(1, Ordering::SeqCst);
+            if let Some(tag) = text.split_whitespace().find(|word| word.starts_with("req")) {
+                self.log.lock().unwrap().push(tag.to_string());
+            }
+            Ok(None)
+        }
+    }
+
+    /// A contribution whose every tool output names `tag`.
+    fn tagged_contribution(tag: &str) -> RawTraceContribution {
+        let mut raw = rich_contribution(6);
+        for event in &mut raw.events {
+            if let Some(content) = event.content.as_mut() {
+                *content = format!("{tag} {content}");
+            }
+        }
+        raw
+    }
+
+    /// Admitted requests take turns at the classifier in arrival order: every
+    /// call for the first request is made before any for the second. And
+    /// however many requests wait, no more than the bound are in flight.
+    #[tokio::test]
+    async fn requests_classify_in_arrival_order_and_never_over_the_bound() {
+        let tagged = Arc::new(Tagged {
+            log: Mutex::new(Vec::new()),
+            now: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        });
+        let redactor = Arc::new(PrefetchingContributionRedaction::new(
+            Vec::new(),
+            tagged.clone(),
+            PrivacyFilterBackendTag::NearAi,
+            2,
+        ));
+        let mut handles = Vec::new();
+        let queue = redactor.classify_queue();
+        for i in 0..16 {
+            let redactor = redactor.clone();
+            handles.push(tokio::spawn(async move {
+                redactor
+                    .redact(tagged_contribution(&format!("req{i:02}")))
+                    .await
+            }));
+            // Arrive in order: wait until this one has joined the queue.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while queue.joined() < i as u64 + 1 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("each request joins the queue");
+        }
+        for handle in handles {
+            handle.await.expect("no panic").expect("redacts");
+        }
+        let log = tagged.log.lock().unwrap().clone();
+        let mut order: Vec<String> = Vec::new();
+        for tag in &log {
+            if order.last() != Some(tag) {
+                order.push(tag.clone());
+            }
+        }
+        let expected: Vec<String> = (0..16).map(|i| format!("req{i:02}")).collect();
+        assert_eq!(order, expected, "requests interleaved or ran out of order");
+        assert!(tagged.peak.load(Ordering::SeqCst) <= 2);
+        assert!(redactor.classify_queue().mean_turn().is_some());
     }
 }

@@ -421,7 +421,13 @@ submission is necessary but not sufficient for large sessions.
 - **Deadline.** The submission path's client deadline becomes the
   witness's request limit plus a margin for transfer: 330 s against
   today's 300 s default, set as one named constant beside the 120 s ones
-  it replaces (`submit.rs:1378`). The interactive token and admission
+  it replaces (`submit.rs:1378`). **Revised 2026-11-05 (owner decision,
+  #1973):** the witness's limit is now 540 s and the client's
+  `WITNESS_REVIEW_TIMEOUT` 570 s. The owner asked for about 600 s and
+  630 s, but the dstack gateway closes a connection after 10 minutes with
+  no data, and the witness sends nothing until it answers, so both sit a
+  minute under that. The daemon's preview cap moved from 7 to 11 minutes
+  with them. The interactive token and admission
   reviews keep 120 s; a person is waiting on those. A client deadline
   shorter than the witness's limit abandons work the witness would have
   finished, and is the current bug.
@@ -441,7 +447,7 @@ submission is necessary but not sufficient for large sessions.
   later." and a manual retry; it is not dropped and not refused.
 - **How the row states map to this.** "Running privacy check…" is shown
   from the moment the upload pass starts the witness call until it
-  returns or hits the 330 s deadline. A timeout, connection failure or
+  returns or hits the 570 s deadline (330 s before 2026-11-05). A timeout, connection failure or
   `witness_saturated` turns the row to "Privacy check unavailable. Trying
   again." until the next attempt starts, when it reads "Running privacy
   check…" again. The third consecutive timeout on the entry ends the loop
@@ -729,7 +735,7 @@ Order is forced by section 7: refresh, then redeploy, then the check.
 4. **Daemon and submit.** Lift the preview refusal for the ordinary
    path; replace the `witness_certificate_missing` refusal for a plain
    pin with witness + check; on fail, R5 save and
-   `witness-changed-after-review`; 330 s submission deadline, timeout
+   `witness-changed-after-review`; 570 s submission deadline, timeout
    retry bound, size ceiling (section 6). Existing witness pins
    unchanged.
 5. **macOS.** Strings, row states, preview footer, second-preview

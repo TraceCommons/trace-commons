@@ -874,15 +874,16 @@ pub struct HttpWitnessTransport {
 /// `/v1/witness/admission`, the token-bundle route), body included.
 ///
 /// Derived from the witness's own bound, not chosen beside it: the witness
-/// abandons a request after `DEFAULT_REQUEST_TIMEOUT_SECS` (300 s,
-/// `trace-commons-witness`), measured as several megabytes of transcript
-/// through its classifier, and answers `504 witness_request_timed_out`. A
-/// client that gave up first (this was 120 s) abandoned healthy work the
+/// abandons a request after `DEFAULT_REQUEST_TIMEOUT_SECS` (540 s since
+/// 2026-11-05, `trace-commons-witness`) and answers
+/// `504 witness_request_timed_out`. A client that gave up first (this was
+/// 120 s, then 330 s against a 300 s witness) abandoned healthy work the
 /// witness was still doing, kept a witness slot busy for nothing, and
 /// reported it as the quote endpoint being down. Thirty seconds over the
 /// witness's bound leaves room for its 504 to arrive, so the witness's own
-/// answer is the one a person normally gets.
-pub const WITNESS_REVIEW_TIMEOUT: Duration = Duration::from_secs(330);
+/// answer is the one a person normally gets. 570 s also stays under the
+/// dstack gateway's 10-minute idle close in front of the witness.
+pub const WITNESS_REVIEW_TIMEOUT: Duration = Duration::from_secs(570);
 
 /// The deadline for the small witness-path calls: the quote
 /// (`/v1/attestation`) and the collateral ingest serves for it. Neither does
@@ -4015,7 +4016,7 @@ mod tests {
         // out because this crate cannot depend on the server's; moving that
         // default means moving this, or a slow redaction the witness would
         // still finish is abandoned by the client first.
-        const WITNESS_SERVER_REQUEST_TIMEOUT_SECS: u64 = 300;
+        const WITNESS_SERVER_REQUEST_TIMEOUT_SECS: u64 = 540;
         assert!(WITNESS_REVIEW_TIMEOUT.as_secs() > WITNESS_SERVER_REQUEST_TIMEOUT_SECS);
         assert!(WITNESS_PROBE_TIMEOUT < WITNESS_REVIEW_TIMEOUT);
         assert!(WITNESS_CONNECT_TIMEOUT <= WITNESS_PROBE_TIMEOUT);
