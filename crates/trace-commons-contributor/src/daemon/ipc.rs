@@ -511,6 +511,8 @@ pub const METHODS: &[&str] = &[
     "search_original",
     "set_consent_scopes",
     "set_project_mode",
+    "plan_project_modes",
+    "set_project_modes",
     "set_contribution_override",
     "clear_contribution_override",
     "set_public_profile",
@@ -616,6 +618,10 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     // `auto_upload` is refused inside these two; the other modes only stop
     // sends.
     "set_project_mode",
+    // Reads only, and Ask or Never only: a bulk change never sets
+    // `auto_upload` (`project_bulk::BULK_MODES`).
+    "plan_project_modes",
+    "set_project_modes",
     "set_contribution_override",
     "clear_contribution_override",
     "automatic_grant",
@@ -4162,6 +4168,8 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "set_managed_herdr" => handle_set_managed_herdr(shared, req),
         "record_usage_event" => handle_record_usage_event(shared, req),
         "set_project_mode" => handle_set_project_mode(shared, req),
+        "plan_project_modes" => handle_plan_project_modes(shared, req),
+        "set_project_modes" => handle_set_project_modes(shared, req),
         "set_contribution_override" => handle_set_contribution_override(shared, req),
         "clear_contribution_override" => handle_clear_contribution_override(shared, req),
         "grant_automatic" => handle_grant_automatic(shared, req),
@@ -5128,6 +5136,18 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
         }
         row
     };
+    // The label, and on a row whose label carries a suffix, the collision
+    // it resolves (`policy::LabelCollision`): ABSENT, never null, on every
+    // other row. A shell groups rows by `collision.group`, the daemon's own
+    // collision test, never by parsing a label.
+    let with_label = |mut row: serde_json::Value, key: &str, shown: Option<&str>| {
+        let parts = labels.parts(key, shown);
+        row["project_label"] = serde_json::Value::from(parts.label);
+        if let Some(collision) = parts.collision {
+            row["collision"] = serde_json::json!(collision);
+        }
+        row
+    };
     let discovered: std::collections::BTreeMap<String, Option<String>> = queue
         .all()
         .iter()
@@ -5158,7 +5178,7 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
             let row = with_counts(
                 serde_json::json!({
                 "project_id": project_id_for(key),
-                "project_label": labels.label(key, entry.display_path.as_deref()),
+                "project_label": serde_json::Value::Null,
                 "project_path": display_path(shown),
                 "mode": mode,
                 "folder_mode": policy.shown_folder_mode(key),
@@ -5168,14 +5188,18 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 }),
                 key,
             );
-            with_armed(row, key, mode)
+            with_label(
+                with_armed(row, key, mode),
+                key,
+                entry.display_path.as_deref(),
+            )
         })
         .chain(discovered.iter().map(|(key, shown)| {
             let mode = policy.shown_mode(key);
             let row = with_counts(
                 serde_json::json!({
                 "project_id": project_id_for(key),
-                "project_label": labels.label(key, shown.as_deref()),
+                "project_label": serde_json::Value::Null,
                 "project_path": display_path(shown.as_deref().unwrap_or(key)),
                 "mode": mode,
                 "folder_mode": policy.shown_folder_mode(key),
@@ -5185,14 +5209,14 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 }),
                 key,
             );
-            with_armed(row, key, mode)
+            with_label(with_armed(row, key, mode), key, shown.as_deref())
         }))
         .chain(found_only.iter().map(|key| {
             let mode = policy.shown_mode(key);
             let row = with_counts(
                 serde_json::json!({
                 "project_id": project_id_for(key),
-                "project_label": labels.label(key, None),
+                "project_label": serde_json::Value::Null,
                 "project_path": display_path(key),
                 "mode": mode,
                 "folder_mode": policy.shown_folder_mode(key),
@@ -5202,7 +5226,7 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 }),
                 key,
             );
-            with_armed(row, key, mode)
+            with_label(with_armed(row, key, mode), key, None)
         }))
         .collect();
     // K7's suggestion. See `queue::unpurposed_traces`, which `status` shares
@@ -5562,6 +5586,171 @@ fn handle_withdraw_automatic_grant(shared: &DaemonShared, req: &Request) -> Resp
         shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
     }
     Response::ok(req.id, serde_json::json!({ "withdrawn": withdrawn }))
+}
+
+/// The projects a bulk call names and its mode, from `project_ids` and
+/// `mode`. A refusal names the bad parameter.
+fn bulk_params(req: &Request) -> Result<(Vec<String>, ProjectMode), &'static str> {
+    let Some(ids) = req
+        .params
+        .get("project_ids")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Err("project_ids-required");
+    };
+    if ids.len() > super::project_bulk::MAX_BULK_PROJECTS {
+        return Err("project_ids-too-many");
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(id) = id.as_str() else {
+            return Err("project_ids-invalid");
+        };
+        if seen.insert(id) {
+            out.push(id.to_string());
+        }
+    }
+    let mode = match req
+        .params
+        .get("mode")
+        .cloned()
+        .map(serde_json::from_value::<ProjectMode>)
+    {
+        Some(Ok(m)) => m,
+        _ => return Err("mode-invalid"),
+    };
+    Ok((out, mode))
+}
+
+/// The named projects as the daemon holds them now: mode in force,
+/// whether each can take `mode`, label, and traces waiting. An id the
+/// daemon does not know is left out: there is nothing of it to change.
+fn bulk_projects_now(
+    shared: &DaemonShared,
+    ids: &[String],
+    mode: ProjectMode,
+) -> Vec<super::project_bulk::BulkProject> {
+    // Lock order is policy before queue, as everywhere else.
+    let policy = shared.policy.lock().expect("policy lock");
+    let queue = shared.queue.lock().expect("queue lock");
+    let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+    let labels = super::policy::LabelCollisions::new(&known);
+    // Each id once, not each id against every key: `project_key_for_id`
+    // per id would hash every known key per id.
+    let by_id: std::collections::HashMap<String, String> =
+        std::iter::once(UNKNOWN_PROJECT_KEY.to_string())
+            .chain(known.iter().cloned())
+            .map(|key| (project_id_for(&key), key))
+            .collect();
+    let mut pending: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut shown_path: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for entry in queue.all() {
+        if let Some(path) = entry.project_path.as_deref() {
+            shown_path.entry(entry.project_key.as_str()).or_insert(path);
+        }
+    }
+    for entry in queue.pending() {
+        *pending.entry(entry.project_key.as_str()).or_default() += 1;
+    }
+    ids.iter()
+        .filter_map(|id| {
+            let key = by_id.get(id)?;
+            let shown = policy
+                .projects
+                .get(key)
+                .and_then(|e| e.display_path.as_deref())
+                .or_else(|| shown_path.get(key.as_str()).copied());
+            Some(super::project_bulk::BulkProject {
+                project_id: id.clone(),
+                label: labels.label(key, shown),
+                mode: policy.shown_mode(key),
+                can_take: super::project_bulk::can_take(key, mode),
+                pending: pending.get(key.as_str()).copied().unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+/// What setting `project_ids` to `mode` at once would do, read from the
+/// live policy and queue, with the confirmation's words when it must ask
+/// first (`project_bulk::plan`). Changes nothing.
+fn handle_plan_project_modes(shared: &DaemonShared, req: &Request) -> Response {
+    let (ids, mode) = match bulk_params(req) {
+        Ok(params) => params,
+        Err(label) => return Response::err(req.id, ERR_BAD_PARAMS, label),
+    };
+    let plan = super::project_bulk::plan(&bulk_projects_now(shared, &ids, mode), mode);
+    Response::ok(req.id, serde_json::json!(plan))
+}
+
+/// Set `project_ids` to Ask or Never, one `set_project_mode` each, after
+/// planning again from the live policy and queue. Automatic is refused
+/// before anything is read. A change that asks first runs only when
+/// `agreed` (the counts its confirmation named) still covers the live
+/// counts; otherwise `bulk-confirmation-stale`, and the shell asks again.
+/// The first refusal stops the rest; the answer says which changed.
+fn handle_set_project_modes(shared: &DaemonShared, req: &Request) -> Response {
+    let (ids, mode) = match bulk_params(req) {
+        Ok(params) => params,
+        Err(label) => return Response::err(req.id, ERR_BAD_PARAMS, label),
+    };
+    if !super::project_bulk::BULK_MODES.contains(&mode) {
+        return Response::err(req.id, ERR_BAD_PARAMS, "bulk-automatic-refused");
+    }
+    let agreed = match req.params.get("agreed") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => {
+            let count = |name: &str| {
+                value
+                    .get(name)
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|n| usize::try_from(n).ok())
+            };
+            match (count("turns_off_automatic"), count("pending")) {
+                (Some(turns_off_automatic), Some(pending)) => Some(super::project_bulk::Agreed {
+                    turns_off_automatic,
+                    pending,
+                }),
+                _ => return Response::err(req.id, ERR_BAD_PARAMS, "agreed-invalid"),
+            }
+        }
+    };
+    let plan = super::project_bulk::plan(&bulk_projects_now(shared, &ids, mode), mode);
+    if !super::project_bulk::agreed_covers(&plan, agreed) {
+        return Response::err(req.id, ERR_BAD_PARAMS, "bulk-confirmation-stale");
+    }
+    let mut changed: Vec<String> = Vec::new();
+    let mut purged: u64 = 0;
+    let mut refused: Option<String> = None;
+    for id in &plan.project_ids {
+        let one = Request {
+            id: req.id,
+            method: "set_project_mode".to_string(),
+            params: serde_json::json!({ "project_id": id, "mode": mode }),
+        };
+        let answer = handle_set_project_mode(shared, &one);
+        if let Some(error) = answer.error {
+            refused = Some(error.message);
+            break;
+        }
+        purged += answer
+            .result
+            .as_ref()
+            .and_then(|r| r.get("purged"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        changed.push(id.clone());
+    }
+    let mut result = serde_json::json!({
+        "changed": changed,
+        "total": plan.project_ids.len(),
+        "purged": purged,
+    });
+    if let Some(label) = refused {
+        result["refused"] = serde_json::Value::from(label);
+    }
+    Response::ok(req.id, result)
 }
 
 fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
@@ -19625,7 +19814,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 109, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 111, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 84, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
@@ -23924,6 +24113,254 @@ mod tests {
                 unknown_filter.error.expect("refused").message,
                 ERR_LIST_FILTER_UNRECOGNIZED
             );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Settings > Projects' Manage sheet (#1952 review): collision groups
+    // on `list_projects`, and the bulk plan and change.
+
+    /// Rows whose labels carry a suffix report the daemon's collision
+    /// group; every other row has no `collision` key at all.
+    #[test]
+    fn list_projects_reports_the_collision_group_on_suffixed_rows() {
+        let s = shared();
+        seed_entry_with_eligibility(&s, "/tmp/bulkc-a/app", None);
+        seed_entry_with_eligibility(&s, "/tmp/bulkc-b/app", None);
+        seed_entry_with_eligibility(&s, "/tmp/bulkc-a/solo", None);
+        let r = handle_request(&s, &req("list_projects", serde_json::json!({})));
+        let projects = r.result.expect("answers")["projects"].clone();
+        let row = |key: &str| {
+            projects
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["project_id"] == project_id_for(key))
+                .cloned()
+                .expect("row")
+        };
+        let (a, b) = (row("/tmp/bulkc-a/app"), row("/tmp/bulkc-b/app"));
+        assert_eq!(a["collision"]["group"], b["collision"]["group"]);
+        assert_eq!(a["collision"]["base_label"], "app");
+        let suffix = a["collision"]["suffix"].as_str().unwrap();
+        assert_eq!(a["project_label"], format!("app ({suffix})"));
+        let solo = row("/tmp/bulkc-a/solo");
+        assert!(solo.get("collision").is_none(), "{solo}");
+        assert_eq!(solo["project_label"], "solo");
+    }
+
+    fn arm_from_now(s: &DaemonShared, key: &str) {
+        let r = handle_set_project_mode(
+            s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({
+                    "project_key": key, "mode": "auto_upload", "include_backlog": false
+                }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+    }
+
+    /// A bulk Never over an Automatic project and an Ask project with
+    /// traces waiting asks first, naming both counts; the change runs only
+    /// with those counts agreed, and then sets every target.
+    #[test]
+    fn a_bulk_never_that_turns_off_automatic_asks_and_then_runs() {
+        let s = enrolled_shared();
+        let (auto, ask, never) = ("/tmp/bulk-auto", "/tmp/bulk-ask", "/tmp/bulk-never");
+        seed_entry_with_eligibility(&s, auto, None);
+        seed_entry_with_eligibility(&s, ask, None);
+        seed_entry_with_eligibility(&s, ask, None);
+        seed_entry_with_eligibility(&s, never, None);
+        arm_from_now(&s, auto);
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": never, "mode": "ignore" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let ids: Vec<String> = [auto, ask, never]
+            .iter()
+            .map(|k| project_id_for(k))
+            .collect();
+
+        let plan = handle_request(
+            &s,
+            &req(
+                "plan_project_modes",
+                serde_json::json!({ "project_ids": ids, "mode": "ignore" }),
+            ),
+        )
+        .result
+        .expect("plan answers");
+        assert_eq!(plan["outcome"], "confirm", "{plan}");
+        assert_eq!(
+            plan["project_ids"],
+            serde_json::json!([project_id_for(auto), project_id_for(ask)])
+        );
+        assert_eq!(plan["turns_off_automatic"], 1);
+        assert_eq!(plan["pending"], 3, "one waiting in each: auto 1, ask 2");
+        assert_eq!(plan["confirmation"]["title"], "Set 2 projects to Never?");
+        assert_eq!(
+            plan["bulk_modes"],
+            serde_json::json!(["notify_only", "ignore"])
+        );
+
+        // Not agreed: refused, nothing changed.
+        let stale = handle_request(
+            &s,
+            &req(
+                "set_project_modes",
+                serde_json::json!({ "project_ids": ids, "mode": "ignore" }),
+            ),
+        );
+        assert_eq!(stale.error.unwrap().message, "bulk-confirmation-stale");
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(auto),
+            ProjectMode::AutoUpload
+        );
+
+        // A trace arrived after the confirmation was drawn: the agreed
+        // counts no longer cover it.
+        seed_entry_with_eligibility(&s, ask, None);
+        let grew = handle_request(
+            &s,
+            &req(
+                "set_project_modes",
+                serde_json::json!({
+                    "project_ids": ids, "mode": "ignore",
+                    "agreed": { "turns_off_automatic": 1, "pending": 3 },
+                }),
+            ),
+        );
+        assert_eq!(grew.error.unwrap().message, "bulk-confirmation-stale");
+
+        let done = handle_request(
+            &s,
+            &req(
+                "set_project_modes",
+                serde_json::json!({
+                    "project_ids": ids, "mode": "ignore",
+                    "agreed": { "turns_off_automatic": 1, "pending": 4 },
+                }),
+            ),
+        )
+        .result
+        .expect("the change answers");
+        assert_eq!(
+            done["changed"],
+            serde_json::json!([project_id_for(auto), project_id_for(ask)])
+        );
+        assert_eq!(done["total"], 2);
+        assert_eq!(done["purged"], 4);
+        assert!(done.get("refused").is_none(), "{done}");
+        let policy = s.policy.lock().unwrap();
+        for key in [auto, ask, never] {
+            assert_eq!(policy.resolve(key), ProjectMode::Ignore, "{key}");
+        }
+    }
+
+    /// Bulk Automatic is refused by both calls, before anything is read.
+    #[test]
+    fn bulk_automatic_is_refused() {
+        let s = enrolled_shared();
+        let key = "/tmp/bulk-refused";
+        seed_entry_with_eligibility(&s, key, None);
+        let ids = [project_id_for(key)];
+        let plan = handle_request(
+            &s,
+            &req(
+                "plan_project_modes",
+                serde_json::json!({ "project_ids": ids, "mode": "auto_upload" }),
+            ),
+        )
+        .result
+        .unwrap();
+        assert_eq!(plan["outcome"], "refused");
+        let set = handle_request(
+            &s,
+            &req(
+                "set_project_modes",
+                serde_json::json!({ "project_ids": ids, "mode": "auto_upload" }),
+            ),
+        );
+        assert_eq!(set.error.unwrap().message, "bulk-automatic-refused");
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(key),
+            ProjectMode::NotifyOnly
+        );
+    }
+
+    /// A change that turns nothing off and removes nothing runs without an
+    /// agreement; unknown and repeated ids are ignored; bad params name
+    /// the parameter.
+    #[test]
+    fn a_bulk_ask_over_never_applies_without_asking() {
+        let s = shared();
+        let (a, b) = ("/tmp/bulk-n1", "/tmp/bulk-n2");
+        seed_entry_with_eligibility(&s, a, None);
+        seed_entry_with_eligibility(&s, b, None);
+        for key in [a, b] {
+            let r = handle_set_project_mode(
+                &s,
+                &req(
+                    "set_project_mode",
+                    serde_json::json!({ "project_key": key, "mode": "ignore" }),
+                ),
+            );
+            assert!(r.error.is_none(), "{:?}", r.error);
+        }
+        let ids = serde_json::json!([
+            project_id_for(a),
+            project_id_for(a),
+            project_id_for(b),
+            "proj_unknown"
+        ]);
+        let plan = handle_request(
+            &s,
+            &req(
+                "plan_project_modes",
+                serde_json::json!({ "project_ids": ids, "mode": "notify_only" }),
+            ),
+        )
+        .result
+        .unwrap();
+        assert_eq!(plan["outcome"], "apply", "{plan}");
+        assert!(plan.get("confirmation").is_none());
+        let done = handle_request(
+            &s,
+            &req(
+                "set_project_modes",
+                serde_json::json!({ "project_ids": ids, "mode": "notify_only" }),
+            ),
+        )
+        .result
+        .unwrap();
+        assert_eq!(done["total"], 2);
+        assert_eq!(done["changed"].as_array().unwrap().len(), 2);
+        for (params, label) in [
+            (
+                serde_json::json!({ "mode": "ignore" }),
+                "project_ids-required",
+            ),
+            (
+                serde_json::json!({ "project_ids": [1], "mode": "ignore" }),
+                "project_ids-invalid",
+            ),
+            (
+                serde_json::json!({ "project_ids": [], "mode": "sometimes" }),
+                "mode-invalid",
+            ),
+            (
+                serde_json::json!({ "project_ids": [], "mode": "ignore", "agreed": { "pending": 1 } }),
+                "agreed-invalid",
+            ),
+        ] {
+            let r = handle_request(&s, &req("set_project_modes", params));
+            assert_eq!(r.error.unwrap().message, label);
         }
     }
 }

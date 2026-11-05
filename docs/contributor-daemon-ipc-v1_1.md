@@ -21,6 +21,15 @@ old behaviour, because no application has shipped against `v1` yet. See
 
 **New in this revision (additive, no existing field or shape changed):**
 
+- `list_projects` rows whose label carries the daemon's disambiguating
+  suffix carry `collision` (`group`, `base_label`, `suffix`), so a client
+  groups rows by the daemon's own collision test rather than by parsing a
+  label. Absent on every other row. See
+  [`collision`](#collision-1952-review).
+- `plan_project_modes` and `set_project_modes` plan and make a bulk or
+  group mode change (Ask or Never only), asking first when it turns off
+  Automatic or removes waiting traces, from the daemon's live state. See
+  [`plan_project_modes` and `set_project_modes`](#plan_project_modes-and-set_project_modes).
 - The daily upload limit is retired. `set_settings` accepts
   `max_uploads_per_day` and `max_bytes_per_day` and ignores them, so a
   shell built while the limit existed can still save its other settings;
@@ -669,6 +678,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `resume` | — | `paused: false` | |
 | `list_projects` | `include_found` (optional boolean) | `projects[]` of `{project_id, project_label, mode, folder_mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now`, `overridden_by` (`null` or the override's mode) | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
+| `plan_project_modes` | `project_ids` (array), `mode` | `outcome`, `project_ids`, `turns_off_automatic`, `pending`, `confirmation` (when `outcome` is `confirm`), `bulk_modes` | reads only; see "`plan_project_modes` and `set_project_modes`" below |
+| `set_project_modes` | `project_ids` (array), `mode` (`notify_only` or `ignore`), `agreed` (optional `{turns_off_automatic, pending}`) | `changed`, `total`, `purged`, `refused` (only when stopped part way) | `auto_upload` refused with `bulk-automatic-refused`; `bulk-confirmation-stale` when the live counts outgrow `agreed`; see below |
 | `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208) and with `consent-scopes-not-chosen` while the enrollment's scopes were never chosen; see "The contribution override" below |
 | `clear_contribution_override` | — | `cleared`, `returned: <count>` | every folder back on its own mode; see "The contribution override" below |
 | `mission_matches` | `catalogue` (a contribution mission catalogue; PROVISIONAL, shape owned by Z7/Z8) | `matches[]` of mission ids, `read: {tools, folders}` (counts) | K16 (#1173): which contribution missions this Mac's work fits, worked out on this Mac only; read-only; refused with `catalogue-required`, `catalogue-invalid` or `catalogue-schema-unsupported`; see "`mission_matches`" below |
@@ -1948,6 +1959,70 @@ cancels any scheduled preview for the entry, as `dismiss` does. Neither
 method writes an audit row, as `dismiss` does not: they are decisions about
 one session, not autonomy changes.
 
+### `plan_project_modes` and `set_project_modes`
+
+A bulk or group mode change (Settings > Projects' Manage sheet), planned
+and made by the daemon so no client decides when it asks first. The rules
+(owner decisions 2026-11-04 on #1952):
+
+- A bulk change sets `notify_only` (Ask) or `ignore` (Never), never
+  `auto_upload`. Arming is a grant, made one project at a time through the
+  arming confirmation. `bulk_modes` on every plan names the two, and a
+  client's bulk menus offer those only.
+- It asks first when it turns off Automatic on one or more projects
+  (`turns_off_automatic`), or when a Never removes waiting traces
+  (`pending`; always 0 for Ask).
+- Projects already in the mode, or unable to take it, are skipped and not
+  counted. An id the daemon does not know is skipped. Repeated ids count
+  once. At most 10,000 ids.
+
+`plan_project_modes` changes nothing:
+
+```json
+{
+  "outcome": "confirm",
+  "project_ids": ["proj_9f2c1ab30d4e5f60", "proj_0d4e5f609f2c1ab3"],
+  "turns_off_automatic": 1,
+  "pending": 3,
+  "confirmation": {
+    "title": "Set 2 projects to Never?",
+    "body": "This turns off Automatic for 1 project. This removes 3 waiting traces. Traces already sent aren't affected.",
+    "button": "Never",
+    "keep": "Keep",
+    "help": "Setting it back to Ask can offer the removed traces again.",
+    "destructive": true
+  },
+  "bulk_modes": ["notify_only", "ignore"]
+}
+```
+
+`outcome` is `nothing` (no project changes), `apply` (change straight
+away), `confirm` (ask first, in `confirmation`'s words, rendered whole), or
+`refused` (`auto_upload`). `help` is present only when a Never removes
+waiting traces. A plan for no ids answers `nothing` with `bulk_modes`,
+which is how a client learns the menus' modes.
+
+`set_project_modes` plans again from the live policy and queue, then runs
+one `set_project_mode` per project the plan reaches, in order, with that
+method's audit records and purge. `auto_upload` is refused with
+`bulk-automatic-refused` before anything is read. A change whose plan asks
+first runs only when `agreed` carries the counts the person was shown and
+neither live count is larger; otherwise it is refused with
+`bulk-confirmation-stale` and nothing changes, and the client plans and
+asks again. That closes the window between the confirmation and the
+call; the plan and the per-project changes are not under one lock, so a
+trace arriving during the change itself is removed as one project's Never
+would remove it, and `purged` reports what was actually removed. The first
+refusal stops the rest:
+
+```json
+{ "changed": ["proj_9f2c1ab30d4e5f60"], "total": 2, "purged": 1, "refused": "project-key-unrecognized" }
+```
+
+`refused` is present only when the change stopped part way; `changed` is
+what did change, so a client keeps the others selected and can say "1 of 2
+changed."
+
 ### `set_project_mode` and the ignore purge
 
 Setting a project to `ignore` also clears whatever it has waiting. Two
@@ -2963,6 +3038,24 @@ to `notify_only` is an exception to the grant, as one set to `ignore` is.
 Until 2026-10-29 a row under that grant carried only
 `["auto_upload", "ignore"]` and `set_project_mode` refused `notify_only` with
 `automatic-sharing-requires-ignore`; both are gone.
+
+#### `collision` (#1952 review)
+
+Present only on a row whose `project_label` carries the four-hex-digit
+suffix the daemon adds when two known projects' folded basenames are the
+same, and absent (never null) on every other row:
+
+```json
+"collision": { "group": "api", "base_label": "Api", "suffix": "57b3" }
+```
+
+`group` is the folded basename the collision test compared: every row in
+one group has the same value, and it says no more than the label already
+does. `base_label` is the label without its suffix, spelled from the
+unfolded path; `suffix` is the four hex digits, from `sha256(key)`. A
+client groups rows by `group` and never by parsing `project_label`: a
+folder whose own name is `notes (beef)` has no `collision` and is not
+grouped. The unresolved bucket never carries one.
 
 #### `unpurposed_traces` (K7)
 
