@@ -1,5 +1,13 @@
 {
   "schema_version": 1,
-  "registry_version": 1,
-  "flags": {}
+  "registry_version": 2,
+  "flags": {
+    "managed_hermes": {
+      "description": "Managed Hermes launches in Private AI",
+      "owner": "TraceCommons",
+      "default": false,
+      "required_capabilities": ["managed_hermes"],
+      "timing": "live"
+    }
+  }
 }

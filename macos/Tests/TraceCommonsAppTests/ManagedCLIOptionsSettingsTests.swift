@@ -37,6 +37,7 @@ final class ManagedCLIOptionsSettingsTests: XCTestCase {
     @MainActor
     func testHermesOptionsSaveUsesItsOwnToolAndPreservesOtherDrafts() async throws {
         let model = AppModel()
+        model.featureFlags = try FeatureFlagIntegrationTests.hermesFlags(enabled: true)
         let daemon = CLIOptionsDaemon(reply: .echo)
         model.setClientForTesting(DaemonClient(daemon: daemon))
         var value = try snapshot(options: "--model old")

@@ -15,6 +15,48 @@ use trace_commons_contributor::{
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabled_hermes_refuses_before_asking_for_sign_in() {
+    let home = tempfile::tempdir().unwrap();
+    let daemon = start_embedded(ConfigStore::open(home.path().into()).unwrap())
+        .await
+        .unwrap();
+    let launch = || {
+        Command::new(env!("CARGO_BIN_EXE_near-ai"))
+            .arg("--config-dir")
+            .arg(home.path())
+            .args(["launch", "hermes"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let disabled = launch();
+    assert!(!disabled.status.success());
+    let error = String::from_utf8_lossy(&disabled.stderr);
+    assert!(error.contains("invalid managed request"), "{error}");
+    assert!(!error.contains("Sign in"), "{error}");
+
+    let now = chrono::Utc::now();
+    daemon
+        .shared
+        .feature_flags
+        .accept(
+            &serde_json::to_vec(&json!({
+                "schema_version":1,"environment":daemon.shared.feature_flags.environment(),
+                "revision":1,"issued_at":now,"expires_at":now+chrono::Duration::hours(1),
+                "flags":{"managed_hermes":true}
+            }))
+            .unwrap(),
+            now,
+        )
+        .unwrap();
+    let enabled = launch();
+    assert!(!enabled.status.success());
+    let error = String::from_utf8_lossy(&enabled.stderr);
+    assert!(error.contains("Sign in to NEAR AI"), "{error}");
+    daemon.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_launch_appears_in_ui_snapshot_and_reports_native_exit() {
     exercise_terminal_exit(false, false).await;
 }

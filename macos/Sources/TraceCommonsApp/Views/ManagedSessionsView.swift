@@ -65,6 +65,9 @@ struct ManagedSessionsSection: View {
             model.pendingManagedLaunch = nil
             start(tool)
         }
+        .onChange(of: model.managedToolIsEnabled("hermes")) { _, enabled in
+            if !enabled, launching?.tool == "hermes" { launching = nil }
+        }
         // Kept: `managed_changed` is published only when a request changes
         // the session revision, so an expiry or a reconciled exit is seen
         // on the next read.
@@ -168,7 +171,7 @@ struct ManagedSessionsSection: View {
 
     /// A tool's launch dialog: an optional folder, then Open.
     private func start(_ tool: String) {
-        guard !model.managedBusy else { return }
+        guard !model.managedBusy, model.managedToolIsEnabled(tool) else { return }
         launchTerminal = nil
         launching = ManagedFolderChoice(tool: tool)
     }
@@ -602,7 +605,9 @@ struct ManagedLaunchSheet: View {
         }
         return snapshot.flatMap { ManagedSurface.sessionDestination($0.capabilities) } ?? model.managedText("terminal")
     }
-    private var selectedAccount: ManagedAccount? { model.managedSnapshot?.accounts.first { $0.id == accountID } }
+    private var selectedAccount: ManagedAccount? {
+        model.managedSnapshot?.accounts.first { $0.id == accountID && model.managedToolIsEnabled($0.tool) }
+    }
     private var toolAvailable: Bool { selectedAccount.map { model.managedSnapshot?.canLaunch(tool: $0.tool) == true } ?? false }
     private var supportsFolderSettings: Bool { model.managedSnapshot?.capabilities.folderSettings == true }
     private var folderReady: Bool {
@@ -634,7 +639,9 @@ struct ManagedLaunchSheet: View {
                     GlassPicker(
                         model.managedText("saved_account"),
                         selection: Binding(get: { accountID.isEmpty ? nil : accountID }, set: { accountID = $0 ?? "" }),
-                        options: (model.managedSnapshot?.accounts ?? []).filter { model.managedSnapshot?.canLaunch(tool: $0.tool) == true || $0.id == accountID }.map { account in
+                        options: (model.managedSnapshot?.accounts ?? []).filter {
+                            model.managedToolIsEnabled($0.tool) && (model.managedSnapshot?.canLaunch(tool: $0.tool) == true || $0.id == accountID)
+                        }.map { account in
                             GlassPickerOption(
                                 [ManagedWords.tool(account.tool, model: model), account.label, model.managedText(account.connection)]
                                     .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),

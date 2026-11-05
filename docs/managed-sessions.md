@@ -367,7 +367,12 @@ the test suite.
 
 ## Hermes sessions
 
-Hermes can start from Private AI on macOS or with `near-ai launch hermes`.
+Hermes can start from Private AI on macOS or with `near-ai launch hermes` when
+the environment's `managed_hermes` feature flag is enabled. It defaults off;
+see [Feature flags](operator/feature-flags.md). A live disable or expired enable
+hides new-work controls and refuses new setup/accounts/launches, including
+prepared tickets, without cancelling running sessions or deleting saved accounts
+and history. Show, Stop and Dismiss remain available for existing sessions.
 It uses the app's NEAR AI sign-in, a saved NEAR AI key (`near-ai`), or an
 OpenAI API key (`api-key`). Subscription sign-in is not supported. NEAR AI
 sign-in uses the model catalogue/default; a saved key requires a Model ID.
