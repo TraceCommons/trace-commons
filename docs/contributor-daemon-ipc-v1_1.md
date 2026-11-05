@@ -3523,8 +3523,14 @@ reason no unattended approval can satisfy:
 - `token-distribution-review-required`, which clears through a witness review
   of that one session;
 - `witness-risk-review-required`: a session approved on the contributor's
-  behalf that the witness certified with a residual-risk verdict other than
-  `low`. The witness has already seen it, and nothing went to the commons.
+  behalf that the witness certified `high`, or with no readable verdict.
+  `low` and `medium` go without a person (owner decision, 2026-11-05: the
+  witness rates every trace with message text or a redaction `medium`).
+  The witness has already seen it, and nothing went to the commons.
+  A daemon releases, once per process, the holds of this kind whose pinned
+  certificate says `medium`, which an older build parked: each goes back to
+  waiting with its pin, and is re-approved under the folder's standing
+  opt-in.
   Its certified review is kept pinned to the entry, so `preview` shows the
   witness's bytes without running the witness again, and a person's
   `approve` uploads exactly those bytes. Like any pinned `Pending` preview,

@@ -1748,6 +1748,58 @@ impl Queue {
         released
     }
 
+    /// The `Pending` entries held under
+    /// `submit::REASON_WITNESS_RISK_REVIEW_REQUIRED` that carry a witness
+    /// pin, with the pin: what [`Self::release_witness_risk_holds`] may
+    /// release. A hold with no pin has no certificate left to read, so it is
+    /// not listed and stays held.
+    pub fn witness_risk_holds(&self) -> Vec<(Uuid, String)> {
+        self.entries
+            .iter()
+            .filter(|e| {
+                e.state == QueueState::Pending
+                    && e.reason_label.as_deref()
+                        == Some(crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED)
+                    && e.holds_witness_certificate()
+            })
+            .filter_map(|e| Some((e.entry_id, e.previewed_envelope_digest.clone()?)))
+            .collect()
+    }
+
+    /// Release the witness-risk holds in `allowed`, each named with the pin
+    /// its verdict was read from, back to waiting as a fresh offer dated
+    /// `now`, like [`Self::release_measurement_holds`]. The pin stays, so the
+    /// standing opt-in re-approves the entry and the upload pass sends the
+    /// certified bytes it was held with, under the same verdict check, with
+    /// no second witness run.
+    ///
+    /// An entry moves only if it is still `Pending` under that label and
+    /// still pinned to the same review: between reading the certificates and
+    /// taking this lock a person may have approved it, dismissed it, or
+    /// opened a fresh review, and none of those is undone. Returns how many
+    /// moved.
+    pub fn release_witness_risk_holds(
+        &mut self,
+        allowed: &[(Uuid, String)],
+        now: DateTime<Utc>,
+    ) -> usize {
+        let mut released = 0;
+        for e in self.entries.iter_mut() {
+            let still_held = e.state == QueueState::Pending
+                && e.reason_label.as_deref()
+                    == Some(crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED);
+            let same_pin = allowed.iter().any(|(id, pin)| {
+                *id == e.entry_id && e.previewed_envelope_digest.as_deref() == Some(pin.as_str())
+            });
+            if still_held && same_pin {
+                e.reason_label = None;
+                e.discovered_at = now;
+                released += 1;
+            }
+        }
+        released
+    }
+
     /// Whether `entry_id` is still an approval made on the contributor's
     /// behalf. For a caller that chose it earlier and let the lock go: in
     /// between, the contributor may have dismissed it or approved it
@@ -3158,6 +3210,77 @@ mod tests {
             user_turns: 0,
         };
         assert_eq!(backwards.duration_secs(), None, "no negative lengths");
+    }
+
+    /// The queue half of releasing holds the old rule parked: only a
+    /// `Pending` witness-risk hold with a witness pin is listed, and only one
+    /// still held under that label and pinned to the same review is
+    /// released. It keeps its pin and is dated `now`; other holds and other
+    /// labels are untouched.
+    #[test]
+    fn a_witness_risk_hold_is_released_only_while_still_held_on_the_same_pin() {
+        let now = at("2026-11-05T12:00:00Z");
+        let pin = |b: &str| format!("{WITNESS_PIN_PREFIX}{}", b.repeat(32));
+        let mut q = Queue::default();
+        let mut held = |path: &str, label: &str, p: Option<String>| {
+            let e = QueueEntry {
+                approved_unattended: true,
+                ..entry_in(path, QueueState::Approved)
+            };
+            let id = e.entry_id;
+            q.push_for_test(e);
+            match p {
+                Some(p) => assert!(q.hold_with_witness_pin(id, label, &p, None, None)),
+                None => assert!(q.revoke_approval(id, label)),
+            }
+            id
+        };
+        let risk = crate::submit::REASON_WITNESS_RISK_REVIEW_REQUIRED;
+        let released = held("/w/a", risk, Some(pin("aa")));
+        let repinned = held("/w/b", risk, Some(pin("bb")));
+        let unpinned = held("/w/c", risk, None);
+        let other_label = held(
+            "/w/d",
+            crate::submit::REASON_WITNESS_NOT_TRUSTED,
+            Some(pin("dd")),
+        );
+
+        let listed = q.witness_risk_holds();
+        assert_eq!(
+            listed,
+            vec![(released, pin("aa")), (repinned, pin("bb"))],
+            "an unpinned hold and another label are not listed"
+        );
+        // Between the read and the release, `repinned` was opened again.
+        q.entries
+            .iter_mut()
+            .find(|e| e.entry_id == repinned)
+            .unwrap()
+            .previewed_envelope_digest = Some(pin("cc"));
+        let asked = [
+            (released, pin("aa")),
+            (repinned, pin("bb")),
+            (unpinned, pin("ee")),
+            (other_label, pin("dd")),
+        ];
+        assert_eq!(q.release_witness_risk_holds(&asked, now), 1);
+        let e = q.get(released).unwrap();
+        assert_eq!(e.state, QueueState::Pending);
+        assert_eq!(e.reason_label, None);
+        assert_eq!(e.discovered_at, now);
+        assert_eq!(
+            e.previewed_envelope_digest.as_deref(),
+            Some(pin("aa").as_str())
+        );
+        assert!(!e.held_for_review());
+        for id in [repinned, unpinned, other_label] {
+            assert!(q.get(id).unwrap().held_for_review(), "{id}");
+        }
+        assert_eq!(
+            q.release_witness_risk_holds(&asked, now),
+            0,
+            "already released"
+        );
     }
 
     /// R5, the queue half: an unattended approval held after the witness

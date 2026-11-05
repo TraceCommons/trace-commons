@@ -773,14 +773,14 @@ impl Uploader<'_, '_> {
                     }
                     // A pinned review is not a person's approve. A contributor
                     // can open a review on a waiting session in an automatic
-                    // project, see a verdict that is not `low`, and close it;
+                    // project, see a `high` verdict, and close it;
                     // the watcher then approves the entry on their behalf with
                     // the pin still in place. The same hold as a fresh witness
                     // run, read from the certificate `approved_witness_for`
                     // has just validated, and before anything is handed to
                     // the pipeline.
                     if entry.approved_unattended
-                        && !crate::submit::verdict_is_low(artifact.response())
+                        && !crate::submit::verdict_allows_unattended(artifact.response())
                     {
                         if let Some(pin) = entry.previewed_envelope_digest.clone() {
                             return Ok(UploadDecision::HeldForReview {
@@ -830,9 +830,10 @@ impl Uploader<'_, '_> {
             }
             // Nobody has looked at this session. If the witness is what
             // builds it, its verdict is the first point at which the risk is
-            // known, and one that is not `low` stops here for a person.
+            // known, and one that does not let it go unattended (`high`, or
+            // unreadable) stops here for a person.
             if entry.approved_unattended {
-                self.ctx.hold_witnessed_unless_low_risk();
+                self.ctx.hold_witnessed_unless_unattended_allowed();
             }
         }
 
@@ -1082,7 +1083,7 @@ mod tests {
         let witnessed = crate::witness::transport::WitnessedEnvelope {
             admission: None,
             envelope_bytes: b"{}".to_vec(),
-            certificate_json: r#"{"residual_risk_verdict":"medium"}"#.into(),
+            certificate_json: r#"{"residual_risk_verdict":"high"}"#.into(),
             signature_hex: format!("0x{}", "ab".repeat(65)),
         };
         let record = crate::witness::inference_record::InferenceAttestationRecord::uncertified(
