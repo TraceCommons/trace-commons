@@ -3461,7 +3461,7 @@ final class AppModel: ObservableObject {
     /// with.
     private func showToast(for response: ApproveResponse, attempted: [String]) {
         undoTask?.cancel()
-        let toast = response.toast
+        let toast = response.toast(undoCopy: Self.undoWords)
         let approvedIDs = response.approvedEntryIDs(attempted: attempted)
         let startedAt = Date()
         undo = Undo(

@@ -517,6 +517,8 @@ public struct MonitorUndoCopy: MonitorWordTable {
     public let unavailable: String
     public let within: String
     public let mayHaveStarted: String
+    public let heldForReviewOne: String
+    public let heldForReview: String
     public let undoing: String
     /// "Data redaction has begun.": said once per app run, under the first
     /// Submit a person makes that goes to the privacy witness. See
@@ -529,6 +531,8 @@ public struct MonitorUndoCopy: MonitorWordTable {
         case unavailable
         case within
         case mayHaveStarted = "may_have_started"
+        case heldForReviewOne = "held_for_review_one"
+        case heldForReview = "held_for_review"
         case undoing
         case redactionBegun = "redaction_begun"
     }
