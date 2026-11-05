@@ -153,6 +153,62 @@ cache goes cold for good. Correctness is unaffected, and 2.1 does not depend
 on that cache (it keeps its own answers per request). An eviction policy
 would restore the cross-request hit rate.
 
+### 2.5 Skip the classifier for keys and structural tokens (owner decision 2026-11-05)
+
+On by default, in one function the client's redaction and the witness's
+both call (`classifier_skips_structural_text`, `trace_contribution.rs`):
+
+1. **Object keys never go to the classifier.**
+2. **A value is skipped** when it is one to forty characters, each an
+   ASCII letter, digit or one of `_ . - / :`, **and** it has no uppercase
+   letter followed by a lowercase one.
+3. **Everything else is classified**, however short: anything with
+   whitespace, any non-ASCII character, any capitalized word (`Jane`,
+   `Sam`, `McDonald`), any token over forty characters.
+
+Examples. Skipped: `bash`, `edit_file`, `src/main.rs`, `200`, a hex digest,
+`true`, `call_1`, `ERROR`. Classified: `Jane Doe`, `Jane`, `Dear Sam`,
+`fix the login bug`, `José`, a 41-character token.
+
+This is the classifier stage only. The deterministic detectors run on
+every field, skipped or not, before the rule is asked. They still remove
+`a@b.co`, `+1-415-555-0123`, an AWS access key, `10.0.0.12`,
+`https://intranet.example.corp/wiki` and `/home/jdoe/notes.txt`.
+
+**What it gives up.** These skip-shaped values are not caught by the
+deterministic pass. With the skip on, nothing looks at them; before, the
+classifier did, though whether it caught them was not measured:
+
+- a public IPv4 address (`203.0.113.7`);
+- a bare hostname (`build.corp.internal`);
+- a lowercase username (`jdoe`);
+- an IPv6 address (`2001:db8::1`);
+- an unformatted phone number (`4155550123`).
+
+A test pins this list, so the spec cannot drift from the code. **Open for
+the owner:** a stricter rule would also classify tokens shaped like an IP
+address, a run of seven or more digits, or a dotted name with no slash.
+Bare usernames have no shape a rule can see.
+
+**Savings.** Measured on the load harness's synthetic contributions, a
+fresh witness each way, zero-latency stand-in classifier:
+
+| contribution | calls, skip off | calls, skip on |
+|---|---|---|
+| 241 KB in one tool result | 13 | 5 (-62%) |
+| 241 KB over 120 tool results | 358 | 239 (-33%) |
+
+Most of the remaining calls are synthetic tool output with whitespace in
+it. Real sessions carry more ids, paths and flags, so they should save
+more; that is not measured.
+
+**Not covered.** The ingest server's prose-PII backstop
+(`rescrub_envelope_prose_pii_with`) is unchanged and still classifies
+every string and key it examines. The redaction pipeline alias is
+unchanged as well. Whether the skip should move the alias is an owner
+question: it changes classifier coverage without changing which
+classifier runs.
+
 ## 3. More than one witness
 
 ### 3.1 Identity: replicas share key and measurement

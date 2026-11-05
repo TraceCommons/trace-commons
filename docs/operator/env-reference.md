@@ -455,6 +455,7 @@ audit-relevant and is included in gate version hash derivation.
 | Var | R? | Default | Description |
 |---|---|---|---|
 | `TRACE_PRIVACY_FILTER_BACKEND` | optional | unset | `sidecar` \| `near-ai` \| `self-hosted` \| unset. Unset = deterministic-only redaction. Unknown values refuse startup. |
+| `TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL` | optional | on | Whether the prose classifier skips object keys and structural tokens (1-40 chars of ASCII letters, digits, `_ . - / :`, with no capitalized word). Unset, `1`, `true` or `on` skip; any other value classifies everything. The deterministic detectors run regardless. Client and witness must agree, or the witness-at-submission subset check sees different edits. See `docs/superpowers/specs/2026-11-05-witness-scaling-design.md` section 2.5. |
 | `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` | optional | unset | Truthy = refuse to start unless a privacy filter backend is configured. Opt-in; unset keeps existing boot behaviour. Recommended wherever prose-PII filtering is part of the deployment's controls. |
 | `TRACE_PRIVACY_FILTER_COMMAND` | when `sidecar` | (none) | Path to sidecar binary. Legacy name `IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND` still read with a one-shot deprecation warning. |
 | `TRACE_PRIVACY_FILTER_ARGS` | optional | empty | Whitespace-separated argv. Legacy: `IRONCLAW_TRACE_PRIVACY_FILTER_ARGS`. |

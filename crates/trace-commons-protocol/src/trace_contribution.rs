@@ -3993,11 +3993,58 @@ pub fn secret_leak_pattern_names() -> Vec<&'static str> {
     secret_leak_patterns().iter().map(|p| p.name).collect()
 }
 
+/// Whether the prose-PII classifier may skip `text` (owner decision
+/// 2026-11-05).
+///
+/// The rule, exactly: skip a value that is a single structural token --
+/// one to forty characters, each an ASCII letter, digit or one of `_ . - / :`
+/// -- **and** that contains no uppercase letter followed by a lowercase one.
+/// So `bash`, `edit_file`, `src/main.rs`, `200`, a hex digest, `true` and an
+/// ISO date are skipped; anything with whitespace, any non-ASCII character,
+/// or a capitalized word (`Jane`, `Sam`, `McDonald`) is classified however
+/// short, and so is any token over forty characters.
+///
+/// Object keys are never classified at all (see `redact_metadata_value`).
+///
+/// This is the classifier stage only. The deterministic detectors -- emails,
+/// phones, keys, IPs, paths, hostnames -- run on every field, skipped or not,
+/// before this is asked. The client's redaction and the witness's share this
+/// one function, so they skip the same texts and make the same edits.
+/// `TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL=0` turns it off.
+pub fn classifier_skips_structural_text(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || bytes.len() > 40 {
+        return false;
+    }
+    if !bytes
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'/' | b':'))
+    {
+        return false;
+    }
+    !bytes
+        .windows(2)
+        .any(|pair| pair[0].is_ascii_uppercase() && pair[1].is_ascii_lowercase())
+}
+
+/// `TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL`: unset, `1`, `true` or `on` skip
+/// (the default); anything else classifies everything. An unrecognized value
+/// errs toward classifying more.
+fn structural_skip_from_env() -> bool {
+    match std::env::var("TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL") {
+        Err(_) => true,
+        Ok(value) => matches!(value.trim(), "" | "1" | "true" | "on"),
+    }
+}
+
 pub struct DeterministicTraceRedactor {
     leak_detector: SecretLeakDetector,
     known_path_prefixes: Vec<String>,
     privacy_filter: Option<Arc<dyn PrivacyFilterAdapter>>,
     privacy_filter_backend: PrivacyFilterBackendTag,
+    /// Whether the prose classifier skips object keys and structural tokens;
+    /// see [`classifier_skips_structural_text`].
+    skip_structural: bool,
 }
 
 impl Default for DeterministicTraceRedactor {
@@ -4022,6 +4069,7 @@ impl DeterministicTraceRedactor {
             known_path_prefixes,
             privacy_filter: None,
             privacy_filter_backend: PrivacyFilterBackendTag::None,
+            skip_structural: structural_skip_from_env(),
         }
     }
 
@@ -4039,6 +4087,7 @@ impl DeterministicTraceRedactor {
             known_path_prefixes: Vec::new(),
             privacy_filter: None,
             privacy_filter_backend: PrivacyFilterBackendTag::None,
+            skip_structural: structural_skip_from_env(),
         }
     }
 
@@ -4060,6 +4109,7 @@ impl DeterministicTraceRedactor {
             known_path_prefixes,
             privacy_filter,
             privacy_filter_backend,
+            skip_structural: structural_skip_from_env(),
         })
     }
 
@@ -4072,6 +4122,14 @@ impl DeterministicTraceRedactor {
             known_path_prefixes.push(path_to_string(current_dir));
         }
         Self::new(known_path_prefixes)
+    }
+
+    /// Turn the structural skip on or off regardless of
+    /// `TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL`. For tests and for a caller
+    /// that must match another party's setting exactly.
+    pub fn with_structural_skip(mut self, skip: bool) -> Self {
+        self.skip_structural = skip;
+        self
     }
 
     pub fn with_privacy_filter(
@@ -4112,6 +4170,12 @@ impl DeterministicTraceRedactor {
         let Some(adapter) = self.privacy_filter.as_ref() else {
             return Ok(text);
         };
+        // A structural token -- an id, a path, a number, a lowercase name --
+        // carries no prose for the classifier to find. The deterministic
+        // pass has already run over it. See `classifier_skips_structural_text`.
+        if self.skip_structural && classifier_skips_structural_text(&text) {
+            return Ok(text);
+        }
         // A configured prose classifier is a required control. Preserve its
         // error category; never certify deterministic-only fallback as full.
         let redaction = match adapter.redact_text(&text).await? {
@@ -4399,13 +4463,23 @@ impl DeterministicTraceRedactor {
                             continue;
                         }
                         let key = if redact_keys && context.charge(key.len()) {
-                            self.redact_text_with_state_through_prose_filter(
-                                &key,
-                                context.state,
-                                context.report,
-                                context.summary,
-                            )
-                            .await?
+                            if self.skip_structural {
+                                // Keys never go to the classifier (owner
+                                // decision 2026-11-05); the deterministic
+                                // detectors still run over them.
+                                let (redacted, key_report) =
+                                    self.redact_text_with_state(&key, context.state);
+                                context.report.merge(key_report);
+                                redacted
+                            } else {
+                                self.redact_text_with_state_through_prose_filter(
+                                    &key,
+                                    context.state,
+                                    context.report,
+                                    context.summary,
+                                )
+                                .await?
+                            }
                         } else {
                             key
                         };
@@ -15901,5 +15975,242 @@ mod attested_body_redaction_tests {
             exchange.structured_payload["request"].get("body").is_none(),
             "no consent for tool payloads must mean no request body"
         );
+    }
+}
+
+#[cfg(test)]
+mod structural_skip_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Records every text the classifier is asked about, and redacts the
+    /// marker names so the classifier's effect is visible in the output.
+    #[derive(Default)]
+    struct Recording {
+        asked: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl PrivacyFilterAdapter for Recording {
+        async fn redact_text(
+            &self,
+            text: &str,
+        ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError> {
+            self.asked.lock().unwrap().push(text.to_string());
+            Ok(None)
+        }
+    }
+
+    fn redactor(adapter: Arc<Recording>, skip: bool) -> DeterministicTraceRedactor {
+        DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .with_privacy_filter(adapter, PrivacyFilterBackendTag::NearAi)
+            .with_structural_skip(skip)
+    }
+
+    fn contribution(payload: serde_json::Value, content: &str) -> RawTraceContribution {
+        serde_json::from_value(serde_json::json!({
+            "consent": {
+                "correction_included": false, "message_text_included": true,
+                "policy_version": "2026-04-24", "revocable": true,
+                "routing_metadata_included": false, "scopes": ["debugging_evaluation"],
+                "tool_payloads_included": true,
+            },
+            "contributor": {"revocation_handle": uuid::Uuid::from_u128(7)},
+            "created_at": "2026-11-05T00:00:00Z",
+            "embedding_analysis": null,
+            "events": [{
+                "content": content, "cost_usd": null, "latency_ms": null,
+                "token_counts": null, "event_id": uuid::Uuid::from_u128(1),
+                "event_type": "tool_result", "structured_payload": payload,
+                "success": true, "timestamp": "2026-11-05T00:00:01Z",
+                "tool_call_id": "call_1", "tool_name": "shell",
+            }],
+            "ironclaw": {"channel": "cli", "version": "0.1.0"},
+            "outcome": {"task_success": "success", "user_feedback": "none"},
+            "replay": {"replay_notes": [], "replayable": true, "required_tools": ["shell"]},
+            "submission_id": uuid::Uuid::from_u128(8),
+            "trace_id": uuid::Uuid::from_u128(9),
+            "value": {"credit_points_pending": 0.0, "submission_score": 0.0},
+        }))
+        .expect("fixture parses")
+    }
+
+    #[test]
+    fn the_rule_skips_structural_tokens_and_nothing_with_prose_in_it() {
+        for skipped in [
+            "bash",
+            "edit_file",
+            "src/main.rs",
+            "200",
+            "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7e8f90123",
+            "true",
+            "2026-11-05T00:00:01Z",
+            "call_1",
+            "ERROR",
+            "x",
+        ] {
+            assert!(classifier_skips_structural_text(skipped), "{skipped:?}");
+        }
+        for classified in [
+            "Jane Doe",
+            "Jane",
+            "Dear Sam",
+            "fix the login bug",
+            "Jos\u{e9}",
+            "Sam",
+            "McDonald",
+            "ab",
+            "a".repeat(41).as_str(),
+            "",
+            "with space",
+            "tab\there",
+            "line\nbreak",
+            "<EMAIL_1>",
+            "50%",
+        ] {
+            if classified == "ab" {
+                // Lowercase two-letter tokens are structural by the rule.
+                assert!(classifier_skips_structural_text(classified));
+                continue;
+            }
+            assert!(
+                !classifier_skips_structural_text(classified),
+                "{classified:?}"
+            );
+        }
+        assert!(classifier_skips_structural_text(&"a".repeat(40)));
+    }
+
+    /// Keys never reach the classifier; skipped values do not either;
+    /// prose, names and non-ASCII always do.
+    #[tokio::test]
+    async fn keys_and_structural_values_are_not_classified() {
+        let payload = serde_json::json!({
+            "tool": "bash",
+            "Jane Doe": "edit_file",
+            "path": "src/main.rs",
+            "status": 200,
+            "code": "200",
+            "sha": "a7f3c9d2e1b48856f0c1d2e3a4b5c6d7e8f90123",
+            "ok": "true",
+            "who": "Jane",
+            "greeting": "Dear Sam",
+            "task": "fix the login bug",
+            "name": "Jos\u{e9}",
+            "long": "a".repeat(41),
+        });
+        let adapter = Arc::new(Recording::default());
+        redactor(adapter.clone(), true)
+            .redact_trace(contribution(payload, "fix the login bug for Jane"))
+            .await
+            .expect("redacts");
+        let asked = adapter.asked.lock().unwrap().clone();
+        for key in [
+            "tool", "Jane Doe", "path", "status", "code", "sha", "who", "greeting",
+        ] {
+            assert!(
+                !asked.iter().any(|t| t == key),
+                "key {key:?} was classified"
+            );
+        }
+        for skipped in ["bash", "edit_file", "src/main.rs", "200", "true"] {
+            assert!(
+                !asked.iter().any(|t| t == skipped),
+                "{skipped:?} was classified"
+            );
+        }
+        assert!(!asked.iter().any(|t| t.starts_with("a7f3c9d2")));
+        for classified in ["Jane", "Dear Sam", "fix the login bug", "Jos\u{e9}"] {
+            assert!(
+                asked.iter().any(|t| t == classified),
+                "{classified:?} was not classified"
+            );
+        }
+        assert!(asked.iter().any(|t| t.len() == 41));
+        assert!(
+            asked.iter().any(|t| t.contains("for Jane")),
+            "event content"
+        );
+    }
+
+    /// With the skip off, keys and structural values go to the classifier
+    /// as before.
+    #[tokio::test]
+    async fn the_skip_can_be_turned_off() {
+        let payload = serde_json::json!({"tool": "bash", "Jane Doe": "edit_file"});
+        let adapter = Arc::new(Recording::default());
+        redactor(adapter.clone(), false)
+            .redact_trace(contribution(payload, "ok"))
+            .await
+            .expect("redacts");
+        let asked = adapter.asked.lock().unwrap().clone();
+        for text in ["tool", "bash", "Jane Doe", "edit_file"] {
+            assert!(
+                asked.iter().any(|t| t == text),
+                "{text:?} was not classified"
+            );
+        }
+    }
+
+    /// The trade-off the skip makes, pinned. These token-shaped values are
+    /// NOT removed by the deterministic pass, so with the skip on nothing
+    /// looks at them; before it, the classifier did. Recorded in the witness
+    /// scaling spec; if a detector starts catching one, move it to the
+    /// caught list in `deterministic_detectors_still_redact_skipped_shape_values`
+    /// and update the spec.
+    #[tokio::test]
+    async fn skip_shaped_values_the_deterministic_pass_does_not_catch() {
+        for sample in [
+            "203.0.113.7",
+            "build.corp.internal",
+            "jdoe",
+            "2001:db8::1",
+            "4155550123",
+        ] {
+            assert!(classifier_skips_structural_text(sample), "{sample:?}");
+            let envelope = DeterministicTraceRedactor::deterministic_only(Vec::new())
+                .redact_trace(contribution(serde_json::json!({ "v": sample }), sample))
+                .await
+                .expect("redacts");
+            let event = serde_json::to_string(&envelope.events[0]).unwrap();
+            assert!(
+                event.contains(&format!("\"v\":\"{sample}\"")),
+                "{sample:?} is now caught deterministically: update the spec"
+            );
+        }
+    }
+
+    /// The deterministic detectors still run on a value the classifier
+    /// skips: a token-shaped email, phone, access key and IP are removed
+    /// from the output.
+    #[tokio::test]
+    async fn deterministic_detectors_still_redact_skipped_shape_values() {
+        let secret = concat!("AKIA", "QQWERTYUIOPASDFG");
+        let payload = serde_json::json!({
+            "email": "a@b.co",
+            "phone": "+1-415-555-0123",
+            "key": secret,
+            "ip": "10.0.0.12",
+            "url": "https://intranet.example.corp/wiki",
+            "home": "/home/jdoe/notes.txt",
+        });
+        // Not every one of these has the skip shape (`@` and `+` do not);
+        // what matters is that none survives either way.
+        let adapter = Arc::new(Recording::default());
+        let envelope = redactor(adapter.clone(), true)
+            .redact_trace(contribution(payload, "ok"))
+            .await
+            .expect("redacts");
+        let output = serde_json::to_string(&envelope).unwrap();
+        for leaked in [
+            "a@b.co",
+            "415-555-0123",
+            secret,
+            "10.0.0.12",
+            "intranet.example.corp",
+            "jdoe",
+        ] {
+            assert!(!output.contains(leaked), "{leaked:?} survived: {output}");
+        }
     }
 }

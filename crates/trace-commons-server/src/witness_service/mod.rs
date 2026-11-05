@@ -2498,6 +2498,9 @@ mod tests {
 
     #[tokio::test]
     async fn structured_witness_refuses_secret_echoed_by_classifier() {
+        // Prose, so the classifier is asked about it: a single structural
+        // token like SURVIVOR is skipped (structural skip, 2026-11-05).
+        const ECHO_TRIGGER: &str = "please echo this sentence";
         struct EchoSecret;
         #[async_trait]
         impl PrivacyFilterAdapter for EchoSecret {
@@ -2511,7 +2514,7 @@ mod tests {
                 Ok(Some(
                     trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction {
                         private_edits: None,
-                        redacted_text: if text == SURVIVOR {
+                        redacted_text: if text == ECHO_TRIGGER {
                             SECRET.into()
                         } else {
                             text.into()
@@ -2529,7 +2532,7 @@ mod tests {
         );
         assert!(
             witness_contribution(
-                contribution_request(SURVIVOR),
+                contribution_request(ECHO_TRIGGER),
                 &redactor,
                 &TestSigner::new("metadata-witness"),
                 &TestEnclave
@@ -2542,16 +2545,19 @@ mod tests {
     #[tokio::test]
     async fn structured_witness_refuses_colliding_redacted_metadata_keys() {
         let mut request = contribution_request(SURVIVOR);
+        // Keys never reach the classifier (structural skip, 2026-11-05), so
+        // the collision comes from the deterministic pass: an address key
+        // redacts to the placeholder the second key already spells.
         request
             .raw_contribution
             .ironclaw
             .feature_flags
-            .insert(CLASSIFIER_ONLY_PII.into(), "first".into());
+            .insert("a@b.co".into(), "first".into());
         request
             .raw_contribution
             .ironclaw
             .feature_flags
-            .insert("<PROSE_NAME>".into(), "second".into());
+            .insert("<PRIVATE_EMAIL_1>".into(), "second".into());
         let redactor = PipelineContributionRedaction::with_privacy_filter(
             Vec::new(),
             Arc::new(NameRemovingFilter),
