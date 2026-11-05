@@ -838,7 +838,7 @@ mod tests {
         let line = crate::managed::statusline::line(&home_for(&store, id), None)
             .await
             .expect("a line from a running route");
-        assert!(line.starts_with("ironwire"), "{line}");
+        assert!(line.starts_with("claude -> near.ai"), "{line}");
 
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let result = client

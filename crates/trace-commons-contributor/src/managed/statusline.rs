@@ -1,12 +1,12 @@
-//! The status line a managed Claude Code session shows: IronWire's own
-//! line for the session's proxy, served by this executable.
+//! The status line a managed Claude Code session shows: the session's route
+//! and usage, with the client and provider's user-facing names.
 //!
 //! A managed session's proxy is embedded (`ironwire_proxy::embed`), one per
 //! session, each in its own home under `<config dir>/managed-routes/<session
 //! id>`. Claude Code runs the status-line command on every render, so the
 //! launcher passes it `--settings` naming `<this executable> statusline
 //! --home <that home>` ([`settings`]), and the `statusline` subcommand
-//! ([`run`]) prints IronWire's line for the proxy that owns that home.
+//! ([`run`]) prints the line for the proxy that owns that home.
 //!
 //! It never fails loudly. Every failure prints nothing and exits 0, and the
 //! whole run is bounded by IronWire's [`BUDGET`]: a status line that stalls
@@ -29,6 +29,25 @@ pub async fn line(home: &Path, document: Option<&str>) -> Option<String> {
     .await
     .ok()
     .flatten()
+    .map(|line| display_line(&line))
+}
+
+/// Keep upstream route and usage details while naming the client and provider.
+fn display_line(line: &str) -> String {
+    let line = line.strip_prefix("ironwire → ").unwrap_or(line);
+    let (route, details) = line.split_once(" · ").unwrap_or((line, ""));
+    let route = if route == "nearai" {
+        "near.ai".to_owned()
+    } else if let Some(details) = route.strip_prefix("nearai (") {
+        format!("near.ai ({details}")
+    } else {
+        route.to_owned()
+    };
+    if details.is_empty() {
+        format!("claude -> {route}")
+    } else {
+        format!("claude -> {route} · {details}")
+    }
 }
 
 /// The `statusline` subcommand: print the line, or nothing. Never an error.
@@ -136,6 +155,19 @@ fn settings_for(exe: &Path, home: &Path, shell: Shell) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_names_the_client_and_provider_and_keeps_details() {
+        assert_eq!(display_line("ironwire → nearai"), "claude -> near.ai");
+        assert_eq!(
+            display_line("ironwire → nearai (glm-5 for claude-opus-5) · Claude 50%"),
+            "claude -> near.ai (glm-5 for claude-opus-5) · Claude 50%"
+        );
+        assert_eq!(
+            display_line("ironwire → claude-sub"),
+            "claude -> claude-sub"
+        );
+    }
 
     /// Paths with spaces, both quotes, `$`, a backtick and a backslash come
     /// back from `/bin/sh` exactly as given.
