@@ -3232,6 +3232,8 @@ pub fn queue_outcome_line(label: &str) -> &'static str {
         crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED
         | crate::daemon::second_look::REASON_SCRUB_CHECK_MANUAL => "Waiting for review; not sent",
         queue::REASON_DISMISSED => "Skipped; not sent",
+        // Owner-approved wording, 2026-11-05.
+        queue::REASON_NO_USER_MESSAGES => "No messages to share.",
         queue::REASON_EXPIRED => "Expired without a decision; not sent",
         queue::REASON_CHANGED => "Trace changed; review it again before sending",
         queue::REASON_SCOPES_CHANGED => "Permissions changed; review again before sending",
@@ -3508,6 +3510,12 @@ mod tests {
             assert_ne!(line, "Status unavailable", "{label}");
             assert!(!line.contains(label), "raw label: {label}");
         }
+        // A session with no message from the person, in the owner's
+        // approved words (2026-11-05).
+        assert_eq!(
+            queue_outcome_line(queue::REASON_NO_USER_MESSAGES),
+            "No messages to share."
+        );
         // The witness holds, in the owner's approved words (2026-11-05).
         assert_eq!(
             queue_outcome_line(crate::submit::REASON_WITNESS_NOT_TRUSTED),

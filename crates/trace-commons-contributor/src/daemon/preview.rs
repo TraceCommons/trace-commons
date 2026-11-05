@@ -3236,7 +3236,8 @@ mod tests {
         assert_eq!(
             super::super::second_look::second_look_reasons(
                 super::super::second_look::Scrub::Scrubbed(summary.scrub_counts),
-                0
+                0,
+                super::super::second_look::RedactionWitness::Absent,
             ),
             vec![super::super::second_look::REASON_LOOKS_UNSURE]
         );
@@ -3259,7 +3260,8 @@ mod tests {
         assert_eq!(
             super::super::second_look::second_look_reasons(
                 super::super::second_look::Scrub::Scrubbed(summary.scrub_counts),
-                0
+                0,
+                super::super::second_look::RedactionWitness::Absent,
             ),
             vec![super::super::second_look::REASON_NOTHING_MATCHED]
         );
