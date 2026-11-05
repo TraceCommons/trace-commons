@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-05-environment-feature-flags-design.md`
 
-Status: implemented; final independent review and profile build checks in progress.
+Status: implemented, independently reviewed, and locally validated on 2026-11-05.
 
 ## Global Constraints
 
@@ -104,4 +104,28 @@ Status: implemented; final independent review and profile build checks in progre
 - [x] Run final Rust tests once with fixed flags: `cargo test -p trace-commons-protocol`, `cargo test -p trace-commons-contributor`, `cargo test -p trace-commons-contributor-ffi`, and `cargo test -p trace-commons-server --test it -- 'license_boundary::'`. Include the staging profile/channel test build and compile-selected testing profile checks, plus production/testing refusal tests.
 - [x] Run `cargo fmt --all -- --check`, relevant package Clippy with the repository allow-list, `cargo build -p trace-commons-contributor-ffi`, then `swift test` in `macos/` against that fresh dylib. Run publisher tests, profile packaging tests, and existing channel/release separation checks (including their self-tests where supported).
 - [x] If dependency manifests changed despite the no-new-dependency design, audit the diff for authorization and run all four required cargo-deny license configurations. Never edit license-boundary expected sets to make a new edge pass.
-- [ ] Request a fresh whole-branch review. Address regressions and rerun affected verification only. Report the branch/worktree, tests, and separately any unfinished live serving, publication, deployment, or platform gates. No release or production flag change is authorized by local implementation approval.
+- [x] Request a fresh whole-branch review. Address regressions and rerun affected verification only. Report the branch/worktree, tests, and separately any unfinished live serving, publication, deployment, or platform gates. No release or production flag change is authorized by local implementation approval.
+
+
+## Completed validation and repair notes
+
+- Final contributor suite: 5,515 passed, 10 ignored. FFI: 295 passed.
+- Protocol: 676 passed. License boundary: 4 passed; no dependencies changed.
+- Final native run: 3,518 XCTest cases executed (10 skipped), zero failures;
+  eight Swift Testing cases passed against the freshly rebuilt FFI.
+- Clippy, formatting, publisher/profile/CLI tests, plist checks and release
+  separation checks passed. Testing-profile runtime tests and staging FFI tests
+  passed; the incompatible production/testing profile failed compilation as intended.
+- Independent review found missing flag refresh on native transport gaps. Its
+  regression failed for both gap events before the handler fix and passed afterward.
+- Native verification exposed an attached callback lifetime defect. The C ABI
+  regression proved unsubscribe returned before an active callback finished.
+  The repair gates queued readers, drains current and retired callbacks, preserves
+  nonblocking callback-side clear, and disables failed subscription candidates.
+  An additional focused review identified the replacement case; its regression
+  also failed before the retained-sink fix and passed afterward. Full Rust/native
+  suites passed after the finalized repair.
+- Existing global manifest ignores required a narrow exception so the three
+  reviewed, dated example manifests are tracked. They have not been published.
+- No hosted CI run, merge, live flag publication, or production deployment was
+  performed. Server runtime and Windows/Linux native UI integration remain outside v1.

@@ -1789,8 +1789,8 @@ final class AppModel: ObservableObject {
         // Captured, not read through `self`: the callback runs on a Rust
         // thread, and `deliver` is lock-guarded and never calls back in.
         let liveData = self.liveData
-        // Declares nothing yet: `reengage_due` is declared on this same
-        // subscription once the system's answer is known, and only while a
+        // Feature changes are always accepted. `reengage_due` is declared
+        // on this same subscription once the system's answer is known, only while a
         // notification can be posted (`refreshReengageDeclaration`).
         let subscription = daemon.subscribe(accepts: ["feature_flags_changed"]) { [weak self] json in
             liveData?.deliver(eventJSON: json)
@@ -1864,7 +1864,8 @@ final class AppModel: ObservableObject {
         self?.refreshAfterQueueChange()
     }
 
-    private func handle(event: DaemonEvent) {
+    // Internal so transport-gap recovery can be exercised without flooding the event bus.
+    func handle(event: DaemonEvent) {
         switch event {
         case .featureFlagsChanged:
             refreshFeatureFlags()
@@ -1915,6 +1916,7 @@ final class AppModel: ObservableObject {
                 creditPending: credit
             )
         case .resyncRequired, .lagged:
+            refreshFeatureFlags()
             refreshManagedSessions()
             refreshQueue()
             refreshStatus()

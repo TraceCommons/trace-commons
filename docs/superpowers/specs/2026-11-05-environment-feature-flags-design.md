@@ -1,6 +1,6 @@
 # Environment feature flags
 
-Status: approved by owner on 2026-11-05; implementation in progress.
+Status: approved by owner on 2026-11-05; implemented and locally validated. No live publication.
 
 ## Intent and decisions
 

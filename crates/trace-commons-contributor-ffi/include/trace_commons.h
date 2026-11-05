@@ -2481,6 +2481,8 @@ uint64_t    tc_subscribe_with_accepts(tc_handle*, const char* accepts_json, void
  * freeing ctx. Clear or note the prior tc_last_error value first so a
  * leftover error is not mistaken for this one.
  */
+/* Attached handles also disable cloned reader sinks and drain active callbacks;
+ * calling from an attached callback is refused with the same context label. */
 void        tc_unsubscribe(tc_handle*, uint64_t token);
 
 /* Preview. Reads the session file and runs the real redaction pipeline.
