@@ -445,6 +445,7 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
     .chain(super::card_presentation::ui_copy())
     // Token analytics, approved in Ron's 2026-10-11 owner review (D17).
     .chain(super::analytics_copy::ANALYTICS_COPY.iter().map(|(key, value)| ((*key).to_owned(), (*value).to_owned())))
+    .chain(super::skills_copy::COPY.iter().map(|(key, value)| ((*key).to_owned(), (*value).to_owned())))
     .collect()
 }
 

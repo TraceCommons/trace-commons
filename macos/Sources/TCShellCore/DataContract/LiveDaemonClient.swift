@@ -319,6 +319,15 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         return try await call("insights_submitted", params: params, as: DaemonData.InsightsSubmitted.self)
     }
 
+    public func insightsSkills(refresh: Bool) async throws -> DaemonData.SkillsSnapshot {
+        try await call("insights_skills", params: ["refresh": refresh], as: DaemonData.SkillsSnapshot.self)
+    }
+
+    public func setSkillsFollow(publisherID: String, followed: Bool) async throws -> DaemonData.SkillsSnapshot {
+        try await call("insights_skills_follow", params: ["publisher_id": publisherID, "followed": followed],
+                       as: DaemonData.SkillsSnapshot.self)
+    }
+
     public func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?) async throws -> DaemonData.SubscriptionUsage {
         return try await subscriptionUsage(refresh: refresh, interactive: interactive, provider: provider, login: nil)
     }

@@ -466,6 +466,8 @@ pub const METHODS: &[&str] = &[
     "inference_activity",
     "insights_glance",
     "insights_week",
+    "insights_skills",
+    "insights_skills_follow",
     "insights_sessions",
     "insights_session_drill",
     "insights_session_label",
@@ -1185,6 +1187,7 @@ pub struct DaemonShared {
     /// owner, 2026-10-29). See
     /// `daemon::insights_week`.
     pub(crate) insights_counter: super::insights_week::CounterPass,
+    pub(crate) insights_skills: Arc<super::insights_skills::SkillsService>,
     /// The contribution-mission catalogue behind `list_pending`'s
     /// `mission_fit`. In memory only and `None` until something writes it,
     /// which in production nothing does until Z7/Z8's server catalogue
@@ -1704,6 +1707,7 @@ impl DaemonShared {
             harness_plans: super::harness::PlanStore::default(),
             skill_loop: Mutex::new(super::skill_loop::SkillLoopState::default()),
             insights_counter,
+            insights_skills: Arc::new(Default::default()),
             mission_catalogue: Mutex::new(None),
             estimate_table: Mutex::new(EstimateTableSlot::built_in()),
             settlement: Mutex::new(Default::default()),
@@ -3909,6 +3913,7 @@ fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
 /// Labels are explicit because several methods share a label that cannot
 /// be derived from their names, including the onboarding and profile groups.
 const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
+    ("insights_skills", "insights-skills-requires-async"),
     // It waits for the revoke at NEAR AI and takes the key out of the
     // running proxy; neither can happen on this dispatcher.
     (
@@ -4145,6 +4150,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "inference_activity" => super::inference_map::handle_activity(shared, req),
         "insights_glance" => super::insights_glance::handle_glance(shared, req),
         "insights_week" => super::insights_week::handle_week(shared, req),
+        "insights_skills_follow" => super::insights_skills::handle_follow(shared, req),
         "insights_sessions" => super::insights_sessions::handle_sessions(shared, req),
         "insights_session_drill" => super::insights_sessions::handle_session_drill(shared, req),
         "insights_session_label" => super::insights_sessions::handle_session_label(shared, req),
@@ -7359,6 +7365,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         return super::managed::handle_async(shared, req).await;
     }
     match req.method.as_str() {
+        "insights_skills" => super::insights_skills::handle(shared, req).await,
         "harness_plan" => super::harness::handle_plan_async(shared, req).await,
         "inference_summary" => super::network_data::handle_summary(shared, req).await,
         "model_spend" => super::network_data::handle_model_spend(shared, req).await,
@@ -19995,7 +20002,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 78);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 79);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -20478,8 +20485,8 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 113, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 84, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(sync.len(), 114, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(asy.len(), 85, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

@@ -8,9 +8,9 @@ import TCBridge
 @MainActor
 final class InsightsTabsTests: XCTestCase {
     func testTheBarShowsOverviewBreakdownAndBenchmarks() {
-        XCTAssertEqual(InsightsView.shownTabs, [.overview, .patterns, .benchmarks])
+        XCTAssertEqual(InsightsView.shownTabs, [.overview, .patterns, .benchmarks, .skills])
         XCTAssertEqual(InsightsView.shownTabs.map(\.copyKey),
-                       ["analytics_tab_overview", "analytics_tab_patterns", "analytics_tab_benchmarks"])
+                       ["analytics_tab_overview", "analytics_tab_patterns", "analytics_tab_benchmarks", "analytics_tab_skills"])
     }
 
     func testBreakdownIsTheSecondTabsName() throws {

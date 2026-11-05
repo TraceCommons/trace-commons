@@ -387,6 +387,7 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         case .overview: "overview"
         case .patterns: "breakdown"
         case .benchmarks: "benchmarks"
+        case .skills: "skills"
         }
     }
 
@@ -403,9 +404,12 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         let benchmarks = InsightsBenchmarksModel(reader: { _, _ in bench })
         let usage = subscriptions(state)
         let subscriptions = SubscriptionUsageModel(reader: { _, _, _, _ in usage })
+        let skillsSnapshot = InsightsSkillsRenderTests.snapshot(copy: copy ?? [:])
+        let skills = InsightsSkillsModel(reader: { _ in skillsSnapshot }, copy: copy ?? [:])
+        await skills.load()
         let view = InsightsView(storeSelection: .standard, storeCopy: copy, model: model, overviewModel: overview,
                                 initialTab: tab, subscriptionModel: subscriptions, benchmarks: benchmarks,
-                                openTraces: {})
+                                openTraces: {}, skills: skills)
         let height: CGFloat = width < 900 ? 4_000 : 2_800
         return try await render(AnyView(view), width: width, height: height) {
             model.weekSettled && !overview.busy && overview.shown != nil
@@ -429,14 +433,17 @@ final class InsightsGetStartedRenderTests: XCTestCase {
                 ZStack { Color(red: 0.36, green: 0.40, blue: 0.47); GlassTokens.Color.glassVeil.color }
             }
             .environment(\.colorScheme, .light)
-        let hosting = NSHostingView(rootView: content)
+        let hosting = NSHostingView(rootView: AnyView(content))
         let bounds = NSRect(origin: .zero, size: size)
         hosting.frame = bounds
         let window = NSWindow(contentRect: bounds, styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: .aqua)
         window.contentView = hosting
-        defer { window.close() }
+        defer {
+            window.contentView = nil
+            window.close()
+        }
         hosting.layoutSubtreeIfNeeded(); window.displayIfNeeded()
         for _ in 0 ..< 300 where !ready() { try await Task.sleep(nanoseconds: 10_000_000) }
         XCTAssertTrue(ready(), "the models did not settle")
@@ -447,7 +454,14 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         }
         let bitmap = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: bounds))
         hosting.cacheDisplay(in: bounds, to: bitmap)
-        return try XCTUnwrap(cropped(bitmap).representation(using: .png, properties: [:]))
+        let png = try XCTUnwrap(cropped(bitmap).representation(using: .png, properties: [:]))
+        // End the hosted lifecycle while its window still exists. Closing
+        // alone can return before onDisappear and polling-task cancellation
+        // run (InsightsRenderLifecycleTests).
+        hosting.rootView = AnyView(EmptyView())
+        hosting.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+        try await Task.sleep(for: .milliseconds(10))
+        return png
     }
 
     /// The bitmap without the empty pane under the content, so a shot is

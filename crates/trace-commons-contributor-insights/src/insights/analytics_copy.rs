@@ -852,6 +852,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // (mockups approved by the product owner, 2026-10-29). Money is a
     // `{x}` hole, always at API list prices for Claude and Codex.
     ("analytics_tab_benchmarks", "Benchmarks"),
+    ("analytics_tab_skills", "Skills"),
     ("analytics_tile_spend", "AI spend"),
     ("analytics_tile_top_model", "Top model"),
     ("analytics_tile_credits", "Credits earned"),
