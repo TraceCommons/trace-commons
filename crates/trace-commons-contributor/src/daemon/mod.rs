@@ -653,14 +653,9 @@ async fn supervise_passes(
     managed_lease_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut lease_pass = tokio::task::JoinSet::new();
     let mut token_cleanup_tasks = tokio::task::JoinSet::new();
-    // The published estimate table's fetch schedule (OWNER DECISION E11).
-    // A local of this loop, so nothing that answers a request can reach it.
-    let mut table_schedule =
-        crate::credit_estimate_table::EstimateTableSchedule::starting(Utc::now());
-    // The contribution-mission slot's fetch schedule: due on the first tick
-    // with a config, then every `MISSION_SLOT_REFRESH`. A local of this loop
-    // too.
-    let mut mission_slot_schedule = activity_missions::MissionSlotSchedule::default();
+    // What one tick carries to the next. A local of this loop, so nothing
+    // that answers a request can reach it.
+    let mut tick_state = TickState::starting(Utc::now());
     let shutdown_signal = Arc::clone(&shared.shutdown_signal);
     // A person's approval asks for an upload pass when its hold ends
     // (`DaemonShared::request_upload_at`), so a trace they just sent goes
@@ -740,100 +735,7 @@ async fn supervise_passes(
                 }
             }
             _ = ticker.tick() => {
-                let tick_started = std::time::Instant::now();
-                let now = Utc::now();
-                // Ahead of `watcher::tick` so the sources it builds via
-                // `source_roots_with_routing` see this pass's snapshot
-                // rather than the previous one. A no-op when nothing was
-                // declared; otherwise bounded by the ledger's own short
-                // timeout, so this cannot stall the tick.
-                shared.refresh_routing().await;
-                // Applies a switch a client set over a transport that does
-                // not reach `handle_request_async` (the C ABI's pre-start
-                // settings override writes the file directly), and notices
-                // a proxy that ended on its own. Cheap when there is
-                // nothing to do, which is the ordinary case.
-                shared.reconcile_private_inference().await;
-                // Fixed labels, never `error = %e`. These errors are
-                // `anyhow::Error`s whose outermost context routinely embeds
-                // a filesystem path -- `write_atomic_0600`'s "creating temp
-                // file <dir>/...", `ConfigStore::open`'s state-directory
-                // context, `load_receipts`' "reading <path>". Under a
-                // service manager these land in the journal, where the path
-                // carries the OS username. The condition worth logging is
-                // *which pass* failed, and health carries the rest.
-                // Ahead of the watcher, so an armed project's re-offers are
-                // re-approved in this same pass, and outside the `!dry_run`
-                // block below: it sends nothing, so pause, quiesce and dry-run
-                // do not hold it back (see `settle_near_ai_notice`).
-                settle_near_ai_notice(shared, now);
-                // What ingest says about account admission, read before every
-                // full pass for the gate's R3. See `account_admission`.
-                // Skipped, and any earlier answer dropped, in a dry run and
-                // when nothing is armed.
-                account_admission::refresh(shared, now, dry_run).await;
-                // No usable session: renew an expired one off the pass, so
-                // R3 can lift at the next pass. Not awaited.
-                if shared.account_admission.take_session_missing() {
-                    let _ = account_session_renewal::renew_off_pass(shared);
-                }
-                if watcher::tick(shared, now).await.is_err() {
-                    tracing::warn!(pass = "watch", "daemon pass failed");
-                }
-                // The settlement estimate's scan, when one is due. Started
-                // off the workers and not awaited, so a large machine never
-                // holds up this tick; it reads and sends nothing but local
-                // files, so pause and dry-run do not hold it back.
-                let _ = settlement_estimate::tick(shared, now);
-                subscription_usage::tick(shared, now);
-                // NEAR AI credit arriving, and a balance sample for the
-                // 24-hour change: on its own schedule, a no-op without a
-                // NEAR AI sign-in. Reads only; sends nothing about traces.
-                nearai_credential::arrivals::poll(shared, now).await;
-                expire_and_digest(shared, now);
-                // Everything above is read-only bookkeeping; uploading is
-                // what dry-run withholds.
-                if !dry_run {
-                    if let Err(e) = drain_approved(shared, now, tick_started).await {
-                        // The one detail that is safe and load-bearing: a
-                        // fail-closed precondition is a fixed label by
-                        // construction (`SubmitPreconditionFailure`), and
-                        // it is what suspends queue expiry.
-                        tracing::warn!(
-                            pass = "upload",
-                            reason = uploader::precondition_health_label(&e),
-                            "daemon pass failed"
-                        );
-                    }
-                    if refresh_history(shared, now).await.is_err() {
-                        tracing::warn!(pass = "history", "daemon pass failed");
-                    }
-                    if refresh_community(shared, now).await.is_err() {
-                        tracing::warn!(pass = "community", "daemon pass failed");
-                    }
-                    // On its own fixed schedule, not this tick's: most
-                    // ticks find it not due and return at once.
-                    refresh_estimate_table(shared, now, &mut table_schedule).await;
-                    // Likewise on its own schedule, and likewise a public,
-                    // anonymous read that sends nothing about this Mac.
-                    activity_missions::refresh_mission_slot(
-                        shared,
-                        now,
-                        &mut mission_slot_schedule,
-                    )
-                    .await;
-                    // Anonymous usage counts, US only: asks the region every
-                    // few days and sends finished weeks. Most ticks find
-                    // nothing due and return without a request.
-                    usage_analytics::tick(shared, now).await;
-                }
-                // A fetched table ageing out is the clock alone: announced
-                // here, outside the `!dry_run` block, with no fetch.
-                shared.publish_estimate_in_force_change(now, None);
-                // Last, after every pass that announces its own changes: what
-                // the clock alone moved in `status` this tick. Outside the
-                // `!dry_run` block, since the clock moves in a dry run too.
-                shared.publish_time_driven_status(now);
+                run_tick(shared, dry_run, &mut tick_state).await;
             }
             _ = sigterm.as_mut() => {
                 tracing::info!("daemon stopping on signal");
@@ -845,6 +747,206 @@ async fn supervise_passes(
             return Ok(());
         }
     }
+}
+
+/// What one tick of the periodic passes carries over to the next.
+struct TickState {
+    /// Each pass's own panic guard and backoff (`pass_supervisor`).
+    guards: pass_supervisor::PassGuards,
+    /// The published estimate table's fetch schedule (OWNER DECISION E11).
+    table_schedule: crate::credit_estimate_table::EstimateTableSchedule,
+    /// The contribution-mission slot's fetch schedule: due on the first tick
+    /// with a config, then every `MISSION_SLOT_REFRESH`.
+    mission_slot_schedule: activity_missions::MissionSlotSchedule,
+}
+
+impl TickState {
+    fn starting(now: chrono::DateTime<Utc>) -> Self {
+        Self {
+            guards: pass_supervisor::PassGuards::daemon(),
+            table_schedule: crate::credit_estimate_table::EstimateTableSchedule::starting(now),
+            mission_slot_schedule: activity_missions::MissionSlotSchedule::default(),
+        }
+    }
+}
+
+/// One tick of the periodic passes, in order.
+///
+/// Each pass runs under its own panic guard (`PassGuards::run`): a pass that
+/// panics is skipped for a backoff of its own and the rest of the tick goes
+/// on, so one pass that panics on every run (a watcher pass meeting the same
+/// file each time) cannot hold back upload, expiry or history. A panic that
+/// poisoned shared state still unwinds out of the tick, and the whole-loop
+/// rule in `pass_supervisor::run_restarting` stops the passes.
+///
+/// Fail closed: the upload pass runs only in a tick where the passes its
+/// gate reads from ran -- account admission (the gate's R3 answer) and
+/// expiry. A panic in either withholds that tick's upload rather than
+/// sending on a stale answer or an entry that should have aged out.
+async fn run_tick(shared: &Arc<ipc::DaemonShared>, dry_run: bool, state: &mut TickState) {
+    let guards = &mut state.guards;
+    let tick_started = std::time::Instant::now();
+    let now = Utc::now();
+    // Ahead of `watcher::tick` so the sources it builds via
+    // `source_roots_with_routing` see this pass's snapshot rather than the
+    // previous one. A no-op when nothing was declared; otherwise bounded by
+    // the ledger's own short timeout, so this cannot stall the tick.
+    guards
+        .run(shared, "routing", shared.refresh_routing())
+        .await;
+    // Applies a switch a client set over a transport that does not reach
+    // `handle_request_async` (the C ABI's pre-start settings override writes
+    // the file directly), and notices a proxy that ended on its own. Cheap
+    // when there is nothing to do, which is the ordinary case.
+    guards
+        .run(
+            shared,
+            "private-inference",
+            shared.reconcile_private_inference(),
+        )
+        .await;
+    // Fixed labels, never `error = %e`. These errors are `anyhow::Error`s
+    // whose outermost context routinely embeds a filesystem path --
+    // `write_atomic_0600`'s "creating temp file <dir>/...",
+    // `ConfigStore::open`'s state-directory context, `load_receipts`'
+    // "reading <path>". Under a service manager these land in the journal,
+    // where the path carries the OS username. The condition worth logging is
+    // *which pass* failed, and health carries the rest.
+    //
+    // Ahead of the watcher, so an armed project's re-offers are re-approved
+    // in this same pass, and outside the `!dry_run` block below: it sends
+    // nothing, so pause, quiesce and dry-run do not hold it back (see
+    // `settle_near_ai_notice`).
+    guards
+        .run(shared, "near-ai-notice", async {
+            settle_near_ai_notice(shared, now);
+        })
+        .await;
+    // What ingest says about account admission, read before every full pass
+    // for the gate's R3. See `account_admission`. Skipped, and any earlier
+    // answer dropped, in a dry run and when nothing is armed.
+    let admission = guards
+        .run(shared, "account-admission", async {
+            account_admission::refresh(shared, now, dry_run).await;
+            // No usable session: renew an expired one off the pass, so R3
+            // can lift at the next pass. Not awaited.
+            if shared.account_admission.take_session_missing() {
+                let _ = account_session_renewal::renew_off_pass(shared);
+            }
+        })
+        .await;
+    if let pass_supervisor::PassRun::Ran(Err(_)) = guards
+        .run(shared, "watch", watcher::tick(shared, now))
+        .await
+    {
+        tracing::warn!(pass = "watch", "daemon pass failed");
+    }
+    // The settlement estimate's scan, when one is due. Started off the
+    // workers and not awaited, so a large machine never holds up this tick;
+    // it reads and sends nothing but local files, so pause and dry-run do not
+    // hold it back.
+    guards
+        .run(shared, "settlement-estimate", async {
+            let _ = settlement_estimate::tick(shared, now);
+        })
+        .await;
+    guards
+        .run(shared, "subscription-usage", async {
+            subscription_usage::tick(shared, now);
+        })
+        .await;
+    // NEAR AI credit arriving, and a balance sample for the 24-hour change:
+    // on its own schedule, a no-op without a NEAR AI sign-in. Reads only;
+    // sends nothing about traces.
+    guards
+        .run(
+            shared,
+            "near-ai-arrivals",
+            nearai_credential::arrivals::poll(shared, now),
+        )
+        .await;
+    let expiry = guards
+        .run(shared, "expire", async {
+            expire_and_digest(shared, now);
+        })
+        .await;
+    // Everything above is read-only bookkeeping; uploading is what dry-run
+    // withholds.
+    if !dry_run {
+        if admission.ran() && expiry.ran() {
+            if let pass_supervisor::PassRun::Ran(Err(e)) = guards
+                .run(shared, "upload", drain_approved(shared, now, tick_started))
+                .await
+            {
+                // The one detail that is safe and load-bearing: a fail-closed
+                // precondition is a fixed label by construction
+                // (`SubmitPreconditionFailure`), and it is what suspends
+                // queue expiry.
+                tracing::warn!(
+                    pass = "upload",
+                    reason = uploader::precondition_health_label(&e),
+                    "daemon pass failed"
+                );
+            }
+        }
+        if let pass_supervisor::PassRun::Ran(Err(_)) = guards
+            .run(shared, "history", refresh_history(shared, now))
+            .await
+        {
+            tracing::warn!(pass = "history", "daemon pass failed");
+        }
+        if let pass_supervisor::PassRun::Ran(Err(_)) = guards
+            .run(shared, "community", refresh_community(shared, now))
+            .await
+        {
+            tracing::warn!(pass = "community", "daemon pass failed");
+        }
+        // On its own fixed schedule, not this tick's: most ticks find it not
+        // due and return at once.
+        let table_schedule = &mut state.table_schedule;
+        guards
+            .run(
+                shared,
+                "estimate-table",
+                refresh_estimate_table(shared, now, table_schedule),
+            )
+            .await;
+        // Likewise on its own schedule, and likewise a public, anonymous read
+        // that sends nothing about this Mac.
+        let mission_slot_schedule = &mut state.mission_slot_schedule;
+        guards
+            .run(
+                shared,
+                "mission-slot",
+                activity_missions::refresh_mission_slot(shared, now, mission_slot_schedule),
+            )
+            .await;
+        // Anonymous usage counts, US only: asks the region every few days and
+        // sends finished weeks. Most ticks find nothing due and return
+        // without a request.
+        guards
+            .run(
+                shared,
+                "usage-analytics",
+                usage_analytics::tick(shared, now),
+            )
+            .await;
+    }
+    // A fetched table ageing out is the clock alone: announced here, outside
+    // the `!dry_run` block, with no fetch.
+    guards
+        .run(shared, "estimate-in-force", async {
+            shared.publish_estimate_in_force_change(now, None);
+        })
+        .await;
+    // Last, after every pass that announces its own changes: what the clock
+    // alone moved in `status` this tick. Outside the `!dry_run` block, since
+    // the clock moves in a dry run too.
+    guards
+        .run(shared, "time-driven-status", async {
+            shared.publish_time_driven_status(now);
+        })
+        .await;
 }
 
 /// When to wake for an upload pass asked for at `at`: just after it, by the
