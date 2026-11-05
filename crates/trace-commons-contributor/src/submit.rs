@@ -636,6 +636,19 @@ pub const WITNESS_BATCH_STOP_LABELS: [&str; 3] = [
     REASON_WITNESS_SATURATED,
 ];
 
+/// Whether a witness failure label says the witness judged nothing because
+/// it did not answer: it ran past its deadline (`witness_timeout`) or could
+/// not be reached (`witness_unreachable`). Such a session is `Failed`, never
+/// refused, and the daemon retries it with the transient-upload backoff,
+/// holding it for a person once that budget is spent. A busy witness
+/// (`witness_saturated`) is not covered: it names its own retry delay and has
+/// its own path. Every other witness label is a judgement, or a trust check
+/// that failed, and stays a refusal.
+#[must_use]
+pub fn witness_failure_is_transient(label: &str) -> bool {
+    matches!(label, "witness_timeout" | "witness_unreachable")
+}
+
 /// The label to stop a batch on, if `outcome` is one of
 /// [`WITNESS_BATCH_STOP_LABELS`].
 fn witness_batch_stop(outcome: &SubmitOutcome) -> Option<&'static str> {
@@ -1954,6 +1967,13 @@ impl<'a> SubmitContext<'a> {
                                 {
                                     return Ok(SubmitOutcome::Failed {
                                         reason_label: REASON_WITNESS_SATURATED.to_string(),
+                                    });
+                                }
+                                // Nor one that did not answer: `Failed`, which
+                                // the daemon retries.
+                                if witness_failure_is_transient(label) {
+                                    return Ok(SubmitOutcome::Failed {
+                                        reason_label: label.to_string(),
                                     });
                                 }
                                 return Ok(refused(label, &transcript.session_hash));
@@ -4270,6 +4290,19 @@ mod tests {
             public_bio: None,
             public_since: None,
             witness: None,
+        }
+    }
+
+    /// A witness that did not answer judged nothing and is retried; every
+    /// other witness label is a judgement or a failed trust check.
+    #[test]
+    fn only_a_witness_that_did_not_answer_is_transient() {
+        assert!(witness_failure_is_transient("witness_timeout"));
+        assert!(witness_failure_is_transient("witness_unreachable"));
+        for label in crate::witness::WitnessTrustError::ALL_REFUSAL_LABELS {
+            if label != "witness_timeout" && label != "witness_unreachable" {
+                assert!(!witness_failure_is_transient(label), "{label}");
+            }
         }
     }
 

@@ -990,6 +990,27 @@ pub const REASONS_NEEDING_A_PERSON: &[&str] = &[
     // The Automatic Scrub check's hold (K4 of #1118): the scrubber was
     // unsure about the session, and an unsure session never moves on its own.
     super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
+    // A witness that never answered through the whole transient-upload
+    // budget (`daemon::TransientUpload::Witness`). While retrying, the entry
+    // is `Approved` under the same label and is not held; only the spent
+    // budget leaves it `Pending` under it.
+    "witness_timeout",
+    "witness_unreachable",
+];
+
+/// `witness_attestation_unavailable`, as `witness::WitnessTrustError` spells
+/// it.
+const REASON_WITNESS_ATTESTATION_UNAVAILABLE: &str = "witness_attestation_unavailable";
+
+/// Refusals a newer build offers again
+/// ([`Queue::reoffer_panicked_refusals`]): each may be the build's fault
+/// rather than the trace's. A redaction that panicked is a defect in the
+/// build; `witness_attestation_unavailable` was also what earlier builds
+/// recorded when the witness merely ran past its deadline, a terminal
+/// refusal for a session nothing had judged.
+pub const REOFFERED_ON_A_NEWER_BUILD: &[&str] = &[
+    crate::envelope::REASON_REDACTION_PANICKED,
+    REASON_WITNESS_ATTESTATION_UNAVAILABLE,
 ];
 
 /// Strip an entry back to a fresh offer, keeping only provenance.
@@ -1995,34 +2016,46 @@ impl Queue {
         changed
     }
 
-    /// Record the build a refusal happened on, when it was a
-    /// `redaction-panicked` refusal; any other refusal is left as it is.
+    /// Record the build a refusal happened on, when it is one a newer build
+    /// offers again ([`REOFFERED_ON_A_NEWER_BUILD`]); any other refusal is
+    /// left as it is.
     pub fn note_refusal_version(&mut self, entry_id: Uuid, version: &str) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id)
             && e.state == QueueState::Refused
-            && e.reason_label.as_deref() == Some(crate::envelope::REASON_REDACTION_PANICKED)
+            && e.reason_label
+                .as_deref()
+                .is_some_and(|r| REOFFERED_ON_A_NEWER_BUILD.contains(&r))
         {
             e.refused_on_version = Some(version.to_string());
         }
     }
 
-    /// Offer again every trace refused because its redaction panicked on a
-    /// build older than `current_version`: back to `Approved` if it was
-    /// approved (the drain's usual checks then decide whether that approval
-    /// still holds), otherwise back to `Pending`. Returns whether anything
-    /// moved. A refusal with no recorded build, or one recorded on this
-    /// build or a newer one, stays refused.
+    /// Offer again every trace refused under one of
+    /// [`REOFFERED_ON_A_NEWER_BUILD`] on a build older than
+    /// `current_version`: back to `Approved` if it was approved (the drain's
+    /// usual checks then decide whether that approval still holds),
+    /// otherwise back to `Pending`, where a standing opt-in is applied again
+    /// by the watcher's usual rules. Returns whether anything moved. A
+    /// refusal recorded on this build or a newer one stays refused. One with
+    /// no recorded build stays refused too, except
+    /// `witness_attestation_unavailable`: no build recorded one before this
+    /// rule, and those builds also gave that label to a witness that only
+    /// ran out of time, so an unrecorded one is from an older build.
     pub fn reoffer_panicked_refusals(&mut self, current_version: &str) -> bool {
         let mut changed = false;
         for e in self.entries.iter_mut() {
-            if e.state != QueueState::Refused
-                || e.reason_label.as_deref() != Some(crate::envelope::REASON_REDACTION_PANICKED)
-            {
+            let Some(reason) = e.reason_label.as_deref() else {
+                continue;
+            };
+            if e.state != QueueState::Refused || !REOFFERED_ON_A_NEWER_BUILD.contains(&reason) {
                 continue;
             }
-            let newer = e.refused_on_version.as_deref().is_some_and(|refused_on| {
-                crate::update::version::is_newer(refused_on, current_version).unwrap_or(false)
-            });
+            let newer = match e.refused_on_version.as_deref() {
+                Some(refused_on) => {
+                    crate::update::version::is_newer(refused_on, current_version).unwrap_or(false)
+                }
+                None => reason == REASON_WITNESS_ATTESTATION_UNAVAILABLE,
+            };
             if !newer {
                 continue;
             }
@@ -3097,6 +3130,70 @@ mod tests {
     /// a newer build runs: approved again if it was approved, pending if it
     /// was not. The same build, an older one, or any other refusal leaves
     /// it where it is.
+    /// Builds before the witness timeout was told apart refused a session
+    /// `witness_attestation_unavailable` when the witness merely ran out of
+    /// time, and recorded no build. Such a refusal is offered again; one
+    /// recorded on this build waits for a newer one, like a panic's. A
+    /// panic's refusal with no recorded build still stays refused.
+    #[test]
+    fn a_witness_unavailable_refusal_from_an_older_build_is_offered_again() {
+        let unavailable = REASON_WITNESS_ATTESTATION_UNAVAILABLE;
+        let old = entry("old", "2026-11-04T00:00:00Z");
+        let current = entry("current", "2026-11-04T00:00:00Z");
+        let panicked = entry("panicked", "2026-11-04T00:00:00Z");
+        let mut q = Queue::new();
+        for e in [&old, &current, &panicked] {
+            q.upsert(e.clone(), 5000).unwrap();
+        }
+        q.set_state(old.entry_id, QueueState::Refused, Some(unavailable.into()));
+        q.set_state(
+            current.entry_id,
+            QueueState::Refused,
+            Some(unavailable.into()),
+        );
+        q.note_refusal_version(current.entry_id, "0.24.4");
+        q.set_state(
+            panicked.entry_id,
+            QueueState::Refused,
+            Some(crate::envelope::REASON_REDACTION_PANICKED.into()),
+        );
+
+        assert!(q.reoffer_panicked_refusals("0.24.4"));
+        let back = q.get(old.entry_id).unwrap();
+        assert_eq!(back.state, QueueState::Pending);
+        assert_eq!(back.reason_label, None);
+        assert_eq!(q.get(current.entry_id).unwrap().state, QueueState::Refused);
+        assert_eq!(q.get(panicked.entry_id).unwrap().state, QueueState::Refused);
+        assert!(
+            !q.reoffer_panicked_refusals("0.24.4"),
+            "nothing left to move"
+        );
+
+        assert!(q.reoffer_panicked_refusals("0.24.5"));
+        assert_eq!(q.get(current.entry_id).unwrap().state, QueueState::Pending);
+    }
+
+    /// The witness labels that hold a session for a person hold it only
+    /// once it is `Pending` under them: while retrying it stays approved.
+    #[test]
+    fn a_witness_no_answer_label_holds_only_a_pending_entry() {
+        let mut q = Queue::new();
+        let e = entry("w", "2026-11-04T00:00:00Z");
+        q.upsert(e.clone(), 5000).unwrap();
+        q.set_state(
+            e.entry_id,
+            QueueState::Approved,
+            Some("witness_timeout".into()),
+        );
+        assert!(!q.get(e.entry_id).unwrap().held_for_review());
+        q.set_state(
+            e.entry_id,
+            QueueState::Pending,
+            Some("witness_timeout".into()),
+        );
+        assert!(q.get(e.entry_id).unwrap().held_for_review());
+    }
+
     #[test]
     fn a_panicked_refusal_is_offered_again_on_a_newer_build_only() {
         let panicked = crate::envelope::REASON_REDACTION_PANICKED;
