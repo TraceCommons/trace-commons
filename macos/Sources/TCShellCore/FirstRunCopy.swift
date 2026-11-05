@@ -78,6 +78,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let noSharing: String
         public let skipNote: String
         public let skip: String
+        /// Join's button after "Don't share traces now" (Alejo, 2026-11-05).
+        public let finishSetup: String
     }
 
     public struct Folders: Decodable, Equatable, Sendable {

@@ -39,4 +39,14 @@ final class AlejoFeedbackTests: XCTestCase {
         let frame = try source("Views/FirstRun/FirstRunFrame.swift")
         XCTAssertTrue(frame.contains("GlassButtonStyle(footer.subdued ? .secondary : .primary, size: .stage)"))
     }
+
+    /// Join never says "Start sharing" to someone who chose not to share.
+    func test_joinSaysFinishSetupAfterNotSharing() throws {
+        let copy = try words()
+        XCTAssertEqual(copy.join.finishSetup, "Finish setup")
+        XCTAssertEqual(JoinScreenLayout.footerTitle(FirstRunState(), copy: copy, shares: false), "Finish setup")
+        XCTAssertEqual(JoinScreenLayout.footerTitle(FirstRunState(), copy: copy, shares: true), copy.uses.start)
+        let join = try source("Views/FirstRun/JoinScreen.swift")
+        XCTAssertTrue(join.contains("shares: UsesScreenLayout.hasSelection(runner.state, options: model.consentScopes)),"))
+    }
 }

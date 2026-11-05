@@ -183,9 +183,14 @@ pub struct JoinCopy {
     /// 2026-10-12): Join has no Skip. Kept so the wire table is unchanged.
     pub skip_note: &'static str,
     /// Approved 2026-10-08 (button rule). Join has not read it since
-    /// 2026-10-12; Uses' primary action reads it until the person chooses
-    /// something (Ron, 2026-11-05).
+    /// 2026-10-12. Uses read it until the person chose something (Ron,
+    /// 2026-11-05) until it said "Don't share traces now" instead (Alejo,
+    /// 2026-11-05); unread now, kept so the wire table is unchanged.
     pub skip: &'static str,
+    /// Join's button after "Don't share traces now" on Uses, in place of
+    /// "Start sharing" (Alejo's launch feedback, 2026-11-05). DRAFT, NEEDS
+    /// APPROVAL.
+    pub finish_setup: &'static str,
 }
 
 /// Welcome, the animated first run's splash (Ron's 2026-10-21 canvas).
@@ -531,6 +536,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             no_sharing: "Connecting or creating an account doesn't authorize any data sharing.",
             skip_note: "Skipping sets up watching only. Contributing needs a near.ai account; sign in any time.",
             skip: "Skip",
+            finish_setup: "Finish setup",
         },
         folders: FoldersCopy {
             title_light: "Which folders may this ",
@@ -1152,6 +1158,7 @@ mod tests {
         );
         assert_eq!(copy.uses.dont_share_now, "Don't share traces now");
         assert_eq!(copy.uses.share_traces, "Share traces");
+        assert_eq!(copy.join.finish_setup, "Finish setup");
         assert_eq!(copy.tools.title_bold, "tools");
         for bold in [
             copy.tools.title_bold,
