@@ -275,6 +275,17 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertEqual(MenuPanelStatus.condition(decisionsOwed: nil, unhealthy: false, paused: false, available: true, stale: false), .attention)
         XCTAssertEqual(MenuPanelStatus.condition(decisionsOwed: 0, unhealthy: false, paused: true, available: true, stale: false), .paused)
         XCTAssertEqual(MenuPanelStatus.condition(decisionsOwed: 0, unhealthy: false, paused: false, available: true, stale: false), .live)
+        // Before the first status reply the count is loading, not unknown:
+        // no attention mark for a question not yet answered.
+        XCTAssertEqual(MenuPanelStatus.condition(
+            decisionsOwed: nil, unhealthy: false, paused: false, available: true, stale: false,
+            statusAnswered: false), .loading)
+        XCTAssertEqual(MenuPanelStatus.condition(
+            decisionsOwed: nil, unhealthy: true, paused: false, available: true, stale: false,
+            statusAnswered: false), .attention)
+        XCTAssertEqual(MenuPanelStatus.condition(
+            decisionsOwed: nil, unhealthy: false, paused: false, available: false, stale: false,
+            statusAnswered: false), .unavailable)
     }
 
     /// The popover's store is the app's live client, never sample data,

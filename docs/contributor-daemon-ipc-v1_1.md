@@ -7439,9 +7439,9 @@ loads (`#[serde(default)]`).
 
 ```json
 {
-  "week":     {"submitted": 0, "accepted": 0, "quarantined": 0, "other": 0},
-  "month":    {"submitted": 0, "accepted": 0, "quarantined": 0, "other": 0},
-  "all_time": {"submitted": 0, "accepted": 0, "quarantined": 0, "other": 0},
+  "week":     {"submitted": 0, "accepted": 0, "quarantined": 0, "withdrawn": 0, "other": 0, "contributed": 0},
+  "month":    {"submitted": 0, "accepted": 0, "quarantined": 0, "withdrawn": 0, "other": 0, "contributed": 0},
+  "all_time": {"submitted": 0, "accepted": 0, "quarantined": 0, "withdrawn": 0, "other": 0, "contributed": 0},
   "credit_pending": 0.0,
   "credit_final": 0.0,
   "quarantined": 0,
@@ -7453,6 +7453,15 @@ loads (`#[serde(default)]`).
 `quarantined` is reported separately and must be rendered separately.
 Quarantine means **held for operator privacy review**, not rejected. A
 contributor who sees it grouped with failures reads it as rejection.
+
+`contributed` (in each of `week`, `month` and `all_time`) is what every
+shell's Contributed figure shows: `accepted + submitted`, accepted plus
+waiting to be scored. Held (`quarantined`) is **not** in it; it is its own
+figure beside Contributed, and counting it in both made one page read as
+more traces than there are. A shell reads this field and never re-adds the
+buckets itself. It is a sum of two buckets, not a bucket, so it is not part
+of a window's total. A daemon older than this field omits it; a shell draws
+a dash for it then, never a figure it added up.
 
 `taken_back` (K7) is how many history records have been taken back -- the
 design's third tile, "2 taken back": withdrawn from this daemon (a local
@@ -7841,7 +7850,7 @@ sentence, and it does not divide by `10^scale` itself.
 | `tc_near_ai_balance_amount` | `present`, `nanos`, `scale` | The bare amount, e.g. `$8.50`. |
 | `tc_near_ai_balance_remaining_line` | `present`, `nanos`, `scale` | `Left to spend: $8.50.`, or the no-limit sentence when `present == 0`. |
 | `tc_near_ai_balance_limit_line` | `present`, `nanos`, `scale` | The ceiling, or `""`. |
-| `tc_near_ai_balance_spent_line` | `present`, `nanos`, `scale` | What the account has spent, or `""`. |
+| `tc_near_ai_balance_spent_line` | `present`, `nanos`, `scale`, `remaining_present` | What the account has spent, or `""`. `remaining_present` is whether `remaining_nanos` is non-null; it picks the rounding (below). |
 | `tc_near_ai_balance_observed_line` | `seconds_ago` | How long ago **this daemon** asked. Negative gives `""`. |
 
 `present` is `0` for a `null` on the wire and non-zero otherwise. It is a
@@ -7853,6 +7862,13 @@ debt as no figure at all.
 The rounding is **down**, toward minus infinity, so a printed figure is never
 larger than the one that arrived; a nonzero amount under a cent is
 `less than $0.01` and not `$0.00`.
+
+One exception: Spent drawn beside a remaining figure (`remaining_present`
+non-zero) rounds **up** to the cent, so Limit, Spent and what is left add up
+on the cents shown (limit $130.00 and spent $18.185 leave $111.81, so Spent
+reads $18.19). With no remaining figure there is nothing to add up with, and
+Spent rounds down like every other amount. A spend above zero and under a
+cent is `less than $0.01` either way, never `$0.01`.
 
 #### Three neighbouring fields, three different meanings for a missing key
 

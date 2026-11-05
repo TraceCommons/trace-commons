@@ -601,10 +601,13 @@ fn render_week(app: &Rc<App>) {
         .spacing(space::M)
         .homogeneous(true)
         .build();
+    // The core's Contributed figure (accepted plus waiting to be scored),
+    // the one every shell shows under this word. `submitted` alone is only
+    // the waiting part of it.
     cards.append(&stat_card(
         Tone::Clear,
         copy::CONTRIBUTED,
-        rollup.week.submitted,
+        rollup.week.contributed,
     ));
     cards.append(&stat_card(
         Tone::Held,

@@ -801,8 +801,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     // HistoryViewModel records: x:Bind is strongly typed and performs no
     // implicit ToString for TextBlock.Text, so an int bound straight to a
     // figure is a compile error on Windows and nowhere else.
+    // The core's Contributed figure (accepted plus waiting to be scored),
+    // the one every shell shows under this word; `Submitted` alone is only
+    // the waiting part of it. A dash from a daemon that did not send it.
     public string ContributedCountText =>
-        _rollup.Week.Submitted.ToString(CultureInfo.CurrentCulture);
+        _rollup.Week.Contributed?.ToString(CultureInfo.CurrentCulture) ?? "\u2014";
 
     public string HeldCountText =>
         _rollup.Week.Quarantined.ToString(CultureInfo.CurrentCulture);

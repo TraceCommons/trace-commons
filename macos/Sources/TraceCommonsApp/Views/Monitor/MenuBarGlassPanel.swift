@@ -632,7 +632,9 @@ struct MenuBarStripLabel: View {
         let condition = MenuPanelStatus.condition(
             decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
             paused: model.status.paused, available: model.startup == .running,
-            stale: store.stale || !store.columnsCurrent)
+            stale: store.stale || !store.columnsCurrent,
+            // A failed read has answered: that is unknown, not loading.
+            statusAnswered: model.status.answered || model.statusReadFailed)
         let badge = MenuPanelStatus.badge(model.decisionsOwed)
         // The mark's words, only while the strip draws the mark: the badge
         // and condition come from a different read than the nudge, and a
@@ -725,13 +727,18 @@ enum MenuPanelStatus {
 
     /// What the strip says, in `MenuBarStatus.state`'s spirit: a daemon
     /// that is not running, or data that could not be read, is
-    /// unavailable; trouble or an unknown count needs attention; then
-    /// paused; then live. Never live unless everything is.
+    /// unavailable; before the first status reply it is loading, since a
+    /// count not yet asked for is not an unknown one; trouble or an
+    /// unknown count needs attention; then paused; then live. Never live
+    /// unless everything is.
     static func condition(
-        decisionsOwed: Int?, unhealthy: Bool, paused: Bool, available: Bool, stale: Bool
+        decisionsOwed: Int?, unhealthy: Bool, paused: Bool, available: Bool, stale: Bool,
+        statusAnswered: Bool = true
     ) -> GlassMenuBarStrip.Condition {
         guard available, !stale else { return .unavailable }
-        if unhealthy || decisionsOwed == nil { return .attention }
+        if unhealthy { return .attention }
+        if !statusAnswered { return .loading }
+        if decisionsOwed == nil { return .attention }
         return paused ? .paused : .live
     }
 

@@ -49,7 +49,8 @@ struct SummaryInspector: View {
             if let table = MonitorWords.table {
                 HStack(spacing: GlassTokens.Space.s3) {
                     GlassLegendCell(
-                        table.shared, value: SummaryFacts.contributed(rollup), status: .shared)
+                        table.shared, value: HomeFormat.contributed(rollup), status: .shared,
+                        loading: home.isLoading("history_rollup"))
                     GlassLegendCell(
                         table.kept, value: SummaryFacts.kept(loaded: loaded, sessions: sessions), status: .kept)
                 }
@@ -93,7 +94,8 @@ struct SummaryInspector: View {
             SummaryDecisionLine(glyph: "rectangle.split.2x1", tone: .ask, text: fill(
                 words.summaryPanel.waitingForYou, SummaryFacts.waiting(traces.status)))
             SummaryDecisionLine(glyph: "checkmark", tone: .on, text: fill(
-                words.counts.contributedCount, SummaryFacts.contributed(rollup)))
+                words.counts.contributedCount, HomeFormat.contributed(rollup)),
+                loading: home.isLoading("history_rollup"))
             pending
         }
     }
@@ -160,6 +162,11 @@ private struct SummaryDecisionLine: View {
     let glyph: String?
     let tone: GlassStatus?
     let text: String
+    /// The first reply has not come: a placeholder bar, never the line
+    /// with a dash in it (a dash says the core did not give a value).
+    var loading = false
+    /// The placeholder: about "57 contributed" wide, one line tall.
+    static let loadingWidth: CGFloat = 96
 
     var body: some View {
         // Ron's `DecisionLine`: the glyph in a 20 column, 10 before the line.
@@ -175,10 +182,14 @@ private struct SummaryDecisionLine: View {
             }
             .frame(width: 20)
             .accessibilityHidden(true)
-            Text(text)
-                .glassType(GlassTokens.TypeScale.body)
-                .foregroundStyle(GlassColor.textPrimary)
-                .fixedSize(horizontal: false, vertical: true)
+            if loading {
+                GlassSkeleton(width: Self.loadingWidth)
+            } else {
+                Text(text)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }
@@ -264,10 +275,12 @@ enum SummaryFacts {
         var tile: GlassToolTile.Kind? = nil
     }
 
-    /// The history statuses that still stand as contributed: in the
-    /// commons, waiting to be scored, or held for privacy review (Ron's
-    /// `isContributed`). Withdrawn and expired records are not counted.
-    static let contributedStatuses: Set<String> = ["accepted", "submitted", "quarantined"]
+    /// The history statuses counted as contributed, by the core's rule for
+    /// its `contributed` figure: in the commons, or waiting to be scored
+    /// (`submitted`, and `processing`, which the core counts as submitted).
+    /// Held for privacy review is its own figure and not counted here;
+    /// withdrawn and expired records are not counted either.
+    static let contributedStatuses: Set<String> = ["accepted", "submitted", "processing"]
 
     /// Decisions owed, the badge's count; a dash when the core did not say.
     /// Never `queue_depth`.
@@ -278,13 +291,6 @@ enum SummaryFacts {
     /// Sessions waiting in the tree; a dash before it is read.
     static func kept(loaded: Bool, sessions: [DaemonData.QueueEntry]) -> String {
         loaded ? String(sessions.count) : "—"
-    }
-
-    /// Contributed, all time, as Ron's `isContributed` counts it and as
-    /// the statistics below count it: accepted, waiting to be scored and
-    /// held for privacy review. A part the core did not give is a dash.
-    static func contributed(_ rollup: DaemonData.HistoryRollup?) -> String {
-        HomeFormat.contributed(rollup)
     }
 
     /// A value the store holds, or nil when its last read failed: the
