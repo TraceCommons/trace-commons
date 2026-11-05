@@ -374,6 +374,32 @@ mod tests {
     const MEASUREMENT: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
     const ALIAS: &str = "ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1";
 
+    /// An operator lists both aliases through the structural-skip bump
+    /// (2026-11-05); each is admitted exactly, and an unknown one is not.
+    #[test]
+    fn both_aliases_listed_are_each_admitted_and_an_unknown_one_is_not() {
+        let config = from_values(
+            Some("true"),
+            Some(ADDRESS),
+            Some(MEASUREMENT),
+            Some(
+                "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1,\
+                 ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v2",
+            ),
+        )
+        .expect("valid")
+        .expect("enabled");
+        assert!(config.policy_version_allowed(
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1"
+        ));
+        assert!(config.policy_version_allowed(
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v2"
+        ));
+        assert!(!config.policy_version_allowed(
+            "ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v3"
+        ));
+    }
+
     #[test]
     fn the_switch_off_yields_no_config_and_no_error() {
         let config = from_values(None, Some(ADDRESS), Some(MEASUREMENT), Some(ALIAS))

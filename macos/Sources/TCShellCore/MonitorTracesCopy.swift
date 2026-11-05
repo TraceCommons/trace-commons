@@ -518,6 +518,10 @@ public struct MonitorUndoCopy: MonitorWordTable {
     public let within: String
     public let mayHaveStarted: String
     public let undoing: String
+    /// "Data redaction has begun.": said once per app run, under the first
+    /// Submit a person makes that goes to the privacy witness. See
+    /// `RedactionBegunNotice`.
+    public let redactionBegun: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case approvalSaved = "approval_saved"
@@ -526,6 +530,7 @@ public struct MonitorUndoCopy: MonitorWordTable {
         case within
         case mayHaveStarted = "may_have_started"
         case undoing
+        case redactionBegun = "redaction_begun"
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }

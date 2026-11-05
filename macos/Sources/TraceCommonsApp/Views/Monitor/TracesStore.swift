@@ -402,7 +402,14 @@ final class TracesStore {
         /// When the core took it, on this machine's clock: the card counts
         /// up from here (the accepted count-up, never a countdown).
         var at = Date()
+        /// "Data redaction has begun.", on the first Submit of this app run
+        /// that went to the privacy witness; nil on every other.
+        var redactionBegun: String? = nil
     }
+
+    /// When to say "Data redaction has begun.": once per app run, over the
+    /// person's own Submits. Injectable for tests.
+    var redactionNotice: RedactionBegunNotice = .appRun
 
     /// The last contribution, until it is undone or another is made.
     private(set) var lastContributed: Contributed?
@@ -414,6 +421,8 @@ final class TracesStore {
         let toast: SubmitToast
         var label: String? = nil
         var at = Date()
+        /// See `Contributed.redactionBegun`.
+        var redactionBegun: String? = nil
     }
 
     private(set) var lastContributedFolder: ContributedFolder?
@@ -858,7 +867,10 @@ final class TracesStore {
                 guard mine == attachment else { return }
                 lastContributed = Contributed(
                     entryId: entryId, toast: response.toast,
-                    label: tree.allSessions.first { $0.entryId == entryId }?.projectLabel)
+                    label: tree.allSessions.first { $0.entryId == entryId }?.projectLabel,
+                    // A person pressed Submit: a foreground submission.
+                    redactionBegun: redactionNotice.line(
+                        .foreground, witnessReview: response.witnessReview == true, words: words?.undo))
                 // One undo slot: a single-session contribute ends the folder's undo.
                 lastContributedFolder = nil
                 // A newer decision ends the older Keep's undo.
@@ -1123,7 +1135,11 @@ final class TracesStore {
             let response = try await client.approveFolder(
                 projectId: folder.id, verdict: verdict, filter: idleOnly ? .idleSessions : nil)
             guard mine == attachment else { return }
-            lastContributedFolder = ContributedFolder(projectId: folder.id, toast: response.toast, label: folder.label)
+            lastContributedFolder = ContributedFolder(
+                projectId: folder.id, toast: response.toast, label: folder.label,
+                // A person pressed the folder's Submit: a foreground submission.
+                redactionBegun: redactionNotice.line(
+                    .foreground, witnessReview: response.witnessReview == true, words: words?.undo))
             lastContributed = nil
             folderNotice = Self.eligibilityCalls
                 .withheldLine(Int64(clamping: response.excludedIneligible ?? 0))

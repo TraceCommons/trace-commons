@@ -135,6 +135,9 @@ WITH params AS (
         (:r1_v76_applied)::timestamptz AS v76_applied_at,
         ARRAY[
             -- BEGIN FULL_REDACTION_PIPELINE_VERSIONS
+            'ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v2',
+            'ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v2',
+            'ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v3',
             'ironclaw-deterministic-secret-path-v3+privacy-filter-near-ai-v1',
             'ironclaw-deterministic-secret-path-v3+privacy-filter-self-hosted-v1',
             'ironclaw-deterministic-secret-path-v3+privacy-filter-sidecar-v2'

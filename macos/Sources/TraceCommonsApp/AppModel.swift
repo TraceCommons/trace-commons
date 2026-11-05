@@ -278,12 +278,18 @@ final class AppModel: ObservableObject {
         /// Seconds since `approvedAt`, ticked for display. Stops advancing
         /// after `Undo.tickCeiling`; the affordance does not.
         var heldSeconds: Int
+        /// "Data redaction has begun.", on this app run's first Submit that
+        /// went to the privacy witness (`RedactionBegunNotice`); nil otherwise.
+        var redactionBegun: String? = nil
 
         /// The display counter stops here. Past a couple of minutes the exact
         /// figure has stopped meaning anything, and a ticker that runs for the
         /// life of the process to redraw a number nobody is reading is waste.
         static let tickCeiling = 120
     }
+
+    /// The undo card's words from the core's Traces table.
+    private static let undoWords = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.undo
 
     @Published private(set) var contributionLine = PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? "")?.accountContributionRefresh ?? ""
     @Published private(set) var contributionBusy = false
@@ -3463,7 +3469,10 @@ final class AppModel: ObservableObject {
             toastLine: toast.line,
             offerUndo: toast.offerUndo,
             approvedAt: startedAt,
-            heldSeconds: 0
+            heldSeconds: 0,
+            // Every caller is a person's press: a foreground submission.
+            redactionBegun: RedactionBegunNotice.appRun.line(
+                .foreground, witnessReview: response.witnessReview == true, words: Self.undoWords)
         )
         guard toast.offerUndo else {
             // Nothing to count up toward -- the toast still needs to be

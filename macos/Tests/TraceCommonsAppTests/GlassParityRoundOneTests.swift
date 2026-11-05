@@ -46,6 +46,21 @@ final class GlassParityRoundOneTests: XCTestCase {
         XCTAssertFalse(words.undo.mayHaveStarted.isEmpty)
     }
 
+    /// "Data redaction has begun." is the core's shared line, and a Submit
+    /// the daemon did not hand to the privacy witness says nothing and does
+    /// not use up this run's once.
+    func test_theRedactionBegunLineIsTheCoresAndOnlyForAWitnessSubmit() async throws {
+        let words = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
+        XCTAssertEqual(words.undo.redactionBegun, "Data redaction has begun.")
+        let (store, folder) = try await loaded()
+        let notice = RedactionBegunNotice()
+        store.redactionNotice = notice
+        let session = try XCTUnwrap(folder.sessions.first)
+        await store.perform(.contribute, on: session.entryId)
+        XCTAssertNil(store.lastContributed?.redactionBegun, "the sample daemon sends no witness_review")
+        XCTAssertTrue(notice.claim(.foreground, witnessReview: true), "the once was used up")
+    }
+
     /// A Contribute keeps the session's folder name for its undo card.
     func test_aContributionKeepsItsFolderName() async throws {
         let (store, folder) = try await loaded()
