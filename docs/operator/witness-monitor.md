@@ -143,7 +143,9 @@ one.
 `--project tracecommons-pilot-2026 --account zaki@iqlusion.io`. The recipient is
 the placeholder `<ALERT_EMAIL>`; do not put an address in the repo.
 
-The service account is `tc-pilot-runtime@tracecommons-pilot-2026.iam.gserviceaccount.com`,
+The Monitoring and Logging APIs are already enabled on the project (checked
+2026-11-05) and it has no notification channels yet, so the setup has no
+"enable API" step. The service account is `tc-pilot-runtime@tracecommons-pilot-2026.iam.gserviceaccount.com`,
 from "Prereqs to provision per pilot" and the `TC_RUNTIME_SA` export in
 [`pilot-gcp-deployment.md`](./pilot-gcp-deployment.md). That document names the
 account for a pilot provisioned from it; step 0 confirms that it is the one
@@ -151,14 +153,15 @@ attached to `tc-pilot-host`.
 
 Order matters: the policies reference the custom metric, and Cloud Monitoring
 creates a custom metric on its first write, so the monitor must write once
-before step 5.
+before step 4.
 
 ```sh
 P=tracecommons-pilot-2026
 A=zaki@iqlusion.io
 SA=tc-pilot-runtime@${P}.iam.gserviceaccount.com
 
-# 0. Read-only: confirm the host's service account and that its scopes allow
+# 0. Read-only (checked 2026-11-05: the host runs as $SA with the
+#    cloud-platform scope, and $SA has no Monitoring role yet): confirm the host's service account and that its scopes allow
 #    Monitoring writes (cloud-platform or monitoring/monitoring.write).
 gcloud compute instances list --project "$P" --account "$A" \
   --filter='name=tc-pilot-host' \
@@ -167,14 +170,11 @@ gcloud compute instances list --project "$P" --account "$A" \
 # monitoring.write and cloud-platform, the VM must be stopped to change them;
 # stop here and decide.
 
-# 1. Enable the Monitoring API (a no-op if already on).
-gcloud services enable monitoring.googleapis.com --project "$P" --account "$A"
-
-# 2. The minimal grant: write metrics, nothing else.
+# 1. The minimal grant: write metrics, nothing else.
 gcloud projects add-iam-policy-binding "$P" --account "$A" \
   --member="serviceAccount:${SA}" --role=roles/monitoring.metricWriter
 
-# 3. The email channel. Note the printed channel name,
+# 2. The email channel. Note the printed channel name,
 #    projects/<project>/notificationChannels/<id>. Google emails the address a
 #    verification link; the channel delivers only after it is verified.
 gcloud beta monitoring channels create --project "$P" --account "$A" \
@@ -182,15 +182,15 @@ gcloud beta monitoring channels create --project "$P" --account "$A" \
   --channel-labels=email_address=<ALERT_EMAIL>
 CHANNEL=projects/${P}/notificationChannels/<ID from the line above>
 
-# 4. On the host: install the monitor (see "Installing it"), set
+# 3. On the host: install the monitor (see "Installing it"), set
 #    TRACE_COMMONS_WITNESS_MONITOR_EXPORT_METRICS=1 in the env file, then run it
 #    once by hand so the metric exists, and expect exit status 0:
 sudo systemctl start trace-commons-witness-monitor.service
 systemctl status trace-commons-witness-monitor.service
-# An `api_denied` here means step 2 has not taken effect or the VM scopes are
-# too narrow (step 0). Wait a minute after step 2 and retry once.
+# An `api_denied` here means step 1 has not taken effect or the VM scopes are
+# too narrow (step 0). Wait a minute after step 1 and retry once.
 
-# 5. The gauge policy, with email when an incident opens and when it closes.
+# 4. The gauge policy, with email when an incident opens and when it closes.
 cat > witness-gauge-policy.json <<'EOF'
 {
   "displayName": "Witness overloaded, unreachable or unmonitored",
@@ -230,7 +230,7 @@ gcloud monitoring policies create --project "$P" --account "$A" \
   --policy-from-file=witness-gauge-policy.json \
   --notification-channels="$CHANNEL"
 
-# 6. The uptime check on the witness's diagnostics page. <WITNESS_HOST> is the
+# 5. The uptime check on the witness's diagnostics page. <WITNESS_HOST> is the
 #    witness's public hostname (no scheme, no path). Defaults: every minute,
 #    2xx passes, probes from all regions.
 gcloud monitoring uptime create "Witness diagnostics" \
@@ -241,7 +241,7 @@ gcloud monitoring uptime create "Witness diagnostics" \
 CHECK_ID=$(gcloud monitoring uptime list-configs --project "$P" --account "$A" \
   --filter='displayName="Witness diagnostics"' --format='value(name.basename())')
 
-# 7. The uptime policy on the same channel. It opens when the check fails from
+# 6. The uptime policy on the same channel. It opens when the check fails from
 #    more than one region for a minute, so one regional blip does not email.
 cat > witness-uptime-policy.json <<EOF
 {
@@ -274,18 +274,18 @@ gcloud monitoring policies create --project "$P" --account "$A" \
   --policy-from-file=witness-uptime-policy.json \
   --notification-channels="$CHANNEL"
 
-# 8. Confirm what exists (read-only).
+# 7. Confirm what exists (read-only).
 gcloud monitoring policies list --project "$P" --account "$A" \
   --format='value(displayName,enabled)'
 gcloud beta monitoring channels list --project "$P" --account "$A" \
   --format='value(displayName,type,verificationStatus)'
 ```
 
-The 1200 s alignment in step 7 is Google's standard form for uptime-check
+The 1200 s alignment in step 6 is Google's standard form for uptime-check
 policies and is why that email can lag the failure by a few minutes; the gauge
 policy is the fast one.
 
-### Test alert (run once, after step 8)
+### Test alert (run once, after step 7)
 
 Cloud Monitoring has no "send a test" for a policy, so make the monitor raise a
 real `unreachable` against an address nothing listens on, then clear it. This
