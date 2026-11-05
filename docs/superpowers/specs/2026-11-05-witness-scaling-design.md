@@ -41,7 +41,7 @@ no window-cache hits), measured:
 | 241 KB over 60 tool results | 140 | 190.2 s |
 
 Of the calls a 120-result contribution makes, 68% carry under 200 bytes of
-input (ids, argument strings, keys). Each still costs the fixed latency, so
+input (ids, argument strings, keys); these are what 2.3 batches. Each still costs the fixed latency, so
 call count, not bytes, sets the wall time. A real session with hundreds of
 events passes the witness's 300 s limit on call count alone.
 
@@ -53,8 +53,17 @@ NEAR AI adapter's four attempts against its 30 s per-call timeout, so the
 classifier call itself was failing from inside the CVM at that time. The
 earlier 241 KB success in 114.7 s fits the same pattern: three timeouts
 and then a success. Diagnosing that is an operations task, outside this
-spec. It does mean the live latency is not the model above, and the model
-needs re-measuring against the endpoint when it is healthy.
+spec. It does mean the live latency is not the model above.
+
+The owner then measured the endpoint directly from a Mac with a valid key
+(2026-11-05, synthetic text): 20 KiB in 11.3 s, 103 KiB in 14.8 s, 205 KiB
+in 36.5 s. That is several times slower than the September model, and the
+fixed cost per call (~11 s) is what grew most. At that rate each text leaf
+costs over 10 s on its own, which makes call count, the subject of 2.1 and
+2.3, matter even more than the stand-in tables below show. It also put a
+full window past the adapter's old 30 s per-call timeout, so this branch
+raises `DEFAULT_TIMEOUT_MS` to 90 s. Rerun the stand-in with `--base-ms
+11000` to model today's endpoint.
 
 ## 2. In-process changes (this branch)
 
@@ -77,7 +86,9 @@ replay asks about. The replay is the same call the sequential witness
 makes. Tests assert the same envelope bytes and the same private edit maps
 against the sequential pass, for the same classifier answers. A classifier
 failure is still a refusal: answers are taken in pipeline order and
-classification stops at the first error.
+classification stops at the first error. A text the replay asks about that
+has no answer is a refusal too (`witness_classify_answer_missing`), never a
+fresh call.
 
 The bound is per process (`TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT`,
 default 2), shared by every request, because every request spends the same
@@ -133,16 +144,32 @@ section 1, 2.1 and 2.3 are the levers. The feature still lists
 the separate GTK and Tauri lockfiles; drop it together with a refresh of
 those lockfiles.
 
-### 2.3 Not done: batching small leaves
+### 2.3 Batching small leaves, off by default
 
-The endpoint accepts an array of inputs. Sending many small leaves in one
-request would cut the 68% of calls under 200 bytes to a handful. Batching
-was reverted in #468 because the endpoint then limited tokens per request;
-since 2026-09-03 the limit is the body size, and nobody has measured batching
-under it. That needs a low-volume synthetic measurement by someone holding a
-key, with no driver live on it, before any code depends on it. It would sit
-behind the same answer cache as 2.1, so output identity is tested the same
-way.
+The endpoint accepts an array of inputs. Batching was reverted in #468
+because the endpoint then limited tokens per request, and no one has
+measured it under today's body limit. So it is built and off:
+`TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS`, default 1.
+
+When it is on, `PrivacyFilterAdapter::redact_texts` packs texts that fit
+one window into input arrays, in order. Packing stops at the item limit and
+at the encoded-body cap, and each answer is mapped back by its index.
+
+- A text that is blank, too large for one window, or already cached goes
+  through `redact_text` exactly as it would alone.
+- A failed request, or a response whose entry count differs from its
+  input count, fails every text in that request.
+- A span that fails verification in any entry fails the whole batch.
+- A 413 halves the batch.
+
+The witness hands the adapter `preferred_batch_inputs()` texts per permit,
+so the in-flight bound counts requests, not texts. Tests show each batched
+answer equals the unbatched one, and that the witness's envelope and edit
+maps are unchanged with batching on.
+
+Turning it on waits for `scripts/witness-load/near_ai_probe.py batch` to
+show, against the live endpoint, that an array returns one entry per input
+and that those entries match the same inputs sent one at a time.
 
 ### 2.4 Known gap: the window cache stops filling
 
@@ -269,10 +296,13 @@ are not in this repository, and nobody has measured them.
 1. Find why the live witness's classifier calls failed on 2026-11-05 (CVM
    logs, `near-ai privacy classify failed` labels, key status).
 2. Re-measure the endpoint with synthetic text, at low volume, on a key no
-   driver is using: the body limit (binary search with escape-heavy text),
-   per-call latency, overlap tolerance at 2/4/8, and array batching.
+   driver is using: `scripts/witness-load/near_ai_probe.py limit`, `batch`
+   and `latency` (body limit by binary search with escape-heavy text, array
+   batching, per-call latency). Overlap tolerance at 2/4/8 is not in the
+   probe on purpose: it is the measurement that poisoned the key last time,
+   and should be run deliberately, on its own key.
 3. Set `TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT` and the body cap from
    step 2. Ship with the redeploy the companion spec already sequences.
-4. Batching (2.3), if step 2 shows it holds.
+4. Turn batching on (2.3) if step 2 shows it holds.
 5. Replicas (section 3), when availability matters or when per-replica
    keys are available.

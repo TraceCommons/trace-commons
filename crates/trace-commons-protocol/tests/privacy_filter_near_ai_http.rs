@@ -956,3 +956,214 @@ async fn escape_heavy_bodies_arrive_under_the_cap() {
         .collect();
     assert_eq!(inputs, text);
 }
+
+/// A stand-in that answers a string or an array of inputs, one entry per
+/// input, spanning every "bob@example.com" in each at its own codepoint
+/// offsets. `refuse_arrays_over` returns a 413 for arrays longer than it;
+/// `drop_one_entry` answers an array with one entry too few.
+fn per_input_emails(
+    refuse_arrays_over: usize,
+    drop_one_entry: bool,
+) -> impl Fn(&wiremock::Request) -> ResponseTemplate + Send + Sync + 'static {
+    move |req: &wiremock::Request| {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        let (inputs, is_array): (Vec<String>, bool) = match &body["input"] {
+            serde_json::Value::String(one) => (vec![one.clone()], false),
+            serde_json::Value::Array(many) => (
+                many.iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect(),
+                true,
+            ),
+            other => panic!("unexpected input {other}"),
+        };
+        if is_array && inputs.len() > refuse_arrays_over {
+            return ResponseTemplate::new(413).set_body_string("Failed to buffer the request body");
+        }
+        let mut data: Vec<serde_json::Value> = inputs
+            .iter()
+            .map(|input| {
+                let spans: Vec<serde_json::Value> = input
+                    .match_indices("bob@example.com")
+                    .map(|(byte, needle)| {
+                        let start = input[..byte].chars().count();
+                        json!({"category": "private_email", "start": start,
+                               "end": start + needle.chars().count(), "score": 0.99, "text": needle})
+                    })
+                    .collect();
+                json!({"spans": spans})
+            })
+            .collect();
+        if is_array && drop_one_entry {
+            data.pop();
+        }
+        ResponseTemplate::new(200).set_body_json(json!({ "data": data }))
+    }
+}
+
+/// Texts of every kind `redact_texts` routes differently: blank, small with
+/// and without a span, multibyte, repeated, and one needing several windows.
+fn mixed_texts() -> Vec<String> {
+    let mut texts: Vec<String> = (0..40)
+        .map(|i| match i % 5 {
+            0 => format!("mail bob@example.com about item {i}"),
+            1 => format!("caf\u{e9} \u{4e2d}\u{6587} \u{1f600} \"q\" \\ line {i}\n"),
+            2 => format!("plain text {i}"),
+            3 => "   ".to_string(),
+            _ => "repeated bob@example.com text".to_string(),
+        })
+        .collect();
+    texts.push(format!(
+        "{}tail bob@example.com",
+        "clean line\n".repeat(APPROX_BYTES_PER_WINDOW / 8)
+    ));
+    texts
+}
+
+fn batching_adapter(base_url: String, batch: usize) -> NearAiPrivacyFilterAdapter {
+    adapter(base_url).with_max_batch_inputs(batch)
+}
+
+async fn answers_of(
+    adapter: &NearAiPrivacyFilterAdapter,
+    texts: &[String],
+) -> Vec<Result<Option<String>, String>> {
+    let borrowed: Vec<&str> = texts.iter().map(String::as_str).collect();
+    adapter
+        .redact_texts(&borrowed)
+        .await
+        .into_iter()
+        .map(|answer| {
+            answer
+                .map(|redaction| redaction.map(|r| r.redacted_text))
+                .map_err(|e| e.to_string())
+        })
+        .collect()
+}
+
+/// Off by default: an adapter that was not asked to batch prefers one text
+/// per call and sends no input arrays.
+#[tokio::test]
+async fn batching_is_off_by_default() {
+    let server = server_with(per_input_emails(usize::MAX, false)).await;
+    let adapter = adapter(server.uri());
+    assert_eq!(adapter.preferred_batch_inputs(), 1);
+    answers_of(&adapter, &mixed_texts()).await;
+    for request in server.received_requests().await.unwrap() {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert!(
+            body["input"].is_string(),
+            "an input array was sent with batching off"
+        );
+    }
+}
+
+/// Batched answers are exactly the unbatched ones, text by text, in order,
+/// in fewer requests -- and every body is under the cap.
+#[tokio::test]
+async fn batched_answers_match_unbatched_answers_by_index() {
+    let texts = mixed_texts();
+    let single_server = server_with(per_input_emails(usize::MAX, false)).await;
+    let expected = answers_of(&adapter(single_server.uri()), &texts).await;
+    let single_requests = single_server.received_requests().await.unwrap().len();
+
+    let server = server_with(per_input_emails(usize::MAX, false)).await;
+    let batched = answers_of(&batching_adapter(server.uri(), 8), &texts).await;
+    assert_eq!(batched, expected);
+    assert!(expected.iter().all(Result::is_ok));
+    assert!(
+        expected
+            .iter()
+            .filter_map(|a| a.as_ref().ok().cloned().flatten())
+            .any(|t| t.contains("[REDACTED:private_email]")),
+        "the fixture must redact something"
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        requests.len() * 3 < single_requests,
+        "{} vs {single_requests}",
+        requests.len()
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.body.len() <= MAX_CLASSIFY_REQUEST_BODY_BYTES)
+    );
+    assert!(requests.iter().any(|r| {
+        let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+        body["input"].as_array().is_some_and(|a| a.len() > 1)
+    }));
+}
+
+/// Packing respects the body cap, not only the item limit: with a small cap
+/// many texts that the item limit would put together go out in several
+/// requests, each under the cap.
+#[tokio::test]
+async fn batches_are_packed_under_the_body_cap() {
+    const CAP: usize = 2 * 1024;
+    let texts: Vec<String> = (0..60)
+        .map(|i| format!("line {i} \"quoted\" \\ bob@example.com {}", "x".repeat(200)))
+        .collect();
+    let server = server_with(per_input_emails(usize::MAX, false)).await;
+    let adapter = adapter_with_cap(server.uri(), CAP).with_max_batch_inputs(50);
+    let answers = answers_of(&adapter, &texts).await;
+    assert!(answers.iter().all(Result::is_ok));
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests.len() > 1);
+    for request in &requests {
+        assert!(request.body.len() <= CAP, "{} > {CAP}", request.body.len());
+    }
+}
+
+/// A batch the endpoint refuses as too large is split until it is accepted,
+/// and the answers are unchanged.
+#[tokio::test]
+async fn a_413_on_a_batch_splits_it() {
+    let texts = mixed_texts();
+    let reference_server = server_with(per_input_emails(usize::MAX, false)).await;
+    let expected = answers_of(&adapter(reference_server.uri()), &texts).await;
+    let server = server_with(per_input_emails(3, false)).await;
+    let answers = answers_of(&batching_adapter(server.uri(), 16), &texts).await;
+    assert_eq!(answers, expected);
+}
+
+/// A batch answered with the wrong number of entries is a failure for every
+/// text it carried -- none of its answers is used -- while texts that went
+/// alone are unaffected.
+#[tokio::test]
+async fn a_batch_with_a_missing_entry_fails_every_text_in_it() {
+    let texts = mixed_texts();
+    let server = server_with(per_input_emails(usize::MAX, true)).await;
+    let answers = answers_of(&batching_adapter(server.uri(), 8), &texts).await;
+    let failed = answers.iter().filter(|a| a.is_err()).count();
+    assert!(failed > 0, "a short batch must fail");
+    for (text, answer) in texts.iter().zip(&answers) {
+        if text.trim().is_empty() {
+            assert_eq!(answer, &Ok(None), "blank text never goes to the classifier");
+        }
+        if let Err(error) = answer {
+            assert!(
+                !error.contains("bob@example.com"),
+                "no content in the error"
+            );
+        }
+    }
+}
+
+/// A span in one batch entry that does not match its own input fails the
+/// whole batch closed, as it fails a single request.
+#[tokio::test]
+async fn a_mismatched_span_in_one_entry_fails_the_batch() {
+    let server = server_with(|req: &wiremock::Request| {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        let n = body["input"].as_array().map_or(1, Vec::len);
+        let mut data = vec![json!({"spans": []}); n];
+        data[n - 1] = json!({"spans": [{"category": "private_person", "start": 0, "end": 2,
+                                          "score": 0.9, "text": "zz"}]});
+        ResponseTemplate::new(200).set_body_json(json!({ "data": data }))
+    })
+    .await;
+    let texts: Vec<String> = (0..6).map(|i| format!("text number {i}")).collect();
+    let answers = answers_of(&batching_adapter(server.uri(), 6), &texts).await;
+    assert!(answers.iter().all(Result::is_err), "{answers:?}");
+}

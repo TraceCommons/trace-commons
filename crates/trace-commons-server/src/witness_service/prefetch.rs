@@ -27,14 +27,16 @@
 //!    contribution alone -- so the texts recorded are exactly the texts the
 //!    real pass will ask about.
 //! 2. **Classify.** The distinct texts go to the real adapter, a bounded
-//!    number at once, under a permit pool shared by every request in the
-//!    process, since every request spends the same classifier key.
+//!    number of requests at once, under a permit pool shared by every request
+//!    in the process, since every request spends the same classifier key.
+//!    An adapter that batches (`PrivacyFilterAdapter::redact_texts`) is
+//!    handed several texts per request.
 //! 3. **Replay.** The pipeline runs again with an adapter that answers each
 //!    text from those results. This is the pass whose output is returned, and
 //!    it is the same call the sequential witness makes; only where each answer
-//!    came from differs. A text the record pass did not reach (it stopped
-//!    early on a refusal) goes to the real adapter in the replay, in order,
-//!    as it does today.
+//!    came from differs. A text with no answer is a refusal. The replay can
+//!    only meet one if classification stopped abnormally, because the record
+//!    pass saw every text the replay reaches before its first refusal.
 //!
 //! A classifier failure stays a failure: the first failing text in pipeline
 //! order is answered with its error in the replay, which then fails exactly
@@ -67,6 +69,12 @@ use super::{ContributionRedactor, RedactedContribution, SeamUnavailable, refuse_
 pub const DEFAULT_MAX_CLASSIFY_IN_FLIGHT: usize = 2;
 
 type Answer = Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>;
+
+fn answer_missing() -> TraceContributionError {
+    TraceContributionError::RedactionFailed {
+        reason: "witness_classify_answer_missing".to_string(),
+    }
+}
 
 fn permits_closed() -> TraceContributionError {
     TraceContributionError::RedactionFailed {
@@ -106,18 +114,19 @@ impl PrivacyFilterAdapter for RecordingAdapter {
 /// the shared permits) for any text that pass did not reach.
 struct AnsweringAdapter {
     answers: HashMap<String, Answer>,
-    inner: Arc<dyn PrivacyFilterAdapter>,
-    permits: Arc<Semaphore>,
 }
 
 #[async_trait]
 impl PrivacyFilterAdapter for AnsweringAdapter {
     async fn redact_text(&self, text: &str) -> Answer {
-        if let Some(answer) = self.answers.get(text) {
-            return answer.clone();
-        }
-        let _permit = self.permits.acquire().await.map_err(|_| permits_closed())?;
-        self.inner.redact_text(text).await
+        // A text with no answer is a refusal, never a fresh classifier call
+        // and never a pass. The record pass saw every text the replay can
+        // reach before its first refusal, so this is reached only when
+        // classification stopped abnormally.
+        self.answers
+            .get(text)
+            .cloned()
+            .unwrap_or_else(|| Err(answer_missing()))
     }
 }
 
@@ -173,31 +182,47 @@ impl PrefetchingContributionRedaction {
             .await;
         let texts = recorder.distinct();
 
-        // Bounded and ordered: at most `per_request` calls are started ahead
-        // of the earliest unanswered text, and answers are taken in pipeline
+        // Texts go to the adapter in chunks of what it prefers to be handed
+        // at once: 1 unless it batches (NEAR AI with
+        // `TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS` above 1). One chunk holds
+        // one permit, so the bound counts requests, not texts.
+        //
+        // Bounded and ordered: at most `per_request` chunks are started ahead
+        // of the earliest unanswered one, and answers are taken in pipeline
         // order, so the first error seen is the first in that order,
         // everything before it has its answer, and nothing more is started
         // after it. Dropping the set (an error, or the request's timeout)
         // aborts whatever is still in flight.
-        let mut answers = HashMap::with_capacity(texts.len());
+        let chunk = self.adapter.preferred_batch_inputs().max(1);
+        let mut chunks: Vec<Vec<String>> = Vec::new();
+        for text in texts {
+            match chunks.last_mut() {
+                Some(last) if last.len() < chunk => last.push(text),
+                _ => chunks.push(vec![text]),
+            }
+        }
+        let mut answers = HashMap::new();
         let mut pending = tokio::task::JoinSet::new();
-        let mut done: HashMap<usize, (String, Answer)> = HashMap::new();
-        let mut queue = texts.into_iter().enumerate();
+        let mut done: HashMap<usize, Vec<(String, Answer)>> = HashMap::new();
+        let mut queue = chunks.into_iter().enumerate();
         let mut next_to_take = 0usize;
         let mut in_flight = 0usize;
-        loop {
+        'classify: loop {
             while in_flight < self.per_request {
-                let Some((index, text)) = queue.next() else {
+                let Some((index, texts)) = queue.next() else {
                     break;
                 };
                 let adapter = self.adapter.clone();
                 let permits = self.permits.clone();
                 pending.spawn(async move {
-                    let answer = match permits.acquire_owned().await {
-                        Ok(_permit) => adapter.redact_text(&text).await,
-                        Err(_) => Err(permits_closed()),
+                    let results = match permits.acquire_owned().await {
+                        Ok(_permit) => {
+                            let borrowed: Vec<&str> = texts.iter().map(String::as_str).collect();
+                            adapter.redact_texts(&borrowed).await
+                        }
+                        Err(_) => texts.iter().map(|_| Err(permits_closed())).collect(),
                     };
-                    (index, text, answer)
+                    (index, texts.into_iter().zip(results).collect::<Vec<_>>())
                 });
                 in_flight += 1;
             }
@@ -206,32 +231,25 @@ impl PrefetchingContributionRedaction {
             };
             in_flight -= 1;
             match joined {
-                Ok((index, text, answer)) => {
-                    done.insert(index, (text, answer));
+                Ok((index, results)) => {
+                    done.insert(index, results);
                 }
-                // A panicking classifier call: stop here and let the replay
-                // meet that text again, through the real adapter, where a
-                // panic is a refusal.
+                // A panicking classifier call: stop. The replay meets the
+                // texts it left unanswered and refuses.
                 Err(_) => break,
             }
-            let mut failed = false;
-            while let Some((text, answer)) = done.remove(&next_to_take) {
-                failed = answer.is_err();
-                answers.insert(text, answer);
+            while let Some(results) = done.remove(&next_to_take) {
                 next_to_take += 1;
-                if failed {
-                    break;
+                for (text, answer) in results {
+                    let failed = answer.is_err();
+                    answers.insert(text, answer);
+                    if failed {
+                        break 'classify;
+                    }
                 }
             }
-            if failed {
-                break;
-            }
         }
-        AnsweringAdapter {
-            answers,
-            inner: self.adapter.clone(),
-            permits: self.permits.clone(),
-        }
+        AnsweringAdapter { answers }
     }
 }
 
@@ -369,21 +387,31 @@ mod tests {
     /// concurrent answers come back out of order.
     fn name_spans(request: &Request) -> ResponseTemplate {
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-        let input = body["input"].as_str().unwrap();
-        let mut spans = Vec::new();
-        for name in NAMES {
-            for (byte, found) in input.match_indices(name) {
-                let start = input[..byte].chars().count();
-                spans.push(json!({
-                    "category": "private_person", "start": start,
-                    "end": start + found.chars().count(), "score": 0.9, "text": found,
-                }));
-            }
-        }
-        spans.sort_by_key(|span| span["start"].as_u64());
+        let inputs: Vec<&str> = match &body["input"] {
+            serde_json::Value::String(one) => vec![one.as_str()],
+            serde_json::Value::Array(many) => many.iter().map(|v| v.as_str().unwrap()).collect(),
+            other => panic!("unexpected input {other}"),
+        };
+        let data: Vec<serde_json::Value> = inputs
+            .iter()
+            .map(|input| {
+                let mut spans = Vec::new();
+                for name in NAMES {
+                    for (byte, found) in input.match_indices(name) {
+                        let start = input[..byte].chars().count();
+                        spans.push(json!({
+                            "category": "private_person", "start": start,
+                            "end": start + found.chars().count(), "score": 0.9, "text": found,
+                        }));
+                    }
+                }
+                spans.sort_by_key(|span| span["start"].as_u64());
+                json!({"spans": spans})
+            })
+            .collect();
         ResponseTemplate::new(200)
             .set_delay(Duration::from_millis((request.body.len() % 7) as u64 * 3))
-            .set_body_json(json!({"data": [{"spans": spans}]}))
+            .set_body_json(json!({"data": data}))
     }
 
     async fn classifier() -> MockServer {
@@ -398,6 +426,10 @@ mod tests {
 
     /// A fresh adapter, so neither pass benefits from the other's cache.
     fn near_ai(server: &MockServer) -> Arc<dyn PrivacyFilterAdapter> {
+        near_ai_batching(server, 1)
+    }
+
+    fn near_ai_batching(server: &MockServer, batch: usize) -> Arc<dyn PrivacyFilterAdapter> {
         Arc::new(
             NearAiPrivacyFilterAdapter::new(
                 server.uri(),
@@ -406,7 +438,8 @@ mod tests {
                 Duration::from_secs(10),
                 16 * 1024 * 1024,
             )
-            .unwrap(),
+            .unwrap()
+            .with_max_batch_inputs(batch),
         )
     }
 
@@ -455,6 +488,26 @@ mod tests {
 
             let plain = prefetching.redact(raw.clone()).await.expect("redacts");
             assert_eq!(serde_json::to_vec(&plain.envelope).unwrap(), expected_bytes);
+
+            // And with small texts batched into input arrays.
+            let batching = PrefetchingContributionRedaction::new(
+                Vec::new(),
+                near_ai_batching(&server, 8),
+                PrivacyFilterBackendTag::NearAi,
+                4,
+            );
+            let (batched, batched_maps) = batching
+                .redact_with_edits(raw.clone())
+                .await
+                .expect("redacts");
+            assert_eq!(
+                serde_json::to_vec(&batched.envelope).unwrap(),
+                expected_bytes
+            );
+            assert!(
+                batched_maps == expected_maps,
+                "batched edit maps differ at {events} events"
+            );
 
             // Controls: the classifier and the deterministic pass both ran.
             let text = String::from_utf8(expected_bytes).unwrap();
@@ -592,6 +645,59 @@ mod tests {
         assert!(
             calls < distinct,
             "{calls} of {distinct} texts classified: classification continued past the failure"
+        );
+    }
+
+    /// A text the classify pass left unanswered is a refusal in the replay,
+    /// not a fresh call and not a pass.
+    #[tokio::test]
+    async fn an_unanswered_text_is_a_refusal() {
+        let answering = AnsweringAdapter {
+            answers: HashMap::from([("known".to_string(), Ok(None))]),
+        };
+        assert!(answering.redact_text("known").await.is_ok());
+        let error = answering.redact_text("never classified").await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("witness_classify_answer_missing")
+        );
+    }
+
+    /// With a batching adapter, the permits count requests: a contribution
+    /// whose small texts fit a few batches makes far fewer calls.
+    #[tokio::test]
+    async fn a_batching_adapter_is_handed_several_texts_per_request() {
+        let server = classifier().await;
+        PrefetchingContributionRedaction::new(
+            Vec::new(),
+            near_ai_batching(&server, 16),
+            PrivacyFilterBackendTag::NearAi,
+            2,
+        )
+        .redact(rich_contribution(30))
+        .await
+        .expect("redacts");
+        let batched = server.received_requests().await.unwrap().len();
+        server.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/privacy/classify"))
+            .respond_with(name_spans)
+            .mount(&server)
+            .await;
+        PrefetchingContributionRedaction::new(
+            Vec::new(),
+            near_ai(&server),
+            PrivacyFilterBackendTag::NearAi,
+            2,
+        )
+        .redact(rich_contribution(30))
+        .await
+        .expect("redacts");
+        let single = server.received_requests().await.unwrap().len();
+        assert!(
+            batched * 4 < single,
+            "batched {batched} requests, single {single}"
         );
     }
 }

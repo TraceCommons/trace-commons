@@ -2668,6 +2668,29 @@ pub trait PrivacyFilterAdapter: Send + Sync {
         &self,
         text: &str,
     ) -> Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>;
+
+    /// How many texts a caller holding many should hand to one
+    /// [`Self::redact_texts`] call. 1 (the default) means the backend gains
+    /// nothing from being handed several at once.
+    fn preferred_batch_inputs(&self) -> usize {
+        1
+    }
+
+    /// Redact several independent texts, one answer per text in the same
+    /// order. Each answer must be exactly what [`Self::redact_text`] would
+    /// return for that text given the same classifier answers; a backend
+    /// overrides this only to make fewer round trips. The default asks
+    /// about each text in turn.
+    async fn redact_texts(
+        &self,
+        texts: &[&str],
+    ) -> Vec<Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>> {
+        let mut answers = Vec::with_capacity(texts.len());
+        for text in texts {
+            answers.push(self.redact_text(text).await);
+        }
+        answers
+    }
 }
 
 pub struct NoopPrivacyFilterAdapter;

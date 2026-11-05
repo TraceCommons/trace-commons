@@ -465,8 +465,9 @@ audit-relevant and is included in gate version hash derivation.
 | `TRACE_NEAR_AI_PRIVACY_API_KEY` | when `near-ai` | (none) | NEAR AI Cloud bearer token. Never logged; rotation is restart-only. |
 | `TRACE_NEAR_AI_PRIVACY_BASE_URL` | optional | `https://cloud-api.near.ai/v1` | Hosted endpoint; supports the `https://privacy-filter.completions.near.ai/v1` faster path. Must include the scheme and must be `https`, or `http` against loopback (local sidecars, tests) -- the API key rides on every request as a bearer token, so a plaintext non-loopback endpoint is refused at construction. |
 | `TRACE_NEAR_AI_PRIVACY_MODEL` | optional | `openai/privacy-filter` | Model slug. |
-| `TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS` | optional | `10000` | HTTP request timeout. |
+| `TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS` | optional | `90000` | HTTP request timeout per classify request. Sized for a full 240 KiB window: on 2026-11-05 the live endpoint took 36.5 s for 205 KiB. Each request is attempted up to four times on transport errors and 5xx. |
 | `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_BYTES` | optional | (sidecar default) | Refuses inputs above this size. |
+| `TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS` | optional | `1` (off) | Most texts sent in one `privacy/classify` request as an input array, when a caller hands the adapter several (the witness does). Each answer is mapped back by index; a request that fails, or whose entry count differs from its input count, fails every text it carried. Unmeasured against the live endpoint: run `scripts/witness-load/near_ai_probe.py batch` before raising it. Zero is refused. |
 | `TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES` | optional | `245760` (240 KiB) | Largest serialized `privacy/classify` request body. Windows are cut so each body fits; a body over it or a 413 halves the window (at most four times) before the field is refused. Must be above zero and under the 262144-byte limit measured 2026-09-03. Replaces the retired `TRACE_NEAR_AI_PRIVACY_MAX_INPUT_TOKENS`, which is now refused at startup if set. |
 
 ---

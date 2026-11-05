@@ -18,10 +18,17 @@ use crate::trace_contribution::{
 
 pub const DEFAULT_BASE_URL: &str = "https://cloud-api.near.ai/v1";
 pub const DEFAULT_MODEL: &str = "openai/privacy-filter";
-/// 32,000-token windows measured 5.4 s and the largest success took 9.3 s, so
-/// the previous 10 s default left a window legitimately slower than the
-/// timeout. Raised with the budget it has to serve.
-pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+/// Per-request timeout, sized for a full window at the body cap.
+///
+/// Measured by the owner against the live endpoint on 2026-11-05 with
+/// synthetic text: 20 KiB in 11.3 s, 103 KiB in 14.8 s, 205 KiB in 36.5 s --
+/// several times slower than 2026-09-03, when 243 KiB took 9.3 s. At that
+/// rate a 240 KiB window takes over 40 s, past the old 30 s timeout, which
+/// would turn every full window into four timed-out attempts and a refusal.
+/// 90 s leaves room for the cap and for the endpoint slowing further; four
+/// attempts at it still fit inside the witness's 300 s request limit only
+/// for a single window, which is the case a retry is for.
+pub const DEFAULT_TIMEOUT_MS: u64 = 90_000;
 
 /// Largest `privacy/classify` request BODY, in bytes of the exact serialized
 /// JSON the adapter sends. **Windows are sized by this and nothing else.**
@@ -71,6 +78,14 @@ const _: () = assert!(
 /// operator to look at, not something to keep bisecting through.
 pub const MAX_CLASSIFY_413_SPLITS: usize = 4;
 
+/// Texts per request when a caller hands the adapter several at once. 1:
+/// batching is off by default. #463 batched windows and was reverted (#468)
+/// when the endpoint limited TOKENS per request and a batch summed them; the
+/// limit has been a body size since 2026-09-03, and batching under it has
+/// not been measured. Turn on with `TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS`
+/// only after `scripts/witness-load/near_ai_probe.py batch` says it holds.
+pub const DEFAULT_MAX_BATCH_INPUTS: usize = 1;
+
 /// How many `privacy/classify` requests for a single field may be in flight
 /// at once.
 ///
@@ -107,6 +122,8 @@ pub struct NearAiPrivacyFilterAdapter {
     /// Largest serialized request body. Configurable because the endpoint's
     /// limit has moved before; see [`MAX_CLASSIFY_REQUEST_BODY_BYTES`].
     max_request_body_bytes: usize,
+    /// Most texts sent in one request as an input array. 1 is off.
+    max_batch_inputs: usize,
     /// Memoized classifications, keyed by SHA-256 of the window text.
     ///
     /// Agent traces re-read the same files and echo the same tool output
@@ -238,8 +255,20 @@ impl NearAiPrivacyFilterAdapter {
             api_key: SecretApiKey(api_key.into()),
             max_input_bytes,
             max_request_body_bytes,
+            max_batch_inputs: DEFAULT_MAX_BATCH_INPUTS,
             window_cache: std::sync::Mutex::new(ClassifyWindowCache::default()),
         })
+    }
+}
+
+impl NearAiPrivacyFilterAdapter {
+    /// Send up to `max_batch_inputs` single-window texts per request as an
+    /// input array, when a caller hands several to
+    /// [`PrivacyFilterAdapter::redact_texts`]. 1 turns batching off; 0 is
+    /// treated as 1.
+    pub fn with_max_batch_inputs(mut self, max_batch_inputs: usize) -> Self {
+        self.max_batch_inputs = max_batch_inputs.max(1);
+        self
     }
 }
 
@@ -329,6 +358,29 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
         Err(_) => MAX_CLASSIFY_REQUEST_BODY_BYTES,
     };
 
+    // Off unless set. Sending several inputs in one request was reverted in
+    // #468, when the endpoint limited tokens per request; whether it holds
+    // under today's body limit has not been measured
+    // (scripts/witness-load/near_ai_probe.py measures it).
+    let max_batch_inputs = match std::env::var("TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS") {
+        Ok(value) => {
+            let parsed = value.trim().parse::<usize>().map_err(|err| {
+                PrivacyFilterConfigError::InvalidEnv {
+                    var: "TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS",
+                    reason: err.to_string(),
+                }
+            })?;
+            if parsed == 0 {
+                return Err(PrivacyFilterConfigError::InvalidEnv {
+                    var: "TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS",
+                    reason: "must be at least 1 (1 is off)".to_string(),
+                });
+            }
+            parsed
+        }
+        Err(_) => DEFAULT_MAX_BATCH_INPUTS,
+    };
+
     let adapter = NearAiPrivacyFilterAdapter::with_max_request_body_bytes(
         base_url,
         model,
@@ -336,14 +388,15 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
         Duration::from_millis(timeout_ms),
         max_input_bytes,
         max_request_body_bytes,
-    )?;
+    )?
+    .with_max_batch_inputs(max_batch_inputs);
     Ok(Arc::new(adapter))
 }
 
 #[derive(Serialize)]
-struct ClassifyRequest<'a> {
+struct ClassifyRequest<'a, I: Serialize + ?Sized = str> {
     model: &'a str,
-    input: &'a str,
+    input: &'a I,
 }
 
 #[derive(Deserialize)]
@@ -599,6 +652,125 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
 
         apply_windowed_spans("near-ai", text, &windows)
     }
+
+    fn preferred_batch_inputs(&self) -> usize {
+        self.max_batch_inputs
+    }
+
+    /// With batching on (`TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS` above 1),
+    /// texts that fit one window are sent several to a request as an input
+    /// array, packed under the body cap, and each answer is mapped back by
+    /// its index. Everything else -- blank text, a field over the input
+    /// limit, a text needing several windows, a text already in the window
+    /// cache -- goes through [`Self::redact_text`] exactly as it would alone.
+    ///
+    /// Each text's answer is what `redact_text` returns for it given the
+    /// same spans: the same single window, the same verification, the same
+    /// cache entry, the same `apply_windowed_spans`. A failed request fails
+    /// every text it carried; a 413 splits the batch in half, and a single
+    /// text that still draws one is halved by `redact_text` as usual.
+    async fn redact_texts(&self, texts: &[&str]) -> Vec<Answer> {
+        let mut answers: Vec<Option<Answer>> = vec![None; texts.len()];
+        let mut batchable: Vec<usize> = Vec::new();
+        if self.max_batch_inputs > 1 && texts.len() > 1 {
+            let window_budget = self.max_input_json_bytes();
+            for (index, text) in texts.iter().enumerate() {
+                let fits = !text.trim().is_empty()
+                    && text.len() <= self.max_input_bytes
+                    && json_escaped_len(text) <= window_budget;
+                if !fits {
+                    continue;
+                }
+                let key = window_key(text);
+                match self.cached_window(&key) {
+                    Some(spans) => {
+                        answers[index] = Some(apply_windowed_spans("near-ai", text, &[(0, spans)]))
+                    }
+                    None => batchable.push(index),
+                }
+            }
+        }
+
+        // Pack in order, under both the item limit and the body cap.
+        let mut pending: Vec<Vec<usize>> = Vec::new();
+        let base = self.batch_body_base_len();
+        let mut current: Vec<usize> = Vec::new();
+        let mut current_len = base;
+        for index in batchable {
+            let cost = json_escaped_len(texts[index]) + 2 + usize::from(!current.is_empty());
+            if !current.is_empty()
+                && (current.len() >= self.max_batch_inputs
+                    || current_len + cost > self.max_request_body_bytes)
+            {
+                pending.push(std::mem::take(&mut current));
+                current_len = base;
+            }
+            current_len += json_escaped_len(texts[index]) + 2 + usize::from(!current.is_empty());
+            current.push(index);
+        }
+        if !current.is_empty() {
+            pending.push(current);
+        }
+        // Batches are sent in order; a halved batch's halves go first.
+        pending.reverse();
+        while let Some(batch) = pending.pop() {
+            if batch.len() == 1 {
+                // Alone it is an ordinary single-window request.
+                continue;
+            }
+            let inputs: Vec<&str> = batch.iter().map(|&index| texts[index]).collect();
+            let body = serde_json::to_vec(&ClassifyRequest {
+                model: &self.model,
+                input: inputs.as_slice(),
+            });
+            let outcome = match body {
+                Ok(body) if body.len() <= self.max_request_body_bytes => {
+                    self.send_window(&inputs, body).await
+                }
+                // Over the cap after all: treat as the endpoint would.
+                Ok(_) => Ok(WindowAnswer::TooLarge),
+                Err(_) => Err(TraceContributionError::RedactionFailed {
+                    reason: "near-ai privacy classifier request did not serialize".to_string(),
+                }),
+            };
+            match outcome {
+                Ok(WindowAnswer::Spans(all)) => {
+                    for (&index, spans) in batch.iter().zip(all) {
+                        let text = texts[index];
+                        self.remember_window(window_key(text), &spans);
+                        answers[index] = Some(apply_windowed_spans("near-ai", text, &[(0, spans)]));
+                    }
+                }
+                Ok(WindowAnswer::TooLarge) => {
+                    let (left, right) = batch.split_at(batch.len() / 2);
+                    pending.push(right.to_vec());
+                    pending.push(left.to_vec());
+                }
+                Err(error) => {
+                    for &index in &batch {
+                        answers[index] = Some(Err(error.clone()));
+                    }
+                }
+            }
+        }
+
+        // Everything not answered above, in order, exactly as alone.
+        let mut out = Vec::with_capacity(texts.len());
+        for (index, answer) in answers.into_iter().enumerate() {
+            out.push(match answer {
+                Some(answer) => answer,
+                None => self.redact_text(texts[index]).await,
+            });
+        }
+        out
+    }
+}
+
+type Answer = Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>;
+
+/// The window cache key: SHA-256 of the window's bytes.
+fn window_key(text: &str) -> [u8; 32] {
+    <sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()).into()
 }
 
 impl NearAiPrivacyFilterAdapter {
@@ -689,7 +861,7 @@ impl NearAiPrivacyFilterAdapter {
             // Memoize on the window's content hash. The lock is taken only
             // around the map access and released before any await, so it
             // never spans a network round trip.
-            let key: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()).into();
+            let key = window_key(text);
             if let Some(hit) = self.cached_window(&key) {
                 return Ok(hit);
             }
@@ -703,8 +875,8 @@ impl NearAiPrivacyFilterAdapter {
             let spans = if body.len() > self.max_request_body_bytes {
                 self.classify_halves(text, splits_left).await?
             } else {
-                match self.send_window(text, body).await? {
-                    WindowAnswer::Spans(spans) => spans,
+                match self.send_window(&[text], body).await? {
+                    WindowAnswer::Spans(mut spans) => spans.swap_remove(0),
                     WindowAnswer::TooLarge => self.classify_halves(text, splits_left).await?,
                 }
             };
@@ -756,7 +928,7 @@ impl NearAiPrivacyFilterAdapter {
     /// back as [`WindowAnswer::TooLarge`] for the caller to split.
     async fn send_window(
         &self,
-        text: &str,
+        inputs: &[&str],
         body: Vec<u8>,
     ) -> Result<WindowAnswer, TraceContributionError> {
         let endpoint = format!("{}/privacy/classify", self.base_url.trim_end_matches('/'));
@@ -785,7 +957,7 @@ impl NearAiPrivacyFilterAdapter {
                     // classifier: the upstream is down, the trace is fine.
                     // The input fingerprint rides along hash-only so a
                     // repeatedly-failing window is identifiable in the logs.
-                    let diagnostics = classify_input_diagnostics(&[text]);
+                    let diagnostics = classify_input_diagnostics(inputs);
                     // The driver logs only a hash of the error, so emit the
                     // input fingerprint here where it is provably hash-only.
                     tracing::warn!(
@@ -822,7 +994,7 @@ impl NearAiPrivacyFilterAdapter {
                 // Same split the retry decision above makes, carried out to
                 // the caller: a 5xx, 429 or 408 that outlived our retries is
                 // the vendor's problem, any other 4xx is ours or the trace's.
-                let diagnostics = classify_input_diagnostics(&[text]);
+                let diagnostics = classify_input_diagnostics(inputs);
                 tracing::warn!(
                     classify_input = %diagnostics,
                     attempts = attempt,
@@ -855,17 +1027,30 @@ impl NearAiPrivacyFilterAdapter {
                     .map_err(|err| TraceContributionError::RedactionFailed {
                         reason: format!("near-ai privacy classifier response parse error: {}", err),
                     })?;
-            let entry =
-                parsed
-                    .data
-                    .into_iter()
-                    .next()
-                    .ok_or(TraceContributionError::RedactionFailed {
-                        reason: "near-ai privacy classifier returned empty data array".to_string(),
-                    })?;
-            // Verified before it is remembered: a refused response must
-            // never be served from the cache.
-            let spans = verify_span_texts(text, entry.spans)?;
+            // One entry per input, in input order. A single-input request
+            // reads the first entry, as it always has; a batch must account
+            // for every input exactly, or none of it is used.
+            if parsed.data.is_empty() {
+                return Err(TraceContributionError::RedactionFailed {
+                    reason: "near-ai privacy classifier returned empty data array".to_string(),
+                });
+            }
+            if inputs.len() > 1 && parsed.data.len() != inputs.len() {
+                return Err(TraceContributionError::RedactionFailed {
+                    reason: format!(
+                        "near-ai privacy classifier returned {} entries for {} inputs",
+                        parsed.data.len(),
+                        inputs.len()
+                    ),
+                });
+            }
+            // Verified before anything is remembered: a refused response
+            // must never be served from the cache.
+            let spans = inputs
+                .iter()
+                .zip(parsed.data)
+                .map(|(input, entry)| verify_span_texts(input, entry.spans))
+                .collect::<Result<Vec<_>, _>>()?;
             return Ok(WindowAnswer::Spans(spans));
         }
     }
@@ -873,8 +1058,9 @@ impl NearAiPrivacyFilterAdapter {
 
 /// What one classify request answered.
 enum WindowAnswer {
-    /// Verified spans, in the window's own codepoint coordinates.
-    Spans(Vec<ClassifySpan>),
+    /// Verified spans per input, each in that input's own codepoint
+    /// coordinates, in input order.
+    Spans(Vec<Vec<ClassifySpan>>),
     /// A 413: the body was over the endpoint's limit.
     TooLarge,
 }
@@ -884,6 +1070,19 @@ impl NearAiPrivacyFilterAdapter {
     /// within the adapter's body cap: the body is the request envelope
     /// (model, keys, the input's quotes) plus the input's JSON-escaped bytes,
     /// and the envelope is measured, not guessed.
+    /// Body bytes of a batch request with no inputs (`"input":[]`); each
+    /// input adds its escaped length, two quotes and, after the first, a
+    /// comma.
+    fn batch_body_base_len(&self) -> usize {
+        let empty: &[&str] = &[];
+        serde_json::to_vec(&ClassifyRequest {
+            model: &self.model,
+            input: empty,
+        })
+        .map(|body| body.len())
+        .unwrap_or(self.max_request_body_bytes)
+    }
+
     fn max_input_json_bytes(&self) -> usize {
         let envelope = serde_json::to_vec(&ClassifyRequest {
             model: &self.model,
