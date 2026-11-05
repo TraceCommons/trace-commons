@@ -217,14 +217,16 @@ pub fn ignore_project_copy(project: &str, pending: usize) -> IgnoreProjectCopy {
 }
 
 /// A bulk or group change's projects as one name (#1952, #1954): the
-/// project's own label when the change reaches one, else how many. The
-/// count form is `shell_words_copy::ProjectsManagerWords::projects_count`,
-/// approved by the owner 2026-11-04.
+/// project's own label when the change reaches one, else how many, in
+/// `shell_words_copy::ProjectsManagerWords::projects_count`'s words (filled
+/// from that table, so the two cannot differ).
 #[must_use]
 pub fn bulk_projects_name(labels: &[&str]) -> String {
     match labels {
         [one] => (*one).to_string(),
-        _ => format!("{} projects", labels.len()),
+        _ => crate::shell_words_copy::projects_manager_words()
+            .projects_count
+            .replace("{count}", &labels.len().to_string()),
     }
 }
 
@@ -262,9 +264,10 @@ pub struct BulkModeConfirmation {
 /// turning off Automatic on `automatic_off` of them and, for a Never,
 /// removing `pending` waiting traces.
 ///
-/// The Never title is [`ignore_project_title`]'s (approved); the Ask title
-/// has the same shape and is DRAFT, NEEDS APPROVAL. The pending sentence
-/// is [`ignore_project_body`]'s (approved), said only when traces wait.
+/// The Never title is [`ignore_project_title`]'s (DRAFT, NEEDS APPROVAL);
+/// the Ask title has the same shape and is DRAFT, NEEDS APPROVAL. The
+/// pending sentence is [`ignore_project_body`]'s (approved), said only
+/// when traces wait.
 #[must_use]
 pub fn bulk_mode_confirmation(
     name: &str,

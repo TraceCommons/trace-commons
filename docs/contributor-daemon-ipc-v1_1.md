@@ -1997,9 +1997,11 @@ method's audit records and purge. `auto_upload` is refused with
 first runs only when `agreed` carries the counts the person was shown and
 neither live count is larger; otherwise it is refused with
 `bulk-confirmation-stale` and nothing changes, and the client plans and
-asks again. A trace that arrived after the confirmation was drawn is
-therefore never removed without being counted. The first refusal stops the
-rest:
+asks again. That closes the window between the confirmation and the
+call; the plan and the per-project changes are not under one lock, so a
+trace arriving during the change itself is removed as one project's Never
+would remove it, and `purged` reports what was actually removed. The first
+refusal stops the rest:
 
 ```json
 { "changed": ["proj_9f2c1ab30d4e5f60"], "total": 2, "purged": 1, "refused": "project-key-unrecognized" }

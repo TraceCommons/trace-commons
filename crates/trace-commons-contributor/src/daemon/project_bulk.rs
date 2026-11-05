@@ -179,7 +179,7 @@ mod tests {
         assert!(!agreed_covers(&plan, Some(Agreed::default())));
     }
 
-    /// Kristi's first case: 10 selected, 7 already Never. Three change,
+    /// The #1952 review's first case: 10 selected, 7 already Never. Three change,
     /// and the title counts three, not ten.
     #[test]
     fn projects_already_in_the_mode_are_skipped_and_not_counted() {
@@ -196,7 +196,7 @@ mod tests {
         assert!(copy.destructive);
     }
 
-    /// Kristi's second case: 40 selected, 12 Automatic, set to Never with
+    /// The #1952 review's second case: 40 selected, 12 Automatic, set to Never with
     /// nothing waiting. It asks, naming the 12.
     #[test]
     fn turning_off_automatic_asks_with_the_count() {
