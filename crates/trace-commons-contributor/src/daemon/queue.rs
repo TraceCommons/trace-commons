@@ -294,6 +294,12 @@ pub struct QueueEntry {
     pub state: QueueState,
     /// A fixed label, never a message body or response text.
     pub reason_label: Option<String>,
+    /// The contributor build a `redaction-panicked` refusal happened on. A
+    /// panic is a defect in that build, not a verdict on the trace, so a
+    /// newer build offers the trace again (`reoffer_panicked_refusals`).
+    /// Absent for every other state and refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused_on_version: Option<String>,
     pub attempts: u32,
     pub retry_after: Option<DateTime<Utc>>,
     /// Transient classifier failures since this entry was last approved.
@@ -1989,6 +1995,49 @@ impl Queue {
         changed
     }
 
+    /// Record the build a refusal happened on, when it was a
+    /// `redaction-panicked` refusal; any other refusal is left as it is.
+    pub fn note_refusal_version(&mut self, entry_id: Uuid, version: &str) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id)
+            && e.state == QueueState::Refused
+            && e.reason_label.as_deref() == Some(crate::envelope::REASON_REDACTION_PANICKED)
+        {
+            e.refused_on_version = Some(version.to_string());
+        }
+    }
+
+    /// Offer again every trace refused because its redaction panicked on a
+    /// build older than `current_version`: back to `Approved` if it was
+    /// approved (the drain's usual checks then decide whether that approval
+    /// still holds), otherwise back to `Pending`. Returns whether anything
+    /// moved. A refusal with no recorded build, or one recorded on this
+    /// build or a newer one, stays refused.
+    pub fn reoffer_panicked_refusals(&mut self, current_version: &str) -> bool {
+        let mut changed = false;
+        for e in self.entries.iter_mut() {
+            if e.state != QueueState::Refused
+                || e.reason_label.as_deref() != Some(crate::envelope::REASON_REDACTION_PANICKED)
+            {
+                continue;
+            }
+            let newer = e.refused_on_version.as_deref().is_some_and(|refused_on| {
+                crate::update::version::is_newer(refused_on, current_version).unwrap_or(false)
+            });
+            if !newer {
+                continue;
+            }
+            e.state = if e.approved_at.is_some() {
+                QueueState::Approved
+            } else {
+                QueueState::Pending
+            };
+            e.reason_label = None;
+            e.refused_on_version = None;
+            changed = true;
+        }
+        changed
+    }
+
     /// Revoke an unattended approval and pin the certified review the
     /// witness has just produced for it, so a person opening the entry sees
     /// those bytes instead of running the witness again (the spec's R5).
@@ -3042,6 +3091,62 @@ mod tests {
             discovered_at: at(discovered),
             ..Default::default()
         }
+    }
+
+    /// A trace refused because its redaction panicked is offered again once
+    /// a newer build runs: approved again if it was approved, pending if it
+    /// was not. The same build, an older one, or any other refusal leaves
+    /// it where it is.
+    #[test]
+    fn a_panicked_refusal_is_offered_again_on_a_newer_build_only() {
+        let panicked = crate::envelope::REASON_REDACTION_PANICKED;
+        let approved = QueueEntry {
+            approved_at: Some(at("2026-11-04T00:00:00Z")),
+            ..entry("approved", "2026-11-04T00:00:00Z")
+        };
+        let pending = entry("pending", "2026-11-04T00:00:00Z");
+        let other = QueueEntry {
+            approved_at: Some(at("2026-11-04T00:00:00Z")),
+            ..entry("other", "2026-11-04T00:00:00Z")
+        };
+        let mut q = Queue::new();
+        for e in [&approved, &pending, &other] {
+            q.upsert(e.clone(), 5000).unwrap();
+        }
+        for (id, label) in [
+            (approved.entry_id, panicked),
+            (pending.entry_id, panicked),
+            (other.entry_id, "redaction-failed"),
+        ] {
+            q.set_state(id, QueueState::Refused, Some(label.to_string()));
+            q.note_refusal_version(id, "0.24.1");
+        }
+        // Only a panic records the version.
+        assert_eq!(q.get(other.entry_id).unwrap().refused_on_version, None);
+        assert_eq!(
+            q.get(approved.entry_id)
+                .unwrap()
+                .refused_on_version
+                .as_deref(),
+            Some("0.24.1")
+        );
+
+        for same_or_older in ["0.24.1", "0.24.0"] {
+            assert!(!q.reoffer_panicked_refusals(same_or_older));
+            assert_eq!(q.get(approved.entry_id).unwrap().state, QueueState::Refused);
+        }
+
+        assert!(q.reoffer_panicked_refusals("0.24.2"));
+        let back = q.get(approved.entry_id).unwrap();
+        assert_eq!(back.state, QueueState::Approved);
+        assert_eq!(back.reason_label, None);
+        assert_eq!(back.refused_on_version, None);
+        assert_eq!(q.get(pending.entry_id).unwrap().state, QueueState::Pending);
+        let untouched = q.get(other.entry_id).unwrap();
+        assert_eq!(untouched.state, QueueState::Refused);
+        assert_eq!(untouched.reason_label.as_deref(), Some("redaction-failed"));
+        // Nothing left to move.
+        assert!(!q.reoffer_panicked_refusals("0.24.2"));
     }
 
     /// `entry`, plus the observation it is supposed to be made of.

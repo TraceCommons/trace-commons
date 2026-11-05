@@ -2609,6 +2609,13 @@ pub(crate) async fn checked_local_redaction(
         {
             return REASON_TRANSIENT_REDACTION;
         }
+        if error
+            .downcast_ref::<crate::envelope::RedactionPanicked>()
+            .is_some()
+        {
+            tracing::warn!("refusing session: redaction panicked");
+            return crate::envelope::REASON_REDACTION_PANICKED;
+        }
         // Named refusals survive; everything else is a condition of the
         // machine and stays generic. A credential the contributor typed and a
         // filter backend that collapsed two metadata keys are both things a
@@ -2635,7 +2642,17 @@ pub(crate) fn validate_local_envelope(
     envelope_limit: usize,
 ) -> std::result::Result<(), &'static str> {
     envelope_size_ok(envelope, envelope_limit).map_err(|_| "session-too-large")?;
-    if envelope_has_residual_secret(redactor, envelope).map_err(|_| "secret-scan-failed")? {
+    if envelope_has_residual_secret(redactor, envelope).map_err(|error| {
+        if error
+            .downcast_ref::<crate::envelope::RedactionPanicked>()
+            .is_some()
+        {
+            tracing::warn!("refusing session: redaction panicked");
+            crate::envelope::REASON_REDACTION_PANICKED
+        } else {
+            "secret-scan-failed"
+        }
+    })? {
         return Err("secret-leak-detected");
     }
     Ok(())
@@ -2644,8 +2661,8 @@ pub(crate) fn validate_local_envelope(
 /// Re-scan a finished envelope for a residual secret shape. Returns
 /// `Ok(Some(Refused))` (emitting the same `refusing session` warn every
 /// caller relies on) when the redactor's re-scan still finds a secret shape
-/// in the serialized envelope, or when the scan itself could not finish
-/// (`secret-scan-failed`), else `Ok(None)`. This is the single seam both
+/// in the serialized envelope, or `redaction-panicked` when the scan itself
+/// panicked, else `Ok(None)`. This is the single seam both
 /// the dry-run and real submit paths route through, so deleting either call
 /// site removes the fail-closed guard entirely -- callers must `continue` on
 /// `Some(_)`.
@@ -2660,14 +2677,32 @@ fn residual_secret_refusal(
             Ok(Some(refused("secret-leak-detected", session_ref)))
         }
         Ok(false) => Ok(None),
-        // A scan that could not finish proves nothing, so the session is
-        // refused. Refused, not an error: an error here ends the whole
-        // upload pass, and this session would end every pass after it.
-        Err(_) => {
-            tracing::warn!("refusing session: residual secret scan failed");
-            Ok(Some(refused("secret-scan-failed", session_ref)))
-        }
+        Err(error) => residual_scan_error_outcome(error, session_ref),
     }
+}
+
+/// What a residual scan that did not finish means for the session.
+///
+/// A panic in the scan is refused, for that session alone, under
+/// `redaction-panicked`: the same input panics again on every pass, and as
+/// an error it would end the upload pass each time. Every other error (an
+/// envelope that would not serialize) propagates as before, so the pass
+/// reports it and a later pass retries.
+fn residual_scan_error_outcome(
+    error: anyhow::Error,
+    session_ref: &str,
+) -> Result<Option<SubmitOutcome>> {
+    if error
+        .downcast_ref::<crate::envelope::RedactionPanicked>()
+        .is_some()
+    {
+        tracing::warn!("refusing session: redaction panicked");
+        return Ok(Some(refused(
+            crate::envelope::REASON_REDACTION_PANICKED,
+            session_ref,
+        )));
+    }
+    Err(error)
 }
 
 /// `cfg` with `opts.pii_filter` overriding `cfg.pii_filter` when set.
@@ -3173,6 +3208,29 @@ fn is_auth_failure(e: &OcError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a panic in the residual scan becomes a refusal; any other scan
+    /// error still ends the pass as it did, so a later pass retries it.
+    #[test]
+    fn only_a_panicking_residual_scan_refuses_its_session() {
+        let outcome = residual_scan_error_outcome(
+            anyhow::Error::new(crate::envelope::RedactionPanicked),
+            "session-ref",
+        )
+        .unwrap();
+        match outcome {
+            Some(SubmitOutcome::Refused { reason_label, .. }) => {
+                assert_eq!(reason_label, crate::envelope::REASON_REDACTION_PANICKED);
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let error = residual_scan_error_outcome(
+            anyhow::anyhow!("envelope-serialize-failed"),
+            "session-ref",
+        )
+        .expect_err("a serialize failure keeps propagating");
+        assert_eq!(error.to_string(), "envelope-serialize-failed");
+    }
 
     #[test]
     fn the_upload_timeout_grows_with_the_body() {
