@@ -37,9 +37,9 @@ fn display_line(line: &str) -> String {
     let line = line.strip_prefix("ironwire → ").unwrap_or(line);
     let (route, details) = line.split_once(" · ").unwrap_or((line, ""));
     let route = if route == "nearai" {
-        "near.ai".to_owned()
+        crate::channel::NEAR_AI_DISPLAY_NAME.to_owned()
     } else if let Some(details) = route.strip_prefix("nearai (") {
-        format!("near.ai ({details}")
+        format!("{} ({details}", crate::channel::NEAR_AI_DISPLAY_NAME)
     } else {
         route.to_owned()
     };

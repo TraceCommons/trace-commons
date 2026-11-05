@@ -243,6 +243,9 @@ pub const NEAR_AI_WALLET_RECIPIENT: &str = values::NEAR_AI_WALLET_RECIPIENT;
 /// reachable from any shell.
 pub const NEAR_AI_SIGN_IN_PROVIDERS: &[&str] = values::NEAR_AI_SIGN_IN_PROVIDERS;
 
+/// The provider's name as the managed-session status line shows it.
+pub const NEAR_AI_DISPLAY_NAME: &str = "near.ai";
+
 /// Where a staging build fetches its signed NEAR AI measurement pins (spec
 /// 5.3): a static file on the staging site. The device never takes this from
 /// configuration, from ingest or from IPC.
