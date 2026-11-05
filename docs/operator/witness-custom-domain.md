@@ -62,6 +62,30 @@ certificate work; it does not identify which gateway resolver or routing
 component failed. The provider must diagnose that boundary before cutover.
 The reproduction is prepared here; no external support message was sent.
 
+## Repair investigation, 2026-11-05
+
+The gateway's published image and informational RPC identify dstack-gateway
+0.6.1 with the expected `_dstack-app-address` prefix. That version uses
+TTL-aware lookup caching and a ten-second maximum negative-cache lifetime;
+the persistent custom-SNI failure is not explained by normal negative caching.
+The gateway supports `core.proxy.app_address_dns_servers` as an operator-side
+resolver override, but the tenant API has no resolver update or cache-flush
+operation. Gateway logs are needed to distinguish a lookup error from an
+address-selection error before applying a provider-side correction.
+
+The tenant network-config API can change gateway URLs, but this guest is on
+dstack 0.5.9: its URL list stops after the first successful gateway, and a new
+registration replaces its single WireGuard interface. Appending another URL
+would not exercise it while prod9 registers successfully; putting another
+cluster first could strand the original prod9 URLs. Network config is copied
+at boot, so changing the API configuration without restart does not refresh
+that guest copy. No network configuration was changed in this investigation.
+
+A [provider report](phala-custom-sni-report-2026-11-05.md) is prepared for
+review; it has not been sent. See the [supported network API](https://docs.phala.com/api-reference/cvms/update-kmsgateway-urls),
+[pinned guest implementation](https://github.com/Dstack-TEE/dstack/blob/v0.5.9/dstack-util/src/system_setup.rs),
+and [gateway resolver implementation](https://github.com/Dstack-TEE/dstack/blob/gateway-v0.6.1/dstack/gateway/src/proxy/tls_passthough.rs).
+
 ## Client transition
 
 Discovery still advertises the original Phala URL. Existing clients do not automatically adopt this hostname. Witness URL changes require explicit contributor confirmation and void the old automatic grants.
