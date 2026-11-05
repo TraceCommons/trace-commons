@@ -1406,6 +1406,18 @@ what was current when it was written.
 | `public_logs` / `public_sysinfo` / `public_tcbinfo` | `false` / `false` / `true` |
 | `allowed_envs` | `["TRACE_NEAR_AI_PRIVACY_API_KEY"]` |
 
+**The v1 policy version covers two classifier rules.** Certificates labelled
+`...privacy-filter-near-ai-v1` from the first witness deployed with #1977
+(planned 2026-11-05) onward were produced with the classify skip rule: short
+identifier-shaped keys and structural tokens are not sent to the NEAR AI
+classifier (see section 2 of
+`docs/superpowers/specs/2026-11-05-witness-scaling-design.md`). Earlier v1
+certificates classified every string. The label stays v1 because 0.24.4 and
+older apps accept only the v1 string. A v2 label, which marks the skip rule,
+ships with the polling witness after an app release that accepts it. Until
+then, tell the two apart by the certificate's issue time against the
+deployment date recorded here.
+
 **The signing address survived the upgrade**, which is the proof this was an
 upgrade rather than a recreation: the KMS re-derived the same key from the
 stable app id. An address that had changed would have meant a new app id and
