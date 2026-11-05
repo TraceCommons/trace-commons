@@ -3870,31 +3870,35 @@ fn overlaps_merged(merged: &[std::ops::Range<usize>], probe: &std::ops::Range<us
         .is_some_and(|range| range.start < probe.end)
 }
 
+// Word boundaries in these patterns, and in the email, token, URL and tenant
+// patterns, are ASCII ones (`(?-u:\b)`). A Unicode `\b` treats a CJK or
+// accented letter as a word character, so a key or address touching one --
+// CJK prose has no spaces -- had no boundary and was sent unredacted.
 fn secret_leak_patterns() -> &'static [SecretLeakPattern] {
     static SECRET_LEAK_PATTERNS: LazyLock<Vec<SecretLeakPattern>> = LazyLock::new(|| {
         vec![
             SecretLeakPattern {
                 name: "openai_api_key",
                 severity: SecretLeakSeverity::Critical,
-                regex: Regex::new(r"\bsk-[A-Za-z0-9_-]{20,}\b")
+                regex: Regex::new(r"(?-u:\b)sk-[A-Za-z0-9_-]{20,}(?-u:\b)")
                     .expect("hardcoded OpenAI key regex must compile"),
             },
             SecretLeakPattern {
                 name: "github_token",
                 severity: SecretLeakSeverity::Critical,
-                regex: Regex::new(r"\bgh[pousr]_[A-Za-z0-9_]{10,}\b")
+                regex: Regex::new(r"(?-u:\b)gh[pousr]_[A-Za-z0-9_]{10,}(?-u:\b)")
                     .expect("hardcoded GitHub token regex must compile"),
             },
             SecretLeakPattern {
                 name: "aws_access_key",
                 severity: SecretLeakSeverity::High,
-                regex: Regex::new(r"\bAKIA[0-9A-Z]{16}\b")
+                regex: Regex::new(r"(?-u:\b)AKIA[0-9A-Z]{16}(?-u:\b)")
                     .expect("hardcoded AWS access key regex must compile"),
             },
             SecretLeakPattern {
                 name: "provider_token",
                 severity: SecretLeakSeverity::Critical,
-                regex: Regex::new(r"(?i)\b(?:rk|pk|glpat|xox[baprs])[-_a-z0-9]{8,}\b")
+                regex: Regex::new(r"(?i)(?-u:\b)(?:rk|pk|glpat|xox[baprs])[-_a-z0-9]{8,}(?-u:\b)")
                     .expect("hardcoded provider token regex must compile"),
             },
             SecretLeakPattern {
@@ -3939,27 +3943,27 @@ fn secret_leak_patterns() -> &'static [SecretLeakPattern] {
                 // 40-character minimum is what keeps it off ordinary text.
                 name: "cursor_api_key",
                 severity: SecretLeakSeverity::Critical,
-                regex: Regex::new(r"(?i)\bcrsr_[0-9a-f]{40,}")
+                regex: Regex::new(r"(?i)(?-u:\b)crsr_[0-9a-f]{40,}")
                     .expect("hardcoded Cursor API key regex must compile"),
             },
             SecretLeakPattern {
                 name: "jwt",
                 severity: SecretLeakSeverity::Critical,
                 regex: Regex::new(
-                    r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
+                    r"(?-u:\b)eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?-u:\b)",
                 )
                 .expect("hardcoded JWT regex must compile"),
             },
             SecretLeakPattern {
                 name: "npm_token",
                 severity: SecretLeakSeverity::Critical,
-                regex: Regex::new(r"\bnpm_[A-Za-z0-9]{36}\b")
+                regex: Regex::new(r"(?-u:\b)npm_[A-Za-z0-9]{36}(?-u:\b)")
                     .expect("hardcoded npm token regex must compile"),
             },
             SecretLeakPattern {
                 name: "google_api_key",
                 severity: SecretLeakSeverity::High,
-                regex: Regex::new(r"\bAIza[0-9A-Za-z_-]{35,}\b")
+                regex: Regex::new(r"(?-u:\b)AIza[0-9A-Za-z_-]{35,}(?-u:\b)")
                     .expect("hardcoded Google API key regex must compile"),
             },
             SecretLeakPattern {
@@ -8255,7 +8259,7 @@ fn apply_labeled_ranges(
 fn private_email_regex() -> &'static Regex {
     static PRIVATE_EMAIL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by unit tests and should always compile.
-        Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+        Regex::new(r"(?i)(?-u:\b)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?-u:\b)")
             .expect("hardcoded private email regex must compile")
     });
     &PRIVATE_EMAIL_REGEX
@@ -8282,7 +8286,7 @@ fn local_path_regex() -> &'static Regex {
 fn trace_queue_secret_like_reason_regex() -> &'static Regex {
     static TRACE_QUEUE_SECRET_LIKE_REASON_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by queue diagnostics tests.
-        Regex::new(r"(?ix)\b(?:sk|pk|rk|ghp|gho|ghu|glpat|xox[baprs])[-_a-z0-9]{8,}\b")
+        Regex::new(r"(?ix)(?-u:\b)(?:sk|pk|rk|ghp|gho|ghu|glpat|xox[baprs])[-_a-z0-9]{8,}(?-u:\b)")
             .expect("hardcoded trace queue secret-like reason regex must compile")
     });
     &TRACE_QUEUE_SECRET_LIKE_REASON_REGEX
@@ -8291,7 +8295,7 @@ fn trace_queue_secret_like_reason_regex() -> &'static Regex {
 fn remote_credit_explanation_url_regex() -> &'static Regex {
     static REMOTE_CREDIT_EXPLANATION_URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by local status-history safety tests.
-        Regex::new(r#"(?i)\bhttps?://[^\s'"`<>{}\[\]]+"#)
+        Regex::new(r#"(?i)(?-u:\b)https?://[^\s'"`<>{}\[\]]+"#)
             .expect("hardcoded remote credit explanation URL regex must compile")
     });
     &REMOTE_CREDIT_EXPLANATION_URL_REGEX
@@ -8300,7 +8304,7 @@ fn remote_credit_explanation_url_regex() -> &'static Regex {
 fn remote_credit_explanation_tenant_ref_regex() -> &'static Regex {
     static REMOTE_CREDIT_EXPLANATION_TENANT_REF_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         // safety: hardcoded regex is covered by local status-history safety tests.
-        Regex::new(r"(?i)\btenant[-_][a-z0-9][a-z0-9_-]{1,}\b")
+        Regex::new(r"(?i)(?-u:\b)tenant[-_][a-z0-9][a-z0-9_-]{1,}(?-u:\b)")
             .expect("hardcoded remote credit explanation tenant-ref regex must compile")
     });
     &REMOTE_CREDIT_EXPLANATION_TENANT_REF_REGEX
@@ -10495,7 +10499,10 @@ mod tests {
         // this literal both have to be brought along deliberately.
         assert_eq!(
             provider.regex.as_str(),
-            r"(?i)\b(?:rk|pk|glpat|xox[baprs])[-_a-z0-9]{8,}\b",
+            // Its boundaries became ASCII ones so a token touching a CJK or
+            // accented letter is still found; the prefixes and tail are as
+            // before.
+            r"(?i)(?-u:\b)(?:rk|pk|glpat|xox[baprs])[-_a-z0-9]{8,}(?-u:\b)",
             "provider_token's regex moved; this change was supposed to leave it alone"
         );
 

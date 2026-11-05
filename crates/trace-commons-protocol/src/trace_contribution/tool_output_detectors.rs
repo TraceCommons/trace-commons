@@ -148,16 +148,15 @@ fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
-/// The start of a look-behind window up to `width` bytes before `end`,
-/// moved forward to a character boundary. Without that, a multi-byte
-/// character straddling `end - width` makes `get` return `None`, and the
-/// cue the window exists to find is silently missed.
-fn window_before(input: &str, end: usize, width: usize) -> usize {
-    let mut from = end.saturating_sub(width);
-    while !input.is_char_boundary(from) {
-        from += 1;
+/// A blank inside a line: ASCII space or tab, as before, or any non-ASCII
+/// whitespace (a no-break, ideographic or em space) except the Unicode line
+/// and paragraph separators. ASCII newlines and the rest keep ending a token.
+fn is_inline_blank(c: char) -> bool {
+    match c {
+        ' ' | '\t' => true,
+        '\u{85}' | '\u{2028}' | '\u{2029}' => false,
+        c => !c.is_ascii() && c.is_whitespace(),
     }
-    from
 }
 
 // --- git_author ------------------------------------------------------------
@@ -513,13 +512,12 @@ fn in_host_context(input: &str, start: usize, lowered: &str) -> bool {
         // `ssh` and the host is still the gap after the cue.
         .trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ':' | '='))
         .to_ascii_lowercase();
-    // The separator may be multi-byte (an arrow, a dash, an accented
-    // letter), so the word starts after its full width, not one byte on.
+    // Trimming the word off the end leaves a prefix that ends on a
+    // character boundary even when the separator is multi-byte (an arrow,
+    // a dash, an accented letter).
     let word_start = trimmed
-        .char_indices()
-        .rev()
-        .find(|&(_, c)| !(c.is_ascii_alphanumeric() || c == '_'))
-        .map_or(0, |(at, c)| at + c.len_utf8());
+        .trim_end_matches(|c: char| c.is_ascii_alphanumeric() || c == '_')
+        .len();
     HOST_CUES.contains(&&trimmed[word_start..])
 }
 
@@ -640,7 +638,10 @@ fn ipv4_findings(input: &str, findings: &mut Vec<Finding>) {
             continue;
         }
         let window = input
-            .get(window_before(input, start, 12)..start)
+            // Widened back to a character boundary, as `cue_window_start`
+            // does: a window starting inside a character would be `None`
+            // and the cue silently missed.
+            .get(input.floor_char_boundary(start.saturating_sub(12))..start)
             .unwrap_or_default()
             .to_ascii_lowercase();
         if VERSION_CUES.iter().any(|cue| window.contains(cue)) {
@@ -713,18 +714,15 @@ const NETWORK_CUES: &[&str] = &[
 /// nothing either way and the run stays an address.
 fn preceded_by_a_product_word(input: &str, start: usize) -> bool {
     let before = &input[..start];
-    let token_end = match before.as_bytes().last() {
-        Some(b' ' | b'\t') => before.trim_end_matches([' ', '\t']).len(),
-        Some(b':' | b'=') => before.len(),
+    let token_end = match before.chars().next_back() {
+        Some(c) if is_inline_blank(c) => before.trim_end_matches(is_inline_blank).len(),
+        Some(':' | '=') => before.len(),
         _ => return false,
     };
     let head = &before[..token_end];
-    // Unicode whitespace (a no-break or ideographic space) is multi-byte.
-    let token_start = head
-        .char_indices()
-        .rev()
-        .find(|&(_, c)| c.is_whitespace())
-        .map_or(0, |(at, c)| at + c.len_utf8());
+    // Trimming the token off the end stops on a character boundary even
+    // when the whitespace before it is multi-byte.
+    let token_start = head.trim_end_matches(|c: char| !c.is_whitespace()).len();
     let token = head[token_start..].trim_end_matches([':', '=', '"', '\'']);
     if !token.bytes().any(|byte| byte.is_ascii_alphabetic()) {
         return false;
@@ -873,7 +871,10 @@ const PHONE_CUES: &[&str] = &[
 /// Whether a phone word sits on the same line, shortly before `start`.
 fn has_phone_cue(input: &str, start: usize) -> bool {
     let line_start = input[..start].rfind('\n').map_or(0, |at| at + 1);
-    let from = window_before(input, start, 32).max(line_start);
+    // Widened back to a character boundary; see the version-cue window.
+    let from = input
+        .floor_char_boundary(start.saturating_sub(32))
+        .max(line_start);
     let window = input
         .get(from..start)
         .unwrap_or_default()
@@ -1695,6 +1696,18 @@ mod tests {
     fn a_product_word_after_multibyte_whitespace_still_reads_as_a_version() {
         assert_untouched("\u{3000}openssl 3.0.13.1");
         assert_untouched("\u{a0}postgres:16.4.2.1");
+        // Unicode whitespace between the product and its version.
+        assert_untouched("openssl\u{a0}3.0.13.1");
+        assert_untouched("openssl\u{3000}3.0.13.1");
+    }
+
+    #[test]
+    fn a_newline_still_ends_a_product_token() {
+        // ASCII behaviour is unchanged: a word on the line above says
+        // nothing about this one.
+        let (out, report) = redact("openssl\n34.117.59.81");
+        assert_eq!(out, "openssl\n<PRIVATE_IP_ADDRESS_1>");
+        assert_eq!(count(&report, IP_ADDRESS), 1);
     }
 
     #[test]
@@ -1769,5 +1782,81 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// CJK prose has no spaces, and an accented letter can follow a token
+    /// directly. A word boundary that counts those letters as word
+    /// characters found no edge there, and the address or key went through.
+    #[test]
+    fn a_non_ascii_letter_touching_an_email_or_key_does_not_hide_it() {
+        for input in [
+            "\u{8bf7}\u{8054}\u{7cfb}jane.doe@example.com\u{8c22}\u{8c22}",
+            "jane.doe@example.com\u{e9}",
+            "\u{5bc6}\u{94a5}AKIAIOSFODNN7EXAMPLE\u{3002}",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl\u{4e2d}",
+            "\u{952e}sk-abcdefghijklmnopqrstuvwxyz0123\u{4e2d}",
+            "\u{e9}ghp_abcdefghijklmnop1234\u{e9}",
+            "\u{e9}AIzaSyA1234567890abcdefghijklmnopqrstuv\u{e9}",
+            "\u{e9}npm_abcdefghijklmnopqrstuvwxyz0123456789\u{e9}",
+        ] {
+            let (out, _) = redact(input);
+            assert!(
+                redaction_marks(&out) >= 1,
+                "nothing redacted: {input:?} -> {out:?}"
+            );
+            assert!(!out.contains("example.com"), "email kept: {out:?}");
+        }
+    }
+
+    /// Placeholders and redaction marks in a redacted text.
+    fn redaction_marks(text: &str) -> usize {
+        text.matches("<PRIVATE_").count() + text.matches("[REDACTED").count()
+    }
+
+    /// The fail-open half of the sweep: a multi-byte character that lands
+    /// near, but not inside or between, what a detector reads must not cost
+    /// a redaction. Checks the same line before and after the seed (at every
+    /// alignment of a byte-counted look-behind window) and the lines around
+    /// it.
+    #[test]
+    fn a_multibyte_character_beside_a_seed_never_costs_a_redaction() {
+        // Seeds whose detector anchors on the start of a line; text before
+        // them on the same line legitimately changes what they are.
+        const LINE_ANCHORED: &[&str] = &[
+            "10.0.0.5 nas.local printer.lan",
+            "Author: Jane Example <jane@example.com>",
+            "$ whoami\njane\n",
+            "-rw-r--r--  1 jane  staff  1204 Oct 11 10:00 notes.txt",
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----",
+        ];
+        let mut lost = Vec::new();
+        for seed in SWEEP_SEEDS {
+            let (out, _) = redact(seed);
+            let expected = redaction_marks(&out);
+            if expected == 0 {
+                // A seed that should be left alone (a version string).
+                continue;
+            }
+            for &ch in MULTIBYTE {
+                let mut variants = vec![
+                    format!("{ch}\n{seed}"),
+                    format!("{seed}\n{ch}"),
+                    format!("{seed} {ch}"),
+                    format!("{seed}{ch}"),
+                ];
+                if !LINE_ANCHORED.contains(seed) {
+                    for run in 0..=40 {
+                        variants.push(format!("{} {seed}", ch.to_string().repeat(run)));
+                    }
+                }
+                for variant in variants {
+                    let (out, _) = redact(&variant);
+                    if redaction_marks(&out) < expected {
+                        lost.push(format!("{variant:?} -> {out:?}"));
+                    }
+                }
+            }
+        }
+        assert!(lost.is_empty(), "lost a redaction:\n{}", lost.join("\n"));
     }
 }
