@@ -1,6 +1,8 @@
 # Run the redaction witness at submission, not at preview
 
-Status: DRAFT for owner review. No code changes.
+Status: APPROVED design, except the three questions still open in 9.2.
+The owner approved Q1-Q8 and the section 3 strings on 2026-11-05 ("go
+with recs"). No code changes.
 Date: 2026-11-05.
 
 Code references are to `origin/main` at c7997d6e0. Paths under
@@ -185,23 +187,23 @@ those two flows.
 it takes the `submit.rs:1780-1880` arm. No change. `daemon preview
 <entry_id>` gains the local preview under a witness, as the shells do.
 
-## 3. What the contributor sees (DRAFT strings)
+## 3. What the contributor sees
 
 Owner rules: very short; no product name; never "daemon" or "passkey".
-These are drafts. There is deliberately no one-time confirm: the footer
-is on every preview and carries the disclosure, so nothing new interrupts
-(copy-guide rule 9). The changed state is a new row state, not a banner,
-but it is listed in Q5 for approval all the same.
+There is deliberately no one-time confirm: the footer is on every preview
+and carries the disclosure, so nothing new interrupts (copy-guide rule
+9). The changed state is a new row state, not a banner, and was approved
+with the rest under Q5.
 
-| Where | DRAFT |
-|---|---|
-| Preview footer, witnessed client | "When you submit, your full trace goes to a secure privacy check. It can only remove more." |
-| Row state while checking | "Running privacy check…" |
-| Row state, check unavailable (retrying) | "Privacy check unavailable. Trying again." |
-| Row state, retries exhausted (section 6) | "Privacy check timed out. Try again later." |
-| Refusal, over the size ceiling (section 6) | existing `failed_too_large` sentence |
-| Row state, `witness-changed-after-review` | "Changed by the privacy check. Review again to send." |
-| Second preview header | "This is what the privacy check returned." |
+| Where | Text | Status |
+|---|---|---|
+| Preview footer, witnessed client | "When you submit, your full trace goes to a secure privacy check. It can only remove more." | APPROVED 2026-11-05 |
+| Row state while checking | "Running privacy check…" | APPROVED 2026-11-05 |
+| Row state, check unavailable (retrying) | "Privacy check unavailable. Trying again." | APPROVED 2026-11-05 |
+| Row state, `witness-changed-after-review` | "Changed by the privacy check. Review again to send." | APPROVED 2026-11-05 |
+| Second preview header | "This is what the privacy check returned." | APPROVED 2026-11-05 |
+| Row state, retries exhausted (section 6) | "Privacy check timed out. Try again later." | DRAFT, added with section 6 after Q5 was asked |
+| Refusal, over the size ceiling (section 6) | existing `failed_too_large` sentence (`witness_copy.rs:805`) | existing, approved earlier |
 
 The disclosure at `witness_copy.rs:794` ("...before you approve a
 contribution") stays for the admission and token flows only.
@@ -438,16 +440,24 @@ submission is necessary but not sufficient for large sessions.
   of consecutive timeouts on one entry (recommend 3), the entry leaves the
   retry loop with the row state "Privacy check timed out. Try again
   later." and a manual retry; it is not dropped and not refused.
-- **Progress.** One row state while a call is in flight, "Running privacy
-  check…" (section 3). No percentage: the witness reports none, and an
-  invented one would be wrong.
+- **How the row states map to this.** "Running privacy check…" is shown
+  from the moment the upload pass starts the witness call until it
+  returns or hits the 330 s deadline. A timeout, connection failure or
+  `witness_saturated` turns the row to "Privacy check unavailable. Trying
+  again." until the next attempt starts, when it reads "Running privacy
+  check…" again. The third consecutive timeout on the entry ends the loop
+  with "Privacy check timed out. Try again later." No percentage: the
+  witness reports none, and an invented one would be wrong.
 - **Size.** The client refuses before sending anything when the raw
   contribution is over a witness size ceiling, with the label
   `witness-too-large` and the existing `failed_too_large` sentence
   (`witness_copy.rs:805`): "nothing left the machine". The ceiling is a
   configured byte figure derived from measured witness throughput and its
   request limit, not a guess; until it is measured, recommend 512 KB of
-  raw contribution (Q9). Splitting one session across several witness
+  raw contribution (Q9). The refusal is final for that trace under the
+  current ceiling and is never retried, so an oversized trace cannot fail
+  forever in the retry loop; it is re-offered automatically if the
+  ceiling is raised. Splitting one session across several witness
   requests is not proposed: a certificate covers one envelope, and a
   merged artifact would need a new certificate format.
 - **Raising the ceiling** is witness work, outside this spec: classifier
@@ -558,28 +568,29 @@ every existing device would stop uploading.
 **Recommendation: E.** It depends on a witness redeploy, which is held
 until devices can refresh their measurement pins (section 7).
 
-## 9. Open questions for the owner
+## 9. Owner decisions and open questions
 
-1. **Send the client's path prefixes to the witness?** Needed for the
-   check to pass on Windows and for cwds outside the standard roots.
-   *Recommend yes*, as hints added to the witness's own, in a new
-   measurement. It rides the same redeploy as the #1366 detectors
-   (section 7.3), so it adds no rollout of its own.
-2. **Is the consent rule right?** "This, or this with more removed, and
-   nothing else." *Recommend yes.*
-3. **Upload regardless of the certificate's verdict for a person's
-   approval?** *Recommend yes*; the unattended hold stays.
-4. **Name the witness "privacy check" in copy?** Today's strings say
-   "witness" and "privacy witness". *Recommend "privacy check".*
-5. **Approve the DRAFT strings in section 3**, including the
-   `witness-changed-after-review` row state. *Recommend as drafted.*
-6. **Size shown before submission.** The approved preview's size, which
-   can grow slightly. *Recommend showing it unqualified*; placeholders
-   change it by bytes, not by meaning.
-7. **Second look shows the witness's bytes** (raw already sent under the
-   first approval). *Recommend yes*, as argued in 2.1.
-8. **Retire `witness_preview_request` for ordinary previews?**
-   *Recommend yes*; keep it for admission and token review.
+### 9.1 Decided (owner, 2026-11-05: "go with recs")
+
+1. **Path prefixes go to the witness**, as hints added to the witness's
+   own, in a new measurement. It rides the redeploy that also brings the
+   #1366 detectors (section 7.3). Windows witnessed clients keep today's
+   flow until that redeploy is live.
+2. **Consent rule:** "this, or this with more removed, and nothing else."
+3. **A person-approved trace that passes the check uploads whatever the
+   certificate's verdict.** The hold for traces nobody looked at stays.
+4. **The copy calls the witness "privacy check".**
+5. **The section 3 strings are approved as drafted**, including the
+   `witness-changed-after-review` row state.
+6. **The approved preview's size is shown unqualified** before
+   submission.
+7. **The second look shows the witness's bytes**, though the raw session
+   has already gone to the witness under the first approval (2.1).
+8. **`witness_preview_request` is retired for ordinary previews**, and
+   kept for admission and token review.
+
+### 9.2 Still open
+
 9. **Witness size ceiling until throughput is measured.** *Recommend
    512 KB of raw contribution*, refused before anything is sent.
 10. **Should a signed measurement refresh leave approvals and automatic
@@ -588,6 +599,8 @@ until devices can refresh their measurement pins (section 7).
 11. **Who holds the list-signing key, and where?** *Recommend* an offline
     key held by the owner, with a second holder for recovery; never on a
     service host.
+12. **The new "Privacy check timed out. Try again later." row state**
+    (section 3), added after Q5 was asked. *Recommend as drafted.*
 
 ## 10. Phased plan (sketch, no code)
 
@@ -601,7 +614,8 @@ Order is forced by section 7: refresh, then redeploy, then the check.
 2. **Witness redeploy.** One image carrying the #1366 detectors, the
    client path prefixes in the request (Q1), and the submission-length
    request limit. Publish old + new in the signed list first; record
-   commit, image digest and measurement in the operator docs.
+   commit, image digest and measurement in the operator docs. Held by the
+   owner until phase 1 has reached devices.
 3. **Check.** `subset_check` in the contributor crate with label-only
    errors. Tests: property tests that splice random grammar tokens into
    random envelopes and must pass; any inserted byte, reorder, dropped
@@ -618,6 +632,8 @@ Order is forced by section 7: refresh, then redeploy, then the check.
    unchanged.
 5. **macOS.** Strings, row states, preview footer, second-preview
    header; ordinary preview stops offering the witness review.
-6. **GTK, Windows, Tauri** parity with macOS (Tauri minimal).
+6. **GTK, Windows, Tauri** parity with macOS (Tauri minimal). Windows
+   switches only once the phase 2 image, with path prefixes, is live
+   (decision 1).
 7. **Docs.** Update the 2026-09-02 witness-client spec and the
    2026-09-04 native-inference onboarding dependency 1 to point here.
