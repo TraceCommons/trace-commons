@@ -2089,27 +2089,54 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Sets several projects to Ask or Never at once (Settings > Projects'
-    /// Manage sheet): one `set_project_mode` call each, in order, with the
-    /// list refreshed once at the end. Never Automatic: arming is a grant,
-    /// made one project at a time through the arming confirmation, so a
-    /// mode outside `ProjectsManager.bulkModes` sends nothing. The first
-    /// refusal stops the rest and lands in `lastActionError`; the list is
-    /// refreshed either way, so it shows what did change.
-    func setProjectModes(_ projectIDs: [String], mode: ProjectMode) {
-        guard ProjectsManager.bulkModes.contains(mode), !projectIDs.isEmpty else { return }
-        perform(
-            "set_project_mode",
-            work: { client in
-                for id in projectIDs { try client.setProjectMode(projectID: id, mode: mode) }
-            },
-            onFailure: {
-                self.refreshProjects()
-                self.refreshAudit()
+    /// What a bulk or group change would do (Settings > Projects' Manage
+    /// sheet), as the daemon plans it from its live policy and queue. Nil
+    /// without a daemon or on a refusal, which changes nothing.
+    func planProjectModes(_ projectIDs: [String], mode: ProjectMode) async -> ProjectsBulkPlan? {
+        guard let client else { return nil }
+        let outcome = await DaemonWork.run {
+            Result { try client.planProjectModes(projectIDs: projectIDs, mode: mode) }
+        }
+        guard case .success(let plan) = outcome else { return nil }
+        return plan
+    }
+
+    /// How a bulk change ended.
+    enum BulkChange: Equatable {
+        /// It ran; `result.changed` may be fewer than `result.total`.
+        case ran(ProjectsBulkResult)
+        /// The live counts grew past what was agreed: plan and ask again.
+        case stale
+        /// Refused or unreachable; nothing is known to have changed.
+        case failed
+    }
+
+    /// Sets several projects to Ask or Never at once, in one
+    /// `set_project_modes` call: the daemon refuses Automatic, re-plans
+    /// from its live state, and runs only when `agreed` (the plan whose
+    /// confirmation was accepted) still covers it. The list is refreshed
+    /// whatever the answer, so it shows what did change. A change stopped
+    /// part way says how many of how many changed (DRAFT words).
+    func setProjectModes(_ projectIDs: [String], mode: ProjectMode, agreed: ProjectsBulkPlan?) async -> BulkChange {
+        guard let client, !projectIDs.isEmpty else { return .failed }
+        let outcome = await DaemonWork.run {
+            Result { try client.setProjectModes(projectIDs: projectIDs, mode: mode, agreed: agreed) }
+        }
+        refreshProjects()
+        refreshAudit()
+        switch outcome {
+        case .success(let result):
+            if result.changed.count < result.total {
+                let words = ShellWords.table?.projectsManager.changedSome
+                lastActionError = words.map {
+                    ShellWordsCopy.fill($0, ["count": String(result.changed.count), "total": String(result.total)])
+                } ?? ShellWords.table?.settings.projectModeFailed
             }
-        ) { _ in
-            self.refreshProjects()
-            self.refreshAudit()
+            return .ran(result)
+        case .failure(let error):
+            if (error as? DaemonClient.Failure)?.message == "bulk-confirmation-stale" { return .stale }
+            lastActionError = ShellWords.table?.settings.projectModeFailed ?? "set_project_modes: failed"
+            return .failed
         }
     }
 

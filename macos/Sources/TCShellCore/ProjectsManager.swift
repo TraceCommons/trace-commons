@@ -24,10 +24,10 @@ public struct ProjectModeCounts: Equatable, Sendable {
 }
 
 /// Projects whose labels share a base name: the daemon gave each a short
-/// suffix because their folder names collide (`policy.rs`
-/// `label_with_suffix_if`), usually clones or copies of one repository.
+/// suffix because their folder names collide, and says so on the row
+/// (`ProjectRow.collision`). Usually clones or copies of one repository.
 public struct ProjectGroup: Identifiable, Equatable, Sendable {
-    /// The case-folded base name, which is what the daemon compares.
+    /// The daemon's collision group.
     public let id: String
     /// The base name as the first member spells it.
     public let name: String
@@ -46,8 +46,7 @@ public struct ProjectGroup: Identifiable, Equatable, Sendable {
         return members.allSatisfy { $0.mode == first } ? first : nil
     }
 
-    /// Traces waiting across the members, which a Never would clear.
-    public var pending: Int { members.reduce(0) { $0 + ($1.pendingCount ?? 0) } }
+    public var memberIDs: [String] { members.map(\.id) }
 }
 
 /// One entry of the Manage sheet: a project alone, or a group of them.
@@ -70,49 +69,96 @@ public enum ProjectLine: Identifiable, Equatable, Sendable {
     }
 }
 
-/// What a bulk or group mode change does, by project id.
-public enum ProjectsBulkPlan: Equatable, Sendable {
-    /// Every target is already there, or none can take the mode.
-    case nothing
-    /// Set each to the mode, one existing `set_project_mode` call each.
-    case apply([String])
-    /// Never would clear `pending` waiting traces: ask first, as one row's
-    /// Never does.
-    case confirmNever([String], pending: Int)
-    /// Automatic is a consent grant, made one project at a time through the
-    /// arming confirmation; it is never applied in bulk.
-    case refused
+/// A checkbox over several rows: none, some or all of them selected.
+public enum ProjectsSelectionState: Equatable, Sendable {
+    case none, some, all
+}
+
+/// What a bulk or group mode change will do, as the daemon plans it
+/// (`plan_project_modes`, `daemon::project_bulk`). The rule lives there,
+/// read from the live policy and queue, so no shell decides when a bulk
+/// change asks first: a change that turns off Automatic, or a Never that
+/// removes waiting traces, asks; Automatic is never set in bulk.
+public struct ProjectsBulkPlan: Decodable, Equatable, Sendable {
+    public enum Outcome: String, Decodable, Equatable, Sendable {
+        case nothing, apply, confirm, refused
+    }
+
+    /// The confirmation's words, composed by the core.
+    public struct Confirmation: Decodable, Equatable, Sendable {
+        public let title: String
+        public let body: String
+        public let button: String
+        public let keep: String
+        public let help: String?
+        public let destructive: Bool
+
+        public init(title: String, body: String, button: String, keep: String, help: String?, destructive: Bool) {
+            self.title = title
+            self.body = body
+            self.button = button
+            self.keep = keep
+            self.help = help
+            self.destructive = destructive
+        }
+    }
+
+    public let outcome: Outcome
+    /// The projects the change reaches.
+    public let projectIds: [String]
+    public let turnsOffAutomatic: Int
+    public let pending: Int
+    /// Present when `outcome` is `confirm`.
+    public let confirmation: Confirmation?
+    /// The modes a bulk change may set: the menus offer these and nothing
+    /// else.
+    public let bulkModes: [ProjectMode]
+
+    public init(
+        outcome: Outcome, projectIds: [String], turnsOffAutomatic: Int = 0, pending: Int = 0,
+        confirmation: Confirmation? = nil, bulkModes: [ProjectMode] = [.ask, .ignore]
+    ) {
+        self.outcome = outcome
+        self.projectIds = projectIds
+        self.turnsOffAutomatic = turnsOffAutomatic
+        self.pending = pending
+        self.confirmation = confirmation
+        self.bulkModes = bulkModes
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case outcome
+        case projectIds = "project_ids"
+        case turnsOffAutomatic = "turns_off_automatic"
+        case pending, confirmation
+        case bulkModes = "bulk_modes"
+    }
+}
+
+/// What a bulk change did (`set_project_modes`): the projects that changed,
+/// of how many it set out to change, and the refusal that stopped it.
+public struct ProjectsBulkResult: Decodable, Equatable, Sendable {
+    public let changed: [String]
+    public let total: Int
+    public let refused: String?
+
+    public init(changed: [String], total: Int, refused: String? = nil) {
+        self.changed = changed
+        self.total = total
+        self.refused = refused
+    }
 }
 
 /// Settings > Projects' summary and Manage sheet, as pure rules (owner
-/// design, 2026-11-04).
+/// design, 2026-11-04). Grouping is the daemon's (`ProjectRow.collision`)
+/// and the bulk rule is the daemon's (`ProjectsBulkPlan`); what is left
+/// here is layout and selection.
 public enum ProjectsManager {
-    /// The modes a bulk or group change may set. Never Automatic: arming is
-    /// a grant (owner rulings 2026-10-02), so it stays per project, behind
-    /// the arming confirmation.
-    public static let bulkModes: [ProjectMode] = [.ask, .ignore]
-
-    /// A label's base name and the daemon's four-hex-digit suffix, or nil
-    /// when it has none. Exactly the daemon's shape: `"{label} ({hex4})"`
-    /// with lowercase hex.
-    public static func split(_ label: String) -> (base: String, suffix: String)? {
-        let chars = Array(label)
-        // "x (abcd)" is at least 8 characters.
-        guard chars.count >= 8, chars[chars.count - 1] == ")", chars[chars.count - 6] == "(",
-              chars[chars.count - 7] == " "
-        else { return nil }
-        let hex = chars[(chars.count - 5)..<(chars.count - 1)]
-        guard hex.allSatisfy({ ("0"..."9").contains($0) || ("a"..."f").contains($0) }) else { return nil }
-        let base = String(chars[0..<(chars.count - 7)])
-        guard !base.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
-        return (base, String(hex))
-    }
-
     /// What a row in a group shows: its suffix, the only part that differs.
     /// A row alone shows its whole label.
     public static func memberLabel(_ row: ProjectRow) -> String {
-        guard !row.isUnresolvedBucket, let split = split(row.displayLabel) else { return row.displayLabel }
-        return split.suffix
+        guard !row.isUnresolvedBucket, let collision = row.collision else { return row.displayLabel }
+        return collision.suffix
     }
 
     public static func counts(_ rows: [ProjectRow]) -> ProjectModeCounts {
@@ -137,12 +183,13 @@ public enum ProjectsManager {
         }
     }
 
-    /// The rows as entries: rows sharing a base name (two or more) become a
-    /// group where the first of them stood; every other row stands alone.
+    /// The rows as entries: rows in one of the daemon's collision groups
+    /// (two or more of them shown) become a group where the first of them
+    /// stood; every other row stands alone. A row with no `collision` is
+    /// never grouped, so an older daemon draws a plain list.
     public static func entries(_ rows: [ProjectRow]) -> [ProjectEntry] {
         func key(_ row: ProjectRow) -> String? {
-            guard !row.isUnresolvedBucket, let split = split(row.displayLabel) else { return nil }
-            return split.base.lowercased()
+            row.isUnresolvedBucket ? nil : row.collision?.group
         }
         var members: [String: [ProjectRow]] = [:]
         for row in rows {
@@ -156,7 +203,7 @@ public enum ProjectsManager {
                 continue
             }
             guard placed.insert(key).inserted else { continue }
-            let name = split(group[0].displayLabel)?.base ?? group[0].displayLabel
+            let name = group[0].collision?.baseLabel ?? group[0].displayLabel
             entries.append(.group(ProjectGroup(id: key, name: name, members: group)))
         }
         return entries
@@ -176,22 +223,32 @@ public enum ProjectsManager {
     }
 
     /// The selected rows among those shown, in their order. A selection
-    /// hidden by the search or filter is not acted on.
+    /// hidden by the search or the filter is not acted on. One inside a
+    /// collapsed group is: the group's header checkbox shows it (checked or
+    /// mixed), and that checkbox is how a whole group is selected without
+    /// opening it.
     public static func selected(_ ids: Set<String>, in shown: [ProjectRow]) -> [ProjectRow] {
         shown.filter { ids.contains($0.id) }
     }
 
-    /// What setting `rows` to `mode` at once does. Rows already in the mode
-    /// and rows that cannot take it (`offerableModes`) are skipped.
-    public static func plan(_ rows: [ProjectRow], to mode: ProjectMode) -> ProjectsBulkPlan {
-        guard bulkModes.contains(mode) else { return .refused }
-        let targets = rows.filter { $0.mode != mode && $0.offerableModes.contains(mode) }
-        guard !targets.isEmpty else { return .nothing }
-        let ids = targets.map(\.id)
-        if mode == .ignore {
-            let pending = targets.reduce(0) { $0 + ($1.pendingCount ?? 0) }
-            if pending > 0 { return .confirmNever(ids, pending: pending) }
-        }
-        return .apply(ids)
+    /// How many of `ids` are selected, for a checkbox over them.
+    public static func selectionState(_ selection: Set<String>, of ids: [String]) -> ProjectsSelectionState {
+        let picked = ids.reduce(0) { $0 + (selection.contains($1) ? 1 : 0) }
+        if picked == 0 { return .none }
+        return picked == ids.count ? .all : .some
+    }
+
+    /// What a checkbox over `ids` does when set `on` or off: all of them
+    /// selected, or none of them. Other selections stay. The same answer
+    /// however many times it is applied, because a mixed checkbox writes
+    /// each of its sources.
+    public static func selecting(_ selection: Set<String>, ids: [String], on: Bool) -> Set<String> {
+        on ? selection.union(ids) : selection.subtracting(ids)
+    }
+
+    /// The selection after a bulk change: only the projects that changed
+    /// leave it, so a change stopped part way keeps the rest selected.
+    public static func afterChange(_ selection: Set<String>, changed: [String]) -> Set<String> {
+        selection.subtracting(changed)
     }
 }

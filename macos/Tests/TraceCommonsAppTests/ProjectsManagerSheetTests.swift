@@ -7,16 +7,19 @@ import XCTest
 
 @testable import TraceCommonsApp
 
-/// Settings > Projects' Manage sheet (owner design, 2026-11-04): a bulk
-/// change is the existing per-project call made once per project, never
-/// Automatic, and the sheet's group and bulk menus offer Ask and Never only.
+/// Settings > Projects' Manage sheet (owner design, 2026-11-04; #1952
+/// review): a bulk change is one `set_project_modes` call the daemon plans
+/// and checks, never Automatic, and the sheet's group and bulk menus offer
+/// only the daemon's `bulk_modes`.
 @MainActor
 final class ProjectsManagerSheetTests: XCTestCase {
     private final class RecordingDaemon: DaemonCalling, @unchecked Sendable {
         private let state = OSAllocatedUnfairLock(initialState: [(String, String)]())
-        /// Project ids whose `set_project_mode` is refused.
-        let refuse: Set<String>
-        init(refuse: Set<String> = []) { self.refuse = refuse }
+        /// What `set_project_modes` answers.
+        let setAnswer: String
+        init(setAnswer: String = #"{"id":1,"result":{"changed":[],"total":0,"purged":0}}"#) {
+            self.setAnswer = setAnswer
+        }
 
         var calls: [(method: String, params: [String: Any])] {
             state.withLock { $0 }.map { method, json in
@@ -27,12 +30,11 @@ final class ProjectsManagerSheetTests: XCTestCase {
         func call(_ method: String, params paramsJSON: String) -> String {
             state.withLock { $0.append((method, paramsJSON)) }
             switch method {
-            case "set_project_mode":
-                let params = (try? JSONSerialization.jsonObject(with: Data(paramsJSON.utf8)) as? [String: Any]) ?? [:]
-                if let id = params["project_id"] as? String, refuse.contains(id) {
-                    return #"{"id":1,"error":{"code":"refused","message":"project-key-unrecognized"}}"#
-                }
-                return #"{"id":1,"result":{"purged":0}}"#
+            case "set_project_modes": return setAnswer
+            case "plan_project_modes":
+                return #"{"id":1,"result":{"outcome":"confirm","project_ids":["a","b"],"turns_off_automatic":1,"pending":2,"#
+                    + #""confirmation":{"title":"Set 2 projects to Never?","body":"This turns off Automatic for 1 project.","#
+                    + #""button":"Never","keep":"Keep","destructive":true},"bulk_modes":["notify_only","ignore"]}}"#
             case "list_projects": return #"{"id":1,"result":{"projects":[]}}"#
             case "list_audit": return #"{"id":1,"result":{"entries":[]}}"#
             default: return #"{"id":1,"result":{}}"#
@@ -49,91 +51,113 @@ final class ProjectsManagerSheetTests: XCTestCase {
         return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
     }()
 
-    /// Waits for the refreshes that follow a bulk change, then lets the
-    /// main actor take their answers.
-    private func settle(_ daemon: RecordingDaemon, until: () -> Bool) async {
-        let deadline = Date().addingTimeInterval(5)
-        while !until(), Date() < deadline {
-            try? await Task.sleep(nanoseconds: 5_000_000)
-        }
-        try? await Task.sleep(nanoseconds: 50_000_000)
+    private func model(_ daemon: RecordingDaemon) -> AppModel {
+        let model = AppModel()
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        return model
     }
 
-    private func modeCalls(_ daemon: RecordingDaemon) -> [(String, String)] {
-        daemon.calls.filter { $0.method == "set_project_mode" }.map {
-            ($0.params["project_id"] as? String ?? "", $0.params["mode"] as? String ?? "")
-        }
-    }
-
-    func test_bulkNeverIsOneExistingCallPerProjectInOrder() async {
+    /// The daemon's plan arrives whole: what it reaches, both counts, and
+    /// the confirmation's words, which this shell never composes.
+    func test_thePlanIsTheDaemons() async throws {
         let daemon = RecordingDaemon()
-        let model = AppModel()
-        model.setClientForTesting(DaemonClient(daemon: daemon))
-        model.setProjectModes(["b", "a", "c"], mode: .ignore)
-        await settle(daemon) { daemon.calls.contains { $0.method == "list_audit" } }
-        let calls = modeCalls(daemon)
-        XCTAssertEqual(calls.map(\.0), ["b", "a", "c"])
-        XCTAssertEqual(Set(calls.map(\.1)), ["ignore"])
-        // Other refreshes this stub does not answer may report; a mode
-        // change did not.
-        if let line = ShellWords.table?.settings.projectModeFailed {
-            XCTAssertNotEqual(model.lastActionError, line)
-        }
+        let answer = await model(daemon).planProjectModes(["a", "b", "c"], mode: .ignore)
+        let plan = try XCTUnwrap(answer)
+        XCTAssertEqual(plan.outcome, .confirm)
+        XCTAssertEqual(plan.projectIds, ["a", "b"])
+        XCTAssertEqual(plan.turnsOffAutomatic, 1)
+        XCTAssertEqual(plan.pending, 2)
+        XCTAssertEqual(plan.confirmation?.title, "Set 2 projects to Never?")
+        XCTAssertEqual(plan.bulkModes, [.ask, .ignore])
+        let call = try XCTUnwrap(daemon.calls.first { $0.method == "plan_project_modes" })
+        XCTAssertEqual(call.params["project_ids"] as? [String], ["a", "b", "c"])
+        XCTAssertEqual(call.params["mode"] as? String, "ignore")
     }
 
-    func test_bulkAskIsAllowed() async {
+    /// A bulk change is one call naming every project, carrying the counts
+    /// the person agreed to; only the ids that changed are reported.
+    func test_aBulkChangeIsOneCallWithTheAgreedCounts() async throws {
+        let daemon = RecordingDaemon(setAnswer: #"{"id":1,"result":{"changed":["a","b"],"total":2,"purged":2}}"#)
+        let model = model(daemon)
+        let agreed = ProjectsBulkPlan(outcome: .confirm, projectIds: ["a", "b"], turnsOffAutomatic: 1, pending: 2)
+        let outcome = await model.setProjectModes(["a", "b", "c"], mode: .ignore, agreed: agreed)
+        XCTAssertEqual(outcome, .ran(ProjectsBulkResult(changed: ["a", "b"], total: 2)))
+        let sets = daemon.calls.filter { $0.method == "set_project_modes" }
+        XCTAssertEqual(sets.count, 1)
+        XCTAssertEqual(sets[0].params["project_ids"] as? [String], ["a", "b", "c"])
+        XCTAssertEqual(sets[0].params["mode"] as? String, "ignore")
+        let sent = try XCTUnwrap(sets[0].params["agreed"] as? [String: Int])
+        XCTAssertEqual(sent, ["turns_off_automatic": 1, "pending": 2])
+        XCTAssertFalse(daemon.calls.contains { $0.method == "set_project_mode" }, "no per-project calls")
+        XCTAssertNil(model.lastActionError)
+    }
+
+    /// A change that asks first and had nothing agreed sends no `agreed`.
+    func test_anUnconfirmedChangeSendsNoAgreement() async throws {
         let daemon = RecordingDaemon()
-        let model = AppModel()
-        model.setClientForTesting(DaemonClient(daemon: daemon))
-        model.setProjectModes(["a"], mode: .ask)
-        await settle(daemon) { daemon.calls.contains { $0.method == "list_audit" } }
-        XCTAssertEqual(modeCalls(daemon).map(\.1), ["notify_only"])
+        _ = await model(daemon).setProjectModes(["a"], mode: .ask, agreed: nil)
+        let call = try XCTUnwrap(daemon.calls.first { $0.method == "set_project_modes" })
+        XCTAssertNil(call.params["agreed"])
+        XCTAssertEqual(call.params["mode"] as? String, "notify_only")
     }
 
-    /// Automatic is a grant: a bulk Automatic sends nothing at all.
-    func test_bulkAutomaticSendsNothing() async {
-        let daemon = RecordingDaemon()
-        let model = AppModel()
-        model.setClientForTesting(DaemonClient(daemon: daemon))
-        model.setProjectModes(["a", "b"], mode: .autoUpload)
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertTrue(daemon.calls.isEmpty, "a bulk Automatic reached the daemon")
+    /// Counts that grew since the confirmation was drawn come back stale,
+    /// so the sheet plans and asks again; nothing is reported as failed.
+    func test_staleCountsAskAgain() async {
+        let daemon = RecordingDaemon(
+            setAnswer: #"{"id":1,"error":{"code":"bad_params","message":"bulk-confirmation-stale"}}"#)
+        let model = model(daemon)
+        let outcome = await model.setProjectModes(["a"], mode: .ignore, agreed: nil)
+        XCTAssertEqual(outcome, .stale)
+        XCTAssertNil(model.lastActionError)
     }
 
-    /// The first refusal stops the rest, says so in the core's words, and
-    /// the list is still refreshed so it shows what did change.
-    func test_aRefusalStopsTheRestAndIsReported() async throws {
-        let daemon = RecordingDaemon(refuse: ["b"])
-        let model = AppModel()
-        model.setClientForTesting(DaemonClient(daemon: daemon))
-        // Every error the model reports, in order: a later refresh this
-        // stub does not answer may replace the mode change's.
-        var reported: [String] = []
-        let watch = model.$lastActionError.compactMap { $0 }.sink { reported.append($0) }
-        defer { watch.cancel() }
-        model.setProjectModes(["a", "b", "c"], mode: .ignore)
-        await settle(daemon) { daemon.calls.contains { $0.method == "list_audit" } }
-        XCTAssertEqual(modeCalls(daemon).map(\.0), ["a", "b"], "c was sent after b was refused")
-        let line = try XCTUnwrap(ShellWords.table?.settings.projectModeFailed)
-        XCTAssertEqual(reported.first, line)
+    /// A change stopped part way says how many of how many changed.
+    func test_aPartialChangeSaysHowManyChanged() async throws {
+        let daemon = RecordingDaemon(
+            setAnswer: #"{"id":1,"result":{"changed":["a"],"total":3,"purged":0,"refused":"project-key-unrecognized"}}"#)
+        let model = model(daemon)
+        let outcome = await model.setProjectModes(["a", "b", "c"], mode: .ask, agreed: nil)
+        XCTAssertEqual(outcome, .ran(ProjectsBulkResult(changed: ["a"], total: 3, refused: "project-key-unrecognized")))
+        XCTAssertEqual(model.lastActionError, "1 of 3 changed.")
+    }
+
+    /// A refusal says so in the core's words.
+    func test_aRefusalIsReported() async throws {
+        let daemon = RecordingDaemon(
+            setAnswer: #"{"id":1,"error":{"code":"bad_params","message":"bulk-automatic-refused"}}"#)
+        let model = model(daemon)
+        let outcome = await model.setProjectModes(["a"], mode: .autoUpload, agreed: nil)
+        XCTAssertEqual(outcome, .failed)
+        XCTAssertEqual(model.lastActionError, try XCTUnwrap(ShellWords.table?.settings.projectModeFailed))
     }
 
     // MARK: The sheet's source
 
-    /// Group and bulk menus list `ProjectsManager.bulkModes` and nothing
-    /// else; only a row's own menu offers its `offerableModes`.
-    func test_groupAndBulkMenusOfferAskAndNeverOnly() {
+    /// Group and bulk menus list the daemon's `bulk_modes` and nothing
+    /// else; only a row's own menu offers its `offerableModes`. Every bulk
+    /// path goes through the daemon's plan.
+    func test_groupAndBulkMenusOfferTheDaemonsBulkModesOnly() {
         let source = Self.source
         XCTAssertFalse(source.isEmpty)
-        XCTAssertTrue(source.contains("ProjectModeChoices.options(for: ProjectsManager.bulkModes, copy: modeCopy)"))
+        XCTAssertTrue(source.contains("ProjectModeChoices.options(for: bulkModes ?? [], copy: modeCopy)"))
         XCTAssertEqual(source.components(separatedBy: "options: bulkOptions,").count - 1, 2,
                        "the group header and the bulk bar")
         XCTAssertEqual(source.components(separatedBy: "ProjectModeChoices.options(for: project.offerableModes").count - 1, 1,
                        "only a row offers its own modes")
-        // Every bulk path goes through the plan, which refuses Automatic.
-        XCTAssertEqual(source.components(separatedBy: "model.setProjectModes(").count - 1, 2)
-        XCTAssertTrue(source.contains("switch ProjectsManager.plan(rows, to: mode) {"))
-        XCTAssertTrue(source.contains("model.setProjectModes(request.ids, mode: .ignore)"))
+        XCTAssertFalse(source.contains("ProjectsManager.plan("), "the shell plans nothing itself")
+        XCTAssertEqual(source.components(separatedBy: "model.setProjectModes(").count - 1, 1)
+        XCTAssertTrue(source.contains("model.planProjectModes(ids, mode: mode)"))
+    }
+
+    /// While a change runs, the bulk and group menus and every row's menu
+    /// wait for it.
+    func test_controlsWaitWhileAChangeRuns() {
+        let source = Self.source
+        XCTAssertTrue(source.contains(".disabled(selected.isEmpty || running || bulkModes == nil)"))
+        XCTAssertTrue(source.contains(".disabled(running || bulkModes == nil)"))
+        XCTAssertEqual(source.components(separatedBy: ".disabled(running)").count - 1, 1, "the row's menu")
+        XCTAssertTrue(source.contains("guard !running, !ids.isEmpty else { return }"))
     }
 
     /// The Settings body stays a plain stack (#1941); the sheet's list is
@@ -145,32 +169,39 @@ final class ProjectsManagerSheetTests: XCTestCase {
         XCTAssertTrue(source[list.lowerBound...].contains("LazyVStack"))
     }
 
-    /// Keyboard and VoiceOver: a group header is a native disclosure named
-    /// by the group and its count, and each checkbox names its project.
-    func test_headersAndCheckboxesAreNamed() {
+    /// Keyboard and VoiceOver (docs/ui-copy-guide.md sections 4 and 5): the
+    /// group's disclosure, its menu and its checkbox have distinct names,
+    /// the bulk menu says it acts on the selection, the search field's
+    /// prompt is its own key, search takes focus on open, the bulk bar comes
+    /// before the list, and the disclosure is disabled while searching.
+    func test_controlsAreNamedAndReachable() throws {
         let source = Self.source
-        XCTAssertTrue(source.contains("words.groupAccessibility, [\"title\": group.name, \"count\": String(group.members.count)]"))
         XCTAssertTrue(source.contains("DisclosureGroup(isExpanded: Binding("))
+        XCTAssertTrue(source.contains("words.groupAccessibility, [\"title\": group.name, \"count\": count]"))
+        XCTAssertTrue(source.contains("words.groupMenuAccessibility, [\"title\": group.name]"))
+        XCTAssertTrue(source.contains("words.selectGroupAccessibility, [\"title\": group.name]"))
+        XCTAssertTrue(source.contains("words.bulkMenuAccessibility, [\"count\": count]"))
         XCTAssertTrue(source.contains(".accessibilityLabel(ShellWordsCopy.fill(words.selectAccessibility, [\"title\": project.displayLabel]))"))
+        XCTAssertTrue(source.contains("prompt: words.searchPrompt"))
+        XCTAssertTrue(source.contains("searchFocused = true"))
+        XCTAssertTrue(source.contains(".disabled(searching)"))
+        let bar = try XCTUnwrap(source.range(of: "bulkBar(shown: shown, selected: selected)"))
+        let list = try XCTUnwrap(source.range(of: "ProjectsManagerList(lines: lines)"))
+        XCTAssertLessThan(bar.lowerBound, list.lowerBound, "the bulk bar is above the list")
+        // The summary's count is not a bare number to VoiceOver.
+        XCTAssertTrue(source.contains("ShellWordsCopy.fill($0.projectsCount, [\"count\": count])"))
     }
 
-    /// A group's or a selection's Never with traces waiting asks in the one
-    /// Never confirmation's words, titled by how many projects it changes
-    /// (owner, 2026-11-04: "Set 3 projects to Never?" for a group too).
-    func test_groupAndBulkNeverAreTitledByCount() throws {
-        let words = try XCTUnwrap(ShellWords.table?.projectsManager)
-        let rows = [
-            ProjectRow(projectId: "a", projectLabel: "api (1111)", mode: .ask, pendingCount: 1),
-            ProjectRow(projectId: "b", projectLabel: "api (2222)", mode: .ask, pendingCount: 2),
-            ProjectRow(projectId: "c", projectLabel: "api (3333)", mode: .ask),
-        ]
-        let name = ProjectsManagerSheet.neverName(["a", "b", "c"], in: rows, words: words)
-        let copy = try XCTUnwrap(ProjectsManagerSheet.bulkNeverCopy(.init(ids: ["a", "b", "c"], name: name, pending: 3)))
-        XCTAssertEqual(copy.title, "Set 3 projects to Never?")
-        // One project is named, as its own row's Never is.
-        XCTAssertEqual(ProjectsManagerSheet.neverName(["b"], in: rows, words: words), "api (2222)")
-        // The group's name is never the title.
-        XCTAssertFalse(Self.source.contains("run(group.members, to: wanted, name: group.name)"))
-        XCTAssertTrue(Self.source.contains("name: Self.neverName(ids, in: rows, words: words)"))
+    /// The bulk confirmation draws the daemon's words, destructive only for
+    /// a Never.
+    func test_theBulkConfirmationIsTheDaemons() {
+        let never = ProjectsBulkPlan.Confirmation(
+            title: "t", body: "b", button: "Never", keep: "Keep", help: "h", destructive: true)
+        XCTAssertEqual(ProjectsManagerSheet.confirmAction(never) {}.role, .destructive)
+        let ask = ProjectsBulkPlan.Confirmation(
+            title: "t", body: "b", button: "Ask", keep: "Keep", help: nil, destructive: false)
+        let action = ProjectsManagerSheet.confirmAction(ask) {}
+        XCTAssertEqual(action.role, .standard)
+        XCTAssertEqual(action.title, "Ask")
     }
 }
