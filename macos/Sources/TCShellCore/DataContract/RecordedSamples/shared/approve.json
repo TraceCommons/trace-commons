@@ -7,5 +7,6 @@
     "local_path": 2,
     "private_email": 2
   },
-  "skipped": []
+  "skipped": [],
+  "witness_review": false
 }

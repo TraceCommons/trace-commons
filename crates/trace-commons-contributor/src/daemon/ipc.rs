@@ -7866,14 +7866,11 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // (`witness_worker::needs_witness_job`). Always present. A shell says
     // "Data redaction has begun." off it, once per app run, for a person's
     // own Submit; it is a fact about the approval, never a progress report.
-    result["witness_review"] = serde_json::Value::from(cfg.as_ref().is_some_and(|cfg| {
-        let queue = shared.queue.lock().expect("queue lock");
-        approved_ids.iter().any(|id| {
-            queue
-                .get(*id)
-                .is_some_and(|entry| super::witness_worker::needs_witness_job(cfg, entry))
-        })
-    }));
+    result["witness_review"] = serde_json::Value::from(goes_to_the_witness(
+        cfg.as_ref(),
+        &shared.queue.lock().expect("queue lock"),
+        &approved_ids,
+    ));
     // Absent, not zero, for an invited contributor and for a single-entry
     // approve. Zero would read as "nothing was left out", which is a claim
     // about a filter that did not run.
@@ -7893,6 +7890,22 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
 /// The terms a person's approval is given under, read once for a whole
 /// call. See `handle_approve`, which reads them, and
 /// `approve_as_a_person`, which records them on every entry it approves.
+/// Whether any of `approved` will be reviewed by the privacy witness (the
+/// witness worker's [`super::witness_worker::needs_witness_job`]).
+fn goes_to_the_witness(
+    cfg: Option<&crate::config::ContributorConfig>,
+    queue: &super::queue::Queue,
+    approved: &[Uuid],
+) -> bool {
+    cfg.is_some_and(|cfg| {
+        approved.iter().any(|id| {
+            queue
+                .get(*id)
+                .is_some_and(|entry| super::witness_worker::needs_witness_job(cfg, entry))
+        })
+    })
+}
+
 pub(super) struct ApprovalTerms<'a> {
     pub cfg: Option<&'a crate::config::ContributorConfig>,
     pub scopes: &'a [String],
@@ -13656,13 +13669,24 @@ mod tests {
 
     /// Witness configured for the device, for the `witness_review` tests.
     fn configure_witness(s: &DaemonShared) {
-        let mut cfg = crate::commands::unenrolled_preview_config();
-        cfg.witness = Some(crate::config::WitnessSettings {
-            url: "https://witness.example".into(),
-            signing_address: "0x0000000000000000000000000000000000000000".into(),
-            expected_measurements: vec!["measurement".into()],
-            admission_evidence: false,
-        });
+        let cfg: crate::config::ContributorConfig = serde_json::from_value(serde_json::json!({
+            "schema_version": crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+            "issuer_url": "https://issuer.example",
+            "ingest_url": "https://ingest.example",
+            "audience": "upload",
+            "tenant_id": "tenant",
+            "instance_id": "",
+            "user_subject": "device",
+            "device_key_id": "device",
+            "consent_scopes": ["debugging_evaluation"],
+            "witness": {
+                "url": "https://witness.example",
+                "signing_address": format!("0x{}", "ab".repeat(20)),
+                "expected_measurements": [format!("mrtd={}", "ab".repeat(48))],
+                "admission_evidence": false,
+            },
+        }))
+        .unwrap();
         s.store.save_config(&cfg).unwrap();
     }
 
@@ -13681,7 +13705,9 @@ mod tests {
             .record_previewed_envelope(id, "sha256:pinned", None, None);
         let r =
             handle_request_async(&s, &req("approve", serde_json::json!({ "entry_id": id }))).await;
-        let result = r.result.expect("approve answers");
+        let result = r
+            .result
+            .unwrap_or_else(|| panic!("approve answers: {:?}", r.error.map(|e| e.message)));
         assert_eq!(result["approved"], 1, "{result}");
         assert_eq!(result["witness_review"], false, "{result}");
 
@@ -13695,19 +13721,34 @@ mod tests {
             .record_previewed_envelope(id, "sha256:pinned", None, None);
         let r =
             handle_request_async(&s, &req("approve", serde_json::json!({ "entry_id": id }))).await;
-        let result = r.result.expect("approve answers");
+        let result = r
+            .result
+            .unwrap_or_else(|| panic!("approve answers: {:?}", r.error.map(|e| e.message)));
         assert_eq!(result["approved"], 1, "{result}");
         assert_eq!(result["witness_review"], false, "{result}");
 
         // Witness configured, nothing pinned: the witness worker reviews it.
+        // Decided by the same function the reply uses; an approve here
+        // would need a real session file to build from.
         let s = shared();
         configure_witness(&s);
-        let id = seed_entry_with_eligibility(&s, "/tmp/towitness", None);
-        let r =
-            handle_request_async(&s, &req("approve", serde_json::json!({ "entry_id": id }))).await;
-        let result = r.result.expect("approve answers");
-        assert_eq!(result["approved"], 1, "{result}");
-        assert_eq!(result["witness_review"], true, "{result}");
+        let cfg = s.store.load_config().unwrap().unwrap();
+        let to_witness = seed_entry_with_eligibility(&s, "/tmp/towitness", None);
+        let pinned = seed_entry_with_eligibility(&s, "/tmp/towitness", None);
+        s.queue
+            .lock()
+            .unwrap()
+            .record_previewed_envelope(pinned, "sha256:pinned", None, None);
+        let queue = s.queue.lock().unwrap();
+        assert!(goes_to_the_witness(Some(&cfg), &queue, &[to_witness]));
+        assert!(goes_to_the_witness(
+            Some(&cfg),
+            &queue,
+            &[pinned, to_witness]
+        ));
+        assert!(!goes_to_the_witness(Some(&cfg), &queue, &[pinned]));
+        assert!(!goes_to_the_witness(Some(&cfg), &queue, &[]));
+        assert!(!goes_to_the_witness(None, &queue, &[to_witness]));
     }
 
     /// A person's approval asks for an upload pass at the instant its hold
@@ -13727,7 +13768,9 @@ mod tests {
 
         let r =
             handle_request_async(&s, &req("approve", serde_json::json!({ "entry_id": id }))).await;
-        let result = r.result.expect("approve answers");
+        let result = r
+            .result
+            .unwrap_or_else(|| panic!("approve answers: {:?}", r.error.map(|e| e.message)));
         assert_eq!(result["approved"], 1, "{result}");
         let reported: chrono::DateTime<Utc> = result["hold_until"]
             .as_str()

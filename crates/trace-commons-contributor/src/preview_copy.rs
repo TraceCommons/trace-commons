@@ -2452,13 +2452,9 @@ mod tests {
         assert_eq!(REDACTION_BEGUN, "Data redaction has begun.");
         assert_eq!(monitor_traces_copy().undo.redaction_begun, REDACTION_BEGUN);
         let lowered = REDACTION_BEGUN.to_ascii_lowercase();
-        for banned in [
-            "trace commons",
-            "tracecommons",
-            "daemon",
-            "passkey",
-            "witness",
-        ] {
+        // The commons' own name is guarded crate-wide by
+        // `tests/no_commons_name_in_copy.rs`.
+        for banned in ["daemon", "passkey", "witness"] {
             assert!(!lowered.contains(banned), "{banned}");
         }
     }
