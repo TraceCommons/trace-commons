@@ -68,46 +68,41 @@ const DETERMINISTIC_ONLY: &str = "deterministic-only";
 /// certificate quietly claiming coverage the pass did not have.
 const FULL_PIPELINE: &str = "full-pipeline";
 
-/// 64 MiB, and the reasoning matters more than the number.
+/// 1 MiB: the per-trace ceiling plus room for the request around it.
 ///
-/// The redacted-envelope cap is 16 MiB; the measured raw-to-envelope ratio on
-/// this pilot is about 3.4:1, and 7% of real sessions already exceed the cap
-/// before that multiplier. 64 MiB clears 16 MiB × 3.4 with room, and is still
-/// a bound rather than a gesture: the body is read through a limiter that
-/// stops at it, so an oversized request costs this much and not what the
-/// sender chose to send.
-const DEFAULT_MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+/// Owner decision 2026-11-05: the client refuses a trace over 256 KB of raw
+/// contribution before sending it (witness-at-submission spec, Q9), and the
+/// witness holds sixteen requests at once. A request body is that raw
+/// contribution as JSON -- escaping can double escape-heavy text -- plus the
+/// grants and envelope fields, so 1 MiB holds the largest legitimate request
+/// with room. It is read through a limiter that stops at this many bytes.
+///
+/// Memory at the cap: one request holds the body, the parsed contribution,
+/// the record pass's copy, the redacted envelope and its serialization --
+/// about six copies, ~6 MiB -- so sixteen slots are on the order of 100 MiB.
+/// (It was 64 MiB per request with four slots, a gigabyte or more.)
+const DEFAULT_MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
-/// Four `POST /v1/witness` requests at once, and the number is argued rather
-/// than round.
+/// Sixteen requests at once (owner decision 2026-11-05; was four).
 ///
-/// The binding evidence is #456: raising the privacy filter's in-flight
-/// classify windows from 1 to 8 collapsed throughput on the pilot -- every
-/// backstop tick returned `done=0 transient=3 breaker_tripped=true` -- and
-/// `MAX_CONCURRENT_CLASSIFY_WINDOWS` has been 1 ever since. That constant
-/// serialises windows *within* one request; N concurrent requests put N
-/// windows in flight at the same endpoint and reintroduce exactly the
-/// concurrency that collapsed. So the bound is set strictly under the 8 that
-/// is known to fail, not at some number that merely sounds safe.
+/// A slot no longer means a classifier call. Classifier calls are bounded on
+/// their own, process-wide (`--max-classify-in-flight`, 2), and admitted
+/// requests take turns at them in arrival order. So a slot is a place in
+/// line: sixteen lets a burst of submissions queue instead of being turned
+/// away, without putting more load on the classifier key.
 ///
-/// In `full-pipeline` the classifier overlap is no longer set by this number:
-/// `--max-classify-in-flight` bounds classify calls across all requests, and
-/// one request may use all of it. This bounds requests, and so memory.
+/// Beyond sixteen the answer is an immediate `503 witness_saturated`, as
+/// before. A request is also answered busy at once when the requests ahead
+/// of it would, at the recent pace, keep it waiting past the request
+/// timeout, so a slot is never given to a request that could only time out.
 ///
-/// The other constraint is memory, and it is what rules out a much larger
-/// value: a request at the 64 MiB body cap is buffered whole, parsed into an
-/// owned transcript, redacted into another, and serialised again -- several
-/// tens of megabytes each, so a couple of hundred megabytes per slot at the
-/// cap. In `full-pipeline` the contribution path holds one more copy of the
-/// raw contribution while it runs, for the pass that records what to
-/// classify. Four slots is on the order of a gigabyte in the worst case, which a
-/// modestly provisioned CVM survives and sixteen would not.
+/// Memory bounds the number: see [`DEFAULT_MAX_REQUEST_BYTES`]. Sixteen
+/// slots at a 1 MiB body are on the order of 100 MiB.
 ///
-/// In `full-pipeline` a request is IO-bound -- a serial chain of network calls
-/// -- so four is not about cores. In `deterministic-only` it is CPU-bound and
-/// four oversubscribes a small guest, but each pass is a linear scan that
-/// finishes; oversubscription there costs latency, not stability.
-const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 4;
+/// #456 is still the evidence on classifier concurrency (eight in flight
+/// collapsed throughput); it now governs `--max-classify-in-flight`, not
+/// this number.
+const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 16;
 
 /// Nine minutes: the owner asked for about ten (2026-11-05), and the layer in
 /// front sets the ceiling.
@@ -463,6 +458,7 @@ async fn main() -> Result<()> {
     // Resolved before the listener binds, like the signing identity above: a
     // witness that cannot build the pipeline it was told to run must fail to
     // start, not fail per request.
+    let mut classify_queue = None;
     let (redactor, contribution_redactor): (
         Arc<dyn TranscriptRedactor>,
         Arc<dyn trace_commons_server::witness_service::ContributionRedactor>,
@@ -480,9 +476,19 @@ async fn main() -> Result<()> {
             redaction_pipeline = %trace_commons_protocol::trace_contribution::redaction_pipeline_version(backend),
             "witness redaction pipeline"
         );
-        (Arc::new(FullPipelineRedaction::new(known_path_prefixes.clone(), adapter.clone(), backend)),
-         Arc::new(trace_commons_server::witness_service::prefetch::PrefetchingContributionRedaction::new(known_path_prefixes, adapter, backend, args.max_classify_in_flight)
-             .with_classify_budget(classify_budget(args.request_timeout_secs))))
+        (
+            Arc::new(FullPipelineRedaction::new(
+                known_path_prefixes.clone(),
+                adapter.clone(),
+                backend,
+            )),
+            {
+                let redaction = trace_commons_server::witness_service::prefetch::PrefetchingContributionRedaction::new(known_path_prefixes, adapter, backend, args.max_classify_in_flight)
+                 .with_classify_budget(classify_budget(args.request_timeout_secs));
+                classify_queue = Some(redaction.classify_queue());
+                Arc::new(redaction)
+            },
+        )
     } else {
         (Arc::new(DeterministicRedaction::new(known_path_prefixes.clone())),
          Arc::new(trace_commons_server::witness_service::PipelineContributionRedaction::deterministic_only(known_path_prefixes)))
@@ -620,12 +626,15 @@ async fn main() -> Result<()> {
     }
     let service = Arc::new(service);
 
-    let load = WitnessLoadBound::with_reservation(
+    let mut load = WitnessLoadBound::with_reservation(
         args.max_concurrent_requests,
         reserved_interactive_slots,
         Duration::from_secs(args.request_timeout_secs),
     )
     .map_err(anyhow::Error::msg)?;
+    if let Some(queue) = classify_queue {
+        load = load.with_classify_queue(queue);
+    }
     let listener = TcpListener::bind(&args.bind)
         .await
         .with_context(|| format!("could not bind {}", args.bind))?;
