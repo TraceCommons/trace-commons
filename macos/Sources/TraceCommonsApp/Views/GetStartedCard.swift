@@ -75,7 +75,7 @@ struct GetStartedCard: View {
 /// The pixel field, out to the card's own edges and corners: the card's
 /// content sits inside its padding, so the field reaches back out by that
 /// padding and is cut to the card's corner radius.
-struct GetStartedCardField: View {
+private struct GetStartedCardField: View {
     /// Three nearby blues: the kept blue, the chart blue and first run's
     /// pale beam core, which the cells drift between.
     static let palette = [GlassTokens.Color.dataKept, GlassTokens.Color.chartSeries1,

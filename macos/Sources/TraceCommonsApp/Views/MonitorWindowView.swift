@@ -310,10 +310,7 @@ struct MonitorWindowView: View {
                             back: { tracesPage = .tree })
                     }
                 case .inference:
-                    InferenceTabView(store: inference, openTraces: {
-                        tab = .traces
-                        tracesPage = .tree
-                    }) {
+                    InferenceTabView(store: inference) {
                         navigation.requestSettings(at: .privateAI)
                         openWindow(id: WindowID.settings)
                     }
