@@ -157,6 +157,7 @@ jobs:
         admission_test_inference_connection_route
         admission_test_payout_rails
         admission_test_first_run_stats
+        admission_test_witness_blocked
         admission_test_payout_pass
         admission_test_referral_rewards
         admission_test_referral_codes
@@ -419,6 +420,14 @@ jobs:
         run: cargo test -p trace-commons-server --test first_run_stats_pg -- --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_first_run_stats
+      # Daily totals of submissions the witness blocked (V154): adding up per
+      # tenant, day and label, the tenant predicate, the database-set day,
+      # both caps, and the cross-tenant totals function, as a real LOGIN role
+      # the suite provisions.
+      - name: witness_blocked_pg
+        run: cargo test -p trace-commons-server --test witness_blocked_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_witness_blocked
       # The per-rail payout pass (payout spec sections 3, 4 and 7): exactly
       # once across a crash on the cumulative and the keyed rail, one rail's
       # stop or halt never reaching another, a credential refusal changing no
