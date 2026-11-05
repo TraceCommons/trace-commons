@@ -83,7 +83,7 @@ final class DesignRulings20261102Tests: XCTestCase {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains(
             "return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n"
-                + "            tracesHero\n            privateAI\n            HomeSection(words?.sectionTraces) {"))
+                + "            tracesHero\n            noCredit\n            privateAI\n            HomeSection(words?.sectionTraces) {"))
         XCTAssertEqual(home.components(separatedBy: "            privateAI\n").count - 1, 1)
     }
 

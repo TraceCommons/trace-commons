@@ -241,3 +241,14 @@ fn the_override_refused_line_is_the_core_sentence_and_names_no_path() {
         assert!(!line.contains(name), "the sentence names no directory");
     }
 }
+
+#[test]
+fn feature_profile_export_matches_the_core() {
+    let raw = trace_commons_contributor_ffi::tc_feature_profile_json();
+    let exported: trace_commons_contributor::feature_flags::BuildProfileIdentity =
+        serde_json::from_str(&take_owned(raw)).unwrap();
+    assert_eq!(
+        exported,
+        trace_commons_contributor::feature_flags::build_profile_identity().unwrap()
+    );
+}

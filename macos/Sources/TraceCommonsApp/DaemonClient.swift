@@ -1210,6 +1210,8 @@ enum DaemonEventParser {
             struct StatusWrapper: Decodable { let status: DaemonStatus }
             let status = (try? DaemonDecoding.decoder().decode(StatusWrapper.self, from: data))?.status
             return .snapshot(pending: pending, status: status ?? .unknown)
+        case "feature_flags_changed":
+            return .featureFlagsChanged
         case "queue_changed":
             return .queueChanged
         case "status_changed":

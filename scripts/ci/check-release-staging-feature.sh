@@ -624,6 +624,9 @@ self_test() {
   # The plist renderer reads the enabled-language list as well as its channel.
   for file in "${BUILD_FILES[@]}" "${SHIPPED_MANIFESTS[@]}" "${STAGING_FILES[@]}" \
     localization/generated/locales.plist \
+    scripts/feature-flags/profile.py crates/trace-commons-contributor/feature-flags/registry.json \
+    crates/trace-commons-contributor/feature-flags/profiles/production.json crates/trace-commons-contributor/feature-flags/profiles/staging.json \
+    crates/trace-commons-contributor/feature-flags/profiles/testing.json \
     "$repo"/.github/workflows/*.yml "$repo"/.github/workflows/*.yaml \
     "$repo"/.github/actions/*/action.yml; do
     [[ "$file" == *'*'* ]] && continue

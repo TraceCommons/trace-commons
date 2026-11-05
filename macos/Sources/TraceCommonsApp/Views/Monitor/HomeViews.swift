@@ -39,6 +39,8 @@ struct HomeTabView: View {
     var openHistory: () -> Void = {}
     /// The Insights card: switches the window to the Insights tab.
     var openInsights: () -> Void = {}
+    /// The no-credit reminder's Open Settings: Settings at the data uses.
+    var openSettings: () -> Void = {}
     /// The hosted Insights and Mission drafts screens' inputs, from
     /// `TraceCommonsAppMain`.
     let insightsStoreSelection: InsightsStoreSelection
@@ -84,7 +86,8 @@ struct HomeTabView: View {
                 insightsHeading: Self.insightsHeading,
                 missionDrafts: missionDrafts, missionsEnabled: missionsEnabled,
                 openHistory: openHistory, openMissionDrafts: { page = .missionDrafts },
-                openInsights: openInsights, openMissions: { page = .missions }, inference: inference)
+                openInsights: openInsights, openMissions: { page = .missions }, openSettings: openSettings,
+                inference: inference)
         case .history:
             HistoryPage(store: store, statusLabel: statusLabel, selection: $selection, back: { page = .overview })
         case .missions:
@@ -156,6 +159,7 @@ private struct HomeOverview: View {
     let openMissionDrafts: () -> Void
     let openInsights: () -> Void
     let openMissions: () -> Void
+    let openSettings: () -> Void
     /// The Private AI section's state and counts (`HomeTabView.inference`).
     let inference: InferenceStore?
     /// The NEAR AI balance the Balance tile reads.
@@ -341,6 +345,7 @@ private struct HomeOverview: View {
         // X (product owner, 2026-10-28, 2026-10-29; restored 2026-11-05).
         return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             tracesHero
+            noCredit
             privateAI
             HomeSection(words?.sectionTraces) {
                 Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
@@ -376,6 +381,17 @@ private struct HomeOverview: View {
     private var tracesHero: some View {
         if let words {
             HomeTracesHero(words: words, openTraces: openTraces, openPrivateAI: openPrivateAI)
+        }
+    }
+
+    /// Under the Traces hero while Train coding models is off (product
+    /// owner, 2026-11-05): one slim line saying no credit is earned until it
+    /// is on, and Open Settings to the data uses. No X; it goes once the use
+    /// is on.
+    @ViewBuilder
+    private var noCredit: some View {
+        if let words, NoCreditNotice.showsOnHome(loggedIn: model.status.loggedIn, scopes: model.status.consentScopes) {
+            NoCreditNotice(line: words.noCreditBody, action: words.noCreditOpenSettings, perform: openSettings)
         }
     }
 

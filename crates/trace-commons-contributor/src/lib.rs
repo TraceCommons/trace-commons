@@ -27,6 +27,7 @@ pub mod disclosure;
 pub mod disclosure_copy;
 pub mod envelope;
 pub mod external_url;
+pub mod feature_flags;
 pub mod first_run_copy;
 pub mod flow1;
 pub mod harness_state;
