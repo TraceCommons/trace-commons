@@ -35,7 +35,7 @@ pub const COPY: &[(&str, &str)] = &[
         "skills_follow_failed",
         "Could not save your publisher selection. Try again.",
     ),
-    ("skills_disabled", "Skills analysis is off with Insights."),
+    ("skills_disabled", "Skills is off."),
     (
         "skills_inventory_empty",
         "No skills found in the checked locations.",

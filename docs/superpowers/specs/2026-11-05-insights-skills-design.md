@@ -2,6 +2,15 @@
 
 Status: approved product scope in conversation; implementation authorized by “start building”.
 
+The owner subsequently requested building on PR #2003's environment flag system.
+Skills is a live `insights_skills` gate with a false default. Compatible production,
+staging and testing profiles declare `insights_skills_v1` and permit a remote
+enable; no live manifest is published by this implementation. Rust gates its
+behavior and Swift consumes the daemon snapshot for visibility. Missing or
+unavailable decisions are disabled. A disable stops new Skills actions and
+background scheduling, and unmounts the native Skills view; existing work may
+finish safely without changing consent or folder exclusions.
+
 ## Intent
 
 Help people understand the agent skills they already have and discover public

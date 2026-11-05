@@ -10,6 +10,9 @@ struct InsightsView: View {
     @State private var comparisonsModel: InsightsComparisonsModel
     @State private var benchmarksModel: InsightsBenchmarksModel
     @State private var skillsModel: InsightsSkillsModel
+    /// The authoritative AppModel feature snapshot, passed by the window.
+    /// Missing/older-daemon decisions default off at the caller boundary.
+    private let isSkillsEnabled: Bool
     /// Home's figures, for Overview's credit tile; `nil` hides the tile.
     private let home: HomeStore?
     @State private var fallbackSubscriptionModel: SubscriptionUsageModel
@@ -48,7 +51,8 @@ struct InsightsView: View {
                     home: HomeStore? = nil,
                     payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil,
                     openTraces: (() -> Void)? = nil,
-                    skills: InsightsSkillsModel? = nil) {
+                    skills: InsightsSkillsModel? = nil,
+                    isSkillsEnabled: Bool = false) {
         let router = InsightsServiceRouter(selection: storeSelection)
         var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
             { @Sendable refresh, interactive, provider, login in
@@ -96,7 +100,7 @@ struct InsightsView: View {
                     reader: daemon.map { client in { @Sendable refresh in try await client.insightsSkills(refresh: refresh) } },
                     writer: daemon.map { client in { @Sendable publisher, followed in
                         try await client.setSkillsFollow(publisherID: publisher, followed: followed)
-                    } }, copy: storeCopy ?? [:]))
+                    } }, copy: storeCopy ?? [:]), isSkillsEnabled: isSkillsEnabled)
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -115,7 +119,9 @@ struct InsightsView: View {
                     home: HomeStore? = nil,
                     payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil,
                     openTraces: (() -> Void)? = nil,
-                    skills: InsightsSkillsModel? = nil) {
+                    skills: InsightsSkillsModel? = nil,
+                    isSkillsEnabled: Bool = false) {
+        self.isSkillsEnabled = isSkillsEnabled
         self.inspector = inspector ?? InsightsBreakdownInspector()
         self.openTraces = openTraces
         self.storeSelection = storeSelection
@@ -145,9 +151,20 @@ struct InsightsView: View {
         earnings = NearAiEarningsSplit.rows(streams, copy: copy, money: ReferralMoney.format)
     }
 
-    /// The tabs on the bar, in order: Overview, Breakdown, Benchmarks and Skills
-    /// (product owner, 2026-10-29).
-    nonisolated static let shownTabs: [InsightsTab] = [.overview, .patterns, .benchmarks, .skills]
+    /// Older/missing snapshots show only the established Insights tabs.
+    nonisolated static let shownTabs: [InsightsTab] = [.overview, .patterns, .benchmarks]
+
+    nonisolated static func enabledShownTabs(isSkillsEnabled: Bool) -> [InsightsTab] {
+        isSkillsEnabled ? shownTabs + [.skills] : shownTabs
+    }
+
+    private var visibleTab: InsightsTab {
+        tab == .skills && !isSkillsEnabled ? .overview : tab
+    }
+
+    private var tabSelection: Binding<InsightsTab> {
+        Binding(get: { visibleTab }, set: { tab = $0 })
+    }
 
     /// Home's credit tile, the same figure and word as Home's.
     private var creditTile: (value: String, detail: String)? {
@@ -177,7 +194,7 @@ struct InsightsView: View {
 
     /// Whether the tab on screen draws the get-started card and the sample.
     private var showsSample: Bool {
-        switch tab {
+        switch visibleTab {
         case .overview, .patterns: weekEmpty
         case .benchmarks: benchmarksEmpty
         case .skills: false
@@ -213,14 +230,15 @@ struct InsightsView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Overview, Breakdown and Benchmarks (product owner,
             // 2026-10-29). Breakdown's details are the inspector's.
-            GlassSegmentedTabs(model.text("title"), selection: $tab, segments: Self.shownTabs.map {
+            GlassSegmentedTabs(model.text("title"), selection: tabSelection,
+                               segments: Self.enabledShownTabs(isSkillsEnabled: isSkillsEnabled).map {
                 GlassSegment($0 == .skills ? skillsModel.text("skills_title") : model.text($0.copyKey), value: $0)
             })
             // A failed copy or snapshot read, on every tab.
             if let error = model.error { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
             // No top inset of its own: the main pane's `contentTop` is the
             // gap under the tab bar on every tab (owner, 2026-10-19).
-            switch tab {
+            switch visibleTab {
             case .overview where showsSample:
                 if let sample {
                     InsightsOverviewTab(
@@ -277,14 +295,17 @@ struct InsightsView: View {
         .onAppear { patternsModel.open() }
         .onAppear { showSampleWeekIfAsked() }
         // Breakdown's details are the inspector's while Breakdown is shown.
-        .onChange(of: tab, initial: true) { _, shown in showBreakdownDetail(shown) }
+        .onChange(of: visibleTab, initial: true) { _, shown in showBreakdownDetail(shown) }
+        .onChange(of: isSkillsEnabled, initial: true) { _, enabled in
+            if !enabled, tab == .skills { tab = .overview }
+        }
         // The sample is built only when it is first needed, and while it
         // shows, Insights asks again each minute, so the card and the
         // sample go as soon as the first trace is counted.
         .onChange(of: showsSample, initial: true) { _, shows in
             if shows, sample == nil { sample = InsightsSampleModels() }
             // The inspector reads the sample's days while the sample shows.
-            showBreakdownDetail(tab)
+            showBreakdownDetail(visibleTab)
         }
         .task(id: showsSample) {
             guard showsSample else { return }

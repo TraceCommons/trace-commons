@@ -104,3 +104,32 @@
 - UI artifacts: `/private/tmp/insights-skills-reviewed-renders/` contains all
   four sections at 440pt and 900pt; narrow and wide layouts were inspected.
 - Local implementation branch: `insights-skills-v1`. No deployment or release.
+
+## Environment-flag integration requested by owner
+
+- [x] Stack PR #2004 on PR #2003 (`environment-feature-flags`) and preserve
+  the Skills implementation in its isolated worktree.
+- [x] Register `insights_skills` with live timing, false default and
+  `insights_skills_v1` capability. Bump registry/profile versions together;
+  all environment profiles support a future remote enable. Dated manifests
+  explicitly keep it false; do not publish them.
+- [x] Gate daemon entry points and background usage extraction through the
+  authoritative runtime. Test off/on/off, default-off and no disabled side effects.
+- [x] Gate native tab visibility, cancel hidden polling and move selection
+  back to Overview on disable. Test missing/older daemon and live changes.
+- [x] Re-run integration, profile/package, Rust and native checks, then update
+  the stacked PR with the exact verified head.
+
+Stacked verification: the new Runtime off/on/off endpoint and counter tests,
+default-off/capability tests in all three environments, profile/publisher/CLI
+tests (8), channel plist checks, clippy and license boundary (4) pass. The
+production plist fixtures were updated only for the intentional v2 profile digest.
+The broad Rust command initially unified the contributor's test-only credential
+feature into FFI; running the FFI package separately passes all 295 tests. The
+unchanged launcher PID-marker fixture raced once; its isolated regression and
+entire contributor integration target (347 tests) passed on rerun. The native
+flag host now has the same finite viewport as the app, and both snapshot helpers
+end hosted tasks before closing. Focused native flag/pane/lifecycle checks pass;
+the final full native run passed: 3,541 XCTest tests (10 skips), zero failures, plus 8 Swift Testing tests.
+
+A focused independent review of the flag integration found no remaining important findings. All publication remains an explicit separate operation; no live flag configuration was published.

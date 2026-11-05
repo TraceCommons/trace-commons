@@ -368,7 +368,7 @@ final class InsightsGetStartedRenderTests: XCTestCase {
 
     func testEveryTabForEveryKindOfUserRenders() async throws {
         for state in UserState.allCases {
-            for tab in InsightsView.shownTabs {
+            for tab in InsightsView.enabledShownTabs(isSkillsEnabled: true) {
                 for width in [1100, 760] as [CGFloat] {
                     let png = try await Self.shot(state, tab: tab, width: width)
                     XCTAssertGreaterThan(png.count, 20_000, "\(state) \(tab) \(width)")
@@ -409,7 +409,7 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         await skills.load()
         let view = InsightsView(storeSelection: .standard, storeCopy: copy, model: model, overviewModel: overview,
                                 initialTab: tab, subscriptionModel: subscriptions, benchmarks: benchmarks,
-                                openTraces: {}, skills: skills)
+                                openTraces: {}, skills: skills, isSkillsEnabled: true)
         let height: CGFloat = width < 900 ? 4_000 : 2_800
         return try await render(AnyView(view), width: width, height: height) {
             model.weekSettled && !overview.busy && overview.shown != nil

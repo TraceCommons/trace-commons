@@ -345,7 +345,7 @@ struct MonitorWindowView: View {
                                  openTraces: {
                                      tab = .traces
                                      tracesPage = .tree
-                                 })
+                                 }, isSkillsEnabled: model.featureIsEnabled("insights_skills"))
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).

@@ -53,7 +53,7 @@ final class InsightsPaneWidthRenderTests: XCTestCase {
         ]
         for (name, height, view) in tabs {
             for dark in [true, false] {
-                let png = try Self.render(view, height: height, dark: dark)
+                let png = try await Self.render(view, height: height, dark: dark)
                 XCTAssertGreaterThan(png.count, 20_000, name)
                 if let dir = ProcessInfo.processInfo.environment["TC_INSIGHTS_RENDER_DIR"] {
                     try png.write(to: URL(fileURLWithPath: dir)
@@ -71,7 +71,8 @@ final class InsightsPaneWidthRenderTests: XCTestCase {
 
     /// The tab on a stand-in for the pane's glass at the pane's content width.
     @MainActor
-    static func render(_ view: AnyView, height: CGFloat, dark: Bool) throws -> Data {
+    static func render(_ view: AnyView, height: CGFloat, dark: Bool,
+                       ready: () -> Bool = { true }) async throws -> Data {
         _ = NSApplication.shared
         let size = CGSize(width: paneContentWidth + 2 * MonitorWindowView.mainInset, height: height)
         let content = view
@@ -83,17 +84,31 @@ final class InsightsPaneWidthRenderTests: XCTestCase {
                 ZStack { Color(red: 0.36, green: 0.40, blue: 0.47); GlassTokens.Color.glassVeil.color }
             }
             .environment(\.colorScheme, dark ? .dark : .light)
-        let hosting = NSHostingView(rootView: content)
+        let hosting = NSHostingView(rootView: AnyView(content))
         let bounds = NSRect(origin: .zero, size: size)
         hosting.frame = bounds
         let window = NSWindow(contentRect: bounds, styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         window.contentView = hosting
-        defer { window.close() }
+        defer {
+            window.contentView = nil
+            window.close()
+        }
         hosting.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+        for _ in 0 ..< 300 where !ready() {
+            try await Task.sleep(for: .milliseconds(10))
+            hosting.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+        }
+        XCTAssertTrue(ready(), "the hosted view did not settle")
         let bitmap = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: bounds))
         hosting.cacheDisplay(in: bounds, to: bitmap)
-        return try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        // Finish disappearance and .task cancellation while the original
+        // window still exists (InsightsRenderLifecycleTests).
+        hosting.rootView = AnyView(EmptyView())
+        hosting.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+        try await Task.sleep(for: .milliseconds(10))
+        return png
     }
 }

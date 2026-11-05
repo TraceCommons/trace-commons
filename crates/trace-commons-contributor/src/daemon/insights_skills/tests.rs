@@ -164,7 +164,8 @@ fn response_rows_observe_encoded_bytes_and_report_partial() {
 #[test]
 fn disabled_skills_never_opens_the_cache_or_scans_local_roots() {
     let (_dir, store) = crate::config::tests_support::temp_store();
-    let shared = DaemonShared::load(store).unwrap();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
     shared.settings.lock().unwrap().insights_counter_pass = false;
     let value = snapshot(&shared);
     assert_eq!(value["enabled"], false);
@@ -175,7 +176,8 @@ fn disabled_skills_never_opens_the_cache_or_scans_local_roots() {
 #[test]
 fn dry_run_disables_proactive_catalog_even_when_insights_is_on() {
     let (_dir, store) = crate::config::tests_support::temp_store();
-    let mut shared = DaemonShared::load(store).unwrap();
+    let mut shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
     shared.settings.lock().unwrap().insights_counter_pass = true;
     shared.dev_dry_run = true;
     assert!(!enabled(&shared));
@@ -186,7 +188,8 @@ fn dry_run_disables_proactive_catalog_even_when_insights_is_on() {
 #[test]
 fn changing_a_never_rule_invalidates_cached_global_inventory() {
     let (_dir, store) = crate::config::tests_support::temp_store();
-    let shared = DaemonShared::load(store).unwrap();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
     shared.settings.lock().unwrap().insights_counter_pass = true;
     let policy_before = inventory_policy(&shared).unwrap();
     let inventory: Inventory = serde_json::from_value(json!({
@@ -223,7 +226,8 @@ fn changing_a_never_rule_invalidates_cached_global_inventory() {
 #[test]
 fn global_never_keeps_public_catalog_but_suppresses_local_inventory() {
     let (_dir, store) = crate::config::tests_support::temp_store();
-    let shared = DaemonShared::load(store).unwrap();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
     shared.policy.lock().unwrap().contribution_override =
         Some(super::super::policy::ContributionOverride {
             mode: super::super::policy::ProjectMode::Ignore,
@@ -279,4 +283,168 @@ fn known_source_outside_catalog_is_unavailable_instead_of_unknown() {
         updates(&inventory, &PublicState::default(), now)[0]["status"],
         "unavailable"
     );
+}
+
+fn with_feature_runtime(mut shared: DaemonShared) -> DaemonShared {
+    let registry = serde_json::from_value(json!({
+        "schema_version":1,"registry_version":2,
+        "flags":{"insights_skills":{"description":"Skills","owner":"tests","default":false,"required_capabilities":["insights_skills_v1"],"timing":"live"}}
+    })).unwrap();
+    let profile = serde_json::from_value(json!({
+        "schema_version":1,"registry_version":2,"environment":"testing",
+        "capabilities":["insights_skills_v1"],"remote_enable":["insights_skills"]
+    }))
+    .unwrap();
+    shared.feature_flags =
+        crate::feature_flags::Runtime::open(registry, profile, shared.store.dir(), Utc::now())
+            .unwrap();
+    shared
+}
+
+fn set_skills_flag(shared: &DaemonShared, revision: u64, on: bool) {
+    let now = Utc::now();
+    let manifest = serde_json::to_vec(&json!({
+        "schema_version":1,"environment":"testing","revision":revision,
+        "issued_at":now,"expires_at":now+chrono::Duration::hours(1),
+        "flags":{"insights_skills":on}
+    }))
+    .unwrap();
+    shared.feature_flags.accept(&manifest, now).unwrap();
+}
+
+#[tokio::test]
+async fn live_flag_off_on_off_gates_inventory_follow_and_proactive_refresh() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    shared.settings.lock().unwrap().insights_counter_pass = true;
+    let project = tempfile::tempdir().unwrap();
+    let skill = project.path().join(".agents/skills/local/SKILL.md");
+    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    std::fs::write(
+        &skill,
+        b"---\nname: Before\ndescription: Local fixture\n---\n",
+    )
+    .unwrap();
+    shared
+        .policy
+        .lock()
+        .unwrap()
+        .set_mode(
+            project.path().to_str().unwrap(),
+            super::super::policy::ProjectMode::NotifyOnly,
+            Utc::now(),
+        )
+        .unwrap();
+    let request = Request {
+        id: 1,
+        method: "insights_skills".into(),
+        params: json!({"refresh":true}),
+    };
+    let follow = Request {
+        id: 2,
+        method: "insights_skills_follow".into(),
+        params: json!({"publisher_id":"obra","followed":true}),
+    };
+
+    assert!(
+        !shared
+            .feature_flags
+            .snapshot()
+            .is_enabled("insights_skills")
+    );
+    maybe_refresh_public(&shared);
+    assert_eq!(
+        handle(&shared, &request).await.result.unwrap()["enabled"],
+        false
+    );
+    assert_eq!(
+        handle_follow(&shared, &follow).result.unwrap()["enabled"],
+        false
+    );
+    {
+        let runtime = shared.insights_skills.runtime.lock().unwrap();
+        assert!(!runtime.loaded);
+        assert!(runtime.inventory.is_none());
+        assert!(runtime.last_attempt.is_none());
+    }
+    assert!(!shared.store.dir().join(STATE_FILE).exists());
+
+    set_skills_flag(&shared, 1, true);
+    maybe_refresh_public(&shared);
+    assert!(
+        shared
+            .insights_skills
+            .runtime
+            .lock()
+            .unwrap()
+            .last_attempt
+            .is_some()
+    );
+    let result = handle(&shared, &request).await.result.unwrap();
+    assert_eq!(result["enabled"], true);
+    assert!(
+        result["inventory"]["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["name"] == "Before")
+    );
+    assert!(handle_follow(&shared, &follow).error.is_none());
+    let persisted = std::fs::read(shared.store.dir().join(STATE_FILE)).unwrap();
+    let last_attempt = shared.insights_skills.runtime.lock().unwrap().last_attempt;
+
+    set_skills_flag(&shared, 2, false);
+    std::fs::write(
+        skill,
+        b"---\nname: After\ndescription: Changed after disable\n---\n",
+    )
+    .unwrap();
+    maybe_refresh_public(&shared);
+    assert_eq!(
+        handle(&shared, &request).await.result.unwrap()["enabled"],
+        false
+    );
+    let unfollow = Request {
+        params: json!({"publisher_id":"obra","followed":false}),
+        ..follow
+    };
+    assert_eq!(
+        handle_follow(&shared, &unfollow).result.unwrap()["enabled"],
+        false
+    );
+    assert_eq!(
+        std::fs::read(shared.store.dir().join(STATE_FILE)).unwrap(),
+        persisted
+    );
+    let runtime = shared.insights_skills.runtime.lock().unwrap();
+    assert_eq!(runtime.last_attempt, last_attempt);
+    assert!(runtime.public.followed.contains("obra"));
+    assert!(
+        runtime
+            .inventory
+            .as_ref()
+            .unwrap()
+            .2
+            .skills
+            .iter()
+            .any(|row| row.name == "Before")
+    );
+    assert!(!runtime.refreshing);
+}
+
+#[test]
+fn a_missing_registry_flag_cannot_enable_skills() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let mut shared = DaemonShared::load(store).unwrap();
+    let registry =
+        serde_json::from_value(json!({"schema_version":1,"registry_version":2,"flags":{}}))
+            .unwrap();
+    let profile = serde_json::from_value(json!({"schema_version":1,"registry_version":2,"environment":"testing","capabilities":["insights_skills_v1"],"remote_enable":[]})).unwrap();
+    shared.feature_flags =
+        crate::feature_flags::Runtime::open(registry, profile, shared.store.dir(), Utc::now())
+            .unwrap();
+    shared.settings.lock().unwrap().insights_counter_pass = true;
+    maybe_refresh_public(&shared);
+    assert_eq!(snapshot(&shared)["enabled"], false);
+    assert!(!shared.insights_skills.runtime.lock().unwrap().loaded);
 }

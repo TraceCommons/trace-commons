@@ -1,5 +1,15 @@
 {
   "schema_version": 1,
-  "registry_version": 1,
-  "flags": {}
+  "registry_version": 2,
+  "flags": {
+    "insights_skills": {
+      "description": "Local skill inventory, observed usage, public publisher feeds, and update detection in Insights.",
+      "owner": "TraceCommons",
+      "default": false,
+      "required_capabilities": [
+        "insights_skills_v1"
+      ],
+      "timing": "live"
+    }
+  }
 }

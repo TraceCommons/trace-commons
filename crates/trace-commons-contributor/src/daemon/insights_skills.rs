@@ -460,10 +460,11 @@ impl SkillsService {
         Ok(runtime)
     }
 
-    fn start_refresh(self: &Arc<Self>, dir: PathBuf, force: bool) {
-        if cfg!(any(test, feature = "test-credential-store")) {
+    fn start_refresh(self: &Arc<Self>, shared: &DaemonShared, force: bool) {
+        if !enabled(shared) {
             return;
         }
+        let dir = shared.store.dir().to_owned();
         let Ok(mut runtime) = self.state(&dir) else {
             return;
         };
@@ -501,8 +502,16 @@ impl SkillsService {
         runtime.last_attempt = Some(Instant::now());
         runtime.refreshing = true;
         drop(runtime);
+        // Test builds exercise the actual admission/throttle path while never
+        // contacting a publisher. Explicit live qualification calls fetch directly.
+        if cfg!(any(test, feature = "test-credential-store")) {
+            if let Ok(mut runtime) = self.runtime.lock() {
+                runtime.refreshing = false;
+            }
+            return;
+        }
         let service = Arc::clone(self);
-        tokio::spawn(async move {
+        let spawned = shared.spawn_detached(move |shared| async move {
             let client = reqwest::Client::builder()
                 .https_only(true)
                 .no_proxy()
@@ -517,6 +526,9 @@ impl SkillsService {
                         .iter()
                         .filter(|publisher| !publisher.repository.is_empty())
                     {
+                        if !enabled(&shared) {
+                            break;
+                        }
                         let fetched = fetch_publisher(&client, publisher).await;
                         let mut histories = BTreeMap::new();
                         if let Ok(skills) = &fetched {
@@ -540,9 +552,20 @@ impl SkillsService {
                 };
                 let _ = tokio::time::timeout(REFRESH_TOTAL, work).await;
             }
+            let publish = enabled(&shared);
             let Ok(mut runtime) = service.runtime.lock() else {
                 return;
             };
+            runtime.refreshing = false;
+            // A refresh admitted while enabled may finish after a live disable.
+            // Discard its feature results and leave the durable cache untouched.
+            if !publish {
+                runtime.last_attempt = None;
+                for target in &history_targets {
+                    runtime.history_requested.remove(&target.key());
+                }
+                return;
+            }
             let now = Utc::now();
             let mut failed = false;
             for publisher in publishers()
@@ -585,6 +608,12 @@ impl SkillsService {
                 None
             };
         });
+        if spawned.is_none() {
+            if let Ok(mut runtime) = self.runtime.lock() {
+                runtime.refreshing = false;
+                runtime.last_attempt = None;
+            }
+        }
     }
 }
 
@@ -680,18 +709,17 @@ async fn fetch_history(
 /// Called by the existing daemon poll; public refresh does not require opening
 /// the Skills tab, and has the same Insights gate and six-hour throttle.
 pub(crate) fn maybe_refresh_public(shared: &DaemonShared) {
-    if cfg!(any(test, feature = "test-credential-store")) {
-        return;
-    }
     if enabled(shared) {
-        shared
-            .insights_skills
-            .start_refresh(shared.store.dir().to_owned(), false);
+        shared.insights_skills.start_refresh(shared, false);
     }
 }
 
 fn enabled(shared: &DaemonShared) -> bool {
     !shared.dev_dry_run
+        && shared
+            .feature_flags
+            .snapshot()
+            .is_enabled("insights_skills")
         && shared
             .settings
             .lock()
@@ -931,12 +959,13 @@ pub(crate) async fn handle(shared: &DaemonShared, req: &Request) -> Response {
     }
     let mut value = super::run_blocking(|| snapshot(shared));
     if enabled(shared) {
-        shared
-            .insights_skills
-            .start_refresh(shared.store.dir().to_owned(), force);
+        shared.insights_skills.start_refresh(shared, force);
         if let Ok(runtime) = shared.insights_skills.runtime.lock() {
             value["refreshing"] = runtime.refreshing.into();
         }
+    }
+    if !enabled(shared) {
+        value = json!({"enabled":false,"copy":copy()});
     }
     Response::ok(req.id, value)
 }
