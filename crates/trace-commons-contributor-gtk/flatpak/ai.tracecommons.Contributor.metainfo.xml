@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.24.4" date="2026-11-05">
+      <description>
+        <p>Retries the privacy check instead of dropping traces, keeps working while it runs, and adds a Projects manager.</p>
+      </description>
+    </release>
     <release version="0.24.3" date="2026-11-05">
       <description>
         <p>Keeps earlier traces in history after an account change, recovers when background work fails, and redacts more hostnames, emails and keys.</p>
