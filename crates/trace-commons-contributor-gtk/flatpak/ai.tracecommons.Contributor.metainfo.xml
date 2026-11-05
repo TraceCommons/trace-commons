@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.24.5" date="2026-11-05">
+      <description>
+        <p>Sends traces to the privacy check and collects them when ready, instead of waiting on one long connection.</p>
+      </description>
+    </release>
     <release version="0.24.4" date="2026-11-05">
       <description>
         <p>Retries the privacy check instead of dropping traces, keeps working while it runs, and adds a Projects manager.</p>
