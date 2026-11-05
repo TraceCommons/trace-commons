@@ -18,8 +18,9 @@
 //! - **Outside consent (Q10).** The list lives in its own file, never in
 //!   `WitnessSettings`, so it is not part of the witness identity digest, the
 //!   approval input fingerprint or the grant-terms void rule. A refresh
-//!   re-asks nothing; a change of witness URL still does, through
-//!   `WitnessSettings` as before.
+//!   re-asks nothing. A manual change of `WitnessSettings` still invalidates
+//!   approval as before; signed runtime endpoint routing is separate
+//!   (`super::configuration`) and leaves that enrollment identity unchanged.
 //! - **Refreshed** at daemon start, about daily after that
 //!   ([`ListRefreshSchedule`]), and when a witness is refused for its
 //!   measurement ([`refresh_on_refusal`]). A build with no trusted key never
@@ -245,6 +246,7 @@ pub struct ListRefreshSchedule {
     /// The stored list's version when last looked at, so a change is seen
     /// whichever path installed it.
     seen_version: Option<u64>,
+    seen_configuration: Option<String>,
 }
 
 impl ListRefreshSchedule {
@@ -253,6 +255,7 @@ impl ListRefreshSchedule {
         Self {
             next_at: started_at,
             seen_version: None,
+            seen_configuration: None,
         }
     }
 
@@ -265,6 +268,14 @@ impl ListRefreshSchedule {
         if version.is_some() {
             self.seen_version = version;
         }
+        changed
+    }
+
+    /// Track matching signed routing independently, including time-based
+    /// activation of prepublished pins without any document version change.
+    pub fn configuration_changed(&mut self, state: Option<String>) -> bool {
+        let changed = state.is_some() && state != self.seen_configuration;
+        self.seen_configuration = state;
         changed
     }
 
@@ -315,6 +326,21 @@ pub enum RefreshOutcome {
 /// configured witness URL; install still requires the signed document to name
 /// that URL. Logs one fixed label.
 pub async fn refresh(cfg: &ContributorConfig, dir: &Path) -> RefreshOutcome {
+    let (legacy, configuration) = tokio::join!(
+        refresh_legacy(cfg, dir),
+        super::configuration::refresh(cfg, dir)
+    );
+    match (legacy, configuration) {
+        (RefreshOutcome::Installed { version }, _) | (_, RefreshOutcome::Installed { version }) => {
+            RefreshOutcome::Installed { version }
+        }
+        (RefreshOutcome::NotNewer, _) | (_, RefreshOutcome::NotNewer) => RefreshOutcome::NotNewer,
+        (RefreshOutcome::Skipped, RefreshOutcome::Skipped) => RefreshOutcome::Skipped,
+        _ => RefreshOutcome::Failed,
+    }
+}
+
+async fn refresh_legacy(cfg: &ContributorConfig, dir: &Path) -> RefreshOutcome {
     let Some(witness) = cfg.witness.as_ref() else {
         return RefreshOutcome::Skipped;
     };

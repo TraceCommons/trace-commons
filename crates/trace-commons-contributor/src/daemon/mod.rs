@@ -2649,6 +2649,7 @@ async fn refresh_witness_accepted_list(
         .lock()
         .expect("queue lock")
         .has_measurement_holds();
+    let mut configuration_state = None;
     if let Ok(Some(cfg)) = shared.store.load_config() {
         let _ = crate::witness::accepted_list::refresh_for_tick(
             &cfg,
@@ -2659,6 +2660,9 @@ async fn refresh_witness_accepted_list(
             holds,
         )
         .await;
+        configuration_state = cfg.witness.as_ref().and_then(|settings| {
+            crate::witness::configuration::active_state(settings, shared.store.dir(), now)
+        });
     }
     let dir = shared.store.dir();
     let version = crate::witness::accepted_list::load_verified(
@@ -2666,7 +2670,8 @@ async fn refresh_witness_accepted_list(
         &crate::witness::accepted_list::trusted_keys(dir),
     )
     .map(|list| list.version);
-    note_accepted_list_version(shared, schedule, version, now);
+    let configuration_changed = schedule.configuration_changed(configuration_state);
+    note_accepted_list_version(shared, schedule, version, now, configuration_changed);
 }
 
 /// When the stored accepted list is one `schedule` has not seen, release the
@@ -2678,8 +2683,10 @@ fn note_accepted_list_version(
     schedule: &mut crate::witness::accepted_list::ListRefreshSchedule,
     version: Option<u64>,
     now: chrono::DateTime<Utc>,
+    configuration_changed: bool,
 ) {
-    if !schedule.list_version_changed(version) {
+    let list_changed = schedule.list_version_changed(version);
+    if !list_changed && !configuration_changed {
         return;
     }
     let decisions_owed_before = shared.decisions_owed_value();
@@ -3482,7 +3489,7 @@ mod tests {
             let mut schedule = crate::witness::accepted_list::ListRefreshSchedule::starting(at(0));
             let mut rx = shared.events.subscribe();
 
-            note_accepted_list_version(&shared, &mut schedule, Some(7), at(1));
+            note_accepted_list_version(&shared, &mut schedule, Some(7), at(1), false);
             {
                 let q = shared.queue.lock().unwrap();
                 assert_eq!(q.get(measurement).unwrap().reason_label, None);
@@ -3504,7 +3511,7 @@ mod tests {
                 queue::QueueState::Pending,
                 Some(crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED.to_string()),
             );
-            note_accepted_list_version(&shared, &mut schedule, Some(7), at(2));
+            note_accepted_list_version(&shared, &mut schedule, Some(7), at(2), false);
             assert!(
                 shared
                     .queue
@@ -3513,6 +3520,14 @@ mod tests {
                     .get(measurement)
                     .unwrap()
                     .held_for_review()
+            );
+            // Signed routing/activation is an independent change signal.
+            note_accepted_list_version(&shared, &mut schedule, Some(7), at(3), true);
+            let q = shared.queue.lock().unwrap();
+            assert_eq!(q.get(measurement).unwrap().reason_label, None);
+            assert_eq!(
+                q.get(untrusted).unwrap().reason_label.as_deref(),
+                Some(crate::submit::REASON_WITNESS_NOT_TRUSTED)
             );
         }
 

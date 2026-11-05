@@ -88,9 +88,9 @@ and [gateway resolver implementation](https://github.com/Dstack-TEE/dstack/blob/
 
 ## Client transition
 
-Discovery still advertises the original Phala URL. Existing clients do not automatically adopt this hostname. Witness URL changes require explicit contributor confirmation and void the old automatic grants.
+The owner approved automatic domain changes authenticated by the commons signing key. Updated clients keep their configured enrollment identity, fetch [signed endpoint configuration](witness-configuration.md), and verify a runtime destination before sending data. These signed routing changes preserve grants; manual configured-identity edits still invalidate them. One initial supported client release is required.
 
-Accepted-list V1 has exactly one URL. Clients fetch one fixed ingest route and reject a list for any other URL. URL-specific query delivery and client support are implemented in this branch. Do not replace the legacy list or flip discovery until that server support is deployed, its client support is released and the custom-domain gateway fault is resolved. Custom-domain signed V3 is staged, not enabled, at `/etc/tracecommons/witness/accepted-lists/e2b3d84969c4681419afdd98023a53db98edc87e4509dc5f0d1bea70bfd8fd6f.json`. Keep legacy V2 and the old URL available during that transition. Both legacy provisioning and the connected-inference catalog need coordinated updates; an installed older catalog selection is not automatically replaced.
+The existing V1 query routes remain for compatibility: legacy V2 is served and custom-host V3 is staged, disabled, at `/etc/tracecommons/witness/accepted-lists/e2b3d84969c4681419afdd98023a53db98edc87e4509dc5f0d1bea70bfd8fd6f.json`. That per-URL mechanism alone cannot automatically move an older app. Do not flip legacy discovery or remove its endpoint/list while older clients still require it. The new configuration can retain the healthy old endpoint as preferred or fallback while the custom-SNI fault is fixed.
 
 ## Future host moves and rollback
 

@@ -300,6 +300,7 @@ Every runbook in this directory, with a one-line description.
   the Cloud KMS list-signing key, `trace-commons-witness-list`, publishing,
   witness rollover and key rotation.
 - [Stable witness hostname](witness-custom-domain.md) — in-CVM TLS, DNS routing, verification and migration limits.
+- [Signed witness endpoint configuration](witness-configuration.md) — publish automatic domain and measurement updates after the initial client release.
 - [Phala custom-SNI provider report](phala-custom-sni-report-2026-11-05.md) — prepared routing reproduction and diagnosis request; not sent.
 
 ## Doc lifecycle and freshness

@@ -29,8 +29,10 @@ What a client does with a list:
   parse) keeps what it has and logs a fixed label. It never goes unpinned and
   never trusts an unsigned list.
 - Keeps approvals and automatic grants: the list is stored apart from the
-  witness settings, so a refresh re-asks nothing. A change of witness URL
-  still re-asks, as before (Q10).
+  witness settings, so a refresh re-asks nothing. A manual change of the configured enrollment URL still re-asks, as before
+  (Q10). Operator-authenticated runtime routing is covered separately by
+  [signed endpoint configuration](witness-configuration.md), which the owner
+  approved for automatic domain updates.
 
 **Current state: on.** Clients trust one list-signing key, compiled into
 `TRUSTED_LIST_SIGNING_KEYS` in

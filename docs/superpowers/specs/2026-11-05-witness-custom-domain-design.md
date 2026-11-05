@@ -15,3 +15,7 @@ Owner approved including compatible client transition after reviewing the initia
 New clients encode their configured witness URL as a query parameter on the same fixed ingest origin and retain bounded reads, host policy, no redirects, signatures and exact signed URL matching. An older server ignores the query and legacy clients continue working; a mismatched list is refused. URL changes still require explicit confirmation and invalidate grants. The existing global version high-water mark stays intact: retain legacy V2 and publish custom V3 or higher; never use equal versions for a transition, and rollback lists must exceed every version already seen. Longer coexistence requires coordinated publication versions.
 
 The custom-SNI gateway failure blocks discovery cutover, not implementation. Do not change either server publishing surface until the new server route and client support are released and the domain passes repeated HTTPS and job checks.
+
+## Automatic endpoint updates supersede manual cutover
+
+The owner subsequently approved automatic domain switching through signed configuration. The final behavior is specified in [automatic witness endpoints](2026-11-05-automatic-witness-endpoints-design.md). Existing V1 query routes remain compatible, but updated clients retain a stable enrollment URL and apply signed runtime endpoints without regranting. Manual settings changes still invalidate grants.

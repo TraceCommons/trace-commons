@@ -6670,6 +6670,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         first_run_estimate: Default::default(),
         witness_accepted_list_path: None,
         witness_accepted_list_directory: None,
+        witness_configuration_path: None,
         first_run_copy: Default::default(),
         first_run_stats: None,
         witness_blocked: None,
@@ -31411,6 +31412,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         first_run_estimate: Default::default(),
         witness_accepted_list_path: None,
         witness_accepted_list_directory: None,
+        witness_configuration_path: None,
         first_run_copy: Default::default(),
         first_run_stats: None,
         witness_blocked: None,
@@ -103616,6 +103618,273 @@ mod witness_accepted_list_tests {
                     );
                 }
             }
+        }
+    }
+}
+
+mod witness_configuration_tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use ring::signature::{Ed25519KeyPair, KeyPair as _};
+    use tower::ServiceExt;
+    use trace_commons_protocol::witness_accepted_list::{
+        AcceptedEntry, AcceptedList, ListSignature, WITNESS_ACCEPTED_LIST_SCHEMA,
+        assemble_signed_list, key_id_for,
+    };
+    use trace_commons_protocol::witness_configuration::{
+        WITNESS_CONFIGURATION_MAX_BYTES, WITNESS_CONFIGURATION_SCHEMA, WitnessConfiguration,
+        WitnessEndpoint,
+    };
+
+    async fn get_at(state: Arc<AppState>, uri: &str) -> axum::response::Response {
+        app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn get_configuration(state: Arc<AppState>) -> axum::response::Response {
+        get_at(state, "/v1/public/witness-configuration").await
+    }
+
+    fn entry() -> AcceptedEntry {
+        let now = chrono::Utc::now();
+        AcceptedEntry {
+            measurements: format!("mrtd={}", "aa".repeat(48)),
+            signing_address: format!("0x{}", "11".repeat(20)),
+            not_before: now,
+            not_after: now + chrono::Duration::days(30),
+            commit: None,
+        }
+    }
+
+    // All keys and URLs are synthetic; no operational key enters this fixture.
+    fn sign_payload(payload: String) -> Vec<u8> {
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+        let key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
+        let signature = ListSignature {
+            key_id: key_id_for(&public),
+            signature: hex::encode(key.sign(payload.as_bytes()).as_ref()),
+        };
+        assemble_signed_list(payload, vec![signature])
+    }
+
+    fn signed_configuration(version: u64) -> Vec<u8> {
+        sign_payload(
+            WitnessConfiguration {
+                schema: WITNESS_CONFIGURATION_SCHEMA.into(),
+                version,
+                issued_at: chrono::Utc::now(),
+                enrollment_urls: vec![
+                    "https://witness.example".into(),
+                    "https://new-witness.example".into(),
+                ],
+                endpoints: vec![WitnessEndpoint {
+                    url: "https://new-witness.example".into(),
+                    entries: vec![entry()],
+                }],
+            }
+            .canonical_payload()
+            .unwrap(),
+        )
+    }
+
+    fn signed_v1_list() -> Vec<u8> {
+        sign_payload(
+            AcceptedList {
+                schema: WITNESS_ACCEPTED_LIST_SCHEMA.into(),
+                version: 1,
+                issued_at: chrono::Utc::now(),
+                witness_url: "https://witness.example".into(),
+                entries: vec![entry()],
+            }
+            .canonical_payload()
+            .unwrap(),
+        )
+    }
+
+    fn state_serving(path: Option<PathBuf>) -> Arc<AppState> {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).witness_configuration_path = path.map(Arc::new);
+        state
+    }
+
+    async fn assert_error(response: axum::response::Response, status: StatusCode, label: &str) {
+        assert_eq!(response.status(), status);
+        let body = to_bytes(response.into_body(), WITNESS_CONFIGURATION_MAX_BYTES)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"], label);
+        assert!(!body.windows(7).any(|bytes| bytes == b"payload"));
+    }
+
+    #[test]
+    fn the_route_literal_is_the_protocol_path() {
+        assert_eq!(
+            trace_commons_protocol::witness_configuration::WITNESS_CONFIGURATION_PATH,
+            "/v1/public/witness-configuration"
+        );
+    }
+
+    #[test]
+    fn absent_or_blank_configuration_path_is_unconfigured() {
+        for value in [None, Some(""), Some(" \t\n")] {
+            assert!(witness_configuration::path_from_value(value).is_none());
+        }
+        assert_eq!(
+            witness_configuration::path_from_value(Some(" /srv/configuration.json "))
+                .as_deref()
+                .map(PathBuf::as_path),
+            Some(Path::new("/srv/configuration.json"))
+        );
+    }
+
+    #[tokio::test]
+    async fn no_configuration_setting_returns_fixed_public_404() {
+        assert_error(
+            get_configuration(state_serving(None)).await,
+            StatusCode::NOT_FOUND,
+            witness_configuration::LABEL_NOT_PUBLISHED,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn configured_missing_unreadable_unsigned_corrupt_or_oversized_files_return_fixed_503() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("configuration.json");
+        let state = state_serving(Some(path.clone()));
+        assert_error(
+            get_configuration(Arc::clone(&state)).await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            witness_configuration::LABEL_UNAVAILABLE,
+        )
+        .await;
+        assert_error(
+            get_configuration(state_serving(Some(dir.path().to_path_buf()))).await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            witness_configuration::LABEL_UNAVAILABLE,
+        )
+        .await;
+
+        let mut unsigned: serde_json::Value =
+            serde_json::from_slice(&signed_configuration(1)).unwrap();
+        unsigned["signatures"] = serde_json::json!([]);
+        let bare = unsigned["payload"].as_str().unwrap().as_bytes().to_vec();
+        let mut oversized = signed_configuration(2);
+        oversized.resize(WITNESS_CONFIGURATION_MAX_BYTES + 1, b' ');
+        for body in [
+            b"not JSON".to_vec(),
+            serde_json::to_vec(&unsigned).unwrap(),
+            bare,
+            signed_v1_list(),
+            oversized,
+        ] {
+            std::fs::write(&path, body).unwrap();
+            assert_error(
+                get_configuration(Arc::clone(&state)).await,
+                StatusCode::SERVICE_UNAVAILABLE,
+                witness_configuration::LABEL_UNAVAILABLE,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn configuration_is_byte_exact_and_updates_without_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("configuration.json");
+        // Whitespace in the envelope demonstrates the route never reserializes.
+        let value: serde_json::Value = serde_json::from_slice(&signed_configuration(1)).unwrap();
+        let mut first = serde_json::to_vec_pretty(&value).unwrap();
+        first.extend_from_slice(b"\n\n");
+        std::fs::write(&path, &first).unwrap();
+        let state = state_serving(Some(path.clone()));
+        let response = get_configuration(Arc::clone(&state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        for (header, expected) in [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=300"),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ] {
+            assert_eq!(response.headers().get(header).unwrap(), expected);
+        }
+        assert_eq!(
+            to_bytes(response.into_body(), WITNESS_CONFIGURATION_MAX_BYTES)
+                .await
+                .unwrap()
+                .as_ref(),
+            first.as_slice()
+        );
+
+        let second = signed_configuration(2);
+        let replacement = dir.path().join("replacement.json");
+        std::fs::write(&replacement, &second).unwrap();
+        std::fs::rename(replacement, path).unwrap();
+        let response = get_configuration(state).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(response.into_body(), WITNESS_CONFIGURATION_MAX_BYTES)
+                .await
+                .unwrap()
+                .as_ref(),
+            second.as_slice()
+        );
+    }
+
+    #[tokio::test]
+    async fn configuration_is_public_even_when_ingest_controls_are_required_and_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("configuration.json");
+        std::fs::write(&path, signed_configuration(1)).unwrap();
+        let mut state = state_serving(Some(path));
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.require_tenant_access_grants = true;
+        state_mut.require_eddsa_signed_tokens = true;
+        state_mut.require_db_mirror_writes = true;
+        state_mut.require_postgres_trace_rls_ready = true;
+        state_mut.require_privacy_filter = true;
+        // No bearer, cookie or tenant context is supplied.
+        assert_eq!(get_configuration(state).await.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn configuration_and_legacy_v1_routes_publish_independent_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        let configuration_path = dir.path().join("configuration.json");
+        let legacy_path = dir.path().join("legacy.json");
+        let legacy = signed_v1_list();
+        let configuration = signed_configuration(1);
+        std::fs::write(&legacy_path, &legacy).unwrap();
+        std::fs::write(&configuration_path, &configuration).unwrap();
+        let mut state = state_serving(Some(configuration_path));
+        Arc::make_mut(&mut state).witness_accepted_list_path = Some(Arc::new(legacy_path));
+        for (uri, expected) in [
+            ("/v1/public/witness-configuration", &configuration),
+            ("/v1/public/witness-accepted-list", &legacy),
+            (
+                "/v1/public/witness-accepted-list?witness_url=https%3A%2F%2Fwitness.example",
+                &legacy,
+            ),
+        ] {
+            let response = get_at(Arc::clone(&state), uri).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                to_bytes(response.into_body(), WITNESS_CONFIGURATION_MAX_BYTES)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                expected.as_slice()
+            );
         }
     }
 }

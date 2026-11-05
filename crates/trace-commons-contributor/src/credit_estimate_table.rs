@@ -296,6 +296,16 @@ impl EstimateTableClient {
         .await
     }
 
+    /// Fetch the global signed operator configuration at the fixed origin
+    /// path, anonymously, without a selector or redirects, and with a bound.
+    pub async fn fetch_witness_configuration(&self) -> Result<Vec<u8>, EstimateTableClientError> {
+        self.get_bounded(
+            trace_commons_protocol::witness_configuration::WITNESS_CONFIGURATION_PATH,
+            trace_commons_protocol::witness_configuration::WITNESS_CONFIGURATION_MAX_BYTES,
+        )
+        .await
+    }
+
     /// Fetch the signed list selected by the configured witness URL. The
     /// selector is query-encoded without changing the configured URL. An older
     /// server may ignore it; the caller still verifies the signature and URL

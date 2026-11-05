@@ -19,6 +19,9 @@
 //!   a client would.
 //! - `public-key`: convert the KMS key's exported PEM into the 64-hex raw
 //!   key compiled into clients, and print its key id.
+//! - `configuration-payload`, `configuration-sign`, `configuration-verify`:
+//!   the corresponding workflow for signed witness endpoint configuration,
+//!   retaining enrollment anchors while publishing preferred/fallback endpoints.
 //!
 //! Output is labels and counts only; no path, URL or key material besides
 //! the public key `public-key` is asked for.
@@ -34,6 +37,9 @@ use trace_commons_attestation::measurements::ExpectedMeasurements;
 use trace_commons_protocol::witness_accepted_list::{
     AcceptedList, ListSignature, assemble_signed_list, check_served_shape, key_id_for,
     parse_public_key_hex, verify_signed_list,
+};
+use trace_commons_protocol::witness_configuration::{
+    WitnessConfiguration, check_configuration_served_shape, verify_signed_configuration,
 };
 
 /// The DER prefix of an Ed25519 SubjectPublicKeyInfo (RFC 8410): the raw
@@ -88,6 +94,30 @@ enum Commands {
     PublicKey {
         #[arg(long)]
         pem: PathBuf,
+    },
+    /// Validate endpoint configuration and write the canonical payload.
+    ConfigurationPayload {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Sign endpoint configuration with the same KMS list-signing key.
+    ConfigurationSign {
+        #[command(flatten)]
+        args: SignArgs,
+    },
+    /// Verify signed endpoint configuration as a client would.
+    ConfigurationVerify {
+        #[arg(long)]
+        signed: PathBuf,
+        #[arg(long = "public-key-pem")]
+        public_key_pem: Vec<PathBuf>,
+        #[arg(long = "public-key-hex")]
+        public_key_hex: Vec<String>,
+        /// Also require this enrollment URL among the retained anchors.
+        #[arg(long)]
+        witness_url: Option<String>,
     },
 }
 
@@ -172,6 +202,42 @@ fn main() -> Result<()> {
             let key = public_key_from_pem_file(&pem)?;
             println!("public_key_hex={}", hex::encode(key));
             println!("key_id={}", key_id_for(&key));
+        }
+        Commands::ConfigurationPayload { input, output } => {
+            let configuration = build_configuration_payload(&input, &output)?;
+            println!(
+                "WitnessConfigurationPayloadOK: version={} endpoints={}",
+                configuration.version,
+                configuration.endpoints.len()
+            );
+        }
+        Commands::ConfigurationSign { args } => {
+            let (configuration, signatures) = sign_configuration(&args)?;
+            println!(
+                "WitnessConfigurationSignOK: version={} endpoints={} signatures={signatures}",
+                configuration.version,
+                configuration.endpoints.len()
+            );
+        }
+        Commands::ConfigurationVerify {
+            signed,
+            public_key_pem,
+            public_key_hex,
+            witness_url,
+        } => {
+            let mut keys = Vec::new();
+            for path in &public_key_pem {
+                keys.push(public_key_from_pem_file(path)?);
+            }
+            for hex_key in &public_key_hex {
+                keys.push(parse_public_key_hex(hex_key).context("public_key_hex_invalid")?);
+            }
+            let configuration = verify_configuration(&signed, &keys, witness_url.as_deref())?;
+            println!(
+                "WitnessConfigurationVerifyOK: version={} endpoints={}",
+                configuration.version,
+                configuration.endpoints.len()
+            );
         }
     }
     Ok(())
@@ -317,6 +383,131 @@ fn verify(path: &Path, keys: &[[u8; 32]], witness_url: Option<&str>) -> Result<A
     Ok(list)
 }
 
+/// Validate with the same measurement/address parsers used by contributors.
+fn check_configuration_entries(configuration: &WitnessConfiguration) -> Result<()> {
+    for (endpoint_index, endpoint) in configuration.endpoints.iter().enumerate() {
+        for (entry_index, entry) in endpoint.entries.iter().enumerate() {
+            match ExpectedMeasurements::from_env_value(Some(&entry.measurements)) {
+                Ok(Some(_)) => {}
+                _ => bail!("endpoint {endpoint_index} entry {entry_index}: measurements_malformed"),
+            }
+            if decode_address(&entry.signing_address).is_none() {
+                bail!("endpoint {endpoint_index} entry {entry_index}: signing_address_malformed");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_configuration_payload(input: &Path, output: &Path) -> Result<WitnessConfiguration> {
+    let text = std::fs::read_to_string(input).context("configuration_input_unreadable")?;
+    let configuration: WitnessConfiguration =
+        serde_json::from_str(&text).context("configuration_input_malformed")?;
+    check_configuration_entries(&configuration)?;
+    let payload = configuration
+        .canonical_payload()
+        .map_err(|error| anyhow::anyhow!(error.label()))?;
+    check_configuration_publication_size(&payload, &[])?;
+    std::fs::write(output, payload.as_bytes()).context("payload_write_failed")?;
+    Ok(configuration)
+}
+
+/// Reserve the exact serialized space of one Ed25519 signature, including
+/// payload escaping, before writing a payload or invoking KMS. These zero
+/// bytes only measure publication shape and are never treated as authentic.
+fn check_configuration_publication_size(payload: &str, existing: &[ListSignature]) -> Result<()> {
+    let mut signatures = existing.to_vec();
+    signatures.push(ListSignature {
+        key_id: "0".repeat(16),
+        signature: "0".repeat(128),
+    });
+    check_configuration_served_shape(&assemble_signed_list(payload.into(), signatures))
+        .map_err(|error| anyhow::anyhow!(error.label()))?;
+    Ok(())
+}
+
+/// Sign the exact reviewed canonical payload and locally verify before writing.
+fn sign_configuration(args: &SignArgs) -> Result<(WitnessConfiguration, usize)> {
+    let payload = std::fs::read_to_string(&args.payload).context("payload_unreadable")?;
+    let configuration: WitnessConfiguration =
+        serde_json::from_str(&payload).context("payload_malformed")?;
+    check_configuration_entries(&configuration)?;
+    if configuration
+        .canonical_payload()
+        .map_err(|error| anyhow::anyhow!(error.label()))?
+        != payload
+    {
+        bail!("payload_not_canonical");
+    }
+    let public_key = public_key_from_pem_file(&args.public_key_pem)?;
+    let mut signatures = match &args.append_to {
+        Some(existing) => {
+            let bytes = std::fs::read(existing).context("existing_configuration_unreadable")?;
+            check_configuration_served_shape(&bytes)
+                .map_err(|error| anyhow::anyhow!(error.label()))?;
+            let signed: trace_commons_protocol::witness_accepted_list::SignedAcceptedList =
+                serde_json::from_slice(&bytes).context("existing_configuration_malformed")?;
+            if signed.payload != payload {
+                bail!("existing_configuration_payload_differs");
+            }
+            signed.signatures
+        }
+        None => Vec::new(),
+    };
+    let key_id = key_id_for(&public_key);
+    if signatures
+        .iter()
+        .any(|signature| signature.key_id == key_id)
+    {
+        bail!("already_signed_by_this_key");
+    }
+    check_configuration_publication_size(&payload, &signatures)?;
+    let scratch = tempfile::tempdir().context("scratch_unavailable")?;
+    let signature_file = scratch.path().join("signature");
+    let status = Command::new(&args.gcloud)
+        .args(gcloud_sign_args(args, &signature_file))
+        .status()
+        .context("gcloud_unavailable")?;
+    if !status.success() {
+        bail!("gcloud_sign_failed");
+    }
+    let signature =
+        decode_signature_file(&std::fs::read(&signature_file).context("signature_file_missing")?)?;
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_key)
+        .verify(payload.as_bytes(), &signature)
+        .map_err(|_| anyhow::anyhow!("signature_does_not_match_public_key"))?;
+    signatures.push(ListSignature {
+        key_id,
+        signature: hex::encode(signature),
+    });
+    let count = signatures.len();
+    let document = assemble_signed_list(payload, signatures);
+    let configuration = verify_signed_configuration(&document, &[public_key])
+        .map_err(|error| anyhow::anyhow!(error.label()))?;
+    std::fs::write(&args.output, &document).context("signed_configuration_write_failed")?;
+    Ok((configuration, count))
+}
+
+fn verify_configuration(
+    path: &Path,
+    keys: &[[u8; 32]],
+    witness_url: Option<&str>,
+) -> Result<WitnessConfiguration> {
+    if keys.is_empty() {
+        bail!("no_public_key_given");
+    }
+    let bytes = std::fs::read(path).context("signed_configuration_unreadable")?;
+    let configuration = verify_signed_configuration(&bytes, keys)
+        .map_err(|error| anyhow::anyhow!(error.label()))?;
+    check_configuration_entries(&configuration)?;
+    if let Some(url) = witness_url
+        && !configuration.names_witness(url)
+    {
+        bail!("witness_url_mismatch");
+    }
+    Ok(configuration)
+}
+
 fn public_key_from_pem_file(path: &Path) -> Result<[u8; 32]> {
     public_key_from_pem(&std::fs::read_to_string(path).context("public_key_unreadable")?)
 }
@@ -375,6 +566,17 @@ mod tests {
                 "not_after": "2027-11-05T00:00:00Z",
                 "commit": "85173de19"
             }]
+        })
+    }
+
+    fn operator_configuration() -> serde_json::Value {
+        let list = operator_list();
+        serde_json::json!({
+            "schema": trace_commons_protocol::witness_configuration::WITNESS_CONFIGURATION_SCHEMA,
+            "version": 7,
+            "issued_at": list["issued_at"],
+            "enrollment_urls": ["https://old.example", "https://witness.example"],
+            "endpoints": [{"url": "https://witness.example", "entries": list["entries"]}]
         })
     }
 
@@ -556,5 +758,276 @@ mod tests {
             sign(&args).unwrap_err().to_string(),
             "payload_not_canonical"
         );
+    }
+
+    #[test]
+    fn configuration_commands_are_available_alongside_legacy_commands() {
+        assert!(matches!(
+            Cli::try_parse_from([
+                "witness-list",
+                "configuration-payload",
+                "--input",
+                "in",
+                "--output",
+                "out"
+            ])
+            .unwrap()
+            .command,
+            Commands::ConfigurationPayload { .. }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "witness-list",
+                "configuration-verify",
+                "--signed",
+                "in",
+                "--witness-url",
+                "https://old.example"
+            ])
+            .unwrap()
+            .command,
+            Commands::ConfigurationVerify { .. }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "witness-list",
+                "configuration-sign",
+                "--payload",
+                "in",
+                "--public-key-pem",
+                "pem",
+                "--location",
+                "loc",
+                "--keyring",
+                "ring",
+                "--key",
+                "key",
+                "--key-version",
+                "1",
+                "--output",
+                "out"
+            ])
+            .unwrap()
+            .command,
+            Commands::ConfigurationSign { .. }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "witness-list",
+                "payload",
+                "--input",
+                "in",
+                "--output",
+                "out"
+            ])
+            .unwrap()
+            .command,
+            Commands::Payload { .. }
+        ));
+    }
+
+    #[test]
+    fn invalid_configuration_is_never_built_and_valid_withdrawal_is_canonical() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("configuration.json");
+        let output = dir.path().join("payload.json");
+        for mutate in [
+            |v: &mut serde_json::Value| {
+                v["endpoints"][0]["entries"][0]["measurements"] = "mrtd=zz".into()
+            },
+            |v: &mut serde_json::Value| {
+                v["endpoints"][0]["entries"][0]["measurements"] = "compose_hash=00".into()
+            },
+            |v: &mut serde_json::Value| {
+                v["endpoints"][0]["entries"][0]["signing_address"] = "0x00".into()
+            },
+            |v: &mut serde_json::Value| v["endpoints"][0]["url"] = "http://witness.example".into(),
+            |v: &mut serde_json::Value| v["enrollment_urls"] = serde_json::json!([]),
+            |v: &mut serde_json::Value| v["future"] = true.into(),
+        ] {
+            let mut configuration = operator_configuration();
+            mutate(&mut configuration);
+            std::fs::write(&input, serde_json::to_vec(&configuration).unwrap()).unwrap();
+            assert!(build_configuration_payload(&input, &output).is_err());
+            assert!(!output.exists());
+        }
+        let mut withdrawn = operator_configuration();
+        withdrawn["endpoints"] = serde_json::json!([]);
+        std::fs::write(&input, serde_json::to_vec_pretty(&withdrawn).unwrap()).unwrap();
+        let configuration = build_configuration_payload(&input, &output).unwrap();
+        assert!(configuration.endpoints.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&output).unwrap(),
+            configuration.canonical_payload().unwrap()
+        );
+    }
+
+    #[test]
+    fn oversized_configuration_is_refused_before_writing_or_calling_kms() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("configuration.json");
+        let output = dir.path().join("payload.json");
+        let mut value = operator_configuration();
+        let entry = value["endpoints"][0]["entries"][0].clone();
+        value["enrollment_urls"] = serde_json::Value::Array(
+            (0..8)
+                .map(|i| format!("https://w{i}.example").into())
+                .collect(),
+        );
+        value["endpoints"] = serde_json::Value::Array((0..8).map(|i| serde_json::json!({"url": format!("https://w{i}.example"), "entries": vec![entry.clone(); 32]})).collect());
+        std::fs::write(&input, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            build_configuration_payload(&input, &output)
+                .unwrap_err()
+                .to_string(),
+            "witness-configuration-too-large"
+        );
+        assert!(!output.exists());
+        let configuration: WitnessConfiguration = serde_json::from_value(value).unwrap();
+        std::fs::write(&output, configuration.canonical_payload().unwrap()).unwrap();
+        std::fs::write(dir.path().join("public.pem"), pem_of(&test_key())).unwrap();
+        let args = sign_args(dir.path(), "/nonexistent/gcloud".into());
+        assert_eq!(
+            sign_configuration(&args).unwrap_err().to_string(),
+            "witness-configuration-too-large"
+        );
+        assert!(!args.output.exists());
+    }
+
+    #[cfg(unix)]
+    fn configuration_gcloud(
+        dir: &Path,
+        payload: &[u8],
+        key: &Ed25519KeyPair,
+        name: &str,
+    ) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let signature =
+            base64::engine::general_purpose::STANDARD.encode(key.sign(payload).as_ref());
+        let expected = dir.join(format!("{name}.expected"));
+        std::fs::write(&expected, payload).unwrap();
+        let script = dir.join(name);
+        std::fs::write(&script, format!(
+            "#!/bin/sh\nset -e\nin=''\nout=''\nfor a in \"$@\"; do\n case \"$a\" in\n --digest-algorithm*) exit 9;;\n --input-file=*) in=\"${{a#--input-file=}}\";;\n --signature-file=*) out=\"${{a#--signature-file=}}\";;\n esac\ndone\ncmp -s \"$in\" '{}'\nprintf '%s' '{}' > \"$out\"\n", expected.display(), signature
+        )).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configuration_build_sign_verify_and_key_rotation_use_existing_kms_workflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("configuration.json");
+        std::fs::write(
+            &input,
+            serde_json::to_vec_pretty(&operator_configuration()).unwrap(),
+        )
+        .unwrap();
+        let payload_path = dir.path().join("payload.json");
+        build_configuration_payload(&input, &payload_path).unwrap();
+        let payload = std::fs::read(&payload_path).unwrap();
+        let first = test_key();
+        let first_raw = public_key_from_pem(&pem_of(&first)).unwrap();
+        std::fs::write(dir.path().join("public.pem"), pem_of(&first)).unwrap();
+        let args = sign_args(
+            dir.path(),
+            configuration_gcloud(dir.path(), &payload, &first, "first"),
+        );
+        let (configuration, count) = sign_configuration(&args).unwrap();
+        assert_eq!((configuration.version, count), (7, 1));
+        assert!(
+            verify_configuration(&args.output, &[first_raw], Some("https://old.example/")).is_ok()
+        );
+        assert!(
+            verify_configuration(
+                &args.output,
+                &[first_raw],
+                Some("https://unrelated.example")
+            )
+            .is_err()
+        );
+        assert!(verify_configuration(&args.output, &[], None).is_err());
+        assert!(verify(&args.output, &[first_raw], None).is_err());
+        let stranger = public_key_from_pem(&pem_of(&test_key())).unwrap();
+        assert!(verify_configuration(&args.output, &[stranger], None).is_err());
+
+        let second = test_key();
+        let second_raw = public_key_from_pem(&pem_of(&second)).unwrap();
+        let second_pem = dir.path().join("second.pem");
+        std::fs::write(&second_pem, pem_of(&second)).unwrap();
+        let mut rotate = sign_args(
+            dir.path(),
+            configuration_gcloud(dir.path(), &payload, &second, "second"),
+        );
+        rotate.public_key_pem = second_pem;
+        rotate.append_to = Some(args.output.clone());
+        rotate.output = dir.path().join("signed-both.json");
+        assert_eq!(sign_configuration(&rotate).unwrap().1, 2);
+        assert!(verify_configuration(&rotate.output, &[first_raw], None).is_ok());
+        assert!(verify_configuration(&rotate.output, &[second_raw], None).is_ok());
+        rotate.append_to = Some(rotate.output.clone());
+        rotate.output = dir.path().join("duplicate.json");
+        assert_eq!(
+            sign_configuration(&rotate).unwrap_err().to_string(),
+            "already_signed_by_this_key"
+        );
+        assert!(!rotate.output.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configuration_signing_checks_signature_payload_and_appended_document_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("configuration.json");
+        std::fs::write(
+            &input,
+            serde_json::to_vec(&operator_configuration()).unwrap(),
+        )
+        .unwrap();
+        let payload_path = dir.path().join("payload.json");
+        build_configuration_payload(&input, &payload_path).unwrap();
+        let payload = std::fs::read(&payload_path).unwrap();
+        let key = test_key();
+        std::fs::write(dir.path().join("public.pem"), pem_of(&key)).unwrap();
+        let mut args = sign_args(
+            dir.path(),
+            configuration_gcloud(dir.path(), &payload, &test_key(), "wrong-key"),
+        );
+        assert_eq!(
+            sign_configuration(&args).unwrap_err().to_string(),
+            "signature_does_not_match_public_key"
+        );
+        assert!(!args.output.exists());
+
+        args.gcloud = configuration_gcloud(dir.path(), &payload, &key, "correct-key");
+        let legacy_payload = serde_json::from_value::<AcceptedList>(operator_list())
+            .unwrap()
+            .canonical_payload()
+            .unwrap();
+        let legacy = assemble_signed_list(
+            legacy_payload.clone(),
+            vec![ListSignature {
+                key_id: key_id_for(&public_key_from_pem(&pem_of(&key)).unwrap()),
+                signature: hex::encode(key.sign(legacy_payload.as_bytes()).as_ref()),
+            }],
+        );
+        let append_path = dir.path().join("legacy.json");
+        std::fs::write(&append_path, legacy).unwrap();
+        args.append_to = Some(append_path);
+        assert!(sign_configuration(&args).is_err());
+        assert!(!args.output.exists());
+
+        args.append_to = None;
+        let pretty = serde_json::to_vec_pretty(
+            &serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&payload_path, pretty).unwrap();
+        assert_eq!(
+            sign_configuration(&args).unwrap_err().to_string(),
+            "payload_not_canonical"
+        );
+        assert!(!args.output.exists());
     }
 }
