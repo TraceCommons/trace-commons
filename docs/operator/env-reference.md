@@ -619,6 +619,14 @@ See [legacy invite migration](./legacy-invite-migration.md).
 
 See the [usage analytics design](../superpowers/specs/2026-11-04-us-only-usage-analytics.md).
 
+## Witness accepted-measurements list (default off)
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_WITNESS_ACCEPTED_LIST_PATH` | optional | (unset) | Path to the signed witness accepted-measurements list that `GET /v1/public/witness-accepted-list` serves, unauthenticated and byte for byte. The server does not sign; the operator installs a file signed with the commons' Cloud KMS list-signing key. Read on every request, so a new list needs no restart. Unset or blank: 404 `witness_accepted_list_not_published`. Set, but the file is missing, unreadable, over 64 KiB, or not a well-formed signed list: 503 `witness_accepted_list_unavailable`, logged as that label only; an unsigned list is never served. Never fails startup. Changes nothing ingest itself verifies (`TRACE_COMMONS_WITNESS_EXPECTED_MEASUREMENTS` still governs certificates). |
+
+See [the accepted-list runbook](./witness-accepted-list.md).
+
 ## Payout rails (default off)
 
 | Var | R? | Default | Description |
