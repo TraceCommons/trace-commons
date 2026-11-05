@@ -352,6 +352,38 @@ fn decision_for(
     }
 }
 
+/// Whether a decision means the witness kept a submission from being sent,
+/// and why, for the count the daemon reports to ingest
+/// (`trace_commons_protocol::witness_blocked`). Labels only.
+///
+/// - `busy`: the witness was at capacity (`503 witness_saturated`).
+/// - `timed_out`: `witness_timeout`, this client's deadline or the
+///   witness's own `504 witness_request_timed_out`.
+/// - `unreachable`: `witness_unreachable` (no connection at all) and
+///   `witness_attestation_unavailable`. The quote fetch is the first request
+///   to the witness, so a gateway in front of it that answers with an error
+///   page instead of passing the request on surfaces there.
+///
+/// Nothing else counts: the collateral is ingest's, a quote or certificate
+/// that did not verify is a judgement and not a blocked submission, and a
+/// rate limit is ingest's own pacing.
+pub fn witness_blocked_label(
+    decision: &UploadDecision,
+) -> Option<trace_commons_protocol::witness_blocked::WitnessBlockedLabel> {
+    use trace_commons_protocol::witness_blocked::WitnessBlockedLabel;
+    match decision {
+        UploadDecision::WitnessSaturated { .. } => Some(WitnessBlockedLabel::Busy),
+        UploadDecision::Failed { reason_label } => match reason_label.as_str() {
+            "witness_timeout" => Some(WitnessBlockedLabel::TimedOut),
+            "witness_unreachable" | "witness_attestation_unavailable" => {
+                Some(WitnessBlockedLabel::Unreachable)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The health label a decision implies, if any.
 pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
     match decision {
@@ -982,6 +1014,63 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn witness_blocked_label_maps_only_the_three_blocking_outcomes() {
+        use trace_commons_protocol::witness_blocked::WitnessBlockedLabel;
+        let failed = |label: &str| UploadDecision::Failed {
+            reason_label: label.to_string(),
+        };
+        assert_eq!(
+            witness_blocked_label(&UploadDecision::WitnessSaturated {
+                retry_after_secs: 30
+            }),
+            Some(WitnessBlockedLabel::Busy)
+        );
+        // The labels the witness transport reports, by their own spelling.
+        assert_eq!(
+            witness_blocked_label(&failed(
+                crate::witness::WitnessTrustError::WitnessTimeout.refusal_label()
+            )),
+            Some(WitnessBlockedLabel::TimedOut)
+        );
+        assert_eq!(
+            witness_blocked_label(&failed(
+                crate::witness::WitnessTrustError::WitnessUnreachable.refusal_label()
+            )),
+            Some(WitnessBlockedLabel::Unreachable)
+        );
+        assert_eq!(
+            witness_blocked_label(&failed(
+                crate::witness::WitnessTrustError::WitnessAttestationUnavailable.refusal_label()
+            )),
+            Some(WitnessBlockedLabel::Unreachable)
+        );
+        for other in [
+            "witness_collateral_unavailable",
+            "witness_quote_unverified",
+            "witness_certificate_unverified",
+            "witness_response_malformed",
+            crate::submit::REASON_RATE_LIMITED,
+            crate::submit::REASON_TRANSIENT_REDACTION,
+            "claim-mint-failed",
+        ] {
+            assert_eq!(witness_blocked_label(&failed(other)), None, "{other}");
+        }
+        // A refusal under a blocking label is not a blocked send.
+        assert_eq!(
+            witness_blocked_label(&UploadDecision::Refused {
+                reason_label: "witness_timeout".to_string()
+            }),
+            None
+        );
+        assert_eq!(
+            witness_blocked_label(&UploadDecision::RateLimited {
+                retry_after_secs: 5
+            }),
+            None
+        );
+    }
 
     /// R5: a held session keeps the certified review it was held with, so a
     /// person opening it sees the witness's bytes without a second witness
