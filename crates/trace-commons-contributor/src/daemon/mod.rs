@@ -50,6 +50,8 @@ pub mod device_codes;
 pub mod diagnostics_log;
 pub mod model_training_consent;
 pub(crate) mod setup_completion;
+#[cfg(test)]
+mod witness_blocked_tests;
 /// Moved to the platform crate, which the Insights crate shares; re-exported
 /// here at its old path.
 pub(crate) mod credential_store {
@@ -1646,6 +1648,7 @@ async fn drain_approved(
             &observed_at,
             ctx.last_unavailable_retry_after(),
         );
+        note_witness_blocked(shared, &applied);
         uploaded_this_pass |= applied.uploaded;
         rate_limited |= applied.rate_limited;
         outage |= applied.outage;
@@ -1717,6 +1720,26 @@ struct AppliedDecision {
     rate_limited: bool,
     /// Ingest or the issuer was unavailable; the pass ends.
     outage: bool,
+    /// The witness kept this entry from being sent, and why
+    /// (`uploader::witness_blocked_label`). The caller counts it with
+    /// [`note_witness_blocked`] once the queue guard is released.
+    witness_blocked: Option<trace_commons_protocol::witness_blocked::WitnessBlockedLabel>,
+}
+
+/// Count one submission the witness kept from being sent, for the report
+/// the next history read carries (`refresh_history`). Labels only. The
+/// caller must not hold the queue guard; the caller saves the state.
+fn note_witness_blocked(shared: &ipc::DaemonShared, applied: &AppliedDecision) -> bool {
+    let Some(label) = applied.witness_blocked else {
+        return false;
+    };
+    shared
+        .state
+        .lock()
+        .expect("state lock")
+        .witness_blocked
+        .record(label);
+    true
 }
 
 /// Record one entry's upload decision on the queue. Shared by the upload
@@ -1736,7 +1759,10 @@ fn apply_upload_decision(
     observed_at: &dyn Fn() -> chrono::DateTime<Utc>,
     unavailable_retry_after: Option<u32>,
 ) -> AppliedDecision {
-    let mut applied = AppliedDecision::default();
+    let mut applied = AppliedDecision {
+        witness_blocked: uploader::witness_blocked_label(&decision),
+        ..AppliedDecision::default()
+    };
     // Only a real upload counts toward the arming offer. The offer's
     // whole claim is "you have contributed from here N times", so N
     // counts sends, not settled entries. `AlreadySubmitted` means the
@@ -2741,7 +2767,24 @@ async fn refresh_history(
     let Some(cfg) = shared.store.load_config()? else {
         return Ok(());
     };
-    let updates = match crate::submit::status(&shared.store, &cfg).await {
+    // The witness-blocked counts ride on this read. Taken out before the
+    // request so a count made while it is in flight is not cleared with
+    // them; put back if the read fails, so a report is retried rather than
+    // lost. A failed report never stops the read.
+    let report = std::mem::take(&mut shared.state.lock().expect("state lock").witness_blocked);
+    let read = crate::submit::status_reporting(&shared.store, &cfg, Some(&report)).await;
+    {
+        let mut state = shared.state.lock().expect("state lock");
+        if read.is_err() {
+            state.witness_blocked.merge(&report);
+        }
+        if !report.is_empty() {
+            // Best-effort: the counts are in memory either way, and the
+            // next save writes them.
+            let _ = state.save(&shared.store);
+        }
+    }
+    let updates = match read {
         Ok(u) => u,
         Err(_) => {
             // A failed poll serves the cache as-is; history is not worth a

@@ -319,6 +319,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_referral_bonus_accruals",
     "trace_referral_audit",
     "trace_referral_network_marks",
+    "trace_witness_blocked_days",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -2106,6 +2107,15 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         153,
         "first_run_estimate_requests",
         include_str!("../../../../migrations/V153__first_run_estimate_requests.sql"),
+    ),
+    // V154: daily per-tenant totals of submissions the witness kept a
+    // contributor's daemon from sending, by label. Tenant-isolated for the
+    // runtime; the operator's cross-tenant sums come from a function owned
+    // by a read-only role.
+    (
+        154,
+        "witness_blocked_days",
+        include_str!("../../../../migrations/V154__witness_blocked_days.sql"),
     ),
 ];
 
@@ -8599,6 +8609,7 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
+            include_str!("../../../../migrations/V154__witness_blocked_days.sql"),
             include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
             include_str!("../../../../migrations/V142__referral_rewards.sql"),
             include_str!("../../../../migrations/V141__trace_model_training_consent_grants.sql"),
@@ -8650,6 +8661,7 @@ mod tests {
             include_str!("../../../../migrations/V131__starter_plausibility_features.sql"),
         ];
         let force_rls_migrations = [
+            include_str!("../../../../migrations/V154__witness_blocked_days.sql"),
             include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
             include_str!("../../../../migrations/V142__referral_rewards.sql"),
             include_str!("../../../../migrations/V141__trace_model_training_consent_grants.sql"),

@@ -2513,8 +2513,26 @@ pub async fn status(
     store: &ConfigStore,
     cfg: &ContributorConfig,
 ) -> Result<Vec<TraceSubmissionStatusUpdate>> {
+    status_reporting(store, cfg, None).await
+}
+
+/// [`status`], also carrying the daemon's count of submissions the witness
+/// blocked (`trace_commons_protocol::witness_blocked`) in the
+/// `x-trace-witness-blocked` header of the first status request.
+///
+/// A report with nothing in it is not sent. A report with something in it
+/// is sent even when there are no receipts yet, as one request asking about
+/// no submissions: the device the witness has kept from ever uploading is
+/// the one whose count matters most. `Err` means the report may not have
+/// arrived, and the caller keeps it for the next read.
+pub async fn status_reporting(
+    store: &ConfigStore,
+    cfg: &ContributorConfig,
+    witness_blocked: Option<&trace_commons_protocol::witness_blocked::WitnessBlockedCounts>,
+) -> Result<Vec<TraceSubmissionStatusUpdate>> {
+    let mut report_header = witness_blocked.and_then(|counts| counts.header_value());
     let receipts = store.load_receipts().context("loading receipts")?;
-    if receipts.is_empty() {
+    if receipts.is_empty() && report_header.is_none() {
         return Ok(Vec::new());
     }
     let ids: Vec<Uuid> = receipts.iter().map(|r| r.submission_id).collect();
@@ -2533,19 +2551,45 @@ pub async fn status(
     let client = build_ingest_client(cfg, &token).context("building ingest client")?;
 
     let mut updates = Vec::new();
-    for chunk in ids.chunks(500) {
+    // One empty chunk when there are no receipts, so a pending report still
+    // has a request to ride on.
+    let chunks: Vec<&[Uuid]> = if ids.is_empty() {
+        vec![&[]]
+    } else {
+        ids.chunks(500).collect()
+    };
+    for chunk in chunks {
         let req = TraceSubmissionStatusRequest {
             submission_ids: chunk.to_vec(),
         };
-        let mut chunk_updates: Vec<TraceSubmissionStatusUpdate> = client
-            .call_json(
-                Method::POST,
-                "/v1/contributors/me/submission-status",
-                &[],
-                Some(&req),
-            )
-            .await
-            .context("fetching submission status")?;
+        let mut chunk_updates: Vec<TraceSubmissionStatusUpdate> = match report_header.take() {
+            None => client
+                .call_json(
+                    Method::POST,
+                    "/v1/contributors/me/submission-status",
+                    &[],
+                    Some(&req),
+                )
+                .await
+                .context("fetching submission status")?,
+            Some(value) => {
+                let body = serde_json::to_vec(&req).context("encoding status request")?;
+                let text = client
+                    .call_bytes(
+                        Method::POST,
+                        "/v1/contributors/me/submission-status",
+                        &[],
+                        &body,
+                        &[(
+                            trace_commons_protocol::witness_blocked::WITNESS_BLOCKED_HEADER,
+                            value.as_str(),
+                        )],
+                    )
+                    .await
+                    .context("fetching submission status")?;
+                serde_json::from_str(&text).context("reading submission status")?
+            }
+        };
         updates.append(&mut chunk_updates);
     }
     Ok(updates)
@@ -6121,6 +6165,138 @@ mod tests {
             serde_json::json!([]),
             "status claim request must not request the submit-path's uses: {req}"
         );
+    }
+
+    /// A submission-status route that records the witness-blocked header of
+    /// every request it answers (`None` when absent) and the ids asked for.
+    fn stub_submission_status_recording(
+        seen: Arc<Mutex<Vec<(Option<String>, usize)>>>,
+        fail: bool,
+    ) -> Router {
+        use axum::response::IntoResponse as _;
+        Router::new().route(
+            "/v1/contributors/me/submission-status",
+            post(
+                move |headers: axum::http::HeaderMap, Json(req): Json<serde_json::Value>| {
+                    let seen = seen.clone();
+                    async move {
+                        let header = headers
+                            .get(trace_commons_protocol::witness_blocked::WITNESS_BLOCKED_HEADER)
+                            .map(|v| v.to_str().unwrap().to_string());
+                        let ids = req["submission_ids"].as_array().unwrap().len();
+                        seen.lock().unwrap().push((header, ids));
+                        if fail {
+                            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        }
+                        Json(serde_json::json!([])).into_response()
+                    }
+                },
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn status_reporting_sends_a_pending_report_with_no_receipts() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_submission_status_recording(seen.clone(), false)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+
+        // Nothing to report and no receipts: no request at all.
+        let empty = trace_commons_protocol::witness_blocked::WitnessBlockedCounts::default();
+        assert!(
+            status_reporting(&store, &cfg, Some(&empty))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            status_reporting(&store, &cfg, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(seen.lock().unwrap().is_empty());
+
+        // A report and no receipts: one request, asking about nothing.
+        let report = trace_commons_protocol::witness_blocked::WitnessBlockedCounts {
+            busy: 2,
+            timed_out: 0,
+            unreachable: 5,
+        };
+        assert!(
+            status_reporting(&store, &cfg, Some(&report))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(Some("busy=2,unreachable=5".to_string()), 0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn status_reporting_rides_the_first_chunk_only_and_status_sends_none() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_submission_status_recording(seen.clone(), false)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        // 501 receipts: two chunks.
+        for _ in 0..501 {
+            store
+                .append_receipt(&crate::config::Receipt {
+                    submission_id: Uuid::new_v4(),
+                    session_hash: "sha256:test".to_string(),
+                    source: "claude-code".to_string(),
+                    submitted_at: Utc::now(),
+                    status: "submitted".to_string(),
+                    approved_unattended: None,
+                    approved_verdict: None,
+                    uploaded_bytes: None,
+                })
+                .unwrap();
+        }
+        let report = trace_commons_protocol::witness_blocked::WitnessBlockedCounts {
+            busy: 0,
+            timed_out: 1,
+            unreachable: 0,
+        };
+        status_reporting(&store, &cfg, Some(&report)).await.unwrap();
+        status(&store, &cfg).await.unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                (Some("timed_out=1".to_string()), 500),
+                (None, 1),
+                (None, 500),
+                (None, 1),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn status_reporting_fails_when_ingest_refuses_so_the_report_is_kept() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let issuer = spawn(stub_issuer()).await;
+        let ingest = spawn(stub_submission_status_recording(seen.clone(), true)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
+        let report = trace_commons_protocol::witness_blocked::WitnessBlockedCounts {
+            busy: 1,
+            timed_out: 0,
+            unreachable: 0,
+        };
+        assert!(status_reporting(&store, &cfg, Some(&report)).await.is_err());
+        assert_eq!(seen.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
