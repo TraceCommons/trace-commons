@@ -621,6 +621,24 @@ pub async fn submit_sessions(
     submit_sessions_with_progress(store, cfg, sessions, opts, |_, _, _| {}).await
 }
 
+/// Whether a witness failure is one that clears on its own: the witness did
+/// not answer in time or could not be reached. Nothing was judged, so the
+/// daemon keeps the approval and retries with backoff, a bounded number of
+/// times ([`MAX_WITNESS_TRANSIENT_FAILURES`]). A busy witness
+/// ([`REASON_WITNESS_SATURATED`]) has its own pacing and is not counted
+/// here. The one classification for the daemon's witness worker and its
+/// upload pass; anything not named stays a refusal (fail closed).
+#[must_use]
+pub fn witness_failure_is_transient(label: &str) -> bool {
+    matches!(label, "witness_timeout" | "witness_unreachable")
+}
+
+/// Consecutive transient witness failures one approved entry survives
+/// before it leaves the retry loop (the witness-at-submission spec, section
+/// 6): it ends `Failed` under the same label, kept for a person's retry,
+/// never refused.
+pub const MAX_WITNESS_TRANSIENT_FAILURES: u32 = 3;
+
 /// The witness labels after which a batch stops contacting the witness.
 ///
 /// Each says the witness cannot take work right now -- it did not answer in
@@ -728,6 +746,19 @@ async fn run_batch<S>(
         outcomes.push(outcome);
     }
     Ok(outcomes)
+}
+
+/// What [`SubmitContext::witness_for_pin`] produced.
+pub(crate) enum WitnessForPin {
+    /// The witness certified this session's raw contribution.
+    Witnessed {
+        response: Box<WitnessedEnvelope>,
+        attested_inference: Box<InferenceAttestationRecord>,
+    },
+    /// Nothing was certified, and this is the outcome to report: a refusal,
+    /// a busy witness (`Failed` under [`REASON_WITNESS_SATURATED`]), or the
+    /// claim's own refusal.
+    Outcome(SubmitOutcome),
 }
 
 /// A long-lived submit pipeline: everything `submit_sessions` used to hoist
@@ -1522,6 +1553,183 @@ impl<'a> SubmitContext<'a> {
         Ok((parsed, response, attested_inference, shipped))
     }
 
+    /// Send one raw contribution to the configured witness and return its
+    /// certified envelope, or the outcome to report instead.
+    ///
+    /// The witnessed arm of `submit_loaded`, shared with the daemon's
+    /// witness worker (`daemon::witness_worker`) so the two cannot drift:
+    /// the measurement pin is judged before the claim is minted, the claim
+    /// is minted before anything raw is sent, and a busy witness is a
+    /// retry, never a refusal. `Err` is a fail-closed precondition.
+    async fn witness_raw(
+        &mut self,
+        settings: &WitnessSettings,
+        raw: RawTraceContribution,
+        transcript: &crate::source::SessionTranscript,
+        now: DateTime<Utc>,
+    ) -> Result<
+        std::result::Result<
+            (
+                TraceContributionEnvelope,
+                WitnessedEnvelope,
+                InferenceAttestationRecord,
+            ),
+            SubmitOutcome,
+        >,
+    > {
+        // The pin is judged BEFORE the mint, which is before anything
+        // reaches the network. An unpinned client cannot judge any quote it
+        // receives, so minting a claim for a submission that was always
+        // going to be refused would spend a round trip to learn nothing.
+        match settings.trust() {
+            Ok(trust) if trust.is_pinned() => {}
+            Ok(_) => {
+                record_last_result(WitnessLastResult::Refused {
+                    label: WITNESS_EXPECTED_MEASUREMENT_CONTROL.to_string(),
+                    certificate_obtained: false,
+                });
+                return Ok(Err(refused(
+                    WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+                    &transcript.session_hash,
+                )));
+            }
+            Err(_) => {
+                record_last_result(WitnessLastResult::Refused {
+                    label: "witness_expected_measurement_malformed".to_string(),
+                    certificate_obtained: false,
+                });
+                return Ok(Err(refused(
+                    "witness_expected_measurement_malformed",
+                    &transcript.session_hash,
+                )));
+            }
+        }
+        // The claim is minted BEFORE anything raw is sent. The grants have
+        // to be inside the certified bytes, and a stamp afterwards is a byte
+        // change the certificate does not cover.
+        let token = match self.ensure_claim(now, &transcript.session_hash).await? {
+            Ok(token) => token,
+            Err(outcome) => return Ok(Err(outcome)),
+        };
+        match self
+            .witness_envelope(
+                settings,
+                raw,
+                transcript.attested_call.as_deref(),
+                &token,
+                now,
+            )
+            .await
+        {
+            // The record is dropped on the CLI path: the CLI keeps no
+            // per-entry store to write it to. The daemon's review path and
+            // its witness worker are where it is kept.
+            Ok((parsed, response, attested_inference, shipped)) => {
+                // `parse_witnessed_envelope` inside `witness_envelope` is
+                // what verified this certificate against the bytes that came
+                // back, so reaching here IS "obtained and verified" -- there
+                // is no other way in.
+                record_last_result(WitnessLastResult::Certified {
+                    n_of_m: n_of_m_from_certificate(&response.certificate_json),
+                });
+                self.last_receipt_shipped = shipped;
+                Ok(Ok((parsed, response, attested_inference)))
+            }
+            Err(label) => {
+                record_last_result(WitnessLastResult::Refused {
+                    label: label.to_string(),
+                    certificate_obtained: certificate_obtained_for(label),
+                });
+                // A busy witness judged nothing. The session is held for a
+                // retry, never refused for it.
+                if label == trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR {
+                    return Ok(Err(SubmitOutcome::Failed {
+                        reason_label: REASON_WITNESS_SATURATED.to_string(),
+                    }));
+                }
+                Ok(Err(refused(label, &transcript.session_hash)))
+            }
+        }
+    }
+
+    /// The witness half of a daemon upload, on its own: build the raw
+    /// contribution an approved entry would send, with the approval's own
+    /// verdict and correction, and have the witness certify it. Nothing is
+    /// uploaded; the daemon pins the certified bytes on the approved entry
+    /// and a later upload pass sends exactly those (see
+    /// `daemon::witness_worker`).
+    ///
+    /// Runs the same canary and size gates `submit_loaded` runs before its
+    /// witness call, in the same order. `Err` is a fail-closed precondition
+    /// (`SubmitPreconditionFailure`), as there.
+    pub(crate) async fn witness_for_pin(
+        &mut self,
+        transcript: &crate::source::SessionTranscript,
+        verdict: Option<crate::envelope::ContributorVerdict>,
+        correction: Option<&str>,
+        large_session_permit: Option<crate::large_session_gate::LargeSessionPermit>,
+    ) -> Result<WitnessForPin> {
+        self.last_receipt_shipped = ReceiptShipped::NoCall;
+        self.last_witness_retry_after
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        let Some(settings) = self.cfg.witness.clone() else {
+            return Ok(WitnessForPin::Outcome(refused(
+                "witness-not-configured",
+                &transcript.session_hash,
+            )));
+        };
+        let redactor = match build_redactor_with(
+            &self.effective_cfg,
+            transcript.cwd.as_deref(),
+            self.near_ai.clone(),
+        ) {
+            Ok(r) => r,
+            Err(_) => {
+                return Ok(WitnessForPin::Outcome(refused(
+                    "pii-filter-unavailable",
+                    &transcript.session_hash,
+                )));
+            }
+        };
+        if !self.canary_checked {
+            canary_self_test_async(&redactor)
+                .await
+                .map_err(|_| SubmitPreconditionFailure(PRECONDITION_CANARY_FAILED))?;
+            self.canary_checked = true;
+            self.canary_runs += 1;
+        }
+        let now = Utc::now();
+        let raw = crate::envelope::build_raw_contribution_with_correction(
+            transcript,
+            &self.effective_cfg,
+            now,
+            verdict,
+            correction,
+        );
+        let envelope_limit = self.store.envelope_limit_bytes();
+        if raw_contribution_size_ok(&raw, envelope_limit).is_err() {
+            let size = raw_contribution_size(&raw).unwrap_or(MAX_ENVELOPE_BYTES + 1);
+            return Ok(WitnessForPin::Outcome(refused_for_size(
+                &transcript.session_hash,
+                size,
+                envelope_limit,
+            )));
+        }
+        // The build is done. A large session's permit goes before the
+        // witness call, which can take minutes, so a preview of another
+        // large session is not held up behind the network.
+        drop(large_session_permit);
+        Ok(
+            match self.witness_raw(&settings, raw, transcript, now).await? {
+                Ok((_, response, attested_inference)) => WitnessForPin::Witnessed {
+                    response: Box::new(response),
+                    attested_inference: Box::new(attested_inference),
+                },
+                Err(outcome) => WitnessForPin::Outcome(outcome),
+            },
+        )
+    }
+
     /// What the most recent `submit_loaded` receipt fetch produced.
     ///
     /// Meaningful immediately after a submission returns `Submitted`: the
@@ -1879,85 +2087,13 @@ impl<'a> SubmitContext<'a> {
                         }
                     }
                     Some(settings) => {
-                        // The pin is judged BEFORE the mint, which is before
-                        // anything reaches the network. An unpinned client
-                        // cannot judge any quote it receives, so minting a
-                        // claim for a submission that was always going to be
-                        // refused would spend a round trip to learn nothing.
-                        match settings.trust() {
-                            Ok(trust) if trust.is_pinned() => {}
-                            Ok(_) => {
-                                record_last_result(WitnessLastResult::Refused {
-                                    label: WITNESS_EXPECTED_MEASUREMENT_CONTROL.to_string(),
-                                    certificate_obtained: false,
-                                });
-                                return Ok(refused(
-                                    WITNESS_EXPECTED_MEASUREMENT_CONTROL,
-                                    &transcript.session_hash,
-                                ));
-                            }
-                            Err(_) => {
-                                record_last_result(WitnessLastResult::Refused {
-                                    label: "witness_expected_measurement_malformed".to_string(),
-                                    certificate_obtained: false,
-                                });
-                                return Ok(refused(
-                                    "witness_expected_measurement_malformed",
-                                    &transcript.session_hash,
-                                ));
-                            }
-                        }
-                        // The claim is minted BEFORE anything raw is sent. The
-                        // grants have to be inside the certified bytes, and a
-                        // stamp afterwards is a byte change the certificate
-                        // does not cover.
-                        let token = match self.ensure_claim(now, &transcript.session_hash).await? {
-                            Ok(token) => token,
-                            Err(outcome) => return Ok(outcome),
-                        };
-                        match self
-                            .witness_envelope(
-                                &settings,
-                                raw,
-                                transcript.attested_call.as_deref(),
-                                &token,
-                                now,
-                            )
-                            .await
-                        {
-                            // The record is dropped on this path: the CLI keeps
-                            // no per-entry store to write it to. The daemon's
-                            // review path is where it is kept.
-                            Ok((parsed, response, attested_inference, shipped)) => {
-                                // `parse_witnessed_envelope` inside
-                                // `witness_envelope` is what verified this
-                                // certificate against the bytes that came
-                                // back, so reaching here IS "obtained and
-                                // verified" -- there is no other way in.
-                                record_last_result(WitnessLastResult::Certified {
-                                    n_of_m: n_of_m_from_certificate(&response.certificate_json),
-                                });
-                                self.last_receipt_shipped = shipped;
+                        match self.witness_raw(&settings, raw, &transcript, now).await? {
+                            Ok((parsed, response, attested_inference)) => {
                                 witnessed = Some(response);
                                 witnessed_record = Some(attested_inference);
                                 parsed
                             }
-                            Err(label) => {
-                                record_last_result(WitnessLastResult::Refused {
-                                    label: label.to_string(),
-                                    certificate_obtained: certificate_obtained_for(label),
-                                });
-                                // A busy witness judged nothing. The session
-                                // is held for a retry, never refused for it.
-                                if label
-                                    == trace_commons_protocol::witness_pacing::WITNESS_SATURATED_ERROR
-                                {
-                                    return Ok(SubmitOutcome::Failed {
-                                        reason_label: REASON_WITNESS_SATURATED.to_string(),
-                                    });
-                                }
-                                return Ok(refused(label, &transcript.session_hash));
-                            }
+                            Err(outcome) => return Ok(outcome),
                         }
                     }
                 }

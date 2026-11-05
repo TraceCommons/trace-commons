@@ -173,7 +173,12 @@ pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static st
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _policy = shared.policy.lock().expect("policy lock");
     let mut queue = shared.queue.lock().expect("queue lock");
-    if queue.all().iter().any(|e| e.state == QueueState::Uploading) {
+    // A witness call in flight counts too: its raw session went under the
+    // enrollment being removed, and a result pinned after it would be
+    // dropped anyway (`witness_worker` checks the hold before it records).
+    if queue.all().iter().any(|e| e.state == QueueState::Uploading)
+        || shared.witness_worker.in_flight() > 0
+    {
         return Err((ERR_BUSY, ERR_UPLOAD_IN_FLIGHT));
     }
     if !holds_enrollment(&shared.store) {
@@ -341,13 +346,14 @@ const SETTLE_POLL: Duration = Duration::from_millis(50);
 pub const UPLOAD_INTERRUPTED_EVENT: &str = "unenroll_interrupted_upload";
 
 fn upload_in_flight(shared: &DaemonShared) -> bool {
-    shared
-        .queue
-        .lock()
-        .expect("queue lock")
-        .all()
-        .iter()
-        .any(|e| e.state == QueueState::Uploading)
+    shared.witness_worker.in_flight() > 0
+        || shared
+            .queue
+            .lock()
+            .expect("queue lock")
+            .all()
+            .iter()
+            .any(|e| e.state == QueueState::Uploading)
 }
 
 async fn wait_for_no_upload(shared: &DaemonShared, within: Duration) -> bool {
@@ -406,6 +412,9 @@ pub(super) async fn handle_unenroll(shared: &DaemonShared, req: &Request) -> Res
     // Nothing new goes in flight from here to the end of this call, and an
     // upload already in flight is given a moment, then stopped.
     shared.uploads_held.store(true, Ordering::SeqCst);
+    // Witness jobs not yet started never start: the approvals they were for
+    // are about to be returned.
+    shared.witness_worker.clear_queued();
     settle_uploads(shared).await;
     let removed = super::run_blocking(|| unenroll(shared));
     shared.uploads_held.store(false, Ordering::SeqCst);

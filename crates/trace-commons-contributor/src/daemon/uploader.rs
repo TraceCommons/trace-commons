@@ -195,6 +195,15 @@ pub fn burst_wait(state: &mut DaemonState, now: DateTime<Utc>) -> Option<u32> {
     Some(u32::try_from(wait).unwrap_or(u32::MAX))
 }
 
+/// What one witness job reached (see [`Uploader::witness_entry`]).
+pub(crate) enum WitnessJobOutcome {
+    /// The witness certified the session. Not yet saved or pinned.
+    Witnessed(Box<super::approved_envelope::WitnessReviewArtifact>),
+    /// No certified review: report this decision instead, exactly as the
+    /// upload pass would have.
+    Decision(UploadDecision),
+}
+
 /// Save the certified review of a held session, so opening it shows the
 /// witness's bytes rather than running the witness again (the spec's R5).
 ///
@@ -471,14 +480,16 @@ impl Uploader<'_, '_> {
         Ok(Some(stored))
     }
 
-    /// Upload one queue entry, or explain why not.
-    pub async fn upload_entry(
+    /// The gates every approved entry passes before anything about it is
+    /// read, built or sent: the Manual Scrub check, a live enrollment and
+    /// the NEAR AI notice. Shared by the upload and by the witness worker,
+    /// which sends the raw session to the witness and must not get there by
+    /// a shorter road. `Some` is the decision to report instead.
+    pub(crate) fn send_gates(
         &mut self,
-        source: &dyn TraceSource,
-        session_ref: &SessionRef,
         entry: &QueueEntry,
         now: DateTime<Utc>,
-    ) -> Result<UploadDecision> {
+    ) -> Option<UploadDecision> {
         // The Manual Scrub check (K4 of #1118): nothing goes without a
         // person. The watcher approves nothing on anyone's behalf while it
         // is set; this catches an approval made before the switch, and
@@ -486,7 +497,7 @@ impl Uploader<'_, '_> {
         if entry.approved_unattended
             && self.settings.scrub_check == super::settings::ScrubCheck::Manual
         {
-            return Ok(UploadDecision::HeldForSecondLook {
+            return Some(UploadDecision::HeldForSecondLook {
                 reason_label: super::second_look::REASON_SCRUB_CHECK_MANUAL.to_string(),
                 reasons: Vec::new(),
                 pin: None,
@@ -495,7 +506,7 @@ impl Uploader<'_, '_> {
         }
         if !enrollment_is_live(self.store) {
             self.health.fail(LABEL_NOT_LOGGED_IN, now);
-            return Ok(UploadDecision::Refused {
+            return Some(UploadDecision::Refused {
                 reason_label: LABEL_NOT_LOGGED_IN.to_string(),
             });
         }
@@ -508,22 +519,32 @@ impl Uploader<'_, '_> {
             // consumed the marker would send the contributor's text to a third
             // party with the notice never actually delivered.
             self.health.fail(LABEL_NEAR_AI_NOTICE_PENDING, now);
-            return Ok(UploadDecision::Refused {
+            return Some(UploadDecision::Refused {
                 reason_label: LABEL_NEAR_AI_NOTICE_PENDING.to_string(),
             });
         }
         // Near-AI notice requirement is met (either not configured or already shown),
         // so retract the notice-pending condition if it was set.
         self.health.resolve(LABEL_NEAR_AI_NOTICE_PENDING);
+        None
+    }
 
-        // Pace the send rate under ingest's per-principal limit before any
-        // work is spent on this entry. No health label: like the server's
-        // own `429`, it clears itself on the next pass. The attempt itself is
-        // counted only if it reaches ingest, after `submit_loaded` below.
-        if let Some(retry_after_secs) = burst_wait(self.state, now) {
-            return Ok(UploadDecision::Paced { retry_after_secs });
-        }
-
+    /// Re-read and re-hash the session, and re-derive the approval's input
+    /// fingerprint. Shared by the upload and by the witness worker. The
+    /// large-session permit is held for the caller's build.
+    pub(crate) async fn load_approved(
+        &mut self,
+        source: &dyn TraceSource,
+        session_ref: &SessionRef,
+        entry: &QueueEntry,
+    ) -> std::result::Result<
+        (
+            crate::source::SessionTranscript,
+            String,
+            crate::large_session_gate::LargeSessionPermit,
+        ),
+        UploadDecision,
+    > {
         // Re-read and re-hash. The approval was for the content described by
         // entry.session_hash; if the file has moved on, that approval does not
         // transfer to the new content.
@@ -543,13 +564,13 @@ impl Uploader<'_, '_> {
         let transcript = match super::run_blocking(|| source.load(session_ref)) {
             Ok(t) => t,
             Err(_) => {
-                return Ok(UploadDecision::Refused {
+                return Err(UploadDecision::Refused {
                     reason_label: "parse-failed".to_string(),
                 });
             }
         };
         if transcript.session_hash != entry.session_hash {
-            return Ok(UploadDecision::Superseded {
+            return Err(UploadDecision::Superseded {
                 new_hash: transcript.session_hash,
             });
         }
@@ -566,10 +587,116 @@ impl Uploader<'_, '_> {
             self.settings.ironwire_attested_bodies,
         );
         if entry.approved_inputs.as_deref() != Some(inputs_now.as_str()) {
-            return Ok(UploadDecision::ApprovalStale {
+            return Err(UploadDecision::ApprovalStale {
                 reason_label: super::preview::REASON_INPUTS_CHANGED.to_string(),
             });
         }
+        Ok((transcript, inputs_now, large_session))
+    }
+
+    /// The witness worker's half of an upload (`daemon::witness_worker`):
+    /// the same gates, re-hash and approval-terms check as
+    /// [`Self::upload_entry`], then the witness, and nothing sent to ingest.
+    /// On success the caller pins the certified review on the approved
+    /// entry; the next upload pass sends exactly those bytes through the
+    /// witness-pin path, which applies the risk and Scrub holds for a
+    /// session nobody looked at.
+    pub(crate) async fn witness_entry(
+        &mut self,
+        source: &dyn TraceSource,
+        session_ref: &SessionRef,
+        entry: &QueueEntry,
+        now: DateTime<Utc>,
+    ) -> Result<WitnessJobOutcome> {
+        if let Some(decision) = self.send_gates(entry, now) {
+            return Ok(WitnessJobOutcome::Decision(decision));
+        }
+        let (transcript, inputs_now, large_session) =
+            match self.load_approved(source, session_ref, entry).await {
+                Ok(loaded) => loaded,
+                Err(decision) => return Ok(WitnessJobOutcome::Decision(decision)),
+            };
+        // The same refusal `upload_entry` makes for an entry with no
+        // certified token-bundle review: an ordinary witness run builds none.
+        if self.settings.token_distributions_contribution {
+            return Ok(WitnessJobOutcome::Decision(UploadDecision::ApprovalStale {
+                reason_label: super::queue::REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.into(),
+            }));
+        }
+        let verdict = entry
+            .approved_verdict
+            .as_deref()
+            .and_then(crate::envelope::ContributorVerdict::parse);
+        let outcome = self
+            .ctx
+            .witness_for_pin(
+                &transcript,
+                verdict,
+                entry.approved_correction.as_deref(),
+                Some(large_session),
+            )
+            .await;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                self.health.fail(precondition_health_label(&e), now);
+                return Err(e);
+            }
+        };
+        match outcome {
+            crate::submit::WitnessForPin::Witnessed {
+                response,
+                attested_inference,
+            } => Ok(WitnessJobOutcome::Witnessed(Box::new(
+                super::approved_envelope::WitnessReviewArtifact::new(
+                    *response,
+                    entry.session_hash.clone(),
+                    inputs_now,
+                    entry.approved_verdict.as_deref(),
+                    entry.approved_correction.as_deref(),
+                    Some(*attested_inference),
+                ),
+            ))),
+            crate::submit::WitnessForPin::Outcome(outcome) => {
+                let decision = decision_for(
+                    outcome,
+                    self.ctx.last_receipt_shipped(),
+                    self.ctx.last_witness_retry_after(),
+                    None,
+                );
+                if let Some(label) = health_label_for(&decision) {
+                    self.health.fail(label, now);
+                }
+                Ok(WitnessJobOutcome::Decision(decision))
+            }
+        }
+    }
+
+    /// Upload one queue entry, or explain why not.
+    pub async fn upload_entry(
+        &mut self,
+        source: &dyn TraceSource,
+        session_ref: &SessionRef,
+        entry: &QueueEntry,
+        now: DateTime<Utc>,
+    ) -> Result<UploadDecision> {
+        if let Some(decision) = self.send_gates(entry, now) {
+            return Ok(decision);
+        }
+
+        // Pace the send rate under ingest's per-principal limit before any
+        // work is spent on this entry. No health label: like the server's
+        // own `429`, it clears itself on the next pass. The attempt itself is
+        // counted only if it reaches ingest, after `submit_loaded` below.
+        if let Some(retry_after_secs) = burst_wait(self.state, now) {
+            return Ok(UploadDecision::Paced { retry_after_secs });
+        }
+
+        let (transcript, inputs_now, large_session) =
+            match self.load_approved(source, session_ref, entry).await {
+                Ok(loaded) => loaded,
+                Err(decision) => return Ok(decision),
+            };
 
         // The artifact half. A previewed entry carries the envelope it was
         // previewed as, on disk; the pipeline sends exactly those bytes.

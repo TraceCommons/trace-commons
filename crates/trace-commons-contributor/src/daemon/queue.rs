@@ -800,10 +800,14 @@ impl QueueEntry {
                     | crate::submit::REASON_INGEST_UNREACHABLE
                     | super::health::LABEL_CLAIM_MINT_FAILED
             )
-        ) || self.reason_label.as_deref().is_some_and(|label| {
-            trace_commons_protocol::admission::AdmissionRefusal::from_label(label)
-                == Some(trace_commons_protocol::admission::AdmissionRefusal::InProgress)
-        })
+        ) || self
+            .reason_label
+            .as_deref()
+            .is_some_and(crate::submit::witness_failure_is_transient)
+            || self.reason_label.as_deref().is_some_and(|label| {
+                trace_commons_protocol::admission::AdmissionRefusal::from_label(label)
+                    == Some(trace_commons_protocol::admission::AdmissionRefusal::InProgress)
+            })
     }
 
     /// Whether this entry is approved and held because the witness is at
@@ -1886,6 +1890,45 @@ impl Queue {
         // with no fresh measurement passes `None` rather than leaving a
         // stale figure in place that no longer describes what is pinned now.
         e.would_send_bytes = would_send_bytes;
+        true
+    }
+
+    /// Pin the witness's certified review on an entry that is already
+    /// approved, without touching the approval: the witness worker's result
+    /// (`daemon::witness_worker`). The next upload pass sends exactly these
+    /// bytes through the witness-pin path.
+    ///
+    /// Refused unless the entry is `Approved` with no pin of its own, so a
+    /// result that arrives after a cancel, a revoke or a person's own review
+    /// changes nothing. A retry label the witness left on the entry is
+    /// cleared with its deadline, and so is the run of transient failures:
+    /// the check has now answered.
+    pub fn pin_witnessed_approval(
+        &mut self,
+        entry_id: Uuid,
+        digest: &str,
+        attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
+        would_send_bytes: Option<u64>,
+    ) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.state != QueueState::Approved || e.previewed_envelope_digest.is_some() {
+            return false;
+        }
+        e.previewed_envelope_digest = Some(digest.to_string());
+        e.attested_inference = attested_inference;
+        e.would_send_bytes = would_send_bytes;
+        if e.reason_label
+            .as_deref()
+            .is_some_and(crate::submit::witness_failure_is_transient)
+            || e.reason_label.as_deref() == Some(crate::submit::REASON_WITNESS_SATURATED)
+        {
+            e.reason_label = None;
+            e.retry_after = None;
+        }
+        e.transient_upload_failures = 0;
+        e.transient_upload_run_started_at = None;
         true
     }
 
