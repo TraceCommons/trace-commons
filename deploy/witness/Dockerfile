@@ -78,13 +78,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-# The witness holds raw transcripts in memory and writes nothing. It runs as a
-# non-root user for the ordinary reason, and the one thing that can break is
-# named in the README: it must be able to open the dstack guest-agent socket.
-# If your dstack version creates that socket root-only, the container fails to
-# start with a named error at boot rather than running without an identity --
-# see "First boot".
-RUN useradd --system --no-create-home --uid 10001 witness
+# The witness holds raw transcripts in memory and never writes them. The one
+# thing it writes is sealed job results, to the results directory below (the
+# compose mounts the `witness-results` volume there). It runs as a non-root
+# user for the ordinary reason, and the one thing that can break is named in
+# the README: it must be able to open the dstack guest-agent socket. If your
+# dstack version creates that socket root-only, the container fails to start
+# with a named error at boot rather than running without an identity -- see
+# "First boot".
+#
+# The results directory is created here, owned by the witness user and closed
+# to everyone else, because a new named volume takes its ownership from the
+# image's directory at the mount point. Without it the volume is root-owned and
+# the witness refuses to start.
+RUN useradd --system --no-create-home --uid 10001 witness \
+    && mkdir -p /var/lib/trace-commons-witness/results \
+    && chown witness:witness /var/lib/trace-commons-witness/results \
+    && chmod 700 /var/lib/trace-commons-witness/results
 COPY --from=builder /src/target/release/trace-commons-witness /usr/local/bin/trace-commons-witness
 USER witness
 

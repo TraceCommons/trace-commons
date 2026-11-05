@@ -971,6 +971,72 @@ mod tests {
         }
     }
 
+    /// An agent that derives only the results secret; its measurement is
+    /// set by `mr_td`.
+    struct KeyingAgent {
+        inner: StubAgent,
+    }
+
+    #[async_trait]
+    impl GuestAgent for KeyingAgent {
+        async fn signing_key(&self) -> Result<DerivedSigningKey, EnclaveError> {
+            self.inner.signing_key().await
+        }
+        async fn quote(
+            &self,
+            report_data: &[u8; REPORT_DATA_LEN],
+        ) -> Result<Vec<u8>, EnclaveError> {
+            self.inner.quote(report_data).await
+        }
+        async fn derived_secret(&self, path: &str) -> Result<Zeroizing<[u8; 32]>, EnclaveError> {
+            assert_eq!(path, RESULTS_KEY_PATH);
+            Ok(Zeroizing::new([0x51; 32]))
+        }
+        async fn instance_id(&self) -> Result<String, EnclaveError> {
+            Ok("not hex at all".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_results_key_differs_when_the_measurement_does() {
+        let first = DstackEnclave::connect(Box::new(KeyingAgent {
+            inner: StubAgent::new(),
+        }))
+        .await
+        .unwrap();
+        let mut moved = StubAgent::new();
+        moved.mr_td = [0xEE; 48];
+        let second = DstackEnclave::connect(Box::new(KeyingAgent { inner: moved }))
+            .await
+            .unwrap();
+        let a = first.results_key().await.unwrap();
+        let b = second.results_key().await.unwrap();
+        assert_ne!(*a, *b, "a new measurement must not open old results");
+        assert_eq!(*a, *first.results_key().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn an_agent_that_cannot_derive_keys_or_name_itself_is_refused() {
+        let enclave = connected().await;
+        assert_eq!(
+            enclave.results_key().await.err(),
+            Some(EnclaveError::Transport)
+        );
+        assert_eq!(
+            enclave.instance_id().await.err(),
+            Some(EnclaveError::Transport)
+        );
+        let malformed = DstackEnclave::connect(Box::new(KeyingAgent {
+            inner: StubAgent::new(),
+        }))
+        .await
+        .unwrap();
+        assert_eq!(
+            malformed.instance_id().await.err(),
+            Some(EnclaveError::MalformedResponse)
+        );
+    }
+
     async fn connected() -> DstackEnclave {
         DstackEnclave::connect(Box::new(StubAgent::new()))
             .await
@@ -1365,6 +1431,55 @@ mod tests {
     mod socket {
         use super::super::*;
         use super::{SCALAR_ONE, serve_404_then, serve_response};
+
+        /// The results key's `GetKey` asks for its own path, never the
+        /// signing key's, and reads the 32 bytes back.
+        #[tokio::test]
+        async fn the_results_secret_is_asked_for_at_its_own_path() {
+            let (_dir, path, handle) = serve_response(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{{\"key\":\"0x{}\"}}",
+                hex::encode([0x33u8; 32])
+            ))
+            .await;
+            let secret = DstackSocketAgent::at(&path)
+                .derived_secret(RESULTS_KEY_PATH)
+                .await
+                .expect("the agent answered");
+            assert_eq!(*secret, [0x33u8; 32]);
+            let request = handle.await.expect("served");
+            assert!(
+                request.starts_with(&format!("GET {GET_KEY_PATH}?path={RESULTS_KEY_PATH}&")),
+                "{request}"
+            );
+            assert!(!request.contains("path=vms"));
+        }
+
+        #[tokio::test]
+        async fn a_path_that_could_reshape_the_request_is_refused_unsent() {
+            let agent = DstackSocketAgent::at("/nonexistent/dstack.sock");
+            for path in ["", "a b", "a&path=vms", "a\r\nX: y"] {
+                assert_eq!(
+                    agent.derived_secret(path).await.err(),
+                    Some(EnclaveError::MalformedResponse),
+                    "{path:?}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn the_instance_id_is_read_from_info_as_hex() {
+            let (_dir, path, handle) = serve_response(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"app_id\":\"aa\",\"instance_id\":\"0123456789ABCDEF\"}"
+                    .to_string(),
+            )
+            .await;
+            let id = DstackSocketAgent::at(&path)
+                .instance_id()
+                .await
+                .expect("the agent answered");
+            assert_eq!(id, "0123456789abcdef");
+            assert!(handle.await.unwrap().starts_with("GET /v0/Info "));
+        }
 
         /// A 404 on the versioned path falls through to the unversioned one.
         ///

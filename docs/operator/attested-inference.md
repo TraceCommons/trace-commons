@@ -285,10 +285,21 @@ value comes from a certificate:
 ```bash
 U=https://<app-id>-8088.<dstack gateway host>
 NEW_COMPOSE_HASH=<instance compose_hash from phala cvms get --json>
+# POST /v1/witness is retired: submit a job, then poll it with its secret.
 while :; do
-  M=$(curl -sS --max-time 300 -X POST "$U/v1/witness" \
+  SECRET=$(openssl rand -hex 32)
+  HASH=$(printf '%s' "$SECRET" | xxd -r -p | sha256sum | cut -d' ' -f1)
+  JOB=$(curl -sS --max-time 30 -X POST "$U/v1/witness/jobs" \
         -H 'content-type: application/json' \
+        -H "x-trace-witness-fetch-secret-sha256: $HASH" \
         -d '{"raw_transcript":"user: hello\n","consent":{"include_tool_payloads":false}}' \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])')
+  # With replicas a poll can land on another instance and get 404; it is
+  # simply polled again. (The app polls the instance the 202 names.)
+  until R=$(curl -sS -f --max-time 30 "$U/v1/witness/jobs/$JOB" \
+              -H "x-trace-witness-fetch-secret: $SECRET") \
+        && ! printf '%s' "$R" | grep -q '"state":"pending"'; do sleep 2; done
+  M=$(printf '%s' "$R" \
       | python3 -c 'import json,sys; print(json.load(sys.stdin)["certificate"]["witness_measurement"])')
   echo "$M"
   case "$M" in *"$NEW_COMPOSE_HASH"*) break ;; esac

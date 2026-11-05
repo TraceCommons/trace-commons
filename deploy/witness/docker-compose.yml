@@ -32,12 +32,14 @@ services:
 
     # A restart re-derives the same signing key: dstack's KMS derives the app
     # key from the app id, which does not move. So a restart is invisible to a
-    # client that has pinned the signing address, and the witness holds no
-    # state that a restart could lose.
+    # client that has pinned the signing address. Jobs in progress are lost on
+    # a restart (the client resubmits); finished results survive it, sealed
+    # on the volume below.
     restart: always
 
-    # The witness writes nothing. A writable root filesystem would be a place
-    # for a raw transcript to land.
+    # The root filesystem stays read-only: a writable one would be a place for
+    # a raw transcript to land. The only writable place is the results volume,
+    # and only sealed results go there -- raw sessions are held in memory.
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
@@ -51,8 +53,14 @@ services:
     # GetKey and GetQuote are reached through. It is not network-reachable;
     # the witness proxies GetQuote on /v1/attestation precisely because a
     # contributor cannot call it directly.
+    #
+    # `witness-results` holds finished job results, AES-256-GCM sealed under a
+    # key derived from GetKey and this image's measurement, so another image
+    # cannot open them. Each is deleted on its first fetch or after 24 hours.
+    # The volume lives on the CVM's encrypted data disk.
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
+      - witness-results:/var/lib/trace-commons-witness/results
 
     environment:
       # 0.0.0.0, not the binary's 127.0.0.1 default. The default is correct for
@@ -206,8 +214,8 @@ services:
       # the order of 100 MiB of memory.
       TRACE_COMMONS_WITNESS_MAX_REQUEST_BYTES: "1048576"
 
-      # THE BOUND ON UNAUTHENTICATED WORK. Both routes are unauthenticated, so
-      # anyone who can reach `POST /v1/witness` can spend this CVM's cores and,
+      # THE BOUND ON UNAUTHENTICATED WORK. The routes are unauthenticated, so
+      # anyone who can reach `POST /v1/witness/jobs` can spend this CVM's cores and,
       # in `full-pipeline`, the NEAR AI capacity billed to the key above. The
       # 1 MiB cap above is per request; it says nothing about how many arrive
       # at once. These two say that.
@@ -240,6 +248,15 @@ services:
       # released.
       TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS: "540"
 
+      # Submit-then-poll (docs/superpowers/specs/2026-11-05-witness-submit-then-poll.md).
+      # POST /v1/witness is retired: a job is accepted at once and polled, so
+      # no connection is held for the length of a review. Finished results
+      # are sealed here, at most 256 of them at 4 MiB each (1 GiB worst case
+      # on disk). A full store answers busy.
+      TRACE_COMMONS_WITNESS_RESULTS_DIR: "/var/lib/trace-commons-witness/results"
+      TRACE_COMMONS_WITNESS_MAX_STORED_RESULTS: "256"
+      TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES: "4194304"
+
       # Path prefixes the deterministic pass treats as known, so they are not
       # reported as findings. Empty reports more, never less.
       TRACE_COMMONS_WITNESS_KNOWN_PATH_PREFIXES: ""
@@ -252,3 +269,6 @@ services:
 
     ports:
       - "8088:8088"
+
+volumes:
+  witness-results:

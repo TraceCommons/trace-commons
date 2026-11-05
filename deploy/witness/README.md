@@ -96,15 +96,25 @@ calls. That is a much larger attack surface than the witness's own code, and it
 is the largest single reduction available to a future revision of this
 deployment.
 
-## The two routes are unauthenticated. That is deliberate, and it has a cost.
+## The routes are unauthenticated. That is deliberate, and it has a cost.
 
-The witness serves exactly two routes, both unauthenticated, neither
-rate-limited by source, and without TLS of their own:
+The witness serves these routes, all unauthenticated, none rate-limited by
+source, and without TLS of their own:
 
-- `POST /v1/witness` — raw transcript in, redacted artifact plus certificate out.
+- `POST /v1/witness/jobs` — raw session in, `202 {job_id, poll_after_secs,
+  queue_position, instance_id}` out, at once. `GET /v1/witness/jobs/{job_id}`
+  polls for the redacted artifact plus certificate; `DELETE` cancels. Both
+  carry the job's fetch secret in `x-trace-witness-fetch-secret`; the submit
+  carried its SHA-256. See "Jobs and sealed results" below.
+- `POST /v1/witness/admission` and `POST /v1/witness/token-bundle` — the
+  admission-evidence and token-bundle reviews, still single long requests.
 - `GET /v1/attestation?nonce=<64 hex chars>` — a nonce-bound quote and the
   signing address, so a contributor can verify the enclave *before* sending
   anything.
+
+**`POST /v1/witness` is retired** (owner decision, 2026-11-05) and answers
+`404`. A contributor app that predates the job routes cannot use a witness
+running this version: ship the polling client first, or with it.
 
 They are unauthenticated on purpose: authenticating at the witness would give
 the witness an identity to correlate against content, which is the one thing
@@ -112,7 +122,7 @@ the design is trying not to hand it.
 
 **State the consequence rather than assuming it is understood:**
 
-- `/v1/witness` is **unauthenticated compute over a 64 MiB body**, and that
+- `/v1/witness/jobs` is **unauthenticated compute over a 1 MiB body**, and that
   compute is a redaction pass over the whole of it. Anyone who can reach the
   route can spend the CVM's cores. In `full-pipeline` mode they can also spend
   your classifier's capacity, and if that classifier is a metered external
@@ -130,16 +140,20 @@ answer.
 **Part of the abuse answer is now in this directory, and part of it still is
 not.** Be precise about which is which.
 
-*What is configured here.* `POST /v1/witness` is bounded in two ways, both set
+*What is configured here.* A witness job (and each admission or token-bundle
+request) is bounded in two ways, both set
 in the measured compose and therefore part of the enclave's identity — a
 contributor who pins the measurement can verify that a bound exists and what it
 is:
 
 | Variable | Ships as | What it bounds |
 |---|---|---|
-| `TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS` | `4` | How many witness requests run at once. Over it, the witness answers `503` with `witness_saturated` and a `Retry-After`, immediately. It does not queue. |
+| `TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS` | `16` | How many witness jobs (and admission / token-bundle requests) run at once. A submit past it, or one the jobs ahead would make miss its deadline at the recent pace, is answered `503` with `witness_saturated` and a `Retry-After`, immediately. |
 | `TRACE_COMMONS_WITNESS_RESERVED_INTERACTIVE_SLOTS` | `1` when max is greater than 1; otherwise `0` | Keeps this many of the global slots available when cooperating automatic clients mark witness POSTs with `x-trace-witness-workload: background`. The background budget is max minus reserved. An explicit `0` restores the shared pool; a value at or above max is refused at startup. |
-| `TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS` | `300` | How long one request may take. Over it, `504` with `witness_request_timed_out`, and the slot is released. |
+| `TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS` | `540` | How long one job may take from acceptance, waiting included. Over it, the job's result is `504` with `witness_request_timed_out`, and the slot is released. |
+| `TRACE_COMMONS_WITNESS_RESULTS_DIR` | `/var/lib/trace-commons-witness/results` | Where finished job results are sealed. Must be writable at startup or the witness does not start. On the `witness-results` volume. |
+| `TRACE_COMMONS_WITNESS_MAX_STORED_RESULTS` | `256` | Finished, unfetched results kept at once. A full store answers busy at submit. |
+| `TRACE_COMMONS_WITNESS_MAX_RESULT_BYTES` | `4194304` | The largest result sealed; a larger one is kept as `witness_redaction_failed`. With the line above, the disk bound: 1 GiB at most. |
 | `TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT` | `2` (binary default; not yet in the compose) | Prose-classifier calls in flight at once across all requests in `full-pipeline`. A contribution's text leaves are classified concurrently up to this bound instead of one at a time. Every replica spends the same NEAR AI key unless given its own, so the key-wide overlap is replicas times this. See `docs/superpowers/specs/2026-11-05-witness-scaling-design.md`. Zero is refused at startup. |
 
 The saturation response is exactly `503 {"error":"witness_saturated"}` with
@@ -163,6 +177,38 @@ concurrency bound needs no identity.
 and does one enclave round trip, and it is what a contributor uses to pin this
 witness before trusting it; making it unavailable under load on the other route
 would make the enclave unpinnable exactly when someone is attacking it.
+
+### Jobs and sealed results
+
+Spec: `docs/superpowers/specs/2026-11-05-witness-submit-then-poll.md`.
+
+- **Raw sessions are held in memory only**, from the submit until the job's
+  handler returns. They are never written, sealed or not.
+- **Finished results are sealed to disk** under AES-256-GCM, one file per job
+  named by `sha256(job_id)`. The key is
+  `HKDF-SHA256(GetKey(path = "trace-commons-witness-results-v1"), info =
+  measurement)`. `GetKey` alone derives from the app id, so the measurement
+  is mixed in: a redeploy with a new measurement cannot open the previous
+  image's results, deletes them at startup, and clients resubmit.
+- **A result is served once** and deleted, or deleted unfetched after 24
+  hours. Results survive a restart; jobs in progress do not (the client
+  resubmits).
+- **Fail closed.** No results key, or a results directory the witness cannot
+  write: it does not start. A seal failure drops the result (the job reads as
+  gone). A file that does not open is deleted and reads as gone.
+- **Who may fetch.** The id is 128 random bits; the fetch secret is what
+  authorises a poll or a cancel. Every miss -- unknown id, wrong secret,
+  fetched, expired, unreadable -- is the same `404 witness_job_gone`.
+- **Instance-addressed polling.** The witness reads its instance id from the
+  guest agent's `Info` at boot (logged as `instance_addressed`), and names it
+  in the `202`. The client polls `<instance_id>-8088.<gateway domain>`, which
+  the gateway routes to that instance. Without an instance id the client
+  polls the app URL, which is right for a single instance.
+- **Disk.** The CVM's data disk size is not recorded in this README. The
+  worst case at the shipped values is 1 GiB; confirm the disk before raising
+  them.
+- Job ids and secrets are never logged. Logs are label-only (`witness job
+  accepted`, `finished`, `cancelled`, `expired`).
 
 *What is still the deploying operator's, and is not configured here.* A
 **per-source rate limit at an edge** — the thing that stops a single caller
