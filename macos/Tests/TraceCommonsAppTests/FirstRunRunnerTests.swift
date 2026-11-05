@@ -860,9 +860,9 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertTrue(runner.state.daemonStarted)
         XCTAssertEqual(runner.state.startedSettingsJSON, json)
         XCTAssertNil(runner.state.enrolledInvite)
-        XCTAssertEqual(runner.state.step, .uses)
+        XCTAssertEqual(runner.state.step, .privateAI)
 
-        // Customize sends the same, and stays on Tools.
+        // Customize's `declareRoots` sends the same, and the step stays.
         let customizing = FirstRunRunner(state: state, daemon: RecordingFirstRunDaemon())
         await customizing.commit(.declareRoots)
         XCTAssertTrue(customizing.state.daemonStarted)
@@ -892,7 +892,7 @@ final class FirstRunRunnerTests: XCTestCase {
         }
         XCTAssertEqual(daemon.log.count, 1, "nothing is enrolled or signed in twice")
         XCTAssertEqual(runner.state.startedSettingsJSON, runner.state.sessionRoots.settingsJSON())
-        XCTAssertEqual(runner.state.step, .uses)
+        XCTAssertEqual(runner.state.step, .privateAI)
     }
 
     /// Kristi's #1235 M3: the daemon is running, so a refused change of

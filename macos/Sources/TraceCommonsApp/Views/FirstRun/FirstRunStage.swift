@@ -19,11 +19,6 @@ enum FirstRunStageLayout {
         FirstRunNavigation.threadSteps.firstIndex(of: step)
     }
 
-    /// The step's position on this first run's path.
-    static func threadIndex(of step: FirstRunStep, in state: FirstRunState) -> Int? {
-        FirstRunNavigation.threadSteps(for: state).firstIndex(of: step)
-    }
-
     /// How a stretch of the thread reads: the one before step `index` is
     /// travelled once that step is reached, and the newest one leads.
     enum Segment: Equatable {
@@ -109,8 +104,8 @@ enum FirstRunStageLayout {
 
 /// The navy base every step shares, with the brand-blue glow breathing from
 /// the top-left corner (Ron, 2026-10-21: "a soft brand accent blue gradient
-/// glow emanating from the upper left corner"). Light follows the system
-/// appearance through the tokens.
+/// glow emanating from the upper left corner"). First run is dark only
+/// (Ron, 2026-11-05).
 struct FirstRunBackdrop: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var scheme
