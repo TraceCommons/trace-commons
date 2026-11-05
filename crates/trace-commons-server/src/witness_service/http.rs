@@ -155,6 +155,8 @@ pub struct WitnessLoadBound {
     permits: Arc<Semaphore>,
     background_permits: Arc<Semaphore>,
     request_timeout: Duration,
+    /// Label-only counts for `GET /v1/diagnostics`.
+    counters: Arc<super::diagnostics::LoadCounters>,
     max_concurrent_requests: usize,
     /// The classify queue admitted requests wait in, when the witness has
     /// one; see [`Self::with_classify_queue`].
@@ -194,6 +196,9 @@ impl WitnessLoadBound {
                 max_concurrent_requests - reserved_interactive_slots,
             )),
             request_timeout,
+            counters: Arc::new(super::diagnostics::LoadCounters::new(
+                max_concurrent_requests,
+            )),
             max_concurrent_requests,
             classify_queue: None,
             early_busy: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -222,6 +227,20 @@ impl WitnessLoadBound {
     pub fn early_busy(&self) -> u64 {
         self.early_busy.load(std::sync::atomic::Ordering::Relaxed)
     }
+
+    /// What the bound has done so far, how full it is now, and how the
+    /// classify queue behind it stands.
+    pub fn snapshot(&self) -> super::diagnostics::LoadSnapshot {
+        let mut snapshot = self.counters.snapshot(self.permits.available_permits());
+        snapshot.early_busy = self.early_busy();
+        if let Some(queue) = &self.classify_queue {
+            snapshot.classify_queue_waiting = Some(queue.waiting());
+            snapshot.classify_queue_mean_turn_ms = queue
+                .mean_turn()
+                .map(|turn| u64::try_from(turn.as_millis()).unwrap_or(u64::MAX));
+        }
+        snapshot
+    }
 }
 
 /// What a saturated witness tells a caller to wait, in seconds.
@@ -231,7 +250,8 @@ impl WitnessLoadBound {
 /// the deployment's occupancy ceiling to anyone who reads a 503.
 const SATURATED_RETRY_AFTER_SECS: u32 = WITNESS_SATURATED_RETRY_AFTER_SECS;
 
-fn saturated_refusal() -> Response {
+fn saturated_refusal(load: &WitnessLoadBound) -> Response {
+    load.counters.saturated();
     Refusal::new(StatusCode::SERVICE_UNAVAILABLE, WITNESS_SATURATED_ERROR)
         .retry_after(SATURATED_RETRY_AFTER_SECS)
         .into_response()
@@ -266,7 +286,7 @@ async fn bound_witness_load(
     let _background_permit = if background {
         match Arc::clone(&load.background_permits).try_acquire_owned() {
             Ok(permit) => Some(permit),
-            Err(_) => return saturated_refusal(),
+            Err(_) => return saturated_refusal(&load),
         }
     } else {
         None
@@ -278,20 +298,24 @@ async fn bound_witness_load(
     {
         load.early_busy
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return saturated_refusal();
+        return saturated_refusal(&load);
     }
     let Ok(_global_permit) = Arc::clone(&load.permits).try_acquire_owned() else {
-        return saturated_refusal();
+        return saturated_refusal(&load);
     };
 
     match tokio::time::timeout(load.request_timeout, next.run(request)).await {
-        Ok(response) => response,
+        Ok(response) => {
+            load.counters.finished(response.status().as_u16());
+            response
+        }
         // Dropping the timed-out future is what makes this a bound rather than
         // a message: the handler, its redaction pass and any classifier call
         // under it are cancelled here, and `_permit` is released on the way
         // out of this function. Without that, a hung backend would retire a
         // slot permanently.
         Err(_elapsed) => {
+            load.counters.timed_out();
             Refusal::new(StatusCode::GATEWAY_TIMEOUT, "witness_request_timed_out").into_response()
         }
     }
@@ -2075,6 +2099,48 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "the witness wedged: {body}");
         let value: serde_json::Value = serde_json::from_str(&body).expect("a JSON response");
         assert!(value["certificate"]["redacted_sha256"].is_string());
+    }
+
+    /// The load bound's counts, which `GET /v1/diagnostics` serves, follow
+    /// what the middleware did: one timeout, one success, one saturated
+    /// refusal, and an occupied slot while a request is held.
+    #[tokio::test]
+    async fn the_load_bound_counts_what_it_did() {
+        let service = service_with_redactor(Arc::new(HangsOnceRedactor {
+            hung: Mutex::new(false),
+        }));
+        let load = WitnessLoadBound::new(1, Duration::from_millis(50));
+        send_bounded(
+            service.clone(),
+            load.clone(),
+            post_witness(witness_body("hangs")),
+        )
+        .await;
+        send_bounded(service, load.clone(), post_witness(witness_body("ok"))).await;
+        let snapshot = load.snapshot();
+        assert_eq!(snapshot.timed_out, 1);
+        assert_eq!(snapshot.completed_2xx, 1);
+        assert_eq!(snapshot.in_use, 0);
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let service = service_with_redactor(Arc::new(ParkingRedactor {
+            entered: entered.clone(),
+            release: release.clone(),
+        }));
+        let load = WitnessLoadBound::new(1, Duration::from_secs(30));
+        let held = tokio::spawn({
+            let (service, load) = (service.clone(), load.clone());
+            async move { send_bounded(service, load, post_witness(witness_body("first"))).await }
+        });
+        entered.notified().await;
+        assert_eq!(load.snapshot().in_use, 1);
+        let (status, _) =
+            send_bounded(service, load.clone(), post_witness(witness_body("second"))).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(load.snapshot().saturated_refusals, 1);
+        release.notify_one();
+        held.await.expect("the held request did not panic");
     }
 
     /// Waits until `n` requests hold a slot.

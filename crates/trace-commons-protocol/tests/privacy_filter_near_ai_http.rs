@@ -1168,6 +1168,49 @@ async fn a_mismatched_span_in_one_entry_fails_the_batch() {
     assert!(answers.iter().all(Result::is_err), "{answers:?}");
 }
 
+/// Every request is counted by outcome in the adapter's diagnostics
+/// recorder -- retries included -- and successful ones contribute latency.
+#[tokio::test]
+async fn requests_are_counted_by_outcome() {
+    use std::sync::Arc;
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::{Outcome, Recorder};
+
+    let counted = |server: &MockServer, recorder: &Arc<Recorder>| {
+        adapter(server.uri()).with_diagnostics(recorder.clone())
+    };
+    let recorder = Arc::new(Recorder::default());
+    let ok = server_with(|_: &wiremock::Request| {
+        ResponseTemplate::new(200).set_body_json(json!({ "data": [{ "spans": [] }] }))
+    })
+    .await;
+    counted(&ok, &recorder).redact_text("one").await.unwrap();
+    counted(&ok, &recorder).redact_text("two").await.unwrap();
+    for status in [401, 429, 400] {
+        let server = server_with(move |_: &wiremock::Request| ResponseTemplate::new(status)).await;
+        let _ = counted(&server, &recorder).redact_text("three").await;
+    }
+    let down = server_with(|_: &wiremock::Request| ResponseTemplate::new(503)).await;
+    let _ = counted(&down, &recorder).redact_text("four").await;
+    let garbled =
+        server_with(|_: &wiremock::Request| ResponseTemplate::new(200).set_body_string("not json"))
+            .await;
+    let _ = counted(&garbled, &recorder).redact_text("five").await;
+
+    assert_eq!(recorder.count(Outcome::Ok), 2);
+    assert_eq!(recorder.count(Outcome::Auth), 1);
+    // 429 is retried like a 5xx, so every attempt counts.
+    assert_eq!(recorder.count(Outcome::Quota), MAX_CLASSIFY_ATTEMPTS as u64);
+    assert_eq!(recorder.count(Outcome::OtherClientError), 1);
+    assert_eq!(
+        recorder.count(Outcome::ServerError),
+        MAX_CLASSIFY_ATTEMPTS as u64
+    );
+    assert_eq!(recorder.count(Outcome::BodyShape), 1);
+    let snapshot = recorder.snapshot();
+    assert_eq!(snapshot.in_flight, 0);
+    assert_eq!(snapshot.latency_ms["under_4_kib"].samples, 2);
+}
+
 /// The timeout grows with the body: a slow answer to a small request is
 /// abandoned, the same delay on a larger request is waited for.
 #[tokio::test]
@@ -1287,4 +1330,54 @@ async fn retries_stop_when_the_deadline_cannot_fit_another_attempt() {
         "{:?}",
         started.elapsed()
     );
+}
+
+/// A batched request is one request to the diagnostics recorder, counted and
+/// timed exactly as a single call is, with nothing left in flight.
+#[tokio::test]
+async fn a_batched_request_is_counted_in_diagnostics() {
+    use std::sync::Arc;
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::{Outcome, Recorder};
+
+    let recorder = Arc::new(Recorder::default());
+    let server = server_with(per_input_emails(usize::MAX, false)).await;
+    let adapter = batching_adapter(server.uri(), 8).with_diagnostics(recorder.clone());
+    let texts: Vec<String> = (0..6)
+        .map(|i| format!("mail bob@example.com about item {i}"))
+        .collect();
+    let answers = answers_of(&adapter, &texts).await;
+    assert!(answers.iter().all(Result::is_ok), "{answers:?}");
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1, "six texts in one batch");
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["input"].as_array().map(Vec::len), Some(6));
+    assert_eq!(recorder.count(Outcome::Ok), 1);
+    let snapshot = recorder.snapshot();
+    assert_eq!(snapshot.in_flight, 0);
+    let samples: usize = snapshot
+        .latency_ms
+        .values()
+        .map(|bucket| bucket.samples)
+        .sum();
+    assert_eq!(samples, 1);
+}
+
+/// A batch answered with the wrong number of entries is recorded as
+/// `body_shape`, the label the single path gives any malformed answer, and
+/// nothing from it counts as ok.
+#[tokio::test]
+async fn a_batch_count_mismatch_is_recorded_as_body_shape() {
+    use std::sync::Arc;
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::{Outcome, Recorder};
+
+    let recorder = Arc::new(Recorder::default());
+    let server = server_with(per_input_emails(usize::MAX, true)).await;
+    let adapter = batching_adapter(server.uri(), 8).with_diagnostics(recorder.clone());
+    let texts: Vec<String> = (0..6).map(|i| format!("plain text {i}")).collect();
+    let answers = answers_of(&adapter, &texts).await;
+    assert!(answers.iter().all(Result::is_err), "{answers:?}");
+    assert_eq!(recorder.count(Outcome::BodyShape), 1);
+    assert_eq!(recorder.count(Outcome::Ok), 0);
+    assert_eq!(recorder.snapshot().in_flight, 0);
 }

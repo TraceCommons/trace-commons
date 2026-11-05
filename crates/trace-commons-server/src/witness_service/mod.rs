@@ -65,6 +65,7 @@
 //! [`WitnessRequest`] and [`WitnessResponse`] have hand-written `Debug`
 //! impls that withhold every content-bearing field, for the same reason.
 
+pub mod diagnostics;
 pub mod enclave;
 pub mod http;
 pub mod inference;

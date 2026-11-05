@@ -70,6 +70,8 @@ public enum GlassTokens {
         public static let heroButtonFill: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 1)
         /// The label on heroButtonFill: 18:1.
         public static let heroButtonInk: GlassRGBA = GlassRGBA(0x16161A, alpha: 1)
+        /// The Private AI guide card's title: a dark blue on the light card, lifted in dark so it stays readable (product owner, 2026-11-05). 9:1 on white; 7:1 on the dark pane.
+        public static let guideTitle: GlassRGBA = GlassRGBA(0x73A8FF, alpha: 1, light: GlassRGBA(0x0A459E, alpha: 1))
         /// A bright blue on a hero's ground, in both appearances: the Traces hero's step discs (behind heroInk) and step icons (owner, 2026-10-29, from the owner's mock-up).
         public static let heroAccent: GlassRGBA = GlassRGBA(0x2E95FF, alpha: 1)
         /// A count badge that is not owed a decision (a tab's count): ink at 16%. The flat Light theme draws it in the well's slate, as the legend pills are.
@@ -279,6 +281,7 @@ public enum GlassTokens {
             "heroInk": heroInk,
             "heroButtonFill": heroButtonFill,
             "heroButtonInk": heroButtonInk,
+            "guideTitle": guideTitle,
             "heroAccent": heroAccent,
             "badgeFillSubtle": badgeFillSubtle,
             "badgeFill": badgeFill,

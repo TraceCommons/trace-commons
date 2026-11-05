@@ -198,6 +198,9 @@ pub struct NearAiPrivacyFilterAdapter {
     max_request_body_bytes: usize,
     /// Most texts sent in one request as an input array. 1 is off.
     max_batch_inputs: usize,
+    /// Where each request's outcome and latency are counted. The process-wide
+    /// recorder unless a caller supplies its own; see [`diagnostics`].
+    diagnostics: Arc<diagnostics::Recorder>,
     /// The timeout's fixed and per-KiB parts; see [`call_timeout`].
     timeout_base_ms: u64,
     timeout_per_kib_ms: u64,
@@ -333,6 +336,7 @@ impl NearAiPrivacyFilterAdapter {
             max_input_bytes,
             max_request_body_bytes,
             max_batch_inputs: DEFAULT_MAX_BATCH_INPUTS,
+            diagnostics: diagnostics::global(),
             timeout_base_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
             timeout_per_kib_ms: DEFAULT_TIMEOUT_PER_KIB_MS,
             window_cache: std::sync::Mutex::new(ClassifyWindowCache::default()),
@@ -347,6 +351,13 @@ impl NearAiPrivacyFilterAdapter {
     /// treated as 1.
     pub fn with_max_batch_inputs(mut self, max_batch_inputs: usize) -> Self {
         self.max_batch_inputs = max_batch_inputs.max(1);
+        self
+    }
+
+    /// Count this adapter's requests in `recorder` instead of the
+    /// process-wide one. For tests, which run in parallel in one process.
+    pub fn with_diagnostics(mut self, recorder: Arc<diagnostics::Recorder>) -> Self {
+        self.diagnostics = recorder;
         self
     }
 
@@ -1098,6 +1109,8 @@ impl NearAiPrivacyFilterAdapter {
             };
             // Transient failures (transport errors, 5xx) are retried with
             // exponential backoff; 4xx and body-shape failures are not.
+            let started = std::time::Instant::now();
+            let mut in_flight = Some(self.diagnostics.enter());
             let send_result = self
                 .client
                 .post(&endpoint)
@@ -1110,6 +1123,16 @@ impl NearAiPrivacyFilterAdapter {
             let response = match send_result {
                 Ok(response) => response,
                 Err(err) => {
+                    in_flight.take();
+                    self.diagnostics.record(
+                        if err.is_timeout() {
+                            diagnostics::Outcome::Timeout
+                        } else {
+                            diagnostics::Outcome::Transport
+                        },
+                        body.len(),
+                        started.elapsed(),
+                    );
                     if may_retry(attempt, full_attempt, deadline) {
                         backoff(attempt).await;
                         continue;
@@ -1137,6 +1160,14 @@ impl NearAiPrivacyFilterAdapter {
             };
 
             let status = response.status();
+            if !status.is_success() {
+                in_flight.take();
+                self.diagnostics.record(
+                    diagnostics::Outcome::from_status(status.as_u16()),
+                    body.len(),
+                    started.elapsed(),
+                );
+            }
             if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
                 return Ok(WindowAnswer::TooLarge);
             }
@@ -1181,38 +1212,52 @@ impl NearAiPrivacyFilterAdapter {
                 });
             }
 
-            let parsed: ClassifyResponse =
-                response
-                    .json()
-                    .await
-                    .map_err(|err| TraceContributionError::RedactionFailed {
+            let answer = async {
+                let parsed: ClassifyResponse = response.json().await.map_err(|err| {
+                    TraceContributionError::RedactionFailed {
                         reason: format!("near-ai privacy classifier response parse error: {}", err),
-                    })?;
-            // One entry per input, in input order. A single-input request
-            // reads the first entry, as it always has; a batch must account
-            // for every input exactly, or none of it is used.
-            if parsed.data.is_empty() {
-                return Err(TraceContributionError::RedactionFailed {
-                    reason: "near-ai privacy classifier returned empty data array".to_string(),
-                });
+                    }
+                })?;
+                // One entry per input, in input order. A single-input request
+                // reads the first entry, as it always has; a batch must
+                // account for every input exactly, or none of it is used.
+                if parsed.data.is_empty() {
+                    return Err(TraceContributionError::RedactionFailed {
+                        reason: "near-ai privacy classifier returned empty data array".to_string(),
+                    });
+                }
+                if inputs.len() > 1 && parsed.data.len() != inputs.len() {
+                    return Err(TraceContributionError::RedactionFailed {
+                        reason: format!(
+                            "near-ai privacy classifier returned {} entries for {} inputs",
+                            parsed.data.len(),
+                            inputs.len()
+                        ),
+                    });
+                }
+                // Verified before anything is remembered: a refused response
+                // must never be served from the cache.
+                inputs
+                    .iter()
+                    .zip(parsed.data)
+                    .map(|(input, entry)| verify_span_texts(input, entry.spans))
+                    .collect::<Result<Vec<_>, _>>()
             }
-            if inputs.len() > 1 && parsed.data.len() != inputs.len() {
-                return Err(TraceContributionError::RedactionFailed {
-                    reason: format!(
-                        "near-ai privacy classifier returned {} entries for {} inputs",
-                        parsed.data.len(),
-                        inputs.len()
-                    ),
-                });
-            }
-            // Verified before anything is remembered: a refused response
-            // must never be served from the cache.
-            let spans = inputs
-                .iter()
-                .zip(parsed.data)
-                .map(|(input, entry)| verify_span_texts(input, entry.spans))
-                .collect::<Result<Vec<_>, _>>()?;
-            return Ok(WindowAnswer::Spans(spans));
+            .await;
+            // One request, one outcome, batched or not: a malformed answer --
+            // unparseable, empty, the wrong number of entries, a span that
+            // does not match its input -- is `body_shape`.
+            in_flight.take();
+            self.diagnostics.record(
+                if answer.is_ok() {
+                    diagnostics::Outcome::Ok
+                } else {
+                    diagnostics::Outcome::BodyShape
+                },
+                body.len(),
+                started.elapsed(),
+            );
+            return answer.map(WindowAnswer::Spans);
         }
     }
 }
@@ -1227,10 +1272,6 @@ enum WindowAnswer {
 }
 
 impl NearAiPrivacyFilterAdapter {
-    /// The escaped-input budget that keeps a request's whole serialized body
-    /// within the adapter's body cap: the body is the request envelope
-    /// (model, keys, the input's quotes) plus the input's JSON-escaped bytes,
-    /// and the envelope is measured, not guessed.
     /// Body bytes of a batch request with no inputs (`"input":[]`); each
     /// input adds its escaped length, two quotes and, after the first, a
     /// comma.
@@ -1244,6 +1285,10 @@ impl NearAiPrivacyFilterAdapter {
         .unwrap_or(self.max_request_body_bytes)
     }
 
+    /// The escaped-input budget that keeps a request's whole serialized body
+    /// within the adapter's body cap: the body is the request envelope
+    /// (model, keys, the input's quotes) plus the input's JSON-escaped bytes,
+    /// and the envelope is measured, not guessed.
     fn max_input_json_bytes(&self) -> usize {
         let envelope = serde_json::to_vec(&ClassifyRequest {
             model: &self.model,
@@ -1813,5 +1858,274 @@ mod tests {
         let debug = format!("{secret:?}");
         assert!(!debug.contains("super-secret-token"));
         assert!(debug.contains("***"));
+    }
+}
+
+/// What the classify requests made in this process did, by kind, and how long
+/// the successful ones took, by body size. **Label-only**: counts, gauges and
+/// durations; no text, no request identity, no key, no host.
+///
+/// The witness serves a snapshot at `GET /v1/diagnostics`, because its CVM's
+/// logs are not readable and this is the only way an operator can tell a
+/// rejected key from a slow endpoint from a down one.
+pub mod diagnostics {
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::Duration;
+
+    use serde::Serialize;
+
+    /// How one classify request ended.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Outcome {
+        /// 200 with a well-formed, verified answer.
+        Ok,
+        /// No answer within the request timeout.
+        Timeout,
+        /// The connection failed some other way.
+        Transport,
+        /// 401 or 403: the key was refused.
+        Auth,
+        /// 402 or 429: out of credit or rate limited.
+        Quota,
+        /// Any 5xx.
+        ServerError,
+        /// 413: the body was over the endpoint's limit.
+        TooLarge,
+        /// Any other non-2xx.
+        OtherClientError,
+        /// 200 whose body did not parse, had no entry, or whose spans did not
+        /// match the text sent.
+        BodyShape,
+    }
+
+    impl Outcome {
+        /// Every outcome, in the order a snapshot lists them.
+        pub const ALL: [Outcome; 9] = [
+            Outcome::Ok,
+            Outcome::Timeout,
+            Outcome::Transport,
+            Outcome::Auth,
+            Outcome::Quota,
+            Outcome::ServerError,
+            Outcome::TooLarge,
+            Outcome::OtherClientError,
+            Outcome::BodyShape,
+        ];
+
+        pub fn label(self) -> &'static str {
+            match self {
+                Outcome::Ok => "ok",
+                Outcome::Timeout => "timeout",
+                Outcome::Transport => "transport",
+                Outcome::Auth => "auth_401_403",
+                Outcome::Quota => "quota_402_429",
+                Outcome::ServerError => "server_5xx",
+                Outcome::TooLarge => "too_large_413",
+                Outcome::OtherClientError => "other_4xx",
+                Outcome::BodyShape => "body_shape",
+            }
+        }
+
+        /// The outcome for a non-2xx status.
+        pub fn from_status(status: u16) -> Outcome {
+            match status {
+                401 | 403 => Outcome::Auth,
+                402 | 429 => Outcome::Quota,
+                413 => Outcome::TooLarge,
+                500..=599 => Outcome::ServerError,
+                _ => Outcome::OtherClientError,
+            }
+        }
+
+        fn index(self) -> usize {
+            Outcome::ALL
+                .iter()
+                .position(|outcome| *outcome == self)
+                .unwrap_or(0)
+        }
+    }
+
+    /// Body-size buckets for latency, by request body bytes.
+    const BUCKETS: [(&str, usize); 4] = [
+        ("under_4_kib", 4 * 1024),
+        ("4_to_32_kib", 32 * 1024),
+        ("32_to_128_kib", 128 * 1024),
+        ("128_kib_and_over", usize::MAX),
+    ];
+
+    /// Recent successful latencies kept per bucket.
+    const SAMPLES_PER_BUCKET: usize = 256;
+
+    /// Counts and recent latencies. One per process in production
+    /// ([`global`]); tests make their own.
+    #[derive(Default)]
+    pub struct Recorder {
+        counts: [AtomicU64; 9],
+        in_flight: AtomicUsize,
+        latency_ms: Mutex<[VecDeque<u64>; 4]>,
+    }
+
+    /// Decrements the in-flight gauge when the request it counts ends, on
+    /// every path, including cancellation.
+    pub struct InFlight<'a>(&'a Recorder);
+
+    impl Drop for InFlight<'_> {
+        fn drop(&mut self) {
+            self.0.in_flight.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    impl Recorder {
+        /// A request is starting.
+        pub fn enter(&self) -> InFlight<'_> {
+            self.in_flight.fetch_add(1, Ordering::Relaxed);
+            InFlight(self)
+        }
+
+        /// A request ended. Only successful requests contribute latency: a
+        /// timeout's duration is the timeout, and a refusal's says nothing
+        /// about how fast the endpoint classifies.
+        pub fn record(&self, outcome: Outcome, body_bytes: usize, elapsed: Duration) {
+            self.counts[outcome.index()].fetch_add(1, Ordering::Relaxed);
+            if outcome != Outcome::Ok {
+                return;
+            }
+            let bucket = BUCKETS
+                .iter()
+                .position(|(_, under)| body_bytes < *under)
+                .unwrap_or(BUCKETS.len() - 1);
+            let mut latency = self.latency_ms.lock().unwrap_or_else(|p| p.into_inner());
+            let samples = &mut latency[bucket];
+            if samples.len() == SAMPLES_PER_BUCKET {
+                samples.pop_front();
+            }
+            samples.push_back(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
+        }
+
+        /// A count of outcome `outcome` so far.
+        pub fn count(&self, outcome: Outcome) -> u64 {
+            self.counts[outcome.index()].load(Ordering::Relaxed)
+        }
+
+        pub fn snapshot(&self) -> Snapshot {
+            let outcomes = Outcome::ALL
+                .iter()
+                .map(|outcome| (outcome.label(), self.count(*outcome)))
+                .collect();
+            let latency = self.latency_ms.lock().unwrap_or_else(|p| p.into_inner());
+            let latency_ms = BUCKETS
+                .iter()
+                .zip(latency.iter())
+                .map(|((label, _), samples)| (*label, BucketLatency::of(samples)))
+                .collect();
+            Snapshot {
+                outcomes,
+                in_flight: self.in_flight.load(Ordering::Relaxed),
+                latency_ms,
+            }
+        }
+    }
+
+    /// The process-wide recorder every adapter uses unless told otherwise.
+    pub fn global() -> Arc<Recorder> {
+        static GLOBAL: OnceLock<Arc<Recorder>> = OnceLock::new();
+        GLOBAL.get_or_init(|| Arc::new(Recorder::default())).clone()
+    }
+
+    #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+    pub struct Snapshot {
+        /// Requests by outcome, since the process started. Every attempt
+        /// counts, retries included.
+        pub outcomes: BTreeMap<&'static str, u64>,
+        /// Requests on the wire right now.
+        pub in_flight: usize,
+        /// Successful requests' latency by request-body size, over the last
+        /// few hundred in each bucket.
+        pub latency_ms: BTreeMap<&'static str, BucketLatency>,
+    }
+
+    #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+    pub struct BucketLatency {
+        pub samples: usize,
+        pub p50: Option<u64>,
+        pub p90: Option<u64>,
+        pub p99: Option<u64>,
+        pub max: Option<u64>,
+    }
+
+    impl BucketLatency {
+        fn of(samples: &VecDeque<u64>) -> Self {
+            let mut sorted: Vec<u64> = samples.iter().copied().collect();
+            sorted.sort_unstable();
+            let at = |fraction: f64| -> Option<u64> {
+                if sorted.is_empty() {
+                    return None;
+                }
+                let index = ((sorted.len() - 1) as f64 * fraction).round() as usize;
+                sorted.get(index).copied()
+            };
+            Self {
+                samples: sorted.len(),
+                p50: at(0.50),
+                p90: at(0.90),
+                p99: at(0.99),
+                max: sorted.last().copied(),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn statuses_map_to_their_kinds() {
+            for (status, outcome) in [
+                (401, Outcome::Auth),
+                (403, Outcome::Auth),
+                (402, Outcome::Quota),
+                (429, Outcome::Quota),
+                (413, Outcome::TooLarge),
+                (500, Outcome::ServerError),
+                (503, Outcome::ServerError),
+                (400, Outcome::OtherClientError),
+                (404, Outcome::OtherClientError),
+            ] {
+                assert_eq!(Outcome::from_status(status), outcome, "{status}");
+            }
+        }
+
+        #[test]
+        fn latency_is_bucketed_by_body_and_bounded() {
+            let recorder = Recorder::default();
+            for ms in 1..=300u64 {
+                recorder.record(Outcome::Ok, 100, Duration::from_millis(ms));
+            }
+            recorder.record(Outcome::Ok, 200 * 1024, Duration::from_millis(36_500));
+            recorder.record(Outcome::Timeout, 200 * 1024, Duration::from_secs(90));
+            let snapshot = recorder.snapshot();
+            let small = &snapshot.latency_ms["under_4_kib"];
+            assert_eq!(small.samples, SAMPLES_PER_BUCKET);
+            assert_eq!(small.max, Some(300));
+            assert_eq!(small.p50, Some(173));
+            let large = &snapshot.latency_ms["128_kib_and_over"];
+            assert_eq!(large.samples, 1, "a timeout contributes no latency");
+            assert_eq!(snapshot.outcomes["ok"], 301);
+            assert_eq!(snapshot.outcomes["timeout"], 1);
+            assert_eq!(snapshot.latency_ms["4_to_32_kib"].p50, None);
+        }
+
+        #[test]
+        fn in_flight_counts_until_dropped() {
+            let recorder = Recorder::default();
+            let first = recorder.enter();
+            let second = recorder.enter();
+            assert_eq!(recorder.snapshot().in_flight, 2);
+            drop(first);
+            drop(second);
+            assert_eq!(recorder.snapshot().in_flight, 0);
+        }
     }
 }
