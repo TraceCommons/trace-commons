@@ -292,6 +292,24 @@ fn decision_for(
         {
             UploadDecision::ApprovalStale { reason_label }
         }
+        // The witness's evidence did not verify. Not retried, and not a
+        // terminal refusal of the trace either: the approval is revoked and
+        // the session waits for a person, because a later accepted list can
+        // make the same witness valid. Nothing is sent meanwhile.
+        SubmitOutcome::Refused { reason_label, .. }
+            if crate::submit::witness_trust_hold(&reason_label).is_some() =>
+        {
+            let hold = crate::submit::witness_trust_hold(&reason_label)
+                .unwrap_or(crate::submit::REASON_WITNESS_NOT_TRUSTED);
+            tracing::info!(
+                reason = reason_label.as_str(),
+                hold,
+                "held a session for a person: the witness did not verify"
+            );
+            UploadDecision::ApprovalStale {
+                reason_label: hold.to_string(),
+            }
+        }
         SubmitOutcome::Submitted { submission_id, .. } => UploadDecision::Uploaded {
             submission_id,
             receipt,
@@ -792,6 +810,50 @@ impl Uploader<'_, '_> {
 
 #[cfg(test)]
 mod tests {
+    /// A witness whose evidence was fetched and did not verify is not
+    /// retried and not dropped: the approval is revoked and the session
+    /// waits for a person, under `witness-measurement-not-accepted` when a
+    /// new accepted list could cure it and `witness-not-trusted` otherwise.
+    /// Both are `REASONS_NEEDING_A_PERSON`.
+    #[test]
+    fn an_untrusted_witness_holds_the_session_for_a_person() {
+        use crate::submit::{REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED, REASON_WITNESS_NOT_TRUSTED};
+        for (label, hold) in [
+            (
+                crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+                REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED,
+            ),
+            ("witness_quote_unverified", REASON_WITNESS_NOT_TRUSTED),
+            ("witness_quote_replayed", REASON_WITNESS_NOT_TRUSTED),
+            ("witness_signer_unexpected", REASON_WITNESS_NOT_TRUSTED),
+            ("witness_certificate_unverified", REASON_WITNESS_NOT_TRUSTED),
+            ("witness_certificate_mismatched", REASON_WITNESS_NOT_TRUSTED),
+        ] {
+            let decision = super::decision_for(
+                crate::submit::SubmitOutcome::Refused {
+                    reason_label: label.to_string(),
+                    session_ref: "hash".to_string(),
+                    size_bytes: None,
+                    limit_bytes: None,
+                },
+                crate::submit::ReceiptShipped::NoCall,
+                None,
+                None,
+            );
+            assert_eq!(
+                decision,
+                UploadDecision::ApprovalStale {
+                    reason_label: hold.to_string()
+                },
+                "{label}"
+            );
+            assert!(
+                super::super::queue::REASONS_NEEDING_A_PERSON.contains(&hold),
+                "{hold}"
+            );
+        }
+    }
+
     use super::*;
 
     /// R5: a held session keeps the certified review it was held with, so a

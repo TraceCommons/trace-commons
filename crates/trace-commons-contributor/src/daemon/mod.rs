@@ -1824,25 +1824,38 @@ async fn drain_approved(
                     // Nothing was judged (#1358). The entry keeps its
                     // approval, and with it every guard a retry re-runs,
                     // until the budget is spent; then it ends `Failed`
-                    // under the same label, which reads as what it is.
+                    // under the same label, which reads as what it is --
+                    // or, for a witness that never answered, waits for a
+                    // person under that label (`REASONS_NEEDING_A_PERSON`),
+                    // so it is neither dropped nor re-approved unattended.
                     let observed_at = observed_at();
                     let (failures, run_started) =
                         q.record_transient_upload_failure(entry.entry_id, observed_at);
                     if transient_upload_budget_spent(failures, run_started, observed_at) {
                         q.record_attempt(entry.entry_id, None);
-                        q.set_state(
-                            entry.entry_id,
-                            queue::QueueState::Failed,
-                            Some(reason_label),
-                        );
+                        if kind == TransientUpload::Witness {
+                            q.revoke_approval(entry.entry_id, &reason_label);
+                        } else {
+                            q.set_state(
+                                entry.entry_id,
+                                queue::QueueState::Failed,
+                                Some(reason_label),
+                            );
+                        }
                     } else {
+                        // Ingest's `Retry-After` says nothing about the
+                        // witness, so it does not stretch a witness wait.
+                        let hint = match kind {
+                            TransientUpload::Witness => None,
+                            _ => ctx.last_unavailable_retry_after(),
+                        };
                         q.record_attempt(
                             entry.entry_id,
                             Some(
                                 observed_at
                                     + transient_upload_retry_wait(
                                         failures,
-                                        ctx.last_unavailable_retry_after(),
+                                        hint,
                                         crate::retry_jitter::random_u64(),
                                     ),
                             ),
@@ -1853,7 +1866,7 @@ async fn drain_approved(
                             Some(reason_label),
                         );
                     }
-                    if kind == TransientUpload::Outage {
+                    if matches!(kind, TransientUpload::Outage | TransientUpload::Witness) {
                         outage = true;
                     }
                 } else {
@@ -2121,6 +2134,12 @@ enum TransientUpload {
     /// `409 admission_in_progress`: another attempt at this one submission
     /// holds the lease. About this entry only, so the pass goes on.
     Lease,
+    /// The witness did not answer in time or could not be reached
+    /// (`submit::witness_failure_is_transient`). One witness serves every
+    /// session, so the pass stops at the first, as a `submit` batch does
+    /// (`submit::WITNESS_BATCH_STOP_LABELS`). A spent budget holds the entry
+    /// for a person rather than failing it.
+    Witness,
 }
 
 /// Whether a `Failed` label is one the daemon retries rather than ends
@@ -2137,6 +2156,9 @@ fn transient_upload_kind(reason_label: &str) -> Option<TransientUpload> {
         }
         other if AdmissionRefusal::from_label(other) == Some(AdmissionRefusal::InProgress) => {
             Some(TransientUpload::Lease)
+        }
+        other if crate::submit::witness_failure_is_transient(other) => {
+            Some(TransientUpload::Witness)
         }
         _ => None,
     }
@@ -5344,6 +5366,80 @@ mod tests {
                 .iter()
                 .all(|e| e.state == queue::QueueState::Uploaded)
         );
+    }
+
+    /// A witness that cannot be reached judged nothing. The session keeps
+    /// its approval and is tried again on the transient-upload backoff,
+    /// never refused, and the pass stops there: one witness serves every
+    /// session, so the next would meet the same wall.
+    #[tokio::test]
+    async fn an_unreachable_witness_is_retried_and_stops_the_pass() {
+        let h = TransientRetryHarness::build_with(true, true).await;
+        h.add_session(
+            "9f9f9f9f-9f9f-9f9f-9f9f-9f9f9f9f9f9f",
+            "tidy the lexer too, then mail alice.smith@example.org",
+        )
+        .await;
+        h.pass(TransientRetryHarness::now()).await;
+        let entries = h.entries();
+        assert!(
+            entries
+                .iter()
+                .all(|e| e.state == queue::QueueState::Approved),
+            "{entries:?}"
+        );
+        let tried: Vec<_> = entries
+            .iter()
+            .filter(|e| e.reason_label.as_deref() == Some("witness_unreachable"))
+            .collect();
+        assert_eq!(tried.len(), 1, "the pass stopped at the first: {entries:?}");
+        assert!(tried[0].retry_after.is_some());
+        assert_eq!(tried[0].transient_upload_failures, 1);
+    }
+
+    /// Once the transient-upload budget is spent, a witness that never
+    /// answered leaves the session waiting for a person under the same
+    /// label: not failed, not dropped, and not re-approved unattended.
+    #[tokio::test]
+    async fn a_witness_that_never_answers_is_held_for_a_person_after_the_budget() {
+        let h = TransientRetryHarness::build_with(true, true).await;
+        let mut now = TransientRetryHarness::now();
+        for _ in 0..(MAX_TRANSIENT_UPLOAD_FAILURES * 4) {
+            h.pass(now).await;
+            let entry = h.entry();
+            if entry.state != queue::QueueState::Approved {
+                break;
+            }
+            now = entry.retry_after.expect("a retry time");
+        }
+        let held = h.entry();
+        assert_eq!(held.state, queue::QueueState::Pending, "{held:?}");
+        assert_eq!(held.reason_label.as_deref(), Some("witness_unreachable"));
+        assert!(held.held_for_review(), "{held:?}");
+        assert!(held.transient_upload_failures >= MAX_TRANSIENT_UPLOAD_FAILURES);
+    }
+
+    #[test]
+    fn only_a_witness_whose_evidence_could_not_be_fetched_is_a_transient_upload() {
+        for fetch in [
+            "witness_timeout",
+            "witness_unreachable",
+            "witness_attestation_unavailable",
+            "witness_collateral_unavailable",
+        ] {
+            assert_eq!(
+                transient_upload_kind(fetch),
+                Some(TransientUpload::Witness),
+                "{fetch}"
+            );
+        }
+        for not_retried in [
+            "witness_quote_unverified",
+            "witness_signer_unexpected",
+            "witness_certificate_unverified",
+        ] {
+            assert_eq!(transient_upload_kind(not_retried), None, "{not_retried}");
+        }
     }
 
     /// The control for the 409s that are not a pause. A re-send of bytes

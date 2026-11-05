@@ -328,8 +328,11 @@ extension DaemonData {
         public var heldByManualScrubCheck: Bool { reasonLabel == ReasonLabel.scrubCheckManual }
         /// waiting for a person even in an armed folder, and left out of a
         /// folder approve: the daemon's `held_for_review`. Manual Scrub check
-        /// is not one of these.
-        public var heldForReview: Bool { reasonLabel.map(ReasonLabel.needingAPerson.contains) ?? false }
+        /// is not one of these. Only a pending entry, as in the daemon: an
+        /// approved one retrying under `witness_timeout` is not held.
+        public var heldForReview: Bool {
+            state == "pending" && (reasonLabel.map(ReasonLabel.needingAPerson.contains) ?? false)
+        }
     }
 
     /// `status.settlement_estimate`: what the traces on this Mac would settle
@@ -412,6 +415,12 @@ extension DaemonData {
         public static let tokenDistributionReviewRequired = "token-distribution-review-required"
         public static let witnessRiskReviewRequired = "witness-risk-review-required"
         public static let privacyFilterTransientExhausted = "privacy-filter-transient-exhausted"
+        public static let witnessTimeout = "witness_timeout"
+        public static let witnessUnreachable = "witness_unreachable"
+        public static let witnessAttestationUnavailable = "witness_attestation_unavailable"
+        public static let witnessCollateralUnavailable = "witness_collateral_unavailable"
+        public static let witnessNotTrusted = "witness-not-trusted"
+        public static let witnessMeasurementNotAccepted = "witness-measurement-not-accepted"
 
         /// `queue.rs` `REASONS_NEEDING_A_PERSON`, in its order.
         public static let needingAPerson: Set<String> = [
@@ -419,6 +428,12 @@ extension DaemonData {
             witnessRiskReviewRequired,
             privacyFilterTransientExhausted,
             secondLookReviewRequired,
+            witnessTimeout,
+            witnessUnreachable,
+            witnessAttestationUnavailable,
+            witnessCollateralUnavailable,
+            witnessNotTrusted,
+            witnessMeasurementNotAccepted,
         ]
     }
 
