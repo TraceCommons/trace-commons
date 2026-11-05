@@ -179,6 +179,159 @@ async fn wait_for_stop(
     }
 }
 
+/// The wait before a pass that panicked runs again.
+pub(crate) const PASS_FIRST_BACKOFF: Duration = Duration::from_secs(60);
+/// The longest wait before a pass that keeps panicking runs again.
+pub(crate) const PASS_MAX_BACKOFF: Duration = Duration::from_secs(60 * 60);
+
+/// Fixed event label for one pass's panic, for the warn/error log.
+pub(crate) const EVENT_PASS_PANICKED: &str = "daemon_pass_panicked";
+
+/// The payload a pass guard unwinds with when a pass's panic poisoned
+/// shared state; never a pass's own payload.
+const POISONED_PASS_PAYLOAD: &str = "a pass panicked over shared state";
+
+/// How one guarded pass went this tick.
+#[derive(Debug)]
+pub(crate) enum PassRun<T> {
+    /// It ran to completion with this result.
+    Ran(T),
+    /// It panicked this tick; it is skipped until its backoff ends.
+    Panicked,
+    /// It is waiting out the backoff of an earlier panic and did not run.
+    Skipped,
+}
+
+impl<T> PassRun<T> {
+    /// Whether the pass ran to completion this tick.
+    pub(crate) fn ran(&self) -> bool {
+        matches!(self, PassRun::Ran(_))
+    }
+}
+
+/// One pass's backoff state.
+struct PassGuard {
+    backoff: Backoff,
+    skip_until: Option<tokio::time::Instant>,
+}
+
+/// A panic guard and backoff per periodic pass, so one pass that panics on
+/// every run is skipped for a growing while instead of ending the tick, and
+/// the passes after it still run. Owned by the pass loop: a whole-loop
+/// restart starts every pass over from no backoff.
+pub(crate) struct PassGuards {
+    first: Duration,
+    max: Duration,
+    passes: std::collections::HashMap<&'static str, PassGuard>,
+    #[cfg(test)]
+    pub(crate) inject: std::collections::HashMap<&'static str, fn(&DaemonShared)>,
+    #[cfg(test)]
+    pub(crate) ran: Vec<&'static str>,
+}
+
+impl PassGuards {
+    pub(crate) fn new(first: Duration, max: Duration) -> Self {
+        Self {
+            first,
+            max,
+            passes: std::collections::HashMap::new(),
+            #[cfg(test)]
+            inject: std::collections::HashMap::new(),
+            #[cfg(test)]
+            ran: Vec::new(),
+        }
+    }
+
+    /// The daemon's schedule: 1 min doubling to 1 hour, reset by a run that
+    /// completes.
+    pub(crate) fn daemon() -> Self {
+        Self::new(PASS_FIRST_BACKOFF, PASS_MAX_BACKOFF)
+    }
+
+    /// How long `pass` is still held back by an earlier panic, if it is.
+    #[cfg(test)]
+    pub(crate) fn held_for(&self, pass: &str) -> Option<Duration> {
+        let until = self.passes.get(pass)?.skip_until?;
+        until.checked_duration_since(tokio::time::Instant::now())
+    }
+
+    /// Run `pass` under its guard: not at all while an earlier panic's
+    /// backoff lasts (`fut` is dropped unpolled), and with a panic caught
+    /// and logged by label, which starts or doubles that backoff. A run
+    /// that completes resets it.
+    ///
+    /// A panic that left one of `DaemonShared`'s data-bearing locks poisoned
+    /// is not absorbed here: it unwinds on out of the tick, with a fixed
+    /// payload, so the whole-loop rule in [`run_restarting`] stops the passes
+    /// rather than letting later passes read half-updated state.
+    pub(crate) async fn run<F: Future>(
+        &mut self,
+        shared: &DaemonShared,
+        pass: &'static str,
+        fut: F,
+    ) -> PassRun<F::Output> {
+        #[cfg(test)]
+        if let Some(inject) = self.inject.get(pass).copied() {
+            drop(fut);
+            return self
+                .guarded(shared, pass, async move {
+                    inject(shared);
+                    panic!("injected pass panic");
+                })
+                .await;
+        }
+        self.guarded(shared, pass, fut).await
+    }
+
+    async fn guarded<F: Future>(
+        &mut self,
+        shared: &DaemonShared,
+        pass: &'static str,
+        fut: F,
+    ) -> PassRun<F::Output> {
+        let (first, max) = (self.first, self.max);
+        let guard = self.passes.entry(pass).or_insert_with(|| PassGuard {
+            backoff: Backoff::new(first, max, Duration::MAX),
+            skip_until: None,
+        });
+        if guard
+            .skip_until
+            .is_some_and(|until| tokio::time::Instant::now() < until)
+        {
+            return PassRun::Skipped;
+        }
+        // Unwind safety: what the pass leaves behind is `DaemonShared`; its
+        // data-bearing locks are checked for poison below before anything
+        // else runs.
+        match crate::envelope::catch_unwind_future(fut).await {
+            Ok(output) => {
+                guard.backoff = Backoff::new(first, max, Duration::MAX);
+                guard.skip_until = None;
+                #[cfg(test)]
+                self.ran.push(pass);
+                PassRun::Ran(output)
+            }
+            Err(()) => {
+                if shared.poisoned_state_lock().is_some() {
+                    std::panic::resume_unwind(Box::new(POISONED_PASS_PAYLOAD));
+                }
+                let wait = guard.backoff.after_panic(Duration::ZERO);
+                guard.skip_until = Some(tokio::time::Instant::now() + wait);
+                tracing::warn!(pass = pass, "daemon pass panicked; skipping it for a while");
+                diagnostics_log::record_labels(
+                    tracing::Level::WARN,
+                    EVENT_PASS_PANICKED,
+                    &[
+                        ("pass", pass),
+                        ("retry_in_secs", &wait.as_secs().to_string()),
+                    ],
+                );
+                PassRun::Panicked
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,5 +578,109 @@ mod tests {
         let ended = tokio::time::timeout(Duration::from_secs(10), supervisor).await;
         assert!(matches!(ended, Ok(Ok(Ok(())))));
         embedded.close();
+    }
+
+    fn tick_shared(dir: &std::path::Path) -> Arc<DaemonShared> {
+        let shared = shared_in(dir);
+        // Nothing in these ticks may ask the network.
+        shared.settings.lock().unwrap().share_usage_data = false;
+        shared
+    }
+
+    /// A watch pass that panics on every run does not hold back upload or
+    /// the passes after it, in that tick or later ones, and its own backoff
+    /// grows: skipped while it lasts, panicking again once it ends.
+    #[tokio::test(start_paused = true)]
+    async fn an_always_panicking_watch_pass_does_not_stop_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = tick_shared(dir.path());
+        let mut state = super::super::TickState::starting(chrono::Utc::now());
+        state.guards.inject.insert("watch", |_| {});
+
+        super::super::run_tick(&shared, false, &mut state).await;
+        assert!(!state.guards.ran.contains(&"watch"));
+        for later in ["upload", "expire", "history", "time-driven-status"] {
+            assert!(state.guards.ran.contains(&later), "{later} ran this tick");
+        }
+        let first = state.guards.held_for("watch").expect("watch is held back");
+        assert!(first <= PASS_FIRST_BACKOFF && first > PASS_FIRST_BACKOFF / 2);
+
+        // The next tick, inside the backoff: watch skipped, upload runs.
+        state.guards.ran.clear();
+        super::super::run_tick(&shared, false, &mut state).await;
+        assert!(state.guards.ran.contains(&"upload"));
+        assert!(state.guards.held_for("watch").unwrap() <= first);
+
+        // After the backoff watch runs, panics again, and waits twice as long.
+        tokio::time::advance(PASS_FIRST_BACKOFF + Duration::from_secs(1)).await;
+        state.guards.ran.clear();
+        super::super::run_tick(&shared, false, &mut state).await;
+        assert!(state.guards.ran.contains(&"upload"));
+        let second = state.guards.held_for("watch").expect("held back again");
+        assert!(second > PASS_FIRST_BACKOFF, "the backoff grew: {second:?}");
+        assert!(second <= PASS_FIRST_BACKOFF * 2);
+    }
+
+    /// Fail closed: a tick whose account-admission or expiry pass panicked
+    /// does not upload, since the gate would read a stale answer or an
+    /// entry that should have aged out. The tick's other passes still run.
+    #[tokio::test(start_paused = true)]
+    async fn upload_is_withheld_in_a_tick_whose_gate_inputs_panicked() {
+        for prerequisite in ["account-admission", "expire"] {
+            let dir = tempfile::tempdir().unwrap();
+            let shared = tick_shared(dir.path());
+            let mut state = super::super::TickState::starting(chrono::Utc::now());
+            state.guards.inject.insert(prerequisite, |_| {});
+            super::super::run_tick(&shared, false, &mut state).await;
+            assert!(
+                !state.guards.ran.contains(&"upload"),
+                "upload withheld after {prerequisite} panicked"
+            );
+            assert!(state.guards.ran.contains(&"history"));
+            // Still withheld while that pass waits out its backoff.
+            state.guards.ran.clear();
+            super::super::run_tick(&shared, false, &mut state).await;
+            assert!(!state.guards.ran.contains(&"upload"));
+        }
+    }
+
+    /// Unchanged from the whole-loop rule: a pass whose panic poisons a data
+    /// lock is not absorbed by its guard. It ends the tick, no later pass in
+    /// it runs, and the passes stay stopped.
+    #[tokio::test(start_paused = true)]
+    async fn a_pass_that_poisons_shared_state_still_stops_the_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = tick_shared(dir.path());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&runs);
+        let uploads = Arc::new(AtomicUsize::new(0));
+        let uploaded = Arc::clone(&uploads);
+        let tick_shared = Arc::clone(&shared);
+        let mut signal = never();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3600),
+            run_restarting(&shared, &mut signal, Backoff::daemon(), move |_| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let shared = Arc::clone(&tick_shared);
+                let uploaded = Arc::clone(&uploaded);
+                Box::pin(async move {
+                    let mut state = super::super::TickState::starting(chrono::Utc::now());
+                    state.guards.inject.insert("expire", |shared| {
+                        let _queue = shared.queue.lock().unwrap();
+                        panic!("panics holding the queue lock");
+                    });
+                    super::super::run_tick(&shared, false, &mut state).await;
+                    if state.guards.ran.contains(&"upload") {
+                        uploaded.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Ok(())
+                })
+            }),
+        )
+        .await;
+        assert!(outcome.is_err(), "parked, not returned");
+        assert_eq!(shared.poisoned_state_lock(), Some("queue"));
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "never restarted");
+        assert_eq!(uploads.load(Ordering::SeqCst), 0, "no upload after it");
     }
 }
