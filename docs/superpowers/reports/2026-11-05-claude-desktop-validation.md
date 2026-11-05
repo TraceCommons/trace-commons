@@ -87,7 +87,7 @@ while accepted streams drain and the saved binding remains for re-enable.
 Account, credential and Private AI policy revocations still remove the binding.
 No live configuration was published.
 
-Local combined checks passed: contributor 5,540 passed/10 ignored; protocol 676
+Local combined checks passed: contributor 5,543 passed/10 ignored; protocol 676
 passed; FFI 295 passed; license boundary four passed; profile/publisher/real-CLI
 checks eight passed; three-crate lint; formatting; fresh FFI build followed by
 the full Swift suite (3,542 XCTest cases executed, nine skipped, zero failures;
@@ -109,3 +109,29 @@ The first hosted follow-up run caught old production profile digests in the two
 plist golden fixtures. Only those expected identity values were refreshed for
 the new capability/profile version. The exact macOS channel-plist check passed
 locally afterward; no bundle identity or feed behavior changed.
+
+## Windows follow-up repairs
+
+The first diagnostic run did not reproduce the three earlier route-start
+failures. It exposed a live-disable test connecting after its aggregate state
+check, plus two logout cleanup failures. Pending listener barriers now remain
+shared across all concurrent stops and cancelled reconfiguration; the live
+disable test waits the exact listener acknowledgement and retains a bounded
+old-capability HTTP probe plus fixture-call counter on unexpected TCP success.
+
+Ordinary credential cleanup tests now use production's 15-second OS budget,
+which includes thread scheduling and durable journal writes. Only deliberate
+blocked-store tests request a 500 ms budget for the operation under test. A
+600 ms successful-delete regression requires both secret and journal cleanup,
+while the blocked-delete test still requires the failed reference to remain
+journaled. Production's budget did not change.
+
+Isolated upstream Windows controls showed a Tokio connect could exceed a
+two-second observation window without succeeding; the actual embedded held-SSE
+barrier test passed, including unchanged upstream-call count. A separate TDD
+regression proved an accepted connection could dispatch after the shared stop
+flag; the bound-only shutdown guard now returns fixed 403 before accepting a
+new inference request. Existing streams and generic routing remain unchanged.
+The final upstream pin is `eeab5a61ae658842946f03c857f1f50345dd9487` (1,579
+all-feature tests passed, two ignored; lint and formatting passed). Hosted
+results for the final combined revision are recorded in the PR.

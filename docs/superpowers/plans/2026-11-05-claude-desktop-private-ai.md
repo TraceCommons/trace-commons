@@ -93,7 +93,7 @@ task, per AGENTS.md.
 - [x] Run final Rust checks/suites, FFI rebuild plus Swift tests and relevant copy/contract checks.
 - [x] Fresh review, fix material findings, update draft PRs and report remaining live/release evidence precisely.
 
-## Follow-up verification outcome
+## Desktop setup verification before feature flag integration
 
 The final IronWire revision is `e6b4fecd92d07a1cb8df63ee2abaf92b97464681`.
 Its all-feature suite passed with 1,575 tests passed and two ignored; lint,
@@ -124,13 +124,19 @@ CI, merge, release and deployment are separate states.
   Test opt-in, off/default/missing, pending starts, drain, expiry and re-enable.
 - [x] Gate native setup from the daemon snapshot; clear setup secrets and ignore
   late responses on disable. Test missing/off/on and in-flight disable.
-- [ ] Diagnose Windows failures from hosted logs; repair the cause and retain
-  lifecycle assertions. Verify with hosted Windows CI after publication.
-- [ ] Run final contributor/protocol/FFI tests, lint, formatting, profile scripts,
+- [x] Diagnose Windows failures from hosted logs; repair cleanup budgets and
+  shared listener-barrier ownership, retaining lifecycle assertions. Hosted
+  verification of the final combined revision is recorded in the PR.
+- [x] Run final contributor/protocol/FFI tests, lint, formatting, profile scripts,
   license boundary, fresh FFI build plus Swift suite; review, update and push PR.
 
-Local follow-up validation passed with 5,540 contributor tests, 676 protocol
+Local follow-up validation passed with 5,543 contributor tests, 676 protocol
 tests, 295 FFI tests, four license-boundary tests, eight profile/publisher/CLI
 checks and the full rebuilt native suite. Review's atomic publication finding
 was repaired with a controlled interleaving regression; all affected checks
 were rerun. Hosted Windows diagnosis/verification is tracked in the PR.
+
+Final Windows repair validation passed locally with 5,543 contributor tests,
+676 protocol tests, 295 FFI tests and the rebuilt full native suite, plus all
+profile, license, metadata and lint checks. Upstream's exact-head Windows
+lifecycle gate passed on `eeab5a61ae658842946f03c857f1f50345dd9487`.

@@ -324,7 +324,10 @@ pub(crate) async fn stop(shared: &DaemonShared, revoke: bool) {
             held.unavailable = shared.store.remove_daemon_file(FILE).is_err();
         }
         let route = held.route.take();
-        let starts = std::mem::take(&mut held.start_done);
+        // Pending close acknowledgements stay visible to every concurrent
+        // stop or replacement; a local waiter must never consume ownership.
+        held.start_done.retain(|done| !*done.borrow());
+        let starts = held.start_done.clone();
         let completion = route.as_ref().map(|_| {
             let (done, receiver) = tokio::sync::watch::channel(false);
             held.start_done.push(receiver);
@@ -786,7 +789,8 @@ async fn handle_inline(shared: &DaemonShared, request: &Request) -> Response {
                 };
                 held.pending_key_sha256 = Some(binding.key_sha256.clone());
                 let (done, receiver) = tokio::sync::watch::channel(false);
-                let prior_starts = std::mem::take(&mut held.start_done);
+                held.start_done.retain(|done| !*done.borrow());
+                let prior_starts = held.start_done.clone();
                 held.start_done.push(receiver);
                 (
                     binding,

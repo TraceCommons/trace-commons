@@ -431,6 +431,7 @@ async fn cancelled_configure_never_saves_or_restarts_a_connection() {
 pub(in crate::daemon) async fn held_stream_fixture() -> (
     String,
     Arc<tokio::sync::Notify>,
+    Arc<std::sync::atomic::AtomicUsize>,
     tokio::task::JoinHandle<()>,
 ) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -438,10 +439,13 @@ pub(in crate::daemon) async fn held_stream_fixture() -> (
     let base = format!("http://{}/v1", listener.local_addr().unwrap());
     let reached = Arc::new(tokio::sync::Notify::new());
     let notified = reached.clone();
+    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_completions = completions.clone();
     let server = tokio::spawn(async move {
         loop {
             let (mut socket, _) = listener.accept().await.unwrap();
             let reached = reached.clone();
+            let completions = completions.clone();
             tokio::spawn(async move {
                 let mut request = vec![];
                 let mut buffer = [0; 8192];
@@ -485,6 +489,9 @@ pub(in crate::daemon) async fn held_stream_fixture() -> (
                     );
                     socket.write_all(reply.as_bytes()).await.unwrap();
                 } else {
+                    if request.starts_with(b"POST /v1/chat/completions ") {
+                        completions.fetch_add(1, Ordering::AcqRel);
+                    }
                     let chunk = "data: {\"id\":\"hanging\",\"object\":\"chat.completion.chunk\",\"model\":\"fixture-main\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\n\n";
                     let reply = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n",
@@ -498,12 +505,12 @@ pub(in crate::daemon) async fn held_stream_fixture() -> (
             });
         }
     });
-    (base, notified, server)
+    (base, notified, observed_completions, server)
 }
 
 #[tokio::test]
 async fn shutdown_closes_listener_without_waiting_for_an_active_stream_to_drain() {
-    let (base, notified, server) = held_stream_fixture().await;
+    let (base, notified, _completions, server) = held_stream_fixture().await;
     let (_dir, store) = crate::config::tests_support::temp_store();
     let shared = shared(store.clone(), &base);
     let configured = configure(&shared).await;
@@ -781,9 +788,64 @@ async fn rollout_defaults_off_and_blocks_presets_without_removing_saved_metadata
     server.abort();
 }
 
+/// Diagnose only an already-connected post-close socket. No response text or
+/// request capability escapes this helper; the sole output is a fixed label and
+/// parsed numeric HTTP status. Keep this separate from the refusal assertion.
+async fn probe_old_capability_on_socket(
+    socket: &mut tokio::net::TcpStream,
+    project: &str,
+) -> (&'static str, u16) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let exchange = async {
+        let body = json!({"anthropic_version":"vertex-2023-10-16","max_tokens":16,"messages":[{"role":"user","content":"hello"}]}).to_string();
+        let request = format!(
+            "POST /vertex/projects/{project}/locations/global/publishers/anthropic/models/claude-sonnet-current:streamRawPredict HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        if socket.write_all(request.as_bytes()).await.is_err() {
+            return ("write-failed", 0);
+        }
+        let mut header = Vec::new();
+        let mut buffer = [0; 1024];
+        loop {
+            let read = match socket.read(&mut buffer).await {
+                Ok(0) => return ("closed-without-http", 0),
+                Ok(read) => read,
+                Err(_) => return ("read-failed", 0),
+            };
+            header.extend_from_slice(&buffer[..read]);
+            if let Some(end) = header.windows(2).position(|part| part == b"\r\n") {
+                let status = std::str::from_utf8(&header[..end]).ok().and_then(|line| {
+                    let mut fields = line.split_whitespace();
+                    let protocol = fields.next()?;
+                    if !matches!(protocol, "HTTP/1.0" | "HTTP/1.1") {
+                        return None;
+                    }
+                    fields
+                        .next()?
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|status| (100..=599).contains(status))
+                });
+                return match status {
+                    Some(status) if (200..300).contains(&status) => ("http-success", status),
+                    Some(status) => ("http-rejected", status),
+                    None => ("non-http-status", 0),
+                };
+            }
+            if header.len() >= 8192 {
+                return ("header-limit", 0);
+            }
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), exchange)
+        .await
+        .unwrap_or(("http-timeout", 0))
+}
+
 #[tokio::test]
 async fn rollout_live_disable_drains_and_reenable_preserves_the_same_capability() {
-    let (base, notified, server) = held_stream_fixture().await;
+    let (base, notified, completions, server) = held_stream_fixture().await;
     let (_dir, store) = crate::config::tests_support::temp_store();
     let shared = Arc::new(shared(store.clone(), &base));
     let configured = configure(&shared).await;
@@ -791,21 +853,20 @@ async fn rollout_live_disable_drains_and_reenable_preserves_the_same_capability(
     let response = reqwest::Client::new().post(format!("{}/projects/{}/locations/global/publishers/anthropic/models/claude-sonnet-current:streamRawPredict", env["ANTHROPIC_VERTEX_BASE_URL"], env["ANTHROPIC_VERTEX_PROJECT_ID"]))
         .json(&json!({"anthropic_version":"vertex-2023-10-16","max_tokens":16,"messages":[{"role":"user","content":"hello"}]})).send().await.unwrap();
     notified.notified().await;
+    assert_eq!(completions.load(Ordering::Acquire), 1);
     let lifecycle = tokio::spawn({
         let shared = shared.clone();
         async move { run_rollout(&shared).await }
     });
+    let mut stopped = listener_stopped(&shared);
+    assert!(!*stopped.borrow());
     set_rollout(&shared, false);
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            let stopped = {
-                let held = shared.claude_desktop.lock().unwrap();
-                held.route.is_none() && held.start_done.iter().all(|done| *done.borrow())
-            };
-            if stopped {
-                break;
-            }
-            tokio::task::yield_now().await;
+        while !*stopped.borrow_and_update() {
+            stopped
+                .changed()
+                .await
+                .expect("listener acknowledgement remains owned");
         }
     })
     .await
@@ -813,7 +874,29 @@ async fn rollout_live_disable_drains_and_reenable_preserves_the_same_capability(
     let address = env["ANTHROPIC_VERTEX_BASE_URL"]
         .trim_start_matches("http://")
         .trim_end_matches("/vertex");
-    assert!(tokio::net::TcpStream::connect(address).await.is_err());
+    let tcp_refused = match tokio::net::TcpStream::connect(address).await {
+        Err(_) => true,
+        Ok(mut socket) => {
+            let before = completions.load(Ordering::Acquire);
+            let (classification, status) =
+                probe_old_capability_on_socket(&mut socket, env["ANTHROPIC_VERTEX_PROJECT_ID"])
+                    .await;
+            let delta = completions.load(Ordering::Acquire).saturating_sub(before);
+            eprintln!(
+                "Desktop post-close diagnostic: {classification}; http_status={status}; fixture_call_delta={delta}"
+            );
+            false
+        }
+    };
+    assert_eq!(
+        completions.load(Ordering::Acquire),
+        1,
+        "closed Desktop route forwarded another completion"
+    );
+    assert!(
+        tcp_refused,
+        "Desktop listener accepted TCP after acknowledged closure"
+    );
     assert!(store.daemon_path(FILE).exists());
     assert!(
         call(&shared, "claude_desktop_preset", json!({}))
@@ -1030,4 +1113,66 @@ async fn final_publication_holds_rollout_guard_until_metadata_and_route_commit()
     stop(&shared, true).await;
     finish_drains(&shared).await;
     server.abort();
+}
+
+fn assert_pending<F: std::future::Future>(future: std::pin::Pin<&mut F>) {
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(future.poll(&mut context).is_pending());
+}
+
+#[tokio::test]
+async fn concurrent_stops_all_wait_for_the_same_pending_listener_acknowledgement() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = shared(store, "http://127.0.0.1:9/v1");
+    let (closed, pending) = tokio::sync::watch::channel(false);
+    shared
+        .claude_desktop
+        .lock()
+        .unwrap()
+        .start_done
+        .push(pending);
+    let mut first = Box::pin(stop(&shared, false));
+    let mut second = Box::pin(stop(&shared, true));
+    let mut third = Box::pin(stop(&shared, false));
+    assert_pending(first.as_mut());
+    assert_pending(second.as_mut());
+    assert_pending(third.as_mut());
+    assert_eq!(shared.claude_desktop.lock().unwrap().start_done.len(), 1);
+    closed.send_replace(true);
+    first.await;
+    second.await;
+    third.await;
+}
+
+#[tokio::test]
+async fn cancelled_reconfigure_preserves_prior_listener_barriers_for_every_stop() {
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = shared(store, "http://127.0.0.1:9/v1");
+    let (closed, pending) = tokio::sync::watch::channel(false);
+    shared
+        .claude_desktop
+        .lock()
+        .unwrap()
+        .start_done
+        .push(pending);
+    let request = Request {
+        id: 1,
+        method: "claude_desktop_configure".into(),
+        params: json!({"model":"fixture-main"}),
+    };
+    let mut configuring = Box::pin(handle_inline(&shared, &request));
+    assert_pending(configuring.as_mut());
+    // Cancelling the new start completes its own guard, never the older close.
+    drop(configuring);
+    let mut first = Box::pin(stop(&shared, false));
+    let mut second = Box::pin(stop(&shared, true));
+    let mut third = Box::pin(stop(&shared, false));
+    assert_pending(first.as_mut());
+    assert_pending(second.as_mut());
+    assert_pending(third.as_mut());
+    assert_eq!(shared.claude_desktop.lock().unwrap().start_done.len(), 1);
+    closed.send_replace(true);
+    first.await;
+    second.await;
+    third.await;
 }

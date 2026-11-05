@@ -128,3 +128,8 @@ setup and clears the preset; late requests cannot restore it or copy it.
 Stack PR #2000 on #2003 to reuse the exact runtime. Repair the four Windows
 failures on the same branch and verify on a hosted Windows runner. Keep the
 previous real Desktop promotion gates distinct from flag plumbing and CI.
+
+Shutdown revokes the bound capability at the shared stop flag, before listener
+closure, so an accepted idle/persistent connection cannot dispatch a new
+inference request while another response drains. All concurrent stops and
+replacement starts retain and wait for the same pending listener barriers.

@@ -870,7 +870,7 @@ keyring-core = "=1.0.0"
 # guessed count. Native Messages remains unchanged. The daemon owns the
 # durable Desktop connection and the native app exports its manual preset;
 # remaining promotion gates are recorded in the 2026-11-05 design/plan.
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "e6b4fecd92d07a1cb8df63ee2abaf92b97464681" }
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "eeab5a61ae658842946f03c857f1f50345dd9487" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -884,8 +884,8 @@ ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "e6b4fecd92
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "e6b4fecd92d07a1cb8df63ee2abaf92b97464681" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "e6b4fecd92d07a1cb8df63ee2abaf92b97464681" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "eeab5a61ae658842946f03c857f1f50345dd9487" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "eeab5a61ae658842946f03c857f1f50345dd9487" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"

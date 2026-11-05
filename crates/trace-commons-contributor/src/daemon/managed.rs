@@ -4827,7 +4827,7 @@ mod desktop_withdrawal_tests {
 
     #[tokio::test]
     async fn withdrawn_key_closes_desktop_before_a_managed_cli_stream_finishes() {
-        let (base, reached, server) = held_stream_fixture().await;
+        let (base, reached, _completions, server) = held_stream_fixture().await;
         let (_dir, store) = crate::config::tests_support::temp_store();
         let shared = Arc::new(shared(store.clone(), &base));
         let configured = crate::daemon::ipc::handle_request_async(

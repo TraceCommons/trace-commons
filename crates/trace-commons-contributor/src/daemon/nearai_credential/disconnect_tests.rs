@@ -646,10 +646,12 @@ async fn a_secret_read_that_blocks_is_bounded() {
     let api = CloudApi::for_test(&origin).unwrap();
     let started = std::time::Instant::now();
     let owned = store.clone();
-    let cleared = tokio::task::spawn_blocking(move || clear_store(&owned))
-        .await
-        .unwrap()
-        .unwrap();
+    let cleared = tokio::task::spawn_blocking(move || {
+        clear_store_with_os_budgets(&owned, Duration::from_millis(500), OS_BUDGET)
+    })
+    .await
+    .unwrap()
+    .unwrap();
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "{:?}",
@@ -783,6 +785,44 @@ async fn an_unsettled_pending_key_is_put_back_for_its_identity() {
     assert!(record.session_identity.is_none());
 }
 
+/// Normal logout uses the production OS budget even in a test build. A
+/// successful cleanup slower than a synthetic timeout test's budget must
+/// finish deleting the secret and its journal reference before logout proceeds.
+#[test]
+fn default_logout_cleanup_budget_allows_a_slow_but_successful_store() {
+    use crate::daemon::credential_store::{CredentialError, CredentialReference, SecretBackend};
+
+    struct SlowDelete(std::sync::Arc<dyn SecretBackend>);
+    impl SecretBackend for SlowDelete {
+        fn read(&self, r: &CredentialReference) -> Result<Vec<u8>, CredentialError> {
+            self.0.read(r)
+        }
+        fn write(&self, r: &CredentialReference, b: &[u8]) -> Result<(), CredentialError> {
+            self.0.write(r, b)
+        }
+        fn delete(&self, r: &CredentialReference) -> Result<(), CredentialError> {
+            // Longer than the former test-wide 500ms budget. Ordinary callers
+            // must use the production budget, including durable journal I/O.
+            std::thread::sleep(Duration::from_millis(600));
+            self.0.delete(r)
+        }
+    }
+
+    let (_dir, store) = temp_store();
+    let reference = seed(&store);
+    let inner = crate::daemon::cloud_credential_test_support::backend(store.dir()).unwrap();
+    crate::daemon::cloud_credential_test_support::install_backend(
+        &store,
+        std::sync::Arc::new(SlowDelete(inner)),
+    );
+
+    let cleared = clear_store(&store).unwrap();
+    cleared
+        .cleaned
+        .expect("successful cleanup must finish before logout wipes its journal");
+    assert_cleared(&store, &reference);
+}
+
 /// The OS deletes after the clear are bounded too: a keyring that blocks on
 /// delete leaves the entry journaled and answers `cleaned` as an error,
 /// which `logout` reports before wiping anything.
@@ -803,7 +843,7 @@ async fn an_os_delete_that_blocks_is_bounded() {
         }
     }
     let (_dir, store) = temp_store();
-    seed(&store);
+    let reference = seed(&store);
     let inner = crate::daemon::cloud_credential_test_support::backend(store.dir()).unwrap();
     crate::daemon::cloud_credential_test_support::install_backend(
         &store,
@@ -811,10 +851,12 @@ async fn an_os_delete_that_blocks_is_bounded() {
     );
     let started = std::time::Instant::now();
     let owned = store.clone();
-    let cleared = tokio::task::spawn_blocking(move || clear_store(&owned))
-        .await
-        .unwrap()
-        .unwrap();
+    let cleared = tokio::task::spawn_blocking(move || {
+        clear_store_with_os_budgets(&owned, OS_BUDGET, Duration::from_millis(500))
+    })
+    .await
+    .unwrap()
+    .unwrap();
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "{:?}",
@@ -824,9 +866,15 @@ async fn an_os_delete_that_blocks_is_bounded() {
         cleared.cleaned.unwrap_err().to_string(),
         "near_ai_credential_cleanup_required"
     );
-    // Cleared locally all the same: nothing names the key any more.
+    // Local authority is cleared; unsuccessful deletion stays journaled.
     let settings = DaemonSettings::load(&store).unwrap();
     assert!(settings.cloud_credentials.is_none());
+    let journal = crate::daemon::cloud_credential_lifecycle::Journal::read_named(
+        &store,
+        "cloud-credential-cleanup.json",
+    )
+    .unwrap();
+    assert!(journal.references.contains(&reference));
 }
 
 /// Unenroll whose enrollment removal fails (a malformed account record)
