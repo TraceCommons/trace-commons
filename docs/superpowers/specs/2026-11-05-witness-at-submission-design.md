@@ -1,8 +1,7 @@
 # Run the redaction witness at submission, not at preview
 
-Status: APPROVED design, except the four questions still open in 9.2.
-The owner approved Q1-Q8 and the section 3 strings on 2026-11-05 ("go
-with recs"). No code changes.
+Status: APPROVED design. The owner decided every question in section 9
+and approved the section 3 strings on 2026-11-05. No code changes.
 Date: 2026-11-05.
 
 Code references are to `origin/main` at c7997d6e0. Paths under
@@ -202,7 +201,7 @@ with the rest under Q5.
 | Row state, check unavailable (retrying) | "Privacy check unavailable. Trying again." | APPROVED 2026-11-05 |
 | Row state, `witness-changed-after-review` | "Changed by the privacy check. Review again to send." | APPROVED 2026-11-05 |
 | Second preview header | "This is what the privacy check returned." | APPROVED 2026-11-05 |
-| Row state, retries exhausted (section 6) | "Privacy check timed out. Try again later." | DRAFT, added with section 6 after Q5 was asked |
+| Row state, retries exhausted (section 6) | "Privacy check timed out. Try again later." | APPROVED 2026-11-05 (decision 12) |
 | Refusal, over the size ceiling (section 6) | existing `failed_too_large` sentence (`witness_copy.rs:805`) | existing, approved earlier |
 
 The disclosure at `witness_copy.rs:794` ("...before you approve a
@@ -437,7 +436,7 @@ submission is necessary but not sufficient for large sessions.
   own delay, `submit.rs:1856-1862`). Each retry sends the raw session
   again to the same pinned witness; the approval covers that, because it
   is the same send to the same verified recipient. After a bounded number
-  of consecutive timeouts on one entry (recommend 3), the entry leaves the
+  of consecutive timeouts on one entry (3), the entry leaves the
   retry loop with the row state "Privacy check timed out. Try again
   later." and a manual retry; it is not dropped and not refused.
 - **How the row states map to this.** "Running privacy check…" is shown
@@ -453,8 +452,8 @@ submission is necessary but not sufficient for large sessions.
   `witness-too-large` and the existing `failed_too_large` sentence
   (`witness_copy.rs:805`): "nothing left the machine". The ceiling is a
   configured byte figure derived from measured witness throughput and its
-  request limit, not a guess; until it is measured, recommend 512 KB of
-  raw contribution (Q9). The refusal is final for that trace under the
+  request limit, not a guess; until it is measured, 512 KB of
+  raw contribution (decision 9). The refusal is final for that trace under the
   current ceiling and is never retried, so an oversized trace cannot fail
   forever in the retry loop; it is re-offered automatically if the
   ceiling is raised. Splitting one session across several witness
@@ -509,11 +508,24 @@ every existing device would stop uploading.
   increasing `version`, an `issued_at`, and a list of accepted entries,
   each `{measurements, signing_address, not_before, not_after}`. The
   signing address is carried because a new image may also change it.
-- **Signed** with an Ed25519 key held offline by the operator, separate
-  from every service key. Its public key ships **in the client binary**
-  as a release constant, so trust does not rest on the HTTPS origin that
-  served the bootstrap pins. A client with no compiled-in key never
-  refreshes and behaves as today.
+- **Signed** by a Cloud KMS asymmetric key in the commons' GCP project,
+  algorithm `ec-sign-ed25519`, non-exportable (decision 11). Signing
+  permission (`roles/cloudkms.signerVerifier`, granted on that key only)
+  is held by the owner's account alone, and KMS audit logging is on, so
+  every signature is logged. There is no key file anywhere; GCP is the
+  recovery path. The key is separate from every service key, and no
+  service host can sign with it.
+- **Trust root.** The key's Ed25519 public key ships **in the client
+  binary** as a release constant (a small set, so rotation can overlap;
+  see below). Trust therefore does not rest on the HTTPS origin that
+  served the bootstrap pins, nor on GCP at verification time: the client
+  verifies an ordinary Ed25519 signature offline. A client with no
+  compiled-in key never refreshes and behaves as today.
+- **What is signed.** The document's canonical JSON bytes
+  (`trace-commons-protocol` `canonical_json::canonicalize`). The served
+  form carries the document plus a list of signatures, each naming the
+  key version that made it. A client accepts the document if any one
+  signature verifies against a compiled-in key.
 - **Refreshed** by the client at start-up and daily, and on a
   `witness_expected_measurement` refusal before reporting it. A document
   is accepted only if its signature verifies, its `version` is higher
@@ -523,16 +535,26 @@ every existing device would stop uploading.
 - **Rollover.** The operator publishes old + new, deploys the new image,
   then publishes new only (or lets the old entry's `not_after` pass).
   Clients accept any unexpired entry.
-- **Failure behaviour.** Fetch failure, bad signature, lower version, or
-  expired entries: keep the stored set, log a label. Never widen to
-  unpinned, never fall back to TOFU from the serving origin.
+- **Signing-key rotation.** Create a new KMS key version. Ship a client
+  release whose compiled-in set holds both the old and the new public key,
+  and publish lists signed by both versions meanwhile. Once that release
+  has reached devices, sign with the new version only, then disable and
+  later destroy the old version. A client never learns a signing key from
+  the network.
+- **Failure behaviour.** On the client: fetch failure, no verifying
+  signature, lower version, or only expired entries -- keep the stored
+  set, log a label. Never widen to unpinned, never fall back to TOFU from
+  the serving origin. If KMS is unavailable, or the owner's account
+  cannot sign, no new list is published; clients keep what they have and
+  the served list stays the last signed one. That only blocks a redeploy,
+  which must wait for a signed list carrying its measurement.
 - **Consent interaction.** `witness` is in the approval fingerprint
   (`preview.rs:2654-2660`) and in the grant-terms void rule (spec
   2026-09-23 R6), so a naive refresh re-asks every approval and voids
   every automatic grant. A refresh delivered by a verified list should
-  not: it is the same witness, re-measured, endorsed by the release key.
-  The accepted set therefore lives outside the fingerprinted field; a
-  change of URL still voids (Q10).
+  not: it is the same witness, re-measured, endorsed by the list key.
+  The accepted set therefore lives outside the fingerprinted field; only
+  a change of witness URL voids (decision 10).
 - **Ships before the redeploy**, in a client release that has reached the
   devices that matter. Devices that have not updated keep refusing,
   which is the existing fail-closed behaviour, not a new failure.
@@ -589,25 +611,29 @@ until devices can refresh their measurement pins (section 7).
 8. **`witness_preview_request` is retired for ordinary previews**, and
    kept for admission and token review.
 
-### 9.2 Still open
+### 9.2 Decided later the same day (owner, 2026-11-05)
 
-9. **Witness size ceiling until throughput is measured.** *Recommend
-   512 KB of raw contribution*, refused before anything is sent.
-10. **Should a signed measurement refresh leave approvals and automatic
-    grants intact?** *Recommend yes* for a new measurement at the same
-    URL; a URL change still voids and re-asks.
-11. **Who holds the list-signing key, and where?** *Recommend* an offline
-    key held by the owner, with a second holder for recovery; never on a
-    service host.
-12. **The new "Privacy check timed out. Try again later." row state**
-    (section 3), added after Q5 was asked. *Recommend as drafted.*
+9. **Witness size ceiling: 512 KB of raw contribution** until throughput
+   is measured, refused before anything is sent (section 6).
+10. **A signed measurement refresh keeps approvals and automatic
+    grants.** Only a change of witness URL voids and re-asks (section
+    7.2).
+11. **The accepted-measurements list is signed by a Cloud KMS key**, not
+    an offline key: `ec-sign-ed25519`, non-exportable, in the commons'
+    GCP project, signing limited to the owner's account on that key only,
+    KMS audit logging on, GCP as the recovery path. Clients compile in
+    its public key (section 7.2). This replaces the recommended offline
+    key with a second holder.
+12. **"Privacy check timed out. Try again later." is approved** (section
+    3).
 
 ## 10. Phased plan (sketch, no code)
 
 Order is forced by section 7: refresh, then redeploy, then the check.
 
-1. **Measurement refresh in clients (section 7.2).** Signed list format,
-   compiled-in release key, refresh at start-up, daily and on refusal,
+1. **Measurement refresh in clients (section 7.2).** KMS key created and
+   its signing grant scoped; signed list format, compiled-in public key
+   set, refresh at start-up, daily and on refusal,
    rollback protection, accepted set outside the approval fingerprint.
    Served route on the commons. Ship in a client release and let it
    reach devices.
