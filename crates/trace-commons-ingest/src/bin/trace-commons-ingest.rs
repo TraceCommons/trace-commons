@@ -53,6 +53,8 @@ mod token_bundles;
 mod upload_allowance;
 #[path = "trace_commons_ingest_internal/usage_region.rs"]
 mod usage_region;
+#[path = "trace_commons_ingest_internal/witness_accepted_list.rs"]
+mod witness_accepted_list;
 
 #[cfg(test)]
 use public_run::validate_public_run_provenance;
@@ -1877,6 +1879,11 @@ struct AppState {
     /// serves: from the operator's two settings, validated at boot, or
     /// empty when neither is set.
     first_run_estimate: Arc<trace_commons_protocol::first_run_estimate::FirstRunEstimate>,
+    /// Where the operator installed the signed witness accepted-measurements
+    /// list `GET /v1/public/witness-accepted-list` serves
+    /// (`TRACE_COMMONS_WITNESS_ACCEPTED_LIST_PATH`), read per request. `None`
+    /// when unset: the route answers 404.
+    witness_accepted_list_path: Option<Arc<std::path::PathBuf>>,
     /// What `POST /v1/public/first-run-copy` answers: the default lines, or
     /// the operator's dollar line, validated at boot.
     first_run_copy: Arc<first_run_copy::FirstRunCopyConfig>,
@@ -5359,6 +5366,7 @@ impl AppState {
             referral_config,
             referral_network_mark_key,
             first_run_estimate: credit_estimate::first_run_estimate_from_env()?,
+            witness_accepted_list_path: witness_accepted_list::path_from_env(),
             first_run_copy: first_run_copy::config_from_env()?,
             first_run_stats: db_connections.as_ref().map(|connections| {
                 connections.postgres.clone()
@@ -8934,6 +8942,14 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/public/first-run-estimate",
             get(credit_estimate::first_run_estimate_handler),
+        )
+        // Same reason: the signed witness accepted-measurements list is
+        // public, and a client reads it to learn a redeployed witness's
+        // measurement. Served verbatim from the operator's file; 404 when
+        // unset, 503 when the file cannot be served.
+        .route(
+            "/v1/public/witness-accepted-list",
+            get(witness_accepted_list::witness_accepted_list_handler),
         )
         // Same reason: whether this request may send anonymous usage
         // counts (US only). Keeps nothing about the address; false when it

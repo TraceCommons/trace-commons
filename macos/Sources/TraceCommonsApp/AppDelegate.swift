@@ -39,8 +39,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// and this line deliberately is not.
     var model: AppModel?
     private let quitCoordinator = QuitCoordinator()
+    private let terminationSignal = TerminationSignal()
+    /// Set by SIGTERM just before it asks to terminate, and consumed by the
+    /// next `applicationShouldTerminate`. Whoever sent the signal has
+    /// already decided, so there is no one to ask.
+    private var quitRequestedBySignal = false
     private var openedForInitialActivation = false
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // SIGTERM takes the same path as Quit, minus the confirmation:
+        // compute stop, then willTerminate's daemon stop. See
+        // `TerminationSignal`.
+        terminationSignal.install { [weak self] in
+            self?.quitRequestedBySignal = true
+            NSApp.terminate(nil)
+        }
+
         // The launch's open-application event is current here (not yet in
         // willFinishLaunching): a login-item launch says so in it, and
         // stays in the menu bar (`LaunchRouting.launchKind`).
@@ -80,12 +93,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// installed it for, which is not what "close the window" means anywhere
     /// else on this platform.
     ///
+    /// A quit asked for by SIGTERM skips the confirmation and nothing else:
+    /// a compute stop that does not confirm still keeps the app running.
+    ///
     /// Confirmation is synchronous; compute stop runs on its background queue.
     /// Every pending request gets a reply, including the outer deadline, which
     /// keeps the app running if worker shutdown has not returned safe evidence.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let bySignal = quitRequestedBySignal
+        quitRequestedBySignal = false
         let confirmed =
-            quitCoordinator.isStopping
+            bySignal
+            || quitCoordinator.isStopping
             || QuitConfirmation.granted(
                 prompt: model?.quitPrompt
                     ?? QuitPrompt.decode(fromJSON: TCCoreCopy.quitPromptWithoutWatcherJSON()),

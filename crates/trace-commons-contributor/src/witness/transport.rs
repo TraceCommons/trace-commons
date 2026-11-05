@@ -2122,6 +2122,7 @@ mod tests {
                     .unwrap()
                     .unwrap(),
             ],
+            accepted: Vec::new(),
         }
     }
 
@@ -2223,6 +2224,7 @@ mod tests {
         let unpinned = crate::witness::WitnessTrust {
             signing_address: address_of(&test_signer("witness")),
             measurements: Vec::new(),
+            accepted: Vec::new(),
         };
 
         let err = crate::witness::witness_session(
