@@ -102,11 +102,20 @@ something.
 3. **Submit (upload pass or CLI).** The uploader loads the approved
    preview. Today `submit_loaded` refuses a local pin under a configured
    witness with `witness_certificate_missing` (`submit.rs:1717-1727`).
-   That branch changes: verify the witness's measurement pin (unchanged,
+   That branch changes: rebuild the raw contribution from the transcript
+   with the entry's `approved_verdict` and `approved_correction` (today the
+   `Some(approved)` arm at `submit.rs:1694` builds no raw; only the `None`
+   arm does), verify the witness's measurement pin (unchanged,
    `submit.rs:1790-1815`), mint the claim (`ensure_claim`,
    `submit.rs:1196-1244`), send the raw session, verify the certificate
    (`parse_witnessed_envelope`), run the residual-secret sweep (unchanged),
    then run the subset check against the approved preview.
+   The approved preview is never itself uploaded under a witness; only
+   witnessed bytes are. So dropping the `witness_certificate_missing`
+   refusal loses no fail-closed property: the `approved_inputs`
+   fingerprint, which includes `witness` (`preview.rs:2654`), still proves
+   the preview was built under this witness configuration, and the check
+   runs only after that passes.
 4. **Pass.** Upload the witnessed bytes unchanged, with the certificate,
    exactly as a witness pin uploads today. The grant check is the
    existing `ensure_certified_grant` (`submit.rs:2813-2838`).
@@ -156,13 +165,14 @@ it takes the `submit.rs:1780-1880` arm. No change. `daemon preview
 ## 3. What the contributor sees (DRAFT strings)
 
 Owner rules: very short; no product name; never "daemon" or "passkey".
-These are drafts. The changed state is a new queue state, not a banner,
-but it is listed in Q5 for approval under copy-guide rule 9.
+These are drafts. There is deliberately no one-time confirm: the footer
+is on every preview and carries the disclosure, so nothing new interrupts
+(copy-guide rule 9). The changed state is a new row state, not a banner,
+but it is listed in Q5 for approval all the same.
 
 | Where | DRAFT |
 |---|---|
-| Preview footer, witnessed client | "When you submit, a privacy check may remove more." |
-| Approve confirm, first time | "Your full trace goes to a secure privacy check when you submit. It can remove more. It can't add anything." |
+| Preview footer, witnessed client | "When you submit, your full trace goes to a secure privacy check. It can only remove more." |
 | Row state while checking | "Running privacy check…" |
 | Row state, check unavailable (retrying) | "Privacy check unavailable. Trying again." |
 | Row state, `witness-changed-after-review` | "Changed by the privacy check. Review again to send." |
@@ -179,15 +189,24 @@ Ok | Err(label)`. Label-only errors, no content in logs.
 
 ### 4.1 Fields
 
-**Must match exactly:** `schema_version`, `submission_id` (already
-required, `submit.rs:1160`), `ironclaw` except dynamic-map text
-(4.2), `contributor`, `outcome` (a correction is never scrubbed, S5,
-`trace_contribution.rs:5023-5040`), `replay`, `conversation_id`,
-`source_session`; per event: count, order, `event_id`,
-`parent_event_id`, `event_type`, `timestamp`, `tool_name`,
-`tool_category`, `tool_call_id`, `latency_ms`, `token_counts`,
-`cost_usd`, `success`, `failure_modes`, `side_effect`; every non-string
-JSON leaf.
+**Must match exactly:** structure and every non-string leaf, plus every
+field in `TYPED_METADATA_FIELDS` (`trace_contribution.rs:5336`), which the
+classifier never sees. That covers `schema_version`, `submission_id`
+(already required, `submit.rs:1160`), the whole `contributor` object,
+`source_session`, and per event: count, order, `event_id`,
+`parent_event_id`, `event_type`, `timestamp`, `failure_modes`,
+`tool_category`, `latency_ms`, `token_counts`, `cost_usd`, `success`,
+`side_effect`.
+`outcome.human_correction` must match byte for byte (a correction is never
+scrubbed, S5, `trace_contribution.rs:5023-5040`).
+
+Every other string leaf anywhere in the envelope — `ironclaw`,
+`replay`, `tool_name`, `tool_call_id` and payloads included — follows the
+text rule
+in 4.2, because the witness runs the classifier over metadata too
+(`redact_metadata_value`, called at `trace_contribution.rs:4883`): a
+display handle or model name it flags gets `[REDACTED:...]` on the
+witness side only.
 
 **Ignored, rebuilt per run:** `trace_id` (fresh `Uuid::new_v4()` per
 build, `envelope.rs:835`), `created_at`, and all of `privacy`
@@ -276,6 +295,13 @@ limit.
   (`:7452`) orders payloads; the check compares parsed values, so key
   order does not matter.
 - **Body stripping** removes fields and is allowed explicitly (4.2).
+- **Tool-output compaction** (`redact_tool_specific_payload`,
+  `trace_contribution.rs:7486-7540`: replace with `[REDACTED:label]`,
+  sanitise a URL, summarise a collection) is a pure function of tool name,
+  field name and value. It runs on the same input on both sides and is
+  already present in the preview. Only a protocol version difference could
+  make it diverge, and that surfaces as a structural mismatch: fail closed,
+  second look.
 - The "chunk-capped tail" seen in scoring is a scorer property, not a
   redaction one; nothing in the redaction path caps a tail.
 
