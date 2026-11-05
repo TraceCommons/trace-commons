@@ -147,3 +147,12 @@ A live-gateway positive control proves that the same raw request produces HTTP
 200 and one fixture completion before stop. Local full contributor tests passed
 5,546/10 ignored, followed by focused final probe tests, lint and formatting.
 Production code was unchanged by this final assertion repair.
+
+The corrected live-disable scenario and probe controls passed on Windows. A
+second TCP-only assertion remained in the daemon-shutdown test; all five
+Desktop post-stop checks now use the same bounded request-refusal probe. They
+retain exact listener acknowledgements, fixture-call counts, the shutdown and
+withdrawal deadlines, saved metadata assertions and the held CLI stream. The
+final local targeted run passed all 26 Desktop tests plus the withdrawal test,
+with lint and formatting clean. No production code changed in these test-only
+consistency repairs. Final hosted results are recorded in the PR.

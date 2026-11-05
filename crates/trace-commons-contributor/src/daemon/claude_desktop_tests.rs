@@ -148,18 +148,21 @@ async fn persistent_binding_is_safe_observed_only_after_completion_and_revocable
     let again = call(&restarted, "claude_desktop_preset", json!({})).await;
     assert_eq!(first["environment"], again["environment"]);
     assert_eq!(again["state"], "observed");
+    let stopped = listener_stopped(&restarted);
     let disconnected = call(&restarted, "claude_desktop_disconnect", json!({})).await;
     assert_eq!(disconnected["state"], "disconnected");
     assert!(disconnected.get("environment").is_none());
+    assert!(*stopped.borrow());
+    let address = env["ANTHROPIC_VERTEX_BASE_URL"]
+        .trim_start_matches("http://")
+        .trim_end_matches("/vertex");
+    let (classification, status, refused) =
+        probe_old_capability(address, env["ANTHROPIC_VERTEX_PROJECT_ID"]).await;
     assert!(
-        tokio::net::TcpStream::connect(
-            env["ANTHROPIC_VERTEX_BASE_URL"]
-                .trim_start_matches("http://")
-                .trim_end_matches("/vertex")
-        )
-        .await
-        .is_err()
+        refused,
+        "disconnected Desktop capability: {classification}; http_status={status}"
     );
+    assert_eq!(calls.lock().unwrap().len(), 2);
     reconcile(&restarted).await;
     assert_eq!(
         call(&restarted, "claude_desktop_status", json!({})).await["state"],
@@ -510,7 +513,7 @@ pub(in crate::daemon) async fn held_stream_fixture() -> (
 
 #[tokio::test]
 async fn shutdown_closes_listener_without_waiting_for_an_active_stream_to_drain() {
-    let (base, notified, _completions, server) = held_stream_fixture().await;
+    let (base, notified, completions, server) = held_stream_fixture().await;
     let (_dir, store) = crate::config::tests_support::temp_store();
     let shared = shared(store.clone(), &base);
     let configured = configure(&shared).await;
@@ -530,6 +533,8 @@ async fn shutdown_closes_listener_without_waiting_for_an_active_stream_to_drain(
         call(&shared, "claude_desktop_status", json!({})).await["state"],
         "ready"
     );
+    assert_eq!(completions.load(Ordering::Acquire), 1);
+    let stopped = listener_stopped(&shared);
     shared
         .shutdown
         .store(true, std::sync::atomic::Ordering::Release);
@@ -539,7 +544,14 @@ async fn shutdown_closes_listener_without_waiting_for_an_active_stream_to_drain(
     )
     .await
     .expect("quit remains bounded while stream is active");
-    assert!(tokio::net::TcpStream::connect(address).await.is_err());
+    assert!(*stopped.borrow());
+    let (classification, status, refused) =
+        probe_old_capability(address, env["ANTHROPIC_VERTEX_PROJECT_ID"]).await;
+    assert!(
+        refused,
+        "shutdown Desktop capability: {classification}; http_status={status}"
+    );
+    assert_eq!(completions.load(Ordering::Acquire), 1);
     assert!(
         store.daemon_path(FILE).exists(),
         "normal restart retains binding"
@@ -788,6 +800,28 @@ async fn rollout_defaults_off_and_blocks_presets_without_removing_saved_metadata
     server.abort();
 }
 
+/// A late TCP handshake can complete on Windows after the listener is closed.
+/// Require bounded transport refusal or the revoked capability's explicit 403.
+/// The fixed classification and numeric status are safe to include in failures.
+pub(in crate::daemon) async fn probe_old_capability(
+    address: &str,
+    project: &str,
+) -> (&'static str, u16, bool) {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::TcpStream::connect(address),
+    )
+    .await
+    {
+        Err(_) => ("tcp-connect-timeout", 0, false),
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            ("tcp-refused", 0, true)
+        }
+        Ok(Err(error)) => probe_transport_failure(error.kind(), "tcp-connect-failed"),
+        Ok(Ok(mut socket)) => probe_old_capability_on_socket(&mut socket, project).await,
+    }
+}
+
 /// Probe the old capability on the same socket that connected after listener
 /// acknowledgement. Only a specific closed transport or HTTP 403 proves refusal;
 /// timeouts, malformed responses and other HTTP statuses remain failures.
@@ -907,23 +941,13 @@ async fn rollout_live_disable_drains_and_reenable_preserves_the_same_capability(
     let address = env["ANTHROPIC_VERTEX_BASE_URL"]
         .trim_start_matches("http://")
         .trim_end_matches("/vertex");
-    // Windows can complete a TCP handshake after close acknowledgement while
-    // the ensuing HTTP exchange is reset. The product contract is that the old
-    // capability cannot serve inference; require concrete refusal evidence.
-    let closed_or_revoked = match tokio::net::TcpStream::connect(address).await {
-        Err(_) => true,
-        Ok(mut socket) => {
-            let before = completions.load(Ordering::Acquire);
-            let (classification, status, refused) =
-                probe_old_capability_on_socket(&mut socket, env["ANTHROPIC_VERTEX_PROJECT_ID"])
-                    .await;
-            let delta = completions.load(Ordering::Acquire).saturating_sub(before);
-            eprintln!(
-                "Desktop post-close diagnostic: {classification}; http_status={status}; fixture_call_delta={delta}"
-            );
-            refused
-        }
-    };
+    let before = completions.load(Ordering::Acquire);
+    let (classification, status, closed_or_revoked) =
+        probe_old_capability(address, env["ANTHROPIC_VERTEX_PROJECT_ID"]).await;
+    let delta = completions.load(Ordering::Acquire).saturating_sub(before);
+    eprintln!(
+        "Desktop post-close diagnostic: {classification}; http_status={status}; fixture_call_delta={delta}"
+    );
     assert_eq!(
         completions.load(Ordering::Acquire),
         1,
@@ -1329,15 +1353,12 @@ async fn late_capability_probe_has_a_live_gateway_positive_control() {
     let stopped = listener_stopped(&shared);
     stop(&shared, false).await;
     assert!(*stopped.borrow());
-    let closed_or_revoked = match tokio::net::TcpStream::connect(address).await {
-        Err(_) => true,
-        Ok(mut socket) => {
-            probe_old_capability_on_socket(&mut socket, env["ANTHROPIC_VERTEX_PROJECT_ID"])
-                .await
-                .2
-        }
-    };
-    assert!(closed_or_revoked);
+    let (classification, status, closed_or_revoked) =
+        probe_old_capability(address, env["ANTHROPIC_VERTEX_PROJECT_ID"]).await;
+    assert!(
+        closed_or_revoked,
+        "stopped positive-control capability: {classification}; http_status={status}"
+    );
     assert_eq!(completions.load(Ordering::Acquire), 1);
     drop(live);
     finish_drains(&shared).await;

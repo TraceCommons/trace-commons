@@ -4822,12 +4822,12 @@ mod tests {
 #[cfg(test)]
 mod desktop_withdrawal_tests {
     use super::*;
-    use crate::daemon::claude_desktop::tests::{held_stream_fixture, shared};
+    use crate::daemon::claude_desktop::tests::{held_stream_fixture, probe_old_capability, shared};
     use std::sync::Arc;
 
     #[tokio::test]
     async fn withdrawn_key_closes_desktop_before_a_managed_cli_stream_finishes() {
-        let (base, reached, _completions, server) = held_stream_fixture().await;
+        let (base, reached, completions, server) = held_stream_fixture().await;
         let (_dir, store) = crate::config::tests_support::temp_store();
         let shared = Arc::new(shared(store.clone(), &base));
         let configured = crate::daemon::ipc::handle_request_async(
@@ -4849,6 +4849,11 @@ mod desktop_withdrawal_tests {
             .unwrap()
             .trim_start_matches("http://")
             .trim_end_matches("/vertex")
+            .to_owned();
+        let desktop_project = environment
+            .lines()
+            .find_map(|line| line.strip_prefix("ANTHROPIC_VERTEX_PROJECT_ID="))
+            .unwrap()
             .to_owned();
         assert!(
             tokio::net::TcpStream::connect(&desktop_address)
@@ -4883,6 +4888,7 @@ mod desktop_withdrawal_tests {
             .send().await.unwrap();
         assert!(held.status().is_success());
         reached.notified().await;
+        assert_eq!(completions.load(std::sync::atomic::Ordering::Acquire), 1);
         let mut desktop_stopped = crate::daemon::claude_desktop::tests::listener_stopped(&shared);
         shared.settings.lock().unwrap().near_ai_inference = None;
         let withdrawing = tokio::spawn({
@@ -4905,11 +4911,9 @@ mod desktop_withdrawal_tests {
         })
         .await;
         // Verify the network outcome too, while the CLI stream is still held.
-        let refused = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            tokio::net::TcpStream::connect(&desktop_address),
-        )
-        .await;
+        let (classification, status, refused) =
+            probe_old_capability(&desktop_address, &desktop_project).await;
+        let completion_count = completions.load(std::sync::atomic::Ordering::Acquire);
         let still_draining = !withdrawing.is_finished();
         let preset_revoked = !store
             .daemon_path(crate::config::DAEMON_CLAUDE_DESKTOP_CONNECTION_FILE)
@@ -4925,8 +4929,12 @@ mod desktop_withdrawal_tests {
             "Desktop withdrawal waited for the managed CLI stream"
         );
         assert!(
-            matches!(refused, Ok(Err(_))),
-            "the closed Desktop listener must refuse new connections"
+            refused,
+            "withdrawn Desktop capability: {classification}; http_status={status}"
+        );
+        assert_eq!(
+            completion_count, 1,
+            "withdrawn Desktop route forwarded a new completion"
         );
         assert!(
             still_draining,
