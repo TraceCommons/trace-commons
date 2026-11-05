@@ -7,3 +7,13 @@
 # Changes to it, or to the tests that pin it, need her review.
 /macos/Sources/TraceCommonsApp/Views/Monitor/HomeTracesHero.swift @poldsam
 /macos/Tests/TraceCommonsAppTests/HomeTracesHeroTests.swift @poldsam
+
+# Design and wording: the product owner reviews every change (owner
+# decision, 2026-11-05). These lines come after `*`, so for these paths
+# only her approval counts.
+/macos/Sources/TraceCommonsApp/Views/ @poldsam
+/macos/Sources/TCDesign/ @poldsam
+/design-tokens/ @poldsam
+/docs/design/ @poldsam
+/crates/**/*copy*.rs @poldsam
+/crates/**/copy.rs @poldsam
