@@ -520,6 +520,8 @@ pub struct MonitorUndoCopy {
     pub unavailable: &'static str,
     pub within: &'static str,
     pub may_have_started: &'static str,
+    pub held_for_review_one: &'static str,
+    pub held_for_review: &'static str,
     pub undoing: &'static str,
     /// See [`REDACTION_BEGUN`].
     pub redaction_begun: &'static str,
@@ -771,6 +773,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             unavailable: "Undo unavailable",
             within: "Undo within {seconds}s before upload starts.",
             may_have_started: "Upload may already have started.",
+            held_for_review_one: "1 trace needs individual review.",
+            held_for_review: "{count} traces need individual review.",
             undoing: "Undoing\u{2026}",
             redaction_begun: REDACTION_BEGUN,
         },

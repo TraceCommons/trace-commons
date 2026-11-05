@@ -34,7 +34,7 @@ final class RedactionBegunNoticeTests: XCTestCase {
     func testTheLineComesFromTheWordsItIsGiven() throws {
         let words = try JSONDecoder().decode(MonitorUndoCopy.self, from: Data("""
             {"approval_saved":"A","approved":"B","unavailable":"C","within":"D",
-             "may_have_started":"E","undoing":"F","redaction_begun":"Data redaction has begun."}
+             "may_have_started":"E","undoing":"F","held_for_review_one":"1 trace needs individual review.","held_for_review":"{count} traces need individual review.","redaction_begun":"Data redaction has begun."}
             """.utf8))
         let notice = RedactionBegunNotice()
         XCTAssertNil(notice.line(.background, witnessReview: true, words: words))

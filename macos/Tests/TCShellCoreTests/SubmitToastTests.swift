@@ -14,6 +14,20 @@ import XCTest
 /// Nothing here needs a display, a bundle or the FFI dylib, which is why the
 /// renderer lives in `TCShellCore`.
 final class SubmitToastTests: XCTestCase {
+    func testGroupOutcomeExplainsHeldTracesWithoutClaimingApproval() throws {
+        let words = try JSONDecoder().decode(MonitorUndoCopy.self, from: Data(#"{"approval_saved":"APPROVAL SAVED","approved":"{label} approved","unavailable":"Undo unavailable","within":"Undo within {seconds}s","may_have_started":"Upload may already have started.","undoing":"Undoing","redaction_begun":"Data redaction has begun.","held_for_review_one":"1 trace needs individual review.","held_for_review":"{count} traces need individual review."}"#.utf8))
+        for approved: UInt64 in [0, 2] {
+            let response = ApproveResponse(approved: approved, flagged: 0, redactions: [:], skipped: [],
+                                           holdSecs: 10, holdUntil: nil, excludedHeld: 3)
+            let toast = response.toast(undoCopy: words)
+            XCTAssertTrue(toast.line.hasSuffix("3 traces need individual review."))
+            XCTAssertEqual(toast.offerUndo, approved > 0)
+        }
+        let singular = ApproveResponse(approved: 0, flagged: 0, redactions: [:], skipped: [],
+                                       holdSecs: 10, holdUntil: nil, excludedHeld: 1)
+        XCTAssertTrue(singular.toast(undoCopy: words).line.hasSuffix("1 trace needs individual review."))
+    }
+
     func testTheSpecWorkedExamplesRenderExactly() {
         XCTAssertEqual(
             SubmitToast.render(approved: 1, redactions: 4, flagged: 1, skipped: []).line,

@@ -572,10 +572,11 @@ struct MonitorNotices: View {
             items.append(GlassPopoverItem(id: "folder-undo:" + folder.projectId) {
                 GlassPopoverNotice(
                     title: InspectorPrompts.title(folder.label, toast: folder.toast, words: words),
-                    tag: words.undo.approvalSaved, tagTone: .on,
+                    tag: folder.toast.offerUndo ? words.undo.approvalSaved : nil, tagTone: .on,
                     closeLabel: closeWord, onClose: { traces.dismissContributedFolder() }
                 ) {
-                    GlassNoticeMark(systemImage: "arrow.uturn.backward", tint: GlassStatus.on.color)
+                    GlassNoticeMark(systemImage: folder.toast.offerUndo ? "arrow.uturn.backward" : "info.circle",
+                                     tint: folder.toast.offerUndo ? GlassStatus.on.color : GlassColor.textSecondary)
                 } summary: {
                     UndoDetail(
                         toast: folder.toast, label: folder.label, at: folder.at, words: words,
@@ -596,11 +597,12 @@ struct MonitorNotices: View {
             items.append(GlassPopoverItem(id: "undo:" + contributed.entryId) {
                 GlassPopoverNotice(
                     title: InspectorPrompts.title(contributed.label, toast: contributed.toast, words: words),
-                    tag: words.undo.approvalSaved, tagTone: .on,
+                    tag: contributed.toast.offerUndo ? words.undo.approvalSaved : nil, tagTone: .on,
                     closeLabel: closeWord, onClose: { traces.dismissContributed() },
                     refusal: Self.refusal(traces, entryId: contributed.entryId)
                 ) {
-                    GlassNoticeMark(systemImage: "arrow.uturn.backward", tint: GlassStatus.on.color)
+                    GlassNoticeMark(systemImage: contributed.toast.offerUndo ? "arrow.uturn.backward" : "info.circle",
+                                     tint: contributed.toast.offerUndo ? GlassStatus.on.color : GlassColor.textSecondary)
                 } summary: {
                     UndoDetail(
                         toast: contributed.toast, label: contributed.label, at: contributed.at, words: words,
@@ -629,11 +631,12 @@ struct MonitorNotices: View {
         let words = traces.words
         return GlassPopoverItem(id: "approval-undo:" + undo.entryIDs.joined(separator: ",")) {
             GlassPopoverNotice(
-                title: undo.toastLine, tag: words?.undo.approvalSaved, tagTone: .on,
+                title: undo.toastLine, tag: undo.offerUndo ? words?.undo.approvalSaved : nil, tagTone: .on,
                 closeLabel: undo.offerUndo ? QueueLegacyWords.closeNoticeStillSends : QueueLegacyWords.closeNotice,
                 onClose: { model.dismissUndo() }
             ) {
-                GlassNoticeMark(systemImage: "arrow.uturn.backward", tint: GlassStatus.on.color)
+                GlassNoticeMark(systemImage: undo.offerUndo ? "arrow.uturn.backward" : "info.circle",
+                                     tint: undo.offerUndo ? GlassStatus.on.color : GlassColor.textSecondary)
             } summary: {
                 if let redactionBegun = undo.redactionBegun { Text(redactionBegun) }
                 if undo.offerUndo {

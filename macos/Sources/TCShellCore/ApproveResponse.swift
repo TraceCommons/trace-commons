@@ -121,6 +121,16 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         )
     }
 
+    /// Group exclusions are separate from skipped entries: those traces were
+    /// never selected, and must not disappear from the result explanation.
+    public func toast(undoCopy: MonitorUndoCopy?) -> SubmitToast {
+        let base = toast
+        guard let held = excludedHeld, held > 0, let undoCopy else { return base }
+        let template = held == 1 ? undoCopy.heldForReviewOne : undoCopy.heldForReview
+        let detail = template.replacingOccurrences(of: "{count}", with: String(held))
+        return SubmitToast(line: base.line + " " + detail, offerUndo: base.offerUndo)
+    }
+
     /// Which of `attempted` this response actually approved.
     ///
     /// `approve` reports a count, not a list -- so the entries it approved
