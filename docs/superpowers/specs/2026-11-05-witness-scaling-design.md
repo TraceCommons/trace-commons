@@ -41,7 +41,7 @@ no window-cache hits), measured:
 | 241 KB over 60 tool results | 140 | 190.2 s |
 
 Of the calls a 120-result contribution makes, 68% carry under 200 bytes of
-input (ids, argument strings, keys). Each still costs the fixed latency, so
+input (ids, argument strings, keys); these are what 2.3 batches. Each still costs the fixed latency, so
 call count, not bytes, sets the wall time. A real session with hundreds of
 events passes the witness's 300 s limit on call count alone.
 
@@ -53,8 +53,16 @@ NEAR AI adapter's four attempts against its 30 s per-call timeout, so the
 classifier call itself was failing from inside the CVM at that time. The
 earlier 241 KB success in 114.7 s fits the same pattern: three timeouts
 and then a success. Diagnosing that is an operations task, outside this
-spec. It does mean the live latency is not the model above, and the model
-needs re-measuring against the endpoint when it is healthy.
+spec. It does mean the live latency is not the model above.
+
+The owner then measured the endpoint directly from a Mac with a valid key
+(2026-11-05, synthetic text): 20 KiB in 11.3 s, 103 KiB in 14.8 s, 205 KiB
+in 36.5 s. That is several times slower than the September model, and the
+fixed cost per call (~11 s) is what grew most. At that rate each text leaf
+costs over 10 s on its own, which makes call count, the subject of 2.1 and
+2.3, matter even more than the stand-in tables below show. It also put a
+full window past the adapter's 30 s per-call timeout; #1973 sizes the
+timeout by body and lowers the window cap for that.
 
 ## 2. In-process changes (this branch)
 
@@ -77,7 +85,9 @@ replay asks about. The replay is the same call the sequential witness
 makes. Tests assert the same envelope bytes and the same private edit maps
 against the sequential pass, for the same classifier answers. A classifier
 failure is still a refusal: answers are taken in pipeline order and
-classification stops at the first error.
+classification stops at the first error. A text the replay asks about that
+has no answer is a refusal too (`witness_classify_answer_missing`), never a
+fresh call.
 
 The bound is per process (`TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT`,
 default 2), shared by every request, because every request spends the same
@@ -163,16 +173,46 @@ A 900 KB field: 200 in 133 s. The feature still lists
 the separate GTK and Tauri lockfiles; drop it together with a refresh of
 those lockfiles.
 
-### 2.3 Not done: batching small leaves
+### 2.3 Batching small leaves, off by default
 
-The endpoint accepts an array of inputs. Sending many small leaves in one
-request would cut the 68% of calls under 200 bytes to a handful. Batching
-was reverted in #468 because the endpoint then limited tokens per request;
-since 2026-09-03 the limit is the body size, and nobody has measured batching
-under it. That needs a low-volume synthetic measurement by someone holding a
-key, with no driver live on it, before any code depends on it. It would sit
-behind the same answer cache as 2.1, so output identity is tested the same
-way.
+The endpoint accepts an array of inputs. Batching was reverted in #468
+because the endpoint then limited tokens per request, and no one has
+measured it under today's body limit. So it is built and off:
+`TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS`, default 1.
+
+When it is on, `PrivacyFilterAdapter::redact_texts` packs texts that fit
+one window into input arrays, in order. Packing stops at the item limit and
+at the encoded-body cap, and each answer is mapped back by its index.
+
+- A text that is blank, too large for one window, or already cached goes
+  through `redact_text` exactly as it would alone.
+- A failed request, or a response whose entry count differs from its
+  input count, fails every text in that request.
+- A span that fails verification in any entry fails the whole batch.
+- A 413 halves the batch.
+
+The witness hands the adapter `preferred_batch_inputs()` texts per permit,
+so the in-flight bound counts requests, not texts. Tests show each batched
+answer equals the unbatched one, and that the witness's envelope and edit
+maps are unchanged with batching on.
+
+**Measured 2026-11-05, owner's key, synthetic text: correct, not faster.**
+An array returns one entry per input, and each entry's spans match the same
+input sent alone. But the endpoint appears to work through the array one
+item at a time:
+
+| inputs per request | time | per input |
+|---|---|---|
+| 1 (small, alone) | ~2.0 s | 2.0 s |
+| 4 | 6.41 s | 1.6 s |
+| 16 | 25.50 s | 1.6 s |
+| 64 | 87.00 s | 1.4 s |
+
+Batching saves about 0.5 s per input, and it lengthens each call, which
+works against the per-call timeout and the request budget. **It stays off**
+(owner decision). The levers left are parallel calls (the `overlap`
+probe), more keys or replicas, and not classifying leaves that cannot
+carry prose (#1977).
 
 ### 2.4 Known gap: the window cache stops filling
 
@@ -294,15 +334,126 @@ not throughput, unless each brings its own classifier capacity. This spec
 gives no dollar figures: Phala's CVM pricing and NEAR AI's per-call pricing
 are not in this repository, and nobody has measured them.
 
-## 5. Order of work
+## 5. Submit-then-poll witness API (design sketch, owner request 2026-11-05)
+
+Today a review is one long HTTP request: the client sends the raw session
+and waits, with nothing on the wire, for up to 540 s. That couples the
+review's length to every timeout between client and witness (the dstack
+gateway's 10-minute idle close is the binding one), and a dropped
+connection loses the work. Submit-then-poll decouples them.
+
+**Routes.**
+
+- `POST /v1/witness/jobs` takes the same body as `POST /v1/witness`, plus
+  the contributor nonce and a fetch-secret hash (below). It answers at
+  once with `202 {job_id, poll_after_secs, queue_position}`, or the
+  existing immediate busy when the queue is full or the queued wait would
+  pass the job's lifetime.
+- `GET /v1/witness/jobs/{job_id}` answers `pending` with the queue
+  position, `done` with the same response body and certificate headers
+  `POST /v1/witness` returns today, or a refusal label.
+- `DELETE /v1/witness/jobs/{job_id}` cancels.
+
+**The nonce still binds the result to this client's request.** The client
+sends its nonce in the POST, exactly as it sends it now. The witness binds
+it into the certificate it signs when the job finishes; nothing about the
+certificate format changes. Two requests do not weaken the binding: the
+certificate covers the nonce and the redacted bytes whichever response
+carries it. The attestation quote is still fetched separately by nonce
+(`/v1/attestation`), unchanged.
+
+**Who may fetch.** `job_id` is 128 random bits, but an id travels in URLs
+and logs, so it is not the only capability. The POST carries
+`sha256(fetch_secret)`, where the secret is 32 random bytes the client
+keeps. The GET and DELETE carry the secret itself, in a header. The witness
+compares hashes. A leaked job id alone fetches nothing.
+
+**Retention and one-time fetch.**
+
+- The raw session is held only until its job is processed, then dropped.
+- The redacted result is held until its first successful fetch, then
+  deleted.
+- An unfetched result expires after a short time (proposal: 15 minutes),
+  as does a job that never ran.
+- A fetch after deletion answers `gone`. The client then resubmits; the
+  approval covers the same send to the same witness.
+
+**Storage: memory only.** A raw session never touches disk, sealed or not.
+Sealed disk would let jobs survive a restart, at the cost of raw transcripts
+at rest inside the CVM and a deletion story for them. A restart losing
+in-flight jobs costs a resubmission, and the client already retries. Memory
+is bounded by the job limit times the 1 MiB body cap.
+
+**Limits and backpressure.**
+
+- A bounded job table (proposal: 64 jobs, about 400 MiB worst case at six
+  copies per job; or count result bytes and drop raw bytes as each job
+  runs).
+- Jobs run in arrival order through the same classify queue and permits as
+  today (#1973).
+- A POST is refused busy when the table is full or the estimated wait
+  would pass the job lifetime, so a job is never accepted only to expire.
+- `poll_after_secs` comes from queue position times the recent per-job
+  time, so clients do not poll hot.
+- `GET` is cheap and outside the job bound, like `/v1/attestation`.
+
+**Cancellation.** `DELETE` with the secret drops the raw session at once,
+if the job has not started. A running job is cancelled at its next
+classifier call: no further calls start, and in-flight ones are dropped.
+Its result is never produced.
+
+**Replicas.** The gateway routes the app-id URL to any instance (3.2), so a
+GET can land on a replica that does not hold the job. Two options:
+
+- **Instance-addressed polling (recommended).** The 202 names the
+  instance; the client polls `<instance_id>-8088.<gateway>`, which the
+  gateway routes to that instance directly. Every replica shares the
+  measurement and signing key (3.1), so the client's checks are unchanged.
+  If the instance is gone, the poll fails, and the client resubmits through
+  the app-id URL.
+- **Shared job state across replicas.** This would move raw sessions
+  between CVMs or into a store outside them. Not proposed.
+
+**Privacy.**
+
+- Raw text is held only in the CVM's memory, only until processed.
+- The redacted result is held only until fetched or expired.
+- Job ids and fetch secrets are never logged.
+- `/v1/diagnostics` gains label-only queue counts (jobs pending, running,
+  done-unfetched, expired), never ids.
+
+**Client changes.** The witness worker (#1967) submits, keeps the job id
+and secret in memory, and polls on `poll_after_secs` with jitter. Its
+existing transient-retry path covers `busy`, `gone` and an unreachable
+instance. The interactive preview can use the same path, so a person
+waiting sees "Running privacy check..." with no 540 s connection
+underneath. `POST /v1/witness` stays for older clients until they age out.
+
+**Open questions for the owner.**
+
+1. Result lifetime: is 15 minutes right? Longer helps a sleeping laptop
+   and costs memory.
+2. Memory only (lost on restart), or sealed disk for results only (never
+   raw)?
+3. Should the queue position be shown to the person, or kept internal?
+4. Instance-addressed polling ties a job to one CVM. Is losing jobs when
+   that CVM restarts acceptable?
+5. Keep `POST /v1/witness` indefinitely, or set a date to retire it?
+
+## 6. Order of work
 
 1. Find why the live witness's classifier calls failed on 2026-11-05 (CVM
    logs, `near-ai privacy classify failed` labels, key status).
 2. Re-measure the endpoint with synthetic text, at low volume, on a key no
-   driver is using: the body limit (binary search with escape-heavy text),
-   per-call latency, overlap tolerance at 2/4/8, and array batching.
-3. Set `TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT` and the body cap from
-   step 2. Ship with the redeploy the companion spec already sequences.
-4. Batching (2.3), if step 2 shows it holds.
+   driver is using (`scripts/witness-load/near_ai_probe.py`). Done
+   2026-11-05: `latency` (dense text ~3 s + 0.4 s/KiB; it set #1973's
+   64 KiB cap and 15 s + 600 ms/KiB timeout) and `batch` (correct, not
+   faster; see 2.3). Still to run: `limit`, and `overlap` (2 then 4
+   requests at once, 8 requests in all). Overlap is the measurement that
+   poisoned the key last time, so it runs last, deliberately, on its own key.
+3. Raise `TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT` above 2 only if
+   `overlap` shows 4 holds. Ship with the redeploy the companion spec
+   already sequences.
+4. Batching (2.3) stays off; the numbers say it does not pay.
 5. Replicas (section 3), when availability matters or when per-replica
    keys are available.
