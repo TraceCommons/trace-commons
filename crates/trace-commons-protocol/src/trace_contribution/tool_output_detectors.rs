@@ -509,7 +509,9 @@ fn in_host_context(input: &str, start: usize, lowered: &str) -> bool {
         return true;
     }
     let trimmed = line
-        .trim_end_matches([' ', '\t', '"', '\'', ':', '='])
+        // Any whitespace, not just ASCII blanks: a no-break space between
+        // `ssh` and the host is still the gap after the cue.
+        .trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ':' | '='))
         .to_ascii_lowercase();
     // The separator may be multi-byte (an arrow, a dash, an accented
     // letter), so the word starts after its full width, not one byte on.
@@ -1647,6 +1649,33 @@ mod tests {
         let (out, report) = redact("\u{2014} server: nas.internal");
         assert_eq!(out, "\u{2014} server: <PRIVATE_HOSTNAME_1>");
         assert_eq!(count(&report, PRIVATE_HOSTNAME), 1);
+        // A multi-byte separator directly before the cue.
+        let (out, report) = redact("\u{2192}ssh nas.local");
+        assert_eq!(out, "\u{2192}ssh <PRIVATE_HOSTNAME_1>");
+        assert_eq!(count(&report, PRIVATE_HOSTNAME), 1);
+    }
+
+    /// Unicode whitespace between the cue and the host is still a gap, not
+    /// a word: these were missed (left in the clear) once the slicing panic
+    /// was fixed, because only ASCII blanks were trimmed.
+    #[test]
+    fn unicode_whitespace_between_cue_and_host_still_redacts_the_host() {
+        for (input, expected) in [
+            ("ssh\u{a0}nas.local", "ssh\u{a0}<PRIVATE_HOSTNAME_1>"),
+            ("host:\u{a0}nas.local", "host:\u{a0}<PRIVATE_HOSTNAME_1>"),
+            (
+                "ping\u{3000}printer.lan",
+                "ping\u{3000}<PRIVATE_HOSTNAME_1>",
+            ),
+            (
+                "server =\u{2003}db.internal",
+                "server =\u{2003}<PRIVATE_HOSTNAME_1>",
+            ),
+        ] {
+            let (out, report) = redact(input);
+            assert_eq!(out, expected, "input {input:?}");
+            assert_eq!(count(&report, PRIVATE_HOSTNAME), 1, "input {input:?}");
+        }
     }
 
     #[test]
