@@ -1441,6 +1441,11 @@ pub struct MonitorHomeHistoryCopy {
     pub traces_hero_step_earn_detail: &'static str,
     pub traces_hero_step_use: &'static str,
     pub traces_hero_step_use_detail: &'static str,
+    /// Under the Traces hero while Train coding models is off (product
+    /// owner, 2026-11-05): `NO_CREDIT_REMINDER` from `consent_copy`, and
+    /// its one click to Settings.
+    pub no_credit_body: &'static str,
+    pub no_credit_open_settings: &'static str,
     /// Home's Credit earned tile: the account's whole total under this
     /// Mac's figure, `{amount}` the commons' lifetime points (product
     /// owner, 2026-10-29: show the account-wide total, and leave the change
@@ -1794,6 +1799,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             traces_hero_step_earn_detail: "Each accepted trace earns you credit",
             traces_hero_step_use: "Use Private AI",
             traces_hero_step_use_detail: "Spend your credit on Private AI",
+            no_credit_body: crate::consent_copy::NO_CREDIT_REMINDER,
+            no_credit_open_settings: "Open Settings",
             credit_account_total: "{amount} across your account",
             insights_today: "{total} tokens today",
             insights_teaser: "See where your agents spend their tokens.",

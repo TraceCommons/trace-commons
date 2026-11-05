@@ -78,7 +78,7 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertEqual(words.sectionAccount, "Account")
         XCTAssertEqual(words.privateAISignIn, "Sign in to NEAR AI to get started.")
         let home = try Self.text("Views/Monitor/HomeViews.swift")
-        let hero = try XCTUnwrap(home.range(of: "            tracesHero\n            privateAI\n"))
+        let hero = try XCTUnwrap(home.range(of: "            tracesHero\n            noCredit\n            privateAI\n"))
         let traces = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionTraces) {"))
         let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))
         let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount, accessory: accountSignIn) {"))
