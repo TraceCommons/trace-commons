@@ -2424,12 +2424,41 @@ impl LabelCollisions {
     /// The label [`disambiguated_label`] gives `project_key` against the
     /// known-key set this was built from.
     pub fn label(&self, project_key: &str, project_path: Option<&str>) -> String {
-        label_with_suffix_if(project_key, project_path, |folded| {
+        self.parts(project_key, project_path).label
+    }
+
+    /// [`Self::label`] with what it was built from: the collision group
+    /// when the label carries a suffix. `list_projects` sends the group so
+    /// a shell groups rows by the daemon's own collision test rather than
+    /// by parsing a label (a folder literally named `notes (beef)` has no
+    /// group).
+    pub fn parts(&self, project_key: &str, project_path: Option<&str>) -> LabelParts {
+        label_parts_if(project_key, project_path, |folded| {
             self.by_label
                 .get(folded)
                 .is_some_and(|(first, shared)| *shared || first != project_key)
         })
     }
+}
+
+/// A rendered label, and when it carries a suffix, the collision it
+/// resolves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LabelParts {
+    pub label: String,
+    pub collision: Option<LabelCollision>,
+}
+
+/// Why a label carries a suffix: the projects sharing `group` all do.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct LabelCollision {
+    /// The folded basename the collision test compared. Every project in
+    /// the group has the same one; it says no more than the label does.
+    pub group: String,
+    /// The label without its suffix, from the unfolded path.
+    pub base_label: String,
+    /// The four hex digits from `sha256(key)`.
+    pub suffix: String,
 }
 
 /// The rendering both [`disambiguated_label`] and [`LabelCollisions`] share:
@@ -2440,19 +2469,40 @@ fn label_with_suffix_if(
     project_path: Option<&str>,
     collides: impl FnOnce(&str) -> bool,
 ) -> String {
+    label_parts_if(project_key, project_path, collides).label
+}
+
+fn label_parts_if(
+    project_key: &str,
+    project_path: Option<&str>,
+    collides: impl FnOnce(&str) -> bool,
+) -> LabelParts {
     let label = project_label_for(project_path.unwrap_or(project_key));
     if project_key == UNKNOWN_PROJECT_KEY {
-        return label;
+        return LabelParts {
+            label,
+            collision: None,
+        };
     }
 
     let folded = project_label_for(project_key);
     if !collides(&folded) {
-        return label;
+        return LabelParts {
+            label,
+            collision: None,
+        };
     }
 
     let digest = Sha256::digest(project_key.as_bytes());
     let suffix = hex_prefix(&digest, 4);
-    format!("{label} ({suffix})")
+    LabelParts {
+        label: format!("{label} ({suffix})"),
+        collision: Some(LabelCollision {
+            group: folded,
+            base_label: label,
+            suffix,
+        }),
+    }
 }
 
 fn hex_prefix(bytes: &[u8], chars: usize) -> String {
@@ -2511,6 +2561,45 @@ mod tests {
         assert_eq!(labels.label("/tmp/lc-a/solo", None), "solo");
         assert!(labels.label("/tmp/lc-c/twice", None).starts_with("twice ("));
         assert!(labels.label("/tmp/lc-e/solo", None).starts_with("solo ("));
+    }
+
+    /// A suffixed label reports its collision: the folded basename the
+    /// test compared, the unfolded base and the suffix, so a shell groups
+    /// by the daemon's own rule. A label with no suffix, and the unknown
+    /// bucket, report none, and a folder whose own name ends in something
+    /// suffix-shaped is not mistaken for a collision.
+    #[test]
+    fn label_parts_report_the_collision_the_suffix_resolves() {
+        let known: Vec<String> = [
+            "/tmp/lp-a/app",
+            "/tmp/lp-b/app",
+            "/tmp/lp-a/notes (beef)",
+            "/tmp/lp-a/solo",
+            UNKNOWN_PROJECT_KEY,
+        ]
+        .iter()
+        .map(|k| k.to_string())
+        .collect();
+        let labels = LabelCollisions::new(&known);
+        let a = labels.parts("/tmp/lp-a/app", Some("/tmp/lp-a/App"));
+        let b = labels.parts("/tmp/lp-b/app", Some("/tmp/lp-b/APP"));
+        let (ca, cb) = (a.collision.unwrap(), b.collision.unwrap());
+        assert_eq!(ca.group, cb.group, "one group for both spellings");
+        assert_eq!(ca.group, project_label_for("/tmp/lp-a/app"));
+        assert_eq!(ca.base_label, "App");
+        assert_eq!(cb.base_label, "APP");
+        assert_eq!(a.label, format!("App ({})", ca.suffix));
+        assert_eq!(ca.suffix.len(), 4);
+        assert_ne!(ca.suffix, cb.suffix);
+        for key in [
+            "/tmp/lp-a/notes (beef)",
+            "/tmp/lp-a/solo",
+            UNKNOWN_PROJECT_KEY,
+        ] {
+            let parts = labels.parts(key, None);
+            assert_eq!(parts.collision, None, "{key}");
+            assert_eq!(parts.label, labels.label(key, None), "{key}");
+        }
     }
 
     #[test]

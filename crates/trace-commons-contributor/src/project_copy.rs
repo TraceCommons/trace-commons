@@ -216,6 +216,88 @@ pub fn ignore_project_copy(project: &str, pending: usize) -> IgnoreProjectCopy {
     }
 }
 
+/// A bulk or group change's projects as one name (#1952, #1954): the
+/// project's own label when the change reaches one, else how many. The
+/// count form is `shell_words_copy::ProjectsManagerWords::projects_count`,
+/// approved by the owner 2026-11-04.
+#[must_use]
+pub fn bulk_projects_name(labels: &[&str]) -> String {
+    match labels {
+        [one] => (*one).to_string(),
+        _ => format!("{} projects", labels.len()),
+    }
+}
+
+/// The line a bulk or group change that turns off Automatic says first
+/// (owner decision 2026-11-04 on #1952: such a change always asks, with
+/// the count). DRAFT, NEEDS APPROVAL.
+#[must_use]
+pub fn bulk_turns_off_automatic(count: usize) -> String {
+    if count == 1 {
+        "This turns off Automatic for 1 project.".to_string()
+    } else {
+        format!("This turns off Automatic for {count} projects.")
+    }
+}
+
+/// The confirmation a bulk or group mode change asks before it runs:
+/// every word, composed here so no shell assembles a consent sentence.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct BulkModeConfirmation {
+    pub title: String,
+    pub body: String,
+    /// The confirm button: the mode's own name.
+    pub button: &'static str,
+    /// [`KEEP_PROJECT`].
+    pub keep: &'static str,
+    /// The confirm button's help, [`IGNORE_PROJECT_BODY_TOOLTIP`], when a
+    /// Never removes waiting traces; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub help: Option<&'static str>,
+    /// Whether the confirm is drawn as destructive: a Never.
+    pub destructive: bool,
+}
+
+/// The words for setting the projects `name`d to Never (`never`) or Ask,
+/// turning off Automatic on `automatic_off` of them and, for a Never,
+/// removing `pending` waiting traces.
+///
+/// The Never title is [`ignore_project_title`]'s (approved); the Ask title
+/// has the same shape and is DRAFT, NEEDS APPROVAL. The pending sentence
+/// is [`ignore_project_body`]'s (approved), said only when traces wait.
+#[must_use]
+pub fn bulk_mode_confirmation(
+    name: &str,
+    never: bool,
+    automatic_off: usize,
+    pending: usize,
+) -> BulkModeConfirmation {
+    let mut lines = Vec::new();
+    if automatic_off > 0 {
+        lines.push(bulk_turns_off_automatic(automatic_off));
+    }
+    let removes = never && pending > 0;
+    if removes {
+        lines.push(ignore_project_body(pending));
+    }
+    BulkModeConfirmation {
+        title: if never {
+            ignore_project_title(name)
+        } else {
+            format!("Set {name} to {CONTRIBUTION_MODE_ASK_LABEL}?")
+        },
+        body: lines.join(" "),
+        button: if never {
+            CONTRIBUTION_MODE_NEVER_LABEL
+        } else {
+            CONTRIBUTION_MODE_ASK_LABEL
+        },
+        keep: KEEP_PROJECT,
+        help: removes.then_some(IGNORE_PROJECT_BODY_TOOLTIP),
+        destructive: never,
+    }
+}
+
 /// Every word of the arming offer and the arming confirmation, for one
 /// project the contributor has contributed from `count` times.
 ///
