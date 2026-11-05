@@ -2123,6 +2123,7 @@ fn new_entry(
         },
         reason_label: returned_from_keep
             .then(|| super::queue::REASON_RETURNED_FROM_KEEP.to_string()),
+        refused_on_version: None,
         attempts: 0,
         retry_after: None,
         transient_redaction_failures: 0,

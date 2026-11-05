@@ -1575,6 +1575,9 @@ async fn drain_approved(
                     queue::QueueState::Refused,
                     Some(reason_label),
                 );
+                // A no-op unless the refusal was a caught panic, which a
+                // newer build offers again.
+                q.note_refusal_version(entry.entry_id, env!("CARGO_PKG_VERSION"));
             }
             uploader::UploadDecision::ApprovalStale { reason_label } => {
                 // The same re-offer path the consent-scope guard above

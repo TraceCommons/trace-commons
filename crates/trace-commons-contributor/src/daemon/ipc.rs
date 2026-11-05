@@ -1520,6 +1520,11 @@ impl DaemonShared {
         if queue.release_in_flight() {
             queue.save(&store)?;
         }
+        // A trace refused because redacting it panicked was refused for a
+        // defect in the build that ran it. A newer build offers it again.
+        if queue.reoffer_panicked_refusals(env!("CARGO_PKG_VERSION")) {
+            queue.save(&store)?;
+        }
         // One-time upgrade: retire entries that stand for a single subagent
         // transcript.
         //

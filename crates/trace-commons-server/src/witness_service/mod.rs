@@ -277,6 +277,50 @@ impl std::fmt::Debug for WitnessError {
 #[error("unavailable")]
 pub struct SeamUnavailable;
 
+/// Polls a redaction future and turns a panic inside it into
+/// [`SeamUnavailable`], so [`witness`] refuses the request.
+///
+/// Without it a panic unwinds out of the request's task: the connection
+/// drops, the client reads that as the witness being down, and asks again
+/// with the same transcript on its next pass, forever. The panic payload is
+/// never read; it can carry transcript text.
+///
+/// Asserting unwind safety is sound because the unwound frames hold only the
+/// request's own input and a shared `&DeterministicTraceRedactor`, whose one
+/// lock (the NEAR AI filter's `window_cache`) recovers from poisoning with
+/// `into_inner`.
+struct RefuseOnPanic<F: std::future::Future> {
+    inner: std::pin::Pin<Box<F>>,
+}
+
+impl<T, E, F: std::future::Future<Output = Result<T, E>>> std::future::Future for RefuseOnPanic<F> {
+    type Output = Result<T, SeamUnavailable>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.inner.as_mut().poll(cx)
+        })) {
+            Ok(std::task::Poll::Ready(result)) => {
+                std::task::Poll::Ready(result.map_err(|_| SeamUnavailable))
+            }
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(_) => std::task::Poll::Ready(Err(SeamUnavailable)),
+        }
+    }
+}
+
+/// See [`RefuseOnPanic`]. Any `Err` from the future is a refusal too.
+fn refuse_on_panic<T, E, F: std::future::Future<Output = Result<T, E>>>(
+    future: F,
+) -> RefuseOnPanic<F> {
+    RefuseOnPanic {
+        inner: Box::pin(future),
+    }
+}
+
 /// What a redaction pass produced.
 ///
 /// The report travels with the text because the verdict is derived from it.
@@ -342,7 +386,11 @@ impl DeterministicRedaction {
 #[async_trait]
 impl TranscriptRedactor for DeterministicRedaction {
     async fn redact(&self, raw: &str) -> Result<RedactedTranscript, SeamUnavailable> {
-        let (redacted, report) = self.redactor.redact_text(raw);
+        // A panic is a refusal; see `RefuseOnPanic`.
+        let (redacted, report) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.redactor.redact_text(raw)
+        }))
+        .map_err(|_| SeamUnavailable)?;
         Ok(RedactedTranscript {
             redacted,
             report,
@@ -419,11 +467,7 @@ impl TranscriptRedactor for FullPipelineRedaction {
         // as `Err` from the protocol crate and becomes a refusal here. It is
         // never downgraded to the deterministic result, which would be a
         // certificate claiming coverage the pass did not have.
-        let result = self
-            .redactor
-            .redact_text_through_prose_filter(raw)
-            .await
-            .map_err(|_| SeamUnavailable)?;
+        let result = refuse_on_panic(self.redactor.redact_text_through_prose_filter(raw)).await?;
         Ok(RedactedTranscript {
             redacted: result.redacted,
             report: result.report,
@@ -855,11 +899,7 @@ impl ContributionRedactor for PipelineContributionRedaction {
         ),
         SeamUnavailable,
     > {
-        let (envelope, maps) = self
-            .redactor
-            .redact_trace_with_edits(raw)
-            .await
-            .map_err(|_| SeamUnavailable)?;
+        let (envelope, maps) = refuse_on_panic(self.redactor.redact_trace_with_edits(raw)).await?;
         Ok((
             RedactedContribution {
                 envelope,
@@ -872,11 +912,7 @@ impl ContributionRedactor for PipelineContributionRedaction {
         &self,
         raw: RawTraceContribution,
     ) -> Result<RedactedContribution, SeamUnavailable> {
-        let envelope = self
-            .redactor
-            .redact_trace(raw)
-            .await
-            .map_err(|_| SeamUnavailable)?;
+        let envelope = refuse_on_panic(self.redactor.redact_trace(raw)).await?;
         Ok(RedactedContribution {
             envelope,
             policy_version: self.policy_version.clone(),
@@ -1390,6 +1426,56 @@ mod tests {
             .expect_err("a failed full pipeline must not issue a certificate");
             assert_eq!(error, WitnessError::RedactionFailed);
         }
+    }
+
+    /// A classifier backend that panics, standing in for any panic inside
+    /// the redaction pipeline (a detector slicing inside a character was
+    /// one).
+    struct PanickingFilter;
+
+    #[async_trait]
+    impl trace_commons_protocol::trace_contribution::PrivacyFilterAdapter for PanickingFilter {
+        async fn redact_text(
+            &self,
+            _text: &str,
+        ) -> Result<
+            Option<trace_commons_protocol::trace_contribution::SafePrivacyFilterRedaction>,
+            trace_commons_protocol::trace_contribution::TraceContributionError,
+        > {
+            panic!("classifier panicked");
+        }
+    }
+
+    /// A panic while redacting is a refusal for that request, never a
+    /// dropped connection the client reads as an outage and retries, and
+    /// never a certificate.
+    #[tokio::test]
+    async fn a_panicking_pipeline_refuses_rather_than_unwinding() {
+        let backend = PrivacyFilterBackendTag::SelfHosted;
+        let transcript = FullPipelineRedaction::new(Vec::new(), Arc::new(PanickingFilter), backend);
+        assert!(transcript.redact("deployed the build").await.is_err());
+        let error = witness(
+            request("Alice Brannigan deployed the build", false),
+            &transcript,
+            &TestSigner::new("panic-refusal"),
+            &TestEnclave,
+        )
+        .await
+        .expect_err("a panicking pipeline must not issue a certificate");
+        assert_eq!(error, WitnessError::RedactionFailed);
+
+        let structured = PipelineContributionRedaction::with_privacy_filter(
+            Vec::new(),
+            Arc::new(PanickingFilter),
+            backend,
+        );
+        assert!(structured.redact(raw_contribution(SURVIVOR)).await.is_err());
+        assert!(
+            structured
+                .redact_with_edits(raw_contribution(SURVIVOR))
+                .await
+                .is_err()
+        );
     }
 
     struct RefusingRedactor;
