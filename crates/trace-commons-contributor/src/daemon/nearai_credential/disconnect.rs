@@ -45,10 +45,7 @@ const PENDING_BUDGET: Duration = Duration::from_millis(500);
 /// block on a locked keyring (Linux). Past this the read goes on without the
 /// session (the revoke answers "stored, not revoked"), and the deletes stay
 /// journaled (`cleanup_required`, which `logout` reports).
-#[cfg(not(test))]
 const OS_BUDGET: Duration = Duration::from_secs(15);
-#[cfg(test)]
-const OS_BUDGET: Duration = Duration::from_millis(500);
 
 /// The one log label a revoke that did not happen writes.
 pub(crate) const LABEL_NOT_REVOKED: &str = "near_ai_sign_out_key_not_revoked";
@@ -412,7 +409,18 @@ pub(crate) struct StoreCleared {
 /// contributor-initiated moment, the only kind that may spend an
 /// authorization prompt on the legacy store.
 pub(crate) fn clear_store(store: &ConfigStore) -> Result<StoreCleared> {
-    let current = resolve_stored_bounded(store);
+    clear_store_with_os_budgets(store, OS_BUDGET, OS_BUDGET)
+}
+
+// Timeout tests pass a short budget explicitly. Normal callers, including
+// other tests, retain the production budget for thread scheduling and durable
+// journal I/O; Windows atomic replacement alone may retry a lock for 500ms.
+fn clear_store_with_os_budgets(
+    store: &ConfigStore,
+    read_budget: Duration,
+    cleanup_budget: Duration,
+) -> Result<StoreCleared> {
+    let current = resolve_stored_bounded(store, read_budget);
     let locks = super::session::coordination(store.dir())?;
     let commit = locks
         .commit
@@ -420,7 +428,7 @@ pub(crate) fn clear_store(store: &ConfigStore) -> Result<StoreCleared> {
         .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
     let (removed, revocation) = clear_locked(store, current.as_ref())?;
     drop(commit);
-    let cleaned = cleanup_bounded(store);
+    let cleaned = cleanup_bounded(store, cleanup_budget);
     Ok(StoreCleared {
         removed,
         revocation,
@@ -433,7 +441,7 @@ pub(crate) fn clear_store(store: &ConfigStore) -> Result<StoreCleared> {
 /// and this answers `near_ai_credential_cleanup_required`: whatever was not
 /// deleted stays journaled for the next credential operation, and `logout`
 /// stops before wiping the journal that names it.
-fn cleanup_bounded(store: &ConfigStore) -> Result<()> {
+fn cleanup_bounded(store: &ConfigStore, os_budget: Duration) -> Result<()> {
     let (sender, receiver) = std::sync::mpsc::channel();
     let owned = store.clone();
     std::thread::Builder::new()
@@ -446,7 +454,7 @@ fn cleanup_bounded(store: &ConfigStore) -> Result<()> {
         })
         .map_err(|_| anyhow::anyhow!("near_ai_credential_cleanup_required"))?;
     receiver
-        .recv_timeout(OS_BUDGET)
+        .recv_timeout(os_budget)
         .map_err(|_| anyhow::anyhow!("near_ai_credential_cleanup_required"))?
 }
 
@@ -455,7 +463,7 @@ fn cleanup_bounded(store: &ConfigStore) -> Result<()> {
 /// dropped; the caller goes on as if the secret could not be read. A
 /// detached thread, not the async runtime's blocking pool, so a CLI process
 /// is never kept from exiting by it.
-fn resolve_stored_bounded(store: &ConfigStore) -> Option<DaemonSettings> {
+fn resolve_stored_bounded(store: &ConfigStore, os_budget: Duration) -> Option<DaemonSettings> {
     let (sender, receiver) = std::sync::mpsc::channel();
     let owned = store.clone();
     std::thread::Builder::new()
@@ -464,7 +472,7 @@ fn resolve_stored_bounded(store: &ConfigStore) -> Option<DaemonSettings> {
             let _ = sender.send(resolve_stored(&owned));
         })
         .ok()?;
-    receiver.recv_timeout(OS_BUDGET).ok().flatten()
+    receiver.recv_timeout(os_budget).ok().flatten()
 }
 
 /// The stored credential with its secrets, for a caller with no running

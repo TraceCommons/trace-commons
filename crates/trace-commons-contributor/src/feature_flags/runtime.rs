@@ -13,9 +13,12 @@ pub async fn run(shared: &Arc<DaemonShared>, dry_run: bool) {
         std::future::pending::<()>().await;
         return;
     }
-    poll(&shared.feature_flags, fetch, Utc::now, |snapshot| {
-        shared.publish(EVENT_FEATURE_FLAGS_CHANGED, serde_json::json!({"instance_id":snapshot.instance_id,"generation":snapshot.generation}));
-    }).await;
+    tokio::join!(
+        poll(&shared.feature_flags, fetch, Utc::now, |snapshot| {
+            shared.publish(EVENT_FEATURE_FLAGS_CHANGED, serde_json::json!({"instance_id":snapshot.instance_id,"generation":snapshot.generation}));
+        }),
+        crate::daemon::claude_desktop::run_rollout(shared),
+    );
 }
 async fn poll(
     runtime: &Runtime,

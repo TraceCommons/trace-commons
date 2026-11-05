@@ -10,9 +10,18 @@ an environment; there is no account or percentage targeting.
 defaults, required capabilities, and `live` or `next_start` application timing.
 `profiles/*.json` declares each environment's capabilities and remote-enable list.
 Bump the registry version and every profile's matching version when definitions
-change. Never reuse a retired ID. Experimental flags default false.
+change. Update the production plist fixture digests when the production profile
+identity changes, and run `bash scripts/ci/test-macos-channel-plist.sh` alongside
+`bash scripts/ci/test-feature-profiles.sh`. Never reuse a retired ID. Experimental
+flags default false.
 
-The shipped registry starts empty. No existing feature is automatically gated.
+The shipped registry includes `claude_desktop_private_ai` (live, default false),
+requiring `claude_desktop_private_ai_v1`. All compatible profiles can accept a
+reviewed remote enable; the checked-in example manifests keep it false. This
+gates native setup and the dedicated daemon listener. Disable/expiry stops new
+requests while accepted streams drain, and preserves the saved connection for
+re-enable. Account/key withdrawal and Private AI off still revoke it. No live
+manifest is published by this PR.
 Tests use fixture flags, which are absent from shipped registry/profile data.
 
 Production builds use the production profile. Staging builds default to staging;

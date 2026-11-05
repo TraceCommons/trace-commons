@@ -78,6 +78,7 @@ struct PrivateAISettingsPanels: View {
                             onRefresh: { refreshTools() })
                         .helpIfAny(copy.harnessesPrecedenceTooltip)
                         HarnessListSection(copy: copy, titled: false)
+                        ClaudeDesktopSettingsRow(closeLabel: MonitorWords.close)
                     }
                 }
                 PrivateAISwitchCard(
