@@ -781,6 +781,12 @@ pub const SCRUB_CHECK_AUTOMATIC_LABEL: &str = "Automatic";
 /// reasons and says what the check is not.
 pub const SCRUB_CHECK_AUTOMATIC_HELP: &str = "In folders set to share automatically, a trace is sent on its own once it has been scrubbed, unless nothing personal was removed from it, something left in it still looks like personal data, or it was trimmed to fit. Those wait for you. This only counts and looks for patterns; it does not check that the scrubbing was right.";
 
+/// Approved 2026-11-05. [`SCRUB_CHECK_AUTOMATIC_HELP`] on a device with a
+/// redaction witness, where nothing matched no longer waits
+/// (`second_look::RedactionWitness`). Chosen by the wire's
+/// `redaction_witness`; anything but `true` gets the plain sentence.
+pub const SCRUB_CHECK_AUTOMATIC_HELP_WITNESS: &str = "Sent once the privacy check passes. Anything that still looks personal, or was trimmed, waits for you.";
+
 /// Approved 2026-10-06. The Manual choice (`scrub_check: "manual"`).
 pub const SCRUB_CHECK_MANUAL_LABEL: &str = "Manual";
 
@@ -1360,7 +1366,15 @@ pub fn arming_reworded_notice_for_wire(
             ),
             body: "Your Scrub check was previously unset. This update makes it Automatic. This folder stays set to share automatically, but more traces may now wait for your review.",
             now_heading: "What happens now",
-            scope: SCRUB_CHECK_AUTOMATIC_HELP,
+            scope: if object
+                .get("redaction_witness")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                SCRUB_CHECK_AUTOMATIC_HELP_WITNESS
+            } else {
+                SCRUB_CHECK_AUTOMATIC_HELP
+            },
             limit: concat!(
                 "Choose ",
                 crate::project_copy::folder_mode_ask_label!(),
@@ -3312,6 +3326,38 @@ mod tests {
         assert!(copy.ask_first_action.is_some());
     }
 
+    /// On a witness device the notice says what Automatic does there; any
+    /// other value, or none, keeps the plain sentence.
+    #[test]
+    fn an_automatic_default_upgrade_on_a_witness_device_uses_the_witness_sentence() {
+        let notice = |witness: serde_json::Value| {
+            let mut wire = serde_json::json!({
+                "id": 1, "project_id": "p-1", "project_label": "api",
+                "scrub_check_defaulted": true
+            });
+            if !witness.is_null() {
+                wire["redaction_witness"] = witness;
+            }
+            arming_reworded_notice_for_wire(&wire).unwrap().scope
+        };
+        assert_eq!(
+            notice(serde_json::json!(true)),
+            "Sent once the privacy check passes. Anything that still looks personal, or was trimmed, waits for you."
+        );
+        assert_eq!(
+            notice(serde_json::json!(true)),
+            SCRUB_CHECK_AUTOMATIC_HELP_WITNESS
+        );
+        for other in [
+            serde_json::json!(false),
+            serde_json::Value::Null,
+            serde_json::json!("true"),
+            serde_json::json!(1),
+        ] {
+            assert_eq!(notice(other), SCRUB_CHECK_AUTOMATIC_HELP);
+        }
+    }
+
     /// The held notice: counted, a sentence per reason, the release line,
     /// and a line and button per folder. Nothing held, nothing shown.
     #[test]
@@ -4544,6 +4590,7 @@ mod tests {
             SCRUB_CHECK_TITLE,
             SCRUB_CHECK_AUTOMATIC_LABEL,
             SCRUB_CHECK_AUTOMATIC_HELP,
+            SCRUB_CHECK_AUTOMATIC_HELP_WITNESS,
             SCRUB_CHECK_MANUAL_LABEL,
             SCRUB_CHECK_MANUAL_HELP,
             SCRUB_CHECK_HELD,

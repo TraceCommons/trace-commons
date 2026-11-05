@@ -5061,6 +5061,7 @@ fn queue_outcome_abi_preserves_known_and_unknown_send_state() {
     for label in [
         "dismissed-by-contributor",
         "expired-without-decision",
+        "no-user-messages",
         "admission_refused",
         "unknown",
     ] {
