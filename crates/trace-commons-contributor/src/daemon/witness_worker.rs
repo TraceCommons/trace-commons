@@ -510,6 +510,9 @@ async fn job(shared: &Arc<DaemonShared>, snapshot: &QueueEntry, clock: Clock) ->
     let mut interrupt = shared.upload_interrupt.subscribe();
     let mut state = shared.state.lock().expect("state lock").clone();
     let settings = shared.settings.lock().expect("settings lock").clone();
+    // A scratch copy. A job runs for minutes while the tick's passes keep
+    // changing health, so it is never written back whole: only the label
+    // this job's own outcome implies is applied, below.
     let mut health = shared.health.lock().expect("health lock").clone();
     let raced = {
         let mut up = super::uploader::Uploader {
@@ -527,13 +530,7 @@ async fn job(shared: &Arc<DaemonShared>, snapshot: &QueueEntry, clock: Clock) ->
         .await
     };
     let outcome = match raced {
-        super::RacedUpload::Settled(outcome) => {
-            // The health label a precondition set is what suspends expiry,
-            // so it is copied back on failure too. The state carries
-            // nothing a witness call changes, and is left alone.
-            *shared.health.lock().expect("health lock") = health;
-            outcome
-        }
+        super::RacedUpload::Settled(outcome) => outcome,
         super::RacedUpload::Stopped(why) => {
             super::diagnostics_log::record_labels(
                 tracing::Level::WARN,
@@ -541,20 +538,42 @@ async fn job(shared: &Arc<DaemonShared>, snapshot: &QueueEntry, clock: Clock) ->
                 &[("reason", why.label())],
             );
             tracing::warn!(reason = why.label(), "witness job stopped");
+            // One that hung waits before it is tried again, as a hung
+            // upload does, so it does not hold the lane every pass.
+            if why == super::UploadStop::TimedOut {
+                let mut q = shared.queue.lock().expect("queue lock");
+                if still_current(q.get(entry.entry_id), &entry) {
+                    q.defer_without_attempt(entry.entry_id, clock.now() + super::UPLOAD_HUNG_RETRY);
+                    let _ = q.save(&shared.store);
+                }
+            }
             return JobEnd::Dropped;
         }
     };
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(e) => {
-            tracing::warn!(
-                pass = "witness",
-                reason = super::uploader::precondition_health_label(&e),
-                "witness job failed"
-            );
+            // A fail-closed precondition: its label is what suspends queue
+            // expiry, so it reaches shared health.
+            let label = super::uploader::precondition_health_label(&e);
+            shared
+                .health
+                .lock()
+                .expect("health lock")
+                .fail(label, clock.now());
+            tracing::warn!(pass = "witness", reason = label, "witness job failed");
             return JobEnd::Dropped;
         }
     };
+    if let super::uploader::WitnessJobOutcome::Decision(decision) = &outcome
+        && let Some(label) = super::uploader::health_label_for(decision)
+    {
+        shared
+            .health
+            .lock()
+            .expect("health lock")
+            .fail(label, clock.now());
+    }
     record(shared, &entry, &session_ref, outcome, clock)
 }
 

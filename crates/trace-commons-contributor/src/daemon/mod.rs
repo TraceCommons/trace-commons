@@ -1134,6 +1134,11 @@ pub(crate) async fn race_upload<F: std::future::Future>(
 /// Upload everything that has been approved, whether by the contributor or by
 /// their standing opt-in for the project.
 ///
+/// An approved entry that still needs a witness review is not uploaded
+/// here: after every gate below it is handed to the witness worker
+/// (`witness_worker`), which pins the certified review, and a later pass
+/// uploads that. This pass never waits on the witness.
+///
 /// One `SubmitContext` covers the whole pass, so the claim is minted once and
 /// the privacy-filter canary runs once, exactly as an interactive `submit`
 /// batch does.
@@ -1403,9 +1408,10 @@ async fn drain_approved(
     let store =
         run_blocking(|| crate::config::ConfigStore::open(shared.store.dir().to_path_buf()))?;
     let mut ctx = run_blocking(|| crate::submit::SubmitContext::new(&store, &cfg, &opts, near_ai))?;
-    // Nobody is waiting on this pass, so its witness requests say so, and a
-    // witness that keeps a slot for a person's review turns these away
-    // first (#1014).
+    // The pass makes no witness call of its own (the witness worker does,
+    // see `witness_worker`); declared background all the same, so any call
+    // reached through this context is turned away first by a witness that
+    // keeps a slot for a person's review (#1014).
     ctx.witness_as_background();
 
     let sources = crate::source::all_sources(&source_roots);
@@ -5000,25 +5006,31 @@ mod tests {
     #[tokio::test]
     async fn a_slow_witness_does_not_hold_up_the_pass_and_its_result_uploads_later() {
         let h = TransientRetryHarness::with_witness().await;
-        h.witness_delay_ms.store(1_500, Ordering::SeqCst);
+        // Long enough that nothing below can be waiting on it: the witness
+        // is still answering when every assertion before the settle runs.
+        h.witness_delay_ms.store(3_000, Ordering::SeqCst);
         let now = TransientRetryHarness::now();
+        let id = h.entry().entry_id;
 
-        let started = std::time::Instant::now();
         drain_approved_once_for_test(&h.shared, now).await.unwrap();
+        // The pass returned with the session handed over and nothing
+        // answered: it did not wait.
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(1_000),
-            "the pass waited on the witness: {:?}",
-            started.elapsed()
+            h.shared.witness_worker.is_in_flight(id) || h.shared.witness_worker.queued() == 1,
+            "the pass did not hand the session to the worker"
         );
-        // Other passes run meanwhile: a watch pass completes while the
-        // witness is still working.
         wait_until(std::time::Duration::from_secs(10), || {
             h.witness_live.0.load(Ordering::SeqCst) == 1
         })
         .await;
-        let watched = std::time::Instant::now();
+        // Other passes run meanwhile: a watch pass completes while the
+        // witness is still answering.
         watcher::tick(&h.shared, now).await.unwrap();
-        assert!(watched.elapsed() < std::time::Duration::from_millis(1_000));
+        assert_eq!(
+            h.witness_live.0.load(Ordering::SeqCst),
+            1,
+            "the watch pass waited on the witness"
+        );
         let entry = h.entry();
         assert_eq!(entry.state, queue::QueueState::Approved);
         assert!(!entry.holds_witness_certificate());

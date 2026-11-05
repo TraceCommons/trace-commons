@@ -4845,7 +4845,6 @@ mod tests {
                 })
             }
         };
-        let began = std::time::Instant::now();
         let outcomes = run_batch(
             vec![1, 2, 3, 4, 5],
             (0..CLI_SUBMIT_CONCURRENCY).map(|_| lane()).collect(),
@@ -4859,9 +4858,6 @@ mod tests {
         )
         .await
         .unwrap();
-        // Serially this is 600 ms; side by side the quick ones finish while
-        // the slow one runs.
-        assert!(began.elapsed() < std::time::Duration::from_millis(550));
         assert_eq!(
             most.load(std::sync::atomic::Ordering::SeqCst),
             CLI_SUBMIT_CONCURRENCY
@@ -4871,11 +4867,12 @@ mod tests {
             labels,
             ["s1", "s2", "s3", "s4", "s5"].map(|l| format!("failed ({l})"))
         );
+        // The quick sessions finished while the slow first one ran.
+        assert_ne!(ended.first(), Some(&1), "the slow session held up the rest");
         started.sort_unstable();
         ended.sort_unstable();
         assert_eq!(started, vec![1, 2, 3, 4, 5]);
         assert_eq!(ended, vec![1, 2, 3, 4, 5]);
-        assert_eq!(*ended.first().unwrap(), 1);
     }
 
     #[tokio::test]
