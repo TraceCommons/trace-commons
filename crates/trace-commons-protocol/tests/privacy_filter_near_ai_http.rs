@@ -870,11 +870,11 @@ fn escape_heavy_field_with_emails(lines: usize) -> String {
 }
 
 /// The endpoint's limit falls under the cap: every full window is answered
-/// with a 413, is halved -- twice, here -- and the field still redacts to
+/// with a 413, is halved and the field still redacts to
 /// exactly what an adapter whose cap was under the limit all along produces.
 #[tokio::test]
 async fn a_413_halves_the_window_and_redacts_identically() {
-    const LIMIT: usize = 70 * 1024;
+    const LIMIT: usize = 40 * 1024;
     let text = escape_heavy_field_with_emails(12_000);
 
     let reference_server = server_with(emails_under_body_limit(LIMIT)).await;
@@ -989,5 +989,86 @@ async fn the_timeout_grows_with_the_request_body() {
     assert!(
         large.is_ok(),
         "a 500 ms answer is inside ~840 ms: {large:?}"
+    );
+}
+
+/// With a caller deadline, a retry that could not finish before it is not
+/// started: a slow endpoint costs one attempt and a prompt transient
+/// refusal, not three attempts run into the caller's own timeout.
+#[tokio::test]
+async fn retries_stop_when_the_deadline_cannot_fit_another_attempt() {
+    let slow = || {
+        ResponseTemplate::new(200)
+            .set_delay(Duration::from_millis(2_000))
+            .set_body_json(json!({ "data": [{ "spans": [] }] }))
+    };
+    let adapter = |server: &MockServer| {
+        NearAiPrivacyFilterAdapter::new(
+            server.uri(),
+            "openai/privacy-filter",
+            "test-api-key-do-not-leak",
+            Duration::from_millis(300),
+            1_000_000,
+        )
+        .expect("adapter builds")
+        .with_timeout_per_kib_ms(0)
+    };
+
+    // Deadline 700 ms out: the first attempt times out at 300 ms; another
+    // would need 250 ms of backoff plus 300 ms, which does not fit.
+    let server = server_with(move |_: &wiremock::Request| slow()).await;
+    let started = std::time::Instant::now();
+    let error = adapter(&server)
+        .redact_text_before("a slow window", started + Duration::from_millis(700))
+        .await
+        .expect_err("the endpoint never answers in time");
+    assert!(error.is_transient());
+    assert!(
+        started.elapsed() < Duration::from_millis(700),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+
+    // No deadline: every attempt runs.
+    let server = server_with(move |_: &wiremock::Request| slow()).await;
+    let _ = adapter(&server).redact_text("a slow window").await;
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        MAX_CLASSIFY_ATTEMPTS
+    );
+
+    // A deadline that has already passed starts nothing.
+    let server = server_with(move |_: &wiremock::Request| slow()).await;
+    let past = std::time::Instant::now();
+    assert!(
+        adapter(&server)
+            .redact_text_before("late", past)
+            .await
+            .is_err()
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 0);
+
+    // The first attempt is cut at the deadline even when its own timeout is
+    // longer.
+    let server = server_with(move |_: &wiremock::Request| slow()).await;
+    let long = NearAiPrivacyFilterAdapter::new(
+        server.uri(),
+        "openai/privacy-filter",
+        "test-api-key-do-not-leak",
+        Duration::from_secs(30),
+        1_000_000,
+    )
+    .expect("adapter builds");
+    let started = std::time::Instant::now();
+    assert!(
+        long.redact_text_before("cut short", started + Duration::from_millis(400))
+            .await
+            .is_err()
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(1_500),
+        "{:?}",
+        started.elapsed()
     );
 }

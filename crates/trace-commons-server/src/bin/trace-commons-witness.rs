@@ -109,25 +109,30 @@ const DEFAULT_MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 /// finishes; oversubscription there costs latency, not stability.
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 4;
 
-/// Five minutes, and this one is measured.
+/// Nine minutes: the owner asked for about ten (2026-11-05), and the layer in
+/// front sets the ceiling.
 ///
-/// The classifier's largest proven success is a 243 KiB window in 9.3 s
-/// (`privacy_filter_near_ai`), so a request classifies on the order of
-/// 25 KiB/s of prose, serially. Five minutes is therefore several megabytes of
-/// transcript -- comfortably the whole of a typical session -- while bounding
-/// the worst case: a fully occupied witness returns to service within five
-/// minutes with no operator action.
+/// The witness answers once, at the end, so while it classifies the
+/// connection carries no data. dstack-gateway's `timeouts.idle` closes a
+/// connection after **10 minutes without data** (default in
+/// `gateway/dstack-app/builder/entrypoint.sh` and `gateway.toml`;
+/// `timeouts.total` is 5 h). A 600 s budget would race that close, so the
+/// budget is 540 s, a minute under it. Phala's production gateway may be
+/// configured differently; that has not been checked against a live one.
+/// Nothing in this binary times a request out sooner: `axum::serve` sets no
+/// request timeout.
 ///
-/// The floor is set by the layer below. A single window may retry up to
-/// `MAX_CLASSIFY_ATTEMPTS` times against a 30 s per-call timeout with backoff,
-/// so a request whose one window merely retried can legitimately take over two
-/// minutes. A request timeout under that would abandon healthy work and read
-/// as flakiness.
+/// What it has to hold: classifier windows at the measured 2026-11-05
+/// latency (dense text ~3 s + 0.4 s/KiB; ~29 s for a full 64 KiB window),
+/// two in flight. A window's worst case with no deadline is 160.95 s (three
+/// attempts at 53.4 s plus backoff), and the contribution path passes its
+/// deadline to the classifier so no retry starts that could not finish
+/// inside this budget.
 ///
-/// A body at the 64 MiB cap will exceed this and be refused. That is the
-/// intended answer: the alternative is one caller holding a slot for the
-/// three-quarters of an hour that classifying 64 MiB serially would take.
-const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 300;
+/// A timed-out request is refused with 504 and its slot released. The
+/// client waits longer than this (570 s), so the witness's own answer is the
+/// one a person gets.
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 540;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -476,7 +481,8 @@ async fn main() -> Result<()> {
             "witness redaction pipeline"
         );
         (Arc::new(FullPipelineRedaction::new(known_path_prefixes.clone(), adapter.clone(), backend)),
-         Arc::new(trace_commons_server::witness_service::prefetch::PrefetchingContributionRedaction::new(known_path_prefixes, adapter, backend, args.max_classify_in_flight)))
+         Arc::new(trace_commons_server::witness_service::prefetch::PrefetchingContributionRedaction::new(known_path_prefixes, adapter, backend, args.max_classify_in_flight)
+             .with_classify_budget(classify_budget(args.request_timeout_secs))))
     } else {
         (Arc::new(DeterministicRedaction::new(known_path_prefixes.clone())),
          Arc::new(trace_commons_server::witness_service::PipelineContributionRedaction::deterministic_only(known_path_prefixes)))
@@ -629,6 +635,22 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// How long the contribution path's classifier calls may run: the request
+/// budget less what reading the body, the replay, signing and the answer
+/// need. Retries that could not finish inside it are not started.
+fn classify_budget(request_timeout_secs: u64) -> Duration {
+    Duration::from_secs(
+        request_timeout_secs
+            .saturating_sub(CLASSIFY_BUDGET_MARGIN_SECS)
+            .max(1),
+    )
+}
+
+/// What the rest of a request needs besides classifier calls. The witness's
+/// own work on a 900 KB contribution measured 0.41 s; 20 s covers a slow
+/// body upload too.
+const CLASSIFY_BUDGET_MARGIN_SECS: u64 = 20;
+
 #[cfg(test)]
 mod classify_deadline_tests {
     use super::*;
@@ -648,6 +670,13 @@ mod classify_deadline_tests {
         assert!(
             worst_ms < DEFAULT_REQUEST_TIMEOUT_SECS * 1000,
             "{worst_ms} ms"
+        );
+        // Under dstack-gateway's 10-minute idle close, with a minute spare.
+        const { assert!(DEFAULT_REQUEST_TIMEOUT_SECS + 60 <= 600) };
+        // The classify pass's deadline leaves the rest of the request room.
+        assert!(
+            classify_budget(DEFAULT_REQUEST_TIMEOUT_SECS)
+                < Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)
         );
     }
 }

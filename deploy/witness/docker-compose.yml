@@ -224,19 +224,19 @@ services:
       # couple of hundred megabytes at the cap.
       TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS: "4"
 
-      # Five minutes, and the number is measured rather than round. The
-      # classifier's largest proven success is a 243 KiB window in 9.3 s, so a
-      # request classifies on the order of 25 KiB/s serially: five minutes is
-      # several megabytes of transcript. It is also above the ~2 minutes a
-      # single window can legitimately take when it retries against the 30 s
-      # per-call timeout, so a healthy slow request is not abandoned.
+      # Nine minutes. The owner asked for about ten (2026-11-05); the
+      # dstack gateway closes a connection after 10 minutes with no data, and
+      # the witness sends nothing until it answers, so the budget sits a
+      # minute under that. The classifier was measured at ~3 s + 0.4 s/KiB on
+      # 2026-11-05, and the witness passes this deadline to it, so no retry
+      # starts that could not finish inside it.
       #
       # A bound with no deadline is not a bound: one request whose classifier
       # call never returns would hold its slot for the life of the process, and
       # four of those would wedge the witness at full occupancy with nothing
       # running. A timed-out request is refused with 504 and its slot is
       # released.
-      TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS: "300"
+      TRACE_COMMONS_WITNESS_REQUEST_TIMEOUT_SECS: "540"
 
       # Path prefixes the deterministic pass treats as known, so they are not
       # reported as findings. Empty reports more, never less.

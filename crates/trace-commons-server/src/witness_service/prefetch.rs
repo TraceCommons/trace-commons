@@ -132,6 +132,9 @@ pub struct PrefetchingContributionRedaction {
     policy_version: String,
     permits: Arc<Semaphore>,
     per_request: usize,
+    /// How long a request's classify pass may take; see
+    /// [`Self::with_classify_budget`].
+    budget: Option<std::time::Duration>,
 }
 
 impl PrefetchingContributionRedaction {
@@ -152,7 +155,18 @@ impl PrefetchingContributionRedaction {
             policy_version: redaction_pipeline_version(backend),
             permits: Arc::new(Semaphore::new(max_in_flight)),
             per_request: max_in_flight,
+            budget: None,
         }
+    }
+
+    /// Give each request's classify pass a deadline this long after it
+    /// starts, waiting for permits included. Classifier calls are made with
+    /// [`PrivacyFilterAdapter::redact_text_before`], so a retry that could not
+    /// finish by then is not started and the request refuses instead of
+    /// running into the witness's request timeout.
+    pub fn with_classify_budget(mut self, budget: std::time::Duration) -> Self {
+        self.budget = Some(budget);
+        self
     }
 
     fn pipeline(&self, adapter: Arc<dyn PrivacyFilterAdapter>) -> DeterministicTraceRedactor {
@@ -172,6 +186,7 @@ impl PrefetchingContributionRedaction {
             .redact_trace_with_edits(raw.clone())
             .await;
         let texts = recorder.distinct();
+        let deadline = self.budget.map(|budget| std::time::Instant::now() + budget);
 
         // Bounded and ordered: at most `per_request` calls are started ahead
         // of the earliest unanswered text, and answers are taken in pipeline
@@ -194,7 +209,10 @@ impl PrefetchingContributionRedaction {
                 let permits = self.permits.clone();
                 pending.spawn(async move {
                     let answer = match permits.acquire_owned().await {
-                        Ok(_permit) => adapter.redact_text(&text).await,
+                        Ok(_permit) => match deadline {
+                            Some(deadline) => adapter.redact_text_before(&text, deadline).await,
+                            None => adapter.redact_text(&text).await,
+                        },
                         Err(_) => Err(permits_closed()),
                     };
                     (index, text, answer)
