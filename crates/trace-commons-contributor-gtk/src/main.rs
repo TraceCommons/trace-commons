@@ -453,7 +453,7 @@ mod sigterm_tests {
         assert_eq!(
             (status.code(), status.signal()),
             (Some(0), None),
-            "SIGTERM runs the quit callback; the child exited with {status:?}"
+            "{status:?}"
         );
     }
 
