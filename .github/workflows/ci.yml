@@ -1871,6 +1871,10 @@ jobs:
       # from reintroducing the confound. They gated nothing before.
       - name: Run corpus-builder self-tests
         run: python3 scripts/operator/test_build_agent_traces_corpus.py
+      # The witness overload monitor fails closed: an unreachable or malformed
+      # diagnostics page is an alert. Stdlib-only; loopback HTTP only.
+      - name: Run witness monitor self-tests
+        run: python3 scripts/operator/test_witness_monitor.py
 
   operator-binaries-smoke:
     name: operator-binaries smoke
