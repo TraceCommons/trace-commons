@@ -211,6 +211,7 @@ use crate::insights::model_answers::ModelRoute;
 use crate::insights::session_facts::{ClaudeFactsScan, InferredTask, SessionFacts};
 use crate::insights::session_identity::HarnessSessionScan;
 use crate::insights::session_labels::{LabelledTask, SessionLabel, SessionOutcome};
+use crate::insights::skill_usage::{SKILL_USAGE_VERSION, SkillUsageEvidence, SkillUsageScan};
 use crate::insights::slash_goals::{ClaudeGoal, ClaudeGoalScan, GoalStatus, WeekGoal, WeekGoals};
 use crate::insights::task_classifier::{current_task, reclassify};
 use crate::insights::time_evidence::RecordedTimeScan;
@@ -394,6 +395,14 @@ struct CounterRow {
     /// budget, even when its file is unchanged.
     #[serde(default, skip_serializing_if = "is_zero")]
     facts_version: u32,
+    /// Explicit skill evidence, from the same bounded transcript read. No
+    /// argument, call identifier or source path is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    skill_usage: Option<SkillUsageEvidence>,
+    /// Missing on older rows and rows read with Skills off. When the flag
+    /// enables Skills, reread once within the existing pass budget.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    skill_usage_version: u32,
     /// Whether the session was started by a tool (`Automation`). An
     /// automated row is kept under its own allowance
     /// (`COUNTER_STORE_MAX_AUTOMATED_SESSIONS`), outside the shared caps,
@@ -1046,6 +1055,7 @@ pub(crate) struct CounterJob {
 struct QueuedJob {
     job: CounterJob,
     cleared: u64,
+    skills_enabled: bool,
 }
 
 /// A ledger fold to run on the worker: the ledger's window as the refresh
@@ -1089,6 +1099,11 @@ pub(crate) fn submit_counter_pass(shared: &Arc<DaemonShared>, job: CounterJob) {
     let queued = QueuedJob {
         job,
         cleared: counter.cleared.load(Ordering::SeqCst),
+        skills_enabled: !shared.dev_dry_run
+            && shared
+                .feature_flags
+                .snapshot()
+                .is_enabled("insights_skills"),
     };
     let start = {
         let mut slot = counter.worker_slot();
@@ -1177,7 +1192,17 @@ fn run_counter_jobs(shared: &DaemonShared) {
 /// recorded as `last_pass_at`, as it was when the pass ran in the tick.
 fn run_counter_job(shared: &DaemonShared, queued: QueuedJob) {
     let counter = &shared.insights_counter;
-    let QueuedJob { job, cleared } = queued;
+    let QueuedJob {
+        job,
+        cleared,
+        skills_enabled,
+    } = queued;
+    let skills_enabled = skills_enabled
+        && !shared.dev_dry_run
+        && shared
+            .feature_flags
+            .snapshot()
+            .is_enabled("insights_skills");
     let should_stop = || {
         shared.shutdown.load(Ordering::Relaxed)
             // A poisoned lock reads as off: fail closed.
@@ -1208,6 +1233,7 @@ fn run_counter_job(shared: &DaemonShared, queued: QueuedJob) {
         quiescence_secs,
         &mut project_of,
         cleared,
+        skills_enabled,
         &should_stop,
     );
 }
@@ -1634,6 +1660,7 @@ impl CounterPass {
             quiescence_secs,
             project_of,
             cleared,
+            false,
             &|| false,
         )
         .map(Option::unwrap_or_default)
@@ -1660,6 +1687,7 @@ impl CounterPass {
             quiescence_secs,
             project_of,
             cleared,
+            false,
             &|| false,
         )
         .map(Option::unwrap_or_default)
@@ -1687,6 +1715,7 @@ impl CounterPass {
         quiescence_secs: u64,
         project_of: &mut dyn FnMut(&CounterCandidate) -> (String, bool),
         cleared: u64,
+        skills_enabled: bool,
         should_stop: &dyn Fn() -> bool,
     ) -> Result<Option<PassSummary>, &'static str> {
         #[cfg(test)]
@@ -1701,6 +1730,7 @@ impl CounterPass {
             quiescence_secs,
             project_of,
             cleared,
+            skills_enabled,
             should_stop,
         );
         let failure = result.as_ref().err().copied();
@@ -1768,6 +1798,7 @@ impl CounterPass {
         quiescence_secs: u64,
         project_of: &mut dyn FnMut(&CounterCandidate) -> (String, bool),
         cleared: u64,
+        skills_enabled: bool,
         should_stop: &dyn Fn() -> bool,
     ) -> Result<Option<PassSummary>, &'static str> {
         let key = self.keys.load_or_create().map_err(|_| UNREADABLE_KEY)?;
@@ -1923,6 +1954,7 @@ impl CounterPass {
                     && row.harness_session_read
                     && row.event_span_read
                     && row.facts_version == SESSION_FACTS_VERSION
+                    && (!skills_enabled || row.skill_usage_version == SKILL_USAGE_VERSION)
                     && !row.awaiting_classification()
                     && (row.streamed
                         || !matches!(
@@ -1986,7 +2018,7 @@ impl CounterPass {
             removals.remove(&session);
             #[cfg(test)]
             self.run_before_read_hook();
-            let read = read_body(source, candidate, &key);
+            let read = read_body(source, candidate, &key, skills_enabled);
             match read.compressed_failure {
                 Some(crate::source::compressed::CompressedFailure::Undecodable) => {
                     summary.compressed_unreadable += 1;
@@ -2014,6 +2046,12 @@ impl CounterPass {
                     streamed: true,
                     facts: read.facts,
                     facts_version: SESSION_FACTS_VERSION,
+                    skill_usage: read.skill_usage,
+                    skill_usage_version: if skills_enabled {
+                        SKILL_USAGE_VERSION
+                    } else {
+                        0
+                    },
                     automation: read.automation,
                     automation_read: true,
                     not_analyzable: read.not_analyzable,
@@ -2099,7 +2137,7 @@ impl CounterPass {
             }
             bytes_budgeted = bytes_budgeted.saturating_add(cost);
             spawned_removals.remove(&session);
-            let read = read_body(AnalyticsSource::ClaudeCode, candidate, &key);
+            let read = read_body(AnalyticsSource::ClaudeCode, candidate, &key, false);
             spawned_reads.push((
                 session,
                 SpawnedRow {
@@ -2121,6 +2159,8 @@ impl CounterPass {
                         streamed: true,
                         facts: read.facts,
                         facts_version: SESSION_FACTS_VERSION,
+                        skill_usage: None,
+                        skill_usage_version: 0,
                         automation: Automation::Unknown,
                         automation_read: true,
                         not_analyzable: None,
@@ -2670,6 +2710,105 @@ impl CounterPass {
             _ => None,
         };
         Ok((key, store))
+    }
+
+    /// Name-only skill observations for the person's visible sessions. A
+    /// name can match several installations; this is not source attribution
+    /// or evidence of a skill's effect on the session outcome.
+    pub(crate) fn skill_usage_value(
+        &self,
+        enabled: bool,
+        never_project_keys: &NeverFolders,
+    ) -> serde_json::Value {
+        if !enabled {
+            return serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS});
+        }
+        let (key, store) = match self.visible_store() {
+            Ok(found) => found,
+            Err(reason) => return unreadable_value(reason),
+        };
+        #[derive(Serialize)]
+        struct Aggregate {
+            name: String,
+            agent: &'static str,
+            invocations: u64,
+            loads: u64,
+            sessions: usize,
+            last_seen: Option<DateTime<Utc>>,
+            session_refs: Vec<String>,
+        }
+        let mut aggregates: BTreeMap<(String, &'static str), Aggregate> = BTreeMap::new();
+        let mut observed = 0usize;
+        let mut unknown = 0usize;
+        let mut partial = false;
+        if let (Some(key), Some(store)) = (&key, &store) {
+            let never = never_digests(key, never_project_keys);
+            let tag = store_tag_of(key, store);
+            for row in store.rows.values().filter(|row| is_listed(row, &never)) {
+                let Some(evidence) = row
+                    .skill_usage
+                    .as_ref()
+                    .filter(|e| e.schema_version == SKILL_USAGE_VERSION)
+                else {
+                    unknown += 1;
+                    continue;
+                };
+                observed += 1;
+                partial |= evidence.partial;
+                let agent = match row.body {
+                    RowBody::Claude { .. }
+                    | RowBody::Unknown {
+                        source: AnalyticsSource::ClaudeCode,
+                        ..
+                    } => "claude_code",
+                    _ => "codex",
+                };
+                for count in &evidence.skills {
+                    let key = (count.name.clone(), agent);
+                    // Response size stays bounded independently of the
+                    // number of rows the counter store retains.
+                    if !aggregates.contains_key(&key) && aggregates.len() >= 512 {
+                        partial = true;
+                        continue;
+                    }
+                    let entry = aggregates.entry(key).or_insert_with(|| Aggregate {
+                        name: count.name.clone(),
+                        agent,
+                        invocations: 0,
+                        loads: 0,
+                        sessions: 0,
+                        last_seen: None,
+                        session_refs: Vec::new(),
+                    });
+                    entry.invocations = entry
+                        .invocations
+                        .saturating_add(u64::from(count.invocations));
+                    entry.loads = entry.loads.saturating_add(u64::from(count.loads));
+                    entry.sessions += 1;
+                    entry.last_seen = entry.last_seen.max(count.last_seen);
+                    if entry.session_refs.len() < 20 {
+                        entry.session_refs.push(row.listed_reference(tag));
+                    }
+                }
+            }
+        }
+        serde_json::json!({
+            "enabled": true,
+            "feed": FEED_COUNTER_PASS,
+            "readable": true,
+            "usage": {
+                "sessions_observed": observed,
+                "sessions_unknown": unknown,
+                "partial": partial || unknown > 0 || observed == 0,
+                "skills": aggregates.into_values().collect::<Vec<_>>(),
+            },
+            "coverage": {
+                "claude_code": "explicit_invocations",
+                "codex": "loads_only",
+                "opencode": "unsupported",
+                "matching": "name_only",
+            },
+        })
     }
 
     /// The tag a `insights_sessions` cursor carries for the store now
@@ -3517,7 +3656,12 @@ fn never_digests(key: &DigestKey, never: &NeverFolders) -> NeverDigests {
 /// same string the proxy ledger's attribution uses); `None` when there is
 /// none or more than one, as a saved snapshot's identity does. The file is
 /// read line by line ([`scan_session`]), never held whole.
-fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &DigestKey) -> ReadBody {
+fn read_body(
+    source: AnalyticsSource,
+    candidate: &CounterCandidate,
+    key: &DigestKey,
+    skills_enabled: bool,
+) -> ReadBody {
     let insights_only = insights_only(candidate);
     let mut compressed_failure = None;
     let (bytes, scanned) = if let Some(file) = compressed_file(candidate) {
@@ -3531,6 +3675,7 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
                     key,
                     COUNTER_PASS_MAX_LINE_BYTES,
                     CODEX_PER_TURN_SERIES,
+                    skills_enabled,
                 );
                 compressed_failure = decoder.failure();
                 // A stream that failed part way is unknown, never the part
@@ -3561,6 +3706,7 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
                 key,
                 COUNTER_PASS_MAX_LINE_BYTES,
                 CODEX_PER_TURN_SERIES,
+                skills_enabled,
             )
         });
         (bytes, scanned)
@@ -3575,6 +3721,7 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
             first_event_at: None,
             span: None,
             facts: None,
+            skill_usage: None,
             automation: Automation::Unknown,
             not_analyzable: NotAnalyzable::of(source, insights_only, bytes, None),
             compressed_failure,
@@ -3582,6 +3729,10 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
         };
     };
     let mut facts = scanned.facts;
+    let mut skill_usage = scanned.skill_usage;
+    if let Some(skill_usage) = skill_usage.as_mut() {
+        skill_usage.partial |= scanned.long_lines_skipped > 0 || candidate.group_member_count > 0;
+    }
     // A line passed over may have held counters: partial, never complete.
     let skipped = scanned.long_lines_skipped > 0;
     if skipped {
@@ -3636,6 +3787,7 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
     ReadBody {
         body,
         facts,
+        skill_usage,
         harness_session: scanned
             .harness_session_id
             .map(|id| harness_session_digest(key, candidate.source, &id)),
@@ -3664,6 +3816,7 @@ struct ReadBody {
     /// The session's facts; `None` when they could not be read or the body
     /// is unknown.
     facts: Option<SessionFacts>,
+    skill_usage: Option<SkillUsageEvidence>,
     automation: Automation,
     not_analyzable: Option<NotAnalyzable>,
     /// Why a compressed rollout could not be read to its end.
@@ -3677,6 +3830,7 @@ struct ScannedSession {
     body: ScannedBody,
     /// The facts scan's result, beside the counters; `None` when it failed.
     facts: Option<SessionFacts>,
+    skill_usage: Option<SkillUsageEvidence>,
     /// The one session ID the transcript records, raw, for the caller to
     /// digest at once; `None` when it records none or more than one.
     harness_session_id: Option<String>,
@@ -3779,6 +3933,7 @@ fn scan_session(
     key: &DigestKey,
     max_line: u64,
     codex_per_turn: bool,
+    skills_enabled: bool,
 ) -> Option<ScannedSession> {
     use sha2::Digest as _;
     let format = source_format(source);
@@ -3800,6 +3955,7 @@ fn scan_session(
     let mut codex_series =
         (source == AnalyticsSource::Codex).then(|| CodexTurnSeriesScan::new(key));
     let mut time = Some(RecordedTimeScan::new(format));
+    let mut skill_usage = skills_enabled.then(|| SkillUsageScan::new(format));
     let mut automation = (source == AnalyticsSource::Codex).then(CodexAutomationScan::default);
     // Lenient: it never fails, and sees every record that parses.
     let mut goals = (source == AnalyticsSource::ClaudeCode).then(ClaudeGoalScan::new);
@@ -3839,6 +3995,9 @@ fn scan_session(
             continue;
         }
         let Ok(text) = std::str::from_utf8(&line) else {
+            if let Some(scan) = skill_usage.as_mut() {
+                scan.mark_partial();
+            }
             utf8 = false;
             claude = None;
             codex = None;
@@ -3851,6 +4010,9 @@ fn scan_session(
             continue;
         }
         let Ok(record) = serde_json::from_str::<serde_json::Value>(text) else {
+            if let Some(scan) = skill_usage.as_mut() {
+                scan.mark_partial();
+            }
             claude = None;
             codex = None;
             claude_facts = None;
@@ -3859,6 +4021,9 @@ fn scan_session(
             continue;
         };
         identity.observe(&record);
+        if let Some(scan) = skill_usage.as_mut() {
+            scan.observe(&record);
+        }
         if let Some(scan) = automation.as_mut() {
             scan.observe(&record);
         }
@@ -3933,6 +4098,7 @@ fn scan_session(
     Some(ScannedSession {
         body,
         facts,
+        skill_usage: skill_usage.map(SkillUsageScan::finish),
         harness_session_id: identity.finish().filter(|_| utf8),
         first_event_at: first_event,
         span,
@@ -4992,6 +5158,43 @@ fn usage_by_day_value(
 }
 
 /// `insights_week`.
+/// The Skills answer reuses the counter store and its consent/visibility
+/// gates. It never opens a transcript or discovers sessions on demand.
+pub(crate) fn skills_usage(shared: &DaemonShared) -> serde_json::Value {
+    if shared.dev_dry_run
+        || !shared
+            .feature_flags
+            .snapshot()
+            .is_enabled("insights_skills")
+    {
+        return serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS});
+    }
+    let enabled = shared
+        .settings
+        .lock()
+        .map(|s| s.insights_counter_pass)
+        .unwrap_or(false);
+    let never = if enabled {
+        match never_project_keys(shared) {
+            Some(never) => never,
+            None => return unreadable_value(UNREADABLE_POLICY),
+        }
+    } else {
+        NeverFolders::NONE
+    };
+    let value = shared.insights_counter.skill_usage_value(enabled, &never);
+    // A live disable while the aggregation ran hides even cached evidence.
+    if !shared
+        .feature_flags
+        .snapshot()
+        .is_enabled("insights_skills")
+    {
+        serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS})
+    } else {
+        value
+    }
+}
+
 pub fn handle_week(shared: &DaemonShared, req: &Request) -> Response {
     let week = match req.params.get("iso_week") {
         None | Some(serde_json::Value::Null) => None,
@@ -5196,6 +5399,23 @@ mod tests {
             run_with(&self.pass, candidates, &[], false)
         }
 
+        fn run_skills(&self, candidates: &[CounterCandidate]) -> PassSummary {
+            self.pass
+                .run_pass_from(
+                    candidates,
+                    &[],
+                    &NeverFolders::NONE,
+                    now(),
+                    QUIET,
+                    &mut |_| (PROJECT.to_string(), false),
+                    self.pass.cleared.load(Ordering::SeqCst),
+                    true,
+                    &|| false,
+                )
+                .unwrap()
+                .unwrap()
+        }
+
         fn week(&self, never: &[String]) -> serde_json::Value {
             self.week_with(Some(monday()), never, WeekOptions::default())
         }
@@ -5318,6 +5538,194 @@ mod tests {
         let value = f.week(&[]);
         assert_eq!(value["sessions_stored"], 1, "replaced, not added");
         assert_eq!(claude_line(&value)["tokens"], CLAUDE_TOKENS);
+    }
+
+    #[test]
+    fn skill_usage_obeys_visibility_and_rereads_legacy_rows_once() {
+        let f = Fixture::new();
+        let mut bytes = claude_bytes();
+        bytes.extend_from_slice(b"\n{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"skill-call\",\"name\":\"Skill\",\"input\":{\"skill\":\"review\"}}]}}\n");
+        let path = f.write("skills.jsonl", &bytes);
+        let candidate = candidate(SOURCE_CLAUDE_CODE, &path);
+        assert_eq!(f.run_skills(std::slice::from_ref(&candidate)).read, 1);
+        let usage = f.pass.skill_usage_value(true, &NeverFolders::NONE);
+        assert_eq!(usage["usage"]["skills"][0]["name"], "review");
+        assert_eq!(usage["usage"]["skills"][0]["invocations"], 1);
+        assert_eq!(usage["usage"]["skills"][0]["sessions"], 1);
+        assert!(
+            usage["usage"]["skills"][0]["session_refs"][0]
+                .as_str()
+                .unwrap()
+                .starts_with('t')
+        );
+        let hidden = f.pass.skill_usage_value(true, &NeverFolders::Every);
+        assert!(hidden["usage"]["skills"].as_array().unwrap().is_empty());
+        assert_eq!(
+            f.pass.skill_usage_value(false, &NeverFolders::NONE)["enabled"],
+            false
+        );
+        let mut store = (*f.pass.load_cached().unwrap().unwrap()).clone();
+        for row in store.rows.values_mut() {
+            row.skill_usage_version = 0;
+            row.skill_usage = None;
+        }
+        f.pass.save(store).unwrap();
+        let unknown = f.pass.skill_usage_value(true, &NeverFolders::NONE);
+        assert_eq!(unknown["usage"]["sessions_unknown"], 1);
+        assert_eq!(unknown["usage"]["partial"], true);
+        assert_eq!(f.run_skills(std::slice::from_ref(&candidate)).read, 1);
+        assert_eq!(f.run_skills(std::slice::from_ref(&candidate)).read, 0);
+        f.pass.clear().unwrap();
+        assert!(
+            f.pass.skill_usage_value(true, &NeverFolders::NONE)["usage"]["skills"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn skill_usage_excludes_automated_rows() {
+        let f = Fixture::new();
+        let path = f.write("skills.jsonl", &claude_bytes());
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        let mut store = (*f.pass.load_cached().unwrap().unwrap()).clone();
+        let row = store.rows.values_mut().next().unwrap();
+        row.automation = Automation::Automated;
+        row.skill_usage = Some(crate::insights::skill_usage::SkillUsageEvidence {
+            schema_version: 1,
+            coverage: crate::insights::skill_usage::SkillUsageCoverage::ExplicitInvocations,
+            partial: false,
+            skills: vec![crate::insights::skill_usage::SkillUsageCount {
+                name: "review".into(),
+                invocations: 1,
+                loads: 0,
+                last_seen: None,
+            }],
+        });
+        f.pass.save(store).unwrap();
+        let usage = f.pass.skill_usage_value(true, &NeverFolders::NONE);
+        assert_eq!(usage["usage"]["sessions_observed"], 0);
+        assert!(usage["usage"]["skills"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn skill_usage_live_flag_off_on_off_preserves_counters_and_backfills_once() {
+        let (_dir, mut shared) = shared();
+        let flag_dir = tempfile::tempdir().unwrap();
+        let registry = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "registry_version": 1,
+            "flags": {"insights_skills": {"description": "Test skills", "owner": "tests",
+                "default": false, "required_capabilities": [], "timing": "live"}}
+        }))
+        .unwrap();
+        let profile = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "registry_version": 1, "environment": "staging",
+            "capabilities": [], "remote_enable": ["insights_skills"]
+        }))
+        .unwrap();
+        shared.feature_flags =
+            crate::feature_flags::Runtime::open(registry, profile, flag_dir.path(), now()).unwrap();
+        shared.settings.lock().unwrap().insights_counter_pass = true;
+        let shared = Arc::new(shared);
+        let mut inserted = false;
+        let mut bytes = String::from_utf8(claude_bytes()).unwrap().lines().map(|line| {
+            let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+            if !inserted && record["type"] == "assistant" {
+                record["message"]["content"].as_array_mut().unwrap().push(serde_json::json!({
+                    "type": "tool_use", "id": "flag-skill-call", "name": "Skill", "input": {"skill": "review"}
+                }));
+                inserted = true;
+            }
+            record.to_string()
+        }).collect::<Vec<_>>().join("\n").into_bytes();
+        let path = flag_dir.path().join("session.jsonl");
+        std::fs::write(&path, &bytes).unwrap();
+        let submit = || {
+            submit_counter_pass(
+                &shared,
+                CounterJob {
+                    candidates: vec![candidate(SOURCE_CLAUDE_CODE, &path)],
+                    spawned: Vec::new(),
+                    never_project_keys: NeverFolders::NONE,
+                    now: now(),
+                    quiescence_secs: QUIET,
+                    project_of: Box::new(|_, _| (PROJECT.to_string(), false)),
+                },
+            )
+        };
+        let accept = |revision, on| {
+            let manifest = serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1, "environment": "staging", "revision": revision,
+                "issued_at": now(), "expires_at": now() + Duration::hours(1),
+                "flags": {"insights_skills": on}
+            }))
+            .unwrap();
+            shared.feature_flags.accept(&manifest, now()).unwrap();
+        };
+
+        assert!(
+            !shared
+                .feature_flags
+                .snapshot()
+                .is_enabled("insights_skills")
+        );
+        submit();
+        let row = only_row(&shared.insights_counter);
+        assert!(row.skill_usage.is_none());
+        assert_eq!(row.skill_usage_version, 0);
+        assert!(
+            matches!(&row.body, RowBody::Claude { .. }),
+            "normal usage counters still run while skill evidence is off"
+        );
+        let counters = row.body;
+        assert_eq!(skills_usage(&shared)["enabled"], false);
+        let writes = shared.insights_counter.writes_for_test().0;
+        submit();
+        assert_eq!(
+            shared.insights_counter.writes_for_test().0,
+            writes,
+            "off does not repeatedly reread legacy skill rows"
+        );
+
+        accept(1, true);
+        submit();
+        let row = only_row(&shared.insights_counter);
+        assert_eq!(row.body, counters);
+        assert_eq!(row.skill_usage.as_ref().unwrap().skills[0].name, "review");
+        assert_eq!(row.skill_usage_version, SKILL_USAGE_VERSION);
+        assert_eq!(
+            skills_usage(&shared)["usage"]["skills"][0]["invocations"],
+            1
+        );
+        let writes = shared.insights_counter.writes_for_test().0;
+        submit();
+        assert_eq!(
+            shared.insights_counter.writes_for_test().0,
+            writes,
+            "on backfills unchanged sessions only once"
+        );
+
+        accept(2, false);
+        assert_eq!(
+            skills_usage(&shared)["enabled"],
+            false,
+            "cached observations stop publishing immediately"
+        );
+        bytes.extend_from_slice(b"\n{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"off-skill-call\",\"name\":\"Skill\",\"input\":{\"skill\":\"private-new-skill\"}}]}}\n");
+        std::fs::write(&path, bytes).unwrap();
+        submit();
+        let row = only_row(&shared.insights_counter);
+        assert!(
+            row.skill_usage.is_none(),
+            "new off-state jobs extract no skill evidence"
+        );
+        assert_eq!(row.skill_usage_version, 0);
+        assert!(
+            !std::fs::read_to_string(shared.store.daemon_path(COUNTER_ROWS_FILE))
+                .unwrap()
+                .contains("private-new-skill")
+        );
     }
 
     #[test]
@@ -5598,6 +6006,7 @@ mod tests {
                 &key,
                 COUNTER_PASS_MAX_LINE_BYTES,
                 per_turn,
+                false,
             )
             .unwrap()
         };
@@ -5631,7 +6040,7 @@ mod tests {
     fn one_line_is_never_read_past_the_line_bound() {
         let key = key_for(3);
         let scan = |bytes: &[u8], max: u64| {
-            scan_session(AnalyticsSource::ClaudeCode, bytes, &key, max, true)
+            scan_session(AnalyticsSource::ClaudeCode, bytes, &key, max, true, false)
                 .expect("a long line is passed over, never refuses the file")
         };
         let line =
@@ -5766,6 +6175,7 @@ mod tests {
             first_event_at,
             span,
             facts: None,
+            skill_usage: None,
             automation: Automation::Unknown,
             goals: Vec::new(),
             not_analyzable: NotAnalyzable::of(
@@ -5789,6 +6199,7 @@ mod tests {
     /// automation class, which the automated-session tests cover.
     fn without_facts(mut read: ReadBody) -> ReadBody {
         read.facts = None;
+        read.skill_usage = None;
         read.goals = Vec::new();
         read.automation = Automation::Unknown;
         if let RowBody::Codex { series, .. } = &mut read.body {
@@ -5896,7 +6307,7 @@ mod tests {
             for members in [0, 2] {
                 let mut c = candidate(adapter, &path);
                 c.group_member_count = members;
-                let streamed = read_body(source, &c, &key);
+                let streamed = read_body(source, &c, &key, false);
                 assert_eq!(
                     without_facts(streamed.clone()),
                     read_whole(source, &bytes, members, &key, adapter),
@@ -6129,6 +6540,8 @@ mod tests {
                     streamed: true,
                     facts: None,
                     facts_version: SESSION_FACTS_VERSION,
+                    skill_usage: None,
+                    skill_usage_version: SKILL_USAGE_VERSION,
                     automation: Automation::Unknown,
                     automation_read: true,
                     not_analyzable: None,
@@ -6204,6 +6617,8 @@ mod tests {
                     streamed: true,
                     facts: None,
                     facts_version: SESSION_FACTS_VERSION,
+                    skill_usage: None,
+                    skill_usage_version: SKILL_USAGE_VERSION,
                     automation: Automation::Unknown,
                     automation_read: true,
                     not_analyzable: None,
@@ -6291,6 +6706,8 @@ mod tests {
             streamed: true,
             facts: None,
             facts_version: SESSION_FACTS_VERSION,
+            skill_usage: None,
+            skill_usage_version: SKILL_USAGE_VERSION,
             automation: Automation::Unknown,
             automation_read: true,
             not_analyzable: None,

@@ -365,6 +365,7 @@ fn placeholders() -> impl Iterator<Item = &'static &'static str> {
         .chain(trace_commons_contributor::preview_copy::MONITOR_PLACEHOLDERS)
         .chain(trace_commons_contributor::shell_words_copy::SHELL_WORDS_PLACEHOLDERS)
         .chain(trace_commons_contributor::insights::analytics_copy::ANALYTICS_PLACEHOLDERS)
+        .chain(trace_commons_contributor::insights::skills_copy::PLACEHOLDERS)
 }
 
 /// The core sentences no Swift literal may hold, by where they come from.
@@ -501,6 +502,13 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
     add(
         "insights::analytics_copy::ANALYTICS_COPY",
         trace_commons_contributor::insights::analytics_copy::ANALYTICS_COPY
+            .iter()
+            .map(|(_, words)| holed((*words).to_owned()))
+            .collect(),
+    );
+    add(
+        "insights::skills_copy::COPY",
+        trace_commons_contributor::insights::skills_copy::COPY
             .iter()
             .map(|(_, words)| holed((*words).to_owned()))
             .collect(),

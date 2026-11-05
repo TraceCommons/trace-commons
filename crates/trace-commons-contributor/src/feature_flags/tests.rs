@@ -1,5 +1,42 @@
 use super::*;
 use chrono::{Duration, TimeZone};
+
+#[test]
+fn skills_is_live_default_off_and_remotely_supported_in_each_environment() {
+    let registry = registry().unwrap();
+    let definition = &registry.flags["insights_skills"];
+    assert!(!definition.default);
+    assert_eq!(definition.timing, Timing::Live);
+    for env in [
+        Environment::Production,
+        Environment::Staging,
+        Environment::Testing,
+    ] {
+        let profile = profile_for_environment(env).unwrap();
+        registry.validate(&profile).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::open(registry.clone(), profile.clone(), dir.path(), now()).unwrap();
+        assert!(!runtime.snapshot().is_enabled("insights_skills"));
+        let manifest = |revision, enabled| {
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version":1,"environment":env,"revision":revision,
+                "issued_at":now(),"expires_at":now()+Duration::hours(1),
+                "flags":{"insights_skills":enabled}
+            }))
+            .unwrap()
+        };
+        runtime.accept(&manifest(1, true), now()).unwrap();
+        assert!(runtime.snapshot().is_enabled("insights_skills"));
+        runtime.accept(&manifest(2, false), now()).unwrap();
+        assert!(!runtime.snapshot().is_enabled("insights_skills"));
+        let mut unsupported = profile;
+        unsupported.capabilities.clear();
+        let blocked = Runtime::open(registry.clone(), unsupported, dir.path(), now()).unwrap();
+        blocked.accept(&manifest(1, true), now()).unwrap();
+        assert!(!blocked.snapshot().is_enabled("insights_skills"));
+        assert!(blocked.snapshot().flags["insights_skills"].capability_blocked);
+    }
+}
 pub(super) fn now() -> DateTime<Utc> {
     Utc.timestamp_opt(1_800_000_000, 0).unwrap()
 }
