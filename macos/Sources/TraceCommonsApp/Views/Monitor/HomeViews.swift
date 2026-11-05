@@ -8,7 +8,7 @@ import TCShellCore
 /// (spec, "Screens": History is Home, then History).
 ///
 /// Counts come from the core: waiting is `decisions_owed` (a dash when the
-/// core did not say), contributed is the rollup's accepted count. Pending
+/// core did not say), contributed is `HomeFormat.contributed`. Pending
 /// credit is shown only beside the commons' own statement of what it waits
 /// on (D6), and never as earned.
 ///
@@ -316,8 +316,8 @@ private struct HomeOverview: View {
     }
 
     /// Waiting, contributed and pending credit (#1146 `home-view.tsx`), each
-    /// from the core: waiting is decisions owed, contributed the rollup's
-    /// accepted count. Pending credit is a figure only beside the commons'
+    /// from the core: waiting is decisions owed, contributed
+    /// `HomeFormat.contributed`. Pending credit is a figure only beside the commons'
     /// statement of what it waits on (D6), drawn under the tiles; without
     /// that statement it is a dash, never a bare number that reads as owed.
     ///
@@ -348,9 +348,11 @@ private struct HomeOverview: View {
                     Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
                         GridRow {
                             HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
-                                         systemImage: HomeStatIcons.waiting, action: openTraces)
-                            HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted),
-                                         systemImage: HomeStatIcons.contributed, action: openHistory)
+                                         systemImage: HomeStatIcons.waiting, loading: traces.phase == .loading,
+                                         action: openTraces)
+                            HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(freshRollup),
+                                         systemImage: HomeStatIcons.contributed,
+                                         loading: store.isLoading("history_rollup"), action: openHistory)
                         }
                         if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) {
                             GridRow {
@@ -1460,10 +1462,14 @@ private struct HistoryStats: View {
                 let creditTile = HomeFormat.creditTile(final: rollup?.creditFinal, pending: rollup?.creditPending,
                                                        accepted: rollup?.allTime?.accepted,
                                                        credit: credit)
+                let loadingRollup = store.isLoading("history_rollup")
                 HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value,
-                             detail: creditTile.detail)
-                HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(rollup?.allTime?.accepted))
-                HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined))
+                             detail: creditTile.detail,
+                             loading: store.isLoading("history_rollup", "commons_credit_summary"))
+                HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(rollup),
+                             loading: loadingRollup)
+                HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined),
+                             loading: loadingRollup)
             }
             .fixedSize(horizontal: false, vertical: true)
         }
@@ -1749,8 +1755,10 @@ struct HomeAccountTiles: View {
                 // No sign-in line under it (owner, 2026-11-02): the Account
                 // heading says "No data - Sign in" instead.
                 HomeStatTile(label: HomeFormat.creditReceivedWord, value: tiles.received,
-                             detail: creditDetail, systemImage: HomeStatIcons.credit, action: openPrivateAI)
+                             detail: creditDetail, systemImage: HomeStatIcons.credit,
+                             loading: store.isLoading("history_rollup"), action: openPrivateAI)
                 HomeStatTile(label: HomeFormat.creditPendingTitleWord, value: tiles.pending,
+                             loading: store.isLoading("history_rollup", "commons_credit_summary"),
                              action: openPrivateAI)
                 if let copy = model.privateInferenceCopy {
                     let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
@@ -1785,6 +1793,8 @@ private struct HomeStatTile: View {
     var detailInk: GlassRGBA? = nil
     /// The tile's icon (`HomeStatIcons`); nil draws none.
     var systemImage: String? = nil
+    /// The first answer has not come: a placeholder, not a dash or a zero.
+    var loading = false
     /// Opens where the number lives, and the whole tile is the button;
     /// nil for a tile on the page its number lives on (History's).
     var action: (() -> Void)?
@@ -1796,12 +1806,12 @@ private struct HomeStatTile: View {
         if let action {
             Button(action: action) {
                 GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
-                              interactive: true, iconPlacement: .watermark)
+                              interactive: true, iconPlacement: .watermark, loading: loading)
             }
             .buttonStyle(GlassPressStyle())
         } else {
             GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
-                          iconPlacement: .watermark)
+                          iconPlacement: .watermark, loading: loading)
         }
     }
 }
@@ -1927,6 +1937,16 @@ enum HomeFormat {
         return word
     }
 
+    /// Contributed, all time, as Ron's `isContributed` counts it: accepted,
+    /// waiting to be scored and held for privacy review. The one definition
+    /// behind Home's tile, History's card and the Traces summary. A part the
+    /// core did not give is a dash.
+    static func contributed(_ rollup: DaemonData.HistoryRollup?) -> String {
+        let all = rollup?.allTime
+        let parts = [all?.accepted, all?.submitted, all?.quarantined]
+        return count(parts.contains(nil) ? nil : parts.compactMap { $0 }.reduce(0, +))
+    }
+
     /// A count, or a dash when the core did not say. Zero is a number.
     static func count(_ value: Int?) -> String {
         value.map(String.init) ?? "—"
@@ -1950,7 +1970,7 @@ enum HomeFormat {
     }
 
     static func points(_ value: Double?) -> String {
-        value.map { $0.formatted(.number.precision(.fractionLength(1))) } ?? "—"
+        value.map { $0.formatted(.number.precision(.fractionLength(0...1))) } ?? "—"
     }
 
     /// Home's pending-credit tile: the figure only with the commons'

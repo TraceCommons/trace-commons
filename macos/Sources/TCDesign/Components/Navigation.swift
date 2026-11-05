@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// A badge's value: a count, or unknown (a dash).
+/// A badge's value: a count, unknown (a dash), or still loading (a spinner,
+/// until the first answer; never a dash, which says the core did not give one).
 public enum GlassBadgeValue: Sendable, Equatable {
     case count(Int)
     case unknown
+    case loading
 }
 
 /// One segment of `GlassSegmentedTabs`.
@@ -70,6 +72,8 @@ private struct GlassSegmentMarkView: View {
             GlassBadge(count: count, subtle: true, status: status).accessibilityHidden(hidesCount)
         case .count(.unknown, let status):
             GlassBadge(count: nil, subtle: true, status: status).accessibilityHidden(hidesCount)
+        case .count(.loading, _):
+            GlassSpinner(size: 10)
         case nil:
             EmptyView()
         }

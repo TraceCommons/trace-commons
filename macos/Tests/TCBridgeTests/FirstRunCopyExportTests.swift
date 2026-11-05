@@ -17,6 +17,14 @@ final class FirstRunCopyExportTests: XCTestCase {
         XCTAssertTrue(copy.privateAi.canConnect.contains("{total}"))
     }
 
+    /// One trace reads "1 trace", never "1 traces".
+    func testASingleTraceIsSingular() throws {
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        XCTAssertEqual(copy.frame.sessionCountLine(1), "1 trace")
+        XCTAssertEqual(copy.frame.sessionCountLine(0), "0 traces")
+        XCTAssertEqual(copy.frame.sessionCountLine(2), "2 traces")
+    }
+
     /// Folders' sign-in line is the core's existing Private AI one, read
     /// through the first-run table rather than a second bridge call. It is
     /// no longer the inference step's, which offers a Skip Join does not

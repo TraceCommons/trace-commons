@@ -61,6 +61,26 @@ final class HomeTests: XCTestCase {
         return store
     }
 
+    /// A figure is loading until its first reply, then a number, or unknown
+    /// when the read failed: never the same as a zero or a dash.
+    func test_aFigureIsLoadingUntilItsFirstReply() async {
+        let loaded = HomeStore(client: SampleDaemonClient(.normalDay))
+        XCTAssertTrue(loaded.isLoading("history_rollup"))
+        XCTAssertTrue(loaded.isLoading("history_rollup", "commons_credit_summary"))
+        await loaded.load()
+        XCTAssertFalse(loaded.isLoading("history_rollup"))
+        XCTAssertFalse(loaded.isLoading("history_rollup", "commons_credit_summary"))
+
+        // A failed read has answered: unknown, not loading.
+        let down = await store(.coreDown)
+        XCTAssertFalse(down.isLoading("history_rollup"))
+        XCTAssertNotNil(down.failures["history_rollup"])
+
+        // A new client starts the wait again.
+        loaded.attach(SampleDaemonClient(.normalDay))
+        XCTAssertTrue(loaded.isLoading("history_rollup"))
+    }
+
     /// Every sample set loads; the core-down set records failures instead of
     /// drawing zeros.
     func test_theStoreLoadsEverySampleSet() async {
@@ -91,6 +111,14 @@ final class HomeTests: XCTestCase {
         XCTAssertEqual(HomeFormat.count(nil), "—")
         XCTAssertEqual(HomeFormat.count(0), "0")
         XCTAssertEqual(HomeFormat.points(nil), "—")
+    }
+
+    /// Credit is a whole number where it is whole, and keeps one decimal
+    /// where it is not: "0", not "0.0", beside whole-number counts.
+    func test_pointsAreWholeWhereWhole() {
+        XCTAssertEqual(HomeFormat.points(0), "0")
+        XCTAssertEqual(HomeFormat.points(48), "48")
+        XCTAssertEqual(HomeFormat.points(12.5), "12.5")
     }
 
     /// A recorded reply, decoded after `edit` is applied to its JSON object

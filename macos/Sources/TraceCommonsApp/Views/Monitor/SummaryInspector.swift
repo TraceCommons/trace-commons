@@ -284,9 +284,7 @@ enum SummaryFacts {
     /// the statistics below count it: accepted, waiting to be scored and
     /// held for privacy review. A part the core did not give is a dash.
     static func contributed(_ rollup: DaemonData.HistoryRollup?) -> String {
-        let all = rollup?.allTime
-        let parts = [all?.accepted, all?.submitted, all?.quarantined]
-        return HomeFormat.count(parts.contains(nil) ? nil : parts.compactMap { $0 }.reduce(0, +))
+        HomeFormat.contributed(rollup)
     }
 
     /// A value the store holds, or nil when its last read failed: the

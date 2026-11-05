@@ -185,7 +185,7 @@ struct TracesScreen: View {
                             Text(row.kind.displayName)
                                 .glassType(GlassTokens.TypeScale.bodyStrong)
                                 .foregroundStyle(GlassColor.textPrimary)
-                            Text(FirstRunCopy.fill(copy.frame.sessionCount, ["count": row.traces.formatted()]))
+                            Text(copy.frame.sessionCountLine(row.traces))
                                 .glassType(GlassTokens.TypeScale.caption)
                                 .foregroundStyle(GlassColor.textSecondary)
                         }
