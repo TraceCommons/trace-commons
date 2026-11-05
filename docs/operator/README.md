@@ -299,6 +299,7 @@ Every runbook in this directory, with a one-line description.
   list of witness measurements clients accept beside their sign-up pins:
   the Cloud KMS list-signing key, `trace-commons-witness-list`, publishing,
   witness rollover and key rotation.
+- [Stable witness hostname](witness-custom-domain.md) — in-CVM TLS, DNS routing, verification and migration limits.
 
 ## Doc lifecycle and freshness
 
