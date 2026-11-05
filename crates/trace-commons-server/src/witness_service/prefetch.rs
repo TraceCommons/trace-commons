@@ -495,7 +495,9 @@ mod tests {
                 "event_id": call, "event_type": "tool_call",
                 "structured_payload": {"arguments": {
                     "cmd": format!("ssh build{}.corp.internal 'cat /home/zo\u{eb}/notes-{i}.txt'", i % 3),
-                    "Zo\u{eb} Ng": "owner",
+                    // A name as a value: object keys never reach the
+                    // classifier (structural skip, 2026-11-05).
+                    "owner": "Zo\u{eb} Ng",
                     "nested": [{"who": "bob@example.com"}, "plain", i],
                 }},
                 "success": true, "timestamp": "2026-11-05T00:00:01Z",

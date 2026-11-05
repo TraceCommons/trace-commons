@@ -702,6 +702,16 @@ until devices can refresh their measurement pins (section 7).
     key with a second holder.
 12. **"Privacy check timed out. Try again later." is approved** (section
     3).
+13. **The prose classifier skips identifier-shaped keys and structural
+    tokens**, tightened the same day: address-, host- and phone-shaped
+    tokens and every value under an identity key are always classified,
+    on by default, in client and witness alike through one function
+    (`classifier_skips_structural_text` in the protocol crate), so both
+    make the same edits and the subset check (section 4) is unaffected.
+    The exact rule, the measured savings and the coverage it gives up are
+    in [2026-11-05-witness-scaling-design.md](2026-11-05-witness-scaling-design.md)
+    section 2.5. `TRACE_PRIVACY_FILTER_SKIP_STRUCTURAL=0` turns it off;
+    client and witness must agree on it.
 
 ## 10. Phased plan (sketch, no code)
 

@@ -223,6 +223,71 @@ cache goes cold for good. Correctness is unaffected, and 2.1 does not depend
 on that cache (it keeps its own answers per request). An eviction policy
 would restore the cross-request hit rate.
 
+### 2.5 Skip the classifier for keys and structural tokens (owner decisions 2026-11-05)
+
+On by default, in one function the client's redaction and the witness's
+both call (`classifier_skips_structural_text`, `trace_contribution.rs`).
+The owner accepted the first rule, then took the recommended tightening
+the same day ("go with recs"). The rule as built:
+
+1. **An identifier-shaped key does not go to the classifier.** A key that
+   is not identifier-shaped (by rule 2) is classified like a value:
+   `Jane Doe`, `Owner`.
+2. **A value is skipped** when all of these hold:
+   - it is one to forty characters, each an ASCII letter, digit or one of
+     `_ . - / :`;
+   - it has no uppercase letter followed by a lowercase one;
+   - it has no run of seven or more digits;
+   - it is not a dotted name without a slash (which covers IPv4 addresses
+     and hostnames);
+   - it is not IPv6-shaped (two or more `:` and otherwise hex digits).
+3. **A value under an identity key** -- `author`, `user`, `username`,
+   `name`, `owner`, `email`, `login`, `committer` or `assignee`, matched
+   case-insensitively against the whole key, at any depth below it -- **is
+   always classified**, whatever its shape (`IDENTITY_KEYS`).
+4. **Everything else is classified**, however short: anything with
+   whitespace, any non-ASCII character, any capitalized word (`Jane`,
+   `Sam`, `McDonald`), any token over forty characters.
+
+Examples:
+
+- Skipped: `bash`, `edit_file`, `src/main.rs`, `200`, a hex digest,
+  `true`, `call_1`, `ERROR`, an ISO timestamp.
+- Classified: `Jane Doe`, `Jane`, `Dear Sam`, `fix the login bug`, `José`,
+  a 41-character token, `203.0.113.7`, `build.corp.internal`, `main.rs`,
+  `2001:db8::1`, `4155550123`, and `jdoe` under `author`.
+
+This is the classifier stage only. The deterministic detectors run on
+every field, skipped or not, before the rule is asked. They still remove
+`a@b.co`, `+1-415-555-0123`, an AWS access key, `10.0.0.12`,
+`https://intranet.example.corp/wiki` and `/home/jdoe/notes.txt`.
+
+**What it still gives up.** A bare lowercase username (`jdoe`) under a key
+that is not an identity key is skipped, and the deterministic pass does not
+catch it. A test pins this, so the spec cannot drift from the code. Before
+the tightening, a public IPv4 address, a bare hostname, an IPv6 address and
+an unformatted phone number were skipped as well; they are classified now.
+
+**Savings.** Measured on the load harness's synthetic contributions, a
+fresh witness each way, zero-latency stand-in classifier, the tightened
+rule, 64 KiB windows:
+
+| contribution | calls, skip off | calls, skip on |
+|---|---|---|
+| 241 KB in one tool result | 16 | 9 (-44%) |
+| 241 KB over 120 tool results | 358 | 239 (-33%) |
+
+Most of the remaining calls are synthetic tool output with whitespace in
+it. Real sessions carry more ids, paths and flags, so they should save
+more; that is not measured.
+
+**Not covered.** The ingest server's prose-PII backstop
+(`rescrub_envelope_prose_pii_with`) is unchanged and still classifies
+every string and key it examines. The redaction pipeline alias is
+unchanged as well. Whether the skip should move the alias is an owner
+question: it changes classifier coverage without changing which
+classifier runs.
+
 ## 3. More than one witness
 
 ### 3.1 Identity: replicas share key and measurement
