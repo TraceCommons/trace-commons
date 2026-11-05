@@ -183,6 +183,19 @@ struct Args {
     )]
     max_concurrent_requests: usize,
 
+    /// Prose-classifier calls in flight at once, across every request this
+    /// process serves. Only `full-pipeline` makes such calls. A contribution's
+    /// text leaves are classified concurrently up to this bound instead of one
+    /// at a time. See
+    /// [`trace_commons_server::witness_service::prefetch::DEFAULT_MAX_CLASSIFY_IN_FLIGHT`]
+    /// for why the default is what it is.
+    #[arg(
+        long,
+        env = "TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT",
+        default_value_t = trace_commons_server::witness_service::prefetch::DEFAULT_MAX_CLASSIFY_IN_FLIGHT
+    )]
+    max_classify_in_flight: usize,
+
     /// Slots left available to ordinary calls when background calls fill
     /// their cooperative budget. Defaults to one, or zero for a one-slot
     /// witness. This does not increase the global concurrency limit.
@@ -359,6 +372,9 @@ async fn main() -> Result<()> {
     if args.max_concurrent_requests == 0 {
         bail!("TRACE_COMMONS_WITNESS_MAX_CONCURRENT_REQUESTS must be greater than zero");
     }
+    if args.max_classify_in_flight == 0 {
+        bail!("TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT must be greater than zero");
+    }
     let reserved_interactive_slots = resolved_reserved_interactive_slots(
         args.max_concurrent_requests,
         args.reserved_interactive_slots,
@@ -421,6 +437,7 @@ async fn main() -> Result<()> {
         max_request_bytes = args.max_request_bytes,
         max_concurrent_requests = args.max_concurrent_requests,
         request_timeout_secs = args.request_timeout_secs,
+        max_classify_in_flight = args.max_classify_in_flight,
         "witness ready"
     );
 
@@ -453,7 +470,7 @@ async fn main() -> Result<()> {
             "witness redaction pipeline"
         );
         (Arc::new(FullPipelineRedaction::new(known_path_prefixes.clone(), adapter.clone(), backend)),
-         Arc::new(trace_commons_server::witness_service::PipelineContributionRedaction::with_privacy_filter(known_path_prefixes, adapter, backend)))
+         Arc::new(trace_commons_server::witness_service::prefetch::PrefetchingContributionRedaction::new(known_path_prefixes, adapter, backend, args.max_classify_in_flight)))
     } else {
         (Arc::new(DeterministicRedaction::new(known_path_prefixes.clone())),
          Arc::new(trace_commons_server::witness_service::PipelineContributionRedaction::deterministic_only(known_path_prefixes)))

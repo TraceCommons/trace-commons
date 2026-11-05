@@ -1,0 +1,594 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! Classify a contribution's text leaves concurrently, without changing what
+//! the pipeline produces.
+//!
+//! # Why
+//!
+//! `redact_trace` walks a contribution leaf by leaf -- every event's content,
+//! every metadata string, every structured-payload string and key -- and
+//! awaits the prose classifier on each in turn. Against NEAR AI each call
+//! costs about 1.3 s however small its input, so a trace's wall time is its
+//! leaf count times that: measured locally against a stub with the
+//! endpoint's latency, 241 KB in one field took 9.7 s and the same 241 KB
+//! across 60 tool results took 85.5 s, with the witness's own CPU under 1% of
+//! either. Most of those calls carry under 200 bytes.
+//!
+//! # How, and why the output cannot change
+//!
+//! Two passes over the same raw contribution, through the unmodified
+//! protocol pipeline:
+//!
+//! 1. **Record.** The pipeline runs with an adapter that records each text it
+//!    is asked to classify and answers "nothing found". The classifier stage
+//!    never feeds the deterministic stage -- placeholder numbering, the scan
+//!    budget and every later classifier input are derived from the raw
+//!    contribution alone -- so the texts recorded are exactly the texts the
+//!    real pass will ask about.
+//! 2. **Classify.** The distinct texts go to the real adapter, a bounded
+//!    number at once, under a permit pool shared by every request in the
+//!    process, since every request spends the same classifier key.
+//! 3. **Replay.** The pipeline runs again with an adapter that answers each
+//!    text from those results. This is the pass whose output is returned, and
+//!    it is the same call the sequential witness makes; only where each answer
+//!    came from differs. A text the record pass did not reach (it stopped
+//!    early on a refusal) goes to the real adapter in the replay, in order,
+//!    as it does today.
+//!
+//! A classifier failure stays a failure: the first failing text in pipeline
+//! order is answered with its error in the replay, which then fails exactly
+//! where the sequential pass would have, and the witness refuses.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use tokio::sync::Semaphore;
+use trace_commons_protocol::trace_contribution::{
+    DeterministicTraceRedactor, PrivacyFilterAdapter, PrivacyFilterBackendTag,
+    RawTraceContribution, SafePrivacyFilterRedaction, TraceContributionError,
+    redaction_pipeline_version,
+};
+
+use super::{ContributionRedactor, RedactedContribution, SeamUnavailable, refuse_on_panic};
+
+/// Classifier calls in flight at once, across the whole process.
+///
+/// Two, from the one controlled measurement there is: on 2026-08-28, against
+/// the same NEAR AI key, two concurrent requests passed 2/2 and four failed
+/// 0/4 within a second, and the burst briefly poisoned serial traffic after
+/// it. Today's witness already allows four overlapping calls -- one per
+/// request slot -- so two is tighter than what is deployed, while still
+/// halving a single large request's wall time. That measurement predates the
+/// endpoint's 2026-09-03 limit change and has not been repeated; raise this
+/// only after re-measuring with synthetic text, never with the production key
+/// while a driver is using it.
+pub const DEFAULT_MAX_CLASSIFY_IN_FLIGHT: usize = 2;
+
+type Answer = Result<Option<SafePrivacyFilterRedaction>, TraceContributionError>;
+
+fn permits_closed() -> TraceContributionError {
+    TraceContributionError::RedactionFailed {
+        reason: "witness_classify_permits_closed".to_string(),
+    }
+}
+
+/// Records every text the pipeline asks about, in order, and finds nothing.
+#[derive(Default)]
+struct RecordingAdapter {
+    seen: Mutex<Vec<String>>,
+}
+
+impl RecordingAdapter {
+    /// The recorded texts, first occurrence order, duplicates removed.
+    fn distinct(&self) -> Vec<String> {
+        let seen = std::mem::take(&mut *self.seen.lock().unwrap_or_else(|p| p.into_inner()));
+        let mut kept = std::collections::HashSet::new();
+        seen.into_iter()
+            .filter(|text| kept.insert(text.clone()))
+            .collect()
+    }
+}
+
+#[async_trait]
+impl PrivacyFilterAdapter for RecordingAdapter {
+    async fn redact_text(&self, text: &str) -> Answer {
+        self.seen
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(text.to_string());
+        Ok(None)
+    }
+}
+
+/// Answers from the classify pass, falling back to the real adapter (under
+/// the shared permits) for any text that pass did not reach.
+struct AnsweringAdapter {
+    answers: HashMap<String, Answer>,
+    inner: Arc<dyn PrivacyFilterAdapter>,
+    permits: Arc<Semaphore>,
+}
+
+#[async_trait]
+impl PrivacyFilterAdapter for AnsweringAdapter {
+    async fn redact_text(&self, text: &str) -> Answer {
+        if let Some(answer) = self.answers.get(text) {
+            return answer.clone();
+        }
+        let _permit = self.permits.acquire().await.map_err(|_| permits_closed())?;
+        self.inner.redact_text(text).await
+    }
+}
+
+/// The full pipeline over a contribution, with its classifier calls made
+/// concurrently. Same output as
+/// [`super::PipelineContributionRedaction::with_privacy_filter`] for the same
+/// classifier answers; see the module docs.
+pub struct PrefetchingContributionRedaction {
+    known_path_prefixes: Vec<String>,
+    adapter: Arc<dyn PrivacyFilterAdapter>,
+    backend: PrivacyFilterBackendTag,
+    policy_version: String,
+    permits: Arc<Semaphore>,
+    per_request: usize,
+}
+
+impl PrefetchingContributionRedaction {
+    /// `max_in_flight` bounds classifier calls across every request sharing
+    /// this redactor, which is every request the process serves; one request
+    /// may use all of them. Zero is treated as one.
+    pub fn new(
+        known_path_prefixes: Vec<String>,
+        adapter: Arc<dyn PrivacyFilterAdapter>,
+        backend: PrivacyFilterBackendTag,
+        max_in_flight: usize,
+    ) -> Self {
+        let max_in_flight = max_in_flight.max(1);
+        Self {
+            known_path_prefixes,
+            adapter,
+            backend,
+            policy_version: redaction_pipeline_version(backend),
+            permits: Arc::new(Semaphore::new(max_in_flight)),
+            per_request: max_in_flight,
+        }
+    }
+
+    fn pipeline(&self, adapter: Arc<dyn PrivacyFilterAdapter>) -> DeterministicTraceRedactor {
+        DeterministicTraceRedactor::deterministic_only(self.known_path_prefixes.clone())
+            .with_privacy_filter(adapter, self.backend)
+    }
+
+    /// Steps 1 and 2: record the texts, then classify them concurrently.
+    async fn answers_for(&self, raw: &RawTraceContribution) -> AnsweringAdapter {
+        let recorder = Arc::new(RecordingAdapter::default());
+        // The record pass's own result is discarded. If it refuses (a
+        // credential in metadata, a key collision), the replay refuses at the
+        // same leaf; the texts recorded before that point are still worth
+        // classifying ahead of it.
+        let _ = self
+            .pipeline(recorder.clone())
+            .redact_trace_with_edits(raw.clone())
+            .await;
+        let texts = recorder.distinct();
+
+        // Bounded and ordered: at most `per_request` calls are started ahead
+        // of the earliest unanswered text, and answers are taken in pipeline
+        // order, so the first error seen is the first in that order,
+        // everything before it has its answer, and nothing more is started
+        // after it. Dropping the set (an error, or the request's timeout)
+        // aborts whatever is still in flight.
+        let mut answers = HashMap::with_capacity(texts.len());
+        let mut pending = tokio::task::JoinSet::new();
+        let mut done: HashMap<usize, (String, Answer)> = HashMap::new();
+        let mut queue = texts.into_iter().enumerate();
+        let mut next_to_take = 0usize;
+        let mut in_flight = 0usize;
+        loop {
+            while in_flight < self.per_request {
+                let Some((index, text)) = queue.next() else {
+                    break;
+                };
+                let adapter = self.adapter.clone();
+                let permits = self.permits.clone();
+                pending.spawn(async move {
+                    let answer = match permits.acquire_owned().await {
+                        Ok(_permit) => adapter.redact_text(&text).await,
+                        Err(_) => Err(permits_closed()),
+                    };
+                    (index, text, answer)
+                });
+                in_flight += 1;
+            }
+            let Some(joined) = pending.join_next().await else {
+                break;
+            };
+            in_flight -= 1;
+            match joined {
+                Ok((index, text, answer)) => {
+                    done.insert(index, (text, answer));
+                }
+                // A panicking classifier call: stop here and let the replay
+                // meet that text again, through the real adapter, where a
+                // panic is a refusal.
+                Err(_) => break,
+            }
+            let mut failed = false;
+            while let Some((text, answer)) = done.remove(&next_to_take) {
+                failed = answer.is_err();
+                answers.insert(text, answer);
+                next_to_take += 1;
+                if failed {
+                    break;
+                }
+            }
+            if failed {
+                break;
+            }
+        }
+        AnsweringAdapter {
+            answers,
+            inner: self.adapter.clone(),
+            permits: self.permits.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl ContributionRedactor for PrefetchingContributionRedaction {
+    async fn redact_with_edits(
+        &self,
+        raw: RawTraceContribution,
+    ) -> Result<
+        (
+            RedactedContribution,
+            std::collections::BTreeMap<
+                uuid::Uuid,
+                trace_commons_protocol::private_edit_map::PrivateRedactionEdits,
+            >,
+        ),
+        SeamUnavailable,
+    > {
+        let answers = refuse_on_panic(async { Ok::<_, ()>(self.answers_for(&raw).await) }).await?;
+        let (envelope, maps) = refuse_on_panic(
+            self.pipeline(Arc::new(answers))
+                .redact_trace_with_edits(raw),
+        )
+        .await?;
+        Ok((
+            RedactedContribution {
+                envelope,
+                policy_version: self.policy_version.clone(),
+            },
+            maps,
+        ))
+    }
+
+    async fn redact(
+        &self,
+        raw: RawTraceContribution,
+    ) -> Result<RedactedContribution, SeamUnavailable> {
+        use trace_commons_protocol::trace_contribution::TraceRedactor;
+        let answers = refuse_on_panic(async { Ok::<_, ()>(self.answers_for(&raw).await) }).await?;
+        let envelope = refuse_on_panic(self.pipeline(Arc::new(answers)).redact_trace(raw)).await?;
+        Ok(RedactedContribution {
+            envelope,
+            policy_version: self.policy_version.clone(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use serde_json::json;
+    use trace_commons_protocol::privacy_filter_near_ai::NearAiPrivacyFilterAdapter;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    use crate::witness_service::PipelineContributionRedaction;
+    use trace_commons_protocol::trace_contribution::TraceRedactor;
+
+    /// What the stand-in classifier reports, wherever it appears.
+    const NAMES: &[&str] = &["Alice Brannigan", "Zo\u{eb} Ng", "bob@example.com"];
+
+    /// A contribution with what the pipeline treats differently: message
+    /// text, tool output with names and a credential, multibyte text,
+    /// structured payloads whose keys and values are both classified,
+    /// repeated text (deduplicated by the record pass), and a hostname the
+    /// deterministic pass numbers, so placeholder counters are on the path.
+    fn rich_contribution(events: usize) -> RawTraceContribution {
+        let mut body_events = vec![json!({
+            "content": "please ask Alice Brannigan about the build on build.corp.internal",
+            "cost_usd": null, "latency_ms": null, "token_counts": null, "tool_name": null,
+            "event_id": uuid::Uuid::from_u128(1), "event_type": "user_message",
+            "structured_payload": {"state": "Completed"},
+            "timestamp": "2026-11-05T00:00:00Z",
+        })];
+        for i in 0..events {
+            let call = uuid::Uuid::from_u128(1000 + i as u128);
+            body_events.push(json!({
+                "cost_usd": null, "latency_ms": null, "token_counts": null, "content": null,
+                "event_id": call, "event_type": "tool_call",
+                "structured_payload": {"arguments": {
+                    "cmd": format!("ssh build{}.corp.internal 'cat /home/zo\u{eb}/notes-{i}.txt'", i % 3),
+                    "Zo\u{eb} Ng": "owner",
+                    "nested": [{"who": "bob@example.com"}, "plain", i],
+                }},
+                "success": true, "timestamp": "2026-11-05T00:00:01Z",
+                "tool_call_id": format!("call_{i}"), "tool_name": "shell",
+            }));
+            let output = if i % 4 == 0 {
+                // Repeated verbatim across events.
+                "the same tool output every fourth time, mentioning Alice Brannigan\n".repeat(3)
+            } else {
+                format!(
+                    "line {i}: caf\u{e9} \u{4e2d}\u{6587} \u{1f600} from Zo\u{eb} Ng <bob@example.com>\n\
+                     key {} at build{}.corp.internal\n{}",
+                    concat!("AKIA", "QQWERTYUIOPASDFG"),
+                    i % 5,
+                    "filler \"quoted\" C:\\dir\\file\n".repeat(i % 7)
+                )
+            };
+            body_events.push(json!({
+                "cost_usd": null, "latency_ms": null, "token_counts": null,
+                "content": output,
+                "event_id": uuid::Uuid::from_u128(2000 + i as u128), "event_type": "tool_result",
+                "parent_event_id": call, "structured_payload": null, "success": true,
+                "timestamp": "2026-11-05T00:00:02Z",
+                "tool_call_id": format!("call_{i}"), "tool_name": "shell",
+            }));
+        }
+        serde_json::from_value(json!({
+            "consent": {
+                "correction_included": false, "message_text_included": true,
+                "policy_version": "2026-04-24", "revocable": true,
+                "routing_metadata_included": false, "scopes": ["debugging_evaluation"],
+                "tool_payloads_included": true,
+            },
+            "contributor": {"revocation_handle": uuid::Uuid::from_u128(7)},
+            "created_at": "2026-11-05T00:00:00Z",
+            "embedding_analysis": null,
+            "events": body_events,
+            "ironclaw": {"channel": "cli", "version": "0.1.0"},
+            "outcome": {"task_success": "success", "user_feedback": "none"},
+            "replay": {"replay_notes": ["Synthetic, about Alice Brannigan."], "replayable": true, "required_tools": ["shell"]},
+            "submission_id": uuid::Uuid::from_u128(8),
+            "trace_id": uuid::Uuid::from_u128(9),
+            "value": {"credit_points_pending": 0.0, "submission_score": 0.0},
+        }))
+        .expect("the fixture is a raw contribution")
+    }
+
+    /// A NEAR AI stand-in that spans every name at the request's own
+    /// codepoint offsets, after a delay that varies with the request, so
+    /// concurrent answers come back out of order.
+    fn name_spans(request: &Request) -> ResponseTemplate {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        let input = body["input"].as_str().unwrap();
+        let mut spans = Vec::new();
+        for name in NAMES {
+            for (byte, found) in input.match_indices(name) {
+                let start = input[..byte].chars().count();
+                spans.push(json!({
+                    "category": "private_person", "start": start,
+                    "end": start + found.chars().count(), "score": 0.9, "text": found,
+                }));
+            }
+        }
+        spans.sort_by_key(|span| span["start"].as_u64());
+        ResponseTemplate::new(200)
+            .set_delay(Duration::from_millis((request.body.len() % 7) as u64 * 3))
+            .set_body_json(json!({"data": [{"spans": spans}]}))
+    }
+
+    async fn classifier() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/privacy/classify"))
+            .respond_with(name_spans)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// A fresh adapter, so neither pass benefits from the other's cache.
+    fn near_ai(server: &MockServer) -> Arc<dyn PrivacyFilterAdapter> {
+        Arc::new(
+            NearAiPrivacyFilterAdapter::new(
+                server.uri(),
+                "openai/privacy-filter",
+                "stub-not-a-key",
+                Duration::from_secs(10),
+                16 * 1024 * 1024,
+            )
+            .unwrap(),
+        )
+    }
+
+    /// The property this module exists under: the same envelope, byte for
+    /// byte, and the same private edit maps, as the sequential pipeline, for
+    /// the same classifier answers.
+    #[tokio::test]
+    async fn the_envelope_and_edit_maps_are_identical_to_the_sequential_pass() {
+        let server = classifier().await;
+        for events in [0, 1, 7, 40] {
+            let raw = rich_contribution(events);
+            let sequential = PipelineContributionRedaction::with_privacy_filter(
+                Vec::new(),
+                near_ai(&server),
+                PrivacyFilterBackendTag::NearAi,
+            );
+            let prefetching = PrefetchingContributionRedaction::new(
+                Vec::new(),
+                near_ai(&server),
+                PrivacyFilterBackendTag::NearAi,
+                4,
+            );
+
+            let (expected, expected_maps) = sequential
+                .redact_with_edits(raw.clone())
+                .await
+                .expect("redacts");
+            let (actual, actual_maps) = prefetching
+                .redact_with_edits(raw.clone())
+                .await
+                .expect("redacts");
+            let expected_bytes = serde_json::to_vec(&expected.envelope).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&actual.envelope).unwrap(),
+                expected_bytes
+            );
+            assert!(
+                actual_maps == expected_maps,
+                "edit maps differ at {events} events"
+            );
+            assert!(
+                !expected_maps.is_empty(),
+                "the maps must carry edits to compare"
+            );
+            assert_eq!(actual.policy_version, expected.policy_version);
+
+            let plain = prefetching.redact(raw.clone()).await.expect("redacts");
+            assert_eq!(serde_json::to_vec(&plain.envelope).unwrap(), expected_bytes);
+
+            // Controls: the classifier and the deterministic pass both ran.
+            let text = String::from_utf8(expected_bytes).unwrap();
+            for name in NAMES {
+                assert!(!text.contains(name), "{name} survived at {events} events");
+            }
+            assert!(!text.contains(concat!("AKIA", "QQWERTYUIOPASDFG")));
+        }
+    }
+
+    /// A stand-in classifier that measures overlap.
+    struct Overlap {
+        now: AtomicUsize,
+        peak: AtomicUsize,
+        calls: AtomicUsize,
+        fail_on: Option<&'static str>,
+    }
+
+    impl Overlap {
+        fn new(fail_on: Option<&'static str>) -> Arc<Self> {
+            Arc::new(Self {
+                now: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                calls: AtomicUsize::new(0),
+                fail_on,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl PrivacyFilterAdapter for Overlap {
+        async fn redact_text(&self, text: &str) -> Answer {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            self.now.fetch_sub(1, Ordering::SeqCst);
+            if self.fail_on.is_some_and(|marker| text.contains(marker)) {
+                return Err(TraceContributionError::TransientRedactionFailed {
+                    reason: "classifier down".to_string(),
+                });
+            }
+            Ok(None)
+        }
+    }
+
+    /// Calls overlap up to the bound and never past it, including across
+    /// requests sharing one redactor -- the bound is per process, because
+    /// every request spends the same classifier key.
+    #[tokio::test]
+    async fn classifier_calls_overlap_up_to_the_process_wide_bound() {
+        let overlap = Overlap::new(None);
+        let redactor = Arc::new(PrefetchingContributionRedaction::new(
+            Vec::new(),
+            overlap.clone(),
+            PrivacyFilterBackendTag::NearAi,
+            3,
+        ));
+        let first = redactor.redact(rich_contribution(20));
+        let second = redactor.redact(rich_contribution(21));
+        let (first, second) = tokio::join!(first, second);
+        first.expect("redacts");
+        second.expect("redacts");
+        assert_eq!(overlap.peak.load(Ordering::SeqCst), 3);
+
+        let single = Overlap::new(None);
+        PrefetchingContributionRedaction::new(
+            Vec::new(),
+            single.clone(),
+            PrivacyFilterBackendTag::NearAi,
+            1,
+        )
+        .redact(rich_contribution(10))
+        .await
+        .expect("redacts");
+        assert_eq!(single.peak.load(Ordering::SeqCst), 1);
+    }
+
+    /// Each distinct text is classified once per request: the record pass
+    /// deduplicates, and the replay is answered without a second call.
+    #[tokio::test]
+    async fn each_distinct_text_is_classified_once() {
+        let overlap = Overlap::new(None);
+        let raw = rich_contribution(12);
+        let recorder = Arc::new(RecordingAdapter::default());
+        DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .with_privacy_filter(recorder.clone(), PrivacyFilterBackendTag::NearAi)
+            .redact_trace_with_edits(raw.clone())
+            .await
+            .expect("redacts");
+        let seen = recorder.seen.lock().unwrap().len();
+        let distinct = recorder.distinct().len();
+        assert!(distinct < seen, "the fixture must repeat some text");
+
+        PrefetchingContributionRedaction::new(
+            Vec::new(),
+            overlap.clone(),
+            PrivacyFilterBackendTag::NearAi,
+            4,
+        )
+        .redact(raw)
+        .await
+        .expect("redacts");
+        assert_eq!(overlap.calls.load(Ordering::SeqCst), distinct);
+    }
+
+    /// Fail-closed: a classifier failure on any text refuses the whole
+    /// contribution, and calls stop being started once it is seen.
+    #[tokio::test]
+    async fn a_classifier_failure_refuses_the_contribution() {
+        let overlap = Overlap::new(Some("line 3:"));
+        let redactor = PrefetchingContributionRedaction::new(
+            Vec::new(),
+            overlap.clone(),
+            PrivacyFilterBackendTag::NearAi,
+            2,
+        );
+        assert!(redactor.redact(rich_contribution(30)).await.is_err());
+        let calls = overlap.calls.load(Ordering::SeqCst);
+        assert!(
+            redactor
+                .redact_with_edits(rich_contribution(30))
+                .await
+                .is_err()
+        );
+        let recorder = Arc::new(RecordingAdapter::default());
+        let _ = DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .with_privacy_filter(recorder.clone(), PrivacyFilterBackendTag::NearAi)
+            .redact_trace(rich_contribution(30))
+            .await;
+        let distinct = recorder.distinct().len();
+        assert!(
+            calls < distinct,
+            "{calls} of {distinct} texts classified: classification continued past the failure"
+        );
+    }
+}
