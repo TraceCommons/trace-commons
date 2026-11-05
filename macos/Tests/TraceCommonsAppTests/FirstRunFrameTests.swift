@@ -32,7 +32,7 @@ final class FirstRunFrameTests: XCTestCase {
     func test_theThreadNamesTheStepsInTheCoresWords() throws {
         let copy = try words()
         XCTAssertEqual(copy.threadLabels, [
-            copy.frame.stepTools, copy.frame.stepUses, copy.frame.stepTraces, copy.frame.stepPrivateAi,
+            copy.frame.stepTools, copy.frame.stepPrivateAi, copy.frame.stepTraces, copy.frame.stepUses,
             copy.frame.stepJoin,
         ])
         XCTAssertNil(copy.threadLabel(for: .welcome), "Welcome shows no thread")
@@ -61,7 +61,7 @@ final class FirstRunFrameTests: XCTestCase {
         let frame = try Self.source()
         XCTAssertEqual(frame.components(separatedBy: "Button(copy.frame.back)").count - 1, 1)
         let back = try XCTUnwrap(frame.range(of: "Button(copy.frame.back)"))
-        let after = String(frame[back.upperBound...].prefix(320))
+        let after = String(frame[back.upperBound...].prefix(480))
         XCTAssertTrue(after.contains("FirstRunNavigation.back(state)"))
         // While a commit runs, Back is the screen's own (Join's sign-in),
         // never a plain step back the runner could undo.

@@ -15,11 +15,11 @@ final class FirstRunNavigationTests: XCTestCase {
     }
 
     /// The animated first run (Ron's 2026-10-21 canvas): one order for
-    /// everyone, signing in last. The step thread names every step after
-    /// Welcome.
+    /// everyone, signing in last, with nothing asked about sharing until
+    /// Uses (Ron, 2026-11-05). The step thread names every step after Welcome.
     func test_theStepsRunFromWelcomeToJoin() {
-        XCTAssertEqual(FirstRunNavigation.steps, [.welcome, .tools, .uses, .traces, .privateAI, .join])
-        XCTAssertEqual(FirstRunNavigation.threadSteps, [.tools, .uses, .traces, .privateAI, .join])
+        XCTAssertEqual(FirstRunNavigation.steps, [.welcome, .tools, .privateAI, .traces, .uses, .join])
+        XCTAssertEqual(FirstRunNavigation.threadSteps, [.tools, .privateAI, .traces, .uses, .join])
         XCTAssertEqual(FirstRunState().step, .welcome, "a first run opens on Welcome")
         var state = FirstRunState()
         var visited: [FirstRunStep] = [state.step]
@@ -27,7 +27,7 @@ final class FirstRunNavigationTests: XCTestCase {
             state = FirstRunNavigation.next(state)
             visited.append(state.step)
         }
-        XCTAssertEqual(visited, [.welcome, .tools, .uses, .traces, .privateAI, .join, .join])
+        XCTAssertEqual(visited, [.welcome, .tools, .privateAI, .traces, .uses, .join, .join])
     }
 
     /// A step already passed, picked on the thread, is Back to it; one not
@@ -52,13 +52,11 @@ final class FirstRunNavigationTests: XCTestCase {
     }
 
     /// Uses goes on once the required use is known, so nobody passes it
-    /// without seeing that use, and once the person picked a Sharing
-    /// choice: neither is preselected (owner, 2026-10-27).
+    /// without seeing that use. Nothing else is required: with no Sharing
+    /// choice its action reads Skip (Ron, 2026-11-05).
     func test_usesWaitsForTheRequiredUseToBeKnown() {
-        var state = FirstRunState(step: .uses)
+        let state = FirstRunState(step: .uses)
         XCTAssertFalse(state.sharingChosen)
-        XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"), "no pick yet")
-        state.sharingChosen = true
         XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: nil))
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"))
     }
@@ -240,16 +238,13 @@ final class FirstRunNavigationTests: XCTestCase {
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"))
     }
 
-    /// Start, on Join, waits for a Sharing choice the person picked, even
-    /// with an enrollment held. Watching only shares nothing and needs none.
-    func test_joinWaitsForASharingChoice() {
-        var state = FirstRunState(step: .join, account: .enrolled)
-        XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"))
-        state.sharing = .askMe
-        XCTAssertFalse(
-            FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"),
-            "the field's starting value is not a pick")
-        state.sharingChosen = true
+    /// Start, on Join, does not wait for a Sharing choice: Uses can be
+    /// skipped (Ron, 2026-11-05), and one not made stays Ask. Watching only
+    /// shares nothing and needs none either.
+    func test_joinNeedsNoSharingChoice() {
+        let state = FirstRunState(step: .join, account: .enrolled)
+        XCTAssertFalse(state.sharingChosen)
+        XCTAssertEqual(state.sharing, .askMe)
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"))
         let watching = FirstRunState(step: .join, account: .watchOnly)
         XCTAssertTrue(FirstRunNavigation.canContinue(watching, candidates: [], requiredScope: "research"))
@@ -277,7 +272,7 @@ final class FirstRunNavigationTests: XCTestCase {
     }
 
     func test_backKeepsEveryAnswer() {
-        var state = FirstRunState(step: .uses)
+        var state = FirstRunState(step: .privateAI)
         state.invite = "INVITE-1"
         state.toolAnswers[.codex] = .off
         state.scopes = ["research"]
@@ -287,7 +282,7 @@ final class FirstRunNavigationTests: XCTestCase {
         expected.step = .tools
         XCTAssertEqual(back, expected)
         XCTAssertEqual(FirstRunNavigation.back(FirstRunNavigation.back(back)).step, .welcome)
-        XCTAssertEqual(FirstRunNavigation.next(back).step, .uses)
+        XCTAssertEqual(FirstRunNavigation.next(back).step, .privateAI)
     }
 
     /// The core's ready answer belongs to the Start it was asked for. Back
