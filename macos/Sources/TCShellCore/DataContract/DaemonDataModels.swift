@@ -768,10 +768,17 @@ extension DaemonData {
     public struct WitnessCapacity: Codable, Equatable, Sendable {
         public let waitingSessions: Int?
         public let nextRetryAt: Date?
+        /// Approved traces still waiting on, or in, the privacy check (the
+        /// daemon's witness worker). Absent from an older daemon.
+        public let privacyCheckSessions: Int?
+        /// Witness calls running now. Absent from an older daemon.
+        public let checkingSessions: Int?
 
         public enum CodingKeys: String, CodingKey {
             case waitingSessions = "waiting_sessions"
             case nextRetryAt = "next_retry_at"
+            case privacyCheckSessions = "privacy_check_sessions"
+            case checkingSessions = "checking_sessions"
         }
     }
 

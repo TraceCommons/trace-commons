@@ -57,13 +57,14 @@ final class DesignRulings20261102Tests: XCTestCase {
         XCTAssertTrue(card.contains("disclosure = SharingDisclosureFlow()"))
     }
 
-    /// One card for all three: Insights' empty state, the Private AI guide
-    /// and Home's Traces walkthrough draw the same view, which has no
-    /// gradient, graphic or pill, and an X only when given one.
+    /// One card for both: Insights' empty state and the Private AI guide
+    /// draw the same view, which has no gradient, graphic or pill, and an X
+    /// only when given one. Home's Traces hero is the owner's own design
+    /// again (2026-11-05, `HomeTracesHeroTests`).
     func test_theThreeGettingStartedCardsAreOneDesign() throws {
         XCTAssertTrue(try Self.text("Views/InsightsGetStarted.swift").contains("GetStartedCard("))
         XCTAssertTrue(try Self.text("Views/Monitor/InferenceViews.swift").contains("GetStartedCard("))
-        XCTAssertTrue(try Self.text("Views/Monitor/HomeViews.swift").contains("GetStartedCard("))
+        XCTAssertFalse(try Self.text("Views/Monitor/HomeViews.swift").contains("GetStartedCard("))
         let card = try Self.text("Views/GetStartedCard.swift")
         for absent in ["Gradient", "GlassHeroCard(", "GlassHeroSymbol(", "heroInk", "actionOnPill"] {
             XCTAssertFalse(card.contains(absent), absent)
@@ -73,12 +74,13 @@ final class DesignRulings20261102Tests: XCTestCase {
         XCTAssertTrue(card.contains("Image(systemName: \"arrow.right\")"), "a step's action is a text link")
     }
 
-    /// Private AI is the first section on Home, above Traces and Account.
+    /// Private AI is the first section on Home, above Traces and Account,
+    /// under the Traces hero, which leads Home (owner, 2026-11-05).
     func test_privateAIIsFirstOnHome() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains(
             "return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n"
-                + "            privateAI\n            HomeSection(words?.sectionTraces) {"))
+                + "            tracesHero\n            privateAI\n            HomeSection(words?.sectionTraces) {"))
         XCTAssertEqual(home.components(separatedBy: "            privateAI\n").count - 1, 1)
     }
 

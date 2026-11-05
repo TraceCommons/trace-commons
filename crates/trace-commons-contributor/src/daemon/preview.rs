@@ -427,14 +427,13 @@ pub const REASON_PREVIEW_TIMED_OUT: &str = "preview-timed-out";
 ///
 /// Sized from the slowest legitimate build, which is a witness review: the
 /// quote and the collateral (`WITNESS_PROBE_TIMEOUT`, 30 s each) and then
-/// the review itself (`WITNESS_REVIEW_TIMEOUT`, 330 s, which is the
-/// witness's own 300 s bound plus room for its answer). That is 390 s of
-/// network at most; seven minutes leaves half a minute for reading,
-/// redacting and summarizing locally. A local build with a remote privacy
-/// filter shares the bound: each of its calls has its own timeout, and one
-/// still running after seven minutes is several megabytes of prose, which
-/// the witness itself would refuse.
-pub const PREVIEW_BUILD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(7 * 60);
+/// the review itself (`WITNESS_REVIEW_TIMEOUT`, 570 s, which is the
+/// witness's own 540 s bound plus room for its answer). That is 630 s of
+/// network at most; eleven minutes leaves half a minute for reading,
+/// redacting and summarizing locally. (Seven minutes before 2026-11-05,
+/// when the witness's bound was 300 s.) A local build with a remote privacy
+/// filter shares the bound: each of its calls has its own timeout.
+pub const PREVIEW_BUILD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(11 * 60);
 
 /// Every label [`preview_failure_label`] can return.
 pub const PREVIEW_FAILURE_LABELS: [&str; 10] = [

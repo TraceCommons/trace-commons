@@ -2,3 +2,8 @@
 # maintainers below before it can merge. Branch protection on `main` requires
 # a code-owner review, so an approval from anyone else does not count.
 *   @zmanian @poldsam
+
+# Home's Traces hero (the three steps) is the product owner's design.
+# Changes to it, or to the tests that pin it, need her review.
+/macos/Sources/TraceCommonsApp/Views/Monitor/HomeTracesHero.swift @poldsam
+/macos/Tests/TraceCommonsAppTests/HomeTracesHeroTests.swift @poldsam
