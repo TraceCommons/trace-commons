@@ -621,22 +621,10 @@ pub async fn submit_sessions(
     submit_sessions_with_progress(store, cfg, sessions, opts, |_, _, _| {}).await
 }
 
-/// Whether a witness failure is one that clears on its own: the witness did
-/// not answer in time or could not be reached. Nothing was judged, so the
-/// daemon keeps the approval and retries with backoff, a bounded number of
-/// times ([`MAX_WITNESS_TRANSIENT_FAILURES`]). A busy witness
-/// ([`REASON_WITNESS_SATURATED`]) has its own pacing and is not counted
-/// here. The one classification for the daemon's witness worker and its
-/// upload pass; anything not named stays a refusal (fail closed).
-#[must_use]
-pub fn witness_failure_is_transient(label: &str) -> bool {
-    matches!(label, "witness_timeout" | "witness_unreachable")
-}
-
-/// Consecutive transient witness failures one approved entry survives
-/// before it leaves the retry loop (the witness-at-submission spec, section
-/// 6): it ends `Failed` under the same label, kept for a person's retry,
-/// never refused.
+/// Consecutive transient witness failures ([`witness_failure_is_transient`])
+/// one approved entry survives before it leaves the daemon's retry loop
+/// (the witness-at-submission spec, section 6): it ends `Failed` under the
+/// same label, kept for a person's retry, never refused.
 pub const MAX_WITNESS_TRANSIENT_FAILURES: u32 = 3;
 
 /// The witness labels after which a batch stops contacting the witness.
@@ -653,6 +641,19 @@ pub const WITNESS_BATCH_STOP_LABELS: [&str; 3] = [
     "witness_unreachable",
     REASON_WITNESS_SATURATED,
 ];
+
+/// Whether a witness failure label says the witness judged nothing because
+/// it did not answer: it ran past its deadline (`witness_timeout`) or could
+/// not be reached (`witness_unreachable`). Such a session is never refused:
+/// the daemon keeps its approval and retries it with backoff. A busy witness
+/// (`witness_saturated`) is not covered: it names its own retry delay and has
+/// its own path. Every other witness label is a judgement, or a trust check
+/// that failed, and stays a refusal. The one classification, shared with
+/// #1964.
+#[must_use]
+pub fn witness_failure_is_transient(label: &str) -> bool {
+    matches!(label, "witness_timeout" | "witness_unreachable")
+}
 
 /// The label to stop a batch on, if `outcome` is one of
 /// [`WITNESS_BATCH_STOP_LABELS`].
