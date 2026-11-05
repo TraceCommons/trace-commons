@@ -737,6 +737,64 @@ full, and make it again before adding a second name to that list.
 
 Changing the mode changes the measurement. See "The configuration is measured".
 
+### The classifier key, and the startup check
+
+The key goes in as `TRACE_NEAR_AI_PRIVACY_API_KEY`, through Phala's sealed
+(encrypted) environment at deploy time. It is the only name in `allowed_envs`.
+The variable's name is measured; its value is not and must never appear in a
+file in this repository. The sealed value is not part of the compose
+hash, but whether a key-only update leaves `MRCONFIGID` where it was has not
+been checked against Phala. Read the measurement back after any deploy, as
+"The configuration is measured" says.
+
+With `full-pipeline` against `near-ai`, the witness makes **one tiny
+synthetic classify request at startup**, before it binds its listener. The
+text is a fixed sentence (`CLASSIFIER_STARTUP_CHECK_TEXT` in
+`src/bin/trace-commons-witness.rs`) that identifies no one. Its outcomes:
+
+- **401 or 403**: the endpoint refused the key. The witness logs
+  `classifier_startup_check="auth_401_403"` and **exits without serving**.
+  A witness that booted with a refused key would refuse every request after
+  its retries; that is how the 2026-11-05 outage looked from outside.
+- **Any other failure** (timeout, transport, 5xx, 402/429): the witness logs
+  `classifier_startup_check="failed"` with the failure kinds, then starts.
+  These recover on their own, and each request refuses for itself while
+  they last. With a down endpoint, the check's retries can delay startup by
+  up to a minute.
+- **Success**: `classifier_startup_check="ok"`.
+
+All three lines are label-only. After a deploy, confirm the check passed from
+`GET /v1/diagnostics` (below): `classifier.outcomes.ok` is at least 1 and
+`auth_401_403` is 0. The CVM's logs may not be readable.
+
+### `GET /v1/diagnostics`
+
+A label-only view of what this witness is doing. It is unauthenticated, like
+`/v1/attestation`, and outside the request-slot bound, so it still answers
+when the witness is saturated. It serves:
+
+- **Identity:** the build line (version, commit, build time), the witness
+  measurement, signing address and redaction pipeline alias. All of these
+  are already public through `/v1/attestation` or every certificate.
+- **Uptime.**
+- **Request slots:** `max_concurrent`, `in_use`, completed by status class,
+  `saturated_refusals`, `timed_out`.
+- **NEAR AI classifier** (`classifier`, `null` for any other backend):
+  - requests by outcome since start, every retry counted: `ok`, `timeout`,
+    `transport`, `auth_401_403`, `quota_402_429`, `server_5xx`,
+    `too_large_413`, `other_4xx`, `body_shape`;
+  - requests on the wire now;
+  - p50/p90/p99/max latency of the last 256 successful requests in each
+    body-size bucket.
+
+It never carries text, request or trace identifiers, keys, classifier
+hostnames, peer addresses or per-request records. A test pins the exact
+field set, so adding a field means changing that test.
+
+```bash
+curl -s https://<app_id>-8088.<gateway domain>/v1/diagnostics | python3 -m json.tool
+```
+
 ---
 
 ## Requiring attested inference
@@ -1259,6 +1317,22 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
 A malformed nonce is rejected rather than padded — `parse_hex` accepts exactly
 64 bare hex characters, no `0x` prefix — so a `400` here is usually your nonce,
 not the witness.
+
+Then check the witness's own load and reachability. Once a build with
+`GET /v1/diagnostics` is deployed (witness-diagnostics-v1), run the witness
+health check, which prints `WitnessHealthOK` or
+`WitnessHealthFailure:<labels>` and exits 0 or 1. A build without the route
+fails it as `unreachable:http_4xx`, deliberately: an unobservable witness is
+not a healthy one.
+
+```sh
+TRACE_COMMONS_WITNESS_MONITOR_URL="https://<witness-host>/v1/diagnostics" \
+  python3 scripts/operator/witness_monitor.py check
+```
+
+Run it as the last step of every witness deploy and record its one output line
+with the deploy evidence. The standing one-minute poll is described in
+[`docs/operator/witness-monitor.md`](../../docs/operator/witness-monitor.md).
 
 ---
 

@@ -37,6 +37,9 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use sha2::Digest as _;
 use tokio::net::TcpListener;
+use trace_commons_server::witness_service::diagnostics::{
+    WitnessDiagnosticsInfo, diagnostics_router,
+};
 use trace_commons_server::witness_service::enclave::{DSTACK_SOCKET_PATH, DstackSocketAgent};
 use trace_commons_server::witness_service::http::{WitnessLoadBound, witness_router};
 use trace_commons_server::witness_service::inference::{
@@ -483,6 +486,7 @@ async fn main() -> Result<()> {
         .measurement()
         .await
         .map_err(|_| anyhow::anyhow!("the enclave could not report its own measurement"))?;
+    let enclave_signing_address = enclave.signing_address().to_string();
 
     // The sealed-results store, before the listener binds. A witness that
     // cannot derive its results key or write its results directory must not
@@ -523,6 +527,10 @@ async fn main() -> Result<()> {
     // Resolved before the listener binds, like the signing identity above: a
     // witness that cannot build the pipeline it was told to run must fail to
     // start, not fail per request.
+    let mut near_ai_classifier = false;
+    let mut redaction_pipeline =
+        trace_commons_protocol::trace_contribution::DETERMINISTIC_REDACTION_PIPELINE_VERSION
+            .to_string();
     let mut classify_queue = None;
     let (redactor, contribution_redactor): (
         Arc<dyn TranscriptRedactor>,
@@ -537,10 +545,16 @@ async fn main() -> Result<()> {
                      prose-PII classifier: set TRACE_PRIVACY_FILTER_BACKEND"
                     )
                 })?;
+        redaction_pipeline =
+            trace_commons_protocol::trace_contribution::redaction_pipeline_version(backend);
         tracing::info!(
-            redaction_pipeline = %trace_commons_protocol::trace_contribution::redaction_pipeline_version(backend),
+            redaction_pipeline = %redaction_pipeline,
             "witness redaction pipeline"
         );
+        if backend == trace_commons_protocol::trace_contribution::PrivacyFilterBackendTag::NearAi {
+            near_ai_classifier = true;
+            classifier_startup_check(adapter.as_ref()).await?;
+        }
         (
             Arc::new(FullPipelineRedaction::new(
                 known_path_prefixes.clone(),
@@ -722,9 +736,80 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(&args.bind)
         .await
         .with_context(|| format!("could not bind {}", args.bind))?;
-    axum::serve(listener, witness_router(service, load, jobs))
-        .await
-        .context("the witness listener stopped")?;
+    let diagnostics = diagnostics_router(
+        load.clone(),
+        jobs.clone(),
+        WitnessDiagnosticsInfo {
+            build: trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION")).to_string(),
+            witness_measurement: measurement.to_string(),
+            signing_address: enclave_signing_address,
+            redaction_pipeline,
+            near_ai_classifier,
+        },
+    );
+    axum::serve(
+        listener,
+        witness_router(service, load, jobs).merge(diagnostics),
+    )
+    .await
+    .context("the witness listener stopped")?;
+    Ok(())
+}
+
+/// A synthetic text for the startup check. Nothing about it identifies
+/// anyone; it exists to make one classify request.
+const CLASSIFIER_STARTUP_CHECK_TEXT: &str =
+    "witness startup check: the build passed on the second try";
+
+/// One tiny synthetic classify request before the listener binds.
+///
+/// A key the endpoint refuses (401/403) stops the witness from starting: it
+/// could certify nothing, and a witness that boots and then refuses every
+/// request after its retries is how the 2026-11-05 outage looked from
+/// outside. Any other failure -- a timeout, a 5xx, a slow endpoint -- is
+/// logged by kind and the witness starts anyway, because those recover on
+/// their own and each request still refuses for itself while they last.
+/// The result is label-only: the outcome kind, never the text or a body.
+async fn classifier_startup_check(
+    adapter: &dyn trace_commons_protocol::trace_contribution::PrivacyFilterAdapter,
+) -> anyhow::Result<()> {
+    use trace_commons_protocol::privacy_filter_near_ai::diagnostics::{Outcome, global};
+    let recorder = global();
+    let before: Vec<u64> = Outcome::ALL.iter().map(|o| recorder.count(*o)).collect();
+    let result = adapter.redact_text(CLASSIFIER_STARTUP_CHECK_TEXT).await;
+    let grew = |outcome: Outcome| {
+        let index = Outcome::ALL.iter().position(|o| *o == outcome).unwrap_or(0);
+        recorder.count(outcome) > before[index]
+    };
+    if grew(Outcome::Auth) {
+        tracing::error!(
+            classifier_startup_check = "auth_401_403",
+            "the NEAR AI classifier refused the configured key"
+        );
+        bail!(
+            "the NEAR AI privacy classifier refused TRACE_NEAR_AI_PRIVACY_API_KEY (401/403); \
+             the witness will not start without a working key"
+        );
+    }
+    match result {
+        Ok(_) => tracing::info!(
+            classifier_startup_check = "ok",
+            "NEAR AI classifier answered"
+        ),
+        Err(_) => {
+            let failures: Vec<&str> = Outcome::ALL
+                .iter()
+                .filter(|outcome| **outcome != Outcome::Ok && grew(**outcome))
+                .map(|outcome| outcome.label())
+                .collect();
+            tracing::warn!(
+                classifier_startup_check = "failed",
+                failures = %failures.join(","),
+                "NEAR AI classifier did not answer at startup; starting, and each request \
+                 refuses until it does"
+            );
+        }
+    }
     Ok(())
 }
 

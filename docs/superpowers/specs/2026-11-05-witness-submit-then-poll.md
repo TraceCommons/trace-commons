@@ -249,10 +249,12 @@ inside the transport, so `witness_contribution`'s checks are untouched.
 
 ## 10. Diagnostics and logs
 
-- The job table exposes label-only counts: `pending` (waiting for the
-  classify turn), `running`, `done_unfetched`, and `expired` (results
-  deleted unfetched since start). `/v1/diagnostics` (PR #1975) gains them
-  when that lands; until then they are a method on the table.
+- `/v1/diagnostics` (#1975) gains a `jobs` object of label-only counts:
+  `pending` (waiting for the classify turn), `running`, `done_unfetched`,
+  and `expired` (results deleted unfetched since start). A submit refused
+  busy counts in `requests.saturated_refusals`, and one refused because
+  the queue would outlast it also in `requests.early_busy`, as requests
+  did.
 - Logs are label-only: `job accepted`, `job finished` with the status
   class, `job result sealed`, `job expired`, sweep counts. Never an id, a
   secret, a body length or a hash prefix of either.

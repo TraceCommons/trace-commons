@@ -383,7 +383,7 @@ pub enum PollOutcome {
 }
 
 /// Label-only counts, for diagnostics. Never an id.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct JobCounts {
     /// Accepted and waiting for the classify turn.
     pub pending: usize,
