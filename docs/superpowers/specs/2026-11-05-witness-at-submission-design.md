@@ -458,8 +458,9 @@ submission is necessary but not sufficient for large sessions.
   `witness-too-large` and the existing `failed_too_large` sentence
   (`witness_copy.rs:805`): "nothing left the machine". The ceiling is a
   configured byte figure derived from measured witness throughput and its
-  request limit, not a guess; until it is measured, 512 KB of
-  raw contribution (decision 9). The refusal is final for that trace under the
+  request limit, not a guess; until it is measured, 256 KB of
+  raw contribution (decision 9, lowered from 512 KB by the owner on
+  2026-11-05 until batching is measured). The refusal is final for that trace under the
   current ceiling and is never retried, so an oversized trace cannot fail
   forever in the retry loop; it is re-offered automatically if the
   ceiling is raised. Splitting one session across several witness
@@ -685,7 +686,10 @@ until devices can refresh their measurement pins (section 7).
 
 ### 9.2 Decided later the same day (owner, 2026-11-05)
 
-9. **Witness size ceiling: 512 KB of raw contribution** until throughput
+9. **Witness size ceiling: 256 KB of raw contribution** (owner decision
+   2026-11-05; was 512 KB) until throughput and batching are measured.
+   The witness's request body cap is 1 MiB to match (#1973). Originally:
+   512 KB
    is measured, refused before anything is sent (section 6).
 10. **A signed measurement refresh keeps approvals and automatic
     grants.** Only a change of witness URL voids and re-asks (section

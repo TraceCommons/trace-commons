@@ -683,11 +683,10 @@ impl WitnessJobs {
             return false;
         }
         match table.remove(id_hash) {
-            Some(Slot::Active { abort, .. }) => {
-                if let Some(abort) = abort {
-                    abort.abort();
-                }
-            }
+            Some(Slot::Active {
+                abort: Some(abort), ..
+            }) => abort.abort(),
+            Some(Slot::Active { abort: None, .. }) => {}
             Some(Slot::Done { .. }) => {
                 drop(table);
                 self.sealer.remove(id_hash);

@@ -27,7 +27,8 @@ The design this informs is
 |---|---|
 | `fake_dstack_agent.py` | Serves `GET /v0/GetKey` and `/v0/GetQuote` on a unix socket in the shape `DstackSocketAgent` reads. The quote is the attestation crate's real fixture TDX quote, with `report_data` spliced in at the offset the witness parses. |
 | `stub_classifier.py` | A NEAR AI `privacy/classify` stand-in. Latency is `--base-ms + --per-kib-ms x body KiB`, default 1300 + 32, fitted to the 2026-09-03 live measurements. A body over `--max-body-bytes` gets a 413. `--curve measured-2026-11-05` uses the owner's measured latency for that day instead. `--trip-above N` fails with a 502 any request that arrives while N are already in flight. Spans every `Alice Example` at codepoint offsets. Logs body size, in-flight count, status and seconds per request, never content. `GET /stats` and `GET /stats/reset` serve the totals. |
-| `witness_load.py` | `run` submits synthetic contributions to `POST /v1/witness/jobs` from N workers and polls each to its answer and prints status counts, latency p50/p90/p99/max, requests/s and KB/s as JSON. `body` writes one body to stdout. |
+| `near_ai_probe.py` | For the key holder: measures the live endpoint's body limit, array batching and latency with synthetic text (below). |
+| `witness_load.py` | `run` submits synthetic contributions to `POST /v1/witness/jobs` from N workers, polls each to its answer, and prints status counts, latency (submit to answer) p50/p90/p99/max, requests/s and KB/s as JSON. `body` writes one body to stdout. |
 
 ## Run it
 
@@ -70,6 +71,46 @@ python3 -I $W/scripts/witness-load/witness_load.py run --url http://127.0.0.1:18
 curl -s 127.0.0.1:18471/stats    # classify calls, bytes, peak in-flight
 kill $(cat witness.pid stub.pid agent.pid)
 ```
+
+## Measuring the live endpoint (key holder only)
+
+`scripts/witness-load/near_ai_probe.py` measures NEAR AI's `privacy/classify`
+directly, for the two settings the witness depends on:
+`TRACE_NEAR_AI_PRIVACY_MAX_REQUEST_BODY_BYTES` and
+`TRACE_NEAR_AI_PRIVACY_MAX_BATCH_INPUTS`. It sends synthetic text one request
+at a time, five seconds apart, at most 12 requests a run. It prints sizes,
+statuses, entry counts and seconds; it never prints the key, any text, or a
+response body. Nothing is sent without `--yes`. Use a key that no driver or
+witness is using while it runs.
+
+```bash
+export TRACE_NEAR_AI_PRIVACY_API_KEY=...   # from your own secret store
+python3 -I scripts/witness-load/near_ai_probe.py limit --yes      # body limit, <= 8 requests
+python3 -I scripts/witness-load/near_ai_probe.py batch --yes      # arrays of 4, 16, 64 short texts
+python3 -I scripts/witness-load/near_ai_probe.py batch --yes --batch-sizes 64 --batch-item-kib 3
+python3 -I scripts/witness-load/near_ai_probe.py latency --yes    # 1 to 200 KiB bodies, fitted
+# Last, on its own key: bursts of 2 then 4 overlapping requests, a minute apart, 8 in all
+python3 -I scripts/witness-load/near_ai_probe.py overlap --yes --i-understand-overlap
+```
+
+Read `limit` as: the largest 200 and the smallest 413, in body bytes. The
+search stops on any other status rather than reading it as a size answer.
+Read `batch` as: `entries_match_inputs=True` and `same_spans=True` on every
+compared input. Anything else means batching stays off.
+
+Read `latency` from its last line: `base_s` and `per_kib_s` fit the shape
+of the adapter's timeout (`TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS` +
+`_PER_KIB_MS` x body KiB), and `worst_ratio_to_default_timeout` is the
+slowest measured request as a fraction of the default timeout for its size.
+Above about 0.5, there is less than 2x headroom: raise the timeout or lower
+the window cap.
+
+Read `overlap` as the largest `in_flight` whose burst was all `200`, with
+`after_bursts` also `200`. That is the most `TRACE_COMMONS_WITNESS_MAX_CLASSIFY_IN_FLIGHT`
+should be, summed across every witness replica sharing the key. The mode
+sends a serial baseline first and stops at the first burst with any
+failure. A failed burst has poisoned this key for minutes before (2026-08-28),
+so run it last and on a key nothing else is using.
 
 ## Reading the numbers
 

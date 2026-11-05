@@ -356,7 +356,7 @@ async fn run_bounded(
     let _background_permit = if background {
         match Arc::clone(&load.background_permits).try_acquire_owned() {
             Ok(permit) => Some(permit),
-            Err(_) => return saturated_refusal(&load),
+            Err(_) => return saturated_refusal(load),
         }
     } else {
         None
@@ -368,10 +368,10 @@ async fn run_bounded(
     {
         load.early_busy
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return saturated_refusal(&load);
+        return saturated_refusal(load);
     }
     let Ok(_global_permit) = Arc::clone(&load.permits).try_acquire_owned() else {
-        return saturated_refusal(&load);
+        return saturated_refusal(load);
     };
 
     match tokio::time::timeout(load.request_timeout, work).await {
