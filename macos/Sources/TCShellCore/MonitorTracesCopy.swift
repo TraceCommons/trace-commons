@@ -622,15 +622,12 @@ public struct MonitorShellCopy: MonitorWordTable {
     public let settingsRefresh: String
     /// Each Settings card's re-read button's accessible name and tooltip.
     public let settingsRefreshDesktop: String
-    public let settingsRefreshDiscovery: String
     public let settingsRefreshUses: String
     /// Startup's updates card.
     public let updatesEyebrow: String
     public let consentEyebrow: String
     public let desktopEyebrow: String
     public let desktopTitle: String
-    public let discoveryEyebrow: String
-    public let discoveryTitle: String
     public let watcherEyebrow: String
     public let watcherTitle: String
     public let watcherWatching: String
@@ -685,14 +682,11 @@ public struct MonitorShellCopy: MonitorWordTable {
         case mapViewsLabel = "map_views_label"
         case settingsRefresh = "settings_refresh"
         case settingsRefreshDesktop = "settings_refresh_desktop"
-        case settingsRefreshDiscovery = "settings_refresh_discovery"
         case settingsRefreshUses = "settings_refresh_uses"
         case updatesEyebrow = "updates_eyebrow"
         case consentEyebrow = "consent_eyebrow"
         case desktopEyebrow = "desktop_eyebrow"
         case desktopTitle = "desktop_title"
-        case discoveryEyebrow = "discovery_eyebrow"
-        case discoveryTitle = "discovery_title"
         case watcherEyebrow = "watcher_eyebrow"
         case watcherTitle = "watcher_title"
         case watcherWatching = "watcher_watching"
@@ -705,9 +699,9 @@ public struct MonitorShellCopy: MonitorWordTable {
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
 
-    /// Settings' consent, discovery and watcher eyebrows, cut by the owner
-    /// 2026-11-04 (Settings copy pass 2, P140, P84, P79): each arrives "".
-    public static var ownerCut: Set<String> { ["consentEyebrow", "discoveryEyebrow", "watcherEyebrow"] }
+    /// Settings' consent and watcher eyebrows, cut by the owner
+    /// 2026-11-04 (Settings copy pass 2, P140, P79): each arrives "".
+    public static var ownerCut: Set<String> { ["consentEyebrow", "watcherEyebrow"] }
 
     /// Watching N tools: the singular is its own line.
     public func watching(tools: Int) -> String {

@@ -1,4 +1,5 @@
 import XCTest
+import TCShellCore
 
 @testable import TraceCommonsApp
 
@@ -260,7 +261,7 @@ final class SettingsSectionsTests: XCTestCase {
             .notifications: ("StartupSection", "if let heading = Notifier.copy?.notificationHeading"),
             .updates: ("StartupSection", "GlassEyebrowCard(SettingsWords.updates)"),
             .watching: ("WatchingSection",
-                        "GlassEyebrowCard(SettingsLegacyWords.discoveryEyebrow, title: SettingsLegacyWords.discoveryTitle, accessory: {"),
+                        "GlassEyebrowCard(SettingsLegacyWords.watcherEyebrow, title: SettingsLegacyWords.watcherTitle, accessory: {"),
             .consent: ("ConsentSection",
                        "GlassEyebrowCard(SettingsLegacyWords.consentEyebrow, title: SettingsLegacyWords.consentHeading, accessory: {"),
             .publicProfile: ("PublicProfileSection", "GlassEyebrowCard(PublicProfileCopy.heading)"),
@@ -309,21 +310,51 @@ final class SettingsSectionsTests: XCTestCase {
         let shell = try XCTUnwrap(MonitorWords.table?.shell)
         for word in [shell.watcherTitle, shell.watcherWatching, shell.watcherPaused,
                      shell.watcherCaption, shell.settingsRefresh, shell.desktopEyebrow,
-                     shell.desktopTitle, shell.discoveryTitle] {
+                     shell.desktopTitle] {
             XCTAssertFalse(word.isEmpty)
         }
-        // Owner dropped the watcher, consent and discovery eyebrows 2026-11-04
-        // (Settings copy pass 2, P79, P140, P84): each arrives "".
-        for word in [shell.watcherEyebrow, shell.consentEyebrow, shell.discoveryEyebrow] {
+        // Owner dropped the watcher and consent eyebrows 2026-11-04
+        // (Settings copy pass 2, P79, P140): each arrives "".
+        for word in [shell.watcherEyebrow, shell.consentEyebrow] {
             XCTAssertEqual(word, "")
         }
         XCTAssertNotEqual(shell.watcherWatching, shell.watcherPaused)
         // Every card that re-reads has the refresh icon button, named in
         // the core's word (owner, 2026-10-20: it was a "Refresh" link).
-        for file in ["WatchingSection", "ConsentSection", "StartupSection"] {
+        for file in ["ConsentSection", "StartupSection"] {
             let text = try SettingsParityTests.text("Views/Settings/\(file).swift")
             XCTAssertTrue(text.contains("GlassRefreshButton(SettingsLegacyWords.refresh"), "\(file) has no refresh")
         }
+    }
+
+    /// Owner, 2026-11-04: the Trace discovery card and its Refresh button
+    /// are gone. The queue-limit line is the watcher card's second caption
+    /// (same style as the first), drawn once settings are read, with the
+    /// settings read's retry notice in its place until then; with no status
+    /// answer there is no watcher card, so the same two cases get a plain
+    /// card and neither is lost.
+    func test_queueLimitLiveInTheWatcherCardAndNoDiscoveryCardRemains() throws {
+        let source = try SettingsParityTests.text("Views/Settings/WatchingSection.swift")
+        XCTAssertEqual(source.components(separatedBy: "GlassEyebrowCard(").count - 1, 1, "only the watcher card remains")
+        XCTAssertFalse(source.contains("GlassRefreshButton"), "Watching has no Refresh button")
+        XCTAssertFalse(source.contains("discovery"), "no Trace discovery card")
+        // The line follows the caption inside the watcher card, in its style.
+        let watcher = try XCTUnwrap(source.range(of: "private func watcher("))
+        let card = String(source[watcher.lowerBound...])
+        let caption = try XCTUnwrap(card.range(of: "Text(SettingsLegacyWords.watcherCaption)"))
+        let line = try XCTUnwrap(card.range(of: "queueLimit\n"))
+        let buttons = try XCTUnwrap(card.range(of: "Button(SettingsLegacyWords.pauseWatcher)"))
+        XCTAssertTrue(caption.upperBound < line.lowerBound && line.upperBound < buttons.lowerBound)
+        // Gated on the settings read, with the retry notice otherwise.
+        for needle in ["if model.daemonSettings == nil {\n            SettingsReadNotice(model.settingsRead, retry: model.refreshSettings)",
+                       "Text(SettingsLegacyWords.undecidedDropped(settings.queueTtlDays))\n                .glassType(GlassTokens.TypeScale.caption)\n                .foregroundStyle(GlassColor.textTertiary)"] {
+            XCTAssertTrue(source.contains(needle), "WatchingSection.swift lacks \(needle)")
+        }
+        // Status unread: the same line or notice in a plain card.
+        XCTAssertTrue(source.contains("} else {\n            // Status not read"))
+        XCTAssertTrue(source.contains("GlassCard { queueLimit }"))
+        // Shells decode no discovery words.
+        XCTAssertFalse(MonitorShellCopy.consumedFields.contains { $0.lowercased().contains("discovery") })
     }
 
     /// The digest interval line at one hour, the shortest interval the

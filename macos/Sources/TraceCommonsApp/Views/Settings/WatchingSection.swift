@@ -10,22 +10,28 @@ struct WatchingSection: View {
         if model.statusRead == .answered {
             watcher(paused: model.status.paused, armed: Self.controlsArmed(
                 read: model.statusRead, lastReadFailed: model.statusReadFailed, startup: model.startup))
+        } else {
+            // Status not read: no chip or buttons to draw, but the queue
+            // limit and a failed settings read still show, as they did
+            // when they had a card of their own.
+            GlassCard { queueLimit }
         }
-        GlassEyebrowCard(SettingsLegacyWords.discoveryEyebrow, title: SettingsLegacyWords.discoveryTitle, accessory: {
-            GlassRefreshButton(SettingsLegacyWords.refreshDiscovery, title: SettingsLegacyWords.refresh, action: model.refreshSettings)
-        }) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                if model.daemonSettings == nil {
-                    SettingsReadNotice(model.settingsRead, retry: model.refreshSettings)
-                } else if let settings = model.daemonSettings {
-                    // What happens to traces nobody decides on: a
-                    // consequence, said nowhere else, so it stays (D16). The
-                    // quiet period and the paused line are gone (the chip
-                    // above says paused); the digest and notification lines
-                    // are Notifications'.
-                    line(SettingsLegacyWords.undecidedDropped(settings.queueTtlDays))
-                }
-            }
+    }
+
+    /// What happens to traces nobody decides on: a consequence, said
+    /// nowhere else, so it stays (D16). Drawn once settings are read; until
+    /// then the read's own notice, with its retry. The quiet period and the
+    /// paused line are gone (the chip says paused); the digest and
+    /// notification lines are Notifications'.
+    @ViewBuilder
+    private var queueLimit: some View {
+        if model.daemonSettings == nil {
+            SettingsReadNotice(model.settingsRead, retry: model.refreshSettings)
+        } else if let settings = model.daemonSettings {
+            Text(SettingsLegacyWords.undecidedDropped(settings.queueTtlDays))
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -44,6 +50,7 @@ struct WatchingSection: View {
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+                queueLimit
                 HStack(spacing: GlassTokens.Space.s4) {
                     Button(SettingsLegacyWords.pauseWatcher) { model.pause(until: nil) }
                         .buttonStyle(GlassButtonStyle(.glass))
@@ -62,9 +69,5 @@ struct WatchingSection: View {
     /// chip (an answer is real, if stale), but neither button acts on it.
     static func controlsArmed(read: SettingsRead, lastReadFailed: Bool, startup: AppModel.Startup) -> Bool {
         read == .answered && !lastReadFailed && startup == .running
-    }
-
-    private func line(_ sentence: String) -> some View {
-        Text(sentence).glassType(GlassTokens.TypeScale.body)
     }
 }
