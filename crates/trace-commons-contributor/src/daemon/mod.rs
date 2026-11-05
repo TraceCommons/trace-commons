@@ -198,7 +198,7 @@ impl std::error::Error for StartFailure {}
 /// same state directory fails loudly instead of two of them racing over the
 /// same queue.
 ///
-/// `run_supervisor` is awaited *inline* here (not spawned and then joined)
+/// The supervise loop is awaited *inline* here (not spawned and then joined)
 /// on purpose: if this async fn's own future is itself dropped before
 /// completion -- the ordinary way a caller races the daemon against, say, a
 /// ctrl-C future in a `tokio::select!` -- Rust's structured-concurrency
@@ -212,10 +212,16 @@ impl std::error::Error for StartFailure {}
 /// daemon -- exactly the corruption `daemon.lock` exists to prevent. See
 /// `EmbeddedDaemon`'s and `run_supervisor`'s docs for the embedding case
 /// that still needs the loop to run as a background task.
+///
+/// This process is the daemon's own, so it stops on SIGTERM / SIGINT, and
+/// that stop runs the same cleanup as any other: the loop's epilogue, then
+/// `EmbeddedDaemon::close`, which removes `daemon.sock` and the lock file.
+/// The handlers are installed first, before anything that a signal's default
+/// action would leave behind exists.
 pub async fn run(store: ConfigStore, dry_run: bool) -> Result<()> {
+    let signal = signal_stream();
     let embedded = start_embedded(store).await?;
-    // This process is the daemon's own, so it stops on SIGTERM / SIGINT.
-    let result = supervise(Arc::clone(&embedded.shared), dry_run, signal_stream()).await;
+    let result = supervise(Arc::clone(&embedded.shared), dry_run, signal).await;
     embedded.close();
     result
 }
@@ -242,8 +248,8 @@ impl Drop for PrivateInferenceShutdown {
 /// divergent, view of the on-disk state.
 ///
 /// Deliberately does **not** itself run the supervise loop (the periodic
-/// watch/upload/digest/history pass): `run` awaits `run_supervisor` inline
-/// for cancel-safety (see its doc). An embedder that needs the loop running
+/// watch/upload/digest/history pass): `run` awaits that loop inline for
+/// cancel-safety (see its doc). An embedder that needs the loop running
 /// in the background, independent of any one call's lifetime, spawns
 /// `run_supervisor` itself and keeps the resulting `JoinHandle` for its own
 /// explicit shutdown.
@@ -545,7 +551,7 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
 /// SIGTERM, and the signal would only stop this loop. `run`, which owns
 /// its process, is the one that listens.
 pub async fn run_supervisor(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> {
-    supervise(shared, dry_run, Box::pin(std::future::pending())).await
+    supervise(shared, dry_run, pass_supervisor::never()).await
 }
 
 /// Run `f` -- blocking, non-yielding work with no `.await` of its own
@@ -2909,29 +2915,34 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
 }
 
 /// A future that resolves when the process is asked to terminate.
-fn signal_stream() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-    Box::pin(async {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{SignalKind, signal};
-            let mut term = match signal(SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(_) => return std::future::pending().await,
-            };
-            let mut interrupt = match signal(SignalKind::interrupt()) {
-                Ok(s) => s,
-                Err(_) => return std::future::pending().await,
-            };
+///
+/// On unix the SIGTERM and SIGINT handlers are installed by this call, not
+/// on the future's first poll, so a signal that arrives while `run` is still
+/// starting is held for the loop rather than ending the process by its
+/// default action. Must be called inside a tokio runtime.
+fn signal_stream() -> pass_supervisor::StopSignal {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let (Ok(mut term), Ok(mut interrupt)) = (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) else {
+            return pass_supervisor::never();
+        };
+        Box::pin(async move {
             tokio::select! {
                 _ = term.recv() => {}
                 _ = interrupt.recv() => {}
             }
-        }
-        #[cfg(not(unix))]
-        {
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Box::pin(async {
             let _ = tokio::signal::ctrl_c().await;
-        }
-    })
+        })
+    }
 }
 
 #[cfg(test)]
@@ -6143,10 +6154,79 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0, "nothing is fetched");
     }
 
-    /// Set in the child process `an_embedded_supervisor_leaves_sigterm_to_the_host`
-    /// starts, to the state directory it runs the supervisor against.
+    /// Set in the child process a SIGTERM test starts, to the directory it
+    /// runs against. Its value's prefix names which half to run.
     #[cfg(unix)]
     const SIGTERM_CHILD_DIR: &str = "TC_TEST_SIGTERM_CHILD_DIR";
+
+    /// Distinct exits for the child halves, so a failure says which step it
+    /// reached.
+    #[cfg(unix)]
+    mod sigterm_exit {
+        /// The signal did not end the process.
+        pub const SURVIVED: i32 = 0;
+        /// The supervisor ended before the signal was sent.
+        pub const SUPERVISOR_ENDED: i32 = 10;
+        /// The supervisor never finished a tick.
+        pub const NOT_READY: i32 = 11;
+        /// `run` never created its socket.
+        pub const RUN_NOT_STARTED: i32 = 20;
+        /// `run` did not end on SIGTERM.
+        pub const RUN_IGNORED_SIGTERM: i32 = 21;
+        /// `run` ended with an error.
+        pub const RUN_FAILED: i32 = 22;
+        /// `run` left `daemon.sock` or `daemon.lock` behind.
+        pub const RUN_LEFT_FILES: i32 = 23;
+    }
+
+    /// Re-run this test binary for one named test with the child variable
+    /// set, its home and config locations all inside `dir`, and return how
+    /// it ended.
+    #[cfg(unix)]
+    fn run_sigterm_child(test: &str, dir: &std::path::Path) -> std::process::ExitStatus {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .env(SIGTERM_CHILD_DIR, dir)
+            // Nothing in the child reads the real home, config or IronWire
+            // home: each is a process-wide input (see the K2 sample recorder
+            // note in Cargo.toml).
+            .env("HOME", dir)
+            .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
+            .env("IRONWIRE_HOME", dir.join("ironwire"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn sigterm_self() {
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status();
+    }
+
+    #[cfg(unix)]
+    fn sigterm_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// Poll `done` every 20 ms for up to `limit`.
+    #[cfg(unix)]
+    async fn sigterm_wait(limit: std::time::Duration, mut done: impl FnMut() -> bool) -> bool {
+        let until = std::time::Instant::now() + limit;
+        while std::time::Instant::now() < until {
+            if done() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        done()
+    }
 
     /// An application that embeds the daemon (the macOS and Windows apps
     /// through the C ABI, the GTK shell directly) owns its process's signals.
@@ -6155,30 +6235,21 @@ mod tests {
     /// app only stopped the daemon's loop and the app kept running.
     ///
     /// Runs in a child process, since the property is about what a signal
-    /// does to the whole process: the child starts the supervisor, sends
-    /// itself SIGTERM, and must die of it.
+    /// does to the whole process: the child starts the supervisor, waits for
+    /// it to finish a tick (by then the old handler was installed), checks
+    /// it is still running, sends itself SIGTERM, and must die of it.
     #[cfg(unix)]
     #[test]
     fn an_embedded_supervisor_leaves_sigterm_to_the_host() {
         use std::os::unix::process::ExitStatusExt;
         if let Ok(dir) = std::env::var(SIGTERM_CHILD_DIR) {
-            sigterm_child(std::path::Path::new(&dir));
+            embedded_sigterm_child(std::path::Path::new(&dir));
         }
         let dir = tempfile::tempdir().unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "daemon::tests::an_embedded_supervisor_leaves_sigterm_to_the_host",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(SIGTERM_CHILD_DIR, dir.path())
-            // Nothing in the child reads the real home.
-            .env("HOME", dir.path())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap();
+        let status = run_sigterm_child(
+            "daemon::tests::an_embedded_supervisor_leaves_sigterm_to_the_host",
+            dir.path(),
+        );
         assert_eq!(
             status.signal(),
             Some(15),
@@ -6186,29 +6257,95 @@ mod tests {
         );
     }
 
-    /// The child's half: a paused, dry-run supervisor, then SIGTERM to this
-    /// process. Exits 0 only if the signal did not end the process.
+    /// The child's half: a paused supervisor with nothing configured, so no
+    /// pass reads a session root or sends anything. Missions are hidden (the
+    /// default), so its first tick empties the slot filled here: that is the
+    /// readiness signal. Exits only if the signal did not end the process.
     #[cfg(unix)]
-    fn sigterm_child(dir: &std::path::Path) -> ! {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
+    fn embedded_sigterm_child(dir: &std::path::Path) -> ! {
+        let code = sigterm_runtime().block_on(async {
             let store = crate::config::ConfigStore::open(dir.join("state")).unwrap();
             let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
-            // Paused, so no pass reads a session root.
             shared.paused.store(true, Ordering::Relaxed);
-            let _supervisor = tokio::spawn(run_supervisor(Arc::clone(&shared), true));
-            // Long enough for the supervisor to reach its loop.
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let _ = std::process::Command::new("/bin/kill")
-                .args(["-TERM", &std::process::id().to_string()])
-                .status();
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            mission_matching::receive_catalogue(
+                &shared.mission_catalogue,
+                &serde_json::json!({"schema_version": 1, "missions": [{"mission_id": "any"}]}),
+                Utc::now(),
+            )
+            .unwrap();
+            let supervisor = tokio::spawn(run_supervisor(Arc::clone(&shared), false));
+            let ticked = sigterm_wait(std::time::Duration::from_secs(60), || {
+                shared.mission_catalogue.lock().unwrap().is_none()
+            })
+            .await;
+            if !ticked {
+                return sigterm_exit::NOT_READY;
+            }
+            if supervisor.is_finished() {
+                return sigterm_exit::SUPERVISOR_ENDED;
+            }
+            sigterm_self();
+            // The signal ends the process well inside this; returning means
+            // it did not.
+            sigterm_wait(std::time::Duration::from_secs(5), || false).await;
+            sigterm_exit::SURVIVED
         });
-        std::process::exit(0)
+        std::process::exit(code)
+    }
+
+    /// The CLI's `daemon run` owns its process, so it still stops on SIGTERM
+    /// (what systemd and launchd send), and stops cleanly: exit 0, with
+    /// `daemon.sock` and `daemon.lock` removed. Without this, passing an
+    /// embedder's never-firing signal here would make the CLI daemon ignore
+    /// SIGTERM and every other test would still pass.
+    #[cfg(unix)]
+    #[test]
+    fn daemon_run_stops_cleanly_on_sigterm() {
+        if let Ok(dir) = std::env::var(SIGTERM_CHILD_DIR) {
+            run_sigterm_child_half(std::path::Path::new(&dir));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let status = run_sigterm_child(
+            "daemon::tests::daemon_run_stops_cleanly_on_sigterm",
+            dir.path(),
+        );
+        assert_eq!(
+            status.code(),
+            Some(sigterm_exit::SURVIVED),
+            "daemon run stops cleanly on SIGTERM; the child exited with {status:?}"
+        );
+    }
+
+    /// The child's half: `run` in a dry run, SIGTERM once its socket exists
+    /// (its handlers are installed before that), then check what it left.
+    #[cfg(unix)]
+    fn run_sigterm_child_half(dir: &std::path::Path) -> ! {
+        let code = sigterm_runtime().block_on(async {
+            let store = crate::config::ConfigStore::open(dir.join("state")).unwrap();
+            let sock = store.daemon_path(DAEMON_SOCK_FILE);
+            let lock = store.daemon_path(DAEMON_LOCK_FILE);
+            let daemon = tokio::spawn(run(store, true));
+            let started = sigterm_wait(std::time::Duration::from_secs(30), || {
+                sock.exists() || daemon.is_finished()
+            })
+            .await;
+            if !started || daemon.is_finished() {
+                return sigterm_exit::RUN_NOT_STARTED;
+            }
+            sigterm_self();
+            let Ok(joined) = tokio::time::timeout(std::time::Duration::from_secs(30), daemon).await
+            else {
+                return sigterm_exit::RUN_IGNORED_SIGTERM;
+            };
+            if !matches!(joined, Ok(Ok(()))) {
+                return sigterm_exit::RUN_FAILED;
+            }
+            if sock.exists() || lock.exists() {
+                return sigterm_exit::RUN_LEFT_FILES;
+            }
+            sigterm_exit::SURVIVED
+        });
+        std::process::exit(code)
     }
 
     /// Without a config there is no origin to ask: nothing is sent and the
