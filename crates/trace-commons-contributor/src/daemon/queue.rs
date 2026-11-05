@@ -998,10 +998,11 @@ pub const REASONS_NEEDING_A_PERSON: &[&str] = &[
     "witness_unreachable",
     REASON_WITNESS_ATTESTATION_UNAVAILABLE,
     "witness_collateral_unavailable",
-    // A witness whose evidence did not verify
-    // (`submit::witness_failure_is_untrusted`): a pin refresh may make it
-    // valid, so a person decides rather than the session being refused.
+    // A witness whose evidence did not verify (`submit::witness_trust_hold`):
+    // a person decides rather than the session being refused. A new accepted
+    // list may cure the measurement case, and clears only that hold.
     crate::submit::REASON_WITNESS_NOT_TRUSTED,
+    crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED,
 ];
 
 /// `witness_attestation_unavailable`, as `witness::WitnessTrustError` spells

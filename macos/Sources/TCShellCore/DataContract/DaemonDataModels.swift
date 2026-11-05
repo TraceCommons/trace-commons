@@ -420,6 +420,7 @@ extension DaemonData {
         public static let witnessAttestationUnavailable = "witness_attestation_unavailable"
         public static let witnessCollateralUnavailable = "witness_collateral_unavailable"
         public static let witnessNotTrusted = "witness-not-trusted"
+        public static let witnessMeasurementNotAccepted = "witness-measurement-not-accepted"
 
         /// `queue.rs` `REASONS_NEEDING_A_PERSON`, in its order.
         public static let needingAPerson: Set<String> = [
@@ -432,6 +433,7 @@ extension DaemonData {
             witnessAttestationUnavailable,
             witnessCollateralUnavailable,
             witnessNotTrusted,
+            witnessMeasurementNotAccepted,
         ]
     }
 

@@ -3393,10 +3393,15 @@ reason no unattended approval can satisfy:
   `approved` under the same label, with `retry_after` set, and is not held.
   Earlier builds refused such a session as `witness_attestation_unavailable`;
   a newer build offers that refusal again.
+- `witness-measurement-not-accepted`: the witness's evidence was fetched and
+  verified, but it reports a measurement outside the accepted set. It is not
+  retried, and nothing was sent. A person decides; a newer accepted list can
+  make the same witness valid.
 - `witness-not-trusted`: the witness's evidence was fetched and did not
-  verify (the quote, its nonce, the signer or the measurement). It is not
-  retried, and nothing was sent. A person decides, because a later pin
-  refresh can make the same witness valid.
+  verify -- the quote is not genuine, it is not bound to this client's nonce,
+  it names another signer than the pinned one, or the certificate on the
+  witness's answer does not verify or does not match its bytes. It is not
+  retried, and nothing was sent. A person decides.
 
 A group control is by definition not a review of one
 session, so held entries are left out for every contributor, invited or not,

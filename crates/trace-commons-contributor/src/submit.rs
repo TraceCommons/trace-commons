@@ -649,7 +649,7 @@ pub const WITNESS_BATCH_STOP_LABELS: [&str; 3] = [
 ///
 /// Fetching is the only thing these labels say failed. Evidence that was
 /// fetched and did not verify has labels of its own
-/// ([`witness_failure_is_untrusted`]), and every other witness label is a
+/// ([`witness_trust_hold`]), and every other witness label is a
 /// judgement or a local refusal that stays one. Nothing is uploaded without a
 /// verified witness either way.
 #[must_use]
@@ -663,28 +663,48 @@ pub fn witness_failure_is_transient(label: &str) -> bool {
     )
 }
 
-/// Whether a witness failure label says the witness's evidence was fetched
-/// and did not verify: the quote is not a genuine one
-/// (`witness_quote_unverified`), is not bound to this client's nonce
-/// (`witness_quote_replayed`), names another signer than the pinned one
-/// (`witness_signer_unexpected`), or reports a measurement that is not
-/// accepted ([`crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL`]).
-/// Never retried, since asking again gets the same evidence; the daemon
-/// holds the session for a person under [`REASON_WITNESS_NOT_TRUSTED`]
-/// rather than refusing it, because a later pin refresh can make the same
-/// witness valid. The `submit` command still reports the specific label.
+/// The label to hold a session for a person under when the witness's
+/// evidence was fetched and did not verify, or `None` for any other label.
+///
+/// - [`REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED`]: the witness reports a
+///   measurement outside the accepted set
+///   ([`crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL`]). A new
+///   accepted list can cure it, so it is the hold that list clears.
+/// - [`REASON_WITNESS_NOT_TRUSTED`]: the quote is not a genuine one
+///   (`witness_quote_unverified`), is not bound to this client's nonce
+///   (`witness_quote_replayed`), names another signer than the pinned one
+///   (`witness_signer_unexpected`), or the certificate on the witness's
+///   answer does not verify or does not match its bytes
+///   (`witness_certificate_unverified`, `witness_certificate_mismatched`).
+///
+/// Never retried, since asking again gets the same evidence, and never a
+/// terminal refusal of the trace: the daemon revokes the approval and a
+/// person decides. Nothing is sent meanwhile. The `submit` command still
+/// reports the specific label.
 #[must_use]
-pub fn witness_failure_is_untrusted(label: &str) -> bool {
+pub fn witness_trust_hold(label: &str) -> Option<&'static str> {
+    if label == crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL {
+        return Some(REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED);
+    }
     matches!(
         label,
-        "witness_quote_unverified" | "witness_quote_replayed" | "witness_signer_unexpected"
-    ) || label == crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL
+        "witness_quote_unverified"
+            | "witness_quote_replayed"
+            | "witness_signer_unexpected"
+            | "witness_certificate_unverified"
+            | "witness_certificate_mismatched"
+    )
+    .then_some(REASON_WITNESS_NOT_TRUSTED)
 }
 
-/// The label a session approved for upload is held for a person under when
-/// the witness did not verify ([`witness_failure_is_untrusted`]). One of
+/// See [`witness_trust_hold`]. One of
 /// `daemon::queue::REASONS_NEEDING_A_PERSON`.
 pub const REASON_WITNESS_NOT_TRUSTED: &str = "witness-not-trusted";
+
+/// See [`witness_trust_hold`]. One of
+/// `daemon::queue::REASONS_NEEDING_A_PERSON`, and the only witness hold a new
+/// accepted list releases.
+pub const REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED: &str = "witness-measurement-not-accepted";
 
 /// The label to stop a batch on, if `outcome` is one of
 /// [`WITNESS_BATCH_STOP_LABELS`].
@@ -4333,9 +4353,11 @@ mod tests {
     /// Witness failures split by cause. Fetching the evidence failed
     /// (timeout, no connection, the attestation or collateral not obtained):
     /// nothing was judged, so it is retried. The evidence was fetched and did
-    /// not verify (the quote, its nonce, the signer, the measurement): never
-    /// retried, held for a person, since a later pin refresh can make it
-    /// valid. No label is both, and the rest are neither.
+    /// not verify: never retried, held for a person under one of two labels.
+    /// A measurement outside the accepted set can be cured by a new accepted
+    /// list, so it has its own; a quote, nonce, signer or certificate that
+    /// does not verify is `witness-not-trusted`. No label is both retried and
+    /// held, and the rest are neither.
     #[test]
     fn witness_failures_split_into_fetch_and_trust() {
         let fetch = [
@@ -4344,11 +4366,16 @@ mod tests {
             "witness_attestation_unavailable",
             "witness_collateral_unavailable",
         ];
-        let trust = [
-            "witness_quote_unverified",
-            "witness_quote_replayed",
-            "witness_signer_unexpected",
-            crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+        let held = [
+            (
+                crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+                REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED,
+            ),
+            ("witness_quote_unverified", REASON_WITNESS_NOT_TRUSTED),
+            ("witness_quote_replayed", REASON_WITNESS_NOT_TRUSTED),
+            ("witness_signer_unexpected", REASON_WITNESS_NOT_TRUSTED),
+            ("witness_certificate_unverified", REASON_WITNESS_NOT_TRUSTED),
+            ("witness_certificate_mismatched", REASON_WITNESS_NOT_TRUSTED),
         ];
         for label in crate::witness::WitnessTrustError::ALL_REFUSAL_LABELS {
             assert_eq!(
@@ -4357,8 +4384,10 @@ mod tests {
                 "{label}"
             );
             assert_eq!(
-                witness_failure_is_untrusted(label),
-                trust.contains(&label),
+                witness_trust_hold(label),
+                held.iter()
+                    .find(|(l, _)| *l == label)
+                    .map(|(_, hold)| *hold),
                 "{label}"
             );
         }

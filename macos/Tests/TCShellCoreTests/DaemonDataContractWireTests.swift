@@ -478,6 +478,7 @@ final class DaemonDataContractWireTests: XCTestCase {
             "witness_attestation_unavailable",
             "witness_collateral_unavailable",
             "witness-not-trusted",
+            "witness-measurement-not-accepted",
         ] {
             XCTAssertTrue(try entry(reason).heldForReview, reason)
             // Only a pending entry is held: an approved one under the label
