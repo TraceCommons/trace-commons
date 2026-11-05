@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// One marker in a transcript, with whatever can honestly be said about it.
 public struct RedactionMark: Equatable {
@@ -49,12 +50,7 @@ public struct RedactionMark: Equatable {
 public enum RedactionMarks {
     /// What the bare `[REDACTED]` can be called. It records that something
     /// left, and there is nothing else in the token to say.
-    public static let unnamed = "something removed"
-
-    /// The suffix on a numbered token whose value was already marked
-    /// earlier. A reader cannot see that without scrolling back, which is
-    /// the whole reason it is worth saying.
-    static let repeatSuffix = ", the same value as an earlier mark"
+    public static let unnamed = Localization.current.text("app.redaction.unnamed")
 
     /// Every marker in `text`, left to right, named.
     public static func scan(_ text: String) -> [RedactionMark] {
@@ -156,7 +152,7 @@ public enum RedactionMarks {
     }
 
     static func name(category: String?, isRepeat: Bool) -> String {
-        let what = category.map { "\($0) removed" } ?? unnamed
-        return isRepeat ? what + repeatSuffix : what
+        let what = category.map { Localization.current.text("app.redaction.removed", parameters: ["category": $0]) } ?? unnamed
+        return isRepeat ? Localization.current.text("app.redaction.repeat", parameters: ["removed": what]) : what
     }
 }

@@ -20,6 +20,7 @@ let ffiLibDir = ProcessInfo.processInfo.environment["TC_FFI_LIB_DIR"]
 
 let package = Package(
     name: "TraceCommons",
+    defaultLocalization: "en",
     platforms: [.macOS(.v14)],
     dependencies: [
         // Pinned exactly, not by range. This dependency decides which bytes
@@ -40,7 +41,17 @@ let package = Package(
         // The ONLY target that touches raw pointers.
         .target(
             name: "TCBridge",
-            dependencies: ["CTraceCommons"],
+            dependencies: ["CTraceCommons", "TCLocalization"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .target(
+            name: "TCLocalization",
+            resources: [.process("Resources")],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "TCLocalizationTests",
+            dependencies: ["TCLocalization"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         // Update logic that must be testable without a framework, a bundle,
@@ -93,6 +104,7 @@ let package = Package(
         // only exist there.
         .target(
             name: "TCShellCore",
+            dependencies: ["TCLocalization"],
             resources: [
                 // K2 of #1173: replies recorded from the real daemon, one
                 // file per sample set per method (plus `shared/` for the
@@ -116,6 +128,7 @@ let package = Package(
                 "TCDesign",
                 "TCShellCore",
                 "TCUpdates",
+                "TCLocalization",
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)],

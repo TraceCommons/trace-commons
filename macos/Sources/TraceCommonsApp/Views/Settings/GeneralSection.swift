@@ -1,6 +1,7 @@
 import SwiftUI
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// General: the appearance, Light, Dark or the system's (design
 /// exploration). Under the flat glass theme Light is its light tint and Dark
@@ -9,6 +10,7 @@ import TCShellCore
 /// rail's switch, and the Traces map's style.
 struct GeneralSection: View {
     @State private var appearance = GlassAppearance.stored
+    @State private var language = Localization.languagePreference()
     /// The edge rail's switch: a shell preference, read once and written
     /// through `EdgeRailController`, which shows or removes the rail at once.
     @State private var edgeRailOn = EdgeRailPreference.isEnabled()
@@ -21,9 +23,32 @@ struct GeneralSection: View {
 
     var body: some View {
         appearanceCard
+        languageCard
         edgeRailCard
         mapStyleCard
         promotionsCard
+    }
+
+    private var languageCard: some View {
+        GlassEyebrowCard(Localization.current.text("app.language.title")) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                Picker(Localization.current.text("app.language.title"), selection: Binding(
+                    get: { language },
+                    set: {
+                        language = $0
+                        Localization.setLanguagePreference($0)
+                    })) {
+                    Text(Localization.current.text("app.language.system")).tag("")
+                    ForEach(Localization.availableLanguages) { choice in
+                        Text(choice.name).tag(choice.id)
+                    }
+                }
+                Text(Localization.current.text("app.language.restart"))
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     /// Whether Home shows promotions, such as a new model on NEAR AI

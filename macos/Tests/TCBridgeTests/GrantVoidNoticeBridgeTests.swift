@@ -61,4 +61,18 @@ final class GrantVoidNoticeBridgeTests: XCTestCase {
         let notice = try XCTUnwrap(GrantVoidNotice.decode(fromJSON: json))
         XCTAssertNil(notice.rearmAction, "no project to arm, so no button")
     }
+
+    func testRawWireInputKeepsUserContentLiteralWhileRenderingOnlyMessageLeaves() throws {
+        let project = "quoted \"folder\"\n{project} {count} café"
+        let data = try JSONSerialization.data(withJSONObject: [
+            "id": 4, "kind": "project", "project_id": "3f1c", "project_label": project,
+            "reasons": ["destination-changed"],
+        ])
+        let input = try XCTUnwrap(String(data: data, encoding: .utf8))
+        let json = try XCTUnwrap(TCConsentCopy.voidNoticeJSON(forVoid: input))
+        let notice = try XCTUnwrap(GrantVoidNotice.decode(fromJSON: json))
+        XCTAssertTrue(notice.title.contains(project), notice.title)
+        XCTAssertFalse(notice.reasons.isEmpty)
+        XCTAssertFalse(json.contains("\"english\":"), "existing notice decoders consume strings, not messages")
+    }
 }

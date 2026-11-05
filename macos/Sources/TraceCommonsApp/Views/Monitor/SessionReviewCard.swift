@@ -2,6 +2,7 @@ import SwiftUI
 import TCBridge
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// What the review card holds for one session: the answer to the outcome
 /// question and the correction written under Partly or Failed.
@@ -686,14 +687,14 @@ struct SessionReviewCard: View {
         func bytes(_ value: Int?) -> String {
             value.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .memory) } ?? dash
         }
-        func number(_ value: Int?) -> String { value.map(String.init) ?? dash }
+        func number(_ value: Int?) -> String { value.map { Localization.current.number(Int64($0)) } ?? dash }
         let tool = SourceKind(rawValue: entry.declaredSource ?? entry.source)?.displayName ?? entry.source
         var rows: [GlassKeyValueList.Item] = [
             .init(words.tool, tool),
             .init(words.folder, entry.projectLabel),
-            .init(words.started, entry.startedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? dash),
+            .init(words.started, entry.startedAt.map { Localization.current.date($0) } ?? dash),
             .init(words.length, entry.durationSecs.map {
-                Duration.seconds($0).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))
+                Duration.seconds($0).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated).locale(Localization.current.locale))
             } ?? dash),
             .init(words.prompts, number(entry.userTurns)),
             .init(words.size, bytes(entry.sizeBytes)),

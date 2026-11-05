@@ -20,6 +20,7 @@ mod live;
 #[cfg(unix)]
 mod owner_watch;
 pub mod policy;
+pub mod presentation;
 mod process;
 mod resource;
 pub use resource::{ResourceEvent, ResourceReading, ResourceTicket};

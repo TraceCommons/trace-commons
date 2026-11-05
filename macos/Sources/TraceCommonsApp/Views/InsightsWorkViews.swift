@@ -2,6 +2,7 @@ import Charts
 import SwiftUI
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// Overview's week at a glance (product owner, 2026-10-29): AI spend at API
 /// prices, the top model and credits earned, then spend by model and
@@ -55,10 +56,10 @@ enum InsightsWorkWords {
     static func dollars(_ micros: Int64) -> String {
         guard micros >= 10_000 else { return InsightsCreditWords.money(UInt64(max(0, micros))) }
         return (Decimal(micros) / 1_000_000).formatted(Decimal.FormatStyle.Currency(code: "USD")
-            .precision(.fractionLength(2)))
+            .precision(.fractionLength(2)).locale(Localization.current.locale))
     }
 
-    static func count(_ value: Int64) -> String { value.formatted(.number) }
+    static func count(_ value: Int64) -> String { Localization.current.number(value) }
 
     /// "▲ 18% vs last week"; `nil` without last week's figure, with no
     /// change, or when either week's figure is only partly known: a minimum
@@ -70,7 +71,7 @@ enum InsightsWorkWords {
         guard percent > 0 else { return nil }
         let up = now > last
         return (InsightsOverviewWords.fill(text(up ? "analytics_change_up" : "analytics_change_down", copy),
-                                           ["p": String(percent)]), up)
+                                           ["p": Localization.current.number(Int64(percent))]), up)
     }
 
     /// Whether this week's or last week's spend is only partly known.
@@ -114,7 +115,7 @@ enum InsightsWorkWords {
                 id: "tokens:" + change.source,
                 label: toolName(change.source, copy: copy) + " · " + text("analytics_card_tokens", copy),
                 words: InsightsOverviewWords.fill(text(up ? "analytics_change_up" : "analytics_change_down", copy),
-                                                  ["p": String(percent)]),
+                                                  ["p": Localization.current.number(Int64(percent))]),
                 up: up))
         }
         return changes
@@ -150,8 +151,8 @@ enum InsightsWorkWords {
         let utc = TimeZone(secondsFromGMT: 0) ?? .current
         return work.byDay.enumerated().map { index, day in
             let label = (try? parse.parse(day.date)).map {
-                $0.formatted(Date.FormatStyle(timeZone: utc).weekday(.abbreviated))
-            } ?? String(index + 1)
+                $0.formatted(Date.FormatStyle(timeZone: utc).weekday(.abbreviated).locale(Localization.current.locale))
+            } ?? Localization.current.number(Int64(index + 1))
             let last = work.lastWeekByDay.flatMap { $0.indices.contains(index) ? $0[index] : nil }
             return DayPair(id: day.date, label: label, week: Double(day.usdMicrosKnown) / 1_000_000,
                            lastWeek: last.map { Double($0.usdMicrosKnown) / 1_000_000 })

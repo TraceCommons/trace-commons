@@ -1,6 +1,7 @@
 import SwiftUI
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// Missions (R10 of #1173): the commons' mission catalogue, reached from
 /// Home (spec, "Screens"). Under #1174's rules:
@@ -131,10 +132,10 @@ enum MissionFormat {
             range.unit == missionCreditUnit, let words = MonitorWords.table
         else { return "—" }
         if range.min == range.max {
-            return words.missionCreditPointsOne.replacingOccurrences(of: "{min}", with: "\(range.min)")
+            return Localization.fill(words.missionCreditPointsOne, ["min": Localization.current.number(Int64(clamping: range.min))])
         }
-        return words.missionCreditPoints.replacingOccurrences(of: "{min}", with: "\(range.min)")
-            .replacingOccurrences(of: "{max}", with: "\(range.max)")
+        return Localization.fill(words.missionCreditPoints, ["min": Localization.current.number(Int64(clamping: range.min)),
+                                                            "max": Localization.current.number(Int64(clamping: range.max))])
     }
 
     /// The one unit the data contract names for a mission's range.

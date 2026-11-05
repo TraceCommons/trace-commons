@@ -3216,7 +3216,7 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
     let local_tz = chrono::Local;
     let blocked = shared.health.lock().expect("health lock").blocks_expiry();
 
-    let (queue_changed, pending_count, digest) = {
+    let (queue_changed, pending_count, digest_presentation) = {
         let mut queue = shared.queue.lock().expect("queue lock");
         let expired = queue.expire(now, ttl_days, blocked);
         // Bookkeeping rows, not receipts: a superseded offer has a live
@@ -3227,8 +3227,8 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
         let compacted = queue.compact_superseded();
         let pending = queue.pending();
         let count = pending.len();
-        let text = notify::digest_text(&pending);
-        (expired + compacted, count, text)
+        let presentation = notify::digest_presentation(&pending);
+        (expired + compacted, count, presentation)
     };
     if queue_changed > 0 {
         let queue = shared.queue.lock().expect("queue lock");
@@ -3306,28 +3306,35 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
         // of them.
         let sentence = |earned: f64| {
             (contributed.count > 0).then(|| {
-                notify::contribution_text(
-                    contributed.count,
+                crate::localized_copy::notifications::contribution(
+                    contributed.count as u64,
                     &contributed.project_labels,
                     earned,
                     contributed.credit_pending,
                 )
             })
         };
-        let contribution = sentence(contributed.credit_final());
+        let contribution_presentation = sentence(contributed.credit_final());
+        let contribution = contribution_presentation
+            .as_ref()
+            .map(crate::localized_copy::english);
         let contribution_in_text = sentence(contributed.credit_final_not_in(folded_final));
-        let mut body = match (pending_count > 0, contribution_in_text.as_deref()) {
-            (true, Some(c)) => format!("{digest}\n{c}"),
-            (true, None) => digest.clone(),
-            (false, Some(c)) => c.to_string(),
+        let mut presentation = match (pending_count > 0, contribution_in_text) {
+            (true, Some(c)) => {
+                crate::localized_copy::notifications::join(digest_presentation.clone(), c, true)
+            }
+            (true, None) => digest_presentation.clone(),
+            (false, Some(c)) => c,
             // `digest_due` cannot return true here, but a body built by
             // exhaustion cannot be wrong later if it can.
-            (false, None) => digest.clone(),
+            (false, None) => digest_presentation.clone(),
         };
         // The arbiter's third sentence, when it folded one in.
-        if let Some((_, sentence)) = &attention.fold {
-            body = format!("{body}\n{sentence}");
+        if let Some(fold) = &attention.fold_presentation {
+            presentation =
+                crate::localized_copy::notifications::join(presentation, fold.clone(), true);
         }
+        let body = crate::localized_copy::english(&presentation);
         let mut payload = serde_json::json!({
             "pending": pending_count,
             "contributed": contributed.count,
@@ -3343,9 +3350,12 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
             "credit_final": notify::wire_credit(contributed.credit_final()),
             "credit_pending": notify::wire_credit(contributed.credit_pending),
             "text": body,
+            "presentation": presentation,
+            "contribution_presentation": contribution_presentation,
         });
         if let Some((kind, sentence)) = &attention.fold {
-            payload["fold"] = serde_json::json!({ "kind": kind.label(), "text": sentence });
+            payload["fold"] = serde_json::json!({ "kind": kind.label(), "text": sentence,
+                "presentation": attention.fold_presentation });
         }
         shared.publish(ipc::EVENT_DIGEST_DUE, payload);
         if local_notifications {

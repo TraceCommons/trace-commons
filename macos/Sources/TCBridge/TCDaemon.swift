@@ -294,12 +294,10 @@ public final class TCDaemon: @unchecked Sendable {
     /// the answer is the no-watcher prompt, which is then the true one.
     public func quitPromptJSON() -> String? {
         let raw: UnsafeMutablePointer<CChar>?? = withHandle { h in
-            tc_quit_prompt_json(h)
+            tc_localized_quit_prompt_json(h)
         }
         guard let inner = raw else { return TCCoreCopy.quitPromptWithoutWatcherJSON() }
-        guard let pointer = inner else { return nil }
-        defer { tc_string_free(pointer) }
-        return String(cString: pointer)
+        return LocalizedPresentation.renderOwned(inner)
     }
 
     /// Calls `method` with `paramsJSON` (a JSON object literal, e.g. "{}")

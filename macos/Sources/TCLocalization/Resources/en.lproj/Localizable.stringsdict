@@ -1,0 +1,1430 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>app.digest.contributed</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld trace contributed.</string>
+			<key>other</key>
+			<string>%lld traces contributed.</string>
+		</dict>
+	</dict>
+	<key>app.digest.contributed_credit</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld trace contributed. {credit} credit pending.</string>
+			<key>other</key>
+			<string>%lld traces contributed. {credit} credit pending.</string>
+		</dict>
+	</dict>
+	<key>app.digest.contributed_project</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld trace contributed from {project}.</string>
+			<key>other</key>
+			<string>%lld traces contributed from {project}.</string>
+		</dict>
+	</dict>
+	<key>app.digest.contributed_project_credit</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld trace contributed from {project}. {credit} credit pending.</string>
+			<key>other</key>
+			<string>%lld traces contributed from {project}. {credit} credit pending.</string>
+		</dict>
+	</dict>
+	<key>app.digest.ready</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld trace ready.</string>
+			<key>other</key>
+			<string>%lld traces ready.</string>
+		</dict>
+	</dict>
+	<key>app.digest.ready_projects</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld trace ready from {projects}.</string>
+			<key>other</key>
+			<string>%lld traces ready from {projects}.</string>
+		</dict>
+	</dict>
+	<key>app.menu.waiting</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld trace waiting for your decision.</string>
+			<key>other</key>
+			<string>%lld traces waiting for your decision.</string>
+		</dict>
+	</dict>
+	<key>app.preview.matches</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld match</string>
+			<key>other</key>
+			<string>%lld matches</string>
+		</dict>
+	</dict>
+	<key>app.subagent.dropped</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld delegated subagent transcript was left out to keep this trace within its size limit; the conversation itself is complete.</string>
+			<key>other</key>
+			<string>%lld delegated subagent transcripts were left out to keep this trace within its size limit; the conversation itself is complete.</string>
+		</dict>
+	</dict>
+	<key>app.subagent.includes</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Includes %lld delegated subagent transcript.</string>
+			<key>other</key>
+			<string>Includes %lld delegated subagent transcripts.</string>
+		</dict>
+	</dict>
+	<key>app.subagent.includes_dropped</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>{included} The largest was left out to keep this trace within its size limit; the conversation itself is complete.</string>
+			<key>other</key>
+			<string>{included} The %lld largest were left out to keep this trace within its size limit; the conversation itself is complete.</string>
+		</dict>
+	</dict>
+	<key>app.toast.scrub</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld redaction applied.</string>
+			<key>other</key>
+			<string>%lld redactions applied.</string>
+		</dict>
+	</dict>
+	<key>contribution_withheld_line.count</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace here cannot be sent, so it is not included.</string>
+			<key>other</key>
+			<string>%lld traces here cannot be sent, so they are not included.</string>
+		</dict>
+	</dict>
+	<key>harness_last_call_line.day</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Last call: %lld day ago</string>
+			<key>other</key>
+			<string>Last call: %lld days ago</string>
+		</dict>
+	</dict>
+	<key>harness_last_call_line.hour</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Last call: %lld hour ago</string>
+			<key>other</key>
+			<string>Last call: %lld hours ago</string>
+		</dict>
+	</dict>
+	<key>harness_last_call_line.minute</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Last call: %lld minute ago</string>
+			<key>other</key>
+			<string>Last call: %lld minutes ago</string>
+		</dict>
+	</dict>
+	<key>message.arming_offer_copy_json.default.evidence</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>You've contributed from {project} once.</string>
+			<key>other</key>
+			<string>You've contributed from {project} %lld times.</string>
+		</dict>
+	</dict>
+	<key>message.decisions_owed_text.count</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld decision owed</string>
+			<key>other</key>
+			<string>%lld decisions owed</string>
+		</dict>
+	</dict>
+	<key>message.gate_held_notice.held.body</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace from a project set to contribute automatically is waiting.</string>
+			<key>other</key>
+			<string>%lld traces from projects set to contribute automatically are waiting.</string>
+		</dict>
+	</dict>
+	<key>message.gate_held_notice.held.project_line</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>{project}: 1 trace waiting</string>
+			<key>other</key>
+			<string>{project}: %lld traces waiting</string>
+		</dict>
+	</dict>
+	<key>message.health_copy_json.queue_full_counted.detail</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>-- {formatted_count} are already waiting. Review or clear some to start again.</string>
+			<key>other</key>
+			<string>-- {formatted_count} are already waiting. Review or clear some to start again.</string>
+		</dict>
+	</dict>
+	<key>message.nudge_digest_help_json.hours</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>At most one an hour, only when traces are waiting.</string>
+			<key>other</key>
+			<string>At most one every %lld hours, only when traces are waiting.</string>
+		</dict>
+	</dict>
+	<key>message.project_ignore_copy_json.waiting.body</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>This removes %lld waiting trace. Traces already sent aren't affected.</string>
+			<key>other</key>
+			<string>This removes %lld waiting traces. Traces already sent aren't affected.</string>
+		</dict>
+	</dict>
+	<key>message.project_ignore_reconciled_text.changed.line</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Ignored {project}. The queue changed while you were deciding: 1 waiting trace was removed, not {promised}.</string>
+			<key>other</key>
+			<string>Ignored {project}. The queue changed while you were deciding: %lld waiting traces were removed, not {promised}.</string>
+		</dict>
+	</dict>
+	<key>message.witness_capacity_notice.waiting.body</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 approved trace is waiting because the privacy witness is busy checking other traces. Nothing is sent until the witness can check it. It will be tried again automatically, and nothing has been lost.</string>
+			<key>other</key>
+			<string>%lld approved traces are waiting because the privacy witness is busy checking other traces. Nothing is sent until the witness can check them. They will be tried again automatically, and nothing has been lost.</string>
+		</dict>
+	</dict>
+	<key>message.witness_last_result_line.receipts</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Last sent: redacted and certified by the witness. {receipts} of %lld model call carried a receipt.</string>
+			<key>other</key>
+			<string>Last sent: redacted and certified by the witness. {receipts} of %lld model calls carried a receipt.</string>
+		</dict>
+	</dict>
+	<key>message.witness_pinned_count_line.count</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>One measurement is pinned.</string>
+			<key>other</key>
+			<string>%lld measurements are pinned.</string>
+		</dict>
+	</dict>
+	<key>near_ai_balance_observed_line.day</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Checked %lld day ago</string>
+			<key>other</key>
+			<string>Checked %lld days ago</string>
+		</dict>
+	</dict>
+	<key>near_ai_balance_observed_line.hour</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Checked %lld hour ago</string>
+			<key>other</key>
+			<string>Checked %lld hours ago</string>
+		</dict>
+	</dict>
+	<key>near_ai_balance_observed_line.minute</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Checked %lld minute ago</string>
+			<key>other</key>
+			<string>Checked %lld minutes ago</string>
+		</dict>
+	</dict>
+	<key>notification.DIGEST_IDLE_SENTENCE</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 of them, from {tool}, has been idle for {days} or more.</string>
+			<key>other</key>
+			<string>%lld of them, from {tool}, have been idle for {days} or more.</string>
+		</dict>
+	</dict>
+	<key>notification.DIGEST_IDLE_SENTENCE_NO_TOOL</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 of them has been idle for {days} or more.</string>
+			<key>other</key>
+			<string>%lld of them have been idle for {days} or more.</string>
+		</dict>
+	</dict>
+	<key>notification.MARK_A11Y_IDLE</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 of them has been idle for {days} or more.</string>
+			<key>other</key>
+			<string>%lld of them have been idle for {days} or more.</string>
+		</dict>
+	</dict>
+	<key>notification.NOTIFY_IDLE_BODY</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace from {tool} has been idle for {days} or more. Review it to send or keep.</string>
+			<key>other</key>
+			<string>%lld traces from {tool} have been idle for {days} or more. Review them to send or keep.</string>
+		</dict>
+	</dict>
+	<key>notification.NOTIFY_IDLE_BODY_NO_TOOL</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace has been idle for {days} or more. Review it to send or keep.</string>
+			<key>other</key>
+			<string>%lld traces have been idle for {days} or more. Review them to send or keep.</string>
+		</dict>
+	</dict>
+	<key>notification.NOTIFY_VERDICTS_BODY</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace accepted and {h} held for privacy review.</string>
+			<key>other</key>
+			<string>%lld traces accepted and {h} held for privacy review.</string>
+		</dict>
+	</dict>
+	<key>notification.NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace accepted.</string>
+			<key>other</key>
+			<string>%lld traces accepted.</string>
+		</dict>
+	</dict>
+	<key>notification.NOTIFY_VERDICTS_BODY_HELD_ONLY</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace held for privacy review.</string>
+			<key>other</key>
+			<string>%lld traces held for privacy review.</string>
+		</dict>
+	</dict>
+	<key>notification.NUDGE_BACKLOG_BODY</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>It is in a folder set to Ask and has been through the preview. Nothing is sent until you decide, and keeping it on this computer is just as good an answer.</string>
+			<key>other</key>
+			<string>They are in folders set to Ask and have been through the preview. Nothing is sent until you decide on each one, and keeping one on this computer is just as good an answer.</string>
+		</dict>
+	</dict>
+	<key>notification.NUDGE_BACKLOG_TITLE</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace to review</string>
+			<key>other</key>
+			<string>%lld traces to review</string>
+		</dict>
+	</dict>
+	<key>notification.NUDGE_IDLE_BODY</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>It looks finished. Nothing is sent until you decide, and keeping it on this computer is just as good an answer.</string>
+			<key>other</key>
+			<string>They look finished. Nothing is sent until you decide on each one, and keeping one on this computer is just as good an answer.</string>
+		</dict>
+	</dict>
+	<key>notification.NUDGE_IDLE_TITLE</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace from {tool} has been idle for {days} or more</string>
+			<key>other</key>
+			<string>%lld traces from {tool} have been idle for {days} or more</string>
+		</dict>
+	</dict>
+	<key>notification.NUDGE_IDLE_TITLE_NO_TOOL</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace has been idle for {days} or more</string>
+			<key>other</key>
+			<string>%lld traces have been idle for {days} or more</string>
+		</dict>
+	</dict>
+	<key>notification.NUDGE_MISSION_FIT_CLAUSE</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 of them fits a mission.</string>
+			<key>other</key>
+			<string>%lld of them fit a mission.</string>
+		</dict>
+	</dict>
+	<key>notification.NUDGE_PANEL_BACKLOG</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>A previewed trace is waiting for a decision</string>
+			<key>other</key>
+			<string>Previewed traces are waiting for a decision</string>
+		</dict>
+	</dict>
+	<key>notification.NUDGE_PANEL_IDLE</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>A trace has been idle for {days} or more</string>
+			<key>other</key>
+			<string>Some traces have been idle for {days} or more</string>
+		</dict>
+	</dict>
+	<key>notification.SETTING_DIGEST_HELP_INTERVAL</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>At most one an hour, only when traces are waiting.</string>
+			<key>other</key>
+			<string>At most one every %lld hours, only when traces are waiting.</string>
+		</dict>
+	</dict>
+	<key>notification.TOOL_LIST_MANY</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld tools</string>
+			<key>other</key>
+			<string>%lld tools</string>
+		</dict>
+	</dict>
+	<key>notification.days</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 day</string>
+			<key>other</key>
+			<string>%lld days</string>
+		</dict>
+	</dict>
+	<key>notification.digest.contributed</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld trace contributed.</string>
+			<key>other</key>
+			<string>%lld traces contributed.</string>
+		</dict>
+	</dict>
+	<key>notification.digest.contributed_project</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld trace contributed from {project}.</string>
+			<key>other</key>
+			<string>%lld traces contributed from {project}.</string>
+		</dict>
+	</dict>
+	<key>notification.digest.pending</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld trace ready to contribute</string>
+			<key>other</key>
+			<string>%lld traces ready to contribute</string>
+		</dict>
+	</dict>
+	<key>notification.digest.pending_more</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld trace ready to contribute from {projects} and {more} more</string>
+			<key>other</key>
+			<string>%lld traces ready to contribute from {projects} and {more} more</string>
+		</dict>
+	</dict>
+	<key>notification.digest.pending_projects</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld trace ready to contribute from {projects}</string>
+			<key>other</key>
+			<string>%lld traces ready to contribute from {projects}</string>
+		</dict>
+	</dict>
+	<key>plural.edge.library</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 contribution sent from this Mac.</string>
+			<key>other</key>
+			<string>%lld contributions sent from this Mac.</string>
+		</dict>
+	</dict>
+	<key>plural.edge.local</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 session waiting here. Nothing leaves until you send it.</string>
+			<key>other</key>
+			<string>%lld sessions waiting here. Nothing leaves until you send it.</string>
+		</dict>
+	</dict>
+	<key>plural.first_run.connect</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>of %lld tool can connect</string>
+			<key>other</key>
+			<string>of %lld tools can connect</string>
+		</dict>
+	</dict>
+	<key>plural.first_run.sessions</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace</string>
+			<key>other</key>
+			<string>%lld traces</string>
+		</dict>
+	</dict>
+	<key>plural.graph.days_back</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>{days} days, 1 window back</string>
+			<key>other</key>
+			<string>{days} days, %lld windows back</string>
+		</dict>
+	</dict>
+	<key>plural.graph.hours_back</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>{hours} hours, 1 window back</string>
+			<key>other</key>
+			<string>{hours} hours, %lld windows back</string>
+		</dict>
+	</dict>
+	<key>plural.history.held</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 held for privacy review</string>
+			<key>other</key>
+			<string>%lld held for privacy review</string>
+		</dict>
+	</dict>
+	<key>plural.history.records</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 record</string>
+			<key>other</key>
+			<string>%lld records</string>
+		</dict>
+	</dict>
+	<key>plural.history.sources</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 source</string>
+			<key>other</key>
+			<string>%lld sources</string>
+		</dict>
+	</dict>
+	<key>plural.insights.traces</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld trace</string>
+			<key>other</key>
+			<string>%lld traces</string>
+		</dict>
+	</dict>
+	<key>plural.inspector.apply</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Apply one outcome to 1 eligible trace.</string>
+			<key>other</key>
+			<string>Apply one outcome to %lld eligible traces.</string>
+		</dict>
+	</dict>
+	<key>plural.inspector.waiting</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 waiting trace</string>
+			<key>other</key>
+			<string>%lld waiting traces</string>
+		</dict>
+	</dict>
+	<key>plural.map.folders</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 folder</string>
+			<key>other</key>
+			<string>%lld folders</string>
+		</dict>
+	</dict>
+	<key>plural.map.kept</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Kept on this Mac</string>
+			<key>other</key>
+			<string>%lld kept on this Mac</string>
+		</dict>
+	</dict>
+	<key>plural.map.reveal</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Show 1 more folder</string>
+			<key>other</key>
+			<string>Show %lld more folders</string>
+		</dict>
+	</dict>
+	<key>plural.map.sessions</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace</string>
+			<key>other</key>
+			<string>%lld traces</string>
+		</dict>
+	</dict>
+	<key>plural.map.tools</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 tool</string>
+			<key>other</key>
+			<string>%lld tools</string>
+		</dict>
+	</dict>
+	<key>plural.map.traces</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace</string>
+			<key>other</key>
+			<string>%lld traces</string>
+		</dict>
+	</dict>
+	<key>plural.preview.matches</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 original match</string>
+			<key>other</key>
+			<string>%lld original matches</string>
+		</dict>
+	</dict>
+	<key>plural.referral.joined</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld person joined</string>
+			<key>other</key>
+			<string>%lld people joined</string>
+		</dict>
+	</dict>
+	<key>plural.shell.waiting</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace waiting for you</string>
+			<key>other</key>
+			<string>%lld traces waiting for you</string>
+		</dict>
+	</dict>
+	<key>plural.shell.watching</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>Watching 1 tool</string>
+			<key>other</key>
+			<string>Watching %lld tools</string>
+		</dict>
+	</dict>
+	<key>plural.source.days</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld days ago</string>
+			<key>other</key>
+			<string>%lld days ago</string>
+		</dict>
+	</dict>
+	<key>plural.source.hours</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 hour ago</string>
+			<key>other</key>
+			<string>%lld hours ago</string>
+		</dict>
+	</dict>
+	<key>plural.source.minutes</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld minutes ago</string>
+			<key>other</key>
+			<string>%lld minutes ago</string>
+		</dict>
+	</dict>
+	<key>plural.source.traces</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace</string>
+			<key>other</key>
+			<string>%lld traces</string>
+		</dict>
+	</dict>
+	<key>plural.subscriptions.days</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 day</string>
+			<key>other</key>
+			<string>%lld days</string>
+		</dict>
+	</dict>
+	<key>plural.subscriptions.hours</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 hour</string>
+			<key>other</key>
+			<string>%lld hours</string>
+		</dict>
+	</dict>
+	<key>plural.subscriptions.minutes</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 minute</string>
+			<key>other</key>
+			<string>%lld minutes</string>
+		</dict>
+	</dict>
+	<key>plural.summary.projects</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 project</string>
+			<key>other</key>
+			<string>%lld projects</string>
+		</dict>
+	</dict>
+	<key>plural.summary.unavailable</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 row unavailable</string>
+			<key>other</key>
+			<string>%lld rows unavailable</string>
+		</dict>
+	</dict>
+	<key>plural.summary.waiting</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace waiting</string>
+			<key>other</key>
+			<string>%lld traces waiting</string>
+		</dict>
+	</dict>
+	<key>plural.training.body</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 sent trace doesn't have Train consent.</string>
+			<key>other</key>
+			<string>%lld sent traces don't have Train consent.</string>
+		</dict>
+	</dict>
+	<key>plural.training.line</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>1 trace needs Train consent</string>
+			<key>other</key>
+			<string>%lld traces need Train consent</string>
+		</dict>
+	</dict>
+	<key>privacy.residual.secrets</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld secret is still in this trace</string>
+			<key>other</key>
+			<string>%lld secrets are still in this trace</string>
+		</dict>
+	</dict>
+</dict>
+</plist>

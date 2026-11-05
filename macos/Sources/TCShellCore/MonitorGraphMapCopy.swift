@@ -1,3 +1,5 @@
+import TCLocalization
+
 /// Ron's #1146 words for the Traces graph footer
 /// (`preview_copy::MonitorTracesGraphCopy`): the zoom and jump controls,
 /// the range pill and each bar's text equivalent. Numbers are `{name}`
@@ -39,23 +41,18 @@ public struct MonitorTracesGraphCopy: MonitorWordTable {
     /// The range pill when no bar is hovered: the window's span at now, or
     /// how many whole windows back it is. `hours` false is a span of days.
     public func range(span: Int, hours: Bool, back: Int) -> String {
-        let unit = hours ? "{hours}" : "{days}"
-        let word: String
-        switch back {
-        case ...0: word = hours ? lastHours : lastDays
-        case 1: word = hours ? hoursBackOne : daysBackOne
-        default: word = hours ? hoursBack : daysBack
+        let values = [hours ? "hours" : "days": Localization.current.number(Int64(span))]
+        if back <= 0 {
+            return Localization.fill(hours ? lastHours : lastDays, values)
         }
-        return word
-            .replacingOccurrences(of: unit, with: String(span))
-            .replacingOccurrences(of: "{count}", with: String(back))
+        return Localization.current.text(hours ? "plural.graph.hours_back" : "plural.graph.days_back",
+                                         parameters: values, count: Int64(back))
     }
 
     /// One bar's text equivalent: its day, then shared and kept.
     public func bar(day: String, shared: Int, kept: Int) -> String {
-        bar.replacingOccurrences(of: "{label}", with: day)
-            .replacingOccurrences(of: "{count}", with: String(shared))
-            .replacingOccurrences(of: "{total}", with: String(kept))
+        Localization.fill(bar, ["label": day, "count": Localization.current.number(Int64(shared)),
+                                "total": Localization.current.number(Int64(kept))])
     }
 }
 
@@ -196,39 +193,39 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
     /// A number, or a dash for one the core has not reported: an unread
     /// count is never said as zero.
     static func figure(_ count: Int?) -> String {
-        count.map(String.init) ?? "\u{2014}"
+        count.map { Localization.current.number(Int64($0)) } ?? "\u{2014}"
     }
 
     /// A counted noun: the singular is its own line.
-    static func counted(_ count: Int?, one: String, many: String) -> String {
-        count == 1 ? one : many.replacingOccurrences(of: "{count}", with: figure(count))
+    static func counted(_ count: Int?, key: String, unknown: String) -> String {
+        guard let count else { return Localization.fill(unknown, ["count": figure(nil)]) }
+        return Localization.current.text(key, count: Int64(count))
     }
 
     static func fill(_ word: String, label: String, count: Int?? = .none) -> String {
-        var filled = word.replacingOccurrences(of: "{label}", with: label)
-        if case .some(let count) = count { filled = filled.replacingOccurrences(of: "{count}", with: figure(count)) }
-        return filled
+        var values = ["label": label]
+        if case .some(let count) = count { values["count"] = figure(count) }
+        return Localization.fill(word, values)
     }
 
     /// This computer's card.
     public func hub(waiting: Int, contributed: Int?) -> String {
-        Self.fill(hub, label: Self.counted(waiting, one: sessionsOne, many: sessions), count: contributed)
+        Self.fill(hub, label: Self.counted(waiting, key: "plural.map.sessions", unknown: sessions), count: contributed)
     }
 
     /// The library's card.
     /// A count of traces in the core's own words: "1 trace", "12 traces".
     public func tracesCounted(_ count: Int) -> String {
-        Self.counted(count, one: tracesOne, many: traces)
+        Self.counted(count, key: "plural.map.traces", unknown: traces)
     }
 
     public func library(contributed: Int?) -> String {
-        Self.fill(library, label: Self.counted(contributed, one: tracesOne, many: traces))
+        Self.fill(library, label: Self.counted(contributed, key: "plural.map.traces", unknown: traces))
     }
 
     /// A tool's card title: its name and how many folders it has.
     public func toolTitle(tool: String, folders count: Int) -> String {
-        Self.fill(toolTitle, label: Self.counted(count, one: foldersOne, many: folders))
-            .replacingOccurrences(of: "{tool}", with: tool)
+        Localization.fill(toolTitle, ["label": Self.counted(count, key: "plural.map.folders", unknown: folders), "tool": tool])
     }
 
     /// A tool's card: what watching it means, then what waits. A tool the
@@ -250,14 +247,14 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
     public func folder(path: String?, rule: String?, waiting: Int, contributed: Int?) -> String {
         let ruleLine = rule.map { Self.fill(folderRule, label: $0) } ?? folderRuleUnset
         let counts = Self.fill(
-            folderCounts, label: Self.counted(waiting, one: sessionsOne, many: sessions), count: contributed)
+            folderCounts, label: Self.counted(waiting, key: "plural.map.sessions", unknown: sessions), count: contributed)
         let place = path.flatMap { $0.isEmpty ? nil : $0 + "." }
         return [place, ruleLine, counts].compactMap { $0 }.joined(separator: " ")
     }
 
     /// The "+N" pill's accessible name: how many folders the click draws.
     public func revealFolders(_ count: Int) -> String {
-        count == 1 ? revealFoldersOne : revealFolders.replacingOccurrences(of: "{count}", with: String(count))
+        Localization.current.text("plural.map.reveal", count: Int64(count))
     }
 
     /// A coin's line under its name: the traces waiting from that tool.
@@ -290,18 +287,17 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
 
     /// Under this computer while a contribution gathers its traces.
     public func collected(_ count: Int, of total: Int) -> String {
-        collected.replacingOccurrences(of: "{count}", with: String(count))
-            .replacingOccurrences(of: "{total}", with: String(total))
+        Localization.fill(collected, ["count": figure(count), "total": figure(total)])
     }
 
     /// Under this computer once traces are kept.
     public func keptHere(_ count: Int) -> String {
-        count == 1 ? keptHereOne : keptHere.replacingOccurrences(of: "{count}", with: String(count))
+        Localization.current.text("plural.map.kept", count: Int64(count))
     }
 
     /// The Private AI destination's card sentence and the line under its
     /// node: how many tools are connected.
     public func connected(tools count: Int, sentence: Bool) -> String {
-        Self.fill(sentence ? connected : connectedLine, label: Self.counted(count, one: toolsOne, many: tools))
+        Self.fill(sentence ? connected : connectedLine, label: Self.counted(count, key: "plural.map.tools", unknown: tools))
     }
 }

@@ -12,19 +12,39 @@ pub const IGNORE_PROJECT_TOOLTIP: &str = "Stops this project being offered and c
 /// The mode is named Never, so the title says so (it was "Ignore
 /// {project}?"). Approved by the owner 2026-11-04 (#1963).
 pub fn ignore_project_title(project: &str) -> String {
-    format!("Set {project} to Never?")
+    crate::localized_copy::english(&ignore_project_title_message(project))
+}
+
+pub(crate) fn ignore_project_title_message(project: &str) -> serde_json::Value {
+    crate::localized_copy::text(
+        "message.project_ignore_copy_json.default.title",
+        "Set {project} to Never?",
+        serde_json::json!({"project": project}),
+    )
 }
 
 /// The confirmation's body. With traces waiting: Approved by the owner 2026-11-04 (Settings copy pass 2, P121).
 /// With none waiting the sentence is unchanged.
 pub fn ignore_project_body(pending: usize) -> String {
+    crate::localized_copy::english(&ignore_project_body_message(pending))
+}
+
+pub(crate) fn ignore_project_body_message(pending: usize) -> serde_json::Value {
     if pending == 0 {
-        return "Stops this project being offered. Nothing already submitted is affected. \
-                You can undo this in Settings."
-            .to_string();
+        return crate::localized_copy::text(
+            "message.project_ignore_copy_json.empty.body",
+            "Stops this project being offered. Nothing already submitted is affected. \
+                You can undo this in Settings.",
+            serde_json::json!({}),
+        );
     }
-    let noun = if pending == 1 { "trace" } else { "traces" };
-    format!("This removes {pending} waiting {noun}. Traces already sent aren't affected.")
+    crate::localized_copy::plural(
+        "message.project_ignore_copy_json.waiting.body",
+        "This removes {count} waiting trace. Traces already sent aren't affected.",
+        "This removes {count} waiting traces. Traces already sent aren't affected.",
+        pending as u64,
+        serde_json::json!({}),
+    )
 }
 
 /// The Never button's help text in the ignore confirmation: the way back the
@@ -33,26 +53,40 @@ pub const IGNORE_PROJECT_BODY_TOOLTIP: &str =
     "Setting it back to Ask can offer the removed traces again.";
 
 pub fn ignore_project_reconciled(project: &str, promised: usize, purged: u64) -> Option<String> {
+    ignore_project_reconciled_message(project, promised, purged)
+        .as_ref()
+        .map(crate::localized_copy::english)
+}
+
+pub(crate) fn ignore_project_reconciled_message(
+    project: &str,
+    promised: usize,
+    purged: u64,
+) -> Option<serde_json::Value> {
     if purged == promised as u64 {
         return None;
     }
-    let clause = if purged == 1 {
-        "1 waiting trace was removed".to_string()
-    } else {
-        format!("{purged} waiting traces were removed")
-    };
-    Some(format!(
-        "Ignored {project}. The queue changed while you were deciding: {clause}, not {promised}."
+    Some(crate::localized_copy::plural(
+        "message.project_ignore_reconciled_text.changed.line",
+        "Ignored {project}. The queue changed while you were deciding: 1 waiting trace was removed, not {promised}.",
+        "Ignored {project}. The queue changed while you were deciding: {count} waiting traces were removed, not {promised}.",
+        purged,
+        serde_json::json!({"project": project, "promised": promised}),
     ))
 }
 
 pub fn arming_offer_evidence(project_label: &str, count: u32) -> String {
-    let times = if count == 1 {
-        "once".to_string()
-    } else {
-        format!("{count} times")
-    };
-    format!("You've contributed from {project_label} {times}.")
+    crate::localized_copy::english(&arming_offer_evidence_message(project_label, count))
+}
+
+pub(crate) fn arming_offer_evidence_message(project: &str, count: u32) -> serde_json::Value {
+    crate::localized_copy::plural(
+        "message.arming_offer_copy_json.default.evidence",
+        "You've contributed from {project} once.",
+        "You've contributed from {project} {count} times.",
+        u64::from(count),
+        serde_json::json!({"project": project}),
+    )
 }
 
 pub fn arming_offer_question(project_label: &str) -> String {

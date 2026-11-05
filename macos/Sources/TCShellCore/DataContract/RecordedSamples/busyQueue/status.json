@@ -38,11 +38,137 @@
           "label": "Not now"
         }
       ],
-      "panel_row": "Some traces have been idle for 3 days or more"
+      "panel_row": "Some traces have been idle for 3 days or more",
+      "presentation": {
+        "title": {
+          "key": "notification.NUDGE_IDLE_TITLE",
+          "english": {
+            "one": "1 trace from {tool} has been idle for {days} or more",
+            "other": "{count} traces from {tool} have been idle for {days} or more"
+          },
+          "parameters": {
+            "days": {
+              "key": "notification.days",
+              "english": {
+                "one": "1 day",
+                "other": "{count} days"
+              },
+              "parameters": {
+                "count": 3
+              }
+            },
+            "tool": {
+              "key": "notification.TOOL_LIST_TWO",
+              "english": "{a} and {b}",
+              "parameters": {
+                "a": "Claude Code",
+                "b": "Codex"
+              }
+            },
+            "count": 14
+          }
+        },
+        "body": {
+          "key": "notification.NUDGE_IDLE_BODY",
+          "english": {
+            "one": "It looks finished. Nothing is sent until you decide, and keeping it on this computer is just as good an answer.",
+            "other": "They look finished. Nothing is sent until you decide on each one, and keeping one on this computer is just as good an answer."
+          },
+          "parameters": {
+            "count": 14
+          }
+        },
+        "panel_row": {
+          "key": "notification.NUDGE_PANEL_IDLE",
+          "english": {
+            "one": "A trace has been idle for {days} or more",
+            "other": "Some traces have been idle for {days} or more"
+          },
+          "parameters": {
+            "days": {
+              "key": "notification.days",
+              "english": {
+                "one": "1 day",
+                "other": "{count} days"
+              },
+              "parameters": {
+                "count": 3
+              }
+            },
+            "tool": {
+              "key": "notification.TOOL_LIST_TWO",
+              "english": "{a} and {b}",
+              "parameters": {
+                "a": "Claude Code",
+                "b": "Codex"
+              }
+            },
+            "count": 14
+          }
+        },
+        "actions": [
+          {
+            "id": "review",
+            "label": {
+              "key": "notification.NUDGE_IDLE_REVIEW",
+              "english": "Review",
+              "parameters": {}
+            }
+          },
+          {
+            "id": "not_now",
+            "label": {
+              "key": "notification.NUDGE_NOT_NOW",
+              "english": "Not now",
+              "parameters": {}
+            }
+          }
+        ]
+      }
     },
     "mark_text": {
       "accessibility": "14 of them have been idle for 3 days or more.",
-      "tooltip": "14 idle for 3 days or more."
+      "tooltip": "14 idle for 3 days or more.",
+      "presentation": {
+        "accessibility": {
+          "key": "notification.MARK_A11Y_IDLE",
+          "english": {
+            "one": "1 of them has been idle for {days} or more.",
+            "other": "{count} of them have been idle for {days} or more."
+          },
+          "parameters": {
+            "n": 14,
+            "days": {
+              "key": "notification.days",
+              "english": {
+                "one": "1 day",
+                "other": "{count} days"
+              },
+              "parameters": {
+                "count": 3
+              }
+            },
+            "count": 14
+          }
+        },
+        "tooltip": {
+          "key": "notification.MARK_TOOLTIP_IDLE",
+          "english": "{n} idle for {days} or more.",
+          "parameters": {
+            "n": 14,
+            "days": {
+              "key": "notification.days",
+              "english": {
+                "one": "1 day",
+                "other": "{count} days"
+              },
+              "parameters": {
+                "count": 3
+              }
+            }
+          }
+        }
+      }
     }
   },
   "next_digest_at": null,

@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// The glass monitor's other screens' words (the map, Inference, Home,
 /// History, Missions and the menu-bar popover), decoded from
@@ -350,10 +351,9 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
     /// does not answer, or for a request that failed. Never the error's own
     /// fixed label, which is for logs.
     public func historyCap(shown: Int, total: Int?) -> String {
-        guard let total else { return historyShown.replacingOccurrences(of: "{shown}", with: String(shown)) }
-        return historyShownOf
-            .replacingOccurrences(of: "{shown}", with: String(shown))
-            .replacingOccurrences(of: "{total}", with: String(total))
+        guard let total else { return Localization.fill(historyShown, ["shown": Localization.current.number(Int64(shown))]) }
+        return Localization.fill(historyShownOf, ["shown": Localization.current.number(Int64(shown)),
+                                                 "total": Localization.current.number(Int64(total))])
     }
 
     /// The window a count covers, in the core's words, from the hours the

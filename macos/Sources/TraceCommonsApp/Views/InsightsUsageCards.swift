@@ -2,6 +2,7 @@ import Charts
 import SwiftUI
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// "AI usage this week" (product owner, 2026-10-28): the high-level
 /// takeaway that leads Overview. One card per resource found on this Mac,
@@ -247,7 +248,8 @@ enum InsightsUsageWords {
         let parse = Date.ISO8601FormatStyle().year().month().day().dateSeparator(.dash)
         let utc = TimeZone(secondsFromGMT: 0) ?? .current
         return date.flatMap { try? parse.parse($0) }
-            .map { $0.formatted(Date.FormatStyle(timeZone: utc).weekday(.narrow)) } ?? String(fallback + 1)
+            .map { $0.formatted(Date.FormatStyle(timeZone: utc).weekday(.narrow).locale(Localization.current.locale)) }
+            ?? Localization.current.number(Int64(fallback + 1))
     }
 
     /// NEAR AI spend on each of the last 7 days, from `by_day`; empty from a

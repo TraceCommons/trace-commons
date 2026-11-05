@@ -1,4 +1,5 @@
 import SwiftUI
+import TCLocalization
 import TCBridge
 import TCDesign
 import TCShellCore
@@ -335,9 +336,7 @@ struct FolderInspector: View {
 
     /// The modal's count line, filled.
     static func applyLine(_ count: Int, words: MonitorTracesCopy) -> String {
-        count == 1
-            ? words.inspector.applyOutcomeOne
-            : FirstRunCopy.fill(words.inspector.applyOutcome, ["count": String(count)])
+        Localization.current.text("plural.inspector.apply", count: Int64(count))
     }
 
     /// Ron's "Submit all eligible (n)", in the core's words.
@@ -347,9 +346,7 @@ struct FolderInspector: View {
 
     /// "n waiting sessions", the singular its own line.
     static func waitingLine(_ count: Int, words: MonitorTracesCopy) -> String {
-        count == 1
-            ? words.inspector.waitingSessionsOne
-            : FirstRunCopy.fill(words.inspector.waitingSessions, ["count": String(count)])
+        Localization.current.text("plural.inspector.waiting", count: Int64(count))
     }
 
     /// "n eligible", then the core's withheld line after a middle dot, as

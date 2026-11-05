@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 // Referral codes (docs/superpowers/specs/2026-10-29-referral-rewards-design.md,
 // sections 5 and 6): the Settings Referrals section, the optional code
@@ -121,9 +122,7 @@ public struct ReferralCopy: Decodable, Equatable, Sendable {
 
     /// `template` with each `{name}` in `values` filled.
     public static func render(_ template: String, _ values: [String: String]) -> String {
-        values.reduce(template) { text, pair in
-            text.replacingOccurrences(of: "{\(pair.key)}", with: pair.value)
-        }
+        Localization.fill(template, values)
     }
 }
 
@@ -317,7 +316,7 @@ public struct ReferralSurface: Equatable, Sendable {
     }
 
     public func joinedLine(_ count: UInt64) -> String {
-        ReferralCopy.render(count == 1 ? copy.joinedOne : copy.joinedMany, ["n": String(count)])
+        Localization.current.text("plural.referral.joined", count: Int64(clamping: count))
     }
 
     /// Copy is offered for a code that can be shown, live or not: someone

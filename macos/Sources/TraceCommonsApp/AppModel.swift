@@ -4,6 +4,7 @@ import Foundation
 import SwiftUI
 import TCBridge
 import TCShellCore
+import TCLocalization
 
 /// Everything the UI reads, and the only thing that talks to the daemon.
 ///
@@ -3523,12 +3524,10 @@ final class AppModel: ObservableObject {
             }
             await MainActor.run {
                 if tooLate == ids.count, ids.count == 1 {
-                    self.lastActionError = "Too late to undo -- this one had already left "
-                        + "the waiting list. History shows what happened to it."
+                    self.lastActionError = Localization.current.text("app.undo.too_late_one")
                 } else if tooLate > 0 {
-                    self.lastActionError = "Too late to undo \(tooLate) of \(ids.count) -- "
-                        + "they had already left the waiting list. History shows what "
-                        + "happened to them."
+                    self.lastActionError = Localization.current.text("app.undo.too_late", parameters: [
+                        "count": Localization.current.number(Int64(tooLate)), "total": Localization.current.number(Int64(ids.count))])
                 }
                 self.refreshQueue()
                 self.refreshHistory()

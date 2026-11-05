@@ -1,5 +1,6 @@
 import CTraceCommons
 import Foundation
+import TCLocalization
 
 /// The words for a watcher another process is already running. Nothing here
 /// authors contributor-facing wording: every sentence comes from
@@ -30,7 +31,7 @@ public enum TCAttach {
     public static func copyJSON() -> String? {
         guard let raw = tc_attach_copy() else { return nil }
         defer { tc_string_free(raw) }
-        return String(cString: raw)
+        return Localization.current.copyJSON(String(cString: raw), namespace: "attach_copy")
     }
 
     /// The decoded copy, or nil if the ABI could not answer.

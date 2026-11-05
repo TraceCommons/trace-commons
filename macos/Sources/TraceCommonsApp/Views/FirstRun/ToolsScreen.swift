@@ -3,6 +3,7 @@ import SwiftUI
 import TCBridge
 import TCDesign
 import TCShellCore
+import TCLocalization
 import UniformTypeIdentifiers
 
 /// What a folder picked with "add your tool" turned out to be.
@@ -1040,12 +1041,13 @@ private struct ToolRepoList: View {
     private func summary(_ project: ProjectRow, rows: [PastSession], never: Bool) -> String {
         if never {
             let count = RulesScreenLayout.watchedSessionCount(project, state: runner.state)
-            return FirstRunCopy.fill(copy.rules.neverCount, ["count": count.formatted()])
+            return FirstRunCopy.fill(copy.rules.neverCount, ["count": Localization.current.number(Int64(clamping: count))])
         }
         let chosen = runner.state.pastSelections[project.projectId] ?? []
         return FirstRunCopy.fill(
             copy.rules.folderSelected,
-            ["selected": rows.filter { chosen.contains($0.id) }.count.formatted(), "total": rows.count.formatted()])
+            ["selected": Localization.current.number(Int64(rows.filter { chosen.contains($0.id) }.count)),
+             "total": Localization.current.number(Int64(rows.count))])
     }
 
     /// Ask, Automatic and Never side by side, as the canvas draws them (Ron,

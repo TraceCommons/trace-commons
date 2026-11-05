@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// `status.witness_capacity`: how many approved sessions are held because
 /// the privacy witness is busy, and when the first is tried again.
@@ -78,7 +79,7 @@ public struct WitnessCapacityNotice: Decodable, Equatable, Sendable {
     /// no time -- never one made up here.
     public func nextRetryLine(
         for capacity: WitnessCapacity,
-        format: (Date) -> String = { $0.formatted(date: .omitted, time: .shortened) }
+        format: (Date) -> String = { $0.formatted(Date.FormatStyle(date: .omitted, time: .shortened).locale(Localization.current.locale)) }
     ) -> String? {
         guard let at = capacity.nextRetryAt else { return nil }
         return "\(nextCheck): \(format(at))"

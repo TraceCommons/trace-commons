@@ -1,9 +1,25 @@
 import Foundation
-import TCBridge
+@testable import TCBridge
 import TCShellCore
 import XCTest
 
 final class ComputeExportTests: XCTestCase {
+    func testExplicitComputePresentationPreservesInheritedProseAndAllFacts() throws {
+        // A busy transition may retain a previous sentence: never choose a
+        // different title or detail in the shell from state/reason alone.
+        let input: [String: Any] = [
+            "schema": "trace_commons.compute_status.v1", "state": "paused", "reason": "command-busy",
+            "title": "Compute is stopped", "detail": "The worker has exited.",
+            "title_key": "title.stopped", "detail_key": "detail.worker_exited",
+            "local_development": true, "worker_stopped": true, "command_pending": true,
+            "can_resume": false, "admission": "assigned", "stop_outcome": "not_running",
+            "technical_path": "/raw/{count}/{detail}", "unknown_field": "user text {title}",
+        ]
+        let json = try XCTUnwrap(LocalizedPresentation.json("compute_snapshot_json", parameters: input))
+        let output = try snapshot(json)
+        XCTAssertEqual(NSDictionary(dictionary: output), NSDictionary(dictionary: input))
+    }
+
     func testCopyExportDoesNotRequireSettingsOrEnrollment() throws {
         let copy = try XCTUnwrap(ComputeCopy.decode(XCTUnwrap(TCCompute.copyJSON())))
         XCTAssertFalse(copy.destination.isEmpty)

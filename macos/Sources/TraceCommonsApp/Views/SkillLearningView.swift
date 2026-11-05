@@ -212,15 +212,13 @@ struct SkillLearningView: View {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 skillFieldLabel(copy.testContract)
                 Text(
-                    String(
-                        format: copy.contractSummaryFormat,
-                        locale: Locale.current,
-                        candidate.evaluationContract.taskCount,
-                        candidate.evaluationContract.clusterCount,
-                        candidate.evaluationContract.totalRequests,
-                        candidate.evaluationContract.outputTokenLimit,
-                        candidate.evaluationContract.requestTimeoutSeconds
-                    )
+                    TCSkillLearning.contractSummaryLine(
+                        tasks: candidate.evaluationContract.taskCount,
+                        cases: candidate.evaluationContract.clusterCount,
+                        requests: candidate.evaluationContract.totalRequests,
+                        outputTokens: candidate.evaluationContract.outputTokenLimit,
+                        seconds: candidate.evaluationContract.requestTimeoutSeconds
+                    ) ?? ""
                 )
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textSecondary)
@@ -292,13 +290,11 @@ private struct SkillReviewPreview: View {
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             Text(
-                String(
-                    format: copy.reviewBudgetFormat,
-                    locale: Locale.current,
-                    candidate.evaluationContract.totalRequests,
-                    candidate.evaluationContract.outputTokenLimit,
-                    candidate.evaluationContract.requiredModelOwner
-                )
+                TCSkillLearning.reviewBudgetLine(
+                    requests: candidate.evaluationContract.totalRequests,
+                    outputTokens: candidate.evaluationContract.outputTokenLimit,
+                    owner: candidate.evaluationContract.requiredModelOwner
+                ) ?? ""
             )
             .glassType(GlassTokens.TypeScale.mono)
             .foregroundStyle(GlassColor.textSecondary)
@@ -353,13 +349,11 @@ private struct SkillEvaluationResults: View {
                     .foregroundStyle(GlassColor.textPrimary)
                     .textSelection(.enabled)
                 Text(
-                    String(
-                        format: copy.modelBudgetFormat,
-                        locale: Locale.current,
-                        report.modelOwnedBy,
-                        report.taskCount,
-                        report.outputTokenLimit
-                    )
+                    TCSkillLearning.modelBudgetLine(
+                        owner: report.modelOwnedBy,
+                        tasks: report.taskCount,
+                        outputTokens: report.outputTokenLimit
+                    ) ?? ""
                 )
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textSecondary)

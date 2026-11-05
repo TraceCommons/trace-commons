@@ -35,7 +35,7 @@ public struct BalanceStatus: Equatable, Sendable {
     /// What is left now minus what was left about a day ago, signed, or
     /// `nil` with no reading from about a day ago. NEVER drawn as zero.
     public let change24hNanos: Int64?
-    /// The core's finished line for a known change, including zero.
+    /// The core's finished, locally rendered line for a known change, including zero.
     public let change24hText: String?
     /// Core-selected direction at displayed precision: -1, 0, or 1.
     /// Older daemon payloads omit it; zero keeps subcent movement neutral.
@@ -101,21 +101,41 @@ public struct BalanceStatus: Equatable, Sendable {
     /// absent key gives. The two are indistinguishable HERE on purpose --
     /// the daemon's own contract is that it never sends one meaning the
     /// other, and this shell has nothing different to say about them.
-    public static func parse(fromJSON json: String) -> BalanceStatus {
+    public static func parse(
+        fromJSON json: String,
+        changeLine: ((Int64?, UInt8) -> String?)? = nil
+    ) -> BalanceStatus {
         guard let data = json.data(using: .utf8),
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return .unreported }
+        let state = object["state"] as? String ?? ""
+        let scale = (object["scale"] as? Int).flatMap { UInt8(exactly: $0) } ?? unreadableScale
+        let change = object["change_24h_nanos"] as? Int64
+        func nonEmpty(_ text: String?) -> String? { text.flatMap { $0.isEmpty ? nil : $0 } }
+        let changedText: String?
+        let unavailableText: String?
+        if let changeLine {
+            // Facts select the message. An older daemon without history
+            // fields still draws nothing; never guess zero or a notice.
+            changedText = state == "known" && change != nil ? nonEmpty(changeLine(change, scale)) : nil
+            unavailableText = state == "known" && changedText == nil
+                && nonEmpty(object["change_24h_unavailable_text"] as? String) != nil
+                ? nonEmpty(changeLine(nil, scale)) : nil
+        } else {
+            changedText = nonEmpty(object["change_24h_text"] as? String)
+            unavailableText = nonEmpty(object["change_24h_unavailable_text"] as? String)
+        }
         return BalanceStatus(
-            state: object["state"] as? String ?? "",
+            state: state,
             remainingNanos: object["remaining_nanos"] as? Int64,
             spendLimitNanos: object["spend_limit_nanos"] as? Int64,
             totalSpentNanos: object["total_spent_nanos"] as? Int64,
-            scale: (object["scale"] as? Int).flatMap { UInt8(exactly: $0) } ?? unreadableScale,
+            scale: scale,
             observedAt: (object["observed_at"] as? String).flatMap(Self.timestamp),
-            change24hNanos: object["change_24h_nanos"] as? Int64,
-            change24hText: (object["change_24h_text"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            change24hNanos: change,
+            change24hText: changedText,
             receivedTotalNanos: object["received_total_nanos"] as? Int64,
-            change24hUnavailableText: (object["change_24h_unavailable_text"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            change24hUnavailableText: unavailableText,
             change24hDirection: object["change_24h_direction"] as? Int)
     }
 

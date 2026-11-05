@@ -3,6 +3,7 @@ import SwiftUI
 import TCBridge
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// "Look inside": the one surface in the product that deliberately shows
 /// trace content, because consent to send something you cannot see is not
@@ -98,7 +99,7 @@ struct PreviewSheet: View {
             case .transcript: return words?.title ?? ""
             case .searchOriginal: return words?.searchOriginal ?? ""
             case .turnIndex: return words?.turnIndex ?? ""
-            case .search: return "Search"
+            case .search: return Localization.current.text("monitor_traces_copy.tree.search")
             }
         }
     }
@@ -159,7 +160,7 @@ struct PreviewSheet: View {
     /// The core's `cannot_show_title`, verbatim. Read only when the core's
     /// table does not decode, so the notice is never drawn without a title
     /// (the `HealthCopy.onHoldFallback` precedent).
-    static let cannotShowFallback = "This one can't be shown."
+    static let cannotShowFallback = Localization.current.text("monitor_traces_copy.session_review.cannot_show_title")
 
     /// The core's line under that sentence, or nothing when its table did
     /// not decode. Every failure that is not a witness refusal reads this:
@@ -858,14 +859,14 @@ struct SearchTab: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
             HStack(spacing: GlassTokens.Space.s4) {
                 searchField
-                Button("Search", action: commit)
+                Button(Localization.current.text("monitor_traces_copy.tree.search"), action: commit)
                     .buttonStyle(GlassButtonStyle(.glass))
             }
 
             if !recents.isEmpty {
                 // The contributor's own previous questions, one click away.
                 HStack(spacing: GlassTokens.Space.s4) {
-                    Text("Recent:")
+                    Text(Localization.current.text("app.preview.recent"))
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textSecondary)
                     ForEach(recents, id: \.self) { term in
@@ -904,7 +905,7 @@ struct SearchTab: View {
     /// neither of which a still image was ever going to show.
     @ViewBuilder
     private var searchField: some View {
-        let prompt = "Search trace"
+        let prompt = Localization.current.text("app.preview.search_prompt")
         if CaptureMode.isRendering {
             Text(needle.isEmpty ? prompt : needle)
                 .glassType(GlassTokens.TypeScale.label.weight(.regular))
@@ -930,7 +931,7 @@ struct SearchTab: View {
     @ViewBuilder
     private var searchResult: some View {
         if offsets == nil {
-            Text("The search couldn't run on this trace.")
+            Text(Localization.current.text("app.preview.search_failed"))
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textSecondary)
         } else if let outcome {
@@ -951,7 +952,7 @@ struct SearchTab: View {
         } else if offsets!.isEmpty {
             // No outcome: the preloaded screenshot path, which sets offsets
             // without running a search.
-            GlassStatusLabel("0 matches", status: .on)
+            GlassStatusLabel(Self.matchCount(0), status: .on)
         } else {
             GlassStatusLabel(Self.matchCount(offsets!.count), status: .ask)
         }
@@ -970,7 +971,7 @@ struct SearchTab: View {
     /// "1 match", "2 matches": inflected here, because a status label takes
     /// a plain string and a plain string does not inflect itself.
     static func matchCount(_ count: Int) -> String {
-        String(AttributedString(localized: "^[\(count) match](inflect: true)").characters)
+        Localization.current.text("app.preview.matches", count: Int64(count))
     }
 
     /// The keystroke path. A local in-memory pass over the already-open
@@ -1108,12 +1109,9 @@ struct TranscriptTab: View {
                     .foregroundStyle(GlassColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
-                Button(copied ? "Copied" : "Copy everything", action: copyAll)
+                Button(copied ? Localization.current.text("managed_copy.copied") : Localization.current.text("app.preview.copy_all"), action: copyAll)
                     .buttonStyle(GlassButtonStyle(.glass))
-                    .help(
-                        "Puts the whole redacted body on the clipboard. "
-                            + "Selection inside the transcript covers one block at a time."
-                    )
+                    .help(Localization.current.text("app.preview.copy_help"))
                     .accessibilityIdentifier("transcript-copy-all")
             }
 

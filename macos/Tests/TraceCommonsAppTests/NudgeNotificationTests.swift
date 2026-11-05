@@ -76,6 +76,13 @@ final class NudgeNotificationTests: XCTestCase {
         XCTAssertNotNil(Notifier.digestBody(text: "", pendingCount: 1, projects: ["api"]))
     }
 
+    func testFallbackDigestPreservesListWordingAndOpaqueLabels() {
+        XCTAssertEqual(Notifier.digestBody(text: "", pendingCount: 2, projects: ["api", "web", "repo {count} %@"]),
+                       "2 traces ready from api, web and repo {count} %@.\nNothing is sent until you review them.")
+        XCTAssertEqual(Notifier.digestBody(text: "", pendingCount: 1, projects: []),
+                       "1 trace ready.\nNothing is sent until you review them.")
+    }
+
     /// The core's digest text carries the earned sentence (owner, 2026-11-01);
     /// the shell posts it exactly as sent rather than word credit itself.
     func testTheDigestPostsTheCoresEarnedSentenceUnchanged() {

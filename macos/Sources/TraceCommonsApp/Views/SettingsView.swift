@@ -1,6 +1,7 @@
 import Foundation
 import TCBridge
 import TCShellCore
+import TCLocalization
 
 // The legacy Settings screen's words. The screen itself is gone: every
 // section now draws on glass from `Views/Settings/`. What the old bodies
@@ -43,15 +44,14 @@ enum SettingsLegacyWords {
     static var queuedNothingSent: String { words?.queuedNothingSent ?? "" }
     static var extraScanConfigured: String { words?.extraScanConfigured ?? "" }
     static func sessionFinishedAfter(_ secs: Int) -> String {
-        fill(words?.sessionFinishedAfter, ["seconds": String(secs)])
+        fill(words?.sessionFinishedAfter, ["seconds": Localization.current.number(Int64(secs))])
     }
-    /// The core's singular at one hour, so it never reads "every 1 hours".
+    /// Retired owner-cut copy: both historical forms are intentionally empty.
     static func atMostOneNotification(_ hours: Int) -> String {
-        fill(hours == 1 ? words?.atMostOneNotificationOne : words?.atMostOneNotification,
-             ["hours": String(hours)])
+        words?.atMostOneNotification ?? ""
     }
     static func undecidedDropped(_ days: Int) -> String {
-        fill(words?.undecidedDropped, ["days": String(days)])
+        fill(words?.undecidedDropped, ["days": Localization.current.number(Int64(days))])
     }
     static func stateLabel(_ title: String, _ value: Bool) -> String {
         fill(value ? words?.stateYes : words?.stateNo, ["title": title])

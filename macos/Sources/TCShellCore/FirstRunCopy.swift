@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// The #1030 first run's words (`tc_first_run_copy_json`,
 /// `first_run_copy::first_run_copy`), grouped by screen. Every field is the
@@ -29,7 +30,7 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
 
         /// A tool's or a repo's trace count line, singular for one.
         public func sessionCountLine(_ count: UInt64) -> String {
-            count == 1 ? sessionCountOne : FirstRunCopy.fill(sessionCount, ["count": count.formatted()])
+            Localization.current.text("plural.first_run.sessions", count: Int64(clamping: count))
         }
         /// Takes back a choice not yet acted on.
         public let undo: String
@@ -275,9 +276,7 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
     /// Fill a string's `{name}` placeholders, each with its value. The one
     /// filler every first-run screen uses; it adds nothing to the template.
     public static func fill(_ template: String, _ values: [String: String]) -> String {
-        values.reduce(template) { text, pair in
-            text.replacingOccurrences(of: "{" + pair.key + "}", with: pair.value)
-        }
+        Localization.fill(template, values)
     }
 
     /// Decode the table, or nil if it will not parse or any string in it is

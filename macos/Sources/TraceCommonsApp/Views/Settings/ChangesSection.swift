@@ -1,6 +1,7 @@
 import SwiftUI
 import TCBridge
 import TCDesign
+import TCLocalization
 
 struct ChangesSection: View {
     @EnvironmentObject private var model: AppModel
@@ -43,6 +44,6 @@ struct ChangesSection: View {
     /// Shown in the reader's own locale and time zone: the layer below has
     /// already decoded the instant to a `Date`.
     private static func instant(_ date: Date) -> String {
-        date.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+        date.formatted(.dateTime.month(.abbreviated).day().hour().minute().locale(Localization.current.locale))
     }
 }

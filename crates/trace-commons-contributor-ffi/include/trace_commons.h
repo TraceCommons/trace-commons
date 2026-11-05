@@ -2632,6 +2632,23 @@ const char* tc_last_error(void);
  */
 char*       tc_residual_secret_line_text(uint32_t count, const char* sites_json);
 
+/* Locale-neutral presentation message: {key, parameters?}. The core chooses
+ * unchecked vs counted; the client supplies language-specific plural rules.
+ * Same ownership and input rules as tc_residual_secret_line_text.
+ */
+char*       tc_residual_secret_message_json(uint32_t count, const char* sites_json);
+
+/* Locale-neutral presentation trees. Operation names are the legacy C name
+ * without tc_; input_json is an object of facts/parameters. Only explicit
+ * operations are supported; unknown/malformed inputs return NULL. Prose
+ * leaves carry {key, english, parameters}; identifiers stay raw. All returned
+ * strings are owned and freed with tc_string_free. Templates opens no store.
+ * The quit variant derives the role from the handle, never client input.
+ */
+char*       tc_localized_presentation_json(const char* operation, const char* input_json);
+char*       tc_message_templates_json(void);
+char*       tc_localized_quit_prompt_json(const tc_handle* handle);
+
 /* The preview's removed-summary panel (redaction_summary::summary_copy):
  * {"removed": [row], "still_present": [row]}, each row {family, display,
  * description, occurrences, distinct, detail}. redactions_json and

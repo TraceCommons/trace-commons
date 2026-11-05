@@ -1,4 +1,5 @@
 import SwiftUI
+import TCLocalization
 import TCBridge
 import TCDesign
 import TCBridge
@@ -967,9 +968,7 @@ struct TracesTreeView: View, Equatable {
         _ folder: TracesTree.FolderNode, words: MonitorTracesCopy, modeLabels: [String: String]
     ) -> String? {
         if folder.mode == .ignore { return words.tree.ignoredFolder }
-        let count = folder.sessions.count == 1
-            ? words.counts.sessionsWaitingOne
-            : FirstRunCopy.fill(words.counts.sessionsWaiting, ["count": String(folder.sessions.count)])
+        let count = Localization.current.text("plural.summary.waiting", count: Int64(folder.sessions.count))
         let parts = [folder.mode.flatMap { modeLabels[$0.rawValue] }, count].compactMap { $0 }
         return parts.joined(separator: " · ")
     }
@@ -997,7 +996,7 @@ struct TracesTreeView: View, Equatable {
     /// did not record that.
     static func when(_ entry: DaemonData.QueueEntry, timeZone: TimeZone = .current) -> String {
         guard let date = entry.discoveredAt ?? entry.startedAt else { return "—" }
-        var style = Date.FormatStyle.dateTime.weekday(.abbreviated).hour().minute()
+        var style = Date.FormatStyle.dateTime.weekday(.abbreviated).hour().minute().locale(Localization.current.locale)
         style.timeZone = timeZone
         return date.formatted(style)
     }
@@ -1013,7 +1012,7 @@ struct TracesTreeView: View, Equatable {
     static func measures(_ entry: DaemonData.QueueEntry) -> String? {
         var parts: [String] = []
         if let seconds = entry.durationSecs {
-            parts.append(Duration.seconds(seconds).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated)))
+            parts.append(Duration.seconds(seconds).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated).locale(Localization.current.locale)))
         }
         if let bytes = entry.sizeBytes {
             parts.append(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .memory))
@@ -1602,4 +1601,3 @@ private struct TracesFolderFrames: PreferenceKey {
         value.merge(nextValue()) { $1 }
     }
 }
-

@@ -1,6 +1,7 @@
 import SwiftUI
 import TCDesign
 import TCBridge
+import TCLocalization
 
 /// The go-public acknowledgement gate: the primary does nothing until there
 /// is a handle to consent to, a consent to it, and no call in flight.
@@ -35,6 +36,7 @@ struct PublicProfileSection: View {
 
     private static let rosterDate: DateFormatter = {
         let formatter = DateFormatter()
+        formatter.locale = Localization.current.locale
         formatter.dateStyle = .long
         formatter.timeStyle = .none
         return formatter

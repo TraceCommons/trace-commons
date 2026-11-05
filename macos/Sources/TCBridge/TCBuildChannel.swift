@@ -15,13 +15,13 @@ public enum TCBuildChannel {
     public static func json() -> String? { take(tc_build_channel_json()) }
 
     /// `tc_channel_mismatch_line`. Nil only on a caught panic.
-    public static func mismatchLine() -> String? { take(tc_channel_mismatch_line()) }
+    public static func mismatchLine() -> String? { LocalizedPresentation.line("channel_mismatch_line") }
 
     /// `tc_channel_window_label`: the core's label for the main window on a
     /// staging build (spec S7, 4.8). Nil on production, whose answer is
     /// empty, and on a caught panic.
     public static func windowLabel() -> String? {
-        guard let label = take(tc_channel_window_label()), !label.isEmpty else { return nil }
+        guard let label = LocalizedPresentation.line("channel_window_label"), !label.isEmpty else { return nil }
         return label
     }
 
@@ -38,6 +38,6 @@ public enum TCBuildChannel {
 
     /// `tc_state_dir_override_refused_line`. Nil only on a caught panic.
     public static func overrideRefusedLine() -> String? {
-        take(tc_state_dir_override_refused_line())
+        LocalizedPresentation.line("state_dir_override_refused_line")
     }
 }

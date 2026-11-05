@@ -1,5 +1,6 @@
 import TCBridge
 import TCShellCore
+import TCLocalization
 
 /// The Settings window's sections, in the Settings IA review's grouped
 /// order (owner, 2026-11-04, D1-D20): Account, then what is watched, then
@@ -181,11 +182,11 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 enum SettingsWords {
     private static var nav: MonitorSettingsNavCopy? { MonitorWords.table?.settingsNav }
     private static var shell: MonitorShellCopy? { MonitorWords.table?.shell }
-    static let general = "General"
-    static let appearance = "Appearance"
-    static let light = "Light"
-    static let dark = "Dark"
-    static let system = "System"
+    static let general = Localization.current.text("app.settings.general")
+    static let appearance = Localization.current.text("app.settings.appearance")
+    static let light = Localization.current.text("app.settings.light")
+    static let dark = Localization.current.text("app.settings.dark")
+    static let system = Localization.current.text("app.settings.system")
     static var updates: String { shell?.updatesEyebrow ?? "" }
     static var projects: String { nav?.projects ?? "" }
     /// The core's referral title (DRAFT, NEEDS APPROVAL), read once; nil

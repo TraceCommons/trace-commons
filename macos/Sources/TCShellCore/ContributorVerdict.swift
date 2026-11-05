@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// The contributor's own answer to "did this trace do what you asked?",
 /// carried as `approve`'s optional `outcome` parameter.
@@ -39,22 +40,22 @@ public enum ContributorVerdict: String, CaseIterable, Sendable {
 /// `SUBMIT_ALL_AS`, `SUBMIT_ALL_AS_TOOLTIP`); these are those strings
 /// character for character.
 public enum VerdictCopy {
-    public static let question = "Did this trace do what you asked?"
-    public static let worked = "Worked"
-    public static let partly = "Partly"
-    public static let failed = "Failed"
+    public static let question = Localization.current.text("contributor_disclosure_copy.outcome.verdict_question")
+    public static let worked = Localization.current.text("contributor_disclosure_copy.outcome.worked")
+    public static let partly = Localization.current.text("contributor_disclosure_copy.outcome.partly")
+    public static let failed = Localization.current.text("contributor_disclosure_copy.outcome.failed")
 
     /// Load-bearing, not decoration. The spec exempts the outcome fields
     /// from the sheet's "exactly what would be sent" guarantee, and this
     /// sentence is the only place that exemption is disclosed to the
     /// contributor. Do not reword, shorten, or drop it.
     public static let caption =
-        "Optional. Recorded with the trace; not shown in the preview."
+        Localization.current.text("contributor_disclosure_copy.outcome.verdict_caption")
 
     /// The bulk verdict control beside `Submit all`. The plain button stays
     /// a one-click unanswered submit; this is the opt-in path for answering
     /// once for the whole group.
-    public static let submitAllAs = "Submit as..."
+    public static let submitAllAs = Localization.current.text("contributor_disclosure_copy.outcome.submit_all_as")
     public static let submitAllAsTooltip =
-        "Record the same outcome for every trace in this group."
+        Localization.current.text("contributor_disclosure_copy.outcome.submit_all_as_tooltip")
 }

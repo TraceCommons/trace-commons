@@ -1,6 +1,7 @@
 import Foundation
 import TCShellCore
 import TCBridge
+import TCLocalization
 
 /// The health sentences, verbatim from the shared design's failure-state
 /// table. Two rules hold across every one of them: never name the mechanism
@@ -75,8 +76,8 @@ extension HealthCopy {
     /// panic or an undecodable payload), so a reported condition is never
     /// drawn as healthy.
     static let onHoldFallback = HealthCopy(
-        title: "Contributions are on hold.",
-        detail: "Something is stopping traces from being sent. Nothing has been lost, and nothing has gone out.",
+        title: Localization.current.text("app.health.hold_title"),
+        detail: Localization.current.text("app.health.hold_detail"),
         severity: .waiting,
         actionTitle: nil
     )

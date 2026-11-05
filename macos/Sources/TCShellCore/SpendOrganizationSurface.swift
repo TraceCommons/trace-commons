@@ -114,7 +114,10 @@ public struct SpendOrganizations: Equatable, Sendable {
 
     /// From the method's own result object. Anything unreadable degrades to
     /// `unreported`, never to a guess.
-    public static func parse(fromJSON json: String) -> SpendOrganizations {
+    public static func parse(
+        fromJSON json: String,
+        localizedView: ((String?) -> String?)? = nil
+    ) -> SpendOrganizations {
         guard let data = json.data(using: .utf8),
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let state = object["state"] as? String
@@ -127,14 +130,29 @@ public struct SpendOrganizations: Equatable, Sendable {
             else { return .unreported }
             organizations.append(Organization(id: id, name: name, current: row["current"] as? Bool ?? false))
         }
+        let currentID = object["current_organization_id"] as? String
+        let view: [String: Any]?
+        if let localizedView, let originalView = object["view"] as? [String: Any],
+           Self.words(originalView) != nil {
+            // Use only the current ID's validated listed name, never a
+            // sentence or another organization's `current` display flag.
+            let currentName = organizations.first { $0.id == currentID }?.name
+            view = localizedView(currentName).flatMap { json in
+                try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+            }
+        } else if localizedView != nil {
+            view = nil // Missing/incomplete legacy view never creates a prompt.
+        } else {
+            view = object["view"] as? [String: Any]
+        }
         return SpendOrganizations(
             state: state,
             organizations: organizations,
-            currentOrganizationID: object["current_organization_id"] as? String,
+            currentOrganizationID: currentID,
             explicit: object["explicit"] as? Bool ?? false,
             prompt: object["prompt"] as? Bool ?? false,
             revokePending: object["revoke_pending"] as? Bool ?? false,
-            words: (object["view"] as? [String: Any]).flatMap(Self.words))
+            words: view.flatMap(Self.words))
     }
 
     private static func words(_ view: [String: Any]) -> Words? {

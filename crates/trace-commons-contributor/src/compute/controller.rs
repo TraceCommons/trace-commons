@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+use super::presentation::{self as prose, Message};
 use super::{ComputeSettings, ComputeSettingsError, ComputeSettingsStore};
 
 #[derive(Debug, Deserialize)]
@@ -39,6 +40,9 @@ pub struct ComputeSnapshot {
     pub reason: &'static str,
     pub title: &'static str,
     pub detail: &'static str,
+    /// Additive presentation identities, independent of transient state/reason.
+    pub title_key: &'static str,
+    pub detail_key: &'static str,
     pub consent_granted: bool,
     pub ram_allowance_gib: Option<u64>,
     pub available: bool,
@@ -53,6 +57,18 @@ pub struct ComputeSnapshot {
     pub drain_outcome: Option<super::worker_protocol::DrainOutcome>,
     pub stop_outcome: Option<super::StopOutcome>,
     pub copy: ComputeCopy,
+}
+
+impl ComputeSnapshot {
+    pub(super) fn set_title(&mut self, message: Message) {
+        self.title = message.english;
+        self.title_key = message.key;
+    }
+
+    pub(super) fn set_detail(&mut self, message: Message) {
+        self.detail = message.english;
+        self.detail_key = message.key;
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -244,37 +260,37 @@ impl Inner {
     fn snapshot(&self) -> ComputeSnapshot {
         let (title, detail) = match self.reason {
             "invalid-allowance" => (
-                "Check RAM allowance",
+                prose::ALLOWANCE,
                 // Approved by the owner 2026-11-04 (Settings copy pass 2, P345).
-                "Enter a whole number above zero.",
+                prose::INVALID_ALLOWANCE,
             ),
             "consent-required" => (
-                "Compute is disabled",
+                prose::DISABLED,
                 // Approved by the owner 2026-11-04 (Settings copy pass 2, P309).
                 // Cut: the shells draw this detail unconditionally, so it renders as an empty line.
-                "",
+                prose::EMPTY,
             ),
             "settings-write-failed" => (
                 // Approved by the owner 2026-11-04 (Settings copy pass 2, P330).
-                "Couldn't save compute settings",
+                prose::SAVE_FAILED,
                 // Approved by the owner 2026-11-04 (Settings copy pass 2, P314).
-                "Nothing changed.",
+                prose::NOTHING_CHANGED,
             ),
             _ => match self.state {
                 ComputeState::Paused => (
-                    "Compute is paused",
+                    prose::PAUSED,
                     // Approved by the owner 2026-11-04 (Settings copy pass 2, P315).
-                    "It never resumes on its own after a restart.",
+                    prose::NO_AUTO_RESUME,
                 ),
                 ComputeState::Disabled => (
-                    "Compute is disabled",
+                    prose::DISABLED,
                     // Approved by the owner 2026-11-04 (Settings copy pass 2, P316).
-                    "Not available in this build.",
+                    prose::NOT_AVAILABLE,
                 ),
                 _ => (
-                    "Compute is unavailable",
+                    prose::UNAVAILABLE,
                     // Approved by the owner 2026-11-04 (Settings copy pass 2, P316).
-                    "Not available in this build.",
+                    prose::NOT_AVAILABLE,
                 ),
             },
         };
@@ -282,8 +298,10 @@ impl Inner {
             schema: "trace_commons.compute_status.v1",
             state: self.state,
             reason: self.reason,
-            title,
-            detail,
+            title: title.english,
+            detail: detail.english,
+            title_key: title.key,
+            detail_key: detail.key,
             consent_granted: self.settings.consent_granted(),
             ram_allowance_gib: self.settings.ram_allowance_gib(),
             available: false,
@@ -307,9 +325,11 @@ fn error_snapshot() -> ComputeSnapshot {
         schema: "trace_commons.compute_status.v1",
         state: ComputeState::Error,
         reason: "controller-unavailable",
-        title: "Compute status is unavailable",
+        title: prose::STATUS_UNAVAILABLE.english,
         // Approved by the owner 2026-11-04 (Settings copy pass 2, P331).
-        detail: "Restart the app to try again.",
+        detail: prose::RESTART.english,
+        title_key: prose::STATUS_UNAVAILABLE.key,
+        detail_key: prose::RESTART.key,
         consent_granted: false,
         ram_allowance_gib: None,
         available: false,
@@ -363,6 +383,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(controller.snapshot().state, ComputeState::Starting);
+        prose::assert_snapshot(&controller.snapshot());
+        assert_eq!(controller.snapshot().title_key, prose::STARTING.key);
         assert!(controller.snapshot().can_pause);
         // A previous stop must not leave a cancellation permit that consumes
         // the next explicit Resume or Enable without attempting startup.
@@ -389,6 +411,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
             assert_eq!(controller.snapshot().state, stopped_state);
+            prose::assert_snapshot(&controller.snapshot());
             assert!(!controller.snapshot().command_pending);
             crate::compute::resource::tests::healthy(&controller);
             controller.command(start);
@@ -398,14 +421,24 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
             assert_eq!(controller.snapshot().state, ComputeState::Starting);
+            prose::assert_snapshot(&controller.snapshot());
         }
+        let starting = controller.snapshot();
         for _ in 0..30 {
             controller.command(ComputeCommand::Resume {});
         }
-        assert_eq!(controller.snapshot().reason, "command-busy");
+        let busy = controller.snapshot();
+        assert_eq!(busy.reason, "command-busy");
+        prose::assert_snapshot(&busy);
+        assert_eq!(
+            (busy.title_key, busy.detail_key),
+            (starting.title_key, starting.detail_key)
+        );
+        assert_eq!((busy.title, busy.detail), (starting.title, starting.detail));
         controller.command(ComputeCommand::Disable {});
         controller.command(ComputeCommand::Pause {});
         let stopped = controller.shutdown(Duration::from_secs(10));
+        prose::assert_snapshot(&stopped);
         assert!(stopped.worker_stopped);
         assert!(!stopped.consent_granted);
         assert!(!stopped.command_pending);
@@ -415,6 +448,15 @@ mod tests {
         assert!(after.worker_stopped);
         assert!(!after.consent_granted);
         assert_eq!(after.reason, "controller-shutting-down");
+        prose::assert_snapshot(&after);
+        assert_eq!(after.title_key, stopped.title_key);
+        // The shutdown snapshot overlays resource-policy detail. A refused
+        // command changes the reason and exposes the actor's retained detail;
+        // each identity must describe its own snapshot, not the earlier one.
+        assert_eq!(
+            stopped.detail_key,
+            prose::policy(super::super::policy::PolicyReason::Shutdown).key
+        );
         assert!(
             !ComputeSettingsStore::open(root.path())
                 .unwrap()
@@ -422,6 +464,57 @@ mod tests {
                 .unwrap()
                 .consent_granted()
         );
+    }
+
+    #[test]
+    fn presentation_identities_follow_controller_messages_not_reason_spelling() {
+        let root = tempfile::tempdir().unwrap();
+        let controller = ComputeController::open(root.path()).unwrap();
+        let initial = controller.snapshot();
+        prose::assert_snapshot(&initial);
+        assert_eq!(initial.title_key, prose::DISABLED.key);
+        for (command, title, detail) in [
+            (
+                ComputeCommand::Enable {
+                    ram_allowance_gib: 0,
+                },
+                prose::ALLOWANCE,
+                prose::INVALID_ALLOWANCE,
+            ),
+            (ComputeCommand::Resume {}, prose::DISABLED, prose::EMPTY),
+            (
+                ComputeCommand::Enable {
+                    ram_allowance_gib: 8,
+                },
+                prose::UNAVAILABLE,
+                prose::NOT_AVAILABLE,
+            ),
+            (
+                ComputeCommand::Pause {},
+                prose::DISABLED,
+                prose::NOT_AVAILABLE,
+            ),
+            (
+                ComputeCommand::Disable {},
+                prose::DISABLED,
+                prose::NOT_AVAILABLE,
+            ),
+        ] {
+            let snapshot = controller.command(command);
+            prose::assert_snapshot(&snapshot);
+            assert_eq!(
+                (snapshot.title_key, snapshot.detail_key),
+                (title.key, detail.key)
+            );
+            assert_eq!(
+                (snapshot.title, snapshot.detail),
+                (title.english, detail.english)
+            );
+            let wire = serde_json::to_value(snapshot).unwrap();
+            assert_eq!(wire["title_key"], title.key);
+            assert_eq!(wire["detail_key"], detail.key);
+        }
+        prose::assert_snapshot(&error_snapshot());
     }
 
     #[test]
@@ -462,6 +555,9 @@ mod tests {
         std::fs::create_dir(root.path().join("compute/settings.json")).unwrap();
         let result = controller.command(ComputeCommand::Disable {});
         assert_eq!(result.reason, "settings-write-failed");
+        prose::assert_snapshot(&result);
+        assert_eq!(result.title_key, prose::SAVE_FAILED.key);
+        assert_eq!(result.detail_key, prose::NOTHING_CHANGED.key);
         assert!(result.consent_granted);
         std::fs::remove_dir(root.path().join("compute/settings.json")).unwrap();
         assert!(

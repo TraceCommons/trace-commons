@@ -11,6 +11,12 @@ import XCTest
 /// its own local notifier (`daemon/notify.rs`, `contribution_text`) and the
 /// two must agree; the tests there and here assert the same rules.
 final class DigestCopyTests: XCTestCase {
+    func testProjectLabelIsNeverReinterpretedAsMessageParameters() {
+        XCTAssertEqual(
+            DigestCopy.contributionLine(count: 2, projects: ["repo {count} {credit} %@"], creditPending: 4.25),
+            "2 traces contributed from repo {count} {credit} %@. 4.3 credit pending.")
+    }
+
     func testNothingContributedProducesNoLine() {
         XCTAssertNil(DigestCopy.contributionLine(count: 0, projects: [], creditPending: 0))
     }

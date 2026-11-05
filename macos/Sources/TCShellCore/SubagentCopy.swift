@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// What one queue card actually covers, when the answer is more than the
 /// conversation itself.
@@ -36,26 +37,12 @@ public enum SubagentCopy {
     public static func line(count: Int, dropped: Int) -> String? {
         let count = max(count, 0)
         let dropped = max(dropped, 0)
-        let trimmed =
-            "left out to keep this trace within its size limit; "
-            + "the conversation itself is complete."
-        switch (count, dropped) {
-        case (0, 0):
-            return nil
-        case (let n, 0):
-            return "Includes \(n) \(transcripts(n))."
-        case (0, 1):
-            return "1 delegated subagent transcript was \(trimmed)"
-        case (0, let d):
-            return "\(d) delegated subagent transcripts were \(trimmed)"
-        case (let n, 1):
-            return "Includes \(n) \(transcripts(n)). The largest was \(trimmed)"
-        case (let n, let d):
-            return "Includes \(n) \(transcripts(n)). The \(d) largest were \(trimmed)"
+        guard count > 0 || dropped > 0 else { return nil }
+        if count == 0 {
+            return Localization.current.text("app.subagent.dropped", count: Int64(dropped))
         }
-    }
-
-    private static func transcripts(_ n: Int) -> String {
-        n == 1 ? "delegated subagent transcript" : "delegated subagent transcripts"
+        let included = Localization.current.text("app.subagent.includes", count: Int64(count))
+        guard dropped > 0 else { return included }
+        return Localization.current.text("app.subagent.includes_dropped", parameters: ["included": included], count: Int64(dropped))
     }
 }

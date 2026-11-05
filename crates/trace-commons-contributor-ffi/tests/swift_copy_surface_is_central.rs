@@ -292,6 +292,37 @@ fn swift_code(source: &str) -> String {
         .collect()
 }
 
+/// A direct legacy call or an explicit keyed operation still asks Rust to
+/// choose the sentence. Preserve literal arguments, but never comments.
+pub(super) fn reaches_core(source: &str, export: &str) -> bool {
+    if swift_code(source).contains(&format!("{export}(")) {
+        return true;
+    }
+    if export == "tc_quit_prompt_json" {
+        return swift_code(source).contains("tc_localized_quit_prompt_json(");
+    }
+    let operation = export.strip_prefix("tc_").expect("C export prefix");
+    let tokens = tokens(source);
+    let mut code = String::new();
+    for (index, token) in tokens.iter().enumerate() {
+        match token {
+            Token::Literal(value) => {
+                if value == operation
+                    && (code.ends_with("LocalizedPresentation.line(")
+                        || code.ends_with("LocalizedPresentation.json("))
+                    && matches!(tokens.get(index + 1), Some(Token::Code(',' | ')')))
+                {
+                    return true;
+                }
+                code.push(' ');
+            }
+            Token::Plus => code.push('+'),
+            Token::Code(c) => code.push(*c),
+        }
+    }
+    false
+}
+
 /// A pinned sentence's fragments: its sentences, split after `.`, `?`, `!`
 /// or `:` and at line breaks, keeping those of at least four words. Shorter
 /// ones -- "Quit", "Not now", "Cancel" -- are button labels every shell
@@ -713,51 +744,8 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
 /// with the reason it is not a copy the core should own instead. An entry
 /// names a file and the fragment, so a NEW file repeating the same words
 /// still fails. Remove an entry when its reason stops being true.
-const ALLOWED: &[(&str, &str, &str)] = &[
-    // The export-failure fallback (`HealthCopy.onHoldFallback`): the core's
-    // `on_hold_copy()`, verbatim, drawn only when `tc_health_copy_json`
-    // returns NULL for a reported label -- a caught panic -- so a reported
-    // condition is never drawn as healthy.
-    (
-        "TraceCommonsApp/HealthCopy.swift",
-        "Contributions are on hold.",
-        "health export-failure fallback",
-    ),
-    (
-        "TraceCommonsApp/HealthCopy.swift",
-        "Something is stopping traces from being sent.",
-        "health export-failure fallback",
-    ),
-    (
-        "TraceCommonsApp/HealthCopy.swift",
-        "Nothing has been lost, and nothing has gone out.",
-        "health export-failure fallback",
-    ),
-    // The legacy History rollup tallies and the queue's week figures, which
-    // held the core's status words as headings, left the shell with the
-    // legacy screens (R15); their allowances went with them.
-    //
-    // Ron's #1146 inspector words (#1241) that native screens already say
-    // in Swift. Each goes when its screen reads the core's table instead.
-    // The legacy queue's no-longer-waiting group left QueueView.swift for
-    // `shell_words_copy` at #1146 parity (2026-10-07).
-    // Not a sentence of its own: Look inside reads the core's
-    // `session_review.cannot_show_title`, and this verbatim copy of it is
-    // the fallback for a table that did not decode, so the cannot-show
-    // notice is never drawn without a title (`HealthCopy.onHoldFallback`).
-    (
-        "TraceCommonsApp/Views/PreviewSheet.swift",
-        "This one can't be shown.",
-        "fallback copy of the core's cannot_show_title (#1241 Task 7)",
-    ),
-    // Not a copy: the scanner matches substrings, and "N waiting for your
-    // decision" contains Ron's "N waiting for you".
-    (
-        "TCShellCore/MenuBarStatus.swift",
-        "waiting for you",
-        "substring of a different sentence (\"waiting for your decision\")",
-    ),
-];
+// Export-failure fallbacks now use explicit catalog keys too.
+const ALLOWED: &[(&str, &str, &str)] = &[];
 
 #[test]
 fn no_pinned_core_sentence_is_a_swift_literal() {
@@ -1034,7 +1022,7 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TraceCommonsApp/Views/Monitor/TracesStore.swift",
         "TCCoreCopy.residualSecretLine",
         "TCBridge/TCCoreCopy.swift",
-        "tc_residual_secret_line_text",
+        "tc_residual_secret_message_json",
     ),
     // Look inside's What's in it tab left with #1241 Task 7; the scrubbing
     // panel is the session card's (see the gate help above).
@@ -1222,9 +1210,8 @@ fn swift_screens_render_core_copy_at_every_safety_surface() {
             "{screen} shows the {surface} without calling `{call}`: it must render the \
              core's words, not its own"
         );
-        let bridge_code = swift_code(&read(bridge));
         assert!(
-            bridge_code.contains(&format!("{export}(")),
+            reaches_core(&read(bridge), export),
             "{bridge} no longer reaches `{export}` for the {surface}"
         );
     }
@@ -1234,6 +1221,10 @@ fn swift_screens_render_core_copy_at_every_safety_surface() {
             "{bridge} no longer reaches `{export}`"
         );
     }
+    assert!(
+        swift_code(&read("TCBridge/LocalizedPresentation.swift"))
+            .contains("tc_localized_presentation_json(")
+    );
 
     // The quit alert shows the prompt it was handed and is not confirmable
     // without one; the hosting sentence it used to hard-code is false for
@@ -1403,6 +1394,20 @@ fn the_swift_scanner_reads_literals_the_way_swift_writes_them() {
     let code = swift_code(source);
     assert!(!code.contains("removes"));
     assert!(!code.contains("Ignore"));
+    for call in [
+        r#"LocalizedPresentation.line("harness_state_line", parameters: ["state": state])"#,
+        r#"LocalizedPresentation.line("harness_state_line")"#,
+        "tc_harness_state_line(state)",
+    ] {
+        assert!(reaches_core(call, "tc_harness_state_line"));
+    }
+    for not_a_call in [
+        r#"// LocalizedPresentation.line("harness_state_line")"#,
+        r##"let text = #"LocalizedPresentation.line("harness_state_line")"#"##,
+        r#"LocalizedPresentation.line("different_operation")"#,
+    ] {
+        assert!(!reaches_core(not_a_call, "tc_harness_state_line"));
+    }
     assert_eq!(
         fragments("Quit? Not now. This means your message text is sent.\nFour words are here"),
         [

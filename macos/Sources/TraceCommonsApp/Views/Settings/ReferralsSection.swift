@@ -1,6 +1,7 @@
 import SwiftUI
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// The Referrals section (referral spec section 6): the account's codes
 /// with Copy and Turn off, how many people joined, the credit from
@@ -178,6 +179,6 @@ struct ReferralsSection: View {
     static func date(_ rfc3339: String) -> String? {
         let parse = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
         let date = (try? parse.parse(rfc3339)) ?? (try? Date.ISO8601FormatStyle().parse(rfc3339))
-        return date?.formatted(date: .long, time: .omitted)
+        return date?.formatted(Date.FormatStyle(date: .long, time: .omitted).locale(Localization.current.locale))
     }
 }

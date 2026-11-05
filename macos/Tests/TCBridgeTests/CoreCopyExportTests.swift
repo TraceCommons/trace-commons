@@ -1,4 +1,4 @@
-import TCBridge
+@testable import TCBridge
 import TCShellCore
 import XCTest
 
@@ -10,6 +10,35 @@ import XCTest
 /// confirmations, the scrubbing panel, the surviving-secret line, the extra
 /// privacy scan, the quit prompt and the unknown-reach withdrawal prompt.
 final class CoreCopyExportTests: XCTestCase {
+    // MARK: - Explicit presentation transport
+
+    func testPresentationScalarsAreDecodedOnlyForLineCallers() throws {
+        let parameters: [String: Any] = ["count": 0]
+        let json = try XCTUnwrap(LocalizedPresentation.json("decisions_owed_text", parameters: parameters))
+        XCTAssertEqual(try JSONDecoder().decode(String.self, from: Data(json.utf8)), "")
+        XCTAssertEqual(LocalizedPresentation.line("decisions_owed_text", parameters: parameters), "")
+        // A JSON object must not accidentally be exposed as a line of JSON text.
+        XCTAssertNil(LocalizedPresentation.line("project_ignore_copy_json", parameters: ["project": "api", "pending": 1]))
+    }
+
+    func testPresentationTransportRejectsUnknownOperationsAndUnsafeInputs() {
+        XCTAssertNil(LocalizedPresentation.json("not_a_presentation_operation"))
+        XCTAssertNil(LocalizedPresentation.json("decisions_owed_text\0ignored", parameters: ["count": 1]))
+        XCTAssertNil(LocalizedPresentation.json("decisions_owed_text", inputJSON: "{}\0{}"))
+        XCTAssertNil(LocalizedPresentation.json("decisions_owed_text", parameters: ["count": Date()]))
+        // Quit roles may only be obtained from the dedicated handle-derived ABI.
+        XCTAssertNil(LocalizedPresentation.json("quit_prompt", parameters: ["role": "watcher"]))
+    }
+
+    func testNamedParametersPreserveQuotesNewlinesAndPlaceholderShapedProjectNames() throws {
+        let project = "quoted \"folder\"\n{count} {project} café"
+        let json = try XCTUnwrap(TCCoreCopy.projectIgnoreCopyJSON(project: project, pending: 2))
+        let copy = try XCTUnwrap(ProjectIgnoreCopy.decode(fromJSON: json))
+        XCTAssertEqual(copy.title, "Set \(project) to Never?")
+        XCTAssertTrue(copy.body.contains("2 waiting traces"))
+        XCTAssertFalse(json.contains("\"english\":"), "prose leaves must be rendered before existing decoders run")
+    }
+
     // MARK: - Ignore project
 
     private func ignoreCopy(_ pending: Int) throws -> ProjectIgnoreCopy {
@@ -192,6 +221,23 @@ final class CoreCopyExportTests: XCTestCase {
     func testRowsAreOrderedByOccurrencesThenFamily() throws {
         let out = try summary(["secret": 3, "local_path": 185, "email": 3])
         XCTAssertEqual(out.removed.map(\.family), ["local_path", "email", "secret"])
+    }
+
+    func testStructuredRedactionPresentationAcceptsRawEntriesAndPreservesTechnicalSites() throws {
+        let input = #"{"occurrences":[["secret:openai_api_key",2],["residual_secret_at:events.3.tool_result",1]],"distinct":[]}"#
+        let json = try XCTUnwrap(LocalizedPresentation.json("redaction_summary_json", inputJSON: input))
+        let rows = try XCTUnwrap(RedactionSummary.rows(fromJSON: json))
+        XCTAssertEqual(rows.removed.map(\.family), ["secret"])
+        XCTAssertEqual(rows.removed[0].occurrences, 2)
+        XCTAssertEqual(rows.stillPresent[0].family, "residual_secret_at")
+        XCTAssertEqual(rows.stillPresent[0].detail, ["events.3.tool_result"])
+        XCTAssertFalse(json.contains("\"english\":"))
+    }
+
+    func testStructuredRedactionPresentationKeepsLegacyCountValidation() {
+        XCTAssertNil(TCCoreCopy.redactionSummaryJSON(occurrences: ["secret": -1], distinct: [:]))
+        XCTAssertNil(TCCoreCopy.redactionSummaryJSON(occurrences: ["secret": Int(UInt32.max) + 1], distinct: [:]))
+        XCTAssertNotNil(TCCoreCopy.redactionSummaryJSON(occurrences: [:], distinct: [:]))
     }
 
     // MARK: - The surviving-secret line

@@ -1,6 +1,7 @@
 import SwiftUI
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// Details' drill-down (product owner, 2026-10-28): the week on screen by
 /// project folder, with Claude Code and Codex usage (traces and tokens,
@@ -29,7 +30,7 @@ enum InsightsCreditWords {
     /// so a charge is never shown as zero.
     static func money(_ micros: UInt64) -> String {
         let dollars = Decimal(micros) / 1_000_000
-        let style = Decimal.FormatStyle.Currency(code: "USD")
+        let style = Decimal.FormatStyle.Currency(code: "USD").locale(Localization.current.locale)
         return micros > 0 && micros < 100
             ? dollars.formatted(style.precision(.significantDigits(1)))
             : dollars.formatted(style.precision(.fractionLength(2...4)))
@@ -221,8 +222,7 @@ enum InsightsProjectRows {
     /// `nil` without traces.
     static func traces(_ usage: Usage?, copy: [String: String]) -> String? {
         usage.map { usage in
-            let key = usage.traces == 1 ? "analytics_projects_traces_one" : "analytics_projects_traces"
-            return InsightsOverviewWords.fill(copy[key] ?? "", ["n": String(usage.traces)])
+            Localization.current.text("plural.insights.traces", count: Int64(usage.traces))
         }
     }
 }

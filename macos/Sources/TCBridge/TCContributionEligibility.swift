@@ -28,11 +28,8 @@ public enum TCContributionEligibility {
     /// cannot read is not evidence about a contributor's session, and saying
     /// it is would stop them offering work that is fine.
     public static func stateLine(state: String) -> String? {
-        guard let raw = state.withCString({ tc_contribution_eligibility_line($0) }) else {
-            return nil
-        }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_contribution_eligibility_line.
+        LocalizedPresentation.line("contribution_eligibility_line", parameters: ["state": state])
     }
 
     /// How firmly that sentence reads, as a raw `TC_PRIVATE_INFERENCE_TONE_*`
@@ -63,11 +60,8 @@ public enum TCContributionEligibility {
     /// state line's fallback: an unknown state still has to say something, an
     /// unknown reason has nothing honest to say.
     public static func reasonLine(reason: String) -> String? {
-        guard let raw = reason.withCString({ tc_contribution_eligibility_reason_line($0) }) else {
-            return nil
-        }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_contribution_eligibility_reason_line.
+        LocalizedPresentation.line("contribution_eligibility_reason_line", parameters: ["reason": reason])
     }
 
     /// Whether a group's submit control may be offered, as a raw
@@ -101,8 +95,7 @@ public enum TCContributionEligibility {
     /// particular session cannot be sent is that row's own sentence, one
     /// level in.
     public static func withheldLine(withheld: Int64) -> String? {
-        guard let raw = tc_contribution_withheld_line(withheld) else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_contribution_withheld_line.
+        LocalizedPresentation.line("contribution_withheld_line", parameters: ["withheld": withheld])
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// Reading the daemon's redaction count map, which does not mean what its
 /// heading says it means.
@@ -31,7 +32,7 @@ public enum RedactionLabels {
 
     /// What the card shows when nothing fired. `ScrubbingCaveat` supplies
     /// the sentence that says what that does and does not prove.
-    public static let nothingMatched = "nothing matched"
+    public static let nothingMatched = Localization.current.text("app.redaction.nothing")
 
     /// The part of a label before its first `:`.
     ///
@@ -88,9 +89,12 @@ public enum RedactionLabels {
                 // above its occurrence count is impossible from a correct
                 // daemon and not worth rendering from an incorrect one.
                 guard let values = distinct[label], values > 0, values < count else {
-                    return "\(count) \(words)"
+                    return Localization.current.text("app.redaction.count", parameters: [
+                        "count": Localization.current.number(Int64(count)), "label": words])
                 }
-                return "\(count) \(words) (\(values) distinct)"
+                return Localization.current.text("app.redaction.distinct", parameters: [
+                    "count": Localization.current.number(Int64(count)), "label": words,
+                    "distinct": Localization.current.number(Int64(values))])
             }
             .joined(separator: "  ·  ")
     }

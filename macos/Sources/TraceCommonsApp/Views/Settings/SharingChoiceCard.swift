@@ -2,6 +2,7 @@ import SwiftUI
 import TCBridge
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// Settings > Projects' sharing choice: setup's Automatic / Ask each time,
 /// changeable at any time (owner, 2026-10-30; #1753 A2). Pure, so the rules
@@ -34,8 +35,8 @@ enum SharingChoice {
     static func automaticCount(_ folders: [TracesTree.FolderNode], words: String) -> String {
         let listed = folders.filter { $0.mode != nil }
         let automatic = listed.filter { $0.mode == .autoUpload }.count
-        return words.replacingOccurrences(of: "{count}", with: String(automatic))
-            .replacingOccurrences(of: "{total}", with: String(listed.count))
+        return Localization.fill(words, ["count": Localization.current.number(Int64(automatic)),
+                                         "total": Localization.current.number(Int64(listed.count))])
     }
 
     /// What pressing Automatic shows first.

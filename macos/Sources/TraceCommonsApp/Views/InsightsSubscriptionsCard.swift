@@ -1,6 +1,7 @@
 import SwiftUI
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 // The limits card that stood here left Overview (product owner,
 // 2026-10-28): each measured login is now a card in "AI usage this week"
@@ -80,8 +81,7 @@ enum InsightsSubscriptionWords {
                 else {
                     let unit = duration.isMultiple(of: 1_440) ? "days" : (duration.isMultiple(of: 60) ? "hours" : "minutes")
                     let count = duration / (unit == "days" ? 1_440 : (unit == "hours" ? 60 : 1))
-                    let key = "analytics_subscriptions_window_" + (count == 1 ? String(unit.dropLast()) : unit)
-                    label = fill(key, ["n": String(count)])
+                    label = Localization.current.text("plural.subscriptions." + unit, count: Int64(clamping: count))
                 }
             } else {
                 switch window.lane {
@@ -92,8 +92,8 @@ enum InsightsSubscriptionWords {
             }
             let expired = window.resetsAt.map { $0 <= now } ?? false
             let measured = login.state == "observed" && !expired
-            let remaining = measured && window.usedPermille != nil
-                ? (window.remainingText.flatMap { $0.isEmpty ? nil : fill("analytics_subscriptions_remaining", ["n": $0]) } ?? unknown)
+            let remaining = measured
+                ? (remainingPercent(usedPermille: window.usedPermille).map { fill("analytics_subscriptions_remaining", ["n": $0]) } ?? unknown)
                 : unknown
             let reset = window.resetsAt.flatMap { date in
                 date > now ? fill("analytics_subscriptions_resets", ["time": timestamp(date)]) : nil
@@ -110,7 +110,15 @@ enum InsightsSubscriptionWords {
                      state: state, freshness: freshness, windows: windows, banked: banked, checked: checked)
     }
 
+    /// The wire measures thousandths, not basis points. Match the core's
+    /// zero-or-one decimal precision, but let Foundation render the percent.
+    static func remainingPercent(usedPermille: Int?, locale: Locale = Localization.current.locale) -> String? {
+        guard let usedPermille, (0...1000).contains(usedPermille) else { return nil }
+        return (Double(1000 - usedPermille) / 1000).formatted(
+            .percent.precision(.fractionLength(0...1)).locale(locale))
+    }
+
     private static func timestamp(_ date: Date) -> String {
-        date.formatted(date: .abbreviated, time: .shortened)
+        Localization.current.date(date)
     }
 }

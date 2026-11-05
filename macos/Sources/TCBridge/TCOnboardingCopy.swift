@@ -1,5 +1,6 @@
 import CTraceCommons
 import Foundation
+import TCLocalization
 
 public struct TCOnboardingCopy: Decodable, Sendable {
     public let welcomeBody: String
@@ -21,6 +22,7 @@ public struct TCOnboardingCopy: Decodable, Sendable {
         defer { tc_string_free(ptr) }
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try? decoder.decode(Self.self, from: Data(String(cString: ptr).utf8))
+        guard let json = Localization.current.copyJSON(String(cString: ptr), namespace: "onboarding_copy") else { return nil }
+        return try? decoder.decode(Self.self, from: Data(json.utf8))
     }
 }

@@ -364,6 +364,12 @@ final class ManagedSessionsTests: XCTestCase {
             "Claude Code stops what it's doing in Project.")
     }
 
+    func testStopLineDoesNotInterpretPlaceholdersInsideUserValues() {
+        XCTAssertEqual(
+            ManagedSurface.stopDescription("{tool} in {folder}", tool: "Tool {folder}", folder: "Repo {tool} %@"),
+            "Tool {folder} in Repo {tool} %@")
+    }
+
     func testStartAgainNamesOnlyTheRowAndARequest() {
         let params = ManagedSurface.startAgainParams(sessionID: "s", requestID: "r")
         XCTAssertEqual(params.count, 2)

@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// What the local scrubber removes, for the screen that answers "what gets
 /// removed?".
@@ -38,21 +39,21 @@ public enum ScrubDetectors {
     /// net rather than the plan.
     public static func label(for slug: String) -> String {
         switch slug {
-        case "openai_api_key": return "OpenAI API keys"
-        case "github_token": return "GitHub tokens"
-        case "aws_access_key": return "AWS access keys"
+        case "openai_api_key": return Localization.current.text("app.detector.openai_api_key")
+        case "github_token": return Localization.current.text("app.detector.github_token")
+        case "aws_access_key": return Localization.current.text("app.detector.aws_access_key")
         // The regex behind this one covers Stripe, GitLab and Slack prefixes.
         // Naming them beats "provider tokens", which tells a contributor
         // nothing about whether their own provider is covered.
-        case "provider_token": return "Stripe, GitLab and Slack tokens"
+        case "provider_token": return Localization.current.text("app.detector.provider_token")
         // Named separately from `provider_token` for the same reason that
         // entry names its providers: a Cursor user reading this list has to
         // be able to see their own key in it.
-        case "cursor_api_key": return "Cursor API keys"
-        case "jwt": return "JSON Web Tokens"
-        case "npm_token": return "npm tokens"
-        case "google_api_key": return "Google API keys"
-        case "pem_header_orphan": return "Private keys in PEM blocks"
+        case "cursor_api_key": return Localization.current.text("app.detector.cursor_api_key")
+        case "jwt": return Localization.current.text("app.detector.jwt")
+        case "npm_token": return Localization.current.text("app.detector.npm_token")
+        case "google_api_key": return Localization.current.text("app.detector.google_api_key")
+        case "pem_header_orphan": return Localization.current.text("app.detector.pem_header_orphan")
         default: return slug.replacingOccurrences(of: "_", with: " ")
         }
     }

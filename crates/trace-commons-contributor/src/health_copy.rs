@@ -198,13 +198,8 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
             )
         }
         health::LABEL_QUEUE_FULL => {
-            let detail = match max_queue_entries {
-                Some(max) => format!(
-                    "-- {} are already waiting. Review or clear some to start again.",
-                    format_count(max)
-                ),
-                None => "-- the queue is full. Review or clear some to start again.".to_string(),
-            };
+            let detail =
+                crate::localized_copy::english(&queue_full_detail_message(max_queue_entries));
             HealthLineCopy::actionable(
                 concat!(crate::app_name!(), " has stopped queuing new traces"),
                 &detail,
@@ -212,6 +207,27 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
             )
         }
         _ => on_hold_copy(),
+    }
+}
+
+/// The numeric selector remains native; the English grouped spelling is
+/// carried separately to preserve the existing banner byte for byte.
+pub(crate) fn queue_full_detail_message(max: Option<u64>) -> serde_json::Value {
+    match max {
+        Some(count) => crate::localized_copy::plural(
+            "message.health_copy_json.queue_full_counted.detail",
+            "-- {formatted_count} are already waiting. Review or clear some to start again.",
+            "-- {formatted_count} are already waiting. Review or clear some to start again.",
+            count,
+            serde_json::json!({"formatted_count": {
+                "decimal": count.to_string(), "english": format_count(count)
+            }}),
+        ),
+        None => crate::localized_copy::text(
+            "message.health_copy_json.queue_full_uncounted.detail",
+            "-- the queue is full. Review or clear some to start again.",
+            serde_json::json!({}),
+        ),
     }
 }
 

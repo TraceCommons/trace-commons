@@ -1,6 +1,7 @@
 import Foundation
 import TCBridge
 import TCShellCore
+import TCLocalization
 import UserNotifications
 
 /// Local notifications: the digest, and the re-engagement notifications.
@@ -351,10 +352,9 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         // rather than one merged sentence.
         var lines: [String] = []
         if pendingCount > 0 {
-            let noun = pendingCount == 1 ? "trace" : "traces"
-            let from = projects.isEmpty ? "" : " from " + Self.joined(projects)
-            lines.append("\(pendingCount) \(noun) ready\(from).")
-            lines.append("Nothing is sent until you review them.")
+            lines.append(Localization.current.text(projects.isEmpty ? "app.digest.ready" : "app.digest.ready_projects",
+                parameters: ["projects": Self.joined(projects)], count: Int64(pendingCount)))
+            lines.append(Localization.current.text("nudge_copy.DIGEST_PENDING_REASSURANCE"))
         }
         if let contributed = DigestCopy.contributionLine(
             count: contributedCount,
@@ -367,13 +367,12 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     }
 
     private nonisolated static func joined(_ labels: [String]) -> String {
-        switch labels.count {
-        case 0: return ""
-        case 1: return labels[0]
-        case 2: return "\(labels[0]) and \(labels[1])"
-        default:
-            return labels.dropLast().joined(separator: ", ") + " and " + labels[labels.count - 1]
+        guard let first = labels.first else { return "" }
+        guard labels.count > 1, let last = labels.last else { return first }
+        let head = labels.dropFirst().dropLast().reduce(first) { head, label in
+            Localization.current.text("app.list.comma", parameters: ["first": head, "last": label])
         }
+        return Localization.current.text("app.list.pair", parameters: ["first": head, "last": last])
     }
 
     nonisolated func userNotificationCenter(

@@ -277,4 +277,44 @@ final class NudgeSurfaceTests: XCTestCase {
         let note = NudgeSurface.notification(due)
         XCTAssertEqual(note?.defaultIntent, .review(.settlementEstimate))
     }
+
+    func testExplicitPresentationChangesProseButNeverActionRoutingOrUserValues() throws {
+        let data = Data(#"""
+            {"kind":"idle_sessions","title":"Older title","body":"Older body",
+             "actions":[{"id":"review","label":"Older label"}],
+             "presentation":{
+               "title":{"key":"test.notification.title","english":"Near.ai","parameters":{}},
+               "body":{"key":"test.notification.body","english":"1 trace from {tool} has been idle for 3 days or more.",
+                       "parameters":{"tool":"{count} %@ {days}"}},
+               "actions":[{"id":"review","label":{"key":"test.notification.review","english":"Review","parameters":{}}}]}}
+            """#.utf8)
+        let due = try DaemonDataDecoding.decoder().decode(DaemonData.ReengageDue.self, from: data)
+        let note = try XCTUnwrap(NudgeSurface.notification(due))
+        XCTAssertEqual(note.title, "Near.ai")
+        XCTAssertEqual(note.body, "1 trace from {count} %@ {days} has been idle for 3 days or more.")
+        XCTAssertEqual(note.actions, [.init(intent: .review(.idleSessions), label: "Review")])
+        XCTAssertEqual(note.defaultIntent, .review(.idleSessions))
+
+        // Even a valid message tree cannot replace a raw wire action ID.
+        let mismatched = String(decoding: data, as: UTF8.self)
+            .replacingOccurrences(of: #""actions":[{"id":"review","label":{"#,
+                                  with: #""actions":[{"id":"not_now","label":{"#)
+        let mismatch = try DaemonDataDecoding.decoder().decode(DaemonData.ReengageDue.self, from: Data(mismatched.utf8))
+        XCTAssertEqual(NudgeSurface.notification(mismatch)?.actions,
+                       [.init(intent: .review(.idleSessions), label: "Older label")])
+    }
+
+    func testDigestPresentationIncludesFoldOnceAndOldDaemonsKeepRawText() throws {
+        let data = Data(#"""
+            {"pending":1,"text":"Older daemon text",
+             "fold":{"kind":"verdicts_landed","text":"1 trace accepted."},
+             "presentation":{"key":"test.notification.lines","english":"{first}\n{second}","parameters":{
+               "first":{"key":"test.notification.pending","english":{"one":"{count} trace ready to contribute","other":"{count} traces ready to contribute"},"parameters":{"count":1}},
+               "second":{"key":"test.notification.fold","english":"1 trace accepted.","parameters":{}}}}}
+            """#.utf8)
+        let due = try DaemonDataDecoding.decoder().decode(DaemonData.DigestDue.self, from: data)
+        XCTAssertEqual(NudgeSurface.digestText(due), "1 trace ready to contribute\n1 trace accepted.")
+        XCTAssertEqual(NudgeSurface.digestText(.init(pending: 1, text: "Raw service text {count}")),
+                       "Raw service text {count}")
+    }
 }

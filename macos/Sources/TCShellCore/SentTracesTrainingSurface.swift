@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// The words for adding Train coding models to traces already sent,
 /// decoded from what the Rust exported (`tc_sent_traces_training_copy_json`).
@@ -73,18 +74,18 @@ public struct SentTracesTrainingCopy: Decodable, Equatable, Sendable {
 
     /// `template` with `{count}` filled in.
     public static func render(_ template: String, count: UInt64) -> String {
-        template.replacingOccurrences(of: "{count}", with: String(count))
+        Localization.fill(template, ["count": Localization.current.number(Int64(clamping: count))])
     }
 
     /// The sheet's body: the one-trace sentence for 1, the counted one
     /// otherwise.
     public func body(count: UInt64) -> String {
-        count == 1 ? bodyOne : Self.render(bodyOther, count: count)
+        Localization.current.text("plural.training.body", count: Int64(clamping: count))
     }
 
     /// The Insights card's quiet line, chosen the same way.
     public func line(count: UInt64) -> String {
-        count == 1 ? lineOne : Self.render(lineOther, count: count)
+        Localization.current.text("plural.training.line", count: Int64(clamping: count))
     }
 
     public func allowAccessibilityName(count: UInt64) -> String {

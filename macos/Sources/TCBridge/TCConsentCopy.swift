@@ -1,5 +1,6 @@
 import CTraceCommons
 import Foundation
+import TCLocalization
 
 /// The consent surface's sentences, read from the Rust rather than written
 /// here.
@@ -16,7 +17,7 @@ public enum TCConsentCopy {
     public static func copyJSON() -> String? {
         guard let raw = tc_consent_copy() else { return nil }
         defer { tc_string_free(raw) }
-        return String(cString: raw)
+        return Localization.current.copyJSON(String(cString: raw), namespace: "consent_copy")
     }
 
     /// The NEAR AI payout section's sentences, as a JSON object, or nil on a
@@ -26,7 +27,7 @@ public enum TCConsentCopy {
     public static func payoutLinkCopyJSON() -> String? {
         guard let raw = tc_payout_link_copy_json() else { return nil }
         defer { tc_string_free(raw) }
-        return String(cString: raw)
+        return Localization.current.copyJSON(String(cString: raw), namespace: "payout_link_copy")
     }
 
     /// The referral words (Settings Referrals, the code field on the NEAR AI
@@ -36,7 +37,7 @@ public enum TCConsentCopy {
     public static func referralCopyJSON() -> String? {
         guard let raw = tc_referral_copy_json() else { return nil }
         defer { tc_string_free(raw) }
-        return String(cString: raw)
+        return Localization.current.copyJSON(String(cString: raw), namespace: "referral_copy")
     }
 
     /// A typed referral code as it is shown, `TC-XXXXX-XXXXX`, read the way
@@ -55,7 +56,7 @@ public enum TCConsentCopy {
     public static func accountDevicesCopyJSON() -> String? {
         guard let raw = tc_account_devices_copy_json() else { return nil }
         defer { tc_string_free(raw) }
-        return String(cString: raw)
+        return Localization.current.copyJSON(String(cString: raw), namespace: "account_devices_copy")
     }
 
     /// The words for changing the NEAR AI login an account uses (F10), as a
@@ -64,7 +65,7 @@ public enum TCConsentCopy {
     public static func accountChangeCopyJSON() -> String? {
         guard let raw = tc_account_change_copy_json() else { return nil }
         defer { tc_string_free(raw) }
-        return String(cString: raw)
+        return Localization.current.copyJSON(String(cString: raw), namespace: "account_change_copy")
     }
 
     /// The words for adding Train coding models to sent traces, as a JSON
@@ -73,7 +74,7 @@ public enum TCConsentCopy {
     public static func sentTracesTrainingCopyJSON() -> String? {
         guard let raw = tc_sent_traces_training_copy_json() else { return nil }
         defer { tc_string_free(raw) }
-        return String(cString: raw)
+        return Localization.current.copyJSON(String(cString: raw), namespace: "sent_traces_training_copy")
     }
 
     /// The tooltip that explains the current answer, chosen by the ABI.
@@ -82,9 +83,8 @@ public enum TCConsentCopy {
     /// the two sentences from `copyJSON`: the branch crosses so that three
     /// shells cannot each keep their own copy of it.
     public static func gateHelp(pinned: Bool) -> String? {
-        guard let raw = tc_consent_gate_help(pinned ? 1 : 0) else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_consent_gate_help.
+        LocalizedPresentation.line("consent_gate_help", parameters: ["pinned": pinned])
     }
 
     /// The notice for one void, as a JSON object, from one element of
@@ -95,10 +95,8 @@ public enum TCConsentCopy {
     /// void without a label) or on a caught panic. The choice between the
     /// project and the grant wording is made by the ABI, not here.
     public static func voidNoticeJSON(forVoid wireJSON: String) -> String? {
-        let raw = wireJSON.withCString { tc_grant_void_notice($0) }
-        guard let raw else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_grant_void_notice.
+        LocalizedPresentation.json("grant_void_notice", inputJSON: wireJSON)
     }
 
     /// The notice for one armed folder whose arming wording no longer claims
@@ -107,10 +105,8 @@ public enum TCConsentCopy {
     /// Decoded by `TCShellCore.ArmingRewordedNotice`. Nil only for an
     /// argument that is not an element, or on a caught panic.
     public static func armingRewordedNoticeJSON(forRewording wireJSON: String) -> String? {
-        let raw = wireJSON.withCString { tc_arming_reworded_notice($0) }
-        guard let raw else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_arming_reworded_notice.
+        LocalizedPresentation.json("arming_reworded_notice", inputJSON: wireJSON)
     }
 
     /// The notice for armed folders the automatic-contribution gate is
@@ -118,10 +114,8 @@ public enum TCConsentCopy {
     /// (`GateHeld.json`). Decoded by `TCShellCore.GateHeldNotice`. Nil when
     /// nothing is held, for an unreadable argument, or on a caught panic.
     public static func gateHeldNoticeJSON(forHeld wireJSON: String) -> String? {
-        let raw = wireJSON.withCString { tc_gate_held_notice($0) }
-        guard let raw else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_gate_held_notice.
+        LocalizedPresentation.json("gate_held_notice", inputJSON: wireJSON)
     }
 
     /// The notice after a legacy invite identity moved to a NEAR AI account,
@@ -132,10 +126,8 @@ public enum TCConsentCopy {
     /// Nil for `null` (nothing to show), an unreadable argument, or a caught
     /// panic. Which folders sentence to show is the ABI's choice.
     public static func legacyMigrationNoticeJSON(forNotice wireJSON: String) -> String? {
-        let raw = wireJSON.withCString { tc_legacy_migration_notice($0) }
-        guard let raw else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_legacy_migration_notice.
+        LocalizedPresentation.json("legacy_migration_notice", inputJSON: wireJSON)
     }
 
     /// The account section's status while this app's account needs
@@ -146,10 +138,8 @@ public enum TCConsentCopy {
     /// Nil while there is nothing to show, for an unreadable argument, or on
     /// a caught panic. Which sentence to show is the ABI's choice.
     public static func accountAttentionJSON(forStatus wireJSON: String) -> String? {
-        let raw = wireJSON.withCString { tc_account_attention_copy_json($0) }
-        guard let raw else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_account_attention_copy_json.
+        LocalizedPresentation.json("account_attention_copy_json", inputJSON: wireJSON)
     }
 
     /// The account section's own "Set up again" (owner, 2026-11-04), as a
@@ -159,7 +149,7 @@ public enum TCConsentCopy {
     public static func setUpAgainCopyJSON() -> String? {
         guard let raw = tc_set_up_again_copy_json() else { return nil }
         defer { tc_string_free(raw) }
-        return String(cString: raw)
+        return Localization.current.copyJSON(String(cString: raw), namespace: "set_up_again_copy")
     }
 
     /// The notice for approved sessions held on a busy privacy witness, as a
@@ -169,10 +159,8 @@ public enum TCConsentCopy {
     /// Nil when nothing is waiting, for an unreadable argument, or on a
     /// caught panic. The count and its wording are the ABI's.
     public static func witnessCapacityNoticeJSON(forCapacity wireJSON: String) -> String? {
-        let raw = wireJSON.withCString { tc_witness_capacity_notice($0) }
-        guard let raw else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_witness_capacity_notice.
+        LocalizedPresentation.json("witness_capacity_notice", inputJSON: wireJSON)
     }
 
     /// K11: the daemon's `route_disclosure` result in, `{facts, copy}` out,
@@ -182,10 +170,7 @@ public enum TCConsentCopy {
     /// Nil for anything the ABI cannot read, including a route or origin
     /// newer than this build: the shell says it could not be read.
     public static func routeDisclosureJSON(forFacts factsJSON: String) -> String? {
-        let raw = factsJSON.withCString { tc_route_disclosure_copy($0) }
-        guard let raw else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        LocalizedPresentation.json("route_disclosure_copy", inputJSON: factsJSON)
     }
 
     /// What a disclosure surface says when `routeDisclosureJSON` is nil:
@@ -193,13 +178,13 @@ public enum TCConsentCopy {
     public static func routeDisclosureUnreadableJSON() -> String? {
         guard let raw = tc_route_disclosure_unreadable_copy() else { return nil }
         defer { tc_string_free(raw) }
-        return String(cString: raw)
+        return Localization.current.copyJSON(String(cString: raw), namespace: "route_disclosure_unreadable_copy")
     }
 
     /// The labels for `certificate_detail`, from `tc_certificate_detail_copy`.
     public static func certificateDetailCopyJSON() -> String? {
         guard let raw = tc_certificate_detail_copy() else { return nil }
         defer { tc_string_free(raw) }
-        return String(cString: raw)
+        return Localization.current.copyJSON(String(cString: raw), namespace: "certificate_detail_copy")
     }
 }

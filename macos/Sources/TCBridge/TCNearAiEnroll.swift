@@ -26,9 +26,8 @@ public enum TCNearAiEnroll {
     /// so an unfamiliar label reaches the generic sentence rather than
     /// nothing. `nil` means a caught Rust panic.
     public static func line(label: String) -> String? {
-        guard let raw = label.withCString({ tc_near_ai_enroll_line($0) }) else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_near_ai_enroll_line.
+        LocalizedPresentation.line("near_ai_enroll_line", parameters: ["label": label])
     }
 
     /// How firmly that sentence reads, as a raw `TC_PRIVATE_INFERENCE_TONE_*`

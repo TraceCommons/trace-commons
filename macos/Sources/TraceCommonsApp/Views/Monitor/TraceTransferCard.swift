@@ -1,6 +1,7 @@
 import SwiftUI
 import TCDesign
 import TCShellCore
+import TCLocalization
 
 /// The trace being contributed, kept or dismissed (owner, 2026-10-19): a
 /// popover notice (`GlassPopoverNotice`) floating over the top of the
@@ -101,7 +102,7 @@ struct TraceTransferCard: View {
     var folder: String { transfer.folderLabel ?? folderLabel ?? transfer.folder }
 
     /// When the trace was recorded (`MapTransfer.at`), if it was.
-    var time: String? { transfer.at?.formatted(date: .abbreviated, time: .shortened) }
+    var time: String? { transfer.at.map { Localization.current.date($0) } }
 
     /// The trace's folder and, when recorded, its time.
     var traceLine: String {

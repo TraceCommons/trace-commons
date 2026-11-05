@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 public struct ManagedAccount: Decodable, Equatable, Identifiable, Sendable {
     public let id: String
@@ -410,7 +411,7 @@ public extension ManagedSurface {
 
     /// The stop confirmation's line with `{tool}` and `{folder}` filled.
     static func stopDescription(_ template: String, tool: String, folder: String) -> String {
-        template.replacingOccurrences(of: "{tool}", with: tool).replacingOccurrences(of: "{folder}", with: folder)
+        Localization.fill(template, ["tool": tool, "folder": folder])
     }
 
     /// The `managed_session_start_again` request: the row and a fresh

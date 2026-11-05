@@ -1,5 +1,6 @@
 import CTraceCommons
 import Foundation
+import TCLocalization
 
 /// The settings screen's session-source rows, read from the Rust rather than
 /// written here.
@@ -17,7 +18,8 @@ public enum TCSourceChecks {
         defer { tc_string_free(raw) }
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try? decoder.decode(SourceSettingsCopy.self, from: Data(String(cString: raw).utf8))
+        guard let json = Localization.current.copyJSON(String(cString: raw), namespace: "source_settings_copy") else { return nil }
+        return try? decoder.decode(SourceSettingsCopy.self, from: Data(json.utf8))
     }
 
     /// The wire key for Claude Code's session source.
@@ -52,15 +54,8 @@ public enum TCSourceChecks {
     /// Nil when the ABI refused -- an unknown tool key, or a caught panic.
     /// The caller shows nothing rather than a sentence written in Swift.
     public static func checkLine(tool: String, sourceMode: String) -> String? {
-        guard
-            let raw = tool.withCString({ toolPtr in
-                sourceMode.withCString { modePtr in
-                    tc_source_check_line(toolPtr, modePtr)
-                }
-            })
-        else { return nil }
-        defer { tc_string_free(raw) }
-        return String(cString: raw)
+        // Legacy equivalent: tc_source_check_line.
+        LocalizedPresentation.line("source_check_line", parameters: ["tool": tool, "source_mode": sourceMode])
     }
 }
 

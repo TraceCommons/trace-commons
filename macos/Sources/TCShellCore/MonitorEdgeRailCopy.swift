@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// The edge rail's words (`preview_copy::MonitorEdgeRailCopy`): the
 /// optional rail on the right edge of the screen, its switch in Settings,
@@ -48,11 +49,11 @@ public struct MonitorEdgeRailCopy: MonitorWordTable {
 
     /// The Traces peek's line for sessions waiting on this Mac.
     public func onThisMac(count: Int) -> String {
-        count == 1 ? onThisMacLineOne : onThisMacLine.replacingOccurrences(of: "{count}", with: String(count))
+        Localization.current.text("plural.edge.local", count: Int64(count))
     }
 
     /// The Traces peek's line for contributions sent from this Mac.
     public func inTheLibrary(count: Int) -> String {
-        count == 1 ? inTheLibraryLineOne : inTheLibraryLine.replacingOccurrences(of: "{count}", with: String(count))
+        Localization.current.text("plural.edge.library", count: Int64(count))
     }
 }

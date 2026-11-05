@@ -1,4 +1,5 @@
 import Foundation
+import TCLocalization
 
 /// The words this shell used to write in Swift -- withdrawal, the public
 /// profile, the legacy queue and History words, the scrubbing caveat and
@@ -206,9 +207,7 @@ public struct ShellWordsCopy: Decodable, Equatable, Sendable {
 
     /// Fill a string's `{name}` holes, each with its value; adds nothing.
     public static func fill(_ template: String, _ values: [String: String]) -> String {
-        values.reduce(template) { text, pair in
-            text.replacingOccurrences(of: "{" + pair.key + "}", with: pair.value)
-        }
+        Localization.fill(template, values)
     }
 
     /// The lines the owner cut 2026-11-04 (Settings copy pass 2, P142,
