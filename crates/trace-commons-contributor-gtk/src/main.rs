@@ -133,9 +133,37 @@ fn main() -> anyhow::Result<()> {
         connect_startup(&application, dir, drivers);
     }
 
+    // SIGTERM takes the ordinary quit path rather than its default action.
+    #[cfg(unix)]
+    {
+        let app = application.clone();
+        on_sigterm(move || app.quit());
+    }
+
     // GTK's own argument parsing would choke on the flags above.
     application.run_with_args::<&str>(&[]);
     Ok(())
+}
+
+/// The number of SIGTERM on Linux and macOS.
+#[cfg(unix)]
+const SIGTERM: i32 = 15;
+
+/// Run `quit` on the main loop whenever SIGTERM arrives (`kill <pid>`, a
+/// session logout), instead of letting the signal's default action end the
+/// process on the spot. The embedded daemon installs no signal handlers
+/// (#1949), so without this a SIGTERM skips every `connect_shutdown`
+/// handler. Passing `app.quit()` makes it the same path as closing the last
+/// window.
+///
+/// glib installs a caught handler, not `SIG_IGN`, so the processes this
+/// shell starts do not inherit an ignored SIGTERM.
+#[cfg(unix)]
+fn on_sigterm(quit: impl Fn() + 'static) -> gtk::glib::SourceId {
+    gtk::glib::unix_signal_add_local(SIGTERM, move || {
+        quit();
+        gtk::glib::ControlFlow::Continue
+    })
 }
 
 fn local_start(drivers: &Drivers) -> bool {
@@ -391,6 +419,62 @@ fn finish_start(
             application.quit();
             gtk::glib::ControlFlow::Break
         });
+    }
+}
+
+#[cfg(all(test, unix))]
+mod sigterm_tests {
+    use super::*;
+
+    /// Set in the child process `sigterm_takes_the_quit_path` starts.
+    const CHILD: &str = "TC_GTK_TEST_SIGTERM_CHILD";
+
+    /// SIGTERM reaches the quit callback on the main loop and does not end
+    /// the process. Runs in a child, because the signal goes to the whole
+    /// process and a missing handler ends it.
+    #[test]
+    fn sigterm_takes_the_quit_path() {
+        use std::os::unix::process::ExitStatusExt;
+        if std::env::var_os(CHILD).is_some() {
+            child();
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sigterm_tests::sigterm_takes_the_quit_path",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(
+            (status.code(), status.signal()),
+            (Some(0), None),
+            "{status:?}"
+        );
+    }
+
+    /// Exits 0 once the callback ran, 1 if it never did. A missing handler
+    /// ends the process by the signal instead.
+    fn child() -> ! {
+        let quit = std::rc::Rc::new(std::cell::Cell::new(false));
+        let seen = quit.clone();
+        let _source = on_sigterm(move || seen.set(true));
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status();
+        let context = gtk::glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !quit.get() && std::time::Instant::now() < until {
+            if !context.iteration(false) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        std::process::exit(if quit.get() { 0 } else { 1 })
     }
 }
 

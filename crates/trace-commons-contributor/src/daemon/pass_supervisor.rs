@@ -31,10 +31,18 @@ use anyhow::Result;
 use super::diagnostics_log;
 use super::ipc::DaemonShared;
 
-/// The stop signal (SIGTERM / SIGINT, or ctrl-C on Windows) the loop and the
-/// backoff both wait on. Created once, so a signal arriving between two runs
-/// of the loop is not lost.
+/// The outside request to stop that the loop and the backoff both wait on.
+/// Created once, so a request arriving between two runs of the loop is not
+/// lost. For the CLI's `daemon run` it is SIGTERM / SIGINT (ctrl-C on
+/// Windows); for an application embedding the daemon it is [`never`], since
+/// that application owns its process's signals and stops the loop through
+/// `shared.shutdown`.
 pub(crate) type StopSignal = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// No outside stop request: the loop ends only through `shared.shutdown`.
+pub(crate) fn never() -> StopSignal {
+    Box::pin(std::future::pending())
+}
 
 /// One run of the periodic loop, borrowing the stop signal.
 pub(crate) type PassesFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
@@ -341,10 +349,6 @@ mod tests {
     fn shared_in(dir: &std::path::Path) -> Arc<DaemonShared> {
         let store = crate::config::ConfigStore::open(dir.join("state")).unwrap();
         Arc::new(DaemonShared::load(store).unwrap())
-    }
-
-    fn never() -> StopSignal {
-        Box::pin(std::future::pending())
     }
 
     #[test]
