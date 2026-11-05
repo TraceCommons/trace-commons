@@ -231,6 +231,10 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
     /// rather than on its head (owner, 2026-10-11), for a card that is a
     /// way into somewhere, as `GlassEyebrowCard`'s is.
     private let chevron: Bool
+    /// Content from the card's own leading edge, not under the title, with
+    /// the icon centred on the title (Ron, 2026-11-05: a list that needs the
+    /// card's width, the Private AI sessions).
+    private let flushContent: Bool
     @State private var infoOpen = false
 
     /// The icon's point size, and the column it sits in.
@@ -259,9 +263,10 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
     /// out; `info` goes behind the info icon after it.
     public init(
         systemImage: String, title: String, subtitle: [String] = [], info: String? = nil, refresh: Refresh? = nil,
-        interactive: Bool = false, promo: GlassPromoTreatment? = nil, chevron: Bool = false,
+        interactive: Bool = false, promo: GlassPromoTreatment? = nil, chevron: Bool = false, flushContent: Bool = false,
         @ViewBuilder accessory: () -> Accessory, @ViewBuilder content: () -> Content
     ) {
+        self.flushContent = flushContent
         self.interactive = interactive
         self.promo = promo
         self.chevron = chevron
@@ -298,7 +303,8 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
         let titleCapHeight = Self.titleCapHeight
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             HStack(alignment: .center, spacing: GlassTokens.Space.s5) {
-                HStack(alignment: Self.centersTitle(subtitle: subtitle, hasContent: Content.self != EmptyView.self)
+                HStack(alignment: flushContent
+                       || Self.centersTitle(subtitle: subtitle, hasContent: Content.self != EmptyView.self)
                        ? .center : .iconTitleTop, spacing: GlassTokens.Space.s5) {
                     // The icon's top on the title's cap height, the top
                     // of its letters (owner, 2026-10-10), on every card with
@@ -344,7 +350,7 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
             }
             if Content.self != EmptyView.self {
                 content
-                    .padding(.leading, Self.iconColumn + GlassTokens.Space.s5)
+                    .padding(.leading, flushContent ? 0 : Self.iconColumn + GlassTokens.Space.s5)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -413,10 +419,10 @@ public extension GlassIconCard where Content == EmptyView {
 public extension GlassIconCard where Accessory == EmptyView {
     init(
         systemImage: String, title: String, subtitle: [String] = [], info: String? = nil, refresh: Refresh? = nil,
-        @ViewBuilder content: () -> Content
+        flushContent: Bool = false, @ViewBuilder content: () -> Content
     ) {
         self.init(systemImage: systemImage, title: title, subtitle: subtitle, info: info, refresh: refresh,
-                  accessory: { EmptyView() }, content: content)
+                  flushContent: flushContent, accessory: { EmptyView() }, content: content)
     }
 }
 
@@ -676,10 +682,12 @@ public struct GlassKeyValueList: View {
 /// A grid row inside a flush card: hairline above, never around.
 public struct GlassTableRow<Content: View>: View {
     private let first: Bool
+    private let horizontalInset: CGFloat
     private let content: Content
 
-    public init(first: Bool = false, @ViewBuilder content: () -> Content) {
+    public init(first: Bool = false, horizontalInset: CGFloat = 12, @ViewBuilder content: () -> Content) {
         self.first = first
+        self.horizontalInset = horizontalInset
         self.content = content()
     }
 
@@ -687,7 +695,7 @@ public struct GlassTableRow<Content: View>: View {
         content
             .glassType(GlassTokens.TypeScale.label.weight(.regular))
             .padding(.vertical, 9)
-            .padding(.horizontal, 12)
+            .padding(.horizontal, horizontalInset)
             .frame(maxWidth: .infinity, alignment: .leading)
             .overlay(alignment: .top) {
                 if !first {

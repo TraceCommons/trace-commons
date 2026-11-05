@@ -5,9 +5,9 @@ import XCTest
 
 /// The window's tabs, in the owner's default order (2026-11-02): Home,
 /// Private AI, Traces, Insights, with Cmd-1..4 following the strip. Every
-/// tab but Home can be dragged into another order (owner, 2026-10-30),
-/// lifted under the pointer and moved by a plain drag (owner, 2026-11-02,
-/// 2026-11-05), and the shortcuts follow it.
+/// tab but Home can be dragged into another order (owner, 2026-10-30), once
+/// a held press has lifted it (owner, 2026-11-02), and the shortcuts follow
+/// it.
 @MainActor
 final class TabOrderTests: XCTestCase {
     typealias Tab = MonitorWindowView.Tab
@@ -72,11 +72,13 @@ final class TabOrderTests: XCTestCase {
         XCTAssertEqual(landing(3, 500, 100, 1...3), 3)
     }
 
-    /// A movable tab lifts under the pointer, with no held press (owner,
-    /// 2026-11-05); it pops out a little larger and raised; a few points of
-    /// travel make letting go a move, not a click (owner, 2026-11-02).
-    func test_hoverLiftsATabAndADragMovesItAtOnce() throws {
+    /// A held press lifts a tab; it pops out a little larger and raised;
+    /// once lifted, a few points of travel make letting go a move, not a
+    /// click (owner, 2026-11-02).
+    func test_aHeldPressLiftsTheTabAndPopsItOut() throws {
         typealias Strip = GlassRuleTabs<Int>
+        XCTAssertGreaterThanOrEqual(Strip.liftDelay, 0.25, "a click that lingers is not a lift")
+        XCTAssertLessThanOrEqual(Strip.liftDelay, 0.5)
         XCTAssertGreaterThan(Strip.liftScale, 1)
         XCTAssertLessThan(Strip.liftScale, 1.1, "slightly")
         XCTAssertGreaterThan(Strip.liftRise, 0)
@@ -87,13 +89,11 @@ final class TabOrderTests: XCTestCase {
         let navigation = try String(
             contentsOf: GlassSurfaceRulesTests.root.deletingLastPathComponent()
                 .appendingPathComponent("TCDesign/Components/Navigation.swift"), encoding: .utf8)
-        // No held press: the drag lifts the tab as the press lands, and
-        // moves it straight away.
-        XCTAssertFalse(navigation.contains("LongPressGesture"))
-        XCTAssertTrue(navigation.contains("let up = hovered == segment.value || lifted == segment.value"))
+        // A quick drag moves nothing: the drag only follows a held press.
         XCTAssertTrue(navigation.contains(
-            "DragGesture(minimumDistance: 0, coordinateSpace: .global)\n"
-                + "            .updating($lifted) { _, state, _ in state = value }"))
+            "LongPressGesture(minimumDuration: Self.liftDelay, maximumDistance: Self.liftSlop)\n"
+                + "            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))"))
+        XCTAssertFalse(navigation.contains("DragGesture(minimumDistance: Self.dragThreshold"))
         // The lift is cleared however the press ends, so a tab always drops.
         XCTAssertTrue(navigation.contains("@GestureState private var lifted: Value?"))
         XCTAssertTrue(navigation.contains("if now == nil, dragging != nil { drop() }"))

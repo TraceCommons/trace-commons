@@ -9,8 +9,8 @@ import TCDesign
 /// small number in a disc, a title and one short line, with an "i" after
 /// the line holding a step's longer explanation, and the step's action, if
 /// it has one, as a text link with an arrow under it. Given `close`, a
-/// small X in the top trailing corner closes the card. No graphic and no
-/// gradient: it is a plain card. Every word is the caller's.
+/// small X in the top trailing corner closes the card. No gradient. Every
+/// word is the caller's.
 ///
 /// `pixelField` adds a dithered grid of blues that grows from the card's
 /// bottom trailing corner and fades out before its text (owner, 2026-11-02,
@@ -43,12 +43,18 @@ struct GetStartedCard: View {
     let steps: [Step]
     var close: Close?
     var pixelField = false
+    /// The field's shape, so one card can be told from another.
+    var fieldPattern: GlassPixelField.Pattern = .corner
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s9) {
             HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    Text(title).insightsTitle()
+                    // The title's type is a hero card's (Ron, 2026-11-05: as
+                    // Home's promo cards), and so is the line's under it.
+                    Text(title)
+                        .glassType(GlassTokens.TypeScale.display.weight(.heavy))
+                        .foregroundStyle(GlassColor.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityAddTraits(.isHeader)
                     if !lead.isEmpty {
@@ -67,7 +73,7 @@ struct GetStartedCard: View {
             .insightsCardBody()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background { if pixelField { GetStartedCardField() } }
+        .background { if pixelField { GetStartedCardField(pattern: fieldPattern) } }
         .insightsSection()
     }
 }
@@ -80,9 +86,10 @@ private struct GetStartedCardField: View {
     /// pale beam core, which the cells drift between.
     static let palette = [GlassTokens.Color.dataKept, GlassTokens.Color.chartSeries1,
                           GlassTokens.Color.firstRunBeamCore]
+    var pattern: GlassPixelField.Pattern = .corner
 
     var body: some View {
-        GlassPixelField(palette: Self.palette)
+        GlassPixelField(palette: Self.palette, pattern: pattern)
             .clipShape(RoundedRectangle(cornerRadius: GlassTokens.Radius.card, style: .continuous))
             .padding(.horizontal, -GlassTokens.Space.cardPaddingHorizontal)
             .padding(.vertical, -GlassTokens.Space.cardPaddingVertical)
