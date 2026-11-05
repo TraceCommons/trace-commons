@@ -800,7 +800,7 @@ final class AppModel: ObservableObject {
         amount: { TCNearAiBalance.amount(present: $0, nanos: $1, scale: $2) },
         remainingLine: { TCNearAiBalance.remainingLine(present: $0, nanos: $1, scale: $2) },
         limitLine: { TCNearAiBalance.limitLine(present: $0, nanos: $1, scale: $2) },
-        spentLine: { TCNearAiBalance.spentLine(present: $0, nanos: $1, scale: $2) },
+        spentLine: { TCNearAiBalance.spentLine(present: $0, nanos: $1, scale: $2, remainingPresent: $3) },
         observedLine: { TCNearAiBalance.observedLine(secondsAgo: $0) }
     )
 
