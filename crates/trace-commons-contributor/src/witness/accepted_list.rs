@@ -282,6 +282,16 @@ impl ListRefreshSchedule {
     }
 }
 
+impl ListRefreshSchedule {
+    /// Record a fetch that failed: try again after [`REFUSAL_REFRESH_SPACING`]
+    /// rather than waiting out a full [`ACCEPTED_LIST_REFRESH`], so a daemon
+    /// that started before a list was published (or while offline) recovers
+    /// within minutes.
+    pub fn failed(&mut self, now: DateTime<Utc>) {
+        self.next_at = now + REFUSAL_REFRESH_SPACING;
+    }
+}
+
 /// What one refresh did, for tests and the caller's decision to retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshOutcome {
@@ -367,6 +377,38 @@ pub async fn refresh_on_refusal(cfg: &ContributorConfig, dir: &Path, now: DateTi
         return false;
     }
     matches!(refresh(cfg, dir).await, RefreshOutcome::Installed { .. })
+}
+
+/// One supervisor tick of the list refresh.
+///
+/// When the schedule is due, fetch; a failed fetch is retried after
+/// [`REFUSAL_REFRESH_SPACING`], any other outcome waits the usual day. When it
+/// is not due but a session is held for a measurement outside the accepted
+/// set (`measurement_holds`), fetch early through [`refresh_on_refusal`]: the
+/// same 10-minute spacing, so a backlog of held sessions cannot hammer the
+/// ingest. Returns true when a newer list was stored. The caller releases the
+/// holds when it sees the stored version change.
+pub async fn refresh_for_tick(
+    cfg: &ContributorConfig,
+    dir: &Path,
+    schedule: &mut ListRefreshSchedule,
+    now: DateTime<Utc>,
+    draw: f64,
+    measurement_holds: bool,
+) -> bool {
+    if schedule.due(now) {
+        let outcome = refresh(cfg, dir).await;
+        if outcome == RefreshOutcome::Failed {
+            schedule.failed(now);
+        } else {
+            schedule.attempted(now, draw);
+        }
+        matches!(outcome, RefreshOutcome::Installed { .. })
+    } else if measurement_holds {
+        refresh_on_refusal(cfg, dir, now).await
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -863,6 +905,73 @@ mod tests {
         assert!(!refresh_on_refusal(&cfg, dir.path(), at(1) + Duration::minutes(1)).await);
         // After it: fetched, but not newer, so nothing to retry for.
         assert!(!refresh_on_refusal(&cfg, dir.path(), at(1) + Duration::minutes(11)).await);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_failed_scheduled_fetch_retries_within_the_spacing_not_a_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = key();
+        set_test_keys(dir.path(), vec![public(&signer)]);
+        // Nothing published yet: 404.
+        let (origin, server) = serve(None).await;
+        let cfg = cfg_for(&origin);
+        let mut schedule = ListRefreshSchedule::starting(at(1));
+        assert!(!refresh_for_tick(&cfg, dir.path(), &mut schedule, at(1), 0.5, false).await);
+        assert!(!schedule.due(at(1) + Duration::minutes(9)));
+        assert!(schedule.due(at(1) + REFUSAL_REFRESH_SPACING));
+        server.abort();
+
+        // A success waits the day.
+        let (origin, server) =
+            serve(Some(signed(&signer, &list(1, vec![entry("cc", 1, 20)])))).await;
+        let cfg = cfg_for(&origin);
+        let later = at(1) + REFUSAL_REFRESH_SPACING;
+        assert!(refresh_for_tick(&cfg, dir.path(), &mut schedule, later, 0.5, false).await);
+        assert!(!schedule.due(later + Duration::hours(23)));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn held_sessions_trigger_one_early_fetch_per_spacing() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = key();
+        set_test_keys(dir.path(), vec![public(&signer)]);
+        let (origin, server) =
+            serve(Some(signed(&signer, &list(2, vec![entry("cc", 1, 20)])))).await;
+        let cfg = cfg_for(&origin);
+        // Startup fetch done long ago: not due for a day.
+        let mut schedule = ListRefreshSchedule::starting(at(1));
+        schedule.attempted(at(1), 0.0);
+        let now = at(1) + Duration::hours(1);
+        // No holds: no early fetch.
+        assert!(!refresh_for_tick(&cfg, dir.path(), &mut schedule, now, 0.5, false).await);
+        assert!(load_verified(dir.path(), &trusted_keys(dir.path())).is_none());
+        // Holds: fetched and installed.
+        assert!(refresh_for_tick(&cfg, dir.path(), &mut schedule, now, 0.5, true).await);
+        assert_eq!(
+            load_verified(dir.path(), &trusted_keys(dir.path()))
+                .unwrap()
+                .version,
+            2
+        );
+        server.abort();
+
+        // A newer list now exists, but a second refusal inside the spacing
+        // does not fetch.
+        let (origin, server) =
+            serve(Some(signed(&signer, &list(3, vec![entry("dd", 1, 20)])))).await;
+        let cfg = cfg_for(&origin);
+        let soon = now + Duration::minutes(5);
+        assert!(!refresh_for_tick(&cfg, dir.path(), &mut schedule, soon, 0.5, true).await);
+        assert_eq!(
+            load_verified(dir.path(), &trusted_keys(dir.path()))
+                .unwrap()
+                .version,
+            2
+        );
+        let after = now + REFUSAL_REFRESH_SPACING;
+        assert!(refresh_for_tick(&cfg, dir.path(), &mut schedule, after, 0.5, true).await);
         server.abort();
     }
 }

@@ -2602,7 +2602,8 @@ async fn refresh_estimate_table(
 }
 
 /// Fetch the signed witness accepted-measurements list when its schedule is
-/// due. Whatever the outcome, the stored list stays unless a newer verified
+/// due, or early (spaced 10 minutes) while a session is held for a measurement
+/// refusal; a failed fetch retries after the same spacing, not a day. Whatever the outcome, the stored list stays unless a newer verified
 /// one replaced it; `witness::accepted_list::refresh` logs one fixed label.
 ///
 /// Then, on every tick and not only after a fetch, release the measurement
@@ -2617,11 +2618,21 @@ async fn refresh_witness_accepted_list(
     now: chrono::DateTime<Utc>,
     schedule: &mut crate::witness::accepted_list::ListRefreshSchedule,
 ) {
-    if schedule.due(now) {
-        schedule.attempted(now, crate::credit_estimate_table::random_draw());
-        if let Ok(Some(cfg)) = shared.store.load_config() {
-            let _ = crate::witness::accepted_list::refresh(&cfg, shared.store.dir()).await;
-        }
+    let holds = shared
+        .queue
+        .lock()
+        .expect("queue lock")
+        .has_measurement_holds();
+    if let Ok(Some(cfg)) = shared.store.load_config() {
+        let _ = crate::witness::accepted_list::refresh_for_tick(
+            &cfg,
+            shared.store.dir(),
+            schedule,
+            now,
+            crate::credit_estimate_table::random_draw(),
+            holds,
+        )
+        .await;
     }
     let dir = shared.store.dir();
     let version = crate::witness::accepted_list::load_verified(

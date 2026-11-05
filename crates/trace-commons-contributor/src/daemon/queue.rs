@@ -1716,6 +1716,15 @@ impl Queue {
         true
     }
 
+    /// Whether any session is held for a measurement outside the accepted set.
+    pub fn has_measurement_holds(&self) -> bool {
+        self.entries.iter().any(|e| {
+            e.state == QueueState::Pending
+                && e.reason_label.as_deref()
+                    == Some(crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED)
+        })
+    }
+
     /// Release every session held because the witness reported a measurement
     /// outside the accepted set (`submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED`),
     /// for a newly installed accepted list that may now include it. Each goes
