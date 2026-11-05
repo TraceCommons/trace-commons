@@ -78,6 +78,9 @@ struct InspectorPrompts: View {
     /// daemon's next upload sweep, which nothing here can observe.
     private func approvalUndo(_ undo: AppModel.Undo) -> some View {
         UndoBarCard(eyebrow: store.words?.undo.approvalSaved, title: undo.toastLine) {
+            if let redactionBegun = undo.redactionBegun {
+                Text(redactionBegun).fixedSize(horizontal: false, vertical: true)
+            }
             if undo.offerUndo {
                 Text(QueueLegacyWords.undoWillSend)
                     .fixedSize(horizontal: false, vertical: true)
@@ -109,7 +112,9 @@ struct InspectorPrompts: View {
         if let contributed = store.lastContributed, let words = store.words {
             let busy = store.acting.contains(contributed.entryId)
             UndoBarCard(eyebrow: words.undo.approvalSaved, title: Self.title(contributed.label, toast: contributed.toast, words: words)) {
-                UndoDetail(toast: contributed.toast, label: contributed.label, at: contributed.at, words: words)
+                UndoDetail(
+                    toast: contributed.toast, label: contributed.label, at: contributed.at, words: words,
+                    redactionBegun: contributed.redactionBegun)
             } actions: {
                 if contributed.toast.offerUndo {
                     Button(busy ? words.undo.undoing : words.undoContribute) {
@@ -129,7 +134,9 @@ struct InspectorPrompts: View {
         if let folder = store.lastContributedFolder, let words = store.words {
             let busy = store.writing.contains(folder.projectId)
             UndoBarCard(eyebrow: words.undo.approvalSaved, title: Self.title(folder.label, toast: folder.toast, words: words)) {
-                UndoDetail(toast: folder.toast, label: folder.label, at: folder.at, words: words)
+                UndoDetail(
+                    toast: folder.toast, label: folder.label, at: folder.at, words: words,
+                    redactionBegun: folder.redactionBegun)
             } actions: {
                 if folder.toast.offerUndo {
                     Button(busy ? words.undo.undoing : words.undoContribute) {
@@ -170,8 +177,14 @@ struct UndoDetail: View {
     let label: String?
     let at: Date
     let words: MonitorTracesCopy
+    /// "Data redaction has begun.", on this run's first Submit that went to
+    /// the privacy witness (`RedactionBegunNotice`).
+    var redactionBegun: String? = nil
 
     var body: some View {
+        if let redactionBegun {
+            Text(redactionBegun).fixedSize(horizontal: false, vertical: true)
+        }
         if toast.offerUndo {
             TimelineView(.periodic(from: at, by: 1)) { context in
                 Text(QueueLegacyWords.approvedAgo(max(0, Int(context.date.timeIntervalSince(at)))))

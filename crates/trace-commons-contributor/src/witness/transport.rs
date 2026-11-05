@@ -1402,6 +1402,19 @@ impl HttpWitnessTransport {
             .send()
             .await
             .map_err(|e| send_failure(&e, WitnessTrustError::WitnessAttestationUnavailable))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            // A witness that predates the job routes answers a bare 404 here
+            // (it still serves `/v1/attestation`, so the client got this
+            // far). Nothing was judged: it is the polling witness not being
+            // deployed yet, which the daemon retries as unreachable rather
+            // than refusing the session.
+            let retry_after_secs = saturation_retry_after(response.headers());
+            let body = response.bytes().await.unwrap_or_default();
+            return Err(match refusal_label(&body) {
+                None => WitnessTrustError::WitnessUnreachable,
+                label => refusal_from_parts(404, retry_after_secs, label.as_deref()),
+            });
+        }
         if response.status() != reqwest::StatusCode::ACCEPTED {
             return Err(refusal_from(response).await);
         }
@@ -4626,6 +4639,30 @@ mod tests {
         let log = log.lock().unwrap();
         assert_eq!(log.submits, 1);
         assert_eq!(log.deletes, 1, "the abandoned job was not cancelled");
+    }
+
+    /// A witness from before the job routes answers the submit with a bare
+    /// 404. That is the new witness not deployed yet, not a judgement on the
+    /// session: unreachable, which the daemon retries.
+    #[tokio::test]
+    async fn a_witness_without_the_job_routes_is_unreachable_not_malformed() {
+        let key = test_signer("old-witness");
+        let app = Router::new().route("/v1/witness", post(|| async { StatusCode::OK }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let transport = transport_for(&url, permissive());
+        let witness = crate::witness::verify::verified_witness_for_test(&url, &address_of(&key));
+        let err = witness_contribution(&transport, &witness, raw_with_secret(), None, &granted())
+            .await
+            .expect_err("an old witness certifies nothing");
+        assert_eq!(err, WitnessTrustError::WitnessUnreachable);
+        assert!(crate::submit::witness_failure_is_transient(
+            err.refusal_label()
+        ));
+        task.abort();
     }
 
     #[test]

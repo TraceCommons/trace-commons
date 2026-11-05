@@ -7862,6 +7862,18 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
                 }))
                 .collect::<Vec<_>>(),
     });
+    // Whether any trace this call approved goes to the privacy witness
+    // (`witness_worker::needs_witness_job`). Always present. A shell says
+    // "Data redaction has begun." off it, once per app run, for a person's
+    // own Submit; it is a fact about the approval, never a progress report.
+    result["witness_review"] = serde_json::Value::from(cfg.as_ref().is_some_and(|cfg| {
+        let queue = shared.queue.lock().expect("queue lock");
+        approved_ids.iter().any(|id| {
+            queue
+                .get(*id)
+                .is_some_and(|entry| super::witness_worker::needs_witness_job(cfg, entry))
+        })
+    }));
     // Absent, not zero, for an invited contributor and for a single-entry
     // approve. Zero would read as "nothing was left out", which is a claim
     // about a filter that did not run.
@@ -13640,6 +13652,62 @@ mod tests {
                  {entry_hold} > {reported}"
             );
         }
+    }
+
+    /// Witness configured for the device, for the `witness_review` tests.
+    fn configure_witness(s: &DaemonShared) {
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.witness = Some(crate::config::WitnessSettings {
+            url: "https://witness.example".into(),
+            signing_address: "0x0000000000000000000000000000000000000000".into(),
+            expected_measurements: vec!["measurement".into()],
+            admission_evidence: false,
+        });
+        s.store.save_config(&cfg).unwrap();
+    }
+
+    /// An approval that hands a trace to the privacy witness says so, so a
+    /// shell can say "Data redaction has begun."; one whose bytes are
+    /// already pinned (no witness job) and one with no witness configured
+    /// say `false`, never nothing.
+    #[tokio::test]
+    async fn an_approval_says_whether_it_goes_to_the_privacy_witness() {
+        // No witness configured.
+        let s = shared();
+        let id = seed_entry_with_eligibility(&s, "/tmp/nowitness", None);
+        s.queue
+            .lock()
+            .unwrap()
+            .record_previewed_envelope(id, "sha256:pinned", None, None);
+        let r =
+            handle_request_async(&s, &req("approve", serde_json::json!({ "entry_id": id }))).await;
+        let result = r.result.expect("approve answers");
+        assert_eq!(result["approved"], 1, "{result}");
+        assert_eq!(result["witness_review"], false, "{result}");
+
+        // Witness configured, bytes already pinned: no witness job.
+        let s = shared();
+        configure_witness(&s);
+        let id = seed_entry_with_eligibility(&s, "/tmp/pinned", None);
+        s.queue
+            .lock()
+            .unwrap()
+            .record_previewed_envelope(id, "sha256:pinned", None, None);
+        let r =
+            handle_request_async(&s, &req("approve", serde_json::json!({ "entry_id": id }))).await;
+        let result = r.result.expect("approve answers");
+        assert_eq!(result["approved"], 1, "{result}");
+        assert_eq!(result["witness_review"], false, "{result}");
+
+        // Witness configured, nothing pinned: the witness worker reviews it.
+        let s = shared();
+        configure_witness(&s);
+        let id = seed_entry_with_eligibility(&s, "/tmp/towitness", None);
+        let r =
+            handle_request_async(&s, &req("approve", serde_json::json!({ "entry_id": id }))).await;
+        let result = r.result.expect("approve answers");
+        assert_eq!(result["approved"], 1, "{result}");
+        assert_eq!(result["witness_review"], true, "{result}");
     }
 
     /// A person's approval asks for an upload pass at the instant its hold

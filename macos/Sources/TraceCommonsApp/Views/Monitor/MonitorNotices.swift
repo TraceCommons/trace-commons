@@ -577,7 +577,9 @@ struct MonitorNotices: View {
                 ) {
                     GlassNoticeMark(systemImage: "arrow.uturn.backward", tint: GlassStatus.on.color)
                 } summary: {
-                    UndoDetail(toast: folder.toast, label: folder.label, at: folder.at, words: words)
+                    UndoDetail(
+                        toast: folder.toast, label: folder.label, at: folder.at, words: words,
+                        redactionBegun: folder.redactionBegun)
                 } details: { EmptyView() } actions: {
                     if folder.toast.offerUndo {
                         Button(busy ? words.undo.undoing : words.undoContribute) {
@@ -600,7 +602,9 @@ struct MonitorNotices: View {
                 ) {
                     GlassNoticeMark(systemImage: "arrow.uturn.backward", tint: GlassStatus.on.color)
                 } summary: {
-                    UndoDetail(toast: contributed.toast, label: contributed.label, at: contributed.at, words: words)
+                    UndoDetail(
+                        toast: contributed.toast, label: contributed.label, at: contributed.at, words: words,
+                        redactionBegun: contributed.redactionBegun)
                 } details: { EmptyView() } actions: {
                     if contributed.toast.offerUndo {
                         Button(busy ? words.undo.undoing : words.undoContribute) {
@@ -631,6 +635,7 @@ struct MonitorNotices: View {
             ) {
                 GlassNoticeMark(systemImage: "arrow.uturn.backward", tint: GlassStatus.on.color)
             } summary: {
+                if let redactionBegun = undo.redactionBegun { Text(redactionBegun) }
                 if undo.offerUndo {
                     Text(QueueLegacyWords.undoWillSend)
                     Text(QueueLegacyWords.approvedAgo(undo.heldSeconds)).monospacedDigit()

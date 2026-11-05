@@ -151,6 +151,15 @@ pub const MONITOR_NEEDS_PRIVACY_CHECK: &str = "Needs a privacy check first. Open
 /// (2026-11-05), the same line the witness-at-submission spec uses.
 pub const MONITOR_PRIVACY_CHECK_NO_ANSWER: &str = "Privacy check timed out. Try again later.";
 
+/// The only feedback a person gets about the privacy witness's work (owner,
+/// 2026-11-05): said once per run of the app, on the first trace the person
+/// submits themselves that goes to the witness (`approve`'s
+/// `witness_review`). Never for a background or Automatic-folder
+/// submission, and never again in the same run. No queue position, no
+/// per-trace progress, no completion message. Shown in the submit's undo
+/// card, the existing status surface after a Submit.
+pub const REDACTION_BEGUN: &str = "Data redaction has begun.";
+
 /// The Traces tab's line for one preview or Submit failure label, or
 /// `None` for a label with no line of its own (the caller says
 /// [`MONITOR_REQUEST_FAILED`]).
@@ -512,6 +521,8 @@ pub struct MonitorUndoCopy {
     pub within: &'static str,
     pub may_have_started: &'static str,
     pub undoing: &'static str,
+    /// See [`REDACTION_BEGUN`].
+    pub redaction_begun: &'static str,
 }
 
 /// The queue's safeguards panel (`queue-status-panel.tsx`): the labels
@@ -761,6 +772,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             within: "Undo within {seconds}s before upload starts.",
             may_have_started: "Upload may already have started.",
             undoing: "Undoing\u{2026}",
+            redaction_begun: REDACTION_BEGUN,
         },
     }
 }
@@ -2431,5 +2443,23 @@ mod tests {
         assert_eq!(scrub_state_line(Some(1)), "Scrubbed \u{00b7} 1 mark");
         assert_eq!(scrub_state_line(None), NOT_YET_SCRUBBED);
         assert_ne!(scrub_state_line(None), scrub_state_line(Some(0)));
+    }
+
+    /// The owner's words, exactly, in the shared table every shell reads,
+    /// and none of the names a contributor-facing line may not carry.
+    #[test]
+    fn the_redaction_begun_line_is_the_owners_and_names_nothing_internal() {
+        assert_eq!(REDACTION_BEGUN, "Data redaction has begun.");
+        assert_eq!(monitor_traces_copy().undo.redaction_begun, REDACTION_BEGUN);
+        let lowered = REDACTION_BEGUN.to_ascii_lowercase();
+        for banned in [
+            "trace commons",
+            "tracecommons",
+            "daemon",
+            "passkey",
+            "witness",
+        ] {
+            assert!(!lowered.contains(banned), "{banned}");
+        }
     }
 }

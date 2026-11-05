@@ -53,6 +53,9 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
     /// Present on every group call, absent on a single-entry call, where the
     /// filter does not run. Not part of `skipped` or `excludedIneligible`.
     public let excludedHeld: UInt64?
+    /// Whether any trace this call approved goes to the privacy witness.
+    /// Absent from an older daemon, which reads as false: nothing is said.
+    public let witnessReview: Bool?
 
     public init(
         approved: UInt64,
@@ -62,7 +65,8 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         holdSecs: UInt64,
         holdUntil: String?,
         excludedIneligible: UInt64? = nil,
-        excludedHeld: UInt64? = nil
+        excludedHeld: UInt64? = nil,
+        witnessReview: Bool? = nil
     ) {
         self.approved = approved
         self.flagged = flagged
@@ -72,6 +76,7 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         self.holdUntil = holdUntil
         self.excludedIneligible = excludedIneligible
         self.excludedHeld = excludedHeld
+        self.witnessReview = witnessReview
     }
 
     enum CodingKeys: String, CodingKey {
@@ -83,6 +88,7 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         case holdUntil = "hold_until"
         case excludedIneligible = "excluded_ineligible"
         case excludedHeld = "excluded_held"
+        case witnessReview = "witness_review"
     }
 
     /// Whether this response is the correction-credential refusal.
