@@ -6668,6 +6668,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         referral_config: Default::default(),
         referral_network_mark_key: None,
         first_run_estimate: Default::default(),
+        witness_accepted_list_path: None,
         first_run_copy: Default::default(),
         first_run_stats: None,
         root,
@@ -31406,6 +31407,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         referral_config: Default::default(),
         referral_network_mark_key: None,
         first_run_estimate: Default::default(),
+        witness_accepted_list_path: None,
         first_run_copy: Default::default(),
         first_run_stats: None,
         root: temp.path().to_path_buf(),
@@ -103250,6 +103252,157 @@ fn api_error_log_label_keeps_only_label_shaped_messages() {
     );
     assert_eq!(api_error_log_label(&"a".repeat(65)), "unlabelled");
     assert_eq!(api_error_log_label("UPPER"), "unlabelled");
+}
+
+mod witness_accepted_list_tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use ring::signature::{Ed25519KeyPair, KeyPair as _};
+    use tower::ServiceExt;
+    use trace_commons_protocol::witness_accepted_list::{
+        AcceptedEntry, AcceptedList, ListSignature, WITNESS_ACCEPTED_LIST_SCHEMA,
+        assemble_signed_list, key_id_for,
+    };
+
+    async fn get_list(state: Arc<AppState>) -> axum::response::Response {
+        app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    // The literal, so the route inventory's `^/v1/public/`
+                    // rule is the one that classifies it.
+                    .uri("/v1/public/witness-accepted-list")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response")
+    }
+
+    /// A list signed with a throwaway key made here; never a real key.
+    fn signed_list(version: u64) -> Vec<u8> {
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+        let key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
+        let payload = AcceptedList {
+            schema: WITNESS_ACCEPTED_LIST_SCHEMA.into(),
+            version,
+            issued_at: chrono::Utc::now(),
+            witness_url: "https://witness.example".into(),
+            entries: vec![AcceptedEntry {
+                measurements: format!("mrtd={}", "aa".repeat(48)),
+                signing_address: format!("0x{}", "11".repeat(20)),
+                not_before: chrono::Utc::now(),
+                not_after: chrono::Utc::now() + chrono::Duration::days(30),
+                commit: None,
+            }],
+        }
+        .canonical_payload()
+        .unwrap();
+        let signature = ListSignature {
+            key_id: key_id_for(&public),
+            signature: hex::encode(key.sign(payload.as_bytes()).as_ref()),
+        };
+        assemble_signed_list(payload, vec![signature])
+    }
+
+    fn state_serving(path: Option<std::path::PathBuf>) -> Arc<AppState> {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        Arc::make_mut(&mut state).witness_accepted_list_path = path.map(Arc::new);
+        state
+    }
+
+    async fn label_of(response: axum::response::Response) -> String {
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json error body");
+        body["error"].as_str().unwrap_or_default().to_string()
+    }
+
+    #[test]
+    fn the_route_literal_is_the_protocol_path() {
+        assert_eq!(
+            trace_commons_protocol::witness_accepted_list::WITNESS_ACCEPTED_LIST_PATH,
+            "/v1/public/witness-accepted-list"
+        );
+    }
+
+    #[test]
+    fn a_blank_setting_is_no_setting() {
+        assert!(witness_accepted_list::path_from_value(None).is_none());
+        assert!(witness_accepted_list::path_from_value(Some("  ")).is_none());
+        assert!(witness_accepted_list::path_from_value(Some("/srv/list.json")).is_some());
+    }
+
+    #[tokio::test]
+    async fn without_a_setting_the_route_is_not_found() {
+        let response = get_list(state_serving(None)).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            label_of(response).await,
+            witness_accepted_list::LABEL_NOT_PUBLISHED
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_unsigned_file_is_unavailable_and_never_served() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("list.json");
+        let response = get_list(state_serving(Some(path.clone()))).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            label_of(response).await,
+            witness_accepted_list::LABEL_UNAVAILABLE
+        );
+
+        // A payload with no signature, and the bare payload on its own.
+        let signed = signed_list(1);
+        let mut unsigned: serde_json::Value = serde_json::from_slice(&signed).unwrap();
+        unsigned["signatures"] = serde_json::json!([]);
+        let bare = unsigned["payload"].as_str().unwrap().to_string();
+        for body in [serde_json::to_vec(&unsigned).unwrap(), bare.into_bytes()] {
+            std::fs::write(&path, &body).unwrap();
+            let response = get_list(state_serving(Some(path.clone()))).await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let text = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert!(!text.windows(7).any(|w| w == b"payload"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_signed_file_is_served_verbatim_and_a_new_one_without_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("list.json");
+        let first = signed_list(1);
+        std::fs::write(&path, &first).unwrap();
+        let state = state_serving(Some(path.clone()));
+
+        let response = get_list(Arc::clone(&state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("public, max-age=300")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), first.as_slice(), "byte for byte");
+
+        let second = signed_list(2);
+        std::fs::write(&path, &second).unwrap();
+        let body = to_bytes(get_list(state).await.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), second.as_slice());
+    }
 }
 
 mod first_run_estimate_tests {

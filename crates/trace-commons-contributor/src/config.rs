@@ -545,6 +545,7 @@ impl WitnessSettings {
         Ok(WitnessTrust {
             signing_address: self.signing_address.clone(),
             measurements,
+            accepted: Vec::new(),
         })
     }
 

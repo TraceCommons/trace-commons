@@ -135,6 +135,10 @@ pub struct StopReport {
 pub struct WorkerProcess {
     // Drop order: kill_on_drop child before releasing controller ownership.
     child: Option<Child>,
+    /// Ends the worker if this process ends without dropping `child`; see
+    /// `owner_watch`. Held exactly as long as `child`.
+    #[cfg(unix)]
+    owner_link: Option<super::owner_watch::OwnerLink>,
     controller_lock: Option<HeldLock>,
     credential: Option<wire::Credential>,
     address: Option<SocketAddr>,
@@ -452,6 +456,135 @@ mod tests {
         parent.try_lock().unwrap();
         assert!(worker.stop().await.stopped);
     }
+
+    /// Set in the owner process `a_worker_exits_when_its_owner_is_killed`
+    /// starts, to the directory it starts its worker in.
+    const OWNER_CHILD_ROOT: &str = "TC_TEST_WORKER_OWNER_ROOT";
+
+    /// Whether `pid` still names a process (zombies included).
+    fn alive(pid: i32) -> bool {
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        // SAFETY: signal 0 sends nothing; it only checks the PID exists.
+        unsafe { kill(pid, 0) == 0 }
+    }
+
+    fn wait_for(deadline: Duration, mut done: impl FnMut() -> bool) -> bool {
+        let until = Instant::now() + deadline;
+        while Instant::now() < until {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        done()
+    }
+
+    /// `kill_on_drop` runs only on a Rust drop, and a process killed by
+    /// SIGKILL (or by SIGTERM's default action) drops nothing. The worker
+    /// must still go when the process that owns it does, rather than keep
+    /// running with no owner and no one to stop it.
+    ///
+    /// The owner is a child process: it starts the signed test worker,
+    /// writes the worker's PID and waits. This test then SIGKILLs the owner
+    /// and requires the worker to be gone.
+    #[test]
+    fn a_worker_exits_when_its_owner_is_killed() {
+        if let Ok(root) = std::env::var(OWNER_CHILD_ROOT) {
+            owner_child(Path::new(&root));
+        }
+        let root = tempfile::tempdir().unwrap();
+        let mut owner = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "compute::process::tests::a_worker_exits_when_its_owner_is_killed",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(OWNER_CHILD_ROOT, root.path())
+            .env("HOME", root.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid_file = root.path().join("worker.pid");
+        let mut pid = None;
+        let started = wait_for(Duration::from_secs(30), || {
+            pid = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.parse::<i32>().ok());
+            pid.is_some() || matches!(owner.try_wait(), Ok(Some(_)))
+        });
+        let Some(pid) = pid.filter(|_| started) else {
+            let _ = owner.kill();
+            panic!("the owner did not start its worker: {:?}", owner.wait());
+        };
+        assert!(alive(pid), "the worker is running before its owner dies");
+        owner.kill().unwrap();
+        owner.wait().unwrap();
+        let gone = wait_for(Duration::from_secs(10), || !alive(pid));
+        if !gone {
+            // Never leave the orphan behind on a shared machine.
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+        assert!(gone, "the worker outlived its SIGKILLed owner");
+    }
+
+    /// The watchdog that ends a worker with its owner (`owner_watch`) does
+    /// not outlive a worker stopped the ordinary way.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_owner_watchdog_leaves_with_a_stopped_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let mut worker =
+            WorkerProcess::new(root.path(), super::super::test_worker::config(root.path()))
+                .unwrap();
+        worker.start(1).await.unwrap();
+        let pid = worker.child.as_ref().and_then(Child::id).unwrap();
+        let listed = std::process::Command::new("pgrep")
+            .args(["-P", &pid.to_string()])
+            .output()
+            .unwrap();
+        let watchdogs: Vec<i32> = String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect();
+        assert_eq!(watchdogs.len(), 1, "one watchdog per worker: {watchdogs:?}");
+        assert!(worker.stop().await.stopped);
+        let watchdog = watchdogs[0];
+        let gone = tokio::task::spawn_blocking(move || {
+            wait_for(Duration::from_secs(5), || !alive(watchdog))
+        })
+        .await
+        .unwrap();
+        assert!(gone, "the watchdog outlived its stopped worker");
+    }
+
+    /// The owner's half: start the signed test worker, publish its PID, and
+    /// wait to be killed.
+    fn owner_child(root: &Path) -> ! {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut worker =
+                WorkerProcess::new(root, super::super::test_worker::config(root)).unwrap();
+            if worker.start(1).await.is_err() {
+                std::process::exit(2);
+            }
+            let pid = worker.child.as_ref().and_then(Child::id).unwrap();
+            std::fs::write(root.join("worker.pid.tmp"), pid.to_string()).unwrap();
+            std::fs::rename(root.join("worker.pid.tmp"), root.join("worker.pid")).unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            // Held, never dropped: the test kills this process first.
+            std::mem::forget(worker);
+        });
+        std::process::exit(3)
+    }
 }
 
 impl WorkerProcess {
@@ -459,6 +592,8 @@ impl WorkerProcess {
         config.validate()?;
         Ok(Self {
             child: None,
+            #[cfg(unix)]
+            owner_link: None,
             controller_lock: None,
             credential: None,
             address: None,
@@ -541,6 +676,8 @@ impl WorkerProcess {
         if let Some(root) = std::env::var_os("SystemRoot") {
             command.env("SystemRoot", root);
         }
+        #[cfg(unix)]
+        let owner_link = super::owner_watch::arm(&mut command)?;
         let spawned = spawn(&mut command);
         // Drop Command's copy promptly; this is not a secure wipe of String or
         // the child's process environment, which remain part of the local trust boundary.
@@ -548,6 +685,10 @@ impl WorkerProcess {
         seed.fill(0);
         let child = spawned?;
         self.child = Some(child);
+        #[cfg(unix)]
+        {
+            self.owner_link = Some(owner_link);
+        }
         self.controller_lock = Some(parent_lock);
         self.credential = Some(credential);
         self.address = None;
@@ -670,6 +811,10 @@ impl WorkerProcess {
         }
         if stopped {
             self.child = None;
+            #[cfg(unix)]
+            {
+                self.owner_link = None;
+            }
             self.controller_lock = None;
             self.credential = None;
             self.address = None;

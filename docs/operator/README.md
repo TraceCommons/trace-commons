@@ -281,6 +281,10 @@ Every runbook in this directory, with a one-line description.
   symptom, with hash-only signatures and fixes.
 - [`./vector-replay.md`](./vector-replay.md) — operator reference for the
   `trace-commons-vector-replay` recovery binary.
+- [`./witness-accepted-list.md`](./witness-accepted-list.md) — the signed
+  list of witness measurements clients accept beside their sign-up pins:
+  the Cloud KMS list-signing key, `trace-commons-witness-list`, publishing,
+  witness rollover and key rotation.
 
 ## Doc lifecycle and freshness
 

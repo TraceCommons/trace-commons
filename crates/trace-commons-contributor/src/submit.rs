@@ -922,6 +922,11 @@ pub struct SubmitContext<'a> {
     /// shipped build.
     #[cfg(test)]
     witness_override: Option<(WitnessedEnvelope, InferenceAttestationRecord)>,
+    /// Refusal labels `witness_envelope` returns, one per call, before the
+    /// override is consulted. Lets a test drive the refusal-then-retry
+    /// branch in `submit_loaded`. Compiled out of every shipped build.
+    #[cfg(test)]
+    witness_refusals: std::sync::Mutex<std::collections::VecDeque<&'static str>>,
 }
 
 impl<'a> SubmitContext<'a> {
@@ -989,6 +994,8 @@ impl<'a> SubmitContext<'a> {
             receipt_override: None,
             #[cfg(test)]
             witness_override: None,
+            #[cfg(test)]
+            witness_refusals: Default::default(),
         })
     }
 
@@ -1098,9 +1105,13 @@ impl<'a> SubmitContext<'a> {
             .witness
             .clone()
             .ok_or_else(|| anyhow::anyhow!("witness-not-configured"))?;
-        let trust = settings
-            .trust()
-            .map_err(|_| anyhow::anyhow!("witness_expected_measurement_malformed"))?;
+        // The sign-up pins plus any signed accepted-list entry valid now.
+        let trust = crate::witness::accepted_list::trust_with_accepted(
+            &settings,
+            self.store.dir(),
+            Utc::now(),
+        )
+        .map_err(|_| anyhow::anyhow!("witness_expected_measurement_malformed"))?;
         if !trust.is_pinned() {
             anyhow::bail!("witness_expected_measurement");
         }
@@ -1522,10 +1533,22 @@ impl<'a> SubmitContext<'a> {
         // A malformed pin and an absent one are different operator mistakes,
         // and a contributor who mistyped a measurement should not be told they
         // configured none.
-        let trust = settings
-            .trust()
-            .map_err(|_| "witness_expected_measurement_malformed")?;
+        // The sign-up pins plus any signed accepted-list entry valid now
+        // (`witness::accepted_list`). The list only adds candidates; a
+        // malformed sign-up pin is still this refusal.
+        let trust =
+            crate::witness::accepted_list::trust_with_accepted(settings, self.store.dir(), now)
+                .map_err(|_| "witness_expected_measurement_malformed")?;
 
+        #[cfg(test)]
+        if let Some(label) = self
+            .witness_refusals
+            .lock()
+            .expect("witness refusals")
+            .pop_front()
+        {
+            return Err(label);
+        }
         #[cfg(test)]
         if let Some((response, record)) = self.witness_override.clone() {
             let parsed = parse_witnessed_envelope(&response).map_err(|e| e.refusal_label())?;
@@ -1985,7 +2008,14 @@ impl<'a> SubmitContext<'a> {
                             Ok(token) => token,
                             Err(outcome) => return Ok(outcome),
                         };
-                        match self
+                        // Kept only when a signed accepted list could be
+                        // fetched (a trusted list key is compiled in), for the
+                        // one retry below.
+                        let retry_raw =
+                            (!crate::witness::accepted_list::trusted_keys(self.store.dir())
+                                .is_empty())
+                            .then(|| raw.clone());
+                        let mut witnessed_outcome = self
                             .witness_envelope(
                                 &settings,
                                 raw,
@@ -1993,8 +2023,34 @@ impl<'a> SubmitContext<'a> {
                                 &token,
                                 now,
                             )
-                            .await
+                            .await;
+                        // A measurement refusal is decided from the quote,
+                        // before anything raw is sent. Before reporting it,
+                        // fetch the signed accepted list once (spaced); only
+                        // if a newer list was stored is the witness asked
+                        // again, once, under the widened trust.
+                        if let (Err(WITNESS_EXPECTED_MEASUREMENT_CONTROL), Some(retry_raw)) =
+                            (&witnessed_outcome, retry_raw)
                         {
+                            if crate::witness::accepted_list::refresh_on_refusal(
+                                self.cfg,
+                                self.store.dir(),
+                                now,
+                            )
+                            .await
+                            {
+                                witnessed_outcome = self
+                                    .witness_envelope(
+                                        &settings,
+                                        retry_raw,
+                                        transcript.attested_call.as_deref(),
+                                        &token,
+                                        now,
+                                    )
+                                    .await;
+                            }
+                        }
+                        match witnessed_outcome {
                             // The record is dropped on this path: the CLI keeps
                             // no per-entry store to write it to. The daemon's
                             // review path is where it is kept.
@@ -7018,6 +7074,152 @@ mod tests {
             ),
             Some(crate::daemon::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED)
         );
+    }
+
+    /// A signed accepted list for the R5 witness, served beside the stub
+    /// ingest, signed with a throwaway key registered for `store`'s dir.
+    fn r5_accepted_list(store: &crate::config::ConfigStore) -> Vec<u8> {
+        use ring::signature::{Ed25519KeyPair, KeyPair as _};
+        use trace_commons_protocol::witness_accepted_list::{
+            AcceptedEntry, AcceptedList, ListSignature, WITNESS_ACCEPTED_LIST_SCHEMA,
+            assemble_signed_list, key_id_for,
+        };
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+        let key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let public: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
+        crate::witness::accepted_list::set_test_keys(store.dir(), vec![public]);
+        let payload = AcceptedList {
+            schema: WITNESS_ACCEPTED_LIST_SCHEMA.into(),
+            version: 1,
+            issued_at: Utc::now(),
+            witness_url: "https://no-repeat-witness.invalid".into(),
+            entries: vec![AcceptedEntry {
+                measurements: format!("mrtd={}", "bb".repeat(48)),
+                signing_address: format!("0x{}", "22".repeat(20)),
+                not_before: Utc::now() - chrono::Duration::hours(1),
+                not_after: Utc::now() + chrono::Duration::days(1),
+                commit: None,
+            }],
+        }
+        .canonical_payload()
+        .unwrap();
+        let signature = ListSignature {
+            key_id: key_id_for(&public),
+            signature: hex::encode(key.sign(payload.as_bytes()).as_ref()),
+        };
+        assemble_signed_list(payload, vec![signature])
+    }
+
+    /// `r5_setup("low")`, with the ingest stub also serving `list` (or 404).
+    async fn refusal_setup(
+        serve_list: bool,
+    ) -> (
+        tempfile::TempDir,
+        crate::config::ConfigStore,
+        ContributorConfig,
+        Arc<Mutex<CapturedUpload>>,
+        WitnessedEnvelope,
+    ) {
+        let (dir, store, mut cfg, _, witnessed) = r5_setup("low").await;
+        let list = r5_accepted_list(&store);
+        let capture = Arc::new(Mutex::new(CapturedUpload::default()));
+        let mut router = stub_ingest_raw(capture.clone(), 200);
+        if serve_list {
+            router = router.route(
+                trace_commons_protocol::witness_accepted_list::WITNESS_ACCEPTED_LIST_PATH,
+                axum::routing::get(move || {
+                    let list = list.clone();
+                    async move { list }
+                }),
+            );
+        }
+        cfg.ingest_url = spawn(router).await;
+        store.save_config(&cfg).unwrap();
+        (dir, store, cfg, capture, witnessed)
+    }
+
+    #[tokio::test]
+    async fn a_measurement_refusal_fetches_the_list_and_retries_once_when_it_is_newer() {
+        use crate::daemon::uploader::{UploadDecision, Uploader};
+        let (_dir, store, cfg, capture, witnessed) = refusal_setup(true).await;
+        let (source, reference) = fixture_selection().remove(0);
+        let entry = r5_unattended_entry(&cfg, &reference);
+        let settings = crate::daemon::settings::DaemonSettings::default();
+        let opts = review_options();
+        let mut state = crate::daemon::state::DaemonState::new();
+        let mut health = crate::daemon::health::HealthState::default();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        ctx.witness_refusals
+            .lock()
+            .unwrap()
+            .push_back(WITNESS_EXPECTED_MEASUREMENT_CONTROL);
+        ctx.witness_override = Some((
+            witnessed,
+            InferenceAttestationRecord::uncertified(inference_record::REASON_BODIES_WITHHELD),
+        ));
+        let decision = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        }
+        .upload_entry(source.as_ref(), &reference, &entry, Utc::now())
+        .await
+        .unwrap();
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "got {decision:?}"
+        );
+        assert!(ctx.witness_refusals.lock().unwrap().is_empty());
+        assert_eq!(capture.lock().unwrap().bodies.len(), 1);
+        // The list was stored, and widens trust from now on.
+        let trust = crate::witness::accepted_list::trust_with_accepted(
+            cfg.witness.as_ref().unwrap(),
+            store.dir(),
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(trust.accepted.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_measurement_refusal_with_no_newer_list_is_reported_without_a_retry() {
+        use crate::daemon::uploader::{UploadDecision, Uploader};
+        let (_dir, store, cfg, capture, witnessed) = refusal_setup(false).await;
+        let (source, reference) = fixture_selection().remove(0);
+        let entry = r5_unattended_entry(&cfg, &reference);
+        let settings = crate::daemon::settings::DaemonSettings::default();
+        let opts = review_options();
+        let mut state = crate::daemon::state::DaemonState::new();
+        let mut health = crate::daemon::health::HealthState::default();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        ctx.witness_refusals
+            .lock()
+            .unwrap()
+            .push_back(WITNESS_EXPECTED_MEASUREMENT_CONTROL);
+        // Would succeed if asked again; it must not be.
+        ctx.witness_override = Some((
+            witnessed,
+            InferenceAttestationRecord::uncertified(inference_record::REASON_BODIES_WITHHELD),
+        ));
+        let decision = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        }
+        .upload_entry(source.as_ref(), &reference, &entry, Utc::now())
+        .await
+        .unwrap();
+        assert_eq!(
+            decision,
+            UploadDecision::Refused {
+                reason_label: WITNESS_EXPECTED_MEASUREMENT_CONTROL.to_string()
+            }
+        );
+        assert!(capture.lock().unwrap().bodies.is_empty(), "nothing sent");
     }
 
     #[tokio::test]
