@@ -104,3 +104,8 @@ Final review also found a flag-off versus final-publication race. Startup now
 holds a synchronous feature snapshot guard through metadata save and route
 publication, in settings -> feature policy -> Desktop lock order. A controlled
 interleaving regression verifies that off acceptance cannot overtake the commit.
+
+The first hosted follow-up run caught old production profile digests in the two
+plist golden fixtures. Only those expected identity values were refreshed for
+the new capability/profile version. The exact macOS channel-plist check passed
+locally afterward; no bundle identity or feed behavior changed.
