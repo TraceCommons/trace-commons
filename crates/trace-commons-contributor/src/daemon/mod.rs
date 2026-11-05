@@ -5373,21 +5373,25 @@ mod tests {
     }
 
     #[test]
-    fn only_a_witness_that_did_not_answer_is_a_transient_upload() {
-        assert_eq!(
-            transient_upload_kind("witness_timeout"),
-            Some(TransientUpload::Witness)
-        );
-        assert_eq!(
-            transient_upload_kind("witness_unreachable"),
-            Some(TransientUpload::Witness)
-        );
-        for terminal in [
+    fn only_a_witness_whose_evidence_could_not_be_fetched_is_a_transient_upload() {
+        for fetch in [
+            "witness_timeout",
+            "witness_unreachable",
             "witness_attestation_unavailable",
+            "witness_collateral_unavailable",
+        ] {
+            assert_eq!(
+                transient_upload_kind(fetch),
+                Some(TransientUpload::Witness),
+                "{fetch}"
+            );
+        }
+        for not_retried in [
             "witness_quote_unverified",
+            "witness_signer_unexpected",
             "witness_certificate_unverified",
         ] {
-            assert_eq!(transient_upload_kind(terminal), None, "{terminal}");
+            assert_eq!(transient_upload_kind(not_retried), None, "{not_retried}");
         }
     }
 

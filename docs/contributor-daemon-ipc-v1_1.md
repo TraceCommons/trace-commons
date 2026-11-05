@@ -3385,13 +3385,18 @@ reason no unattended approval can satisfy:
   behalf that the Automatic Scrub check held because the envelope built for
   it is worth a second look -- nothing matched, it looks unsure, or it was
   trimmed to fit. See `scrub_check` under `set_settings`.
-- `witness_timeout` or `witness_unreachable`, on a `pending` entry: the
-  witness did not answer in time, or could not be reached, through every
-  retry. Nothing was judged and nothing was sent. While it is still being
-  retried the entry stays `approved` under the same label, with
-  `retry_after` set, and is not held. Earlier builds refused such a
-  session as `witness_attestation_unavailable`; a newer build offers that
-  refusal again.
+- `witness_timeout`, `witness_unreachable`, `witness_attestation_unavailable`
+  or `witness_collateral_unavailable`, on a `pending` entry: the witness's
+  evidence could not be fetched (no answer in time, no connection, no
+  attestation or no collateral) through every retry. Nothing was judged and
+  nothing was sent. While it is still being retried the entry stays
+  `approved` under the same label, with `retry_after` set, and is not held.
+  Earlier builds refused such a session as `witness_attestation_unavailable`;
+  a newer build offers that refusal again.
+- `witness-not-trusted`: the witness's evidence was fetched and did not
+  verify (the quote, its nonce, the signer or the measurement). It is not
+  retried, and nothing was sent. A person decides, because a later pin
+  refresh can make the same witness valid.
 
 A group control is by definition not a review of one
 session, so held entries are left out for every contributor, invited or not,

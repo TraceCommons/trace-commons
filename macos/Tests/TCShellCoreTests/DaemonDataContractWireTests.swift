@@ -475,6 +475,9 @@ final class DaemonDataContractWireTests: XCTestCase {
             "second-look-review-required",
             "witness_timeout",
             "witness_unreachable",
+            "witness_attestation_unavailable",
+            "witness_collateral_unavailable",
+            "witness-not-trusted",
         ] {
             XCTAssertTrue(try entry(reason).heldForReview, reason)
             // Only a pending entry is held: an approved one under the label

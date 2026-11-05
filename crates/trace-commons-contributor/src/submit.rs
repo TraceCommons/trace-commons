@@ -636,18 +636,55 @@ pub const WITNESS_BATCH_STOP_LABELS: [&str; 3] = [
     REASON_WITNESS_SATURATED,
 ];
 
-/// Whether a witness failure label says the witness judged nothing because
-/// it did not answer: it ran past its deadline (`witness_timeout`) or could
-/// not be reached (`witness_unreachable`). Such a session is `Failed`, never
-/// refused, and the daemon retries it with the transient-upload backoff,
-/// holding it for a person once that budget is spent. A busy witness
-/// (`witness_saturated`) is not covered: it names its own retry delay and has
-/// its own path. Every other witness label is a judgement, or a trust check
-/// that failed, and stays a refusal.
+/// Whether a witness failure label says its evidence could not be fetched,
+/// so nothing was judged: the witness ran past its deadline
+/// (`witness_timeout`), could not be reached (`witness_unreachable`), or did
+/// not hand over its attestation (`witness_attestation_unavailable`: a
+/// non-success answer, a body with no quote, a broken connection) or Intel's
+/// collateral (`witness_collateral_unavailable`). Such a session is `Failed`,
+/// never refused, and the daemon retries it with the transient-upload
+/// backoff, holding it for a person under the same label once that budget is
+/// spent. A busy witness (`witness_saturated`) is not covered: it names its
+/// own retry delay and has its own path.
+///
+/// Fetching is the only thing these labels say failed. Evidence that was
+/// fetched and did not verify has labels of its own
+/// ([`witness_failure_is_untrusted`]), and every other witness label is a
+/// judgement or a local refusal that stays one. Nothing is uploaded without a
+/// verified witness either way.
 #[must_use]
 pub fn witness_failure_is_transient(label: &str) -> bool {
-    matches!(label, "witness_timeout" | "witness_unreachable")
+    matches!(
+        label,
+        "witness_timeout"
+            | "witness_unreachable"
+            | "witness_attestation_unavailable"
+            | "witness_collateral_unavailable"
+    )
 }
+
+/// Whether a witness failure label says the witness's evidence was fetched
+/// and did not verify: the quote is not a genuine one
+/// (`witness_quote_unverified`), is not bound to this client's nonce
+/// (`witness_quote_replayed`), names another signer than the pinned one
+/// (`witness_signer_unexpected`), or reports a measurement that is not
+/// accepted ([`crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL`]).
+/// Never retried, since asking again gets the same evidence; the daemon
+/// holds the session for a person under [`REASON_WITNESS_NOT_TRUSTED`]
+/// rather than refusing it, because a later pin refresh can make the same
+/// witness valid. The `submit` command still reports the specific label.
+#[must_use]
+pub fn witness_failure_is_untrusted(label: &str) -> bool {
+    matches!(
+        label,
+        "witness_quote_unverified" | "witness_quote_replayed" | "witness_signer_unexpected"
+    ) || label == crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL
+}
+
+/// The label a session approved for upload is held for a person under when
+/// the witness did not verify ([`witness_failure_is_untrusted`]). One of
+/// `daemon::queue::REASONS_NEEDING_A_PERSON`.
+pub const REASON_WITNESS_NOT_TRUSTED: &str = "witness-not-trusted";
 
 /// The label to stop a batch on, if `outcome` is one of
 /// [`WITNESS_BATCH_STOP_LABELS`].
@@ -4293,17 +4330,39 @@ mod tests {
         }
     }
 
-    /// A witness that did not answer judged nothing and is retried; every
-    /// other witness label is a judgement or a failed trust check.
+    /// Witness failures split by cause. Fetching the evidence failed
+    /// (timeout, no connection, the attestation or collateral not obtained):
+    /// nothing was judged, so it is retried. The evidence was fetched and did
+    /// not verify (the quote, its nonce, the signer, the measurement): never
+    /// retried, held for a person, since a later pin refresh can make it
+    /// valid. No label is both, and the rest are neither.
     #[test]
-    fn only_a_witness_that_did_not_answer_is_transient() {
-        assert!(witness_failure_is_transient("witness_timeout"));
-        assert!(witness_failure_is_transient("witness_unreachable"));
+    fn witness_failures_split_into_fetch_and_trust() {
+        let fetch = [
+            "witness_timeout",
+            "witness_unreachable",
+            "witness_attestation_unavailable",
+            "witness_collateral_unavailable",
+        ];
+        let trust = [
+            "witness_quote_unverified",
+            "witness_quote_replayed",
+            "witness_signer_unexpected",
+            crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL,
+        ];
         for label in crate::witness::WitnessTrustError::ALL_REFUSAL_LABELS {
-            if label != "witness_timeout" && label != "witness_unreachable" {
-                assert!(!witness_failure_is_transient(label), "{label}");
-            }
+            assert_eq!(
+                witness_failure_is_transient(label),
+                fetch.contains(&label),
+                "{label}"
+            );
+            assert_eq!(
+                witness_failure_is_untrusted(label),
+                trust.contains(&label),
+                "{label}"
+            );
         }
+        assert!(!witness_failure_is_transient(REASON_WITNESS_SATURATED));
     }
 
     #[tokio::test]

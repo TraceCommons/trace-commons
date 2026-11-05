@@ -990,12 +990,18 @@ pub const REASONS_NEEDING_A_PERSON: &[&str] = &[
     // The Automatic Scrub check's hold (K4 of #1118): the scrubber was
     // unsure about the session, and an unsure session never moves on its own.
     super::second_look::REASON_SECOND_LOOK_REVIEW_REQUIRED,
-    // A witness that never answered through the whole transient-upload
-    // budget (`daemon::TransientUpload::Witness`). While retrying, the entry
-    // is `Approved` under the same label and is not held; only the spent
-    // budget leaves it `Pending` under it.
+    // A witness whose evidence could not be fetched through the whole
+    // transient-upload budget (`submit::witness_failure_is_transient`).
+    // While retrying, the entry is `Approved` under the same label and is
+    // not held; only the spent budget leaves it `Pending` under it.
     "witness_timeout",
     "witness_unreachable",
+    REASON_WITNESS_ATTESTATION_UNAVAILABLE,
+    "witness_collateral_unavailable",
+    // A witness whose evidence did not verify
+    // (`submit::witness_failure_is_untrusted`): a pin refresh may make it
+    // valid, so a person decides rather than the session being refused.
+    crate::submit::REASON_WITNESS_NOT_TRUSTED,
 ];
 
 /// `witness_attestation_unavailable`, as `witness::WitnessTrustError` spells
