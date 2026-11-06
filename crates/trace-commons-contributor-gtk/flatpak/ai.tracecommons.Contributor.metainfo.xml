@@ -64,7 +64,7 @@
   <releases>
     <release version="0.24.8" date="2026-11-05">
       <description>
-        <p>Connect tools first, choose data uses later, and move tabs with a direct drag.</p>
+        <p>On macOS, connects tools first, lets data uses be skipped (skipping earns no credit), removes Use Private AI only, and moves tabs with a direct drag. Existing completed setups are unchanged.</p>
       </description>
     </release>
     <release version="0.24.7" date="2026-11-05">
