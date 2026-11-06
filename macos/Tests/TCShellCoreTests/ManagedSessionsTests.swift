@@ -125,8 +125,61 @@ final class ManagedSessionsTests: XCTestCase {
     func testOpenCodeKeepsKeyConnectionsAndStartsOnTheSignIn() {
         XCTAssertEqual(ManagedSurface.connectionOptions(signedIn: true, tool: "opencode"), ["api_key", "near_ai"])
         XCTAssertEqual(ManagedSurface.connectionOptions(signedIn: false, tool: "opencode"), ["api_key", "near_ai"])
-        XCTAssertEqual(ManagedSurface.signInTools, ["claude", "codex", "opencode"])
+        XCTAssertEqual(ManagedSurface.signInTools, ["claude", "codex", "opencode", "hermes"])
         XCTAssertEqual(ManagedSurface.startKey("opencode"), "start_opencode")
+    }
+
+    func testHermesUsesSharedNamesAndOnlySavedKeyConnections() {
+        XCTAssertEqual(ManagedSurface.toolKey("hermes"), "hermes")
+        XCTAssertEqual(ManagedSurface.startKey("hermes"), "start_hermes")
+        for signedIn in [false, true] {
+            XCTAssertEqual(ManagedSurface.connectionOptions(signedIn: signedIn, tool: "hermes"), ["api_key", "near_ai"])
+        }
+        XCTAssertFalse(ManagedSurface.offersTraceCollection(tool: "hermes"))
+        for tool in ["claude", "codex", "opencode"] {
+            XCTAssertTrue(ManagedSurface.offersTraceCollection(tool: tool))
+        }
+    }
+
+    func testHermesSignInLaunchRequiresInstalledToolAndSignInEntry() throws {
+        func snapshot(tools: [String]?, signedIn: Bool = true, entry: Bool = true) throws -> ManagedSnapshot {
+            let wire = Self.signedInWithOpenCode(tools: tools, signedIn: signedIn)
+            var value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(wire.utf8)) as? [String: Any])
+            if entry {
+                var entries = try XCTUnwrap(value["sign_in_accounts"] as? [[String: Any]])
+                entries.append(["id": "h", "tool": "hermes", "connection": "near_ai_signin", "label": "NEAR AI", "auth_state": "ready"])
+                value["sign_in_accounts"] = entries
+            }
+            value["generations"] = ["hermes": 7]
+            return try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
+        }
+        for tools in [nil, [], [Self.toolRow("hermes", installed: false)]] as [[String]?] {
+            let value = try snapshot(tools: tools)
+            XCTAssertFalse(value.signInStartTools.contains("hermes"))
+            XCTAssertNil(value.signInLaunchParams(tool: "hermes", cwd: nil, requestID: "r"))
+        }
+        let installed = [Self.toolRow("hermes", installed: true)]
+        XCTAssertFalse(try snapshot(tools: installed, signedIn: false).signInStartTools.contains("hermes"))
+        XCTAssertFalse(try snapshot(tools: installed, entry: false).signInStartTools.contains("hermes"))
+        let value = try snapshot(tools: installed)
+        XCTAssertEqual(value.signInStartTools, ["hermes"])
+        let params = try XCTUnwrap(value.signInLaunchParams(tool: "hermes", cwd: nil, requestID: "r"))
+        XCTAssertEqual(params["tool"] as? String, "hermes")
+        XCTAssertEqual(params["connection"] as? String, "near_ai_signin")
+        XCTAssertEqual(params["account_id"] as? String, "h")
+        XCTAssertEqual(params["expected_generation"] as? UInt64, 7)
+        XCTAssertNil(params["cwd"])
+        XCTAssertNil(params["model"])
+        XCTAssertNil(params["collect_traces"])
+    }
+
+    func testHermesNeverOffersResumeEvenWhenGlobalResumeIsAvailable() throws {
+        let wire = #"{"id":"h","tool":"hermes","connection":"near_ai_signin","account_id":"a","account_label":"NEAR AI","project_label":"Project","cwd":"/tmp","state":"exited","purpose":"coding","can_resume":true,"can_start_again":true}"#
+        let session = try JSONDecoder().decode(ManagedSession.self, from: Data(wire.utf8))
+        XCTAssertFalse(ManagedSurface.offersResume(session, terminalLaunch: true, resumeCapable: true))
+        XCTAssertFalse(ManagedSurface.offersCopyResumeCommand(session, configDirectoryKnown: true))
+        XCTAssertEqual(ManagedSurface.rowButtons(session, terminalLaunch: true, resumeCapable: true), [.startAgain])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(session, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: true), [.dismiss])
     }
 
     /// A tools row as the daemon sends it.
@@ -1004,6 +1057,13 @@ final class ManagedSessionsTests: XCTestCase {
         let openCode = params(account("opencode", "api_key"), "  gpt-5 ")
         XCTAssertEqual(openCode["model"] as? String, "gpt-5")
         XCTAssertEqual(openCode["collect_traces"] as? Bool, true)
+        for connection in ["api_key", "near_ai", "near_ai_signin"] {
+            let hermes = account("hermes", connection)
+            XCTAssertEqual(params(hermes, "  provider/model \n")["model"] as? String, "provider/model")
+            XCTAssertNil(params(hermes, nil)["model"])
+            XCTAssertNil(params(hermes, " \n")["model"])
+            XCTAssertNil(params(hermes, "provider/model")["collect_traces"])
+        }
     }
 
     func testAnUnavailableModelHasItsOwnLine() {

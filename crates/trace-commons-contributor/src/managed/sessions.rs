@@ -1012,7 +1012,13 @@ impl SessionRegistry {
             .model
             .as_deref()
             .is_some_and(super::opencode::valid_model);
-        if request.tool == ToolId::Opencode {
+        // Hermes collection and conversation binding have not been qualified.
+        // Refuse rather than imply a trace was collected or a chat resumed.
+        if request.tool == ToolId::Hermes && (request.collect_traces || request.resume_of.is_some())
+        {
+            return Err(ManagedError::InvalidRequest);
+        }
+        if matches!(request.tool, ToolId::Opencode | ToolId::Hermes) {
             // The NEAR AI sign-in can choose a model or use its proxy's
             // default. A saved key needs a model OpenCode can be told.
             let model_ok = match request.connection {
@@ -1043,7 +1049,7 @@ impl SessionRegistry {
         if let Some(background) = request.background_model.as_deref() {
             let ok = super::opencode::valid_model(background)
                 && request.purpose == LaunchPurpose::Coding
-                && request.tool != ToolId::Codex
+                && matches!(request.tool, ToolId::Claude | ToolId::Opencode)
                 && matches!(
                     request.connection,
                     ConnectionKind::NearAi | ConnectionKind::NearAiSignIn
@@ -1513,6 +1519,15 @@ impl SessionRegistry {
             None => entry.view.model = Some(model.to_owned()),
         }
         self.commit(next)
+    }
+
+    /// The tool of a session, including rows replaced in the visible history.
+    pub fn tool(&self, id: Uuid) -> Option<ToolId> {
+        self.data
+            .entries
+            .iter()
+            .find(|e| e.view.id == id)
+            .map(|e| e.view.tool)
     }
 
     /// The connection and state of a session, without consuming anything.

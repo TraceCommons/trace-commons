@@ -35,6 +35,26 @@ final class ManagedCLIOptionsSettingsTests: XCTestCase {
     }
 
     @MainActor
+    func testHermesOptionsSaveUsesItsOwnToolAndPreservesOtherDrafts() async throws {
+        let model = AppModel()
+        model.featureFlags = try FeatureFlagIntegrationTests.hermesFlags(enabled: true)
+        let daemon = CLIOptionsDaemon(reply: .echo)
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        var value = try snapshot(options: "--model old")
+        value.cliOptions?["hermes"] = ""
+        model.managedSnapshot = value
+        model.managedCLIOptionsDrafts.edit(tool: "hermes", options: "--model hermes-model")
+        model.managedCLIOptionsDrafts.edit(tool: "codex", options: "--model pending")
+        model.saveManagedCLIOptions(tool: "hermes")
+        try await waitForSave(model)
+        XCTAssertEqual(daemon.sent, ["tool": "hermes", "options": "--model hermes-model"])
+        XCTAssertEqual(model.managedSnapshot?.cliOptions?["hermes"], "--model hermes-model")
+        XCTAssertFalse(model.managedCLIOptionsDrafts.isChanged(tool: "hermes", saved: model.managedSnapshot?.cliOptions))
+        XCTAssertTrue(model.managedCLIOptionsDrafts.isChanged(tool: "codex", saved: model.managedSnapshot?.cliOptions))
+        XCTAssertNil(model.managedErrorKey)
+    }
+
+    @MainActor
     func testRefusedOrUnconfirmedSaveRetainsTheDraft() async throws {
         for reply in [CLIOptionsDaemon.Reply.refuse, .mismatch] {
             let model = AppModel()

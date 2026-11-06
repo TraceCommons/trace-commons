@@ -56,6 +56,132 @@ use super::client::{PlatformStream, connect_for_attach};
 use super::ipc::{Event, Response};
 use crate::config::ConfigStore;
 
+// The slot and a reader's cloned sink have separate lifetimes. Disabling the
+// shared gate prevents a reader that cloned before unsubscribe from entering a
+// callback afterwards; locking the callback then drains a call already in flight.
+#[cfg(any(unix, windows))]
+type EventSinkSlot = std::sync::Arc<std::sync::Mutex<EventSinkState>>;
+#[cfg(any(unix, windows))]
+#[derive(Default)]
+struct EventSinkState {
+    current: Option<std::sync::Arc<EventSink>>,
+    retired: Vec<std::sync::Arc<EventSink>>,
+}
+#[cfg(any(unix, windows))]
+struct EventSink {
+    enabled: std::sync::atomic::AtomicBool,
+    callback: std::sync::Mutex<Box<dyn Fn(Event) + Send + 'static>>,
+}
+#[cfg(any(unix, windows))]
+std::thread_local! { static IN_EVENT_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(any(unix, windows))]
+struct CallbackScope(bool);
+#[cfg(any(unix, windows))]
+impl Drop for CallbackScope {
+    fn drop(&mut self) {
+        IN_EVENT_CALLBACK.with(|active| active.set(self.0));
+    }
+}
+#[cfg(any(unix, windows))]
+impl EventSink {
+    fn new(callback: impl Fn(Event) + Send + 'static) -> Self {
+        Self {
+            enabled: std::sync::atomic::AtomicBool::new(true),
+            callback: std::sync::Mutex::new(Box::new(callback)),
+        }
+    }
+    fn deliver(&self, event: Event) {
+        let callback = self.callback.lock().unwrap_or_else(|p| p.into_inner());
+        if self.enabled.load(std::sync::atomic::Ordering::Acquire) {
+            let _scope = CallbackScope(IN_EVENT_CALLBACK.with(|active| active.replace(true)));
+            callback(event);
+        }
+    }
+}
+#[cfg(any(unix, windows))]
+fn current_sink(slot: &EventSinkSlot) -> Option<std::sync::Arc<EventSink>> {
+    slot.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .current
+        .clone()
+}
+#[cfg(any(unix, windows))]
+fn prune_retired(state: &mut EventSinkState) {
+    // Disabled + no active callback means even an outstanding reader clone can
+    // never enter it again. Never wait while holding the slot lock: callbacks
+    // may clear their own slot.
+    state
+        .retired
+        .retain(|sink| sink.callback.try_lock().is_err());
+}
+#[cfg(any(unix, windows))]
+fn install_sink(slot: &EventSinkSlot, sink: std::sync::Arc<EventSink>) {
+    let mut state = slot.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(previous) = state.current.replace(sink) {
+        previous
+            .enabled
+            .store(false, std::sync::atomic::Ordering::Release);
+        state.retired.push(previous);
+    }
+    prune_retired(&mut state);
+}
+#[cfg(any(unix, windows))]
+fn subscribe_sink(
+    slot: &EventSinkSlot,
+    sink: impl Fn(Event) + Send + 'static,
+    subscribe: impl FnOnce() -> Result<Response, AttachError>,
+) -> Result<Response, AttachError> {
+    let candidate = std::sync::Arc::new(EventSink::new(sink));
+    install_sink(slot, std::sync::Arc::clone(&candidate));
+    let result = subscribe();
+    if result.is_err() {
+        // A zero-token failure lets a C host release the candidate's ctx.
+        candidate
+            .enabled
+            .store(false, std::sync::atomic::Ordering::Release);
+        drop(candidate.callback.lock().unwrap_or_else(|p| p.into_inner()));
+    }
+    result
+}
+#[cfg(any(unix, windows))]
+fn disable_sink(slot: &EventSinkSlot) {
+    let state = slot.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(sink) = &state.current {
+        sink.enabled
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+    // Retired sinks were disabled at replacement and remain reachable until
+    // their callback has finished, including after a subscribe call times out.
+}
+#[cfg(any(unix, windows))]
+fn quiesce_sink(slot: &EventSinkSlot) -> bool {
+    if IN_EVENT_CALLBACK.with(|active| active.get())
+        || tokio::runtime::Handle::try_current().is_ok()
+    {
+        return false;
+    }
+    let sinks = {
+        let state = slot.lock().unwrap_or_else(|p| p.into_inner());
+        let sinks: Vec<_> = state
+            .retired
+            .iter()
+            .chain(state.current.iter())
+            .cloned()
+            .collect();
+        for sink in &sinks {
+            sink.enabled
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+        sinks
+    };
+    for sink in sinks {
+        // A future delivery checks enabled under this same lock.
+        drop(sink.callback.lock().unwrap_or_else(|p| p.into_inner()));
+    }
+    prune_retired(&mut slot.lock().unwrap_or_else(|p| p.into_inner()));
+    true
+}
+
 /// The daemon method an attached client refuses to forward.
 ///
 /// Matched here rather than left to the daemon because the daemon would
@@ -104,7 +230,7 @@ pub struct AttachedDaemon {
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Response>>>>,
     /// Pushed frames go here. `None` until `subscribe` installs a sink, so a
     /// client that never subscribes costs nothing to feed.
-    sink: Arc<Mutex<Option<Arc<Mutex<Box<dyn Fn(Event) + Send + 'static>>>>>>,
+    sink: EventSinkSlot,
     next_id: AtomicU64,
     closed: Arc<AtomicBool>,
 }
@@ -133,8 +259,7 @@ impl AttachedDaemon {
 
         let pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Response>>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let sink: Arc<Mutex<Option<Arc<Mutex<Box<dyn Fn(Event) + Send + 'static>>>>>> =
-            Arc::new(Mutex::new(None));
+        let sink: EventSinkSlot = Arc::new(Mutex::new(EventSinkState::default()));
         let closed = Arc::new(AtomicBool::new(false));
 
         let reader_pending = Arc::clone(&pending);
@@ -159,9 +284,9 @@ impl AttachedDaemon {
                         continue;
                     }
                     if let Ok(event) = serde_json::from_str::<Event>(&line) {
-                        let callback = reader_sink.lock().unwrap().clone();
+                        let callback = current_sink(&reader_sink);
                         if let Some(sink) = callback {
-                            (sink.lock().unwrap())(event);
+                            sink.deliver(event);
                         }
                     }
                 }
@@ -247,7 +372,13 @@ impl AttachedDaemon {
     /// would be a protocol change; a host that no longer wants events wants
     /// its callback to stop being invoked, which is exactly this.
     pub fn clear_sink(&self) {
-        *self.sink.lock().unwrap() = None;
+        disable_sink(&self.sink);
+    }
+
+    /// A host may free its callback context only after this barrier succeeds.
+    /// Refuses inside a callback or Tokio context; nonblocking clear remains available there.
+    pub fn clear_sink_and_wait(&self) -> bool {
+        quiesce_sink(&self.sink)
     }
 
     /// Close this client connection without sending the daemon's shutdown
@@ -283,8 +414,9 @@ impl AttachedDaemon {
     where
         F: Fn(Event) + Send + 'static,
     {
-        *self.sink.lock().unwrap() = Some(Arc::new(Mutex::new(Box::new(sink))));
-        self.call("subscribe", &serde_json::json!({ "accepts": accepts }))
+        subscribe_sink(&self.sink, sink, || {
+            self.call("subscribe", &serde_json::json!({ "accepts": accepts }))
+        })
     }
 }
 
@@ -304,7 +436,10 @@ mod windows_attached {
     use tokio::time::Instant;
     use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
 
-    use super::{AttachError, ConfigStore, Event, Response};
+    use super::{
+        AttachError, ConfigStore, Event, EventSinkSlot, EventSinkState, Response, current_sink,
+        disable_sink, quiesce_sink, subscribe_sink,
+    };
 
     const METHOD_SHUTDOWN: &str = "shutdown";
     const PIPE_OPEN_RETRY_WINDOW: Duration = Duration::from_millis(500);
@@ -322,7 +457,7 @@ mod windows_attached {
     /// A live, persistent connection to a daemon running in another process.
     pub struct AttachedDaemon {
         commands: tokio_mpsc::UnboundedSender<Command>,
-        sink: Arc<Mutex<Option<Arc<Mutex<Box<dyn Fn(Event) + Send + 'static>>>>>>,
+        sink: EventSinkSlot,
         next_id: AtomicU64,
         closed: Arc<AtomicBool>,
     }
@@ -333,8 +468,7 @@ mod windows_attached {
             let pipe_name = super::super::win_pipe::pipe_name(store);
             let (commands, command_rx) = tokio_mpsc::unbounded_channel();
             let (ready_tx, ready_rx) = mpsc::channel();
-            let sink: Arc<Mutex<Option<Arc<Mutex<Box<dyn Fn(Event) + Send + 'static>>>>>> =
-                Arc::new(Mutex::new(None));
+            let sink: EventSinkSlot = Arc::new(Mutex::new(EventSinkState::default()));
             let closed = Arc::new(AtomicBool::new(false));
 
             let thread_sink = Arc::clone(&sink);
@@ -443,7 +577,12 @@ mod windows_attached {
 
         /// Stop delivering pushed events while leaving the connection usable.
         pub fn clear_sink(&self) {
-            *self.sink.lock().unwrap() = None;
+            disable_sink(&self.sink);
+        }
+
+        /// See the Unix callback-context barrier.
+        pub fn clear_sink_and_wait(&self) -> bool {
+            quiesce_sink(&self.sink)
         }
 
         /// Close this client without asking the daemon to stop.
@@ -469,8 +608,9 @@ mod windows_attached {
         where
             F: Fn(Event) + Send + 'static,
         {
-            *self.sink.lock().unwrap() = Some(Arc::new(Mutex::new(Box::new(sink))));
-            self.call("subscribe", &serde_json::json!({ "accepts": accepts }))
+            subscribe_sink(&self.sink, sink, || {
+                self.call("subscribe", &serde_json::json!({ "accepts": accepts }))
+            })
         }
     }
 
@@ -498,7 +638,7 @@ mod windows_attached {
     async fn run_connection(
         client: NamedPipeClient,
         mut commands: tokio_mpsc::UnboundedReceiver<Command>,
-        sink: Arc<Mutex<Option<Arc<Mutex<Box<dyn Fn(Event) + Send + 'static>>>>>>,
+        sink: EventSinkSlot,
         closed: Arc<AtomicBool>,
     ) {
         let (read_half, mut write_half) = tokio::io::split(client);
@@ -515,9 +655,9 @@ mod windows_attached {
                                     let _ = waiter.send(response);
                                 }
                             } else if let Ok(event) = serde_json::from_str::<Event>(&line) {
-                                let callback = sink.lock().unwrap().clone();
+                                let callback = current_sink(&sink);
                                 if let Some(sink) = callback {
-                                    (sink.lock().unwrap())(event);
+                                    sink.deliver(event);
                                 }
                             }
                         }
@@ -572,6 +712,10 @@ impl AttachedDaemon {
         match self._never {}
     }
 
+    pub fn clear_sink_and_wait(&self) -> bool {
+        match self._never {}
+    }
+
     pub fn close(&self) {
         match self._never {}
     }
@@ -605,6 +749,112 @@ impl AttachedDaemon {
 
 #[cfg(all(test, any(unix, windows)))]
 mod tests {
+    #[test]
+    fn failed_subscription_disables_a_previously_cloned_candidate() {
+        let slot: super::EventSinkSlot =
+            std::sync::Arc::new(std::sync::Mutex::new(super::EventSinkState::default()));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&calls);
+        let mut cloned = None;
+        let result = super::subscribe_sink(
+            &slot,
+            move |_| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+            || {
+                cloned = super::current_sink(&slot);
+                Err(super::AttachError::Disconnected)
+            },
+        );
+        assert!(result.is_err());
+        cloned.unwrap().deliver(super::Event {
+            event: "late".into(),
+            data: serde_json::json!({}),
+        });
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn replacement_cannot_hide_an_active_callback_from_unsubscribe() {
+        let slot: super::EventSinkSlot =
+            std::sync::Arc::new(std::sync::Mutex::new(super::EventSinkState::default()));
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let old = std::sync::Arc::new(super::EventSink::new(move |_| {
+            entered_tx.send(()).unwrap();
+            release_rx.lock().unwrap().recv().unwrap();
+        }));
+        super::install_sink(&slot, std::sync::Arc::clone(&old));
+        let reader = std::thread::spawn(move || {
+            old.deliver(super::Event {
+                event: "old".into(),
+                data: serde_json::json!({}),
+            })
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        super::install_sink(&slot, std::sync::Arc::new(super::EventSink::new(|_| {})));
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        let barrier = std::thread::spawn(move || {
+            assert!(super::quiesce_sink(&slot));
+            done_tx.send(()).unwrap();
+        });
+        let returned_early = done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_ok();
+        release_tx.send(()).unwrap();
+        reader.join().unwrap();
+        barrier.join().unwrap();
+        assert!(
+            !returned_early,
+            "replacement hid a callback that still borrows host context"
+        );
+    }
+
+    #[test]
+    fn a_reader_cloned_before_unsubscribe_cannot_call_after_the_barrier() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&calls);
+        let sink = std::sync::Arc::new(super::EventSink::new(move |_| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+        let slot: super::EventSinkSlot =
+            std::sync::Arc::new(std::sync::Mutex::new(super::EventSinkState {
+                current: Some(std::sync::Arc::clone(&sink)),
+                retired: Vec::new(),
+            }));
+        super::disable_sink(&slot); // stop() does not discard the later barrier.
+        assert!(super::quiesce_sink(&slot));
+        sink.deliver(super::Event {
+            event: "late".into(),
+            data: serde_json::json!({}),
+        });
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn callback_context_refuses_a_barrier_but_can_disable_itself() {
+        let slot: super::EventSinkSlot =
+            std::sync::Arc::new(std::sync::Mutex::new(super::EventSinkState::default()));
+        let weak = std::sync::Arc::downgrade(&slot);
+        let sink = std::sync::Arc::new(super::EventSink::new(move |_| {
+            let slot = weak.upgrade().unwrap();
+            assert!(
+                !super::quiesce_sink(&slot),
+                "a callback must not wait for itself"
+            );
+            super::disable_sink(&slot);
+        }));
+        super::install_sink(&slot, std::sync::Arc::clone(&sink));
+        sink.deliver(super::Event {
+            event: "first".into(),
+            data: serde_json::json!({}),
+        });
+        assert!(super::quiesce_sink(&slot));
+    }
+
     use super::*;
     use crate::daemon::start_embedded;
     #[cfg(windows)]

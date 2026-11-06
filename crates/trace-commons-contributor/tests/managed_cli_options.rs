@@ -85,6 +85,37 @@ fn saved_options_round_trip_through_ipc_and_restart() {
 }
 
 #[test]
+fn hermes_options_cannot_replace_the_managed_route_profile_or_conversation() {
+    use trace_commons_contributor::managed::{ToolId, options::parse};
+    assert_eq!(
+        parse(
+            ToolId::Hermes,
+            "--reasoning high --max-turns=12 --checkpoints"
+        )
+        .unwrap(),
+        ["--reasoning", "high", "--max-turns=12", "--checkpoints"]
+    );
+    for invalid in [
+        "--profile personal",
+        "-p personal",
+        "--provider openrouter",
+        "--prov=openrouter",
+        "--base-url https://example.com",
+        "--api-key other",
+        "--model other",
+        "-mother",
+        "--resume latest",
+        "-c",
+        "--tui",
+        "gateway start",
+        "--no-safe-mode",
+        "--reasoning",
+    ] {
+        assert!(parse(ToolId::Hermes, invalid).is_err(), "{invalid}");
+    }
+}
+
+#[test]
 fn argv_grouping_preserves_literal_shell_syntax_and_empty_values() {
     use trace_commons_contributor::managed::{ToolId, options::parse};
     // A backslash escapes the space off Windows; on Windows it is part of

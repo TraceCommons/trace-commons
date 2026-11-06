@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "registry_version": 2,
+  "environment": "testing",
+  "capabilities": ["managed_hermes"],
+  "remote_enable": ["managed_hermes"]
+}

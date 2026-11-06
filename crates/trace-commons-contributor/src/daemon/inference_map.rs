@@ -501,7 +501,7 @@ fn managed_session_projection(row: &crate::managed::sessions::SessionView) -> se
         // Both NEAR AI connections: an account, and the app's own sign-in.
         (ConnectionKind::NearAi | ConnectionKind::NearAiSignIn, _) => "near_ai",
         (_, ToolId::Claude) => "anthropic",
-        (_, ToolId::Codex | ToolId::Opencode) => "openai",
+        (_, ToolId::Codex | ToolId::Opencode | ToolId::Hermes) => "openai",
     };
     serde_json::json!({
         "id": row.id, "tool": row.tool, "connection": row.connection,

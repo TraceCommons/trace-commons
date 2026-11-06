@@ -9763,9 +9763,10 @@ Acceptance can earn pending credit; this is not credit redemption.
 ### Installed coding tools
 
 `managed_snapshot.tools` is an additive array of `{tool, installed, install_url}`
-rows for `claude`, `codex`, and `opencode`. Each row reports executable discovery
+rows for `claude`, `codex`, `opencode`, and, when `managed_hermes` is enabled,
+`hermes`. Each row reports executable discovery
 independently of trace-source discovery, saved accounts, or sign-in. It does not
-verify tool versions, read traces, or grant consent. All three are managed
+verify tool versions, read traces, or grant consent. All four are managed
 tools; see "Managed OpenCode launch additions" below for OpenCode's launch
 fields. `install_url` is the tool's setup guide from the shared install-guide
 table (`tc_install_guides_json`). Missing native launch binaries return
@@ -9779,10 +9780,37 @@ files are skipped. Windows installation detection includes `.exe`, `.cmd`, and
 wrapper-only installations can be reported installed without being launchable
 through managed sessions. Discovery never invokes a command interpreter. Each
 snapshot refresh checks again. Before daemon startup,
-`tc_managed_tools_json` returns the same array, `tc_managed_copy_json` returns
+`tc_managed_tools_json` returns discovery rows for all four tools, not feature
+availability; shells must independently gate Hermes using the daemon's feature
+snapshot. `tc_managed_copy_json` returns
 the shared copy object, and `tc_install_guides_json` returns the install-guide
 table as `{source slug: url}` for every tool first run asks about; all three
 strings are freed with `tc_string_free`.
+
+### Managed Hermes launches
+
+The default-off, live `managed_hermes` flag gates new accounts, setup, selection,
+preparation, start-again and terminal launch/redemption. Disabled or expired
+decisions return `managed-invalid-request`, including for an unredeemed ticket.
+Snapshots omit Hermes tools, CLI options, sign-in accounts and defaults, and
+disable start-again while retaining saved accounts/history and existing session
+reporting, focus, stop and dismissal. Native views also gate stale snapshots and
+open launch dialogs. The CLI checks before prompting for sign-in. No environment
+manifest is published by adding this flag.
+
+The `hermes` tool supports `near_ai_signin`, saved `near_ai` keys and OpenAI
+`api_key` accounts, with its own generation/default and stable sign-in account.
+Subscriptions and login launches are refused. The sign-in may omit `model` to
+use the proxy default; saved keys require a model ID with OpenCode's validation.
+`collect_traces: true`, `resume_of`, and `background_model` are refused for Hermes.
+
+The native launcher gives each session a fresh `HERMES_HOME`, selects
+`--profile default chat --cli --safe-mode`, and explicitly sets the custom
+provider, model and endpoint. Keys are in the environment, never argv or saved
+configuration. It qualifies required CLI switches through a bounded
+`chat --help` probe. The macOS shell hides unsupported controls and does not
+offer Hermes when an older daemon omits its availability row. The CLI option
+allow-list is documented in [Managed sessions](managed-sessions.md#hermes-sessions).
 
 ### Managed OpenCode launch additions
 
@@ -10060,3 +10088,21 @@ Claude uses fixed OAuth profile/usage endpoints, stable account/organization evi
 Codex remains file-backed and refuses native-running/ambiguous-process or unsupported-storage cases. Its successful native renewal still requires a matching final identity/revision witness. Both providers use bounded sanitized failures and in-memory snapshots, limited to 128 logins. No credential, filesystem path, raw provider account identifier or raw provider error crosses IPC.
 
 Unenroll and managed-registry binding changes invalidate pending generations and held readings. A late native permission result cannot continue to HTTP after cancellation. Claude remains available for a future explicit Refresh; the absence of a Commons enrollment does not turn its usage reader into a background action. See [subscription usage](operator/subscription-usage.md).
+
+## Environment feature snapshots
+
+`feature_flags_snapshot` (empty parameters) returns the daemon-owned schema-1
+feature snapshot: environment, profile digest, daemon-instance UUID, increasing
+snapshot generation, sampled time, source, manifest revision/expiry/freshness,
+and flag decisions (`enabled`, `pending`, `capability_blocked`, `timing`).
+It does no networking or disk writes. `feature_flags_refresh` (empty parameters)
+returns `{"requested":true}` and schedules a coalesced anonymous refresh; it
+cannot accept a URL or flag values. Developer dry runs allow the snapshot read
+but refuse refresh. Neither method grants any operation authorization.
+
+`feature_flags_changed` is an opt-in event, carrying `instance_id` and
+`generation`; subscribers declare that event in `accepts` and re-read the complete
+snapshot. It does not represent notification permission. Consumers also read on
+attach/start and after a subscription delivery gap. Missing methods on an older
+daemon mean unavailable flags; native clients must not invent local enables.
+See [feature flags](operator/feature-flags.md) for lifetime and offline behavior.

@@ -68,7 +68,7 @@ an explicit new selection before a CLI launch without `--account`.
 
 ## Availability and recovery
 
-The app checks for executable Claude Code, Codex and OpenCode installations
+The app checks for executable Claude Code, Codex, OpenCode and Hermes installations
 using the same resolver as managed launches. This does not run the tool, scan
 its session store, or enable watching, importing or collection. **Install** opens
 the tool's official installation page; **Check again** refreshes availability.
@@ -365,6 +365,44 @@ Every launch path except macOS Terminal still needs the release smoke test
 below on its platform: none of the Windows or Linux terminals is started by
 the test suite.
 
+## Hermes sessions
+
+Hermes can start from Private AI on macOS or with `near-ai launch hermes` when
+the environment's `managed_hermes` feature flag is enabled. It defaults off;
+see [Feature flags](operator/feature-flags.md). A live disable or expired enable
+hides new-work controls and refuses new setup/accounts/launches, including
+prepared tickets, without cancelling running sessions or deleting saved accounts
+and history. Show, Stop and Dismiss remain available for existing sessions.
+It uses the app's NEAR AI sign-in, a saved NEAR AI key (`near-ai`), or an
+OpenAI API key (`api-key`). Subscription sign-in is not supported. NEAR AI
+sign-in uses the model catalogue/default; a saved key requires a Model ID.
+
+```sh
+near-ai launch hermes --cwd /path/to/project
+near-ai launch hermes --account Work --model provider/model --cwd /path/to/project
+```
+
+Each launch gets a fresh private `HERMES_HOME` under its managed account and
+explicitly selects the default profile, custom provider, endpoint and model.
+It uses Hermes's classic CLI in safe mode: user/project customization, plugins,
+MCP and injected rules are disabled. The ordinary Hermes profile is unchanged.
+Credentials go through the child environment, not command arguments or saved
+configuration. On NEAR AI, Hermes sees only the session proxy's local credential.
+The launcher stops that isolated home's gateway after the terminal exits.
+This is configuration isolation, not a filesystem/network sandbox for agent tools.
+
+The launcher checks `chat --help` for the required isolation/endpoint switches
+instead of interpreting Hermes's development-version banner. The contract was
+inspected in upstream revision `84a0301415ed` (2026-11-05); older installations
+without those switches are refused. Trace collection, conversation resume and
+background-model selection are not yet supported for managed Hermes launches;
+requests for them are refused rather than silently ignored.
+
+Hermes CLI options currently accept `--reasoning`, `--max-turns`, `--run-budget`,
+`--verbose` and `--checkpoints`. Route, profile, interface and resume overrides
+are refused, including abbreviated flags. Existing Windows, GTK and Tauri
+tool pickers are unchanged; Hermes is available through the shared CLI/backend.
+
 ## OpenCode sessions
 
 OpenCode managed launches use the app's NEAR AI sign-in, an OpenAI API key
@@ -456,8 +494,8 @@ readable without the added availability or managed-route fields.
 
 ## Agent CLI options
 
-Settings > Tools saves additional CLI options separately for Claude Code, Codex
-and OpenCode. The defaults are empty. A saved change applies to newly prepared
+Settings > Tools saves additional CLI options separately for Claude Code, Codex,
+OpenCode and Hermes. The defaults are empty. A saved change applies to newly prepared
 coding sessions from the app and `near-ai launch`, including a new launch made
 with Start again. Existing sessions and account sign-in commands keep their
 options. A launch ticket captures the options at preparation, so changing

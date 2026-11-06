@@ -36,7 +36,7 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
     /// older daemon and for a launch from the command line.
     public let canStop: Bool
     /// The ended session can be launched again as it was.
-    public let canStartAgain: Bool
+    public private(set) var canStartAgain: Bool
     /// The ended session can be resumed: its conversation continues. False
     /// from an older daemon.
     public let canResume: Bool
@@ -79,6 +79,12 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
         canDismiss = try c.decodeIfPresent(Bool.self, forKey: .canDismiss) ?? false
         resumedFrom = try c.decodeIfPresent(String.self, forKey: .resumedFrom).flatMap(SourceCandidate.Wire.parseTimestamp)
         startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt).flatMap(SourceCandidate.Wire.parseTimestamp)
+    }
+
+    func withoutStartAgain() -> Self {
+        var session = self
+        session.canStartAgain = false
+        return session
     }
 }
 
@@ -178,16 +184,16 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         }
     }
     public var cliOptions: [String: String]?
-    public let tools: [ManagedToolAvailability]?
+    public private(set) var tools: [ManagedToolAvailability]?
     public let copy: [String: String]?
     public var revision: UInt64
     public let accounts: [ManagedAccount]
     /// One entry per tool, derived from the NEAR AI sign-in and never
     /// saved. Empty, or absent from an older daemon, without one.
-    public let signInAccounts: [ManagedAccount]?
-    public let defaults: [ManagedSelection]
+    public private(set) var signInAccounts: [ManagedAccount]?
+    public private(set) var defaults: [ManagedSelection]
     public let generations: [String: UInt64]
-    public let sessions: [ManagedSession]
+    public private(set) var sessions: [ManagedSession]
     public let capabilities: Capabilities
     /// Whether a coding session has started on this computer, from the app
     /// or the command line (#1408). Absent from an older daemon.
@@ -213,10 +219,10 @@ public enum ManagedSurface {
     }
 
     /// The managed tools, in the order the Add and Launch sheets offer them.
-    /// OpenCode is one since #1417.
-    public static let supportedTools = ["claude", "codex", "opencode"]
+    public static let supportedTools = ["claude", "codex", "opencode", "hermes"]
     public static func setupTools(_ tools: [ManagedToolAvailability]?) -> [String] {
-        guard let tools else { return supportedTools }
+        // An older daemon cannot establish Hermes support.
+        guard let tools else { return supportedTools.filter { $0 != "hermes" } }
         return supportedTools.filter { tool in tools.first(where: { $0.tool == tool })?.installed == true }
     }
 
@@ -236,9 +242,9 @@ public enum ManagedSurface {
     }
 
     /// The tools a NEAR AI sign-in session can start, in the order shown.
-    /// OpenCode's button also needs the daemon to report it installed
+    /// OpenCode's and Hermes's buttons need the daemon to report them installed
     /// (`ManagedSnapshot.signInStartTools`).
-    public static let signInTools = ["claude", "codex", "opencode"]
+    public static let signInTools = supportedTools
 
     /// The Start button's key for a tool, or nil for a tool this shell
     /// does not know.
@@ -250,10 +256,10 @@ public enum ManagedSurface {
     /// sign-in entries already run on it, with no key. Signed out, a pasted
     /// key stays the fallback.
     public static func connectionOptions(signedIn: Bool, tool: String = "claude") -> [String] {
-        // OpenCode has no subscription flow. A saved NEAR AI connection for
-        // it uses a pasted key and names its own model, even while signed
-        // in; the sign-in entry starts on the default its proxy names.
-        if tool == "opencode" { return ["api_key", "near_ai"] }
+        // OpenCode and Hermes have no subscription flow. Their saved NEAR
+        // AI connections use pasted keys, even while signed in; the
+        // sign-in entries need no saved key.
+        if ["opencode", "hermes"].contains(tool) { return ["api_key", "near_ai"] }
         return signedIn ? ["subscription", "api_key"] : ["subscription", "api_key", "near_ai"]
     }
 
@@ -272,7 +278,12 @@ public enum ManagedSurface {
 
     /// The tool's name key, or nil for a tool this shell does not know.
     public static func toolKey(_ tool: String) -> String? {
-        ["claude", "codex", "opencode"].contains(tool) ? tool : nil
+        supportedTools.contains(tool) ? tool : nil
+    }
+
+    /// Hermes launches do not collect traces.
+    public static func offersTraceCollection(tool: String) -> Bool {
+        ["claude", "codex", "opencode"].contains(tool)
     }
 
     /// A failed action is said in the shared copy, never as the daemon's
@@ -348,7 +359,7 @@ public enum ManagedSurface {
 public extension ManagedSurface {
     /// Whether an ended row offers Resume as its primary button.
     static func offersResume(_ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool) -> Bool {
-        !session.holdsAccount && session.canResume && terminalLaunch && resumeCapable
+        session.tool != "hermes" && !session.holdsAccount && session.canResume && terminalLaunch && resumeCapable
     }
 
     /// The one visible action on the row (owner, 2026-11-01: fewer things on
@@ -365,7 +376,7 @@ public extension ManagedSurface {
     /// Whether an ended row offers "Copy resume command": the row can resume
     /// and holds no account, and the app knows its config directory.
     static func offersCopyResumeCommand(_ session: ManagedSession, configDirectoryKnown: Bool) -> Bool {
-        session.canResume && !session.holdsAccount && configDirectoryKnown
+        session.tool != "hermes" && session.canResume && !session.holdsAccount && configDirectoryKnown
     }
 
     /// The items in the row's menu: Show and Stop for a running row; for an
@@ -753,9 +764,9 @@ public extension ManagedSurface {
 
     /// Whether the Launch sheet offers a background model picker: Claude
     /// Code and OpenCode wherever their main model comes from NEAR AI's
-    /// catalogue. Codex has no background slot of its own.
+    /// catalogue. Codex and Hermes have no background picker.
     static func offersBackgroundModel(tool: String, connection: String) -> Bool {
-        tool != "codex" && folderModelMode(tool: tool, connection: connection) == .catalogue
+        ["claude", "opencode"].contains(tool) && folderModelMode(tool: tool, connection: connection) == .catalogue
     }
 
     /// The main model a background choice is weighed against: the one the
@@ -856,7 +867,8 @@ public extension ManagedSurface {
 
     /// The Launch sheet's `managed_launch_prepare` request. A model is sent
     /// only where one was chosen: OpenCode's typed model with its
-    /// collection opt-in, or a picked model where `offersModelChoice`.
+    /// collection opt-in, Hermes's optional model, or a picked model where
+    /// `offersModelChoice`.
     static func launchParams(
         account: ManagedAccount, cwd: String?, requestID: String, generation: UInt64,
         model: String?, collectTraces: Bool
@@ -871,6 +883,9 @@ public extension ManagedSurface {
         if account.tool == "opencode" {
             params["model"] = (model ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             params["collect_traces"] = collectTraces
+        } else if account.tool == "hermes" {
+            let chosen = (model ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !chosen.isEmpty { params["model"] = chosen }
         } else if offersModelChoice(tool: account.tool, connection: account.connection),
                   let model, model != defaultModel {
             params["model"] = model
@@ -880,6 +895,19 @@ public extension ManagedSurface {
 }
 
 public extension ManagedSnapshot {
+    /// Apply the latest daemon feature decision to an independently sampled
+    /// managed snapshot. Keep saved accounts and session history intact.
+    func allowingHermes(_ enabled: Bool) -> Self {
+        guard !enabled else { return self }
+        var snapshot = self
+        snapshot.tools = tools?.filter { $0.tool != "hermes" }
+        snapshot.signInAccounts = signInAccounts?.filter { $0.tool != "hermes" }
+        snapshot.defaults = defaults.filter { $0.tool != "hermes" }
+        snapshot.cliOptions?.removeValue(forKey: "hermes")
+        snapshot.sessions = sessions.map { $0.tool == "hermes" ? $0.withoutStartAgain() : $0 }
+        return snapshot
+    }
+
     /// A failed operation identifies its tool; old error payloads fall back
     /// to installed tools, never an unrelated hardcoded provider.
     func updateRecoveryTools(attemptedTool: String?) -> [ManagedToolAvailability] {
@@ -905,7 +933,7 @@ public extension ManagedSnapshot {
     }
     func canLaunch(tool: String) -> Bool {
         guard ManagedSurface.supportedTools.contains(tool) else { return false }
-        guard let tools else { return true }
+        guard let tools else { return tool != "hermes" }
         return tools.first { $0.tool == tool }?.installed == true
     }
 
@@ -966,9 +994,9 @@ public extension ManagedSnapshot {
     }
 
     /// The tools the sign-in card offers a Start button for, in order: each
-    /// with a sign-in entry that can launch. OpenCode only while the
-    /// daemon's `tools` row says it is installed; an older daemon that
-    /// sends no `tools` offers no OpenCode button (fail closed), while
+    /// with a sign-in entry that can launch. OpenCode and Hermes only while
+    /// the daemon's `tools` row says they are installed; an older daemon that
+    /// sends no `tools` offers neither button (fail closed), while
     /// Claude Code and Codex keep `canLaunch`'s older-daemon reading.
     var signInStartTools: [String] {
         ManagedSurface.signInTools.filter { tool in
@@ -980,7 +1008,7 @@ public extension ManagedSnapshot {
 
     /// The `managed_launch_prepare` request that starts `tool` on the NEAR
     /// AI sign-in in `cwd`; nil unless the card offers that tool's Start
-    /// button. It names no model: the session's proxy pins one. A nil `cwd`
+    /// button. It names no model: the session uses its default. A nil `cwd`
     /// names no folder, and the daemon starts the session in the person's
     /// home folder (owner, 2026-10-29).
     func signInLaunchParams(tool: String, cwd: String?, requestID: String) -> [String: Any]? {

@@ -841,6 +841,15 @@ pub extern "C" fn tc_build_channel_json() -> *mut c_char {
     })
 }
 
+/// Immutable feature build identity; no networking or disk access. Free with tc_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_feature_profile_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let identity = trace_commons_contributor::feature_flags::build_profile_identity()?;
+        Ok(to_owned_cstring(&serde_json::to_string(&identity)?))
+    })
+}
+
 /// The command-line tool's state for the app at `bundle_path`
 /// (`cli_tool::probe`): the link this build's channel installs in
 /// `/usr/local/bin`, what is there now, and the AppleScript that changes it.
@@ -1965,12 +1974,13 @@ pub unsafe extern "C" fn tc_unsubscribe(handle: *mut tc_handle, token: u64) {
     }
     {
         // Attached handles keep no task per token -- there is one socket and
-        // one sink -- so unsubscribing is dropping that sink. Done before the
-        // runtime-context refusal below, which guards a join this path does
-        // not perform.
+        // one sink. Disable cloned readers and drain any callback before the
+        // host can free ctx; removing only the slot is not a callback barrier.
         let handle_ref = unsafe { &*handle };
         if let Some(attached) = attached_of(handle_ref) {
-            attached.clear_sink();
+            if !attached.clear_sink_and_wait() {
+                set_last_error("unsubscribe-refused-inside-runtime-context");
+            }
             return;
         }
     }
@@ -7393,8 +7403,8 @@ mod managed_availability_tests {
     fn tools_and_copy_are_available_without_a_daemon_handle() {
         let tools = owned_json(tc_managed_tools_json());
         let rows = tools.as_array().unwrap();
-        assert_eq!(rows.len(), 3);
-        for (row, name) in rows.iter().zip(["claude", "codex", "opencode"]) {
+        assert_eq!(rows.len(), 4);
+        for (row, name) in rows.iter().zip(["claude", "codex", "opencode", "hermes"]) {
             assert_eq!(row["tool"], name);
             assert!(row["installed"].is_boolean());
             assert!(row["install_url"].as_str().unwrap().starts_with("https://"));

@@ -65,6 +65,9 @@ struct ManagedSessionsSection: View {
             model.pendingManagedLaunch = nil
             start(tool)
         }
+        .onChange(of: model.managedToolIsEnabled("hermes")) { _, enabled in
+            if !enabled, launching?.tool == "hermes" { launching = nil }
+        }
         // Kept: `managed_changed` is published only when a request changes
         // the session revision, so an expiry or a reconciled exit is seen
         // on the next read.
@@ -168,7 +171,7 @@ struct ManagedSessionsSection: View {
 
     /// A tool's launch dialog: an optional folder, then Open.
     private func start(_ tool: String) {
-        guard !model.managedBusy else { return }
+        guard !model.managedBusy, model.managedToolIsEnabled(tool) else { return }
         launchTerminal = nil
         launching = ManagedFolderChoice(tool: tool)
     }
@@ -288,7 +291,8 @@ struct ManagedSessionsSection: View {
             model.managedText(session.connection),
         ].compactMap { $0 }.filter { !$0.isEmpty }
         if let selectedModel = session.model { meta.append(ManagedSurface.rowModel(selectedModel, names: modelNames)) }
-        if let collection = session.collection, ["off", "pending", "collected", "failed"].contains(collection) {
+        if ManagedSurface.offersTraceCollection(tool: session.tool),
+           let collection = session.collection, ["off", "pending", "collected", "failed"].contains(collection) {
             meta.append(model.managedText("collection_" + collection))
         }
         if let code = session.exitCode {
@@ -515,7 +519,7 @@ struct ManagedAccountSheet: View {
     @State private var label = ""
     @State private var key = ""
 
-    private var availableTools: [String] { model.managedSnapshot?.setupTools ?? ManagedSurface.supportedTools }
+    private var availableTools: [String] { model.managedSnapshot?.setupTools ?? ManagedSurface.setupTools(nil) }
     private var subscription: Bool { connection == "subscription" }
 
     private var canSave: Bool {
@@ -539,14 +543,14 @@ struct ManagedAccountSheet: View {
                 HStack(alignment: .top, spacing: GlassTokens.Space.s5) {
                     ManagedField(label: model.managedText("tool")) {
                         GlassSelect(
-                            model.managedText("tool"), selection: Binding(get: { tool }, set: { tool = $0; if tool == "opencode" && connection == "subscription" { connection = "api_key" } }),
+                            model.managedText("tool"), selection: Binding(get: { tool }, set: { tool = $0; reconcileConnection() }),
                             options: availableTools.map { GlassPickerOption(model.managedText($0), value: $0) })
                     }
                     ManagedField(label: model.managedText("connection")) {
                         GlassSelect(
                             model.managedText("connection"), selection: $connection,
                             options: ManagedSurface.connectionOptions(signedIn: model.managedSnapshot?.nearAiSignedIn == true, tool: tool)
-                                .map { GlassPickerOption(model.managedText(tool == "opencode" && $0 == "api_key" ? "openai_api_key" : $0), value: $0) })
+                                .map { GlassPickerOption(model.managedText(["opencode", "hermes"].contains(tool) && $0 == "api_key" ? "openai_api_key" : $0), value: $0) })
                     }
                 }
                 GlassTextField(model.managedText("label"), text: $label, prompt: model.managedText("label_placeholder"))
@@ -564,7 +568,11 @@ struct ManagedAccountSheet: View {
 
     private func reconcileTool() {
         if !availableTools.contains(tool), let first = availableTools.first { tool = first }
-        if tool == "opencode" && connection == "subscription" { connection = "api_key" }
+        reconcileConnection()
+    }
+
+    private func reconcileConnection() {
+        if ["opencode", "hermes"].contains(tool), connection == "subscription" { connection = "api_key" }
     }
 
     private func save() {
@@ -597,7 +605,9 @@ struct ManagedLaunchSheet: View {
         }
         return snapshot.flatMap { ManagedSurface.sessionDestination($0.capabilities) } ?? model.managedText("terminal")
     }
-    private var selectedAccount: ManagedAccount? { model.managedSnapshot?.accounts.first { $0.id == accountID } }
+    private var selectedAccount: ManagedAccount? {
+        model.managedSnapshot?.accounts.first { $0.id == accountID && model.managedToolIsEnabled($0.tool) }
+    }
     private var toolAvailable: Bool { selectedAccount.map { model.managedSnapshot?.canLaunch(tool: $0.tool) == true } ?? false }
     private var supportsFolderSettings: Bool { model.managedSnapshot?.capabilities.folderSettings == true }
     private var folderReady: Bool {
@@ -629,7 +639,9 @@ struct ManagedLaunchSheet: View {
                     GlassPicker(
                         model.managedText("saved_account"),
                         selection: Binding(get: { accountID.isEmpty ? nil : accountID }, set: { accountID = $0 ?? "" }),
-                        options: (model.managedSnapshot?.accounts ?? []).filter { model.managedSnapshot?.canLaunch(tool: $0.tool) == true || $0.id == accountID }.map { account in
+                        options: (model.managedSnapshot?.accounts ?? []).filter {
+                            model.managedToolIsEnabled($0.tool) && (model.managedSnapshot?.canLaunch(tool: $0.tool) == true || $0.id == accountID)
+                        }.map { account in
                             GlassPickerOption(
                                 [ManagedWords.tool(account.tool, model: model), account.label, model.managedText(account.connection)]
                                     .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),

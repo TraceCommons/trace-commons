@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import CryptoKit
 import Foundation
@@ -12,8 +13,28 @@ import TCShellCore
 /// back before touching any published property.
 @MainActor
 final class AppModel: ObservableObject {
-    @Published var managedSnapshot: ManagedSnapshot? {
-        didSet { if let copy = managedSnapshot?.copy { managedCopy = copy } }
+    @Published var featureFlags: FeatureFlagSnapshot? {
+        didSet {
+            if !featureIsEnabled("managed_hermes"), pendingManagedLaunch == "hermes" {
+                pendingManagedLaunch = nil
+            }
+        }
+    }
+    var featureFlagReadGeneration: UInt64 = 0
+    private var featureFlagWake: AnyCancellable?
+    var featureFlagClient: DaemonClient? { client }
+    @Published private var daemonManagedSnapshot: ManagedSnapshot? {
+        didSet { if let copy = daemonManagedSnapshot?.copy { managedCopy = copy } }
+    }
+    /// All managed surfaces use the latest feature decision, even when their
+    /// managed data predates a live disable. Retain the unmodified daemon data.
+    var managedSnapshot: ManagedSnapshot? {
+        get { daemonManagedSnapshot?.allowingHermes(featureIsEnabled("managed_hermes")) }
+        set { daemonManagedSnapshot = newValue }
+    }
+
+    func managedToolIsEnabled(_ tool: String) -> Bool {
+        ManagedSurface.supportedTools.contains(tool) && (tool != "hermes" || featureIsEnabled("managed_hermes"))
     }
     @Published var managedCLIOptionsDrafts = ManagedCLIOptionsDrafts()
     @Published var managedBusy = false
@@ -43,7 +64,7 @@ final class AppModel: ObservableObject {
 
     func refreshManagedSessions() {
         perform("managed_snapshot", work: { try $0.managedSnapshot() }) { snapshot in
-            if snapshot.revision >= (self.managedSnapshot?.revision ?? 0), self.managedSnapshot != snapshot { self.managedSnapshot = snapshot }
+            if snapshot.revision >= (self.daemonManagedSnapshot?.revision ?? 0), self.daemonManagedSnapshot != snapshot { self.daemonManagedSnapshot = snapshot }
         }
     }
 
@@ -154,25 +175,47 @@ final class AppModel: ObservableObject {
     func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil,
                        terminal: String? = nil) {
         guard let client, !managedBusy else { return }
+        let attemptedTool = params["tool"] as? String
+            ?? daemonManagedSnapshot?.accounts.first(where: { $0.id == (params["account_id"] as? String) })?.tool
+            ?? daemonManagedSnapshot?.signInAccounts?.first(where: { $0.id == (params["account_id"] as? String) })?.tool
+            ?? daemonManagedSnapshot?.sessions.first(where: { $0.id == (params["session_id"] as? String) })?.tool
+        let startsWork = ["managed_account_add", "managed_account_reconnect", "managed_launch_prepare",
+                          "managed_session_start_again", "managed_session_resume", "managed_terminal_launch",
+                          "managed_tool_setup", "managed_cli_options_set"].contains(method)
+        guard !startsWork || attemptedTool != "hermes" || managedToolIsEnabled("hermes") else { return }
         managedBusy = true
         managedErrorKey = nil
         managedErrorTool = nil
         managedErrorMethod = nil
         let optionsBeingSaved = method == "managed_cli_options_set" ? params["options"] as? String : nil
-        let attemptedTool = params["tool"] as? String
-            ?? managedSnapshot?.accounts.first(where: { $0.id == (params["account_id"] as? String) })?.tool
         // Snapshot the untyped parameters before crossing to the worker.
         let encodedParams = Result {
             guard JSONSerialization.isValidJSONObject(params) else { throw CocoaError(.coderInvalidValue) }
             return try JSONSerialization.data(withJSONObject: params)
         }
         Task.detached(priority: .userInitiated) {
-            let result = Result {
+            // A request may have waited behind another worker or a terminal
+            // choice while the live decision changed. Recheck each start step.
+            let mayStart: @Sendable () async -> Bool = {
+                await MainActor.run {
+                    !startsWork || attemptedTool != "hermes" || self.managedToolIsEnabled("hermes")
+                }
+            }
+            guard await mayStart() else {
+                await MainActor.run { self.managedBusy = false }
+                return
+            }
+            let result: Result<UInt64?, Error>
+            do {
                 guard let params = try JSONSerialization.jsonObject(with: encodedParams.get()) as? [String: Any] else {
                     throw CocoaError(.coderInvalidValue)
                 }
                 if let terminal {
                     _ = try client.managedAction("set_managed_terminal", params: ["terminal": terminal])
+                }
+                guard await mayStart() else {
+                    await MainActor.run { self.managedBusy = false }
+                    return
                 }
                 var response = try client.managedAction(method, params: params)
                 if method == "managed_tool_setup", response["opened"] as? Bool != true {
@@ -183,6 +226,10 @@ final class AppModel: ObservableObject {
                     throw DaemonClient.Failure(code: "unavailable", message: "managed-cli-options-unconfirmed")
                 }
                 if method == "managed_account_add", let accountID = response["id"] as? String {
+                    guard await mayStart() else {
+                        await MainActor.run { self.managedBusy = false; self.refreshManagedSessions() }
+                        return
+                    }
                     if let key = newAccountKey {
                         response = try client.managedAction("managed_account_set_key", params: ["account_id": accountID, "key": key])
                     } else {
@@ -190,6 +237,10 @@ final class AppModel: ObservableObject {
                     }
                 }
                 if openTerminal {
+                    guard await mayStart() else {
+                        await MainActor.run { self.managedBusy = false; self.refreshManagedSessions() }
+                        return
+                    }
                     guard let session = response["session_id"] as? String,
                           let ticket = response["ticket"] as? String else {
                         throw DaemonClient.Failure(code: "launch-unknown", message: "managed-launch-unknown")
@@ -200,14 +251,16 @@ final class AppModel: ObservableObject {
                     _ = try client.managedAction("managed_terminal_launch",
                                                  params: ["session_id": session, "ticket": ticket])
                 }
-                return response["revision"] as? UInt64
+                result = .success(response["revision"] as? UInt64)
+            } catch {
+                result = .failure(error)
             }
             await MainActor.run {
                 self.managedBusy = false
                 if case .success(let revision) = result, let revision, let optionsBeingSaved, let tool = attemptedTool {
                     if revision >= (self.managedSnapshot?.revision ?? 0) {
-                        self.managedSnapshot?.cliOptions?[tool] = optionsBeingSaved
-                        self.managedSnapshot?.revision = revision
+                        self.daemonManagedSnapshot?.cliOptions?[tool] = optionsBeingSaved
+                        self.daemonManagedSnapshot?.revision = revision
                     }
                     self.managedCLIOptionsDrafts.saved(tool: tool, options: optionsBeingSaved)
                 }
@@ -1691,6 +1744,7 @@ final class AppModel: ObservableObject {
     }
 
     func start() {
+        if case .refused(let line) = BuildChannelGate.current { startup = .refused(line); return }
         start(plistChannel: BuildChannelGate.plistChannel)
     }
 
@@ -1749,6 +1803,9 @@ final class AppModel: ObservableObject {
                 self.client = DaemonClient(daemon: daemon)
                 self.liveData = DaemonDataWiring.live(daemon)
                 self.startup = .running
+                self.featureFlags = nil
+                self.featureFlagWake = NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
+                    .sink { [weak self] _ in Task { @MainActor in self?.refreshFeatureFlagsAfterWake() } }
                 self.subscribe()
                 self.refreshAll()
                 #if DEBUG
@@ -1780,10 +1837,10 @@ final class AppModel: ObservableObject {
         // Captured, not read through `self`: the callback runs on a Rust
         // thread, and `deliver` is lock-guarded and never calls back in.
         let liveData = self.liveData
-        // Declares nothing yet: `reengage_due` is declared on this same
-        // subscription once the system's answer is known, and only while a
+        // Feature changes are always accepted. `reengage_due` is declared
+        // on this same subscription once the system's answer is known, only while a
         // notification can be posted (`refreshReengageDeclaration`).
-        let subscription = daemon.subscribe { [weak self] json in
+        let subscription = daemon.subscribe(accepts: ["feature_flags_changed"]) { [weak self] json in
             liveData?.deliver(eventJSON: json)
             // Rust background thread. Nothing observable may be touched
             // here; hop first, always.
@@ -1814,7 +1871,7 @@ final class AppModel: ObservableObject {
     /// prompt is answered, and when the app comes forward (the contributor
     /// may have changed it in System Settings).
     func refreshReengageDeclaration() async {
-        let accepts = await reengageAccepts()
+        let accepts = await reengageAccepts() + ["feature_flags_changed"]
         reengage?.update(accepts: accepts)
     }
 
@@ -1855,8 +1912,11 @@ final class AppModel: ObservableObject {
         self?.refreshAfterQueueChange()
     }
 
-    private func handle(event: DaemonEvent) {
+    // Internal so transport-gap recovery can be exercised without flooding the event bus.
+    func handle(event: DaemonEvent) {
         switch event {
+        case .featureFlagsChanged:
+            refreshFeatureFlags()
         case .snapshot(let pending, let status):
             applyPendingUpdate(pending)
             recordRead("status", answered: true)
@@ -1904,6 +1964,7 @@ final class AppModel: ObservableObject {
                 creditPending: credit
             )
         case .resyncRequired, .lagged:
+            refreshFeatureFlags()
             refreshManagedSessions()
             refreshQueue()
             refreshStatus()
@@ -1935,6 +1996,9 @@ final class AppModel: ObservableObject {
     /// a few seconds in the bad case; that is the correct trade against
     /// freeing memory another thread is reading.
     func shutdown() {
+        featureFlagWake = nil
+        featureFlags = nil
+        featureFlagReadGeneration &+= 1
         daemonStartup.cancel()
         isStartingDaemon = false
         undoTask?.cancel()
@@ -1991,6 +2055,7 @@ final class AppModel: ObservableObject {
     // MARK: - Refresh
 
     func refreshAll() {
+        refreshFeatureFlags()
         refreshManagedSessions()
         refreshStatus()
         refreshQueue()

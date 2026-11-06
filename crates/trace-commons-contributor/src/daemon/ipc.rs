@@ -341,6 +341,8 @@ const QUIESCE_POLL_MS: u64 = 200;
 /// until #777. Four members (`arming_suggestion`, `decline_arming`,
 /// `probe_routed_tools`, `search_original`) appear nowhere in it.
 pub const METHODS: &[&str] = &[
+    "feature_flags_snapshot",
+    "feature_flags_refresh",
     "managed_snapshot",
     "managed_tool_setup",
     "managed_cli_options_set",
@@ -557,6 +559,7 @@ pub const METHODS: &[&str] = &[
 /// `skill_install_*` writes and `insights_analyze_session` (with `save` it
 /// writes the person's real Insights store, and can make its digest key).
 pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
+    "feature_flags_snapshot",
     "hello",
     "status",
     "subscribe",
@@ -661,6 +664,7 @@ fn dev_dry_run_refusal(shared: &DaemonShared, req: &Request) -> Option<Response>
     None
 }
 
+pub const EVENT_FEATURE_FLAGS_CHANGED: &str = "feature_flags_changed";
 pub const EVENT_SNAPSHOT: &str = "snapshot";
 pub const EVENT_QUEUE_CHANGED: &str = "queue_changed";
 pub const EVENT_STATUS_CHANGED: &str = "status_changed";
@@ -720,7 +724,7 @@ pub const EVENT_REENGAGE_DUE: &str = "reengage_due";
 
 /// Events a subscriber receives only after naming them in `subscribe`'s
 /// `accepts`. Every other event goes to every subscriber, as it always has.
-pub const OPT_IN_EVENTS: &[&str] = &[EVENT_REENGAGE_DUE];
+pub const OPT_IN_EVENTS: &[&str] = &[EVENT_REENGAGE_DUE, EVENT_FEATURE_FLAGS_CHANGED];
 
 /// Whether `event` is withheld from a subscriber that did not accept it.
 pub fn event_is_opt_in(event: &str) -> bool {
@@ -948,6 +952,7 @@ pub struct GateHeld {
 /// `status_value`, `publish_if_decisions_owed_changed`), or a
 /// temporary in a `match` scrutinee, which lives for the whole `match`.
 pub struct DaemonShared {
+    pub feature_flags: crate::feature_flags::Runtime,
     /// NEAR AI's chat-model catalogue, shared by every reader (a leaf lock).
     /// See `managed::catalogue_cache`.
     pub(crate) model_catalogue: crate::managed::catalogue_cache::CatalogueCache,
@@ -1631,6 +1636,7 @@ impl DaemonShared {
             crate::managed::catalogue_cache::CatalogueCache::open(Some(store.dir()));
         let insights_counter = super::insights_week::CounterPass::for_store(&store);
         Ok(Self {
+            feature_flags: crate::feature_flags::Runtime::for_store(&store)?,
             managed,
             model_catalogue,
             store,
@@ -4122,6 +4128,15 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 "max_line_bytes": MAX_LINE_BYTES,
             }),
         ),
+        "feature_flags_snapshot" => Response::ok(
+            req.id,
+            serde_json::to_value(shared.feature_flags.snapshot())
+                .expect("feature snapshot serialization"),
+        ),
+        "feature_flags_refresh" => {
+            shared.feature_flags.request_refresh();
+            Response::ok(req.id, serde_json::json!({"requested":true}))
+        }
         "status" => Response::ok(req.id, shared.status_value()),
         "certificate_detail" => handle_certificate_detail(shared, req),
         "route_disclosure" => handle_route_disclosure(shared, req),
@@ -20582,7 +20597,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 111, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 113, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 84, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
@@ -22207,8 +22222,12 @@ mod tests {
         }
 
         #[test]
-        fn opt_in_events_are_exactly_reengage_due() {
-            assert_eq!(OPT_IN_EVENTS, &[EVENT_REENGAGE_DUE]);
+        fn opt_in_events_include_declared_feature_changes() {
+            assert_eq!(
+                OPT_IN_EVENTS,
+                &[EVENT_REENGAGE_DUE, EVENT_FEATURE_FLAGS_CHANGED]
+            );
+            assert!(event_is_opt_in(EVENT_FEATURE_FLAGS_CHANGED));
             assert!(event_is_opt_in(EVENT_REENGAGE_DUE));
             assert!(!event_is_opt_in(EVENT_QUEUE_CHANGED));
             assert!(!event_is_opt_in(EVENT_DIGEST_DUE));

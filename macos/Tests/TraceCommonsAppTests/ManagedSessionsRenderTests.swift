@@ -73,17 +73,27 @@ final class ManagedSessionsRenderTests: XCTestCase {
     }
 
     @MainActor
-    func testOpenCodeLaunchAndCollectionControlsRender() throws {
+    func testOpenCodeAndHermesSavedKeyLaunchSheetsRender() throws {
         let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let fixture = try Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json"))
         var value = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture) as? [String: Any])
-        value["accounts"] = [["id": "opencode-test", "tool": "opencode", "connection": "api_key", "label": "Work", "auth_state": "ready"]]
         let model = AppModel()
-        model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
+        model.featureFlags = try FeatureFlagIntegrationTests.hermesFlags(enabled: true)
         let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }
-        try render(ManagedLaunchSheet(onClose: {}, accountID: "opencode-test").environmentObject(model), size: CGSize(width: 580, height: 580), to: directory.appendingPathComponent("managed-opencode-launch.png"))
+        for tool in ["opencode", "hermes"] {
+            value["tools"] = [["tool": tool, "installed": true, "install_url": "https://example.com/" + tool]]
+            for connection in ["api_key", "near_ai"] {
+                value["accounts"] = [["id": "key-test", "tool": tool, "connection": connection, "label": "Work", "auth_state": "ready"]]
+                model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
+                XCTAssertTrue(ManagedSessionsSection.offersLaunch(try XCTUnwrap(model.managedSnapshot)))
+                try render(ManagedLaunchSheet(onClose: {}, accountID: "key-test").environmentObject(model), size: CGSize(width: 580, height: 580), to: directory.appendingPathComponent("managed-\(tool)-\(connection)-launch.png"))
+            }
+            try render(ManagedAccountSheet(onClose: {}).environmentObject(model), size: CGSize(width: 580, height: 480), to: directory.appendingPathComponent("managed-\(tool)-add-key.png"))
+        }
+        XCTAssertEqual(model.managedText("hermes"), "Hermes")
+        XCTAssertEqual(model.managedText("start_hermes"), "Start Hermes")
     }
 
     /// #1408, as the launch dialog (owner, 2026-10-19): the explanation,

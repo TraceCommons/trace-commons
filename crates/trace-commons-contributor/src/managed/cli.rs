@@ -25,7 +25,7 @@ pub struct LaunchArgs {
     pub connection: Option<ConnectionKind>,
     #[arg(long)]
     pub cwd: Option<PathBuf>,
-    /// Model ID. Required for OpenCode on a saved key. For Claude Code or
+    /// Model ID. Required for OpenCode or Hermes on a saved key. For Claude Code or
     /// Codex on NEAR AI, picks the model the session runs on instead of the
     /// tool's default; it must be a NEAR AI chat model.
     #[arg(long)]
@@ -251,6 +251,15 @@ fn agrees(answer: &str) -> bool {
 
 pub async fn launch(store: &ConfigStore, args: LaunchArgs) -> anyhow::Result<i32> {
     use std::io::IsTerminal;
+    // Refuse before account resolution can prompt for sign-in. The daemon
+    // rechecks when preparing and redeeming, including after a live disable.
+    if args.tool == ToolId::Hermes {
+        let flags: crate::feature_flags::Snapshot =
+            call(store, "feature_flags_snapshot", json!({}))?;
+        if !flags.is_enabled("managed_hermes") {
+            return Err(ManagedError::InvalidRequest.into());
+        }
+    }
     let mut snapshot: Snapshot = call(store, "managed_snapshot", json!({}))?;
     let resolved = |snapshot: &Snapshot| {
         resolve(
@@ -360,7 +369,7 @@ fn effective_model(
     if default_model {
         return None;
     }
-    if tool == ToolId::Opencode
+    if matches!(tool, ToolId::Opencode | ToolId::Hermes)
         || matches!(
             connection,
             ConnectionKind::NearAi | ConnectionKind::NearAiSignIn

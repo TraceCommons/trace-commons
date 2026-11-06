@@ -295,7 +295,7 @@ impl NativeCollection {
                     selected.insert(relative.clone());
                 }
             }
-            ToolId::Opencode => return Err(ManagedError::InvalidRequest),
+            ToolId::Opencode | ToolId::Hermes => return Err(ManagedError::InvalidRequest),
         }
         if parents.is_empty() {
             return Err(ManagedError::NotFound);
@@ -350,7 +350,7 @@ impl NativeCollection {
                     ToolId::Codex => {
                         Self::codex_identity(staged.as_ref(), &pending.join(relative), expected)?
                     }
-                    ToolId::Opencode => return Err(ManagedError::InvalidRequest),
+                    ToolId::Opencode | ToolId::Hermes => return Err(ManagedError::InvalidRequest),
                 }
             }
             for session in sessions {

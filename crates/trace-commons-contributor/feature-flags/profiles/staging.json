@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "registry_version": 2,
+  "environment": "staging",
+  "capabilities": ["managed_hermes"],
+  "remote_enable": ["managed_hermes"]
+}

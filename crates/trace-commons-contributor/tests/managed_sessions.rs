@@ -19,13 +19,14 @@ fn native_fixture_child(test: &str) -> bool {
             if std::env::var("TRACE_MANAGED_FIXTURE_BAD_VERSION").as_deref() == Ok("true") { println!("0.0.0"); return; }
             let exe = std::env::current_exe().unwrap();
             let name = exe.file_stem().unwrap().to_str().unwrap();
+            if name == "hermes" { println!("--cli --safe-mode --provider --model --base-url"); return; }
             println!("{}", match name { "claude" => "2.1.289", "codex" => "0.160.0", _ => "1.19.0" });
         }"#).unwrap();
         let status = std::process::Command::new("rustc")
             .arg(&source).arg("-o").arg(bin.path().join(if cfg!(windows) { "fixture-native.exe" } else { "fixture-native" }))
             .status().unwrap();
         assert!(status.success());
-    for tool in ["claude", "codex", "opencode"] {
+    for tool in ["claude", "codex", "opencode", "hermes"] {
         let path = bin.path().join(if cfg!(windows) {
             format!("{tool}.exe")
         } else {
@@ -70,6 +71,212 @@ fn call(daemon: &DaemonShared, method: &str, params: Value) -> Value {
     );
     assert!(response.error.is_none(), "{:?}", response.error);
     response.result.unwrap()
+}
+
+#[test]
+fn hermes_feature_defaults_off_and_live_disable_preserves_existing_sessions() {
+    if native_fixture_child(
+        "hermes_feature_defaults_off_and_live_disable_preserves_existing_sessions",
+    ) {
+        return;
+    }
+    use trace_commons_contributor::daemon::ipc::handle_request_async;
+    for asynchronous in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let daemon = DaemonShared::load(ConfigStore::open(home.path().into()).unwrap()).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let invoke = |method: &str, params| {
+            let request = Request {
+                id: 1,
+                method: method.into(),
+                params,
+            };
+            if asynchronous {
+                runtime.block_on(handle_request_async(&daemon, &request))
+            } else {
+                handle_request(&daemon, &request)
+            }
+        };
+        let now = chrono::Utc::now();
+        let set_flag = |revision, enabled| {
+            daemon.feature_flags.accept(&serde_json::to_vec(&json!({
+                "schema_version":1, "environment":daemon.feature_flags.environment(),
+                "revision":revision, "issued_at":now,
+                "expires_at":now+chrono::Duration::hours(1), "flags":{"managed_hermes":enabled}
+            })).unwrap(), now).unwrap();
+        };
+        let add = json!({"tool":"hermes","connection":"api_key","label":"Hermes"});
+        assert_eq!(
+            invoke("managed_account_add", add.clone())
+                .error
+                .unwrap()
+                .code,
+            "managed-invalid-request"
+        );
+        assert_eq!(
+            invoke(
+                "managed_tool_setup",
+                json!({"tool":"hermes","action":"install"})
+            )
+            .error
+            .unwrap()
+            .code,
+            "managed-invalid-request"
+        );
+        let snapshot = invoke("managed_snapshot", json!({})).result.unwrap();
+        assert!(
+            !snapshot["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["tool"] == "hermes")
+        );
+        assert!(snapshot["cli_options"].get("hermes").is_none());
+        // Unrelated tools remain available while Hermes is off.
+        assert!(
+            invoke(
+                "managed_account_add",
+                json!({"tool":"codex","connection":"api_key","label":"Codex"})
+            )
+            .error
+            .is_none()
+        );
+
+        set_flag(1, true);
+        let snapshot = invoke("managed_snapshot", json!({})).result.unwrap();
+        assert!(
+            snapshot["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["tool"] == "hermes")
+        );
+        assert!(snapshot["cli_options"].get("hermes").is_some());
+        let account = invoke("managed_account_add", add.clone()).result.unwrap();
+        let prepare = || {
+            json!({"request_id":uuid::Uuid::new_v4(),"tool":"hermes","connection":"api_key",
+            "account_id":account["id"],"cwd":home.path(),"expected_generation":0,"model":"private/model"})
+        };
+        let running = invoke("managed_launch_prepare", prepare()).result.unwrap();
+        let context = invoke(
+            "managed_launch_redeem",
+            json!({"session_id":running["session_id"],"ticket":running["ticket"]}),
+        )
+        .result
+        .unwrap();
+        let mut report = json!({"session_id":running["session_id"],"proof":context["proof"],
+            "state":"running","process_id":42,"process_identity":"fixture-start","exit_code":null});
+        assert!(
+            invoke("managed_session_report", report.clone())
+                .error
+                .is_none()
+        );
+        let pending = invoke("managed_launch_prepare", prepare()).result.unwrap();
+        let pending_ticket = json!({"session_id":pending["session_id"],"ticket":pending["ticket"]});
+
+        set_flag(2, false);
+        for (method, params) in [
+            ("managed_launch_prepare", prepare()),
+            ("managed_terminal_launch", pending_ticket.clone()),
+            ("managed_launch_redeem", pending_ticket.clone()),
+            (
+                "managed_session_start_again",
+                json!({"session_id":running["session_id"],"request_id":uuid::Uuid::new_v4()}),
+            ),
+            (
+                "managed_select",
+                json!({"selection":{"tool":"hermes","connection":"api_key","account_id":account["id"],"generation":0},"expected_generation":0}),
+            ),
+        ] {
+            assert_eq!(
+                invoke(method, params).error.unwrap().code,
+                "managed-invalid-request",
+                "{method}"
+            );
+        }
+        let snapshot = invoke("managed_snapshot", json!({})).result.unwrap();
+        assert!(
+            snapshot["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == account["id"])
+        );
+        assert_eq!(
+            snapshot["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == running["session_id"])
+                .unwrap()["state"],
+            "running"
+        );
+        // This CLI-owned session still reaches the ordinary ownership check;
+        // the feature gate must not intercept cleanup operations.
+        assert_eq!(
+            invoke(
+                "managed_session_stop",
+                json!({"session_id":running["session_id"]})
+            )
+            .error
+            .unwrap()
+            .code,
+            "managed-conflict"
+        );
+        report["state"] = json!("exited");
+        report["exit_code"] = json!(0);
+        assert!(invoke("managed_session_report", report).error.is_none());
+        let snapshot = invoke("managed_snapshot", json!({})).result.unwrap();
+        assert_eq!(
+            snapshot["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == running["session_id"])
+                .unwrap()["state"],
+            "exited"
+        );
+        assert_eq!(
+            snapshot["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == running["session_id"])
+                .unwrap()["can_start_again"],
+            false
+        );
+
+        // A refused redemption did not consume the queued ticket.
+        set_flag(3, true);
+        assert!(
+            invoke("managed_launch_redeem", pending_ticket)
+                .error
+                .is_none()
+        );
+        let snapshot = invoke("managed_snapshot", json!({})).result.unwrap();
+        assert_eq!(
+            snapshot["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == running["session_id"])
+                .unwrap()["can_start_again"],
+            true
+        );
+        daemon.feature_flags.tick(now + chrono::Duration::hours(2));
+        assert_eq!(
+            invoke("managed_account_add", add).error.unwrap().code,
+            "managed-invalid-request"
+        );
+        assert!(
+            invoke(
+                "managed_session_dismiss",
+                json!({"session_id":running["session_id"]})
+            )
+            .error
+            .is_none()
+        );
+    }
 }
 
 #[test]

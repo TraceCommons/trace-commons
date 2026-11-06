@@ -622,6 +622,9 @@ self_test() {
 
   local file
   for file in "${BUILD_FILES[@]}" "${SHIPPED_MANIFESTS[@]}" "${STAGING_FILES[@]}" \
+    scripts/feature-flags/profile.py crates/trace-commons-contributor/feature-flags/registry.json \
+    crates/trace-commons-contributor/feature-flags/profiles/production.json crates/trace-commons-contributor/feature-flags/profiles/staging.json \
+    crates/trace-commons-contributor/feature-flags/profiles/testing.json \
     "$repo"/.github/workflows/*.yml "$repo"/.github/workflows/*.yaml \
     "$repo"/.github/actions/*/action.yml; do
     [[ "$file" == *'*'* ]] && continue
