@@ -679,32 +679,6 @@ pub fn verify_certificate(
     Ok(())
 }
 
-/// The redaction pipeline a certificate certifies, read only once
-/// [`verify_certificate`] has accepted it against `pinned_address`.
-///
-/// This is the witness's `redaction_pipeline_version()` alias -- the value
-/// `FULL_REDACTION_PIPELINE_VERSIONS` lists -- which the witness signs as
-/// `redaction_policy_version` in both the v1 and the v2 preimage. Never
-/// read that field any other way: an unverified copy of it is a claim, and
-/// is exactly what a certificate over some other artifact, or from some
-/// other key, would carry.
-///
-/// Returned as the exact string signed. Nothing here trims, lowercases or
-/// otherwise normalises it; a caller comparing it must compare exactly.
-pub fn certified_redaction_pipeline_version(
-    response: &WitnessedEnvelope,
-    pinned_address: &str,
-) -> Result<String, WitnessTrustError> {
-    verify_certificate(response, pinned_address)?;
-    let certificate: serde_json::Value = serde_json::from_str(&response.certificate_json)
-        .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
-    certificate
-        .get("redaction_policy_version")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-        .ok_or(WitnessTrustError::WitnessResponseMalformed)
-}
-
 /// Recover the signer from a stored certificate without exposing its raw
 /// signature or certificate JSON to a shell.
 ///

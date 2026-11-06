@@ -430,6 +430,68 @@ fn candidates(
         entries: Vec::new(),
     }])
 }
+
+/// A saved review follows current signed routing authority just as a fresh
+/// request does. Rotation and withdrawal cannot fall back to signup pins.
+///
+/// Only the signer is rechecked. The witness's measurements were verified
+/// against its attestation quote when the review was made, so a later change
+/// to the published measurements does not make a saved review stale. A signer
+/// that is withdrawn or whose entries have all expired no longer certifies.
+/// The review does not record which endpoint produced it, so any currently
+/// authorized signer for this enrollment is accepted.
+pub(crate) fn verify_review_certificate(
+    settings: &WitnessSettings,
+    dir: &Path,
+    response: &transport::WitnessedEnvelope,
+) -> Result<(), WitnessTrustError> {
+    let now = Utc::now();
+    for candidate in candidates(settings, dir, now)? {
+        let Some(trust) = candidate.trust_at(now) else {
+            continue;
+        };
+        let signers = std::iter::once(trust.signing_address.as_str()).chain(
+            trust
+                .accepted
+                .iter()
+                .map(|pin| pin.signing_address.as_str()),
+        );
+        for address in signers {
+            if transport::verify_certificate(response, address).is_ok() {
+                return Ok(());
+            }
+        }
+    }
+    Err(WitnessTrustError::WitnessCertificateUnverified)
+}
+
+/// The redaction pipeline a saved certificate certifies, read only once
+/// [`verify_review_certificate`] has accepted it.
+///
+/// This is the witness's `redaction_pipeline_version()` alias -- the value
+/// `FULL_REDACTION_PIPELINE_VERSIONS` lists -- which the witness signs as
+/// `redaction_policy_version` in both the v1 and the v2 preimage. Never
+/// read that field any other way: an unverified copy of it is a claim, and
+/// is exactly what a certificate over some other artifact, or from some
+/// other key, would carry.
+///
+/// Returned as the exact string signed. Nothing here trims, lowercases or
+/// otherwise normalises it; a caller comparing it must compare exactly.
+pub(crate) fn certified_redaction_pipeline_version(
+    settings: &WitnessSettings,
+    dir: &Path,
+    response: &transport::WitnessedEnvelope,
+) -> Result<String, WitnessTrustError> {
+    verify_review_certificate(settings, dir, response)?;
+    let certificate: serde_json::Value = serde_json::from_str(&response.certificate_json)
+        .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
+    certificate
+        .get("redaction_policy_version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or(WitnessTrustError::WitnessResponseMalformed)
+}
+
 /// This list belongs solely to this witness transport. Collateral still goes
 /// to configured ingest. A configured/env operator policy remains absolute.
 fn transport_allowlist(cfg: &ContributorConfig, endpoint: &str) -> HostAllowlist {
@@ -780,6 +842,79 @@ mod tests {
         let key = signer();
         accepted_list::set_test_keys(dir.path(), vec![public(&key)]);
         (dir, key)
+    }
+
+    #[test]
+    fn saved_review_uses_rotated_signer_without_changing_enrollment() {
+        let (dir, key) = setup();
+        let enrollment = settings();
+        let (answer, address) = transport::signed_fixture(b"redacted history".to_vec());
+        let mut config = document(2);
+        config.endpoints.truncate(1);
+        config.endpoints[0].entries = vec![entry(&address, "aa")];
+        install_document(dir.path(), &key, &config);
+        verify_review_certificate(&enrollment, dir.path(), &answer).unwrap();
+        assert_eq!(enrollment.signing_address, OLD_SIGNER);
+        let mut changed = answer;
+        changed.envelope_bytes.push(b'!');
+        assert!(verify_review_certificate(&enrollment, dir.path(), &changed).is_err());
+    }
+
+    #[test]
+    fn saved_review_cannot_fall_back_to_withdrawn_signup_signer() {
+        let (dir, key) = setup();
+        let (answer, address) = transport::signed_fixture(b"redacted history".to_vec());
+        let mut enrollment = settings();
+        enrollment.signing_address = address;
+        // With no signed routing delegation, the original pin still works.
+        verify_review_certificate(&enrollment, dir.path(), &answer).unwrap();
+        let mut config = document(2);
+        config.endpoints.clear();
+        install_document(dir.path(), &key, &config);
+        assert!(verify_review_certificate(&enrollment, dir.path(), &answer).is_err());
+    }
+
+    #[test]
+    fn saved_review_survives_a_measurement_change_for_its_signer() {
+        let (dir, key) = setup();
+        // The fixture certificate reports measurement "aa".
+        let (answer, address) = transport::signed_fixture(b"redacted history".to_vec());
+        let mut config = document(2);
+        config.endpoints[0].entries = vec![entry(OLD_SIGNER, "aa")];
+        config.endpoints[1].entries = vec![entry(&address, "aa")];
+        install_document(dir.path(), &key, &config);
+        verify_review_certificate(&settings(), dir.path(), &answer).unwrap();
+        // Republishing the same signer under new measurements keeps the
+        // review: measurements were checked against the quote at review time.
+        config.version = 3;
+        config.endpoints[1].entries = vec![entry(&address, "bb")];
+        install_document(dir.path(), &key, &config);
+        verify_review_certificate(&settings(), dir.path(), &answer).unwrap();
+        // Dropping the signer is what invalidates it.
+        config.version = 4;
+        config.endpoints[1].entries = vec![entry(NEW_SIGNER, "bb")];
+        install_document(dir.path(), &key, &config);
+        assert!(verify_review_certificate(&settings(), dir.path(), &answer).is_err());
+    }
+
+    #[test]
+    fn saved_review_refuses_expired_pins_and_corrupt_signed_cache() {
+        let (dir, key) = setup();
+        let (answer, address) = transport::signed_fixture(b"redacted history".to_vec());
+        let mut config = document(2);
+        config.endpoints.truncate(1);
+        let mut pin = entry(&address, "aa");
+        pin.not_before = Utc::now() - chrono::Duration::hours(2);
+        pin.not_after = Utc::now() - chrono::Duration::hours(1);
+        config.endpoints[0].entries = vec![pin];
+        install_document(dir.path(), &key, &config);
+        assert!(verify_review_certificate(&settings(), dir.path(), &answer).is_err());
+        config.version = 3;
+        config.endpoints[0].entries = vec![entry(&address, "aa")];
+        install_document(dir.path(), &key, &config);
+        verify_review_certificate(&settings(), dir.path(), &answer).unwrap();
+        std::fs::write(dir.path().join(CONFIGURATION_FILE), b"{}").unwrap();
+        assert!(verify_review_certificate(&settings(), dir.path(), &answer).is_err());
     }
     #[test]
     fn verifies_before_install_and_independently_rejects_rollback() {
