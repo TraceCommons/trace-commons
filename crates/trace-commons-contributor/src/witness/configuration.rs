@@ -430,6 +430,65 @@ fn candidates(
         entries: Vec::new(),
     }])
 }
+
+/// A saved review follows current signed routing authority just as a fresh
+/// request does. Rotation and withdrawal cannot fall back to signup pins.
+pub(crate) fn verify_review_certificate(
+    settings: &WitnessSettings,
+    dir: &Path,
+    response: &transport::WitnessedEnvelope,
+) -> Result<(), WitnessTrustError> {
+    let now = Utc::now();
+    for candidate in candidates(settings, dir, now)? {
+        let Some(trust) = candidate.trust_at(now) else {
+            continue;
+        };
+        let pins = trust
+            .measurements
+            .iter()
+            .map(|measurement| (trust.signing_address.as_str(), measurement))
+            .chain(
+                trust
+                    .accepted
+                    .iter()
+                    .map(|pin| (pin.signing_address.as_str(), &pin.measurements)),
+            );
+        for (address, measurements) in pins {
+            if transport::verify_certificate(response, address).is_err() {
+                continue;
+            }
+            // These claims are inspected only after signature verification.
+            let certificate: serde_json::Value =
+                serde_json::from_str(&response.certificate_json)
+                    .map_err(|_| WitnessTrustError::WitnessCertificateUnverified)?;
+            let reported = certificate
+                .get("witness_measurement")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(WitnessTrustError::WitnessCertificateUnverified)?;
+            // The initial certificate contract used a bare MRTD; current
+            // certificates use named registers separated by '+'.
+            let reported =
+                if reported.len() == 96 && reported.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    format!("mrtd={reported}")
+                } else {
+                    reported.replace(':', "=").replace('+', ",")
+                };
+            let actual = ExpectedMeasurements::from_env_value(Some(&reported))
+                .map_err(|_| WitnessTrustError::WitnessCertificateUnverified)?
+                .ok_or(WitnessTrustError::WitnessCertificateUnverified)?
+                .to_pin_string();
+            if measurements
+                .to_pin_string()
+                .split(',')
+                .all(|pin| actual.split(',').any(|field| field == pin))
+            {
+                return Ok(());
+            }
+        }
+    }
+    Err(WitnessTrustError::WitnessCertificateUnverified)
+}
+
 /// This list belongs solely to this witness transport. Collateral still goes
 /// to configured ingest. A configured/env operator policy remains absolute.
 fn transport_allowlist(cfg: &ContributorConfig, endpoint: &str) -> HostAllowlist {
@@ -780,6 +839,71 @@ mod tests {
         let key = signer();
         accepted_list::set_test_keys(dir.path(), vec![public(&key)]);
         (dir, key)
+    }
+
+    #[test]
+    fn saved_review_uses_rotated_signer_without_changing_enrollment() {
+        let (dir, key) = setup();
+        let enrollment = settings();
+        let (answer, address) = transport::signed_fixture(b"redacted history".to_vec());
+        let mut config = document(2);
+        config.endpoints.truncate(1);
+        config.endpoints[0].entries = vec![entry(&address, "aa")];
+        install_document(dir.path(), &key, &config);
+        verify_review_certificate(&enrollment, dir.path(), &answer).unwrap();
+        assert_eq!(enrollment.signing_address, OLD_SIGNER);
+        let mut changed = answer;
+        changed.envelope_bytes.push(b'!');
+        assert!(verify_review_certificate(&enrollment, dir.path(), &changed).is_err());
+    }
+
+    #[test]
+    fn saved_review_cannot_fall_back_to_withdrawn_signup_signer() {
+        let (dir, key) = setup();
+        let (answer, address) = transport::signed_fixture(b"redacted history".to_vec());
+        let mut enrollment = settings();
+        enrollment.signing_address = address;
+        // With no signed routing delegation, the original pin still works.
+        verify_review_certificate(&enrollment, dir.path(), &answer).unwrap();
+        let mut config = document(2);
+        config.endpoints.clear();
+        install_document(dir.path(), &key, &config);
+        assert!(verify_review_certificate(&enrollment, dir.path(), &answer).is_err());
+    }
+
+    #[test]
+    fn saved_review_matches_signer_and_measurements_as_a_pair() {
+        let (dir, key) = setup();
+        let (answer, address) = transport::signed_fixture(b"redacted history".to_vec());
+        let mut config = document(2);
+        config.endpoints[0].entries = vec![entry(OLD_SIGNER, "aa")];
+        config.endpoints[1].entries = vec![entry(&address, "bb")];
+        install_document(dir.path(), &key, &config);
+        assert!(verify_review_certificate(&settings(), dir.path(), &answer).is_err());
+        config.version = 3;
+        config.endpoints[1].entries = vec![entry(&address, "aa")];
+        install_document(dir.path(), &key, &config);
+        verify_review_certificate(&settings(), dir.path(), &answer).unwrap();
+    }
+
+    #[test]
+    fn saved_review_refuses_expired_pins_and_corrupt_signed_cache() {
+        let (dir, key) = setup();
+        let (answer, address) = transport::signed_fixture(b"redacted history".to_vec());
+        let mut config = document(2);
+        config.endpoints.truncate(1);
+        let mut pin = entry(&address, "aa");
+        pin.not_before = Utc::now() - chrono::Duration::hours(2);
+        pin.not_after = Utc::now() - chrono::Duration::hours(1);
+        config.endpoints[0].entries = vec![pin];
+        install_document(dir.path(), &key, &config);
+        assert!(verify_review_certificate(&settings(), dir.path(), &answer).is_err());
+        config.version = 3;
+        config.endpoints[0].entries = vec![entry(&address, "aa")];
+        install_document(dir.path(), &key, &config);
+        verify_review_certificate(&settings(), dir.path(), &answer).unwrap();
+        std::fs::write(dir.path().join(CONFIGURATION_FILE), b"{}").unwrap();
+        assert!(verify_review_certificate(&settings(), dir.path(), &answer).is_err());
     }
     #[test]
     fn verifies_before_install_and_independently_rejects_rollback() {

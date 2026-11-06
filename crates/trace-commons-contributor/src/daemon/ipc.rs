@@ -8225,6 +8225,7 @@ pub(super) async fn approve_as_a_person(
                             && artifact
                                 .validate(
                                     cfg,
+                                    shared.store.dir(),
                                     &entry.session_hash,
                                     fingerprint,
                                     verdict,
@@ -9106,11 +9107,11 @@ async fn build_and_pin_preview(
         let built = super::preview::summarize_witnessed_preview(
             &artifact,
             cfg.ok_or(unavailable)?,
+            &shared.store,
             near_ai,
             &transcript,
             session_ref.size_bytes,
             attested_bodies,
-            shared.store.envelope_limit_bytes(),
         )
         .map_err(|_| (ERR_UNAVAILABLE, "witness-review-stale"))?;
         // The stored artifact this summary was rebuilt from is the one the
@@ -11209,11 +11210,11 @@ mod tests {
         let (summary, body, _) = super::super::preview::summarize_witnessed_preview(
             &artifact,
             &cfg,
+            &s.store,
             None,
             &transcript,
             reference.size_bytes,
             false,
-            crate::envelope::MAX_ENVELOPE_BYTES,
         )
         .unwrap();
         (

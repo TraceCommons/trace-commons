@@ -508,6 +508,7 @@ impl Uploader<'_, '_> {
         );
         artifact.validate(
             self.ctx.effective_cfg(),
+            self.store.dir(),
             &entry.session_hash,
             &fingerprint,
             entry.approved_verdict.as_deref(),
@@ -988,7 +989,9 @@ impl Uploader<'_, '_> {
                     submission_id,
                     receipt,
                     unattended_redaction: Some(super::automatic_gate::session_redaction(
-                        witnessed, witness,
+                        witnessed,
+                        witness,
+                        self.store.dir(),
                     )),
                 }
             }
