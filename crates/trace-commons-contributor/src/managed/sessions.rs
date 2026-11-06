@@ -219,6 +219,11 @@ pub struct LaunchContext {
     /// `route_port`. Additive: an older launcher ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_models: Option<Vec<super::models::ChatModel>>,
+    /// This daemon's Codex route forwards native Responses requests. A new
+    /// launcher requires this affirmative capability before restoring native
+    /// tool schemas; an older daemon may still translate Responses to Chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_native_responses: Option<bool>,
     /// The root row whose conversation this session continues
     /// ([`LaunchRequest::resume_of`]). The launcher derives the tool's own
     /// conversation id from it. Additive: absent for a fresh conversation.
@@ -1241,6 +1246,7 @@ impl SessionRegistry {
             route_port: None,
             route_model: None,
             route_models: None,
+            route_native_responses: None,
             resume_of,
         })
     }
