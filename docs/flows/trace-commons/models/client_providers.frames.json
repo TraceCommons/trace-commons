@@ -1,0 +1,121 @@
+[
+  {
+    "label": "providers_home",
+    "title": "Managed account boundary",
+    "body": "Saved accounts, default selections and derived NEAR AI sign-in entries are separate. This panel projects daemon state.",
+    "controls": [
+      "Add account",
+      "Launch",
+      "Check sign-in",
+      "Sign in",
+      "Rename account",
+      "Make default",
+      "Remove",
+      "Refresh",
+      "Inspect runtime",
+      "Select saved account",
+      "Select NEAR AI sign-in",
+      "Sign out",
+      "Close"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "providers_add",
+    "title": "Add account",
+    "body": "You'll sign in through the tool in Terminal. Stored in this computer's credential store.",
+    "controls": [
+      "Tool",
+      "Sign-in type",
+      "Name",
+      "Sign in",
+      "Save",
+      "Cancel",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "providers_launch",
+    "title": "Launch managed session",
+    "body": "Opens in your terminal.",
+    "controls": [
+      "Account",
+      "Model",
+      "Background model",
+      "Pick a folder as context",
+      "Use home",
+      "Collect this session",
+      "Add to favorites",
+      "Remove from favorites",
+      "Launch",
+      "Retry",
+      "Cancel",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "providers_remove",
+    "title": "Remove this account?",
+    "body": "Its saved sign-in and profile are deleted from this computer.",
+    "controls": [
+      "Remove",
+      "Cancel",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "providers_plan",
+    "title": "Change this tool's settings?",
+    "body": "",
+    "controls": [
+      "Apply",
+      "Cancel",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "providers_exposure",
+    "title": "Route AI requests through NEAR AI",
+    "body": "While it's on, anything else running on this computer, including other users on a shared one, can send requests charged to your accounts.",
+    "controls": [
+      "Turn on",
+      "Not now",
+      "Close"
+    ],
+    "kind": "client"
+  },
+  {
+    "label": "providers_runtime",
+    "title": "Provider runtime boundary",
+    "body": "Session tickets, terminal launch results, proxy startups, usage claims and configuration acknowledgments are independent daemon interfaces. These controls select abstract events.",
+    "controls": [
+      "Accounts",
+      "Select saved account",
+      "Select NEAR AI sign-in",
+      "Sign out",
+      "Edit options",
+      "Save options",
+      "Usage permission",
+      "Connect",
+      "Disconnect",
+      "Refresh usage",
+      "Stop",
+      "Dismiss",
+      "Close"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "providers_closed",
+    "title": "No window open",
+    "body": "The daemon, terminal tools and retained callbacks can continue. Open projects the window lifecycle event.",
+    "controls": [
+      "Open"
+    ],
+    "kind": "server"
+  }
+]
