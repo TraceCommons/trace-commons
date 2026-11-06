@@ -823,6 +823,11 @@ fn near_ai_route(
                 .arg(format!("model_catalog_json={}", quoted(catalog)))
                 .arg("-c")
                 .arg(format!("model={}", quoted(default)));
+            // Hosted search only on models whose search OpenAI runs
+            // (`hosted_search_allowed`); the catalog also marks the others.
+            if !super::models::hosted_search_allowed(in_use) {
+                command.args(["-c", "web_search=\"disabled\""]);
+            }
             // Codex's reviewer (/review), subagents and memory jobs each
             // name a model of their own, which may be one NEAR AI does not
             // list or a less private one: all of them are the model in
@@ -1528,6 +1533,51 @@ mod tests {
         }
     }
 
+    /// Hosted search stays on only when the session starts on an `openai/`
+    /// model, whose search OpenAI runs. Any other model, including one the
+    /// session's own `--model` names over an OpenAI default, starts with
+    /// search disabled.
+    #[test]
+    fn codex_starts_with_hosted_search_only_on_openai_models() {
+        let path = std::path::Path::new("/state/managed-codex-catalogs/s.json");
+        let mut models = listed();
+        models.push(ChatModel {
+            id: "openai/gpt-6-sol".into(),
+            ..Default::default()
+        });
+        let search = |default: &str, cli_options: &[String]| {
+            let mut command = std::process::Command::new("codex");
+            near_ai_route(
+                &mut command,
+                ToolId::Codex,
+                4321,
+                default,
+                &models,
+                Some(path),
+                super::Choices {
+                    background: None,
+                    cli_options,
+                },
+            )
+            .unwrap();
+            let args: Vec<String> = command
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            args.windows(2)
+                .filter(|pair| pair[0] == "-c" && pair[1].starts_with("web_search="))
+                .map(|pair| pair[1].clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(search("openai/gpt-6-sol", &[]).is_empty());
+        let disabled = vec!["web_search=\"disabled\"".to_owned()];
+        assert_eq!(search("deepseek-ai/DeepSeek-V3.1", &[]), disabled);
+        let private = ["--model".to_owned(), "deepseek-ai/DeepSeek-V3.1".to_owned()];
+        assert_eq!(search("openai/gpt-6-sol", &private), disabled);
+        let openai = ["-m".to_owned(), "openai/gpt-6-sol".to_owned()];
+        assert!(search("deepseek-ai/DeepSeek-V3.1", &openai).is_empty());
+    }
+
     /// Codex on a NEAR AI route reads its model list from the session's
     /// catalog file and starts on the default; without the file, no run.
     #[test]
@@ -1556,7 +1606,8 @@ mod tests {
                 .find(|pair| pair[0] == "-c" && pair[1].starts_with(&format!("{key}=")))
                 .map(|pair| pair[1][key.len() + 1..].to_owned())
         };
-        assert!(value("web_search").is_none());
+        // A private model never gets hosted search; see the next test.
+        assert_eq!(value("web_search").as_deref(), Some("\"disabled\""));
         assert_eq!(
             value("model_catalog_json").as_deref(),
             Some("\"/state dir/managed-codex-catalogs/s.json\"")
@@ -2171,7 +2222,7 @@ mod tests {
         assert_eq!(args[..2], ["resume".to_owned(), thread.to_string()]);
         assert_eq!(args[2..4], ["--model".to_owned(), "custom".to_owned()]);
         assert!(args.contains(&"model_provider=\"near_ai_managed\"".to_owned()));
-        assert!(!args.iter().any(|arg| arg.starts_with("web_search=")));
+        assert!(args.contains(&"web_search=\"disabled\"".to_owned()));
         assert_eq!(
             env_of(&command, "CODEX_HOME"),
             Some(Some(

@@ -91,6 +91,15 @@ pub fn catalog(default: &str, models: &[ChatModel], bundled: Option<&Value>) -> 
                     }
                 }
             }
+            // Hosted search only where OpenAI runs it. Set on the entry, not
+            // only at launch, so switching to another model mid-session
+            // drops search too.
+            if !super::models::hosted_search_allowed(&model.id) {
+                entry["supports_search_tool"] = json!(false);
+                if let Some(fields) = entry.as_object_mut() {
+                    fields.remove("web_search_tool_type");
+                }
+            }
             // Never more than NEAR AI serves: the window it lists less the
             // longest answer, which is how Codex sizes its own models, and
             // no more than the window Codex ships for a model it knows.
@@ -135,6 +144,9 @@ const KEPT: &[&str] = &[
     "use_responses_lite",
     "tool_mode",
     "apply_patch_tool_type",
+    // Hosted search, kept only for `openai/` models (see `catalog`).
+    "supports_search_tool",
+    "web_search_tool_type",
 ];
 
 /// The shipped entry Codex would use for `id`: the longest slug `id`
@@ -254,6 +266,8 @@ mod tests {
                 "tool_mode": "code_mode_only",
                 "apply_patch_tool_type": "freeform",
                 "context_window": 272000,
+                "supports_search_tool": true,
+                "web_search_tool_type": "text_and_image",
             })
         };
         json!({"models": [
@@ -428,6 +442,35 @@ mod tests {
         assert_eq!(entries.len(), 2);
         for entry in entries {
             assert_eq!(entry["auto_review_model_override"], entry["slug"]);
+        }
+    }
+
+    #[test]
+    fn hosted_search_is_offered_only_on_openai_entries() {
+        let models = [
+            chat("openai/gpt-6.1-sol", None),
+            // Matches Codex's `gpt-6.1-sol` entry by suffix, but NEAR AI
+            // runs its search outside the model's boundary.
+            chat("nearai-private/gpt-6.1-sol", None),
+            chat("anthropic/claude-sonnet-5-5", None),
+        ];
+        let bundled = bundled();
+        for list in [Some(&bundled), None] {
+            let catalog = catalog("openai/gpt-6.1-sol", &models, list);
+            let entries = catalog["models"].as_array().unwrap();
+            for entry in &entries[1..] {
+                assert_eq!(entry["supports_search_tool"], false, "{}", entry["slug"]);
+                assert!(entry.get("web_search_tool_type").is_none());
+            }
+            if list.is_some() {
+                assert_eq!(entries[0]["supports_search_tool"], true);
+                assert_eq!(entries[0]["web_search_tool_type"], "text_and_image");
+                // The private entry still keeps the rest of what it matched.
+                assert_eq!(entries[1]["base_instructions"], "You are Codex (sol).");
+            } else {
+                // Unknown to Codex: left to Codex's own default.
+                assert!(entries[0].get("supports_search_tool").is_none());
+            }
         }
     }
 

@@ -233,6 +233,17 @@ fn newest_in<'a>(
 /// serves newer models, which remain selectable and may be the fallback.
 pub const CODEX_PREFERRED: &[&str] = &["openai/gpt-6-sol", "openai/gpt-5.6-sol", "openai/gpt-5.5"];
 
+/// Whether Codex may use hosted web search with `id`.
+///
+/// NEAR AI sends `openai/` models to OpenAI's own Responses API, where
+/// OpenAI runs the search and already holds the conversation. Every other
+/// model takes NEAR AI's adapter, which runs the search itself through an
+/// outside search API, carrying a query written from the session out of
+/// the private model's boundary. Same prefix NEAR AI routes on.
+pub fn hosted_search_allowed(id: &str) -> bool {
+    id.starts_with("openai/")
+}
+
 /// Claude Code's and OpenCode's default inside a NEAR AI private or
 /// External pool, first listed first ([`default_for`]). NEAR AI lists
 /// alphabetically, so without this list the default is whichever private
