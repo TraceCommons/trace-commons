@@ -9,6 +9,7 @@ import TCLocalization
 /// choice applies at once and is kept for the next launch. Then the edge
 /// rail's switch, and the Traces map's style.
 struct GeneralSection: View {
+    @EnvironmentObject private var app: AppModel
     @State private var appearance = GlassAppearance.stored
     @State private var language = Localization.languagePreference()
     /// The edge rail's switch: a shell preference, read once and written
@@ -23,7 +24,9 @@ struct GeneralSection: View {
 
     var body: some View {
         appearanceCard
-        languageCard
+        if app.featureIsEnabled("localization_language_selection") {
+            languageCard
+        }
         edgeRailCard
         mapStyleCard
         promotionsCard

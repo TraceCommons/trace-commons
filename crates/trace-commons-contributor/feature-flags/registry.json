@@ -1,5 +1,13 @@
 {
   "schema_version": 1,
-  "registry_version": 1,
-  "flags": {}
+  "registry_version": 2,
+  "flags": {
+    "localization_language_selection": {
+      "description": "Show the native macOS language picker without changing saved language preferences or localization fallback.",
+      "owner": "macos",
+      "default": false,
+      "required_capabilities": ["macos_localization_v1"],
+      "timing": "live"
+    }
+  }
 }

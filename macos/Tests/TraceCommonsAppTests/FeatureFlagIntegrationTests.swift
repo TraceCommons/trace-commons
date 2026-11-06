@@ -19,6 +19,17 @@ final class FeatureFlagIntegrationTests: XCTestCase {
     func testNoDaemonMeansDisabled() {
         let model = AppModel()
         XCTAssertFalse(model.featureIsEnabled("unknown"))
+        XCTAssertFalse(model.featureIsEnabled("localization_language_selection"))
+    }
+    @MainActor
+    func testLanguageSelectionFollowsEffectiveLiveDecision() throws {
+        let model = AppModel()
+        model.featureFlags = try languageSelectionSnapshot(enabled: true)
+        XCTAssertTrue(model.featureIsEnabled("localization_language_selection"))
+        model.featureFlags = try languageSelectionSnapshot(enabled: false)
+        XCTAssertFalse(model.featureIsEnabled("localization_language_selection"))
+        model.featureFlags = nil
+        XCTAssertFalse(model.featureIsEnabled("localization_language_selection"))
     }
     func testFeatureEventRequestsSnapshotRefresh() {
         XCTAssertEqual(DaemonEventParser.parse(#"{"event":"feature_flags_changed","data":{"generation":2}}"#), .featureFlagsChanged)
@@ -76,4 +87,22 @@ final class FeatureFlagIntegrationTests: XCTestCase {
         let identity = try JSONDecoder().decode(BuildFeatureProfile.self, from: Data(XCTUnwrap(TCFeatureFlags.buildProfileJSON()).utf8))
         XCTAssertTrue(identity.agrees(environment: a.environment, digest: a.profileDigest))
     }
+}
+
+/// Pending deliberately differs from enabled: views must use the daemon's
+/// effective decision, never a pending or locally reconstructed decision.
+func languageSelectionSnapshot(enabled: Bool) throws -> FeatureFlagSnapshot {
+    let document: [String: Any] = [
+        "schema_version": 1, "environment": "staging",
+        "profile_digest": String(repeating: "a", count: 64),
+        "instance_id": UUID().uuidString, "generation": 1,
+        "sampled_at": "2026-11-05T00:00:00Z", "source": "remote",
+        "revision": 1, "expires_at": "2026-11-06T00:00:00Z", "fresh": true,
+        "flags": ["localization_language_selection": [
+            "enabled": enabled, "pending": !enabled,
+            "capability_blocked": false, "timing": "live"
+        ]]
+    ]
+    return try JSONDecoder().decode(FeatureFlagSnapshot.self,
+                                    from: JSONSerialization.data(withJSONObject: document))
 }

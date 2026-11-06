@@ -20,10 +20,23 @@ final class NativeOnboardingRenderTests: XCTestCase {
         }
         let words = Localization.current
         let model = AppModel()
-        try render(ScrollView { GeneralSection().padding() }
-            .environment(\.locale, words.locale)
-            .environment(\.layoutDirection, words.isRightToLeft ? .rightToLeft : .leftToRight),
-            size: CGSize(width: 360, height: 900), to: directory.appendingPathComponent("language-settings-narrow.png"))
+        let defaults = UserDefaults.standard
+        let applicationID = Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName
+        let previousLanguage = defaults.persistentDomain(forName: applicationID)?["AppleLanguages"]
+        defer {
+            if let previousLanguage { defaults.set(previousLanguage, forKey: "AppleLanguages") }
+            else { defaults.removeObject(forKey: "AppleLanguages") }
+        }
+        Localization.setLanguagePreference("en")
+        for state in ["unavailable", "disabled", "enabled"] {
+            model.featureFlags = try state == "unavailable" ? nil
+                : languageSelectionSnapshot(enabled: state == "enabled")
+            let filename = state == "enabled" ? "language-settings-narrow.png" : "language-settings-\(state).png"
+            try render(ScrollView { GeneralSection().padding() }.environmentObject(model),
+                size: CGSize(width: 360, height: 900),
+                to: directory.appendingPathComponent(filename))
+            XCTAssertEqual(defaults.stringArray(forKey: "AppleLanguages"), ["en"], "\(state) must preserve language choice")
+        }
         let copy = try XCTUnwrap(TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode))
         let runner = FirstRunRunner(state: FirstRunState(step: .welcome), daemon: RecordingFirstRunDaemon())
         try render(WelcomeScreen(copy: copy, runner: runner).environmentObject(model)

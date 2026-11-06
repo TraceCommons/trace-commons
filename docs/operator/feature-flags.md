@@ -12,8 +12,13 @@ defaults, required capabilities, and `live` or `next_start` application timing.
 Bump the registry version and every profile's matching version when definitions
 change. Never reuse a retired ID. Experimental flags default false.
 
-The shipped registry starts empty. No existing feature is automatically gated.
-Tests use fixture flags, which are absent from shipped registry/profile data.
+The shipped `localization_language_selection` flag controls only the native macOS
+language picker. It defaults off and applies live; staging and testing builds
+allow remote enablement, while production builds do not yet allow it. Disabling
+it hides the picker without clearing a saved language preference. Translation
+resources, language resolution and English fallback remain active. This is a
+UI-only gate, not a Rust behavior or consent gate. Tests also use fixture flags,
+which are absent from shipped registry/profile data.
 
 Production builds use the production profile. Staging builds default to staging;
 the staging workflow also offers a testing profile. Testing uses the same staging

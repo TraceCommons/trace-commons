@@ -15,6 +15,18 @@ Only English is enabled initially; no
 translated locale has been approved or shipped. There are no Python dependencies
 (Python 3.9+).
 
+## Language-picker rollout
+
+Settings uses the daemon's `localization_language_selection` feature decision.
+The flag is default-off and live: missing/unavailable snapshots or a remote
+disable hide the picker without clearing `AppleLanguages`. Saved preferences,
+system-language resolution, native resources and English fallback keep working.
+Staging and testing profiles permit remote enablement; production's allowlist
+does not yet permit it. Enabling production requires a reviewed profile change
+and compatible release, not just a remote manifest. No manifest is published by
+this code change. Translation availability and human-review requirements remain
+independent of this flag; it cannot enable an unapproved locale.
+
 ## Generate and verify
 
 From the repository root, using a **freshly built, trusted** FFI library:

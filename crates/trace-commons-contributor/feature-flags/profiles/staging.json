@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "registry_version": 1,
+  "registry_version": 2,
   "environment": "staging",
-  "capabilities": [],
-  "remote_enable": []
+  "capabilities": ["macos_localization_v1"],
+  "remote_enable": ["localization_language_selection"]
 }
