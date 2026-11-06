@@ -47,7 +47,7 @@ final class AnimatedFirstRunTests: XCTestCase {
     func test_welcomeReadsRonsWords() throws {
         let welcome = try words().welcome
         XCTAssertEqual(welcome.title, "Welcome to Near AI")
-        XCTAssertEqual(welcome.body, "Private AI solutions that put you in control of your data.")
+        XCTAssertEqual(welcome.body, "Think of it as a privacy VPN for your AI: when it's on, your AI work stays confidential. In about a minute, your coding tools run on private AI, and the traces you choose to share earn credit.")
         XCTAssertEqual(FirstRunNavigation.next(FirstRunState()).step, .tools)
     }
 

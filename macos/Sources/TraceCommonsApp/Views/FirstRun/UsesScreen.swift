@@ -622,8 +622,10 @@ struct UsesScreen: View {
             state: $runner.state,
             isCommitting: runner.isCommitting,
             footer: FirstRunFooter(
+                // Says what it does (Alejo, 2026-11-05): dark "Don't share
+                // traces now" until a use is picked, then "Share traces".
                 title: UsesScreenLayout.hasSelection(runner.state, options: options)
-                    ? copy.frame.continueButton : copy.join.skip,
+                    ? copy.uses.shareTraces : copy.uses.dontShareNow,
                 isEnabled: FirstRunNavigation.canContinue(runner.state, candidates: [], requiredScope: required?.name),
                 link: customizing ? nil : FirstRunFooter.Link(
                     title: copy.frame.customSetupInstead,
@@ -631,6 +633,7 @@ struct UsesScreen: View {
                         state: runner.state, open: false, scanned: true, isCommitting: runner.isCommitting),
                     action: openCustomize),
                 backInStep: customizing ? { customizing = false } : nil,
+                subdued: !UsesScreenLayout.hasSelection(runner.state, options: options),
                 action: { runner.state = FirstRunNavigation.next(runner.state) }),
             open: customizing
         ) {

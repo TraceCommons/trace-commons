@@ -52,9 +52,11 @@ enum JoinScreenLayout {
 
     /// "Start sharing": Join is the last step and has no Skip (owner,
     /// 2026-10-12: sign-in required). It stays off until a NEAR AI account
-    /// is signed in (`canStart`).
-    static func footerTitle(_ state: FirstRunState, copy: FirstRunCopy) -> String {
-        copy.uses.start
+    /// is signed in (`canStart`). After "Don't share traces now" on Uses it
+    /// reads "Finish setup" instead, so it never says the opposite of what
+    /// the person chose (Alejo's launch feedback, 2026-11-05).
+    static func footerTitle(_ state: FirstRunState, copy: FirstRunCopy, shares: Bool = true) -> String {
+        shares ? copy.uses.start : copy.join.finishSetup
     }
 
     /// Back while a commit runs on Join: nil (withdrawn) except during the
@@ -465,7 +467,9 @@ struct JoinScreen: View {
             notice: JoinScreenLayout.notice(
                 for: runner.failure, in: runner.state, copy: copy, onboarding: onboarding, privateAI: privateAI),
             footer: FirstRunFooter(
-                title: JoinScreenLayout.footerTitle(runner.state, copy: copy),
+                title: JoinScreenLayout.footerTitle(
+                    runner.state, copy: copy,
+                    shares: UsesScreenLayout.hasSelection(runner.state, options: model.consentScopes)),
                 isEnabled: JoinScreenLayout.canStart(
                     runner.state, uses: copy.uses, requiredScope: required, grant: grant,
                     isCommitting: runner.isCommitting),

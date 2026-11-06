@@ -84,7 +84,11 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertEqual(found, found.sorted())
         XCTAssertTrue(body.contains("GlassButtonStyle(.secondary, size: .stage)"))
         XCTAssertTrue(body.contains("GlassButtonStyle(.link, size: .stage)"))
-        XCTAssertTrue(body.contains("GlassButtonStyle(.primary, size: .stage)"), "the canvas's semibold Continue")
+        // The canvas's semibold Continue, drawn dark when it is the quieter
+        // choice (Uses' "Don't share traces now", Alejo 2026-11-05).
+        XCTAssertTrue(body.contains("GlassButtonStyle(footer.subdued ? .secondary : .primary, size: .stage)"),
+                      "the canvas's semibold Continue")
+        XCTAssertFalse(FirstRunFooter(title: "", isEnabled: false, action: {}).subdued, "the primary unless a screen says")
         XCTAssertTrue(body.contains("if footer.busy { GlassSpinner() }"))
         XCTAssertNil(FirstRunFooter(title: "", isEnabled: false, action: {}).cancel, "no Cancel unless a screen gives one")
         XCTAssertNil(FirstRunFooter(title: "", isEnabled: false, action: {}).link, "no link unless a screen gives one")

@@ -78,6 +78,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let noSharing: String
         public let skipNote: String
         public let skip: String
+        /// Join's button after "Don't share traces now" (Alejo, 2026-11-05).
+        public let finishSetup: String
     }
 
     public struct Folders: Decodable, Equatable, Sendable {
@@ -114,6 +116,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
     public struct Tools: Decodable, Equatable, Sendable {
         public let titleLight: String
         public let titleBold: String
+        /// What connecting gives, and which tools (Alejo, 2026-11-05).
+        public let subtitle: String
         public let addTool: String
         public let addToolCaption: String
         public let addToolRefused: String
@@ -223,6 +227,9 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         /// `creditRequired` under it.
         public let creditScope: String
         public let creditRequired: String
+        /// The button, by whether a use is picked (Alejo, 2026-11-05).
+        public let dontShareNow: String
+        public let shareTraces: String
     }
 
     /// Traces: what the watched tools' traces could earn.

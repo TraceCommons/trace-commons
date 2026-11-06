@@ -25,6 +25,9 @@ struct FirstRunFooter {
     /// sign-in, `JoinScreenLayout.backWhileCommitting`); otherwise Back is
     /// withdrawn while committing.
     let backWhileCommitting: BackWhileCommitting?
+    /// The action is the quieter choice of two, drawn dark rather than as
+    /// the primary (Uses' "Don't share traces now", Alejo 2026-11-05).
+    let subdued: Bool
     let action: () -> Void
 
     struct Cancel {
@@ -46,7 +49,7 @@ struct FirstRunFooter {
     init(
         title: String, isEnabled: Bool, note: String? = nil, busy: Bool = false, cancel: Cancel? = nil,
         link: Link? = nil, backInStep: (() -> Void)? = nil, backWhileCommitting: BackWhileCommitting? = nil,
-        action: @escaping () -> Void
+        subdued: Bool = false, action: @escaping () -> Void
     ) {
         self.title = title
         self.isEnabled = isEnabled
@@ -56,6 +59,7 @@ struct FirstRunFooter {
         self.link = link
         self.backInStep = backInStep
         self.backWhileCommitting = backWhileCommitting
+        self.subdued = subdued
         self.action = action
     }
 }
@@ -258,7 +262,7 @@ struct FirstRunFrame<Graphic: View, Title: View, Content: View>: View {
                     Text(footer.title)
                 }
             }
-            .buttonStyle(GlassButtonStyle(.primary, size: .stage))
+            .buttonStyle(GlassButtonStyle(footer.subdued ? .secondary : .primary, size: .stage))
             .disabled(!footer.isEnabled)
         }
         .padding(.horizontal, FirstRunFrameLayout.barInset)

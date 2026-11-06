@@ -1155,7 +1155,15 @@ struct ToolsScreen: View {
         ) {
             ToolsRing(rows: rows, state: runner.state, scanStart: memory.scanStartedAt)
         } title: {
-            FirstRunTitle(light: copy.tools.titleLight, bold: copy.tools.titleBold)
+            // What connecting gives, before it is asked for (Alejo,
+            // 2026-11-05), as Join's body sits under its title.
+            VStack(spacing: GlassTokens.Space.s3) {
+                FirstRunTitle(light: copy.tools.titleLight, bold: copy.tools.titleBold)
+                Text(copy.tools.subtitle)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .multilineTextAlignment(.center)
+            }
         } content: {
             switch discovery {
             case .found:
