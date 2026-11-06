@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.24.8" date="2026-11-05">
+      <description>
+        <p>Connect tools first, choose data uses later, and move tabs with a direct drag.</p>
+      </description>
+    </release>
     <release version="0.24.7" date="2026-11-05">
       <description>
         <p>More automatic traces go to the privacy check, and empty sessions are skipped.</p>
