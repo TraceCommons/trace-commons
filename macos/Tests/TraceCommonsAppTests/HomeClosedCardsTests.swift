@@ -3,10 +3,10 @@ import TCShellCore
 import XCTest
 @testable import TraceCommonsApp
 
-/// Home's Kimi campaign card closes with a small X (owner, 2026-10-27). A
-/// closed campaign comes back when what the feed says changes, and Settings
-/// can turn the campaign card off altogether. The Insights card and the
-/// Traces walkthrough have no X (owner, 2026-11-04).
+/// Home's Kimi campaign and Insights cards each close with a small X
+/// (owner, 2026-10-27). A closed campaign comes back when what the feed
+/// says changes; the Insights card comes back the next day; and Settings
+/// can turn the campaign card off altogether.
 @MainActor
 final class HomeClosedCardsTests: XCTestCase {
     private func campaign(id: String = "kimi-k3", title: String = "Kimi K3.1 Pro",
@@ -49,17 +49,35 @@ final class HomeClosedCardsTests: XCTestCase {
         XCTAssertFalse(HomeClosedCards.showsCampaign(print, closed: "something-else", promotionsOn: false))
     }
 
+    /// Closed, the Insights card stays closed for the rest of that day in
+    /// the person's calendar, and is back the next.
+    func testTheInsightsCardComesBackTheNextDay() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        let closedAt = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 10, day: 27, hour: 9)))
+        let closedOn = HomeClosedCards.day(closedAt, calendar: calendar)
+        XCTAssertEqual(closedOn, "2026-10-27")
+        XCTAssertTrue(HomeClosedCards.showsInsights(closedOn: "", now: closedAt, calendar: calendar), "never closed")
+        let lateSameDay = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 10, day: 27, hour: 23, minute: 59)))
+        XCTAssertFalse(HomeClosedCards.showsInsights(closedOn: closedOn, now: lateSameDay, calendar: calendar))
+        let nextMorning = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 10, day: 28, hour: 0, minute: 1)))
+        XCTAssertTrue(HomeClosedCards.showsInsights(closedOn: closedOn, now: nextMorning, calendar: calendar))
+    }
+
     func testHomeAndSettingsReadTheSameKeys() throws {
         let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains("@AppStorage(HomeClosedCards.campaignKey) private var closedCampaign = \"\""))
+        XCTAssertTrue(home.contains("@AppStorage(HomeClosedCards.insightsKey) private var insightsClosedOn = \"\""))
         XCTAssertTrue(home.contains("@AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true"))
-        XCTAssertTrue(home.contains("onClose: { closedCampaign = HomeClosedCards.fingerprint(campaign) }"))
-        XCTAssertFalse(home.contains("insightsClosedOn"))
-        XCTAssertFalse(home.contains("tracesHeroClosed"))
+        XCTAssertTrue(home.contains("@AppStorage(HomeClosedCards.tracesHeroKey) private var tracesHeroClosed = false"))
+        XCTAssertFalse(home.contains("onClose: { closedCampaign"), "the campaign has no X (Ron, 2026-11-05)")
+        XCTAssertTrue(home.contains("onClose: { insightsClosedOn = HomeClosedCards.day(Date()) }"))
+        XCTAssertTrue(home.contains("close: GetStartedCard.Close(label: MonitorWords.close) { tracesHeroClosed = true },"))
         let general = try HistoryParityTests.text("Views/Settings/GeneralSection.swift")
         XCTAssertTrue(general.contains("@AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true"))
         XCTAssertTrue(general.contains("Toggle(words.promotionsToggle, isOn: $promotionsOn)"))
-        XCTAssertNotEqual(HomeClosedCards.campaignKey, HomeClosedCards.promotionsKey)
+        XCTAssertEqual(Set([HomeClosedCards.campaignKey, HomeClosedCards.insightsKey, HomeClosedCards.promotionsKey,
+                            HomeClosedCards.tracesHeroKey]).count, 4)
     }
 
     /// The switch's words are the core's, and say what it does.
@@ -70,9 +88,9 @@ final class HomeClosedCardsTests: XCTestCase {
         XCTAssertFalse(words.promotionsCaption.isEmpty)
     }
 
-    /// The hero card draws an X only when given one: the campaign has one;
-    /// Insights and Missions have none, nor does the Traces walkthrough
-    /// (owner, 2026-11-04).
+    /// The hero card draws an X only when given one: Insights has one; the
+    /// campaign (Ron, 2026-11-05) and Missions have none. The Traces walkthrough is the
+    /// getting-started card since 2026-11-02 (owner), with its own X.
     func testOnlyCardsGivenACloseDrawAnX() throws {
         let hero = try String(contentsOf: Self.packageRoot
             .appendingPathComponent("Sources/TCDesign/Components/HeroCard.swift"), encoding: .utf8)
@@ -80,7 +98,7 @@ final class HomeClosedCardsTests: XCTestCase {
         XCTAssertTrue(hero.contains(".foregroundStyle(GlassTokens.Color.heroInk.color"))
         let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
         XCTAssertEqual(home.components(separatedBy: "onClose:").count - 1, 1)
-        XCTAssertEqual(home.components(separatedBy: "GetStartedCard.Close(").count - 1, 0)
+        XCTAssertEqual(home.components(separatedBy: "GetStartedCard.Close(").count - 1, 1)
     }
 
     private static var packageRoot: URL {

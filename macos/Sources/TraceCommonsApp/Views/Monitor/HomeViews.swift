@@ -119,13 +119,19 @@ struct TracesHistoryPage: View {
 /// leaves the machine.
 ///
 /// A closed campaign comes back when what the feed says for it changes;
-/// promotions off hides the campaign card altogether (owner, 2026-10-27).
-/// The Insights card has no X and always shows (owner, 2026-11-04).
+/// the Insights card comes back the next day; promotions off hides the
+/// campaign card altogether (owner, 2026-10-27).
 enum HomeClosedCards {
     /// The fingerprint of the campaign as it was when closed.
     static let campaignKey = "home.closedCampaignFingerprint"
+    /// The day (`day(_:)`) the Insights card was closed on.
+    static let insightsKey = "home.insightsCardClosedOn"
     /// Settings' "Show promotions on Home", on by default.
     static let promotionsKey = "home.showsPromotions"
+    /// The Traces hero was closed with its X (owner, 2026-11-02). It stays
+    /// closed on this Mac: what it explains does not change, and Traces
+    /// and Private AI keep their tabs.
+    static let tracesHeroKey = "home.tracesHeroClosed"
 
     /// Everything the campaign card shows, so any change in the feed --
     /// under the same id or a new one -- is a different fingerprint. New
@@ -140,6 +146,17 @@ enum HomeClosedCards {
     /// person closed, as it was then.
     static func showsCampaign(_ fingerprint: String, closed: String, promotionsOn: Bool) -> Bool {
         promotionsOn && fingerprint != closed
+    }
+
+    /// The day `date` falls on in the person's calendar, as "2026-10-27".
+    static func day(_ date: Date, calendar: Calendar = .current) -> String {
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+    }
+
+    /// The Insights card shows unless it was closed today: once a day.
+    static func showsInsights(closedOn: String, now: Date = Date(), calendar: Calendar = .current) -> Bool {
+        closedOn != day(now, calendar: calendar)
     }
 }
 
@@ -169,8 +186,13 @@ private struct HomeOverview: View {
     /// The campaign closed with its X, as it was then (`fingerprint`): it
     /// comes back when the feed changes it (owner, 2026-10-27).
     @AppStorage(HomeClosedCards.campaignKey) private var closedCampaign = ""
+    /// The day the Insights card was closed with its X: it is back the
+    /// next day; the Insights tab stays where it is (owner, 2026-10-27).
+    @AppStorage(HomeClosedCards.insightsKey) private var insightsClosedOn = ""
     /// Settings' "Show promotions on Home": off, no campaign card.
     @AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true
+    /// The Traces hero, closed with its X: gone from Home on this Mac.
+    @AppStorage(HomeClosedCards.tracesHeroKey) private var tracesHeroClosed = false
 
     /// The rollup, or nil after a failed `history_rollup` read
     /// (`SummaryFacts.fresh`): a stale one is not shown as current.
@@ -199,15 +221,12 @@ private struct HomeOverview: View {
            HomeClosedCards.showsCampaign(
                HomeClosedCards.fingerprint(campaign), closed: closedCampaign, promotionsOn: promotionsOn) {
             GlassHeroCard(
-                gradient: GlassTokens.Gradient.heroCampaign,
+                gradient: GlassTokens.Gradient.heroCampaignCard,
                 title: campaign.title, subtitle: campaign.body,
-                actionTitle: campaign.actionTitle, action: { openURL(campaign.actionURL) },
-                closeLabel: MonitorWords.close, onClose: { closedCampaign = HomeClosedCards.fingerprint(campaign) }
+                actionTitle: campaign.actionTitle, action: { openURL(campaign.actionURL) }
             ) {
                 if let image = campaignStore.image {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFit()
+                    GlassHeroSymbol(image: image)
                 } else {
                     GlassHeroSymbol(campaign.symbol)
                 }
@@ -248,11 +267,12 @@ private struct HomeOverview: View {
                 // and the commons catalogue once the daemon answers it.
                 // Insights as a hero promotion, today's figures in its words
                 // and its graphic (owner, 2026-10-12: an upsell, not a bare
-                // way in). No X (owner, 2026-11-04).
-                if let insightsHeading {
+                // way in).
+                if let insightsHeading, HomeClosedCards.showsInsights(closedOn: insightsClosedOn) {
                     GlassHeroCard(
                         gradient: GlassTokens.Gradient.heroInsights, title: insightsHeading,
-                        subtitle: words?.insightsSubtitle, actionTitle: words?.insightsAction, action: openInsights
+                        subtitle: words?.insightsSubtitle, actionTitle: words?.insightsAction, action: openInsights,
+                        closeLabel: MonitorWords.close, onClose: { insightsClosedOn = HomeClosedCards.day(Date()) }
                     ) {
                         HomeInsightsGraphic(glance: freshGlance)
                     } content: {
@@ -260,8 +280,8 @@ private struct HomeOverview: View {
                     }
                 }
                 // Sent traces without Train coding models, and Review, under
-                // the Insights card while there are any: the way back to a
-                // choice, not a promotion.
+                // the Insights card while there are any. Not closed with the
+                // card: it is the way back to a choice, not a promotion.
                 SentTracesTrainingLine(model: model.sentTracesTraining, history: store.history)
                 if missionsEnabled, store.missions != nil, let catalogue = words?.missionCatalogue {
                     hostedCard(
@@ -339,31 +359,41 @@ private struct HomeOverview: View {
         // Three groups, each under its title: Private AI first (owner,
         // 2026-11-02: back at the top, where it was before 2026-10-28), then
         // Traces (the tiles and what is not contributed across both columns),
-        // then Account (Credit and the NEAR AI balance). The Traces hero
-        // leads Home, over every section, for everyone, every time, with no
-        // X (product owner, 2026-10-28, 2026-10-29; restored 2026-11-05).
+        // then Account (Credit and the NEAR AI balance). The Traces
+        // walkthrough stands in for the Traces cards while no trace folder is
+        // watched and on the launch that finished first run, until it is
+        // closed (owner, 2026-11-02; it led Home above the heading from
+        // 2026-10-28).
         return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            tracesHero
             noCredit
             privateAI
             HomeSection(words?.sectionTraces) {
-                Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
-                    GridRow {
-                        HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
-                                     systemImage: HomeStatIcons.waiting, loading: traces.phase == .loading,
-                                     action: openTraces)
-                        HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(freshRollup),
-                                     systemImage: HomeStatIcons.contributed,
-                                     loading: store.isLoading("history_rollup"), action: openHistory)
-                    }
-                    if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) {
+                if showsTracesWalkthrough {
+                    tracesHero
+                } else {
+                    Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
                         GridRow {
-                            notContributed(uncontributed, title: title)
-                                .gridCellColumns(2)
+                            HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
+                                         loading: traces.phase == .loading, action: openTraces)
+                            HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(freshRollup),
+                                         loading: store.isLoading("history_rollup"), action: openHistory)
+                            // With nothing to say beyond its count, it is a
+                            // third tile on this line (Ron, 2026-11-05).
+                            if uncontributed.count > 0, uncontributed.detail(words) == nil,
+                               let title = HomeFormat.cardHeading(words?.uncontributed) {
+                                notContributed(uncontributed, title: title)
+                            }
+                        }
+                        if uncontributed.count > 0, uncontributed.detail(words) != nil,
+                           let title = HomeFormat.cardHeading(words?.uncontributed) {
+                            GridRow {
+                                notContributed(uncontributed, title: title)
+                                    .gridCellColumns(2)
+                            }
                         }
                     }
+                    .fixedSize(horizontal: false, vertical: true)
                 }
-                .fixedSize(horizontal: false, vertical: true)
             }
             HomeSection(words?.sectionAccount, accessory: accountSignIn) {
                 HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)
@@ -374,17 +404,41 @@ private struct HomeOverview: View {
         }
     }
 
-    /// Home's Traces hero, the product owner's design (`HomeTracesHero`).
-    /// Drawn once the core's words have loaded.
+    /// Whether the Traces walkthrough stands in for the Traces cards
+    /// (`HomeFormat.showsTracesWalkthrough`), unless its X closed it.
+    private var showsTracesWalkthrough: Bool {
+        !tracesHeroClosed && words != nil && HomeFormat.showsTracesWalkthrough(
+            folders: traces.everyFolder, loaded: traces.phase == .loaded,
+            finishedFirstRunThisLaunch: model.finishedFirstRunThisLaunch)
+    }
+
+    /// Home's Traces walkthrough (owner, 2026-10-28): saying that traces
+    /// earn credit, with the way into Traces, where the person shares;
+    /// three steps, contribute, earn, use Private AI (owner, 2026-10-29).
+    /// Condensed on 2026-11-02 (owner): no line under the title, and an X
+    /// that closes it for good on this Mac. Drawn as the Insights empty
+    /// state's card is (owner, 2026-11-02, `GetStartedCard`): a plain card,
+    /// no gradient or pictures, numbered steps, and Start earning as the one
+    /// action, a text link under the step it begins. Drawn once the core's
+    /// words have loaded.
     @ViewBuilder
     private var tracesHero: some View {
-        if let words {
-            HomeTracesHero(words: words, openTraces: openTraces, openPrivateAI: openPrivateAI)
+        if let words, !tracesHeroClosed {
+            GetStartedCard(
+                title: words.tracesHeroTitle,
+                steps: [
+                    .init(title: words.tracesHeroStepContribute, detail: words.tracesHeroStepContributeDetail,
+                          link: GetStartedCard.Link(title: words.tracesHeroAction, action: openTraces)),
+                    .init(title: words.tracesHeroStepEarn, detail: words.tracesHeroStepEarnDetail),
+                    .init(title: words.tracesHeroStepUse, detail: words.tracesHeroStepUseDetail),
+                ],
+                close: GetStartedCard.Close(label: MonitorWords.close) { tracesHeroClosed = true },
+                pixelField: true, fieldPattern: .waves)
         }
     }
 
-    /// Under the Traces hero while Train coding models is off (product
-    /// owner, 2026-11-05): one slim line saying no credit is earned until it
+    /// At the top of Home, over Private AI, while Train coding models is off
+    /// (product owner, 2026-11-05): one slim line saying no credit is earned until it
     /// is on, and Open Settings to the data uses. No X; it goes once the use
     /// is on.
     @ViewBuilder
@@ -454,7 +508,8 @@ private struct HomeOverview: View {
     }
 
     /// What waits on this Mac, not yet contributed, across both columns
-    /// (owner, 2026-10-19): a slim card with a solid accent border, a large
+    /// while it has a call to share, else a tile beside the other two
+    /// (owner, 2026-10-19; Ron, 2026-11-05): a slim card with a solid accent border, a large
     /// icon on the left, how many traces and their size, and the core's
     /// call to share. The whole card opens Traces. Drawn only while
     /// something waits.
@@ -510,10 +565,13 @@ private struct HomeNotContributedCard: View {
         let shape = RoundedRectangle(cornerRadius: GlassTier.card.radius, style: .continuous)
         Button(action: action) {
             HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                VStack(alignment: .leading, spacing: detail == nil ? 0 : GlassTokens.Space.s1) {
                     Text(title)
                         .glassType(GlassTokens.TypeScale.eyebrow)
                         .foregroundStyle(GlassColor.textTertiary)
+                        // A third of the row's width is tight for its word.
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                     HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
                         Text(String(count))
                             .glassType(GlassTokens.TypeScale.heading.weight(.bold))
@@ -526,10 +584,12 @@ private struct HomeNotContributedCard: View {
                         }
                     }
                 }
-                .fixedSize()
+                // Beside the line it keeps its own width; as a tile it takes
+                // the column's, the same as the tiles beside it.
+                .fixedSize(horizontal: detail != nil, vertical: detail != nil)
                 if let detail {
                     // A card on the card: the nested card's translucent
-                    // fill (`GlassGround`), so the watermark shows through.
+                    // fill (`GlassGround`).
                     Text(detail)
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textSecondary)
@@ -538,17 +598,13 @@ private struct HomeNotContributedCard: View {
                         .padding(.vertical, GlassTokens.Space.s4)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .glassTier(.cardQuiet)
-                } else {
-                    Spacer(minLength: 0)
                 }
             }
             // The tiles' inset, so its words start where theirs do.
             .padding(.horizontal, 12)
             .padding(.vertical, GlassTokens.Space.s5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            // Its icon is the card's watermark, as the tiles' is, behind
-            // the words (owner, 2026-10-20).
-            .glassCardWatermark(HomeStatIcons.uncontributed)
+            // As tall as the tiles beside it on one line.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             // The stat tiles' fill and hover.
             .glassTier(.card, hover: GlassTokens.Color.cardHover)
             .contentShape(shape)
@@ -561,13 +617,6 @@ private struct HomeNotContributedCard: View {
 
 /// Home's stat tile icons (owner, 2026-10-12).
 enum HomeStatIcons {
-    static let waiting = "hourglass"
-    static let contributed = "checkmark.seal"
-    static let credit = "dollarsign.circle"
-    /// Held on this Mac, not yet shared: local and private.
-    static let uncontributed = "lock.laptopcomputer"
-    /// The NEAR AI balance (owner, 2026-10-19).
-    static let balance = "creditcard"
     /// Home's Private AI tiles (owner, 2026-10-20).
     static let calls = "arrow.left.arrow.right"
     static let verified = "checkmark.shield"
@@ -1759,7 +1808,7 @@ struct HomeAccountTiles: View {
                 // No sign-in line under it (owner, 2026-11-02): the Account
                 // heading says "No data - Sign in" instead.
                 HomeStatTile(label: HomeFormat.creditReceivedWord, value: tiles.received,
-                             detail: creditDetail, systemImage: HomeStatIcons.credit,
+                             detail: creditDetail,
                              loading: store.isLoading("history_rollup"), action: openPrivateAI)
                 HomeStatTile(label: HomeFormat.creditPendingTitleWord, value: tiles.pending,
                              loading: store.isLoading("history_rollup", "commons_credit_summary"),
@@ -1768,8 +1817,7 @@ struct HomeAccountTiles: View {
                     let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
                     BalanceArrivalFlourish(status: model.balanceStatus, calls: model.balanceCalls) { counting in
                         HomeStatTile(label: copy.balanceTitle, value: counting ?? balance.value,
-                                     detail: balance.detail, detailInk: balance.detailInk,
-                                     systemImage: HomeStatIcons.balance, action: openPrivateAI)
+                                     detail: balance.detail, detailInk: balance.detailInk, action: openPrivateAI)
                     }
                 } else {
                     Color.clear
@@ -1795,27 +1843,23 @@ private struct HomeStatTile: View {
     /// tone.
     var detail: String? = nil
     var detailInk: GlassRGBA? = nil
-    /// The tile's icon (`HomeStatIcons`); nil draws none.
-    var systemImage: String? = nil
     /// The first answer has not come: a placeholder, not a dash or a zero.
     var loading = false
     /// Opens where the number lives, and the whole tile is the button;
     /// nil for a tile on the page its number lives on (History's).
     var action: (() -> Void)?
 
-    /// #1146's `StatCard`: a full card, the value bold and tabular. Its
-    /// icon is the card's watermark on the right (owner, 2026-10-20), as
-    /// every small card on Home draws it.
+    /// #1146's `StatCard`: a full card, the value bold and tabular, with no
+    /// icon (Ron, 2026-11-05).
     var body: some View {
         if let action {
             Button(action: action) {
-                GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
-                              interactive: true, iconPlacement: .watermark, loading: loading)
+                GlassStatCard(label, value: value, detail: detail, detailInk: detailInk,
+                              interactive: true, loading: loading)
             }
             .buttonStyle(GlassPressStyle())
         } else {
-            GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
-                          iconPlacement: .watermark, loading: loading)
+            GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, loading: loading)
         }
     }
 }
@@ -1897,6 +1941,18 @@ enum HomeFormat {
             return (amount, change?.text, change?.ink)
         case .sentence(let sentence): return ("—", sentence, nil)
         }
+    }
+
+    /// Whether the Traces walkthrough stands in for the Traces cards (owner,
+    /// 2026-11-02: "in place of them on first launch or when trace
+    /// directories are not setup/watched"): on the launch that finished
+    /// first run, or once the tree has loaded with no folder watched, none
+    /// at all or every one set to Never. A tree still loading, or one that
+    /// failed, shows the cards, which say unknown in their own way.
+    static func showsTracesWalkthrough(
+        folders: [TracesTree.FolderNode], loaded: Bool, finishedFirstRunThisLaunch: Bool
+    ) -> Bool {
+        finishedFirstRunThisLaunch || (loaded && !folders.contains { $0.mode != .ignore })
     }
 
     /// Whether the Account section's figures wait on a sign-in, so its
