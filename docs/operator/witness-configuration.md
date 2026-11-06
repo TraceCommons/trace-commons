@@ -36,7 +36,12 @@ This capability needs one initial client release. Older clients keep using the e
 
 The example contains placeholders and cannot be signed as-is.
 
-`enrollment_urls` retains the identities devices enrolled with, including retired URLs. A configuration applies only to a device whose configured witness URL appears here. `endpoints` lists active destinations in preference order. Each destination has its own signing-address/measurement pairs; a pin at one destination never authorizes another. Keep retired enrollment aliases so existing devices can still recognize future configurations, but remove retired active endpoints.
+`enrollment_urls` retains the identities devices enrolled with, including retired URLs. Automatic routing applies only when the device's configured witness URL is both a compiled Commons enrollment identity and a signed alias. The compiled identities are:
+
+- `https://f1654b0beac2ac2afae4235ee3d907096cd8f3de-8088.dstack-pha-prod9.phala.network`
+- `https://witness.tracecommons.ai`
+
+Trailing slashes are ignored for identity matching. A signer-supplied alias cannot add a self-hosted witness to this delegation. Custom configured witnesses ignore this configuration and its local rollback state, including invalid cache files; their original same-URL V1 accepted-measurements support remains available. `endpoints` lists active destinations in preference order. Each destination has its own signing-address/measurement pairs; a pin at one destination never authorizes another. Keep retired enrollment aliases so existing devices can still recognize future configurations, but remove retired active endpoints.
 
 URLs must be strict HTTPS without credentials, query, fragment, whitespace, controls or backslashes, at most 2048 bytes. Only trailing slashes are ignored for matching; do not otherwise normalize URL text. Limits are 32 enrollment aliases, 8 endpoints, 32 entries per endpoint and 64 KiB for the whole served document. Unknown fields and malformed pins are refused. An empty active endpoint set explicitly withdraws service; a matching configuration with no currently valid candidates refuses raw sends.
 
@@ -78,7 +83,11 @@ No configured file means fixed 404; a missing, malformed, unsigned or oversized 
 
 ## Client safety and retry behavior
 
-The client verifies cached bytes on read, retains the last verified configuration on fetch failure and serializes installation so concurrent refreshes cannot roll its version back. A malformed existing cache fails closed. A matching configuration is authoritative: expired or withdrawn endpoint entries do not fall back to older signup or V1 pins. A verified configuration for unrelated enrollment URLs cannot reroute a custom witness.
+The client verifies cached bytes on read, retains the last verified configuration on fetch failure and serializes cache and rollback-state reads/writes with the same process-shared file lock. `witness-configuration-high-water.json` separately stores the highest configuration version and the SHA-256 of its exact signed payload. A checked, monotonic local cache generation makes actual installations and same-payload repairs visible to the supervisor even when another process repairs the cache; it releases measurement holds without changing signed policy. Installation durably writes this watermark before replacing the cache. A crash between writes fails closed until the matching publication completes; a newer valid signed document can repair a damaged cache or replace one signed only by a removed key. The same version can repair or be re-signed only when its payload exactly matches the watermark; it cannot change policy. Lower versions and different payloads at the same version are refused.
+
+A missing or damaged cache with a watermark never restores enrollment or V1 pins for Commons routing. An invalid watermark also fails closed. For migration from the unreleased cache-only implementation, a missing watermark is initialized only from a fully verified existing cache; an invalid prior cache cannot establish a replacement version floor. Keep the watermark when repairing cache files. These checks protect retained state, not a fresh state directory after deliberate deletion of both files. A matching configuration is authoritative: expired or withdrawn endpoint entries do not fall back to older signup or V1 pins. A verified configuration for unrelated enrollment URLs cannot reroute a custom witness.
+
+For Commons onboarding and connected-inference discovery, continue publishing one of the compiled stable enrollment identities above even after its active deployment retires. Keep its signup pins valid and preserve it in every later signed configuration. Put future provider domains in the signed `endpoints` list; do not make new clients enroll with an uncompiled provider URL. Existing stored enrollment identities stay unchanged. Enrollment validates the published witness URL, pins and administrator policy without requiring a live connection to that retired alias; actual witness traffic uses the freshly attested signed destination.
 
 The stored enrollment settings and grants remain unchanged during signed runtime routing updates. Manual changes to configured witness identity still invalidate grants. Existing nonempty administrator host restrictions remain absolute; empty policies retain their existing unset-equivalent meaning. Only the chosen witness transport gets a derived signed host when no enforcing policy exists; ingestion, receipts and other clients keep their own host restrictions.
 
@@ -88,8 +97,12 @@ Within one uploader/review invocation, fallback is allowed only while probing ca
 
 The `witness.tracecommons.ai` gateway route is still failing as recorded in [the hostname runbook](witness-custom-domain.md). Do not make it the only active destination. The initial configuration should retain the healthy direct Phala endpoint; both the original and future stable URL can be enrollment aliases. Signed configuration publication, code deployment, the initial app release and actual traffic cutover are separate steps.
 
-Initial configuration version 1 has been signed with the existing commons KMS
-key and verified for both enrollment aliases. It is staged at
-`/etc/tracecommons/witness/witness-configuration.json`, without enabling the
-new server setting. Only the healthy legacy endpoint is active; the stable
-custom hostname is an enrollment alias, not an active destination.
+Initial configuration version 1 is published by pilot ingest build `68555db70`
+at the public configuration route. Its signature verifies for both enrollment
+aliases, and its served bytes match
+`/etc/tracecommons/witness/witness-configuration.json`
+(SHA-256 `d94720ab68815f7f71acaba5ce90ae0fd51267c0a2e6549043d47b03df0f2212`).
+Only the healthy legacy Phala endpoint is active; the stable custom hostname
+is an enrollment alias. The initial supporting client release is a separate
+step. Keep Phala active until runtime destination disclosure and consent copy
+are updated before a first signed host move.

@@ -1,6 +1,7 @@
 //! Signed operator routing, separate from the stable enrollment identity.
 //!
-//! A matching configuration is authoritative, including withdrawal. Endpoint
+//! For compiled Commons enrollments a matching configuration is authoritative,
+//! including withdrawal. Custom enrollments never delegate to this signer. Endpoint
 //! pins are paired and scoped to that endpoint; enrollment pins only establish
 //! that the device opted into witnessing. Neither settings nor generic upload
 //! allowlists are changed. Failover ends before the first raw POST.
@@ -16,13 +17,121 @@ use chrono::{DateTime, Utc};
 use std::{path::Path, sync::Arc};
 use trace_commons_attestation::measurements::{ExpectedMeasurements, ExpectedMeasurementsError};
 use trace_commons_operator_client::host_allowlist::HostAllowlist;
-use trace_commons_protocol::witness_accepted_list::AcceptedEntry;
+use trace_commons_protocol::witness_accepted_list::{AcceptedEntry, SignedAcceptedList};
 use trace_commons_protocol::witness_configuration::{
     WITNESS_CONFIGURATION_MAX_BYTES, WitnessConfiguration, verify_signed_configuration,
 };
 
 /// Exact signed bytes, verified on every read. Independent of the V1 list.
 pub const CONFIGURATION_FILE: &str = "witness-configuration.json";
+/// Separate durable rollback protection, retained even if the cache is damaged.
+pub const CONFIGURATION_HIGH_WATER_FILE: &str = "witness-configuration-high-water.json";
+/// Only these compiled enrollment identities delegate routing to the Commons
+/// signer. Signed aliases never enroll a self-hosted witness in that authority.
+pub const COMMONS_ENROLLMENT_URLS: &[&str] = &[
+    "https://f1654b0beac2ac2afae4235ee3d907096cd8f3de-8088.dstack-pha-prod9.phala.network",
+    "https://witness.tracecommons.ai",
+];
+#[must_use]
+pub fn is_commons_enrollment(url: &str) -> bool {
+    COMMONS_ENROLLMENT_URLS
+        .iter()
+        .any(|known| known.trim_end_matches('/') == url.trim_end_matches('/'))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HighWater {
+    version: u64,
+    // Bind same-version crash/key-rotation repair to the exact signed payload.
+    payload_sha256: String,
+    // Local durable observation signal: repairs at the same signed version
+    // must wake measurement holds even if another process repairs the cache.
+    cache_generation: u64,
+}
+impl HighWater {
+    fn same_payload(&self, other: &Self) -> bool {
+        self.version == other.version && self.payload_sha256 == other.payload_sha256
+    }
+}
+struct CachedDocument {
+    config: WitnessConfiguration,
+    high_water: HighWater,
+}
+fn bounded_file(path: &Path, limit: usize) -> Result<Option<Vec<u8>>, &'static str> {
+    use std::io::Read as _;
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {}
+        _ => return Err(ERR_STORE),
+    }
+    let file = std::fs::File::open(path).map_err(|_| ERR_STORE)?;
+    let mut bytes = Vec::new();
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ERR_STORE)?;
+    if bytes.len() > limit {
+        return Err(ERR_STORE);
+    }
+    Ok(Some(bytes))
+}
+fn verified_document(bytes: &[u8], keys: &[[u8; 32]]) -> Result<CachedDocument, &'static str> {
+    use sha2::{Digest, Sha256};
+    let config = verify_signed_configuration(bytes, keys).map_err(|error| error.label())?;
+    if !measurements_valid(&config) {
+        return Err(ERR_MEASUREMENT);
+    }
+    let signed: SignedAcceptedList = serde_json::from_slice(bytes).map_err(|_| ERR_STORE)?;
+    let high_water = HighWater {
+        version: config.version,
+        payload_sha256: hex::encode(Sha256::digest(signed.payload.as_bytes())),
+        cache_generation: 1,
+    };
+    Ok(CachedDocument { config, high_water })
+}
+fn cached_document(dir: &Path, keys: &[[u8; 32]]) -> Result<Option<CachedDocument>, &'static str> {
+    bounded_file(
+        &dir.join(CONFIGURATION_FILE),
+        WITNESS_CONFIGURATION_MAX_BYTES,
+    )?
+    .map(|bytes| verified_document(&bytes, keys))
+    .transpose()
+}
+fn high_water(dir: &Path) -> Result<Option<HighWater>, &'static str> {
+    bounded_file(&dir.join(CONFIGURATION_HIGH_WATER_FILE), 512)?
+        .map(|bytes| {
+            let high: HighWater = serde_json::from_slice(&bytes).map_err(|_| ERR_STORE)?;
+            if high.version == 0
+                || high.cache_generation == 0
+                || high.payload_sha256.len() != 64
+                || !high
+                    .payload_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(ERR_STORE);
+            }
+            Ok(high)
+        })
+        .transpose()
+}
+fn save_high_water(dir: &Path, high: &HighWater) -> Result<(), &'static str> {
+    crate::config::write_atomic_0600(
+        dir,
+        &dir.join(CONFIGURATION_HIGH_WATER_FILE),
+        &serde_json::to_vec(high).map_err(|_| ERR_STORE)?,
+    )
+    .map_err(|_| ERR_STORE)?;
+    // Atomic file writes sync the file. Also persist its directory entry
+    // before the cache rename, so a crash cannot retain only the newer cache.
+    #[cfg(unix)]
+    std::fs::File::open(dir)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| ERR_STORE)?;
+    // Windows write_atomic_0600 uses MOVEFILE_WRITE_THROUGH.
+    Ok(())
+}
+
 const ERR_URL_MISMATCH: &str = "witness-configuration-enrollment-mismatch";
 const ERR_MEASUREMENT: &str = "witness-configuration-measurement-malformed";
 const ERR_STORE: &str = "witness-configuration-store-failed";
@@ -40,52 +149,92 @@ fn measurements_valid(config: &WitnessConfiguration) -> bool {
         .flat_map(|endpoint| &endpoint.entries)
         .all(|entry| parse_measurement(entry).is_ok())
 }
-/// Read a bounded signed configuration and verify both signature and pin syntax.
+/// Read the bounded signed document together with its durable rollback floor
+/// under the installation lock. Missing or inconsistent state adds no trust.
 pub fn load_verified(dir: &Path, keys: &[[u8; 32]]) -> Option<WitnessConfiguration> {
-    use std::io::Read as _;
-    if keys.is_empty() {
-        return None;
-    }
-    let file = std::fs::File::open(dir.join(CONFIGURATION_FILE)).ok()?;
-    let mut bytes = Vec::new();
-    file.take(WITNESS_CONFIGURATION_MAX_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() > WITNESS_CONFIGURATION_MAX_BYTES {
-        return None;
-    }
-    let config = verify_signed_configuration(&bytes, keys).ok()?;
-    measurements_valid(&config).then_some(config)
+    let _lock = install_lock(dir).ok()?;
+    read_cache_unlocked(dir, keys).ok()?
 }
-/// Install only a relevant, fully parsed, strictly newer signed document.
+/// Verify and install a Commons configuration under the cross-process lock.
+/// Publish durable high-water first, then cache. An identical payload may
+/// repair the cache at the same version; an equal version never changes policy.
 pub fn install(
     dir: &Path,
     bytes: &[u8],
     keys: &[[u8; 32]],
     enrollment_url: &str,
 ) -> Result<InstallOutcome, &'static str> {
-    let config = verify_signed_configuration(bytes, keys).map_err(|error| error.label())?;
-    if !config.names_witness(enrollment_url) {
+    if !is_commons_enrollment(enrollment_url) {
         return Err(ERR_URL_MISMATCH);
     }
-    if !measurements_valid(&config) {
-        return Err(ERR_MEASUREMENT);
+    let incoming = verified_document(bytes, keys)?;
+    if !incoming.config.names_witness(enrollment_url) {
+        return Err(ERR_URL_MISMATCH);
     }
     let _lock = install_lock(dir)?;
-    let held = match std::fs::symlink_metadata(dir.join(CONFIGURATION_FILE)) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
-            Some(load_verified(dir, keys).ok_or(ERR_STORE)?)
+    let cached = cached_document(dir, keys);
+    let mut high = high_water(dir)?;
+    if high.is_none() {
+        // Migration from the not-yet-shipped cache-only implementation. A
+        // verified cache establishes the floor; an invalid cache cannot.
+        if let Some(held) = cached.as_ref().map_err(|_| ERR_STORE)? {
+            save_high_water(dir, &held.high_water)?;
+            high = Some(held.high_water.clone());
         }
-        _ => return Err(ERR_STORE),
-    };
-    if held.is_some_and(|held| held.version >= config.version) {
-        return Ok(InstallOutcome::NotNewer);
     }
+    // A valid cache newer than a present watermark is inconsistent local
+    // state. Never let the lower watermark authorize a cache rollback.
+    if cached
+        .as_ref()
+        .ok()
+        .and_then(Option::as_ref)
+        .is_some_and(|cache| {
+            high.as_ref()
+                .is_none_or(|floor| cache.high_water.version > floor.version)
+                && (cache.high_water.version > incoming.high_water.version
+                    || (cache.high_water.version == incoming.high_water.version
+                        && !cache.high_water.same_payload(&incoming.high_water)))
+        })
+    {
+        return Err(ERR_STORE);
+    }
+    if let Some(held) = &high {
+        if incoming.high_water.version < held.version {
+            return Ok(InstallOutcome::NotNewer);
+        }
+        if incoming.high_water.version == held.version {
+            if !incoming.high_water.same_payload(held) {
+                return Ok(InstallOutcome::NotNewer);
+            }
+            if cached
+                .as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .is_some_and(|cache| cache.high_water.same_payload(held))
+            {
+                return Ok(InstallOutcome::NotNewer);
+            }
+            // Same signed payload, including withdrawal, safely completes a
+            // watermark-first crash or repairs damage/re-signing after rotation.
+            let mut repaired = held.clone();
+            repaired.cache_generation = held.cache_generation.checked_add(1).ok_or(ERR_STORE)?;
+            save_high_water(dir, &repaired)?;
+            crate::config::write_atomic_0600(dir, &dir.join(CONFIGURATION_FILE), bytes)
+                .map_err(|_| ERR_STORE)?;
+            return Ok(InstallOutcome::Installed {
+                version: held.version,
+            });
+        }
+    }
+    let mut next_high_water = incoming.high_water;
+    next_high_water.cache_generation = high.as_ref().map_or(Ok(1), |held| {
+        held.cache_generation.checked_add(1).ok_or(ERR_STORE)
+    })?;
+    save_high_water(dir, &next_high_water)?;
     crate::config::write_atomic_0600(dir, &dir.join(CONFIGURATION_FILE), bytes)
         .map_err(|_| ERR_STORE)?;
     Ok(InstallOutcome::Installed {
-        version: config.version,
+        version: incoming.config.version,
     })
 }
 // A stable inode, never the atomically replaced document. Lock across the
@@ -109,30 +258,66 @@ fn install_lock(dir: &Path) -> Result<std::fs::File, &'static str> {
     Ok(file)
 }
 
-fn read_cache(dir: &Path) -> Result<Option<WitnessConfiguration>, WitnessTrustError> {
-    match std::fs::symlink_metadata(dir.join(CONFIGURATION_FILE)) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
-            load_verified(dir, &accepted_list::trusted_keys(dir))
-                .map(Some)
-                .ok_or_else(unpinned)
+// The caller must hold install_lock. Migration and snapshot reads use the
+// same lock as writers, so watermark-first publication gaps are never observed
+// as permanent measurement holds by another live daemon/CLI process.
+fn read_cache_unlocked(
+    dir: &Path,
+    keys: &[[u8; 32]],
+) -> Result<Option<WitnessConfiguration>, &'static str> {
+    let cached = cached_document(dir, keys)?;
+    match (high_water(dir)?, cached) {
+        (None, None) => Ok(None),
+        (None, Some(held)) => {
+            save_high_water(dir, &held.high_water)?;
+            Ok(Some(held.config))
         }
-        _ => Err(unpinned()),
+        (Some(high), Some(held)) if high.same_payload(&held.high_water) => Ok(Some(held.config)),
+        // Missing/corrupt cache with a durable floor must never restore the
+        // enrollment pins. A valid bound/newer publication can repair it.
+        _ => Err(ERR_STORE),
     }
+}
+fn read_cache_state(dir: &Path) -> Result<Option<(WitnessConfiguration, u64)>, WitnessTrustError> {
+    let _lock = install_lock(dir).map_err(|_| unpinned())?;
+    let Some(config) =
+        read_cache_unlocked(dir, &accepted_list::trusted_keys(dir)).map_err(|_| unpinned())?
+    else {
+        return Ok(None);
+    };
+    let high = high_water(dir)
+        .map_err(|_| unpinned())?
+        .ok_or_else(unpinned)?;
+    Ok(Some((config, high.cache_generation)))
+}
+fn read_cache(dir: &Path) -> Result<Option<WitnessConfiguration>, WitnessTrustError> {
+    read_cache_state(dir).map(|state| state.map(|(config, _)| config))
+}
+fn routing_cache(
+    dir: &Path,
+    enrollment_url: &str,
+) -> Result<Option<WitnessConfiguration>, WitnessTrustError> {
+    if !is_commons_enrollment(enrollment_url) {
+        return Ok(None);
+    }
+    read_cache(dir)
 }
 
 /// Public-data digest used only to notice matching routing/validity changes.
 /// Unrelated configurations cannot release this enrollment's measurement holds.
 pub fn active_state(settings: &WitnessSettings, dir: &Path, now: DateTime<Utc>) -> Option<String> {
     use sha2::{Digest, Sha256};
-    let mut config = read_cache(dir).ok()??;
+    if !is_commons_enrollment(&settings.url) {
+        return None;
+    }
+    let (mut config, generation) = read_cache_state(dir).ok()??;
     if !config.names_witness(&settings.url) {
         return None;
     }
     for endpoint in &mut config.endpoints {
         endpoint.entries.retain(|entry| entry.is_valid_at(now));
     }
-    let bytes = serde_json::to_vec(&config).ok()?;
+    let bytes = serde_json::to_vec(&(config, generation)).ok()?;
     Some(hex::encode(Sha256::digest(bytes)))
 }
 
@@ -141,6 +326,9 @@ pub async fn refresh(cfg: &ContributorConfig, dir: &Path) -> RefreshOutcome {
     let Some(settings) = &cfg.witness else {
         return RefreshOutcome::Skipped;
     };
+    if !is_commons_enrollment(&settings.url) {
+        return RefreshOutcome::Skipped;
+    }
     let keys = accepted_list::trusted_keys(dir);
     if keys.is_empty() {
         return RefreshOutcome::Skipped;
@@ -225,7 +413,9 @@ fn candidates(
     if !signup.is_pinned() {
         return Err(unpinned());
     }
-    if let Some(config) = read_cache(dir)?.filter(|config| config.names_witness(&settings.url)) {
+    if let Some(config) =
+        routing_cache(dir, &settings.url)?.filter(|config| config.names_witness(&settings.url))
+    {
         return Ok(config
             .endpoints
             .into_iter()
@@ -285,13 +475,14 @@ fn http_transport(
 /// Rechecked by HTTP after serializing the raw body, directly before dispatch.
 pub(crate) struct RoutingGuard {
     dir: std::path::PathBuf,
+    enrollment_url: String,
     snapshot: Option<WitnessConfiguration>,
     candidate: Candidate,
     trust: WitnessTrust,
 }
 impl RoutingGuard {
     pub(crate) fn validate(&self) -> Result<(), WitnessTrustError> {
-        if read_cache(&self.dir)? != self.snapshot
+        if routing_cache(&self.dir, &self.enrollment_url)? != self.snapshot
             || self.candidate.trust_at(Utc::now()).as_ref() != Some(&self.trust)
         {
             // The supervisor may already have observed this transition before
@@ -353,7 +544,7 @@ async fn probe_candidates_with<T: RoutedTransport>(
     dir: &Path,
     mut build: impl FnMut(&Candidate) -> Result<T, WitnessTrustError>,
 ) -> Result<(T, VerifiedWitness), WitnessTrustError> {
-    let snapshot = read_cache(dir)?;
+    let snapshot = routing_cache(dir, &settings.url)?;
     let endpoints = candidates(settings, dir, Utc::now())?;
     let mut failure = unpinned();
     for candidate in endpoints {
@@ -385,11 +576,12 @@ async fn probe_candidates_with<T: RoutedTransport>(
                 }
                 // Invalid cache still refuses as unpinned; a verified policy
                 // change is retryable rather than a permanent measurement hold.
-                if read_cache(dir)? != snapshot {
+                if routing_cache(dir, &settings.url)? != snapshot {
                     return Err(WitnessTrustError::WitnessUnreachable);
                 }
                 let guard = RoutingGuard {
                     dir: dir.to_path_buf(),
+                    enrollment_url: settings.url.clone(),
                     snapshot,
                     candidate,
                     trust,
@@ -524,7 +716,7 @@ mod tests {
     use trace_commons_protocol::witness_configuration::{
         WITNESS_CONFIGURATION_SCHEMA, WitnessEndpoint,
     };
-    const ANCHOR: &str = "https://enrollment.example";
+    const ANCHOR: &str = COMMONS_ENROLLMENT_URLS[0];
     const PRIMARY: &str = "https://new-witness.example";
     const FALLBACK: &str = "https://fallback-witness.example";
     const OLD_SIGNER: &str = "0x1111111111111111111111111111111111111111";
@@ -1291,7 +1483,7 @@ mod tests {
                 &[public(&key)],
                 ANCHOR
             ),
-            Err(ERR_STORE)
+            Ok(InstallOutcome::NotNewer)
         );
         assert_eq!(
             std::fs::read(dir.path().join(CONFIGURATION_FILE)).unwrap(),
@@ -1421,6 +1613,7 @@ mod tests {
         let trust = candidate.trust_at(Utc::now()).unwrap();
         let guard = RoutingGuard {
             dir: dir.path().into(),
+            enrollment_url: ANCHOR.into(),
             snapshot,
             candidate,
             trust,
@@ -1547,6 +1740,7 @@ mod tests {
         let trust = candidate.trust_at(Utc::now()).unwrap();
         let guard = RoutingGuard {
             dir: dir.path().into(),
+            enrollment_url: ANCHOR.into(),
             snapshot: read_cache(dir.path()).unwrap(),
             candidate: candidate.clone(),
             trust: trust.clone(),
@@ -1555,6 +1749,7 @@ mod tests {
         expired_candidate.entries[0].not_after = Utc::now() - chrono::Duration::seconds(1);
         let expired = RoutingGuard {
             dir: dir.path().into(),
+            enrollment_url: ANCHOR.into(),
             snapshot: read_cache(dir.path()).unwrap(),
             candidate: expired_candidate,
             trust,
@@ -1569,5 +1764,400 @@ mod tests {
         assert_eq!(guard.validate(), Err(WitnessTrustError::WitnessUnreachable));
         std::fs::write(dir.path().join(CONFIGURATION_FILE), b"tampered").unwrap();
         assert_eq!(guard.validate(), Err(unpinned()));
+    }
+    #[test]
+    fn compiled_enrollment_identity_alone_delegates_routing_authority() {
+        for known in COMMONS_ENROLLMENT_URLS {
+            assert!(is_commons_enrollment(known));
+            assert!(is_commons_enrollment(&format!("{known}/")));
+        }
+        for custom in [
+            "https://acme-witness.internal",
+            "https://witness.tracecommons.ai.attacker.example",
+            "https://witness.tracecommons.ai/custom",
+            "http://witness.tracecommons.ai",
+            "https://witness.tracecommons.ai?custom=1",
+        ] {
+            assert!(
+                !is_commons_enrollment(custom),
+                "a signer cannot choose enrollment eligibility"
+            );
+        }
+        let (dir, key) = setup();
+        let mut config = document(1);
+        config.endpoints.truncate(1);
+        config.endpoints[0].url = "https://previously-unseen-operator-deployment.example".into();
+        config.enrollment_urls.push(config.endpoints[0].url.clone());
+        install_document(dir.path(), &key, &config);
+        let mut enrolled = settings();
+        enrolled.url.push('/');
+        assert_eq!(
+            candidates(&enrolled, dir.path(), Utc::now()).unwrap()[0].url,
+            config.endpoints[0].url
+        );
+    }
+    #[tokio::test]
+    async fn signer_supplied_custom_alias_cannot_reroute_or_block_a_self_hosted_witness() {
+        use trace_commons_protocol::witness_accepted_list::{
+            AcceptedList, WITNESS_ACCEPTED_LIST_SCHEMA,
+        };
+        const CUSTOM: &str = "https://acme-witness.internal";
+        let (dir, key) = setup();
+        let mut config = document(1);
+        config.enrollment_urls.push(CUSTOM.into());
+        install_document(dir.path(), &key, &config);
+        let mut custom = settings();
+        custom.url = CUSTOM.into();
+        assert_eq!(
+            install(dir.path(), &signed(&key, &config), &[public(&key)], CUSTOM),
+            Err(ERR_URL_MISMATCH)
+        );
+        assert!(active_state(&custom, dir.path(), Utc::now()).is_none());
+        // Custom users retain the V1 list scoped to their own original URL.
+        let list = AcceptedList {
+            schema: WITNESS_ACCEPTED_LIST_SCHEMA.into(),
+            version: 1,
+            issued_at: Utc::now(),
+            witness_url: CUSTOM.into(),
+            entries: vec![entry(NEW_SIGNER, "dd")],
+        };
+        let payload = trace_commons_protocol::canonical_json::to_canonical_string(
+            &serde_json::to_value(list).unwrap(),
+        )
+        .unwrap();
+        let list_bytes = serde_json::to_vec(&serde_json::json!({"signatures":[ListSignature {key_id:key_id_for(&public(&key)), signature:hex::encode(key.sign(payload.as_bytes()).as_ref())}], "payload":payload})).unwrap();
+        accepted_list::install(dir.path(), &list_bytes, &[public(&key)], CUSTOM).unwrap();
+        for corrupt in [false, true] {
+            if corrupt {
+                std::fs::write(
+                    dir.path().join(CONFIGURATION_FILE),
+                    b"damaged Commons cache",
+                )
+                .unwrap();
+                std::fs::write(
+                    dir.path().join(CONFIGURATION_HIGH_WATER_FILE),
+                    b"damaged Commons watermark",
+                )
+                .unwrap();
+            }
+            let candidate = candidates(&custom, dir.path(), Utc::now())
+                .unwrap()
+                .remove(0);
+            assert_eq!(candidate.url, CUSTOM);
+            let trust = candidate.trust_at(Utc::now()).unwrap();
+            assert_eq!(trust.signing_address, OLD_SIGNER);
+            assert_eq!(trust.accepted.len(), 1);
+            assert_eq!(
+                trust.accepted[0].measurements,
+                parse_measurement(&entry(NEW_SIGNER, "dd")).unwrap()
+            );
+            let events = recording_events();
+            let result = session_with(
+                RoutingContext::test(&custom, dir.path()),
+                crate::envelope::MAX_ENVELOPE_BYTES,
+                raw(),
+                None,
+                &consent(),
+                |candidate| {
+                    let mut transport = Recording::new(candidate, &events);
+                    transport.measurement = "aa".repeat(48);
+                    Ok(transport)
+                },
+            )
+            .await;
+            assert_eq!(result.unwrap_err(), WitnessTrustError::WitnessUnreachable);
+            assert_eq!(
+                *events.lock().unwrap(),
+                vec![format!("probe:{CUSTOM}"), format!("post:{CUSTOM}")]
+            );
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (origin, server) = serve_config(None, seen.clone()).await;
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.witness = Some(custom);
+        cfg.ingest_url = origin;
+        cfg.allowed_hosts = Some("127.0.0.1".into());
+        assert_eq!(refresh(&cfg, dir.path()).await, RefreshOutcome::Skipped);
+        assert!(seen.lock().unwrap().is_empty());
+        server.abort();
+    }
+    #[test]
+    fn a_damaged_or_rotated_key_cache_can_be_repaired_without_lowering_the_watermark() {
+        let (dir, old_key) = setup();
+        let old = document(8);
+        install_document(dir.path(), &old_key, &old);
+        let before = high_water(dir.path()).unwrap().unwrap();
+        std::fs::write(dir.path().join(CONFIGURATION_FILE), b"damaged").unwrap();
+        let newer = document(9);
+        let next_key = signer();
+        let keys = [public(&next_key)];
+        accepted_list::set_test_keys(dir.path(), keys.to_vec());
+        assert_eq!(
+            install(dir.path(), &signed(&next_key, &newer), &keys, ANCHOR),
+            Ok(InstallOutcome::Installed { version: 9 })
+        );
+        assert!(high_water(dir.path()).unwrap().unwrap().version > before.version);
+        assert_eq!(read_cache(dir.path()).unwrap().unwrap().version, 9);
+        assert_eq!(
+            install(
+                dir.path(),
+                &signed(&old_key, &old),
+                &[public(&old_key), public(&next_key)],
+                ANCHOR
+            ),
+            Ok(InstallOutcome::NotNewer)
+        );
+        // A cache signed only by a subsequently removed key is repairable too.
+        let rotated = document(10);
+        install(
+            dir.path(),
+            &signed(&old_key, &rotated),
+            &[public(&old_key)],
+            ANCHOR,
+        )
+        .unwrap();
+        assert!(read_cache(dir.path()).is_err());
+        let latest = document(11);
+        install(dir.path(), &signed(&next_key, &latest), &keys, ANCHOR).unwrap();
+        assert_eq!(read_cache(dir.path()).unwrap().unwrap().version, 11);
+    }
+    #[test]
+    fn watermark_first_crash_is_repaired_only_by_the_same_payload_or_a_newer_version() {
+        let (dir, key) = setup();
+        let old = document(3);
+        install_document(dir.path(), &key, &old);
+        let incoming = document(4);
+        let bytes = signed(&key, &incoming);
+        let verified = verified_document(&bytes, &[public(&key)]).unwrap();
+        // Simulate process exit between the two durable writes.
+        {
+            let _lock = install_lock(dir.path()).unwrap();
+            save_high_water(dir.path(), &verified.high_water).unwrap();
+        }
+        assert!(read_cache(dir.path()).is_err());
+        let mut different = incoming.clone();
+        different.endpoints.clear();
+        assert_eq!(
+            install(
+                dir.path(),
+                &signed(&key, &different),
+                &[public(&key)],
+                ANCHOR
+            ),
+            Ok(InstallOutcome::NotNewer)
+        );
+        assert!(read_cache(dir.path()).is_err());
+        assert_eq!(
+            install(dir.path(), &bytes, &[public(&key)], ANCHOR),
+            Ok(InstallOutcome::Installed { version: 4 })
+        );
+        assert_eq!(read_cache(dir.path()).unwrap().unwrap().version, 4);
+        // Re-signing the bound payload after removing the old key is safe.
+        let next_key = signer();
+        accepted_list::set_test_keys(dir.path(), vec![public(&next_key)]);
+        assert!(read_cache(dir.path()).is_err());
+        assert_eq!(
+            install(
+                dir.path(),
+                &signed(&next_key, &incoming),
+                &[public(&next_key)],
+                ANCHOR
+            ),
+            Ok(InstallOutcome::Installed { version: 4 })
+        );
+        assert_eq!(read_cache(dir.path()).unwrap().unwrap().version, 4);
+    }
+    #[test]
+    fn missing_cache_keeps_the_durable_floor_and_never_restores_enrollment_pins() {
+        let (dir, key) = setup();
+        let config = document(8);
+        let bytes = signed(&key, &config);
+        install_document(dir.path(), &key, &config);
+        std::fs::remove_file(dir.path().join(CONFIGURATION_FILE)).unwrap();
+        assert!(candidates(&settings(), dir.path(), Utc::now()).is_err());
+        assert_eq!(
+            install(
+                dir.path(),
+                &signed(&key, &document(7)),
+                &[public(&key)],
+                ANCHOR
+            ),
+            Ok(InstallOutcome::NotNewer)
+        );
+        assert!(!dir.path().join(CONFIGURATION_FILE).exists());
+        assert_eq!(
+            install(dir.path(), &bytes, &[public(&key)], ANCHOR),
+            Ok(InstallOutcome::Installed { version: 8 })
+        );
+        assert_eq!(read_cache(dir.path()).unwrap().unwrap().version, 8);
+    }
+    #[test]
+    fn invalid_or_missing_watermark_with_invalid_cache_cannot_reset_the_floor() {
+        for watermark in [
+            None,
+            Some(b"invalid".as_slice()),
+            Some(b"{\"version\":0,\"payload_sha256\":\"00\"}".as_slice()),
+        ] {
+            let (dir, key) = setup();
+            install_document(dir.path(), &key, &document(8));
+            std::fs::write(dir.path().join(CONFIGURATION_FILE), b"invalid").unwrap();
+            match watermark {
+                None => {
+                    std::fs::remove_file(dir.path().join(CONFIGURATION_HIGH_WATER_FILE)).unwrap()
+                }
+                Some(bytes) => {
+                    std::fs::write(dir.path().join(CONFIGURATION_HIGH_WATER_FILE), bytes).unwrap()
+                }
+            }
+            assert!(read_cache(dir.path()).is_err());
+            assert_eq!(
+                install(
+                    dir.path(),
+                    &signed(&key, &document(1)),
+                    &[public(&key)],
+                    ANCHOR
+                ),
+                Err(ERR_STORE)
+            );
+            assert_eq!(
+                install(
+                    dir.path(),
+                    &signed(&key, &document(9)),
+                    &[public(&key)],
+                    ANCHOR
+                ),
+                Err(ERR_STORE)
+            );
+        }
+    }
+    #[test]
+    fn cache_only_migration_preserves_its_verified_version_floor() {
+        let (dir, key) = setup();
+        let old = document(8);
+        let bytes = signed(&key, &old);
+        // State written by the unreleased cache-only implementation.
+        std::fs::write(dir.path().join(CONFIGURATION_FILE), bytes).unwrap();
+        assert_eq!(
+            install(
+                dir.path(),
+                &signed(&key, &document(7)),
+                &[public(&key)],
+                ANCHOR
+            ),
+            Ok(InstallOutcome::NotNewer)
+        );
+        assert_eq!(high_water(dir.path()).unwrap().unwrap().version, 8);
+        assert_eq!(read_cache(dir.path()).unwrap().unwrap().version, 8);
+    }
+    #[test]
+    fn readers_wait_for_the_locked_watermark_and_cache_publication() {
+        let (dir, key) = setup();
+        install_document(dir.path(), &key, &document(8));
+        let incoming = signed(&key, &document(9));
+        let document = verified_document(&incoming, &[public(&key)]).unwrap();
+        let lock = install_lock(dir.path()).unwrap();
+        save_high_water(dir.path(), &document.high_water).unwrap();
+        let path = dir.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            tx.send(read_cache(&path).map(|config| config.map(|config| config.version)))
+                .unwrap();
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(30))
+                .is_err(),
+            "reader must not classify the live publication gap as a permanent hold"
+        );
+        crate::config::write_atomic_0600(
+            dir.path(),
+            &dir.path().join(CONFIGURATION_FILE),
+            &incoming,
+        )
+        .unwrap();
+        drop(lock);
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
+            Ok(Some(9))
+        );
+        reader.join().unwrap();
+    }
+    #[test]
+    fn repair_cache_in_subprocess() {
+        let Some(dir) = std::env::var_os("TRACE_COMMONS_WITNESS_REPAIR_TEST_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let bytes = std::fs::read(dir.join("repair-document.test-input")).unwrap();
+        let key: [u8; 32] = std::fs::read(dir.join("repair-public-key.test-input"))
+            .unwrap()
+            .try_into()
+            .unwrap();
+        accepted_list::set_test_keys(&dir, vec![key]);
+        assert!(matches!(
+            install(&dir, &bytes, &[key], ANCHOR),
+            Ok(InstallOutcome::Installed { .. })
+        ));
+    }
+    #[test]
+    fn a_repair_generation_never_wraps_or_changes_the_signed_policy() {
+        let (dir, key) = setup();
+        let config = document(8);
+        let bytes = signed(&key, &config);
+        install_document(dir.path(), &key, &config);
+        let original = high_water(dir.path()).unwrap().unwrap();
+        std::fs::write(dir.path().join(CONFIGURATION_FILE), b"damaged").unwrap();
+        install(dir.path(), &bytes, &[public(&key)], ANCHOR).unwrap();
+        let repaired = high_water(dir.path()).unwrap().unwrap();
+        assert!(original.same_payload(&repaired));
+        assert_eq!(repaired.cache_generation, original.cache_generation + 1);
+        let mut exhausted = repaired;
+        exhausted.cache_generation = u64::MAX;
+        save_high_water(dir.path(), &exhausted).unwrap();
+        std::fs::write(dir.path().join(CONFIGURATION_FILE), b"damaged").unwrap();
+        assert_eq!(
+            install(dir.path(), &bytes, &[public(&key)], ANCHOR),
+            Err(ERR_STORE)
+        );
+        assert_eq!(
+            high_water(dir.path()).unwrap().unwrap().cache_generation,
+            u64::MAX
+        );
+        assert!(read_cache(dir.path()).is_err());
+    }
+    #[test]
+    fn verified_cache_ahead_of_watermark_still_binds_equal_version_payloads() {
+        let (dir, key) = setup();
+        let config = document(8);
+        install_document(dir.path(), &key, &config);
+        let old = verified_document(&signed(&key, &document(5)), &[public(&key)]).unwrap();
+        save_high_water(dir.path(), &old.high_water).unwrap();
+        let mut conflicting = config.clone();
+        conflicting.endpoints.clear();
+        assert_eq!(
+            install(
+                dir.path(),
+                &signed(&key, &conflicting),
+                &[public(&key)],
+                ANCHOR
+            ),
+            Err(ERR_STORE)
+        );
+        assert_eq!(
+            cached_document(dir.path(), &[public(&key)])
+                .unwrap()
+                .unwrap()
+                .config,
+            config
+        );
+        assert_eq!(
+            install(
+                dir.path(),
+                &signed(&key, &document(9)),
+                &[public(&key)],
+                ANCHOR
+            ),
+            Ok(InstallOutcome::Installed { version: 9 })
+        );
+        assert_eq!(read_cache(dir.path()).unwrap().unwrap().version, 9);
     }
 }
