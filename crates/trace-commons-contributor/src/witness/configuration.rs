@@ -28,10 +28,7 @@ pub const CONFIGURATION_FILE: &str = "witness-configuration.json";
 pub const CONFIGURATION_HIGH_WATER_FILE: &str = "witness-configuration-high-water.json";
 /// Only these compiled enrollment identities delegate routing to the Commons
 /// signer. Signed aliases never enroll a self-hosted witness in that authority.
-pub const COMMONS_ENROLLMENT_URLS: &[&str] = &[
-    "https://f1654b0beac2ac2afae4235ee3d907096cd8f3de-8088.dstack-pha-prod9.phala.network",
-    "https://witness.tracecommons.ai",
-];
+pub const COMMONS_ENROLLMENT_URLS: &[&str] = crate::channel::COMMONS_WITNESS_ENROLLMENT_URLS;
 #[must_use]
 pub fn is_commons_enrollment(url: &str) -> bool {
     COMMONS_ENROLLMENT_URLS
@@ -509,7 +506,7 @@ struct RoutingContext<'a> {
     refresh_cfg: Option<&'a ContributorConfig>,
 }
 impl<'a> RoutingContext<'a> {
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "near-ai-staging")))]
     fn test(settings: &'a WitnessSettings, dir: &'a Path) -> Self {
         Self {
             settings,
@@ -708,7 +705,7 @@ async fn token_session_with<T: TokenTransport>(
     let (transport, verified) = select_with(context, build).await?;
     transport.send_tokens(&verified, request).await
 }
-#[cfg(test)]
+#[cfg(all(test, not(feature = "near-ai-staging")))]
 mod tests {
     use super::*;
     use ring::signature::{Ed25519KeyPair, KeyPair};
