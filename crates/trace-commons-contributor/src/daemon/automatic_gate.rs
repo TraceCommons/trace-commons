@@ -263,10 +263,11 @@ pub enum SessionRedaction {
 
 /// K6: whether a certified full pipeline ran for this session.
 ///
-/// Reads the version only after verifying current witness routing and pins,
+/// Reads the version only through
+/// [`crate::witness::configuration::certified_redaction_pipeline_version`],
 /// which returns it only after the certificate's digest matches the bytes
-/// and its signature recovers to the pinned signer, so a field the
-/// signature does not cover is never consulted. The witness must also be
+/// and its signature recovers to a signer current signed routing still
+/// authorizes, so a field the signature does not cover is never consulted. The witness must also be
 /// pinned to a measurement, the same condition the approved-review path in
 /// `submit` puts on a saved certificate: an unpinned signer is a key, not an
 /// enclave.
@@ -289,20 +290,12 @@ pub fn session_redaction(
     {
         return SessionRedaction::NotCertified;
     }
-    if crate::witness::configuration::verify_review_certificate(settings, state_dir, response)
-        .is_err()
-    {
-        return SessionRedaction::NotCertified;
-    }
-    let certificate = serde_json::from_str::<serde_json::Value>(&response.certificate_json).ok();
-    match certificate
-        .as_ref()
-        .and_then(|value| value.get("redaction_policy_version"))
-        .and_then(serde_json::Value::as_str)
-    {
-        Some(version)
+    match crate::witness::configuration::certified_redaction_pipeline_version(
+        settings, state_dir, response,
+    ) {
+        Ok(version)
             if trace_commons_protocol::trace_contribution::is_full_redaction_pipeline_version(
-                version,
+                &version,
             ) =>
         {
             SessionRedaction::CertifiedFullPipeline
