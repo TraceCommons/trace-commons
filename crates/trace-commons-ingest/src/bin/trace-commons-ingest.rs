@@ -85309,8 +85309,8 @@ fn near_ai_scorer_production_host_requested(
 
 /// Refuse to boot when a NEAR AI host this ingest will call or publish
 /// belongs to the other channel: a `near-ai-staging` build must name only
-/// the NEAR AI staging host, and a default build must never name it
-/// (staging design, section 3.9). The refusal names the control and the
+/// the NEAR AI staging hosts (inference and platform), and a default build
+/// must never name one (staging design, section 3.9). The refusal names the control and the
 /// setting, never the value.
 ///
 /// One exception, on a staging build only and only when

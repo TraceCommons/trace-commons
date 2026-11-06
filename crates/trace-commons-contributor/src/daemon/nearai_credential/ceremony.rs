@@ -1795,7 +1795,7 @@ mod tests {
             reqwest::Url::parse(crate::daemon::nearai_credential::api::CLOUD_API_ORIGIN).unwrap();
         assert_eq!(url.host_str(), pinned.host_str());
         #[cfg(not(feature = "near-ai-staging"))]
-        assert_eq!(url.host_str(), Some("cloud-api.near.ai"));
+        assert_eq!(url.host_str(), Some("cloud-platform.near.ai"));
         let callback = url
             .query_pairs()
             .find(|(k, _)| k == "frontend_callback")

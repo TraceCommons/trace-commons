@@ -1025,12 +1025,12 @@ mod tests {
         assert_eq!(loopback_port(URL), Some(49152));
         assert_eq!(
             loopback_port(
-                "https://cloud-api.near.ai/v1/auth/github?frontend_callback=http%3A%2F%2F127.0.0.1%3A40001%2Ftrace-commons%2Fnear-ai%2Fcallback"
+                "https://cloud-platform.near.ai/v1/auth/github?frontend_callback=http%3A%2F%2F127.0.0.1%3A40001%2Ftrace-commons%2Fnear-ai%2Fcallback"
             ),
             Some(40001)
         );
         assert_eq!(
-            loopback_port("https://cloud-api.near.ai/v1/auth/github"),
+            loopback_port("https://cloud-platform.near.ai/v1/auth/github"),
             None
         );
         assert_eq!(loopback_port("http://localhost:40001/x"), None);

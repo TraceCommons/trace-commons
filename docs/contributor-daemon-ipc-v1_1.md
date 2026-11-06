@@ -9602,7 +9602,9 @@ This addendum supersedes the initial `model_spend` unavailable-only contract.
 `model_spend {}` is asynchronous and uses the existing connected NEAR AI session,
 selected inference-key organization (or the existing first-active-organization
 fallback for a legacy session), and the fixed trusted management origin
-`https://cloud-api.near.ai`. It requests
+`https://cloud-platform.near.ai` (staging `https://cloud-platform-stg.near.ai`;
+NEAR AI moved its account, organization, usage and credit routes there from
+`cloud-api.near.ai` on 2026-11-06). It requests
 `GET /v1/organizations/{organization}/usage/by-model?period=day`. The deployed
 [provider OpenAPI](https://cloud-api.near.ai/api-docs/openapi.json) defines this
 session-authenticated rolling 24-hour report. No registry price estimate is

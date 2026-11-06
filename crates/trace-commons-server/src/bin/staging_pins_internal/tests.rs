@@ -144,9 +144,10 @@ fn sign_then_verify_round_trips() {
 #[test]
 fn the_payload_names_the_staging_gateway_host() {
     // The bare host, as the app compares it, of the compiled-in staging
-    // NEAR AI API base -- not a URL, not a path.
+    // NEAR AI inference base -- not a URL, not a path, and not the
+    // platform API.
     assert_eq!(staging_gateway_host(), "cloud-stg-api.near.ai");
-    let host = reqwest::Url::parse(trace_commons_server::near_ai_api::NEAR_AI_API_BASE_URL)
+    let host = reqwest::Url::parse(trace_commons_server::near_ai_api::NEAR_AI_INFERENCE_BASE_URL)
         .unwrap()
         .host_str()
         .unwrap()
