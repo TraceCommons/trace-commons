@@ -128,4 +128,13 @@ screen budget was used to remove those transitions.
 Earlier typecheck-only status notes describe the model-writing stage. The later
 [integrated validation report](../validation.md) records the suite-level
 frame/control comparisons and sampled traces. Those checks do not establish
-product guarantees; owner promise selection and TLC checks remain pending.
+product guarantees. Owner selection is now complete; TLC check outcomes are recorded separately.
+
+## Selected safety monitors
+
+The owner selected all thirteen candidates. This model configures P5, P8 and P11
+as observation-only safety invariants. See [receipt and processing proof
+notes](../proofs/server-ingest-notes.md) for the exact projections, decision-time
+boundaries, source correspondence and limitations. The observers preserve all
+source guards and finite domains; typechecking and frame/control checks pass.
+This documentation does not claim a completed exhaustive check.

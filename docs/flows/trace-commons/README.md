@@ -1,6 +1,7 @@
 # TraceCommons current-behavior flow models
 
-Source baseline: `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`.
+Model seed baseline: `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`.
+Inventory and selected source seams reviewed at `a2e0aa56608f8c403deff679f8b51e76ac2f5ca7`.
 Workflow: [bkase flow-promises](https://github.com/bkase/plugins/blob/6f35f6ae6b3581c499bdfcae080932b4ffa7e281/pstack/skills/flow-promises/SKILL.md),
 pinned at `6f35f6ae6b3581c499bdfcae080932b4ffa7e281`.
 
@@ -13,16 +14,15 @@ and [composition correspondence](composition.md) delimit the model's scope.
 
 ## Status
 
-See [validation evidence](validation.md) for the completed structural checks.
-The design is approved. Product promises have **not** been selected or encoded.
-Typechecking, frame/control agreement and random simulation are structural
-validation, not proofs of safety or progress. There are no TLC verdicts,
-counterexamples or generated checked statecharts yet. The surface reserves
-space for those charts rather than substituting hand-drawn diagrams.
+The owner selected all 13 [candidate guarantees](promise-candidates.md). They
+are encoded as 15 safety predicates across seven model families. See the
+[proof results](proofs/results.md) for counterexamples, source replays and
+checks that remain incomplete. No production behavior changes are included.
 
-The primary checkout's unrelated untracked files, including passkey,
-account-binding and upload-allowance additions, are outside the pinned source
-baseline. This work does not describe a live deployment configuration.
+[Structural validation](validation.md) covers typechecking, frame/control
+agreement and random simulation. Those checks are separate from safety
+verification. Neither establishes automatic equivalence with executable code.
+This work does not describe a live deployment configuration.
 
 ## Model families
 
@@ -49,13 +49,11 @@ memory safety, OS isolation, or deployed configuration. Detailed domain
 checks do not imply a proof of the abstract composition, and the composition
 does not establish correspondence with executable Rust/Swift automatically.
 
-The source index currently has 993 declaration/boundary rows: 119 detailed
-projections, 215 coarse interfaces, and 659 unresolved correspondence rows.
-Of the unresolved rows, 304 are presentation declarations rather than
-established independent flows. These counts describe mapping granularity,
-not verified behavior. The suite does not claim that every route parameter,
-component, provider branch or platform dialog is modeled in detail; the
-remaining gaps are explicit in the coverage files.
+The refreshed source index has 1,013 declaration/boundary rows: 59 detailed
+projections, 29 coarse interfaces, and 925 unresolved correspondence rows.
+Changed source fingerprints invalidate previous mappings until reviewed again.
+These counts describe mapping granularity, not verified behavior. Platform
+notes outside the selected seams retain their original seed baseline.
 
 ## Reproduce structural validation
 
@@ -81,13 +79,10 @@ logs outside this design seed.
 
 ## Select and check promises
 
-First inspect the screen surface. Then choose product-language promises
-from the separately presented candidates. Record the owner's choice in
-`promise-selection.json`, encode only the selected definitions in the
-relevant `.qnt` files, and list them individually in each `.cfg` as
-`INVARIANT NAME` or `PROPERTY NAME`. Do not add constraints to shrink the
-behavior being checked. Fairness must match the selected promise's stated
-environment and user actions.
+The recorded owner choice is in `promise-selection.json`. The checker refuses
+unselected definitions, stale output folders and exploration constraints.
+Only safety invariants were selected; no progress or fairness theorem is
+claimed. Observers record transition events without granting new behavior.
 
 For a pinned tool checkout and a **new** output directory:
 
@@ -102,8 +97,11 @@ python3 docs/flows/trace-commons/scripts/build_surface.py
 The skill compiles Quint to TLA+, checks through TLC/statechart and renders
 with Pele. It requires Java 21+ (or mise to provision it), network access
 for tool bootstrap, and the pinned skill's own runtime prerequisites.
-Java was not available on PATH at the initial inspection. The selected
-checker intentionally refuses to run before a recorded owner selection.
+Java 21 is installed locally but must be placed on PATH. Set `XDG_CACHE_HOME`
+to a writable tool-cache directory when running in a restricted sandbox.
+`run_proofs.py` runs the selected families with an explicit wall-clock budget;
+interruption never becomes a passing result. See the result manifest for exact
+commands and hashes.
 
 Report each selected promise as holds/breaks/not checked, with source and
 tool versions, finite bounds, state counts, exact command and fairness.

@@ -1,17 +1,17 @@
-// Source baseline 8218cc8. Current behavior only; no promises selected.
+// Source projection refreshed at a2e0aa566; owner selected P1-P13 on 2026-11-06.
 module client_consent {
-  type Folder = { mode: str, askUnder: int, byGrant: bool, terms: bool, fromNow: bool, recorded: bool, heldPath: bool, listingCurrent: bool, projectAtGrant: bool }
+  type Folder = { mode: str, askUnder: int, byGrant: bool, terms: bool, fromNow: bool, recorded: bool, heldPath: bool, listingCurrent: bool, projectAtGrant: bool, completedAuthorization: bool }
   type Entry = { state: str, unknown: bool, onDisk: bool, origin: str, scopeOk: bool, inputOk: bool, pin: bool, hold: str, candidate: bool, overrideHeld: bool }
   var s: {
     screen: str, selected: int, displayedSharing: str, sharingRead: str, sourceRoot: int, folders: int -> Folder, entries: int -> Entry,
     grant: bool, grantId: int, generation: int, includeExisting: bool,
     sourceRecorded: bool, sourceJob: str, jobId: int, jobCurrent: bool,
-    grantTerms: bool, override: str, overrideTerms: bool, overrideRecorded: bool, overrideJobCurrent: bool,
+    grantTerms: bool, override: str, overrideAuthorization: bool, overrideTerms: bool, overrideRecorded: bool, overrideJobCurrent: bool,
     scopeChosen: bool, scopeCall: str, inputsChanged: bool,
     request: str, requestInclude: bool, keepAsks: bool, shownWitnessCurrent: bool,
     audit: bool, build: str, buildEntry: int, buildCurrent: bool,
     check: str, checkEntry: int, checkDisposition: str, notice: bool,
-    firstRun: str, firstRunAsk: bool
+    firstRun: str, firstRunAsk: bool, sharingReadCurrent: bool, proofP1: bool
   }
   val vars = s
   pure def controls(frame: str): Set[str] =
@@ -33,7 +33,7 @@ module client_consent {
     else if (e.state == "approved" and e.origin == "automatic")
       if (mode == "never") { ...e, state: "refused", hold: "project_ignored" } else waiting(e)
     else e
-  pure def blankFolder: Folder = { mode: "ask", askUnder: -1, byGrant: false, terms: true, fromNow: false, recorded: false, heldPath: false, listingCurrent: false, projectAtGrant: false }
+  pure def blankFolder: Folder = { mode: "ask", askUnder: -1, byGrant: false, terms: true, fromNow: false, recorded: false, heldPath: false, listingCurrent: false, projectAtGrant: false, completedAuthorization: false }
   pure def blankEntry(unknown: bool): Entry = { state: "pending", unknown: unknown, onDisk: true, origin: "none", scopeOk: false, inputOk: false, pin: false, hold: "none", candidate: false, overrideHeld: false }
   action init = {
     nondet otherUnknown = Set(false, true).oneOf()
@@ -42,12 +42,12 @@ module client_consent {
     folders: Map(0 -> blankFolder, 1 -> blankFolder), entries: Map(0 -> blankEntry(false), 1 -> { ...blankEntry(otherUnknown), state: "absent", onDisk: false }),
     grant: false, grantId: 1, generation: 1, includeExisting: false,
     sourceRecorded: false, sourceJob: "none", jobId: 1, jobCurrent: false,
-    grantTerms: true, override: "none", overrideTerms: true, overrideRecorded: false, overrideJobCurrent: false,
+    grantTerms: true, override: "none", overrideAuthorization: false, overrideTerms: true, overrideRecorded: false, overrideJobCurrent: false,
     scopeChosen: false, scopeCall: "none", inputsChanged: false,
     request: "none", requestInclude: true, keepAsks: true, shownWitnessCurrent: true,
     audit: false, build: "none", buildEntry: 0, buildCurrent: true,
     check: "none", checkEntry: 0, checkDisposition: "none", notice: false,
-    firstRun: "none", firstRunAsk: false
+    firstRun: "none", firstRunAsk: false, sharingReadCurrent: false, proofP1: true
     }
   }
   // SharingChoiceCard.swift:16-21,202-249. Picking Automatic opens disclosures.
@@ -108,9 +108,9 @@ module client_consent {
   // Include-existing increments generation twice in source; only final equality matters.
   action TheFreshGrantIsSaved = all {
     s.request == "save" and s.audit,
-    s' = { ...s, grant: true, grantId: 3 - s.grantId, generation: 3 - s.generation,
+    s' = { ...s, grant: true, sharingReadCurrent: false, grantId: 3 - s.grantId, generation: 3 - s.generation,
       grantTerms: true, includeExisting: s.requestInclude, sourceRecorded: false,
-      jobCurrent: false, request: "reply", override: if(s.requestInclude) "none" else s.override,
+      jobCurrent: false, request: "reply", override: if(s.requestInclude) "none" else s.override, overrideAuthorization: if(s.requestInclude) false else s.overrideAuthorization,
       folders: Set(0, 1).mapBy(i => { val f = s.folders.get(i)
         { ...f,
         askUnder: if(s.requestInclude and s.keepAsks and f.mode == "ask" and f.askUnder != -1) 3 - s.generation else if(s.requestInclude and not(s.keepAsks) and f.mode == "ask") -1 else if(f.askUnder != -1) -2 else -1,
@@ -123,11 +123,11 @@ module client_consent {
   // ipc.rs:4170,5258-5273; SharingChoiceCard.swift:16-21. Read and UI callback differ.
   action TheSharingChoiceRequestsTheSavedGrant = all {
     s.sharingRead == "none",
-    s' = { ...s, sharingRead: if(s.grant and s.includeExisting) "automatic" else "ask" }
+    s' = { ...s, sharingRead: if(s.grant and s.includeExisting) "automatic" else "ask", sharingReadCurrent: s.grant }
   }
   action TheSharingChoiceReceivesTheSavedGrant = all {
     s.sharingRead != "none",
-    s' = { ...s, displayedSharing: s.sharingRead, sharingRead: "none" }
+    s' = { ...s, displayedSharing: s.sharingRead, sharingRead: "none", proofP1: s.proofP1 and (s.sharingRead != "automatic" or (s.grant and s.sharingReadCurrent)) }
   }
   action TheRefusedGrantIsAcknowledged = all {
     s.request == "refused", s' = { ...s, request: "none", firstRun: if(s.firstRun == "grant") "fallback" else s.firstRun }
@@ -137,7 +137,7 @@ module client_consent {
     nondet returnToAsk = Set(false, true).oneOf()
     all {
       s.screen == "consent_internal" and s.grant,
-      s' = { ...s, grant: false, jobCurrent: false, displayedSharing: "ask",
+      s' = { ...s, grant: false, sharingReadCurrent: false, jobCurrent: false, displayedSharing: "ask",
         folders: Set(0, 1).mapBy(i => { val f = s.folders.get(i)
         if(returnToAsk and f.byGrant and f.mode == "auto") blankFolder else f }) }
     }
@@ -175,7 +175,7 @@ module client_consent {
     all {
       s.grant and s.sourceRecorded and s.grantTerms and s.entries.get(i).state != "absent" and not(s.entries.get(i).unknown) and s.folders.get(i).mode == "ask" and
       (if(s.includeExisting) s.folders.get(i).askUnder != s.generation else s.folders.get(i).askUnder == -1 and not(s.folders.get(i).projectAtGrant) and not(s.entries.get(i).onDisk)),
-      s' = { ...s, folders: s.folders.set(i, { ...s.folders.get(i), mode: "auto", byGrant: true, terms: true }) }
+      s' = { ...s, folders: s.folders.set(i, { ...s.folders.get(i), mode: "auto", byGrant: true, terms: true, completedAuthorization: true }), proofP1: s.proofP1 and s.grant and s.sourceRecorded and s.grantTerms }
     }
   }
   // ipc.rs:5795-5978: policy-before-queue, only queued unattended retracted.
@@ -187,7 +187,7 @@ module client_consent {
       s.screen == "consent_internal" and (mode != "auto" or (s.scopeChosen and not(s.entries.get(i).unknown))) and
       not(mode == "auto" and fromNow and s.grant and s.includeExisting),
       s' = { ...s, folders: s.folders.set(i, { ...s.folders.get(i), mode: mode,
-        askUnder: if(s.grant) s.generation else -2, byGrant: false, terms: true,
+        askUnder: if(s.grant) s.generation else -2, byGrant: false, terms: true, completedAuthorization: mode == "auto" and s.scopeChosen,
         fromNow: mode == "auto" and fromNow, recorded: if(mode == "auto" and fromNow and s.folders.get(i).fromNow) s.folders.get(i).recorded else false,
         heldPath: if(mode == "auto" and fromNow and s.folders.get(i).fromNow) s.folders.get(i).heldPath else false, listingCurrent: false }),
         entries: s.entries.set(i, if(mode != "auto") restrict(s.entries.get(i), mode) else if(fromNow and not(s.folders.get(i).fromNow)) restrict(s.entries.get(i), "ask") else if(s.entries.get(i).hold == "project_ignored") waiting(s.entries.get(i)) else s.entries.get(i)) }
@@ -197,7 +197,7 @@ module client_consent {
   action YouChangeTheGlobalRule = {
     nondet mode = Set("none", "ask", "never", "auto").oneOf()
     all { s.screen == "consent_internal" and mode != s.override and (mode != "auto" or s.scopeChosen),
-      s' = { ...s, override: mode, overrideTerms: true, overrideRecorded: false, overrideJobCurrent: false,
+      s' = { ...s, override: mode, overrideAuthorization: mode == "auto" and s.scopeChosen, overrideTerms: true, overrideRecorded: false, overrideJobCurrent: false,
         entries: Set(0, 1).mapBy(i => { val e = s.entries.get(i)
         if(e.state == "approved" and e.origin == "automatic" and resolved(s.folders.get(i), e, mode) != "auto") waiting(e) else e }) } }
   }
@@ -241,7 +241,7 @@ module client_consent {
       (not(s.folders.get(i).fromNow) or (s.folders.get(i).recorded and not(s.folders.get(i).heldPath))) and
       (s.override != "auto" or s.folders.get(i).mode == "auto" or (s.overrideRecorded and not(s.entries.get(i).overrideHeld))) and
       not(s.folders.get(i).byGrant and s.entries.get(i).onDisk and not(s.grant and s.includeExisting)),
-      s' = { ...s, entries: s.entries.set(i, { ...s.entries.get(i), state: "approved", origin: "automatic", scopeOk: true, inputOk: true, pin: true }) }
+      s' = { ...s, entries: s.entries.set(i, { ...s.entries.get(i), state: "approved", origin: "automatic", scopeOk: true, inputOk: true, pin: true }), proofP1: s.proofP1 and ((s.folders.get(i).mode == "auto" and s.folders.get(i).completedAuthorization) or (s.override == "auto" and s.overrideAuthorization)) }
     }
   }
   // ipc.rs:7286-7440,7867-7947: captured build can finish after settings change.
@@ -310,14 +310,17 @@ module client_consent {
   }
   action TheFirstRunFallsBackToAsk = all {
     s.firstRun == "fallback",
-    s' = { ...s, firstRun: "complete_refused", grant: false, jobCurrent: false, displayedSharing: "ask",
+    s' = { ...s, firstRun: "complete_refused", grant: false, sharingReadCurrent: false, jobCurrent: false, displayedSharing: "ask",
       folders: Set(0, 1).mapBy(i => { val f = s.folders.get(i)
         if(f.byGrant and f.mode == "auto") blankFolder else f }) }
   }
   action TheFirstRunAppliesItsAskRuleAfterTheGrant = all {
     s.firstRun == "grant" and s.request == "none" and s.grant and s.firstRunAsk,
-    s' = { ...s, firstRun: "complete", folders: s.folders.set(0, { ...s.folders.get(0), mode: "ask", askUnder: s.generation, byGrant: false }), entries: s.entries.set(0, restrict(s.entries.get(0), "ask")) }
+    s' = { ...s, firstRun: "complete", folders: s.folders.set(0, { ...s.folders.get(0), mode: "ask", askUnder: s.generation, byGrant: false, completedAuthorization: false }), entries: s.entries.set(0, restrict(s.entries.get(0), "ask")) }
   }
+  // Automatic sharing starts only after my matching access grant has completed.
+  val P1 = s.proofP1
+
   action step = any {
     YouOpenAutomaticDisclosures, YouCancelTheDisclosures, YouInspectConsentInternals, YouSelectTheOtherFolder,
     YouChooseConsentScopes, TheStandingGrantsAdoptChosenScopes, TheScopeChoiceIsWritten, TheScopeWriteOrAuditFails,

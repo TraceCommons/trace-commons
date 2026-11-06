@@ -2,7 +2,7 @@
 
 This is a source-discovery index, not a claim that the entire application is modeled. Owner assignment only identifies the model that should reconcile an entry. A row stays a visible gap until its concrete model actions and observable fields are audited. `coarse-interface` identifies a deliberately abstract interaction; it does not cover handler internals.
 
-Source tree: `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`. Worktree at discovery: `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`. Only files in the pinned Git tree are scanned. The primary checkout and its untracked additions are excluded.
+Source tree: `a2e0aa56608f8c403deff679f8b51e76ac2f5ca7`. Original discovery worktree: `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`. Only files in the pinned Git tree are scanned. The primary checkout and its untracked additions are excluded.
 
 Run from the repository root:
 
@@ -19,30 +19,30 @@ The writer retains audited annotations in coverage.json only while the row ID an
 | Kind | Entries | Detailed | Coarse interface | Gaps |
 | --- | ---: | ---: | ---: | ---: |
 | boundary | 12 | 0 | 0 | 12 |
-| client_worker | 16 | 0 | 2 | 14 |
-| ipc | 188 | 32 | 23 | 133 |
-| native_entry | 15 | 7 | 8 | 0 |
-| navigation | 86 | 54 | 4 | 28 |
-| route | 323 | 18 | 160 | 145 |
-| screen | 329 | 7 | 18 | 304 |
-| server_worker | 24 | 1 | 0 | 23 |
+| client_worker | 16 | 0 | 0 | 16 |
+| ipc | 190 | 0 | 0 | 190 |
+| native_entry | 15 | 5 | 5 | 5 |
+| navigation | 86 | 48 | 1 | 37 |
+| route | 329 | 2 | 9 | 318 |
+| screen | 340 | 3 | 14 | 323 |
+| server_worker | 25 | 1 | 0 | 24 |
 
 | Candidate owner | Detailed | Coarse interface | Gaps |
 | --- | ---: | ---: | ---: |
-| client_consent | 9 | 5 | 0 |
-| client_contribution | 7 | 2 | 79 |
-| client_learning | 7 | 6 | 58 |
-| client_providers | 0 | 25 | 2 |
-| client_services | 10 | 0 | 116 |
-| client_shell | 16 | 6 | 236 |
+| client_consent | 1 | 1 | 0 |
+| client_contribution | 0 | 1 | 99 |
+| client_learning | 0 | 2 | 57 |
+| client_providers | 0 | 6 | 0 |
+| client_services | 0 | 0 | 159 |
+| client_shell | 6 | 1 | 264 |
 | end_to_end | 0 | 0 | 0 |
-| platform_clients | 51 | 11 | 0 |
-| server_identity | 18 | 2 | 0 |
-| server_interfaces | 0 | 144 | 112 |
-| server_lifecycle | 0 | 10 | 9 |
+| platform_clients | 49 | 9 | 4 |
+| server_identity | 2 | 2 | 0 |
+| server_interfaces | 0 | 7 | 241 |
+| server_lifecycle | 0 | 0 | 29 |
 | server_pipeline | 1 | 0 | 18 |
-| server_receipt | 0 | 1 | 6 |
-| server_settlement | 0 | 3 | 23 |
+| server_receipt | 0 | 0 | 7 |
+| server_settlement | 0 | 0 | 47 |
 
 The complete per-entry list is [coverage.json](coverage.json), with exact source path/line, identifier, handler or dispatcher, owner, classification, rationale, actions and observables. HTTP methods are explicit registrations; Axum's implicit HEAD behavior on GET is not counted as a separate registration.
 
@@ -52,14 +52,14 @@ Detailed rows map a specific source flow projection to named model actions and c
 
 Gap totals do not count missing independent flows. Routes and IPC methods are actual registered/dispatch entry points; screen rows are intentionally over-inclusive presentation declarations, including decorative components, and require reachability review. Each row's inventory_role records that distinction. Navigation declarations and worker spawners can also share behavior with another row. An unresolved component declaration is different from an omitted account or queue mutation.
 
-The initial reviewed mappings include the six native macOS first-run screen families, core trace preview/approval/policy/history commands, selected credential/harness/managed-session/profile commands, phase-worker state and explicit auxiliary server interface families. The submit route is coarse at the HTTP entry: its versioned receipt branch is modeled in detail, while legacy processing and parsing are omitted. Cross-platform first-run and native widgets are not covered by those macOS mappings.
+Historical seed mappings included the six native macOS first-run screen families, core trace preview/approval/policy/history commands, selected credential/harness/managed-session/profile commands, phase-worker state and explicit auxiliary server interface families. A source refresh invalidates mappings whose stable ID or source-file fingerprint changed; only the currently retained annotations count in the tables above. The submit route is coarse at the HTTP entry: its versioned receipt branch is modeled in detail, while legacy processing and parsing are omitted. Cross-platform first-run and native widgets are not covered by those macOS mappings.
 
 Substantial remaining gaps include unassigned UI component/sheet declarations and platform-specific navigation, per-card Insights/drilldown behavior and complete learning concurrency, account/device and enrollment route branches, legacy review/gate scheduling, exact administrative reports/drills, all generic-task spawn sites and standalone operator CLI entry points. The manifest is deliberately visible about these gaps; the model suite cannot be described as complete application coverage.
 
 ## Scanner boundaries
 
 - Pinned Git-tree lexical extraction, not a compiler or reachability proof. Runtime feature flags, deployment configuration, middleware ordering, tenant scope and handler behavior require separate source review.
-- HTTP scan includes production .rs files in ingest, server and contributor, excludes tests/ and *_test.rs / *_tests.rs, and removes inline cfg(test) modules (including visibility and positive all(test, ...) forms). Axum .route literal registrations, protocol/local path string constants and AccountRoutes::new() helper chains are supported, including delegated builder files and post_with_body_limit. Qualified protocol aliases and unique imported protocol constant names are resolved; the one AccountRoutes forwarding .route(path, method_router) helper is explicitly recognized.
+- HTTP scan includes production .rs files in ingest, server and contributor, excludes tests/ and *_test.rs / *_tests.rs, and resolves cfg(test)-only external module declarations in standard Rust layouts, and removes inline cfg(test) modules (including visibility and positive all(test, ...) forms). Axum .route literal registrations, protocol/local path string constants and AccountRoutes::new() helper chains are supported, including delegated builder files and post_with_body_limit. Qualified protocol aliases and unique imported protocol constant names are resolved; the one AccountRoutes forwarding .route(path, method_router) helper is explicitly recognized.
 - Unknown .nest, .nest_service, .route_service, .fallback_service, method-router any/on, nonliteral .route paths, indirect handler expressions and unknown AccountRoutes builder methods fail extraction. Ordinary Router.merge calls are composition sites: registrations in all scanned files are listed, but their runtime reachability is not inferred. A new routing API or builder type requires scanner review; a custom router with no recognized construct can remain invisible.
 - IPC scans the top-level literal arms in handle_request and handle_request_async, checks equality with advertised METHODS, and records managed_ asynchronous pre-dispatch delegation. Handler internals, parameter variants, pushed-event payloads and nested dispatchers are not separately enumerated. Future nonliteral/or-pattern method dispatch requires scanner review.
 - macOS navigation cases include HomePage, TracesPage, MonitorDestination, SettingsSection and six FirstRunStep cases. SwiftUI View declarations are over-inclusive candidates (many are components), not proof of screen reachability. Rendering closures without a named View and dynamic sheets require manual UI review.
@@ -67,11 +67,11 @@ Substantial remaining gaps include unassigned UI component/sheet declarations an
 - Manual HTTP boundary rows explicitly enumerate native-account, wallet-onboarding, Cloud credential and browser chooser callback dispatch, wallet asset dispatch and the external IronWire listener start. Their exact executable selectors are checked. A new hand-written HTTP parser/listener is not automatically discovered; external IronWire implementation and HTTP routing are outside this source tree.
 - Worker rows enumerate production spawn_* function declarations in ingest, server and contributor, plus manually audited named daemon supervisor/watch/upload/history/community/estimate/lease/token-cleanup pass entry points; worker HTTP routes are also ordinary route rows. Generic tokio::spawn sites without a spawn_* declaration, other inline tasks, standalone operator binaries and external scheduling/deployment topology are not exhaustively indexed. Worker counts are declaration candidates, not running-process counts.
 - This extractor does not independently enumerate every CLI subcommand, exported C ABI function, Tauri command adapter, GTK D-Bus activation or native service API. Many delegate to the indexed IPC/domain behavior, but equivalence is not inferred. Native local-service flows (including Insights and mission files) have source notes in their domain models; complete adapter/ABI inventories require additional scanning.
-- Owner assignments are heuristic triage. Newly discovered entries default to gap. No row becomes detailed or coarse merely because its subsystem has a model file. Concrete action/observable mappings must be reviewed, and model-check results (if later authorized) remain separate evidence.
+- Owner assignments are heuristic triage. Newly discovered entries default to gap. No row becomes detailed or coarse merely because its subsystem has a model file. Concrete action/observable mappings must be reviewed, and selected-promise model-check results remain separate evidence.
 
 ## Source boundary and exclusions
 
-The model baseline predates unrelated work in the primary checkout. The following paths were untracked there when the inventory was prepared; their contents were not inspected or modeled. This list is a historical exclusion snapshot, not a live scan and not a shipping-feature inventory.
+The historical seed inventory excluded unrelated work in the primary checkout. The following paths were untracked there when the inventory was prepared; their contents were not inspected or modeled. This list is a historical exclusion snapshot, not a live scan and not a shipping-feature inventory.
 
 ```text
 .build/.buildSystem_debug

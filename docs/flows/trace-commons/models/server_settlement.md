@@ -1,10 +1,11 @@
 # Settlement and payout source mapping
 
 Baseline: `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`. This domain models current
-source behavior, with explicit finite abstractions. It introduces no product
-invariants, temporal properties, or guarantee checks. Typechecking is syntax,
-type and effect validation, not behavioral proof. Primary-checkout untracked
-files are excluded from this baseline.
+source behavior, with explicit finite abstractions. The owner selected P9 from
+[promise candidates](../promise-candidates.md): retries must not create a second
+internal credit, and payout retries retain their operation identity. `P9` is
+registered in the TLC configuration. Typechecking alone is not behavioral proof.
+The selected source files remain unchanged at `a2e0aa56608f8c403deff679f8b51e76ac2f5ca7`.
 
 ## Identities and state
 
@@ -130,9 +131,26 @@ no fairness or eventual-payment assumption is added. Server panels are internal
 review frames and their controls are sentence-named model events, not proposed
 application buttons.
 
+## Selected safety observation
+
+`creditCommits` counts actual modeled internal ledger commits per operation,
+saturating at two so a second commit remains a visible violation. `P9` requires
+at most one and requires each ledger member to have a recorded commit. The
+instrument, pipeline NEAR and account-rail first/last key observations record
+dispatch and receipt-query identity in separate namespaces. Pipeline NEAR also
+captures the stored contract at first dispatch. Retry observations must retain
+these identities, including after an uncertain external outcome.
+
+These observations add fields to `s`; no action guard depends on them. Removing
+them projects every transition back to the previous model. They do not add a
+retry restriction. Numeric immutable IDs abstract source-derived keys; collision
+resistance and the external provider's idempotency contract remain assumptions.
+See [proof notes](../proofs/credits-exports-notes.md) for bounds and limitations.
+
 ## Integrated validation
 
 Earlier typecheck-only status notes describe the model-writing stage. The later
 [integrated validation report](../validation.md) records the suite-level
 frame/control comparisons and sampled traces. Those checks do not establish
-product guarantees; owner promise selection and TLC checks remain pending.
+product guarantees. P9 is now selected; its current checker outcome is recorded
+separately in the proof evidence.

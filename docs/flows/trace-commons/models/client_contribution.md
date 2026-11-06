@@ -1,6 +1,6 @@
 # Contribution lifecycle
 
-Source baseline: `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`. Shared daemon behavior; native macOS labels. Only typechecked, no promises selected.
+Original source baseline: `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`; relevant seams reviewed against `a2e0aa56608f8c403deff679f8b51e76ac2f5ca7`. Shared daemon behavior; native macOS labels. The owner selected all P1–P13 on 2026-11-06; this model encodes P2, P3, P4 and P12. See [client proof notes](../proofs/client-notes.md).
 
 ## State and bounds
 
@@ -30,7 +30,7 @@ Source/scopes and manual-Scrub retractions are asynchronous projections; folder 
 
 `TheWatcherDiscoversATrace` exposes `(trace, sourceRev, account)`; `YouApproveThePinnedPreview` / `TheApprovalBuildPinsAndApproves` bind `(trace,pin,artifact,approvedScopes,approvedInputs)`; `TheUploaderClaimsTheApproval` sets durable Uploading; `TheUploadPassesItsPreconditions` projects valid authority/evidence; `TheSendSucceedsWithProofReceipt` / `TheSendSucceedsWithoutProofReceipt` separate sent and proof; `ThePrivacyOrWitnessReviewHoldsTheTrace` returns local human review; `TheDaemonRestartsDuringAnUpload` retains pin/approval; `TheHistoryReadFindsProcessing` / `TheHistoryReadFindsASettledVerdict` are client feedback, not server mutation.
 
-All maps and controls are finite. No invariants, tests asserting product guarantees, temporal properties or TLC checks are included.
+All maps and controls are finite. Owner-selected safety invariants are now listed in the corresponding `.cfg`; no temporal fairness or progress property is claimed. See [client proof notes](../proofs/client-notes.md) for observers, source refreshes and replay evidence.
 
 No universal wait/stutter action is enabled. Timing and fairness remain unselected; no deadlock or progress claim follows from this model.
 
@@ -55,4 +55,24 @@ Watcher discovery, source change, preview-pin sweep, unattended approval, undo e
 Earlier typecheck-only status notes describe the model-writing stage. The later
 [integrated validation report](../validation.md) records the suite-level
 frame/control comparisons and sampled traces. Those checks do not establish
-product guarantees; owner promise selection and TLC checks remain pending.
+product guarantees. Owner selection is now recorded separately; current invariant-check outcomes belong in the proof report, not the older sampling totals.
+
+## Current-source proof refresh
+
+HTTP 429 may arrive after a send starts, so `TheIngestRateLimitDefersTheSend` is enabled in both checking (local pacing) and sending (remote refusal). Its observer compares the next approval against the original approval and preserves the attempt budget.
+
+`historyPending` retains one captured request per represented account across an account change, and `historyEntry` binds the response row independently of later UI selection. Both old and new requests can be pending simultaneously. Empty snapshots can publish too. `displayedHistoryOwner` records the last publisher; P12 monitors the publication event, rather than requiring an already displayed snapshot disappear at the instant an account changes. Repeated requests within one account are coalesced in this finite bound; arbitrary same-account request multiplicity is outside it. Current AppModel `refreshHistory`/`perform` callbacks lack an account/client freshness check.
+
+The asynchronous witness worker added after the original baseline remains a coarse external witness decision in this model: shared `send_gates`/`load_approved` are reviewed, but job scheduling, worker admission identities and witness-pin recovery are not proved here.
+
+### Captured scope context at claim
+
+The first selected P2 trace changed saved scopes after claim. The old monitor
+compared against that mutable preference rather than the actual payload config.
+Source `drain_approved` captures `cfg`, builds `SubmitContext` from it, and checks
+approval against the same snapshot under the claim lock; `effective_config`
+clones it. `uploadScopes` now records that used snapshot, and `sentScopes` records
+it on send. Post-claim consent changes remain enabled. A new pass checks the
+new captured scopes and requires approval matching those scopes. The earlier
+P2 counterexample is historical evidence of the corrected abstraction mismatch.
+See the Rust source-helper replay in [client proof notes](../proofs/client-notes.md).

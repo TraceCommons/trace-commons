@@ -1,4 +1,4 @@
-// Current behavior projection at 8218cc8; no product promises selected.
+// Source projection refreshed at a2e0aa566; owner selected P1-P13 on 2026-11-06.
 module client_contribution {
   var s: {
     screen: str,
@@ -8,6 +8,8 @@ module client_contribution {
     previewEntry: int,
     preview: str,
     upload: str,
+    uploadScopes: int,
+    sentScopes: int,
     enrolled: bool,
     account: int,
     sourceEnabled: bool,
@@ -24,7 +26,11 @@ module client_contribution {
     backoff: str,
     withdrawalEntry: int,
     withdrawalCall: str,
-    historyRead: str
+    historyRead: str,
+    historyPending: int -> bool,
+    historyEntry: int -> int,
+    displayedHistoryOwner: int,
+    proof: { P2: bool, P3: bool, P4: bool, P12: bool }
   }
   val vars = s
 
@@ -55,6 +61,8 @@ module client_contribution {
     previewEntry: 0,
     preview: "none",
     upload: "none",
+    uploadScopes: -1,
+    sentScopes: -1,
     enrolled: true,
     account: 1,
     sourceEnabled: true,
@@ -71,7 +79,11 @@ module client_contribution {
     backoff: "none",
     withdrawalEntry: 0,
     withdrawalCall: "none",
-    historyRead: "unread"
+    historyRead: "unread",
+    historyPending: Map(1 -> false, 2 -> false),
+    historyEntry: Map(1 -> 0, 2 -> 0),
+    displayedHistoryOwner: 0,
+    proof: { P2: true, P3: true, P4: true, P12: true }
   }
 
   // crates/trace-commons-contributor/src/daemon/watcher.rs:1576-1778,2068-2123
@@ -310,7 +322,7 @@ module client_contribution {
     nondet daemonEntry = Set(0, 1).oneOf()
     all {
       s.upload == "none" and s.entries.get(daemonEntry).state == "approved" and not(s.entries.get(daemonEntry).undo) and not(s.entries.get(daemonEntry).retry) and s.entries.get(daemonEntry).approvedScopes == s.scopes and (not(s.entries.get(daemonEntry).unattended) or s.projectMode == "automatic") and not(s.globalHold) and s.capAvailable,
-      s' = { ...s, entries: s.entries.set(daemonEntry, { ...s.entries.get(daemonEntry), state: "uploading" }), uploadEntry: daemonEntry, upload: "checking", screen: if(s.selected == daemonEntry) "contribution_uploading" else s.screen }
+      s' = { ...s, entries: s.entries.set(daemonEntry, { ...s.entries.get(daemonEntry), state: "uploading" }), uploadEntry: daemonEntry, upload: "checking", uploadScopes: s.scopes, screen: if(s.selected == daemonEntry) "contribution_uploading" else s.screen }
     }
   }
 
@@ -369,21 +381,33 @@ module client_contribution {
   }
 
   // crates/trace-commons-contributor/src/daemon/mod.rs:1727-1749 [no per-session attempt consumed]
-  action TheWitnessIsAtCapacity = all {
-    s.upload == "checking",
-    s' = { ...s, entries: s.entries.set(s.uploadEntry, { ...s.entries.get(s.uploadEntry), state: "approved", retry: true }), upload: "none", backoff: "witness", screen: if(s.selected == s.uploadEntry) "contribution_offline" else s.screen }
+  action TheWitnessIsAtCapacity = {
+    val before = s.entries.get(s.uploadEntry)
+    val after = { ...before, state: "approved", retry: true }
+    all {
+      s.upload == "checking",
+      s' = { ...s, entries: s.entries.set(s.uploadEntry, after), upload: "none", backoff: "witness", screen: if(s.selected == s.uploadEntry) "contribution_offline" else s.screen,
+        proof: { ...s.proof, P3: s.proof.P3 and after.state == "approved" and after.retry and after.pin == before.pin and after.artifact == before.artifact and after.approvedScopes == before.approvedScopes and after.approvedInputs == before.approvedInputs and after.unattended == before.unattended and after.attempts == before.attempts } }
+    }
   }
 
   // crates/trace-commons-contributor/src/daemon/mod.rs:1750-1783 [same abstraction for local burst pacing]
-  action TheIngestRateLimitDefersTheSend = all {
-    s.upload == "checking",
-    s' = { ...s, entries: s.entries.set(s.uploadEntry, { ...s.entries.get(s.uploadEntry), state: "approved", retry: true }), upload: "none", backoff: "rate_limit", screen: if(s.selected == s.uploadEntry) "contribution_offline" else s.screen }
+  action TheIngestRateLimitDefersTheSend = {
+    val before = s.entries.get(s.uploadEntry)
+    val after = { ...before, state: "approved", retry: true }
+    all {
+      (s.upload == "checking" or s.upload == "sending"),
+      s' = { ...s, entries: s.entries.set(s.uploadEntry, after), upload: "none", backoff: "rate_limit", screen: if(s.selected == s.uploadEntry) "contribution_offline" else s.screen,
+        proof: { ...s.proof, P3: s.proof.P3 and after.state == "approved" and after.retry and after.pin == before.pin and after.artifact == before.artifact and after.approvedScopes == before.approvedScopes and after.approvedInputs == before.approvedInputs and after.unattended == before.unattended and after.attempts == before.attempts } }
+    }
   }
 
   // crates/trace-commons-contributor/src/daemon/uploader.rs:475-778 [privacy/witness valid evidence input]
   action TheUploadPassesItsPreconditions = all {
     s.upload == "checking" and s.enrolled and s.entries.get(s.uploadEntry).sourceRev == s.entries.get(s.uploadEntry).offeredRev and s.entries.get(s.uploadEntry).approvedInputs == s.inputs and (s.entries.get(s.uploadEntry).pin == 0 or s.entries.get(s.uploadEntry).artifact) and (not(s.entries.get(s.uploadEntry).unattended) or s.scrub == "automatic"),
-    s' = { ...s, upload: "sending" }
+    s' = { ...s, upload: "sending", sentScopes: s.uploadScopes, proof: { ...s.proof,
+      P2: s.proof.P2 and s.entries.get(s.uploadEntry).sourceRev == s.entries.get(s.uploadEntry).offeredRev and s.entries.get(s.uploadEntry).approvedInputs == s.inputs and s.entries.get(s.uploadEntry).approvedScopes == s.uploadScopes and (s.entries.get(s.uploadEntry).pin == 0 or (s.entries.get(s.uploadEntry).artifact and s.entries.get(s.uploadEntry).pinnedRev == s.entries.get(s.uploadEntry).sourceRev)),
+      P4: s.proof.P4 and s.enrolled } }
   }
 
   // crates/trace-commons-contributor/src/daemon/mod.rs:1682-1725 [one retained retry plus one exhausted retry]
@@ -451,32 +475,53 @@ module client_contribution {
 
   // crates/trace-commons-contributor/src/daemon/history.rs:312-349
   action YouRefreshHistory = all {
-    controls(s.screen).contains("Refresh history") and (s.historyRead != "loading"),
-    s' = { ...s, historyRead: "loading" }
+    controls(s.screen).contains("Refresh history"),
+    s' = { ...s, historyRead: "loading", historyPending: s.historyPending.set(s.account, true), historyEntry: s.historyEntry.set(s.account, s.selected) }
   }
 
   // crates/trace-commons-contributor/src/daemon/history.rs:90-105,349-492
-  action TheHistoryReadFindsProcessing = all {
-    s.historyRead == "loading" and s.entries.get(s.selected).withdrawal != "confirmed" and s.entries.get(s.selected).submission != 0,
-    s' = { ...s, entries: s.entries.set(s.selected, { ...s.entries.get(s.selected), history: "processing" }), historyRead: "answered" }
+  action TheHistoryReadFindsProcessing = {
+    nondet owner = Set(1, 2).oneOf()
+    all {
+    s.historyPending.get(owner) and s.entries.get(s.historyEntry.get(owner)).withdrawal != "confirmed" and s.entries.get(s.historyEntry.get(owner)).submission != 0,
+    s' = { ...s, entries: s.entries.set(s.historyEntry.get(owner), { ...s.entries.get(s.historyEntry.get(owner)), history: "processing" }), historyRead: "answered", historyPending: s.historyPending.set(owner, false), displayedHistoryOwner: owner, proof: { ...s.proof, P12: s.proof.P12 and owner == s.account } }
+    }
   }
 
   // crates/trace-commons-contributor/src/daemon/history.rs:90-105,349-492 [credit/rejection alternatives owned by server models]
-  action TheHistoryReadFindsASettledVerdict = all {
-    s.historyRead == "loading" and s.entries.get(s.selected).withdrawal != "confirmed" and s.entries.get(s.selected).submission != 0,
-    s' = { ...s, entries: s.entries.set(s.selected, { ...s.entries.get(s.selected), history: "accepted" }), historyRead: "answered" }
+  action TheHistoryReadFindsASettledVerdict = {
+    nondet owner = Set(1, 2).oneOf()
+    all {
+    s.historyPending.get(owner) and s.entries.get(s.historyEntry.get(owner)).withdrawal != "confirmed" and s.entries.get(s.historyEntry.get(owner)).submission != 0,
+    s' = { ...s, entries: s.entries.set(s.historyEntry.get(owner), { ...s.entries.get(s.historyEntry.get(owner)), history: "accepted" }), historyRead: "answered", historyPending: s.historyPending.set(owner, false), displayedHistoryOwner: owner, proof: { ...s.proof, P12: s.proof.P12 and owner == s.account } }
+    }
   }
 
   // crates/trace-commons-contributor/src/daemon/history.rs:329-349 [age/current-account receipt-scope conditions coarse]
-  action TheHistoryReadFindsPreviousAccount = all {
-    s.historyRead == "loading" and s.entries.get(s.selected).submission != 0 and s.entries.get(s.selected).account != s.account,
-    s' = { ...s, entries: s.entries.set(s.selected, { ...s.entries.get(s.selected), history: "previous_account" }), historyRead: "answered" }
+  action TheHistoryReadFindsPreviousAccount = {
+    nondet owner = Set(1, 2).oneOf()
+    all {
+    s.historyPending.get(owner) and s.entries.get(s.historyEntry.get(owner)).submission != 0 and s.entries.get(s.historyEntry.get(owner)).account != s.account,
+    s' = { ...s, entries: s.entries.set(s.historyEntry.get(owner), { ...s.entries.get(s.historyEntry.get(owner)), history: "previous_account" }), historyRead: "answered", historyPending: s.historyPending.set(owner, false), displayedHistoryOwner: owner, proof: { ...s.proof, P12: s.proof.P12 and owner == s.account } }
+    }
   }
 
   // crates/trace-commons-contributor/src/daemon/history.rs:312-349 [cached history retained]
-  action TheHistoryReadFails = all {
-    s.historyRead == "loading",
-    s' = { ...s, historyRead: "failed" }
+  action TheHistoryReadFails = {
+    nondet owner = Set(1, 2).oneOf()
+    all {
+      s.historyPending.get(owner),
+      s' = { ...s, historyRead: "failed", historyPending: s.historyPending.set(owner, false) }
+    }
+  }
+
+  // AppModel.swift refreshHistory/perform: even an empty old snapshot can publish.
+  action TheHistoryReadPublishesAnEmptySnapshot = {
+    nondet owner = Set(1, 2).oneOf()
+    all {
+      s.historyPending.get(owner),
+      s' = { ...s, historyRead: "answered", historyPending: s.historyPending.set(owner, false), displayedHistoryOwner: owner, proof: { ...s.proof, P12: s.proof.P12 and owner == s.account } }
+    }
   }
 
   // crates/trace-commons-contributor/src/daemon/history.rs:329-349 [authority boundary input]
@@ -495,7 +540,7 @@ module client_contribution {
   // macos/Sources/TraceCommonsApp/AppModel.swift:3673-3679
   action TheWithdrawalRequestSucceeds = all {
     s.withdrawalCall == "request",
-    s' = { ...s, entries: s.entries.set(s.withdrawalEntry, { ...s.entries.get(s.withdrawalEntry), withdrawal: "confirmed" }), withdrawalCall: "none", historyRead: "loading" }
+    s' = { ...s, entries: s.entries.set(s.withdrawalEntry, { ...s.entries.get(s.withdrawalEntry), withdrawal: "confirmed" }), withdrawalCall: "none", historyRead: "loading", historyPending: s.historyPending.set(s.account, true), historyEntry: s.historyEntry.set(s.account, s.selected) }
   }
   // macos/Sources/TraceCommonsApp/AppModel.swift:3680-3688
   action TheWithdrawalNeedsAnAccountSession = all {
@@ -508,9 +553,12 @@ module client_contribution {
     s' = { ...s, entries: s.entries.set(s.withdrawalEntry, { ...s.entries.get(s.withdrawalEntry), withdrawal: "failed" }), withdrawalCall: "none" }
   }
   // macos/Sources/TraceCommonsApp/AppModel.swift:3664-3665,3678-3679
-  action TheHistoryReadReflectsWithdrawal = all {
-    s.historyRead == "loading" and s.entries.get(s.selected).withdrawal == "confirmed",
-    s' = { ...s, entries: s.entries.set(s.selected, { ...s.entries.get(s.selected), history: "withdrawn" }), historyRead: "answered" }
+  action TheHistoryReadReflectsWithdrawal = {
+    nondet owner = Set(1, 2).oneOf()
+    all {
+    s.historyPending.get(owner) and s.entries.get(s.historyEntry.get(owner)).withdrawal == "confirmed",
+    s' = { ...s, entries: s.entries.set(s.historyEntry.get(owner), { ...s.entries.get(s.historyEntry.get(owner)), history: "withdrawn" }), historyRead: "answered", historyPending: s.historyPending.set(owner, false), displayedHistoryOwner: owner, proof: { ...s.proof, P12: s.proof.P12 and owner == s.account } }
+    }
   }
 
 
@@ -543,6 +591,16 @@ module client_contribution {
       s' = { ...s, entries: s.entries.set(daemonEntry, { ...s.entries.get(daemonEntry), state: "refused", hold: "project_ignored", retry: false }), screen: if(s.selected == daemonEntry) "contribution_refused" else s.screen }
     }
   }
+
+
+  // What I approved controls what is submitted; changed source or consent requires a fresh decision.
+  val P2 = s.proof.P2
+  // A temporary rate limit or witness-capacity refusal keeps my approval for a later retry.
+  val P3 = s.proof.P3
+  // Signing out prevents a new upload from starting under the removed enrollment.
+  val P4 = s.proof.P4
+  // A late result from my previous account never replaces the current account's displayed history.
+  val P12 = s.proof.P12
 
   action step = any {
     YouHoldEverySend,
@@ -616,6 +674,7 @@ module client_contribution {
     TheHistoryReadFindsASettledVerdict,
     TheHistoryReadFindsPreviousAccount,
     TheHistoryReadFails,
+    TheHistoryReadPublishesAnEmptySnapshot,
     TheCurrentAccountChanges
   }
 }

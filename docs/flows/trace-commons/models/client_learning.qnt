@@ -1,5 +1,6 @@
-// Current behavior projection at 8218cc8; no product promises selected.
+// Current behavior projection; P13 selected by the owner on 2026-11-06.
 module client_learning {
+  type Skill = {phase: str, operation: str, owner: int, requestOwner: int, ownerGeneration: int, requestGeneration: int, package: int, reviewPackage: int, evaluatedPackage: int, passed: bool, planPackage: int, marker: int, planLive: bool, filesystem: bool, filesystemOwner: int, installedStatus: str, editedOnDisk: bool, published: bool, planId: int, confirmationPresent: bool, confirmationPlanId: int, confirmationPackage: int, confirmationMarker: int, confirmationOwner: int, confirmationGeneration: int, confirmationTested: bool, reconciledPublication: bool}
   var s: {
     screen: str,
     account: int,
@@ -24,14 +25,34 @@ module client_learning {
     draftExists: bool,
     draftDetail: str,
     draftNotice: str,
-    skills: int -> {phase: str, operation: str, owner: int, requestOwner: int, ownerGeneration: int, requestGeneration: int, package: int, reviewPackage: int, evaluatedPackage: int, passed: bool, planPackage: int, marker: int, planLive: bool, filesystem: bool, filesystemOwner: int, installedStatus: str, editedOnDisk: bool, published: bool},
+    skills: int -> Skill,
     selected: int,
     requestEntry: int,
     evaluationBusy: bool,
     publicationOperation: str,
-    error: str
+    error: str,
+    installViolation: bool
   }
   val vars = s
+
+  /// P13: A tested skill is installed only after I confirm the matching installation plan.
+  // Historical publication observation: later account changes, edits and rollback
+  // must not rewrite whether an earlier filesystem publication was authorized.
+  val P13 = not(s.installViolation) and Set(0, 1).forall(i =>
+    s.skills.get(i).installedStatus != "installed" or s.skills.get(i).reconciledPublication)
+  pure def installMatchesConfirmation(e: Skill, account: int, generation: int): bool =
+    e.confirmationPresent and e.confirmationTested
+      and e.confirmationPlanId == e.planId
+      and e.confirmationPackage == e.planPackage
+      and e.confirmationMarker == e.marker
+      and e.confirmationOwner == account
+      and e.confirmationGeneration == generation
+      and e.requestOwner == e.confirmationOwner
+      and e.requestGeneration == e.confirmationGeneration
+      and e.owner == account and e.ownerGeneration == generation
+      and e.passed and e.package == e.reviewPackage
+      and e.reviewPackage == e.evaluatedPackage
+      and e.evaluatedPackage == e.planPackage
 
   pure def controls(frame: str): Set[str] =
     if (frame == "learning_insights_empty") Set("Enable", "Open file", "Refresh", "Insights", "Mission drafts", "Learn", "Close")
@@ -78,12 +99,13 @@ module client_learning {
     draftExists: false,
     draftDetail: "none",
     draftNotice: "none",
-    skills: Map(0 -> {phase: "idle", operation: "none", owner: 1, requestOwner: 1, ownerGeneration: 0, requestGeneration: 0, package: 0, reviewPackage: -1, evaluatedPackage: -1, passed: false, planPackage: -1, marker: 0, planLive: false, filesystem: false, filesystemOwner: 1, installedStatus: "unknown", editedOnDisk: false, published: false}, 1 -> {phase: "idle", operation: "none", owner: 1, requestOwner: 1, ownerGeneration: 0, requestGeneration: 0, package: 0, reviewPackage: -1, evaluatedPackage: -1, passed: false, planPackage: -1, marker: 0, planLive: false, filesystem: false, filesystemOwner: 1, installedStatus: "unknown", editedOnDisk: false, published: false}),
+    skills: Map(0 -> {phase: "idle", operation: "none", owner: 1, requestOwner: 1, ownerGeneration: 0, requestGeneration: 0, package: 0, reviewPackage: -1, evaluatedPackage: -1, passed: false, planPackage: -1, marker: 0, planLive: false, filesystem: false, filesystemOwner: 1, installedStatus: "unknown", editedOnDisk: false, published: false, planId: -1, confirmationPresent: false, confirmationPlanId: -1, confirmationPackage: -1, confirmationMarker: -1, confirmationOwner: 0, confirmationGeneration: -1, confirmationTested: false, reconciledPublication: false}, 1 -> {phase: "idle", operation: "none", owner: 1, requestOwner: 1, ownerGeneration: 0, requestGeneration: 0, package: 0, reviewPackage: -1, evaluatedPackage: -1, passed: false, planPackage: -1, marker: 0, planLive: false, filesystem: false, filesystemOwner: 1, installedStatus: "unknown", editedOnDisk: false, published: false, planId: -1, confirmationPresent: false, confirmationPlanId: -1, confirmationPackage: -1, confirmationMarker: -1, confirmationOwner: 0, confirmationGeneration: -1, confirmationTested: false, reconciledPublication: false}),
     selected: 0,
     requestEntry: 0,
     evaluationBusy: false,
     publicationOperation: "none",
-    error: "none"
+    error: "none",
+    installViolation: false
   }
 
   // macos/Sources/TraceCommonsApp/InsightsModel.swift:76-112
@@ -206,7 +228,7 @@ module client_learning {
   // crates/trace-commons-contributor/src/daemon/skill_loop/handlers.rs:691-735; macos/Sources/TraceCommonsApp/SkillLearningStore.swift:192-205
   action TheInstallStatusRecoversAnOwnedSkill = all {
     s.skills.get(s.requestEntry).operation == "status" and s.skills.get(s.requestEntry).filesystem and s.skills.get(s.requestEntry).filesystemOwner == s.account,
-    s' = { ...s, skills: s.skills.set(s.requestEntry, { ...s.skills.get(s.requestEntry), installedStatus: "installed", operation: "none" }), screen: if(s.screen == "learning_closed") s.screen else "learning_skill_installed" }
+    s' = { ...s, skills: s.skills.set(s.requestEntry, { ...s.skills.get(s.requestEntry), installedStatus: "installed", reconciledPublication: true, operation: "none" }), screen: if(s.screen == "learning_closed") s.screen else "learning_skill_installed" }
   }
 
   // crates/trace-commons-contributor/src/daemon/skill_loop/handlers.rs:304-344; macos/Sources/TraceCommonsApp/SkillLearningStore.swift:160-177
@@ -258,9 +280,14 @@ module client_learning {
   }
 
   // crates/trace-commons-contributor/src/daemon/skill_loop/handlers.rs:510-599
-  action TheSkillInstallPlanIsHeld = all {
-    s.skills.get(s.requestEntry).operation == "plan" and s.skills.get(s.requestEntry).requestOwner == s.account and s.skills.get(s.requestEntry).requestGeneration == s.ownerGeneration,
-    s' = { ...s, skills: s.skills.set(s.requestEntry, { ...s.skills.get(s.requestEntry), phase: "planned", planPackage: s.skills.get(s.requestEntry).evaluatedPackage, marker: s.requestEntry + 1, planLive: true, operation: "none" }), screen: if(s.screen == "learning_closed") s.screen else "learning_skill_plan" }
+  action TheSkillInstallPlanIsHeld = {
+    // Three reusable names always leave a fresh name distinct from the held
+    // plan and the last confirmation; no original transition is disabled.
+    nondet freshPlan = Set(0, 1, 2).exclude(Set(s.skills.get(s.requestEntry).planId, s.skills.get(s.requestEntry).confirmationPlanId)).oneOf()
+    all {
+      s.skills.get(s.requestEntry).operation == "plan" and s.skills.get(s.requestEntry).requestOwner == s.account and s.skills.get(s.requestEntry).requestGeneration == s.ownerGeneration,
+      s' = { ...s, skills: s.skills.set(s.requestEntry, { ...s.skills.get(s.requestEntry), phase: "planned", planPackage: s.skills.get(s.requestEntry).evaluatedPackage, marker: s.requestEntry + 1, planLive: true, planId: freshPlan, operation: "none" }), screen: if(s.screen == "learning_closed") s.screen else "learning_skill_plan" }
+    }
   }
 
   // crates/trace-commons-contributor/src/daemon/skill_loop.rs:30-31,172-185 [10 minute TTL relation]
@@ -272,19 +299,26 @@ module client_learning {
   // macos/Sources/TraceCommonsApp/AppModel+SkillLearning.swift:193-219; crates/trace-commons-contributor/src/daemon/skill_loop/handlers.rs:602-647
   action YouInstallTheReviewedSkill = all {
     controls(s.screen).contains("Install skill") and (s.skills.get(s.selected).phase == "planned" and s.skills.get(s.selected).operation == "none" and s.skills.get(s.selected).planLive and not(s.skills.get(s.selected).filesystem)),
-    s' = { ...s, skills: s.skills.set(s.selected, { ...s.skills.get(s.selected), operation: "install", requestOwner: s.account, requestGeneration: s.ownerGeneration }), requestEntry: s.selected, screen: "learning_skill_busy" }
+    s' = { ...s, skills: s.skills.set(s.selected, { ...s.skills.get(s.selected), operation: "install", requestOwner: s.account, requestGeneration: s.ownerGeneration,
+      confirmationPresent: true, confirmationPlanId: s.skills.get(s.selected).planId,
+      confirmationPackage: s.skills.get(s.selected).planPackage, confirmationMarker: s.skills.get(s.selected).marker,
+      confirmationOwner: s.account, confirmationGeneration: s.ownerGeneration,
+      confirmationTested: s.skills.get(s.selected).passed and s.skills.get(s.selected).package == s.skills.get(s.selected).reviewPackage
+        and s.skills.get(s.selected).reviewPackage == s.skills.get(s.selected).evaluatedPackage
+        and s.skills.get(s.selected).evaluatedPackage == s.skills.get(s.selected).planPackage }), requestEntry: s.selected, screen: "learning_skill_busy" }
   }
 
   // crates/trace-commons-contributor/src/daemon/skill_loop/handlers.rs:637-687 [exclusive filesystem publication then owner recheck]
   action TheFilesystemPublishesTheSkill = all {
     s.skills.get(s.requestEntry).operation == "install" and s.skills.get(s.requestEntry).requestOwner == s.account and s.skills.get(s.requestEntry).requestGeneration == s.ownerGeneration and s.skills.get(s.requestEntry).planLive,
-    s' = { ...s, skills: s.skills.set(s.requestEntry, { ...s.skills.get(s.requestEntry), filesystem: true, filesystemOwner: s.account, operation: "reconcile" }) }
+    s' = { ...s, skills: s.skills.set(s.requestEntry, { ...s.skills.get(s.requestEntry), filesystem: true, filesystemOwner: s.account, reconciledPublication: false, operation: "reconcile" }),
+      installViolation: s.installViolation or not(installMatchesConfirmation(s.skills.get(s.requestEntry), s.account, s.ownerGeneration)) }
   }
 
   // macos/Sources/TraceCommonsApp/AppModel+SkillLearning.swift:211-249
   action TheInstallStatusConfirmsPublication = all {
     s.skills.get(s.requestEntry).operation == "reconcile" and s.skills.get(s.requestEntry).filesystem and s.skills.get(s.requestEntry).filesystemOwner == s.account,
-    s' = { ...s, skills: s.skills.set(s.requestEntry, { ...s.skills.get(s.requestEntry), installedStatus: "installed", operation: "none" }), screen: if(s.screen == "learning_closed") s.screen else "learning_skill_installed" }
+    s' = { ...s, skills: s.skills.set(s.requestEntry, { ...s.skills.get(s.requestEntry), installedStatus: "installed", reconciledPublication: true, operation: "none" }), screen: if(s.screen == "learning_closed") s.screen else "learning_skill_installed" }
   }
 
   // macos/Sources/TraceCommonsApp/AppModel+SkillLearning.swift:250-260; SkillLearningStore.swift:356-376
@@ -326,7 +360,7 @@ module client_learning {
   // macos/Sources/TraceCommonsApp/AppModel+SkillLearning.swift:266-312
   action TheUnchangedSkillIsRolledBack = all {
     s.skills.get(s.requestEntry).operation == "rollback" and not(s.skills.get(s.requestEntry).editedOnDisk) and s.skills.get(s.requestEntry).filesystemOwner == s.account,
-    s' = { ...s, skills: s.skills.set(s.requestEntry, { ...s.skills.get(s.requestEntry), filesystem: false, installedStatus: "absent", operation: "none" }), screen: if(s.screen == "learning_closed") s.screen else "learning_skill_results" }
+    s' = { ...s, skills: s.skills.set(s.requestEntry, { ...s.skills.get(s.requestEntry), filesystem: false, installedStatus: "absent", reconciledPublication: false, operation: "none" }), screen: if(s.screen == "learning_closed") s.screen else "learning_skill_results" }
   }
 
   // macos/Sources/TraceCommonsApp/SkillLearningStore.swift:379-402; crates/trace-commons-contributor/src/skill_loop/copy.rs:143-156
@@ -356,7 +390,7 @@ module client_learning {
   // crates/trace-commons-contributor/src/daemon/skill_loop/handlers.rs:239-270,648-687
   action TheOwnerChangedPublishedInstallIsCompensated = all {
     s.skills.get(s.requestEntry).filesystem and s.skills.get(s.requestEntry).filesystemOwner != s.account and not(s.skills.get(s.requestEntry).editedOnDisk),
-    s' = { ...s, skills: s.skills.set(s.requestEntry, { ...s.skills.get(s.requestEntry), filesystem: false, installedStatus: "unknown" }) }
+    s' = { ...s, skills: s.skills.set(s.requestEntry, { ...s.skills.get(s.requestEntry), filesystem: false, installedStatus: "unknown", reconciledPublication: false }) }
   }
 
   // macos/Sources/TraceCommonsApp/SkillLearningStore.swift:406-421 [phase-specific error recovery coarse]

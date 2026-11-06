@@ -1,0 +1,655 @@
+{
+  "schemaVersion": 1,
+  "recordedAtUTC": "2026-11-06T22:50:53.115483+00:00",
+  "scope": "bounded models and selected source seams; no production change or full source-equivalence proof",
+  "sourceReview": {
+    "reviewedBaseline": "a2e0aa56608f8c403deff679f8b51e76ac2f5ca7",
+    "mainAtFinalReview": "828ad59f5bc539fafd4915267a45152941000639",
+    "unchangedSelectedSourceFiles": [
+      "macos/Sources/TraceCommonsApp/AppModel.swift",
+      "macos/Sources/TraceCommonsApp/Views/Settings/SharingChoiceCard.swift",
+      "macos/Sources/TraceCommonsApp/Views/Settings/AccountSection.swift",
+      "macos/Sources/TraceCommonsApp/SkillLearningStore.swift",
+      "macos/Sources/TraceCommonsApp/AppModel+SkillLearning.swift",
+      "crates/trace-commons-contributor/src/daemon/mod.rs",
+      "crates/trace-commons-contributor/src/daemon/uploader.rs",
+      "crates/trace-commons-contributor/src/submit.rs",
+      "crates/trace-commons-contributor/src/daemon/skill_loop/handlers.rs",
+      "crates/trace-commons-contributor/src/daemon/skill_loop.rs",
+      "crates/trace-commons-contributor/src/skill_loop/install.rs",
+      "crates/trace-commons-server/src/versioned_pipeline.rs",
+      "crates/trace-commons-server/src/versioned_pipeline_credit.rs",
+      "crates/trace-commons-server/src/payout_pass.rs",
+      "crates/trace-commons-server/src/versioned_pipeline_product.rs"
+    ],
+    "ipcDiff": "test-only managed Codex catalogue/redeem assertions; skill handlers unchanged"
+  },
+  "modelSeedBaseline": "8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6",
+  "selectionSha256": "9c45f9def35e233d08910f3e4011ea3abe0f137d5d48088db084b76a76311d23",
+  "tools": {
+    "Quint": "0.33.0",
+    "Apalache": "0.62.1",
+    "TLC": "1.7.4",
+    "Java": "21.0.13",
+    "Pele": "1.9.0",
+    "Node": "26.13.0",
+    "Python": "3.12.8",
+    "workflowCommit": "6f35f6ae6b3581c499bdfcae080932b4ffa7e281",
+    "tlcJarSha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
+  },
+  "limits": {
+    "outerProcessBudgetSeconds": 120,
+    "checkerFollowupAfterFirstBreakDistinctStateCap": 100000,
+    "chartDrawingBudget": 500,
+    "inputStateConstraints": false,
+    "inputActionConstraints": false,
+    "deadlockTheoremSelected": false,
+    "fairnessOrProgressTheoremSelected": false
+  },
+  "promises": [
+    {
+      "id": "P1",
+      "status": "breaks",
+      "seams": [
+        {
+          "model": "client_consent",
+          "definition": "P1",
+          "status": "breaks"
+        }
+      ]
+    },
+    {
+      "id": "P2",
+      "status": "not checked",
+      "seams": [
+        {
+          "model": "client_contribution",
+          "definition": "P2",
+          "status": "not checked"
+        }
+      ]
+    },
+    {
+      "id": "P3",
+      "status": "not checked",
+      "seams": [
+        {
+          "model": "client_contribution",
+          "definition": "P3",
+          "status": "not checked"
+        }
+      ]
+    },
+    {
+      "id": "P4",
+      "status": "not checked",
+      "seams": [
+        {
+          "model": "client_contribution",
+          "definition": "P4",
+          "status": "not checked"
+        }
+      ]
+    },
+    {
+      "id": "P5",
+      "status": "not checked",
+      "seams": [
+        {
+          "model": "server_receipt",
+          "definition": "P5",
+          "status": "not checked"
+        }
+      ]
+    },
+    {
+      "id": "P6",
+      "status": "not checked",
+      "seams": [
+        {
+          "model": "server_pipeline",
+          "definition": "P6",
+          "status": "not checked"
+        }
+      ]
+    },
+    {
+      "id": "P7",
+      "status": "not checked",
+      "seams": [
+        {
+          "model": "server_pipeline",
+          "definition": "P7",
+          "status": "not checked"
+        }
+      ]
+    },
+    {
+      "id": "P8",
+      "status": "not checked",
+      "seams": [
+        {
+          "model": "server_receipt",
+          "definition": "P8",
+          "status": "not checked"
+        },
+        {
+          "model": "server_pipeline",
+          "definition": "P8",
+          "status": "not checked"
+        }
+      ]
+    },
+    {
+      "id": "P9",
+      "status": "not checked",
+      "seams": [
+        {
+          "model": "server_settlement",
+          "definition": "P9",
+          "status": "not checked"
+        }
+      ]
+    },
+    {
+      "id": "P10",
+      "status": "not checked",
+      "seams": [
+        {
+          "model": "server_lifecycle",
+          "definition": "P10",
+          "status": "not checked"
+        }
+      ]
+    },
+    {
+      "id": "P11",
+      "status": "not checked",
+      "seams": [
+        {
+          "model": "server_receipt",
+          "definition": "P11",
+          "status": "not checked"
+        },
+        {
+          "model": "server_lifecycle",
+          "definition": "P11",
+          "status": "not checked"
+        }
+      ]
+    },
+    {
+      "id": "P12",
+      "status": "breaks",
+      "seams": [
+        {
+          "model": "client_contribution",
+          "definition": "P12",
+          "status": "breaks"
+        }
+      ]
+    },
+    {
+      "id": "P13",
+      "status": "not checked",
+      "seams": [
+        {
+          "model": "client_learning",
+          "definition": "P13",
+          "status": "not checked"
+        }
+      ]
+    }
+  ],
+  "finalModelRuns": [
+    {
+      "model": "client_consent",
+      "command": [
+        "python3",
+        "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/scripts/check_selected.py",
+        "client_consent",
+        "--skill-root",
+        "/private/tmp/tc-flow-promises-tools/plugins",
+        "--out",
+        "/private/tmp/tc-quint-proof-checks/tlc-consent-final/client_consent/check"
+      ],
+      "exitCode": 1,
+      "timedOut": false,
+      "elapsedSeconds": 45.29,
+      "budgetSeconds": 120,
+      "budgetKind": "wall-clock process budget; no model constraint",
+      "modelSha256": "1f00f4582914a737e9f178403d32c557509ab62a9b7d8f6af76b7e4f20b3a045",
+      "configSha256": "71f5db6dab2620dbbb6c4aec089ebd8c371df88d23ed2b33b925b32acc30b352",
+      "viewSha256": "31a2930d704958b04cac687a223e871d148c53ef51cc6d4f3b52bdbeb58db521",
+      "artifactsChangedDuringRun": false,
+      "results": [
+        {
+          "definition": "P1",
+          "status": "breaks"
+        }
+      ]
+    },
+    {
+      "model": "client_contribution",
+      "command": [
+        "python3",
+        "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/scripts/check_selected.py",
+        "client_contribution",
+        "--skill-root",
+        "/private/tmp/tc-flow-promises-tools/plugins",
+        "--out",
+        "/private/tmp/tc-quint-proof-checks/tlc-client-scopes-refresh-2/client_contribution/check"
+      ],
+      "exitCode": 1,
+      "timedOut": false,
+      "elapsedSeconds": 24.45,
+      "budgetSeconds": 120,
+      "budgetKind": "wall-clock process budget; no model constraint",
+      "modelSha256": "8aa6f3a4bcddfffcb3c1333b6e9d42c0f8ab88ff1af974dde448cf5716c04a00",
+      "configSha256": "7e929c310625e84f4456fe733a55af5d42601cf5e73004304f1274e4fd462d3c",
+      "viewSha256": "5e36604c509dae123ec9c885cacc5eeab53c694ea15853733ccdbdff96a66673",
+      "artifactsChangedDuringRun": false,
+      "results": [
+        {
+          "definition": "P2",
+          "status": "not checked"
+        },
+        {
+          "definition": "P3",
+          "status": "not checked"
+        },
+        {
+          "definition": "P4",
+          "status": "not checked"
+        },
+        {
+          "definition": "P12",
+          "status": "breaks"
+        }
+      ]
+    },
+    {
+      "model": "client_learning",
+      "command": [
+        "python3",
+        "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/scripts/check_selected.py",
+        "client_learning",
+        "--skill-root",
+        "/private/tmp/tc-flow-promises-tools/plugins",
+        "--out",
+        "/private/tmp/tc-quint-proof-checks/tlc-selected-4/client_learning/check"
+      ],
+      "exitCode": -15,
+      "timedOut": true,
+      "elapsedSeconds": 120.01,
+      "budgetSeconds": 120,
+      "budgetKind": "wall-clock process budget; no model constraint",
+      "modelSha256": "dadc2e60fca0973717bf66e9c5e596b3e1912573febf4965b6eb7774f792b2ad",
+      "configSha256": "6ce46ccebb89efdbe7b9f283418e150dcc57831a8362ea4bc9e99862b7cc1f01",
+      "viewSha256": "9064b88ca49cbd92b7fd5c782fe4583b0df35abf54f28ed40073cf8becd45c00",
+      "artifactsChangedDuringRun": false,
+      "results": [
+        {
+          "definition": "P13",
+          "status": "not checked"
+        }
+      ]
+    },
+    {
+      "model": "server_lifecycle",
+      "command": [
+        "python3",
+        "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/scripts/check_selected.py",
+        "server_lifecycle",
+        "--skill-root",
+        "/private/tmp/tc-flow-promises-tools/plugins",
+        "--out",
+        "/private/tmp/tc-quint-proof-checks/tlc-selected-4/server_lifecycle/check"
+      ],
+      "exitCode": -15,
+      "timedOut": true,
+      "elapsedSeconds": 120.01,
+      "budgetSeconds": 120,
+      "budgetKind": "wall-clock process budget; no model constraint",
+      "modelSha256": "4dbf6f293ab5da0d096ba67950fb67fd2102f3c7188affa8660efad8e94afe29",
+      "configSha256": "5f3ba07aa000334fe0890fed39e5a424bb875e3679b836fdbc6221c756f9536c",
+      "viewSha256": "ef8d6095af516848bd4fa391688a0a0777e9fe59e2d1bd7c3eeec23141a3fd31",
+      "artifactsChangedDuringRun": false,
+      "results": [
+        {
+          "definition": "P10",
+          "status": "not checked"
+        },
+        {
+          "definition": "P11",
+          "status": "not checked"
+        }
+      ]
+    },
+    {
+      "model": "server_pipeline",
+      "command": [
+        "python3",
+        "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/scripts/check_selected.py",
+        "server_pipeline",
+        "--skill-root",
+        "/private/tmp/tc-flow-promises-tools/plugins",
+        "--out",
+        "/private/tmp/tc-quint-proof-checks/tlc-selected-4/server_pipeline/check"
+      ],
+      "exitCode": -15,
+      "timedOut": true,
+      "elapsedSeconds": 120.01,
+      "budgetSeconds": 120,
+      "budgetKind": "wall-clock process budget; no model constraint",
+      "modelSha256": "b637efc035cf624c3c73f5bf574a860935e0386ffd0317369a5b89d5c669117f",
+      "configSha256": "c47a40e6fafa56b739abad5c41b554ace42294ef95c4c338adbba81486a2fdc5",
+      "viewSha256": "e4db3f1f6fd973391026d47695d6d7819067e567c22aa36a7714392fd9e83033",
+      "artifactsChangedDuringRun": false,
+      "results": [
+        {
+          "definition": "P6",
+          "status": "not checked"
+        },
+        {
+          "definition": "P7",
+          "status": "not checked"
+        },
+        {
+          "definition": "P8",
+          "status": "not checked"
+        }
+      ]
+    },
+    {
+      "model": "server_receipt",
+      "command": [
+        "python3",
+        "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/scripts/check_selected.py",
+        "server_receipt",
+        "--skill-root",
+        "/private/tmp/tc-flow-promises-tools/plugins",
+        "--out",
+        "/private/tmp/tc-quint-proof-checks/tlc-selected-4/server_receipt/check"
+      ],
+      "exitCode": -15,
+      "timedOut": true,
+      "elapsedSeconds": 120.0,
+      "budgetSeconds": 120,
+      "budgetKind": "wall-clock process budget; no model constraint",
+      "modelSha256": "0bceeb8153c5347626dc3676da4cdebb4942fc6301fe9c09a796f76a719cf69e",
+      "configSha256": "dd23bf816b3fe3c2c74251a6bfb9cb2d9504671bac34363fd1267633ad80d9c0",
+      "viewSha256": "ea255f982cba24013b4eae3f83d4cfcb58b56112b8c9ec5de79401f3a0e40640",
+      "artifactsChangedDuringRun": false,
+      "results": [
+        {
+          "definition": "P5",
+          "status": "not checked"
+        },
+        {
+          "definition": "P8",
+          "status": "not checked"
+        },
+        {
+          "definition": "P11",
+          "status": "not checked"
+        }
+      ]
+    },
+    {
+      "model": "server_settlement",
+      "command": [
+        "python3",
+        "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/scripts/check_selected.py",
+        "server_settlement",
+        "--skill-root",
+        "/private/tmp/tc-flow-promises-tools/plugins",
+        "--out",
+        "/private/tmp/tc-quint-proof-checks/tlc-selected-4/server_settlement/check"
+      ],
+      "exitCode": -15,
+      "timedOut": true,
+      "elapsedSeconds": 120.01,
+      "budgetSeconds": 120,
+      "budgetKind": "wall-clock process budget; no model constraint",
+      "modelSha256": "8f8350008deab8b9077bf556b99461503f2733c9a922941962f51f4a025606bc",
+      "configSha256": "704c961fa8e96a83c06aa743a88831c0c74c4693c1e7b2ec8e5211832cc731eb",
+      "viewSha256": "7c8e49bcfe813b0cc9294b05770c7e575a9e4686bc96a741c2bbc520553e60e5",
+      "artifactsChangedDuringRun": false,
+      "results": [
+        {
+          "definition": "P9",
+          "status": "not checked"
+        }
+      ]
+    }
+  ],
+  "structuralEvidence": "../../validation.json",
+  "artifacts": [
+    {
+      "path": "client_learning-tlc-command.log",
+      "bytes": 57,
+      "sha256": "61d1018c273b9cb3333b9e85e44fe702c8a640a30170930d7af780fe382c73eb"
+    },
+    {
+      "path": "client_learning-tlc-result.json",
+      "bytes": 886,
+      "sha256": "bcac620d689aa6d678f2764c826409f6c819f3a2759daa9e1c05bde0a1c3f145"
+    },
+    {
+      "path": "contribution-tlc-report.md",
+      "bytes": 591,
+      "sha256": "9dba54c3b0d21058cef0d95339ac9c5bc4ccfaaba9b2af2b2728aa5914ddce12"
+    },
+    {
+      "path": "contribution-tlc-result.json",
+      "bytes": 1111,
+      "sha256": "b7b81317b08d67e28b7b4e202264377dfe996b40440c227a9a051bafbf9d6fde"
+    },
+    {
+      "path": "contribution-tlc.log",
+      "bytes": 13093,
+      "sha256": "ca9432e75d4e96eb469bfa18e0368c0ae03b042dd50911092e3cf31d7ecc6971"
+    },
+    {
+      "path": "main-drift-review.json",
+      "bytes": 1231,
+      "sha256": "d7ead1f1e58b7c60ae414be0231fa25e0b2ca948f195a3b381124573b2fcc98d"
+    },
+    {
+      "path": "p1-bounded8-result.json",
+      "bytes": 554,
+      "sha256": "4cfd2dc20169d17abb617e220293267b12281979769440ec7c426ac13c14a40a"
+    },
+    {
+      "path": "p1-bounded8.log",
+      "bytes": 49285,
+      "sha256": "02b274815400394bc6ea7fd8f4e35f004d56cd053db0b4c76db355e8d19aaa98"
+    },
+    {
+      "path": "p1-tlc-report.md",
+      "bytes": 742,
+      "sha256": "1f27405b6f71c3892ceb41696a3fe0b6ae6e3c65dbfccb8daac7e357dd48f7c8"
+    },
+    {
+      "path": "p1-tlc-result.json",
+      "bytes": 878,
+      "sha256": "c13a1c78f8fdd1576cd9dc20cecccd8c0b8ff4c98cc80110e70ce12522c7c1bc"
+    },
+    {
+      "path": "p1-tlc.log",
+      "bytes": 29949,
+      "sha256": "28c4e633471a2a25aa1dd3f44020ffd69ced37c8303be436ca6c6ba438ad5f43"
+    },
+    {
+      "path": "p10-p11-bounded10.json",
+      "bytes": 640,
+      "sha256": "f3efbfdfd64a4914cc6ef32cd835e810b4bc7cabf406665a756392a25166129a"
+    },
+    {
+      "path": "p10-p11-bounded10.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "p10-p11-inductive.json",
+      "bytes": 559,
+      "sha256": "ad91a4d2247cb7699fb98ec6c4c866abc98c9c70c0eb4254219831c7bab44c07"
+    },
+    {
+      "path": "p10-p11-inductive.log",
+      "bytes": 9973,
+      "sha256": "7a9203c01437612e1a3ac3176d7e58834cd42092eb30647bbecca7299199dcbd"
+    },
+    {
+      "path": "p13-bounded10-command.json",
+      "bytes": 416,
+      "sha256": "a2dfdc5fbbfe97d67c9553d6ca063d2e37b5acd4ba93b1f35763265a40c466b6"
+    },
+    {
+      "path": "p13-bounded10-hashes.json",
+      "bytes": 550,
+      "sha256": "ddb744d9cb6f5b4c14bd6276c85bef3a7e59c0c406a8542a9a5e2f593cf2f0cb"
+    },
+    {
+      "path": "p13-bounded10-result.json",
+      "bytes": 480,
+      "sha256": "ac2120e156d759cde0d7e4fb93562c185cd3cec4e1a981dec0a2f5d5760ab99c"
+    },
+    {
+      "path": "p13-bounded10.log",
+      "bytes": 41046,
+      "sha256": "781b4b7a1a5747a45f3412856ae1cd88d13588366e1b4f661bc3caa4625d800c"
+    },
+    {
+      "path": "p13-inductive-command.json",
+      "bytes": 405,
+      "sha256": "a56e7c4593ef87411764234989645d2ce6b9773ddf1d0e012fee0318b254bb21"
+    },
+    {
+      "path": "p13-inductive-hashes.json",
+      "bytes": 550,
+      "sha256": "5a5022c6dd705bb30e8f1ce4ff8618282570cb3ddd15efedb7f4d5e2185338a8"
+    },
+    {
+      "path": "p13-inductive-result.json",
+      "bytes": 462,
+      "sha256": "d69ab2a50633f3254d58d662fe6245e278dccb0b3c421bb25f5bd166649bf306"
+    },
+    {
+      "path": "p13-inductive.log",
+      "bytes": 9400,
+      "sha256": "16fe3edaaf7b552827550b4ade35aefd0d9cfcd38689f916cdecc09cd17e8f6c"
+    },
+    {
+      "path": "p2-bounded8-result.json",
+      "bytes": 563,
+      "sha256": "023692902a27e84ad80f5dfd3191693551fd42f4a091b6512c8310231c863ed2"
+    },
+    {
+      "path": "p2-bounded8.log",
+      "bytes": 38755,
+      "sha256": "bf4ad72df61d79bd770a72ae7a9fcd18e584afac96c405bead8b17ef48301787"
+    },
+    {
+      "path": "p3-bounded8-result.json",
+      "bytes": 564,
+      "sha256": "118f0006cbed6112715f5d64816a2be21e7eab31bdc66e6ab9e2fe2ea124b808"
+    },
+    {
+      "path": "p3-bounded8.log",
+      "bytes": 40294,
+      "sha256": "5294723777f82c1cc9cc025ed55f2996c5025ff995f0f25891e6420e45c12202"
+    },
+    {
+      "path": "p4-bounded8-result.json",
+      "bytes": 564,
+      "sha256": "a1d03055da5a3f59a96d6c7aca4e649dde8b0793bb60f5ae8853e905b0c261cc"
+    },
+    {
+      "path": "p4-bounded8.log",
+      "bytes": 38755,
+      "sha256": "ab79909305f6a0f341421f1b4f921f8cb42ae0476258e506ab12edfb7b51132d"
+    },
+    {
+      "path": "p9-bounded10.json",
+      "bytes": 624,
+      "sha256": "0a42703bdbd2731b119f4487481c145dafa7aa6cfea5dc48ad0143f0e18a81f6"
+    },
+    {
+      "path": "p9-bounded10.log",
+      "bytes": 112728,
+      "sha256": "d6894cecb6d240ffa7b3a9ca276cdcf412ae94923173ee372854e6c32ffe8019"
+    },
+    {
+      "path": "p9-inductive.json",
+      "bytes": 594,
+      "sha256": "00b7bd8e4d7accb0becb5252b1940b8937ea72ef185d5ec1748d4ed7d4c627a2"
+    },
+    {
+      "path": "p9-inductive.log",
+      "bytes": 9632,
+      "sha256": "1ff24f2073ed1618b5eb4571633cf7afae3f14a93c43ba7806fafd49274ad0fe"
+    },
+    {
+      "path": "server_lifecycle-tlc-command.log",
+      "bytes": 57,
+      "sha256": "61d1018c273b9cb3333b9e85e44fe702c8a640a30170930d7af780fe382c73eb"
+    },
+    {
+      "path": "server_lifecycle-tlc-result.json",
+      "bytes": 959,
+      "sha256": "5962fc8e8e604fd7791176f0a885ebd178095e4d57b8d8bc500e26172cfcb971"
+    },
+    {
+      "path": "server_pipeline-bounded8-result.json",
+      "bytes": 555,
+      "sha256": "09f1879c12e130e95d553f0851772de6e608d431c4a418d73a02f6d493b56893"
+    },
+    {
+      "path": "server_pipeline-bounded8.log",
+      "bytes": 21235,
+      "sha256": "3db3c47ec41e51d3e1f868512501006140e3046320292afc99e0e81b611ecf1f"
+    },
+    {
+      "path": "server_pipeline-tlc-command.log",
+      "bytes": 57,
+      "sha256": "61d1018c273b9cb3333b9e85e44fe702c8a640a30170930d7af780fe382c73eb"
+    },
+    {
+      "path": "server_pipeline-tlc-result.json",
+      "bytes": 1023,
+      "sha256": "8c09a695edfe75a4e7fceba9115afbef096cb1f390ef60668901c4a47d484322"
+    },
+    {
+      "path": "server_receipt-bounded8-result.json",
+      "bytes": 554,
+      "sha256": "17f86bb1e726344fdc74e4bc825cb4f332521571e1c800ebbe7527bb262af25b"
+    },
+    {
+      "path": "server_receipt-bounded8.log",
+      "bytes": 17508,
+      "sha256": "54540f7063bc2d9eea795a886a7560a3512ee726811f28cf84af1124bfc914aa"
+    },
+    {
+      "path": "server_receipt-tlc-command.log",
+      "bytes": 57,
+      "sha256": "61d1018c273b9cb3333b9e85e44fe702c8a640a30170930d7af780fe382c73eb"
+    },
+    {
+      "path": "server_receipt-tlc-result.json",
+      "bytes": 1020,
+      "sha256": "a46fca9a231edf39bfc51e52d079a7df408cef79b55d1b0b347c045a8635a5ad"
+    },
+    {
+      "path": "server_settlement-tlc-command.log",
+      "bytes": 57,
+      "sha256": "61d1018c273b9cb3333b9e85e44fe702c8a640a30170930d7af780fe382c73eb"
+    },
+    {
+      "path": "server_settlement-tlc-result.json",
+      "bytes": 891,
+      "sha256": "81ceac2183f203397f48b3096b3257b272fef4cf553776758223d83cb826f288"
+    }
+  ]
+}

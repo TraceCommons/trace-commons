@@ -148,12 +148,20 @@ The reduced attempt cap, two runs, finite artifact capacity and symbolic time
 are declared bounds. Artifact slot availability can serialize extensive orphan
 production until sweeping frees a slot; the model makes no claim about disk,
 queue or PostgreSQL capacity. Identity tokens can repeat only once no modeled
-observer/artifact can confuse the old and new identities. All promises remain
-pending owner selection.
+observer/artifact can confuse the old and new identities. The owner has now selected the candidates; safety monitors are described below.
 
 ## Integrated validation
 
 Earlier typecheck-only status notes describe the model-writing stage. The later
 [integrated validation report](../validation.md) records the suite-level
 frame/control comparisons and sampled traces. Those checks do not establish
-product guarantees; owner promise selection and TLC checks remain pending.
+product guarantees. Owner selection is now complete; TLC check outcomes are recorded separately.
+
+## Selected safety monitors
+
+The owner selected all thirteen candidates. This model configures P6, P7 and P8
+as observation-only safety invariants. See [receipt and processing proof
+notes](../proofs/server-ingest-notes.md) for the exact projections, decision-time
+boundaries, source correspondence and limitations. The observers preserve all
+source guards and finite domains; typechecking and frame/control checks pass.
+This documentation does not claim a completed exhaustive check.

@@ -1,4 +1,4 @@
-// Current-behavior abstraction; no product promises selected or encoded.
+// Current-behavior abstraction with owner-selected P9 safety observations.
 module server_settlement {
   pure val Runs = Set(0, 1)
   pure val LeaseTokens = Set(0, 1, 2)
@@ -16,11 +16,26 @@ module server_settlement {
     flight: int, flightToken: int, accountLine: int -> str, accountEffect: Set[int], accountConfirmed: Set[int],
     link: int -> str, owed: int -> bool, accountHold: Set[int], streamHold: Set[int], referralHold: bool,
     accountHalted: bool, accountMode: str, referralMode: str, budget: int,
-    accountFlight: int, error: str
+    accountFlight: int, error: str,
+    creditCommits: int -> int, instrumentFirstKey: int -> int, instrumentLastKey: int -> int,
+    nearFirstKey: int -> int, nearLastKey: int -> int, nearFirstContract: int -> int, accountFirstKey: int -> int, accountLastKey: int -> int
   }
   val vars = { s: s }
   val flightLeaseCurrent = if (s.flight == -1) false else
     s.liveLease.get(runOf(s.flight)) and s.flightToken == s.leaseToken.get(runOf(s.flight))
+  // P9: A retry cannot create a second internal credit for the same operation,
+  // and payout retries retain their operation identity. External provider
+  // idempotency is an explicit contract, not an exactly-once delivery theorem.
+  // The observation counts commit events, not membership of an idempotent set.
+  val P9 = Legs.forall(l => s.creditCommits.get(l) <= 1)
+    and s.ledger.forall(l => s.creditCommits.get(l) == 1)
+    and Legs.forall(l => (s.instrumentFirstKey.get(l) == -1 or
+      (s.instrumentFirstKey.get(l) == l and s.instrumentLastKey.get(l) == s.instrumentFirstKey.get(l))))
+    and Runs.forall(r => (s.nearFirstKey.get(r) == -1 or
+      (s.nearFirstKey.get(r) == r and s.nearLastKey.get(r) == s.nearFirstKey.get(r)
+        and s.nearContract.get(r) == s.nearFirstContract.get(r))))
+    and Legs.forall(l => (s.accountFirstKey.get(l) == -1 or
+      (s.accountFirstKey.get(l) == l and s.accountLastKey.get(l) == s.accountFirstKey.get(l))))
   action init = s' = {
     panel: "settlement-ready", selected: Set(), operable: Runs.mapBy(_ => true),
     runnable: Runs.mapBy(_ => true), indexDone: Runs.mapBy(_ => false), settleGuard: Runs.mapBy(_ => false), guardRead: Set(), attempted: Set(),
@@ -31,7 +46,9 @@ module server_settlement {
     flight: -1, flightToken: -1, accountLine: Legs.mapBy(_ => "none"), accountEffect: Set(), accountConfirmed: Set(),
     link: Runs.mapBy(_ => "waiting"), owed: Legs.mapBy(_ => false), accountHold: Set(), streamHold: Set(),
     referralHold: false, accountHalted: false, accountMode: "live", referralMode: "live", budget: 2,
-    accountFlight: -1, error: "none"
+    accountFlight: -1, error: "none",
+    creditCommits: Legs.mapBy(_ => 0), instrumentFirstKey: Legs.mapBy(_ => -1), instrumentLastKey: Legs.mapBy(_ => -1),
+    nearFirstKey: Runs.mapBy(_ => -1), nearLastKey: Runs.mapBy(_ => -1), nearFirstContract: Runs.mapBy(_ => -1), accountFirstKey: Legs.mapBy(_ => -1), accountLastKey: Legs.mapBy(_ => -1)
   }
   // Inbound from the detailed Score model: two awards, immutable operation identities.
   action TheScoreCommitsTwoInstrumentAwards = {
@@ -90,7 +107,8 @@ module server_settlement {
     val r = runOf(l)
     all { s.flight == -1, s.selected.contains(r), s.indexDone.get(r), s.liveLease.get(r), s.runnable.get(r), s.guardRead.contains(r), s.settleGuard.get(r), not(s.attempted.contains(l)),
       Set("pending", "dispatched", "retry", "unreconciled").contains(s.leg.get(l)),
-      s' = { ...s, dispatched: s.dispatched.union(Set(l)), attempted: s.attempted.union(Set(l)), leg: s.leg.set(l, "dispatched"), flight: l, flightToken: s.leaseToken.get(r), resultReady: s.resultReady.exclude(Set(l)), panel: "settlement-progress" } }
+      s' = { ...s, instrumentFirstKey: if (s.instrumentFirstKey.get(l) == -1) s.instrumentFirstKey.set(l, l) else s.instrumentFirstKey,
+        instrumentLastKey: s.instrumentLastKey.set(l, l), dispatched: s.dispatched.union(Set(l)), attempted: s.attempted.union(Set(l)), leg: s.leg.set(l, "dispatched"), flight: l, flightToken: s.leaseToken.get(r), resultReady: s.resultReady.exclude(Set(l)), panel: "settlement-progress" } }
   }
   action TheAdapterReturnsAReceipt = all { s.flight != -1,
     s' = { ...s, resultReady: s.resultReady.union(Set(s.flight)),
@@ -111,7 +129,8 @@ module server_settlement {
   action TheInternalCreditTransactionCommits = all { s.flight != -1, flightLeaseCurrent, isCredit(s.flight), s.resultReady.contains(s.flight),
     s.operable.get(runOf(s.flight)), s.liveLease.get(runOf(s.flight)), s.runnable.get(runOf(s.flight)),
     (not(s.creditBatched.get(runOf(s.flight))) or not(s.creditHold.contains(runOf(s.flight)))),
-    s' = { ...s, leg: s.leg.set(s.flight, "complete"), ledger: s.ledger.union(Set(s.flight)),
+    s' = { ...s, creditCommits: s.creditCommits.set(s.flight, if (s.creditCommits.get(s.flight) == 0) 1 else 2),
+      leg: s.leg.set(s.flight, "complete"), ledger: s.ledger.union(Set(s.flight)),
       batch: if (s.creditBatched.get(runOf(s.flight))) s.batch.union(Set(runOf(s.flight))) else s.batch,
       near: if (s.creditBatched.get(runOf(s.flight))) s.near.set(runOf(s.flight), "pending") else s.near, flight: -1, panel: "settlement-progress" } }
   action TheDuplicateAwardIsWithheld = {
@@ -160,7 +179,9 @@ module server_settlement {
   action ThePipelineNearCallIsDispatched = {
     nondet r = Runs.oneOf()
     all { s.near.get(r) == "prepared", s.runnable.get(r), s.nearContract.get(r) == s.configuredContract, s.nearMode != "disabled", s.nearFlight == -1,
-      s' = { ...s, nearFlight: r, panel: "pipeline-near" } }
+      s' = { ...s, nearFirstKey: if (s.nearFirstKey.get(r) == -1) s.nearFirstKey.set(r, r) else s.nearFirstKey,
+        nearFirstContract: if (s.nearFirstKey.get(r) == -1) s.nearFirstContract.set(r, s.nearContract.get(r)) else s.nearFirstContract,
+        nearLastKey: s.nearLastKey.set(r, r), nearFlight: r, panel: "pipeline-near" } }
   }
   action ThePipelineNearAdapterTakesEffect = all { s.nearFlight != -1,
     s' = { ...s, nearEffect: s.nearEffect.union(Set(s.nearFlight)) } }
@@ -179,12 +200,12 @@ module server_settlement {
   action ThePipelineNearTransactionIsConfirmed = {
     nondet r = Runs.oneOf()
     all { s.near.get(r) == "submitted", s.submittedMode.get(r) == s.nearMode,
-      s' = { ...s, near: s.near.set(r, "confirmed"), panel: "pipeline-near" } }
+      s' = { ...s, nearLastKey: s.nearLastKey.set(r, r), near: s.near.set(r, "confirmed"), panel: "pipeline-near" } }
   }
   action ThePipelineNearTransactionFailsOnChain = {
     nondet r = Runs.oneOf()
     all { s.near.get(r) == "submitted", s.submittedMode.get(r) == s.nearMode,
-      s' = { ...s, near: s.near.set(r, "chain_failed"), error: "near_transaction_failed", panel: "settlement-uncertain" } }
+      s' = { ...s, nearLastKey: s.nearLastKey.set(r, r), near: s.near.set(r, "chain_failed"), error: "near_transaction_failed", panel: "settlement-uncertain" } }
   }
   action TheNearDeploymentConfigurationChanges = {
     nondet mode = Set("disabled", "dry_run", "http").oneOf()
@@ -217,7 +238,8 @@ module server_settlement {
     nondet l = Legs.oneOf()
     all { s.accountLine.get(l) == "pending", s.accountFlight == -1, not(s.accountHalted), s.budget > 0,
       not(s.accountHold.contains(runOf(l))), not(s.streamHold.contains(l)), (isCredit(l) or not(s.referralHold)),
-      s' = { ...s, accountFlight: l, budget: s.budget - 1, panel: "account-payout" } }
+      s' = { ...s, accountFirstKey: if (s.accountFirstKey.get(l) == -1) s.accountFirstKey.set(l, l) else s.accountFirstKey,
+        accountLastKey: s.accountLastKey.set(l, l), accountFlight: l, budget: s.budget - 1, panel: "account-payout" } }
   }
   action TheAccountRailCommitsTheTransfer = all { s.accountFlight != -1,
     s' = { ...s, accountEffect: s.accountEffect.union(Set(s.accountFlight)), panel: "settlement-uncertain" } }
@@ -228,7 +250,8 @@ module server_settlement {
   action TheAccountPassRecoversTheMatchingReceipt = {
     nondet l = Legs.oneOf()
     all { s.accountLine.get(l) == "pending", s.accountEffect.contains(l), s.accountFlight != l, not(s.accountHalted), not(s.accountHold.contains(runOf(l))), not(s.streamHold.contains(l)), (isCredit(l) or not(s.referralHold)),
-      s' = { ...s, accountLine: s.accountLine.set(l, "confirmed"), accountConfirmed: s.accountConfirmed.union(Set(l)), panel: "account-payout" } }
+      s' = { ...s, accountFirstKey: if (s.accountFirstKey.get(l) == -1) s.accountFirstKey.set(l, l) else s.accountFirstKey,
+        accountLastKey: s.accountLastKey.set(l, l), accountLine: s.accountLine.set(l, "confirmed"), accountConfirmed: s.accountConfirmed.union(Set(l)), panel: "account-payout" } }
   }
   action ThePendingAccountLineIsEndedConcurrently = {
     nondet l = Legs.oneOf()

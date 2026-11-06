@@ -1,8 +1,9 @@
-# Promises proposed for owner selection
+# Owner-selected safety hypotheses
 
-These are candidates, **not selected promises or verified guarantees**. The
-review surface was presented before this list. No corresponding invariant
-or temporal property has been added to a model or TLC config.
+The owner selected all 13 candidates with “Check all 13 candidates.” These
+remain verification hypotheses, not established guarantees. Their exact wording
+is preserved below. See [results](proofs/results.md) and the recorded
+[selection](promise-selection.json).
 
 | ID | Product-language promise | What it would rule out / scope |
 | --- | --- | --- |

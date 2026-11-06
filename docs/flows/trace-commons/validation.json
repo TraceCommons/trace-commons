@@ -1,7 +1,8 @@
 {
   "kind": "typechecking and random simulation only; no selected product promises checked",
-  "startedAtUTC": "2026-11-06T02:23:43.381844+00:00",
-  "sourceBaseline": "8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6",
+  "startedAtUTC": "2026-11-06T22:34:51.727147+00:00",
+  "modelSeedBaseline": "8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6",
+  "selectedSeamsReviewedAt": "a2e0aa56608f8c403deff679f8b51e76ac2f5ca7",
   "quintVersion": "0.33.0",
   "nodeVersion": "v26.13.0",
   "pythonVersion": "3.12.8",
@@ -13,7 +14,7 @@
       "name": "client_consent",
       "typecheck": "passed",
       "controlFrames": 4,
-      "modelSha256": "dfaf21ccd75301ad1d4150c543a9569427edd94a440811cc070a871fbee2df0b",
+      "modelSha256": "1f00f4582914a737e9f178403d32c557509ab62a9b7d8f6af76b7e4f20b3a045",
       "viewSha256": "31a2930d704958b04cac687a223e871d148c53ef51cc6d4f3b52bdbeb58db521",
       "framesSha256": "ccf3ece4b28a2aef613f99049e8214c72845e8e830d2687e5a00d94f4550736c",
       "simulationCommand": [
@@ -34,7 +35,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-validation-20261105-final-b/client_consent-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-current/client_consent-{seq}.json"
       ],
       "declaredActions": [
         "ANewSessionArrives",
@@ -88,14 +89,13 @@
         "TheGrantArmsAnEligibleFolder",
         "TheQueueRechecksTheApprovalOrigin",
         "TheUploaderChoosesAPolicyRetraction"
-      ],
-      "configSha256": "e1ccd9103d45490625ebb6b6ac2d7eec8e0546e17865c8faba7da976b8df5167"
+      ]
     },
     {
       "name": "client_contribution",
       "typecheck": "passed",
       "controlFrames": 16,
-      "modelSha256": "e97ff4439c5a55ab5c8ca702e4ead86b14ace8d4daeb415de414f0a81eac30d2",
+      "modelSha256": "8aa6f3a4bcddfffcb3c1333b6e9d42c0f8ab88ff1af974dde448cf5716c04a00",
       "viewSha256": "5e36604c509dae123ec9c885cacc5eeab53c694ea15853733ccdbdff96a66673",
       "framesSha256": "019624ddda73881adf3806814926a467c140cb31e689d2ed338bcdae105574c1",
       "simulationCommand": [
@@ -116,7 +116,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-validation-20261105-final-b/client_contribution-{seq}.json"
+        "/private/tmp/tc-quint-client-contribution-final-structural/client_contribution-{seq}.json"
       ],
       "declaredActions": [
         "TheApprovalBuildPinsAndApproves",
@@ -133,6 +133,7 @@
         "TheHistoryReadFindsASettledVerdict",
         "TheHistoryReadFindsPreviousAccount",
         "TheHistoryReadFindsProcessing",
+        "TheHistoryReadPublishesAnEmptySnapshot",
         "TheHistoryReadReflectsWithdrawal",
         "TheIngestRateLimitDefersTheSend",
         "TheManualScrubSettingRetractsAnUnattendedApproval",
@@ -195,20 +196,21 @@
       ],
       "unobservedActions": [
         "TheAskPolicyReturnsAnUnattendedApprovalToWaiting",
-        "TheDaemonRestartsDuringAnUpload",
         "TheHistoryReadFindsASettledVerdict",
         "TheHistoryReadFindsPreviousAccount",
         "TheHistoryReadFindsProcessing",
         "TheHistoryReadReflectsWithdrawal",
-        "TheManualScrubSettingRetractsAnUnattendedApproval",
         "TheNetworkFailsDuringSend",
         "TheNetworkReturns",
         "TheNeverFolderRefusesAnUnattendedApproval",
+        "ThePrivacyOrWitnessReviewHoldsTheTrace",
+        "TheRedactionRetryBudgetIsSpent",
         "TheRetryBudgetIsSpent",
         "TheSendSucceedsWithProofReceipt",
         "TheSendSucceedsWithoutProofReceipt",
         "TheUnreferencedPreviewPinIsReleased",
         "TheUploadPassesItsPreconditions",
+        "TheUploaderRefusesMissingEnrollment",
         "TheUploaderReoffersChangedInputsOrMissingPin",
         "TheUploaderSupersedesChangedSource",
         "TheWithdrawalNeedsAnAccountSession",
@@ -217,14 +219,13 @@
         "YouApproveThePinnedPreview",
         "YouRetryAFailedTrace",
         "YouWithdrawTheContributedTrace"
-      ],
-      "configSha256": "e1ccd9103d45490625ebb6b6ac2d7eec8e0546e17865c8faba7da976b8df5167"
+      ]
     },
     {
       "name": "client_learning",
       "typecheck": "passed",
       "controlFrames": 18,
-      "modelSha256": "12b1b713650962245f0556b9822cdbab615b0bd42ef1da4d26f3b89e6c54b762",
+      "modelSha256": "dadc2e60fca0973717bf66e9c5e596b3e1912573febf4965b6eb7774f792b2ad",
       "viewSha256": "9064b88ca49cbd92b7fd5c782fe4583b0df35abf54f28ed40073cf8becd45c00",
       "framesSha256": "fe8477f54a1208e27296b7c5478405e0ed54c249914edaaf400d35882fb9635f",
       "simulationCommand": [
@@ -245,7 +246,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-validation-20261105-final-b/client_learning-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-current/client_learning-{seq}.json"
       ],
       "declaredActions": [
         "TheChangedSkillCannotBeRolledBack",
@@ -323,8 +324,7 @@
         "YouKeepTheInstalledSkill",
         "YouRetryInstallStatus",
         "YouReviewInstallingTheSkill"
-      ],
-      "configSha256": "e1ccd9103d45490625ebb6b6ac2d7eec8e0546e17865c8faba7da976b8df5167"
+      ]
     },
     {
       "name": "client_providers",
@@ -351,7 +351,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-validation-20261105-final-b/client_providers-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-current/client_providers-{seq}.json"
       ],
       "declaredActions": [
         "AnotherClientChangesDefault",
@@ -445,8 +445,7 @@
         "TheSessionProxyCannotStart",
         "TheSessionProxyStarts",
         "YouRequestManagedLaunch"
-      ],
-      "configSha256": "e1ccd9103d45490625ebb6b6ac2d7eec8e0546e17865c8faba7da976b8df5167"
+      ]
     },
     {
       "name": "client_services",
@@ -473,7 +472,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-validation-20261105-final-b/client_services-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-current/client_services-{seq}.json"
       ],
       "declaredActions": [
         "AnOlderBrowserCallbackArrives",
@@ -576,8 +575,7 @@
         "YouResumeTheNativeConversation",
         "YouStartTheManagedToolAgain",
         "YouStartUnlinkingAPayoutAccount"
-      ],
-      "configSha256": "e1ccd9103d45490625ebb6b6ac2d7eec8e0546e17865c8faba7da976b8df5167"
+      ]
     },
     {
       "name": "client_shell",
@@ -604,7 +602,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-validation-20261105-final-b/client_shell-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-current/client_shell-{seq}.json"
       ],
       "declaredActions": [
         "ADeepLinkWaitsForOnboarding",
@@ -692,8 +690,7 @@
         "TheInviteEnrollsThisMac",
         "ThePastSessionsAreIncluded",
         "TheSharingDisclosuresAreAccepted"
-      ],
-      "configSha256": "e1ccd9103d45490625ebb6b6ac2d7eec8e0546e17865c8faba7da976b8df5167"
+      ]
     },
     {
       "name": "end_to_end",
@@ -720,7 +717,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-validation-20261105-format/end_to_end-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-current/end_to_end-{seq}.json"
       ],
       "declaredActions": [
         "TheAccountRailAccrues",
@@ -855,8 +852,7 @@
         "TheWorkerLeaseExpires",
         "TheWorkerReadsSettlementGuard",
         "YouWithdrawTrace"
-      ],
-      "configSha256": "e1ccd9103d45490625ebb6b6ac2d7eec8e0546e17865c8faba7da976b8df5167"
+      ]
     },
     {
       "name": "platform_clients",
@@ -883,7 +879,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-validation-20261105-final-b/platform_clients-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-current/platform_clients-{seq}.json"
       ],
       "declaredActions": [
         "EnrollmentAnswers",
@@ -949,8 +945,7 @@
         "TheNativeCompletionReadAnswers",
         "YouFinishNativeWatching",
         "YouRequestTheTauriGrant"
-      ],
-      "configSha256": "e1ccd9103d45490625ebb6b6ac2d7eec8e0546e17865c8faba7da976b8df5167"
+      ]
     },
     {
       "name": "server_identity",
@@ -977,7 +972,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-validation-20261105-final-b/server_identity-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-current/server_identity-{seq}.json"
       ],
       "declaredActions": [
         "TheAccountRequestPresentsCredentials",
@@ -1012,8 +1007,7 @@
         "YouReadAnAccountSurface",
         "YouRevokeAnAccountDevice",
         "YouSignOutTheCurrentSession"
-      ],
-      "configSha256": "e1ccd9103d45490625ebb6b6ac2d7eec8e0546e17865c8faba7da976b8df5167"
+      ]
     },
     {
       "name": "server_interfaces",
@@ -1040,7 +1034,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-validation-20261105-final-b/server_interfaces-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-current/server_interfaces-{seq}.json"
       ],
       "declaredActions": [
         "TheAnonymousBoundaryAcceptsTheRequest",
@@ -1088,14 +1082,13 @@
         "YouCreateAnAccessGrant",
         "YouRevokeAnAccessGrant",
         "YouWithdrawYourCommunityProfile"
-      ],
-      "configSha256": "e1ccd9103d45490625ebb6b6ac2d7eec8e0546e17865c8faba7da976b8df5167"
+      ]
     },
     {
       "name": "server_lifecycle",
       "typecheck": "passed",
       "controlFrames": 8,
-      "modelSha256": "659a5d73302bb96d0749b1e7199991931d915a0bf4521f8adefc4ff07ad1b767",
+      "modelSha256": "4dbf6f293ab5da0d096ba67950fb67fd2102f3c7188affa8660efad8e94afe29",
       "viewSha256": "ef8d6095af516848bd4fa391688a0a0777e9fe59e2d1bd7c3eeec23141a3fd31",
       "framesSha256": "20a4a5015ad185e10c26f760dcff8ea2d1577fa4261199d41c4f5e79a2446fff",
       "simulationCommand": [
@@ -1116,7 +1109,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-validation-20261105-final-b/server_lifecycle-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-current/server_lifecycle-{seq}.json"
       ],
       "declaredActions": [
         "TheAllowedUseEvidenceChanges",
@@ -1160,14 +1153,13 @@
         "YouWithdrawAnOwnedSubmission",
         "init"
       ],
-      "unobservedActions": [],
-      "configSha256": "e1ccd9103d45490625ebb6b6ac2d7eec8e0546e17865c8faba7da976b8df5167"
+      "unobservedActions": []
     },
     {
       "name": "server_pipeline",
       "typecheck": "passed",
       "controlFrames": 9,
-      "modelSha256": "69969cbd020c267d1616b68e62f9ffb0e7c3614ceb0410eb135b2b2f70f3f474",
+      "modelSha256": "b637efc035cf624c3c73f5bf574a860935e0386ffd0317369a5b89d5c669117f",
       "viewSha256": "e4db3f1f6fd973391026d47695d6d7819067e567c22aa36a7714392fd9e83033",
       "framesSha256": "4a2a3c07fdc6a1f12c494036f63108d5f18a7139fd5561d5a0bbc4896f309d69",
       "simulationCommand": [
@@ -1188,7 +1180,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-validation-20261105-final-b/server_pipeline-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-current/server_pipeline-{seq}.json"
       ],
       "declaredActions": [
         "OperatorFailsThePaidRun",
@@ -1243,14 +1235,13 @@
         "TheSettleSelectionAndTerminalEffectsAreRecorded",
         "TheStaleHumanAssessmentIsRefused",
         "TheWorkerParksForHumanReview"
-      ],
-      "configSha256": "e1ccd9103d45490625ebb6b6ac2d7eec8e0546e17865c8faba7da976b8df5167"
+      ]
     },
     {
       "name": "server_receipt",
       "typecheck": "passed",
       "controlFrames": 5,
-      "modelSha256": "2f4b926255bb1de731f6cf52c00ec71fc5e0645a308b7f7e8e53338e4f0b8c43",
+      "modelSha256": "0bceeb8153c5347626dc3676da4cdebb4942fc6301fe9c09a796f76a719cf69e",
       "viewSha256": "ea255f982cba24013b4eae3f83d4cfcb58b56112b8c9ec5de79401f3a0e40640",
       "framesSha256": "edeeff4874fc843892a18afc483093b35495def2fc6180a93bb8c02409d0d779",
       "simulationCommand": [
@@ -1271,7 +1262,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-validation-20261105-final-b/server_receipt-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-current/server_receipt-{seq}.json"
       ],
       "declaredActions": [
         "OperatorChangesAdmissionControl",
@@ -1303,14 +1294,13 @@
         "TheCompletedAdmissionRetryReadsTheExistingReceipt",
         "ThePostCommitAuditOrResponseFails",
         "TheReceiptResponseIsDelivered"
-      ],
-      "configSha256": "e1ccd9103d45490625ebb6b6ac2d7eec8e0546e17865c8faba7da976b8df5167"
+      ]
     },
     {
       "name": "server_settlement",
       "typecheck": "passed",
       "controlFrames": 6,
-      "modelSha256": "9d79a832b541b22db3f12222074b3a0897ff01030b2a0307fd1ee0659470c3d5",
+      "modelSha256": "8f8350008deab8b9077bf556b99461503f2733c9a922941962f51f4a025606bc",
       "viewSha256": "7c8e49bcfe813b0cc9294b05770c7e575a9e4686bc96a741c2bbc520553e60e5",
       "framesSha256": "3e7444884739c9ff26dee5b246e9c4a43b932543666b452058f6da56554ef121",
       "simulationCommand": [
@@ -1331,7 +1321,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-validation-20261105-final-b/server_settlement-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-current/server_settlement-{seq}.json"
       ],
       "declaredActions": [
         "AnotherWorkerReclaimsTheLease",
@@ -1413,8 +1403,7 @@
         "TheStoredNearContractIsRefused",
         "TheWorkerCrashesAfterExternalSuccess",
         "YouRetryFailedNearSubmit"
-      ],
-      "configSha256": "e1ccd9103d45490625ebb6b6ac2d7eec8e0546e17865c8faba7da976b8df5167"
+      ]
     }
   ],
   "views": [
@@ -1484,19 +1473,20 @@
         "TheBackoffPasses",
         "TheChangedScopeRevokesApproval",
         "TheCurrentAccountChanges",
+        "TheDaemonRestartsDuringAnUpload",
         "TheDailyCapIsReached",
         "TheDailyCapResets",
         "TheEnrollmentDisappears",
         "TheEnrollmentReturns",
         "TheHistoryReadFails",
+        "TheHistoryReadPublishesAnEmptySnapshot",
         "TheIngestRateLimitDefersTheSend",
+        "TheManualScrubSettingRetractsAnUnattendedApproval",
         "TheOfferExpires",
         "ThePinnedArtifactIsLost",
         "ThePreviewFails",
         "ThePreviewPinsAnEnvelope",
         "ThePrivacyFilterRefusesTheTrace",
-        "ThePrivacyOrWitnessReviewHoldsTheTrace",
-        "TheRedactionRetryBudgetIsSpent",
         "TheSelectedTraceRowIsRendered",
         "TheSourcePermissionIsLost",
         "TheSourcePermissionReturns",
@@ -1504,7 +1494,6 @@
         "TheStandingGrantApprovesATrace",
         "TheUndoWindowPasses",
         "TheUploaderClaimsTheApproval",
-        "TheUploaderRefusesMissingEnrollment",
         "TheWatcherDiscoversATrace",
         "TheWitnessIsAtCapacity",
         "YouChangeConsentScopes",
@@ -2280,19 +2269,13 @@
       ]
     }
   ],
-  "finishedAtUTC": "2026-11-06T02:29:14.673179+00:00",
-  "additionalChecks": [
-    "inventory extractor self-tests passed",
-    "inventory --check passed against pinned sources",
-    "ITF decoding negative control failed before decoder correction and passes after",
-    "deliberate frame/control drift rejected",
-    "unselected-promise checker refused execution",
-    "surface embedded JSON/JS valid and local HTTP 200",
-    "whitespace-only end_to_end cleanup re-typechecked and re-simulated with matching controls/views"
-  ],
-  "browserVisualQA": "unavailable: CUA browser access host unavailable",
-  "validationRuns": [
-    "/private/tmp/tc-quint-validation-20261105-final-b",
-    "/private/tmp/tc-quint-validation-20261105-format"
+  "finishedAtUTC": "2026-11-06T22:44:33.073854+00:00",
+  "scopedRefreshes": [
+    {
+      "model": "client_contribution",
+      "finishedAtUTC": "2026-11-06T22:44:33.073854+00:00",
+      "reason": "Record actual pass-context scopes in the approval observer; preserve source guards",
+      "evidenceKind": "typechecking and random simulation only; no selected product promises checked"
+    }
   ]
 }

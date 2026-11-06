@@ -1,6 +1,6 @@
 # Standing consent and approval origins
 
-Source baseline: `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6` in the isolated worktree. Current implemented behavior; only Quint typechecking is authorized. No invariants, temporal properties, selected guarantees or TLC checks are included.
+Original source baseline: `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`; relevant source seams reviewed against `a2e0aa56608f8c403deff679f8b51e76ac2f5ca7`. The owner selected all P1–P13 on 2026-11-06; this model encodes P1. These are checks of the documented finite source projection, not universal application equivalence. See [client proof notes](../proofs/client-notes.md).
 
 ## State and finite identity abstraction
 
@@ -67,4 +67,8 @@ Validation: `quint typecheck docs/flows/trace-commons/models/client_consent.qnt`
 Earlier typecheck-only status notes describe the model-writing stage. The later
 [integrated validation report](../validation.md) records the suite-level
 frame/control comparisons and sampled traces. Those checks do not establish
-product guarantees; owner promise selection and TLC checks remain pending.
+product guarantees. Owner selection is now recorded separately; current invariant-check outcomes belong in the proof report, not the older sampling totals.
+
+## Current-source proof refresh
+
+`completedAuthorization` and `overrideAuthorization` are passive provenance markers for a successfully completed standing grant or explicit folder/global Automatic policy write. They never appear in a transition guard. The watcher-start observer covers both authority paths, including direct local Automatic choices. Legacy grant withdrawal can retain an already armed folder, so a current global grant is not imposed on every later row. `sharingReadCurrent` captures freshness of an asynchronous saved-grant response and is invalidated on replacement/withdrawal; stale Automatic UI publication remains enabled and can fail P1. These UI and upload-start facets must be distinguished when interpreting a counterexample.

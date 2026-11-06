@@ -1,8 +1,11 @@
 # Index, access, withdrawal, retention and export mapping
 
 Baseline: `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`. These are bounded current
-source transitions, not selected promises. No invariant/property/TLC check is
-included. Primary-checkout untracked artifacts are excluded.
+source transitions. The owner selected P10 (revocation/expiry prevents a new
+export completion) and P11 (tenant isolation, export portion) from
+[promise candidates](../promise-candidates.md). Both are registered in the TLC
+configuration. The selected export source file remains unchanged at
+`a2e0aa56608f8c403deff679f8b51e76ac2f5ca7`.
 
 ## Finite identities and independent state
 
@@ -99,9 +102,27 @@ response-loss and malformed manifest bytes are in the coarse service boundary.
 These server frames explain state during review. Their sentence action controls
 are model events, not proposed product UI.
 
+## Selected safety observations
+
+`P10` observes live and permitted-use eligibility when a new export completes.
+`P11` observes requester/tenant authorization at that same transition and checks
+that every stored snapshot contains only its tenant's objects. The receipt
+portion of P11 lives in `server_receipt`. Completion facts are saved in
+`completionChecked`, `eligibleAtCompletion` and
+`tenantAuthorizedAtCompletion`; later withdrawal, expiry or an authenticated
+context change does not rewrite the historical fact. A previously delivered
+export is not recalled by these promises.
+
+No observer is read by an action guard or changes an original state assignment;
+erasing these fields recovers the previous transition relation. In particular,
+they do not suppress an export attempt after revocation. They observe the
+existing completion revalidation. See [proof notes](../proofs/credits-exports-notes.md)
+for source-locking semantics, bounds and excluded guarantees.
+
 ## Integrated validation
 
 Earlier typecheck-only status notes describe the model-writing stage. The later
 [integrated validation report](../validation.md) records the suite-level
 frame/control comparisons and sampled traces. Those checks do not establish
-product guarantees; owner promise selection and TLC checks remain pending.
+product guarantees. P10 and the export portion of P11 are now selected; current
+checker outcomes are recorded separately in the proof evidence.

@@ -1,6 +1,6 @@
 # Insights, mission drafts and skill learning
 
-Baseline `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`. Current behavior finite reference projection. Typechecking is the only claim; no product promise is selected.
+Baseline `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`. Current behavior finite reference projection. The owner selected P13 on 2026-11-06: “A tested skill is installed only after I confirm the matching installation plan.” The selected invariant and observer correspondence are documented in [skill-install notes](../proofs/skill-install-notes.md).
 
 ## Variables and bounds
 
@@ -32,7 +32,7 @@ Mission import duplicates, selected draft identities and stale delete confirmati
 
 `TheReadableCounterWeekReturns` / `TheCounterWeekIsDisabledOrUnreadable` expose read-back feeds; `TheMissionMutationCommits` is only a local draft effect. `TheSkillReviewBindsPackageBytes`, `TheSkillEvaluationPasses`, `TheSkillInstallPlanIsHeld`, `TheFilesystemPublishesTheSkill`, `TheInstallStatusConfirmsPublication`, `TheInstallStatusReadFailsAfterPublication`, and `TheUnchangedSkillIsRolledBack` separate approval, evaluation, publication and reconciliation. `TheLearningAccountChanges` invalidates in-memory owner leases while filesystem markers remain external durable facts. `TheRunPublicationReturns` is a separate server publication event.
 
-No fairness assumptions or progress guarantees are encoded. No invariant, temporal property, product test or TLC run has been added.
+No fairness assumptions or progress guarantees are encoded. `P13` records authorization at filesystem publication and requires an independent status observation before installed-status success. Its monitors preserve the original transition projection; they do not add product guards. The configuration selects `INVARIANT P13`; see the proof notes for check evidence and finite bounds.
 
 No universal wait/stutter action is enabled. Timing and fairness remain unselected; no deadlock or progress claim follows from this model.
 
@@ -47,4 +47,4 @@ Account change resets both rows' workflow/plan/UI-install knowledge while preser
 Earlier typecheck-only status notes describe the model-writing stage. The later
 [integrated validation report](../validation.md) records the suite-level
 frame/control comparisons and sampled traces. Those checks do not establish
-product guarantees; owner promise selection and TLC checks remain pending.
+product guarantees. P13 was subsequently selected; the [proof notes](../proofs/skill-install-notes.md) distinguish focused observer tests from the selected invariant checks.

@@ -16,11 +16,21 @@ module server_lifecycle {
     processActive: Set[int], propagation: int -> str, allowedUse: Set[int],
     snapshot: int -> str, snapshotItems: int -> Set[int], snapshotOwner: int -> int,
     snapshotTenant: int -> int, delivered: Set[int], exportGrant: bool,
-    readEligible: Set[int], request: int, error: str
+    readEligible: Set[int], request: int, error: str,
+    completionChecked: Set[int], eligibleAtCompletion: int -> bool, tenantAuthorizedAtCompletion: int -> bool
   }
   val vars = { s: s }
   def live(i: int): bool = s.status.get(i) == "accepted" and not(s.expired.contains(i))
   def locked(i: int): bool = s.flight == i and s.locksHeld
+  // P10: Taking a trace back, revoking it or reaching expiry prevents a new
+  // export from completing with that trace. Previously delivered exports are
+  // not recalled. Eligibility is observed at the locked completion boundary.
+  val P10 = s.delivered.forall(e => s.completionChecked.contains(e) and s.eligibleAtCompletion.get(e))
+  // P11 (export seam): Another tenant's request cannot complete an export of
+  // my trace. This checks the modeled tenant/requester boundary, not all RLS.
+  val P11 = s.delivered.forall(e => s.completionChecked.contains(e) and s.tenantAuthorizedAtCompletion.get(e))
+    and Exports.forall(e => s.snapshot.get(e) == "none" or
+      s.snapshotItems.get(e).forall(i => owner(i) == s.snapshotTenant.get(e)))
   action init = s' = {
     panel: "lifecycle-ready", actor: 0, tenant: 0, status: Objects.mapBy(_ => "accepted"), expired: Set(), legalHold: Set(),
     sessionBound: Set(0, 1, 2), withdrawnSessions: Set(), command: Set(), member: Set(),
@@ -30,7 +40,8 @@ module server_lifecycle {
     propagation: Objects.mapBy(_ => "none"), allowedUse: Objects,
     snapshot: Exports.mapBy(_ => "none"), snapshotItems: Exports.mapBy(_ => Set()),
     snapshotOwner: Exports.mapBy(_ => -1), snapshotTenant: Exports.mapBy(_ => -1), delivered: Set(), exportGrant: true,
-    readEligible: Set(), request: -1, error: "none"
+    readEligible: Set(), request: -1, error: "none", completionChecked: Set(),
+    eligibleAtCompletion: Exports.mapBy(_ => false), tenantAuthorizedAtCompletion: Exports.mapBy(_ => false)
   }
   // Boundary: auth middleware resolved this request identity, not an envelope field.
   action TheAuthenticatedRequestContextChanges = {
@@ -217,7 +228,12 @@ module server_lifecycle {
     all { controls(s.panel).contains("YouCompleteYourExportSnapshot"), s.exportGrant,
       s.snapshotOwner.get(e) == s.actor, s.snapshotTenant.get(e) == s.tenant, s.snapshot.get(e) == "ready",
       s.snapshotItems.get(e).forall(i => live(i) and s.allowedUse.contains(i)),
-      s' = { ...s, snapshot: s.snapshot.set(e, "complete"), delivered: s.delivered.union(Set(e)), panel: "export-complete", error: "none" } }
+      s' = { ...s, completionChecked: s.completionChecked.union(Set(e)),
+        eligibleAtCompletion: s.eligibleAtCompletion.set(e, s.snapshotItems.get(e).forall(i => live(i) and s.allowedUse.contains(i))),
+        tenantAuthorizedAtCompletion: s.tenantAuthorizedAtCompletion.set(e,
+          s.snapshotOwner.get(e) == s.actor and s.snapshotTenant.get(e) == s.tenant and
+          s.snapshotItems.get(e).forall(i => owner(i) == s.tenant)),
+        snapshot: s.snapshot.set(e, "complete"), delivered: s.delivered.union(Set(e)), panel: "export-complete", error: "none" } }
   }
   action TheExportCompletionRevalidationRefusesDelivery = {
     nondet e = Exports.oneOf()

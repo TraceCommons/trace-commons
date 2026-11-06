@@ -20,7 +20,7 @@ import sys
 import tarfile
 from pathlib import Path
 
-BASELINE = "8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6"
+BASELINE = "a2e0aa56608f8c403deff679f8b51e76ac2f5ca7"
 HERE = Path(__file__).resolve().parent.parent
 ROOT = HERE.parents[2]
 INGEST = "crates/trace-commons-ingest/src/"
@@ -216,6 +216,44 @@ def production(text):
     for start, end in reversed(remove):
         text = text[:start] + re.sub(r"[^\n]", " ", text[start:end]) + text[end:]
     return text
+
+
+def test_only_module_paths(tree):
+    """Resolve cfg(test)-only external `mod name;` declarations, not filenames.
+
+    A test helper can have an ordinary name (for example witness/test_jobs.rs).
+    Resolve the two standard Rust module layouts and their descendant modules.
+    Inline modules remain the responsibility of production().
+    """
+    excluded = set()
+    for path, source in tree.items():
+        if not path.endswith(".rs"):
+            continue
+        ts = tokens(source)
+        for i in range(len(ts) - 8):
+            if [token for token, _ in ts[i:i+4]] != ["#", "[", "cfg", "("]:
+                continue
+            end = close(ts, i+1)
+            if not test_only_cfg(ts[i+4:end-1])[0]:
+                continue
+            j = end + 1
+            if ts[j][0] == "pub":
+                j += 1
+                if ts[j][0] == "(":
+                    j = close(ts, j) + 1
+            if ts[j][0] != "mod" or ts[j+2][0] != ";":
+                continue
+            name = ts[j+1][0]
+            parent = Path(path).parent
+            if Path(path).name not in {"mod.rs", "lib.rs", "main.rs"}:
+                parent /= Path(path).stem
+            prefix = str(parent / name)
+            candidates = {prefix + ".rs", prefix + "/mod.rs"} & tree.keys()
+            if len(candidates) != 1:
+                raise Unsupported(f"test-only external module layout unresolved: {path}: {name}")
+            excluded.update(candidates)
+            excluded.update(candidate for candidate in tree if candidate.startswith(prefix + "/"))
+    return excluded
 
 
 def is_production_path(path):
@@ -639,7 +677,7 @@ def document(manifest):
            "Owner assignment only identifies the model that should reconcile an entry. "
            "A row stays a visible gap until its concrete model actions and observable fields are audited. "
            "`coarse-interface` identifies a deliberately abstract interaction; it does not cover handler internals.", "",
-           f"Source tree: `{manifest['source_commit']}`. Worktree at discovery: `{manifest['discovery_worktree_commit']}`. "
+           f"Source tree: `{manifest['source_commit']}`. Original discovery worktree: `{manifest['discovery_worktree_commit']}`. "
            "Only files in the pinned Git tree are scanned. The primary checkout and its untracked additions are excluded.", "",
            "Run from the repository root:", "", "```sh",
            "python3 docs/flows/trace-commons/scripts/inventory.py --self-test",
@@ -669,8 +707,9 @@ def document(manifest):
             "screen rows are intentionally over-inclusive presentation declarations, including decorative components, and require reachability review. "
             "Each row's inventory_role records that distinction. Navigation declarations and worker spawners can also share behavior with another row. "
             "An unresolved component declaration is different from an omitted account or queue mutation.", "",
-            "The initial reviewed mappings include the six native macOS first-run screen families, core trace preview/approval/policy/history commands, "
+            "Historical seed mappings included the six native macOS first-run screen families, core trace preview/approval/policy/history commands, "
             "selected credential/harness/managed-session/profile commands, phase-worker state and explicit auxiliary server interface families. "
+            "A source refresh invalidates mappings whose stable ID or source-file fingerprint changed; only the currently retained annotations count in the tables above. "
             "The submit route is coarse at the HTTP entry: its versioned receipt branch is modeled in detail, while legacy processing and parsing are omitted. "
             "Cross-platform first-run and native widgets are not covered by those macOS mappings.", "",
             "Substantial remaining gaps include unassigned UI component/sheet declarations and platform-specific navigation, "
@@ -680,7 +719,7 @@ def document(manifest):
             "## Scanner boundaries", ""]
     out.extend("- " + limit for limit in manifest["scanner_limits"])
     out += ["", "## Source boundary and exclusions", "",
-            "The model baseline predates unrelated work in the primary checkout. "
+            "The historical seed inventory excluded unrelated work in the primary checkout. "
             "The following paths were untracked there when the inventory was prepared; their contents were not inspected or modeled. "
             "This list is a historical exclusion snapshot, not a live scan and not a shipping-feature inventory.", "", "```text"]
     out.extend(manifest["excluded_primary_untracked_paths"])
@@ -728,6 +767,29 @@ def self_test():
       fn route() { Router::new().route("/feature", get(read)); }
     }''')
     assert found[0]["path_template"] == "/feature"
+    fixture_tree = {
+        "example/src/lib.rs": "#[cfg(test)] pub(crate) mod helper; mod production;",
+        "example/src/helper.rs": "Router::new().fallback_service(inner)",
+        "example/src/helper/nested.rs": "fn helper() {}",
+        "example/src/production.rs": "fn production() {}",
+    }
+    assert test_only_module_paths(fixture_tree) == {
+        "example/src/helper.rs", "example/src/helper/nested.rs"}
+    fixture_tree = {"example/src/lib.rs": '#[cfg(any(test, feature="prod"))] mod optional;',
+                    "example/src/optional.rs": "fn optional() {}"}
+    assert test_only_module_paths(fixture_tree) == set()
+    # Retention requires both stable ID and unchanged whole-file fingerprint.
+    audited = row("ipc", "example", IPC, 0, "same source")
+    audited.update(owner_model="client_shell", classification="detailed",
+                   rationale="audited fixture", model_actions=["init"],
+                   modeled_observables=["s.frame"])
+    unchanged = row("ipc", "example", IPC, 0, "same source")
+    changed = row("ipc", "example", IPC, 0, "changed source")
+    fresh = row("ipc", "new_example", IPC, 0, "same source")
+    reconcile([unchanged, changed, fresh], {"entries": [audited]})
+    assert unchanged["classification"] == "detailed"
+    assert changed["classification"] == fresh["classification"] == "gap"
+    assert changed["model_actions"] == fresh["model_actions"] == []
     print("inventory extractor self-tests passed")
 
 
@@ -742,6 +804,8 @@ def main():
     manifest_path = HERE / "coverage.json"
     previous = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     tree = read_tree(BASELINE)
+    test_only_paths = test_only_module_paths(tree)
+    tree = {path: source for path, source in tree.items() if path not in test_only_paths}
     rows = []
     helpers = 0
     route_files = []
@@ -785,8 +849,9 @@ def main():
     manifest = {
         "schema_version": 1, "source_commit": BASELINE,
         "discovery_worktree_commit": previous.get("discovery_worktree_commit", git("rev-parse", "HEAD").decode().strip()),
-        "scope": "Current source baseline; no product promises selected or checked.",
+        "scope": "Pinned source interface inventory; selected-promise checks and proof results are separate evidence.",
         "discovery": {"route_registration_files": route_files, "account_forwarding_helpers": helpers,
+                      "excluded_test_only_modules": sorted(test_only_paths),
                       "ipc_dispatch_arm_counts": dispatch_counts,
                       "route_methods": "explicit registrations only; GET also has framework-supplied HEAD behavior",
                       "unsupported_constructs": "recognized unsupported routing/dispatch constructs fail the command; none encountered in this baseline"},
@@ -795,7 +860,7 @@ def main():
                                             | {r["path_constant"]["source"]["path"] for r in rows if r.get("path_constant")})},
         "scanner_limits": [
             "Pinned Git-tree lexical extraction, not a compiler or reachability proof. Runtime feature flags, deployment configuration, middleware ordering, tenant scope and handler behavior require separate source review.",
-            "HTTP scan includes production .rs files in ingest, server and contributor, excludes tests/ and *_test.rs / *_tests.rs, and removes inline cfg(test) modules (including visibility and positive all(test, ...) forms). Axum .route literal registrations, protocol/local path string constants and AccountRoutes::new() helper chains are supported, including delegated builder files and post_with_body_limit. Qualified protocol aliases and unique imported protocol constant names are resolved; the one AccountRoutes forwarding .route(path, method_router) helper is explicitly recognized.",
+            "HTTP scan includes production .rs files in ingest, server and contributor, excludes tests/ and *_test.rs / *_tests.rs, and resolves cfg(test)-only external module declarations in standard Rust layouts, and removes inline cfg(test) modules (including visibility and positive all(test, ...) forms). Axum .route literal registrations, protocol/local path string constants and AccountRoutes::new() helper chains are supported, including delegated builder files and post_with_body_limit. Qualified protocol aliases and unique imported protocol constant names are resolved; the one AccountRoutes forwarding .route(path, method_router) helper is explicitly recognized.",
             "Unknown .nest, .nest_service, .route_service, .fallback_service, method-router any/on, nonliteral .route paths, indirect handler expressions and unknown AccountRoutes builder methods fail extraction. Ordinary Router.merge calls are composition sites: registrations in all scanned files are listed, but their runtime reachability is not inferred. A new routing API or builder type requires scanner review; a custom router with no recognized construct can remain invisible.",
             "IPC scans the top-level literal arms in handle_request and handle_request_async, checks equality with advertised METHODS, and records managed_ asynchronous pre-dispatch delegation. Handler internals, parameter variants, pushed-event payloads and nested dispatchers are not separately enumerated. Future nonliteral/or-pattern method dispatch requires scanner review.",
             "macOS navigation cases include HomePage, TracesPage, MonitorDestination, SettingsSection and six FirstRunStep cases. SwiftUI View declarations are over-inclusive candidates (many are components), not proof of screen reachability. Rendering closures without a named View and dynamic sheets require manual UI review.",
@@ -803,7 +868,7 @@ def main():
             "Manual HTTP boundary rows explicitly enumerate native-account, wallet-onboarding, Cloud credential and browser chooser callback dispatch, wallet asset dispatch and the external IronWire listener start. Their exact executable selectors are checked. A new hand-written HTTP parser/listener is not automatically discovered; external IronWire implementation and HTTP routing are outside this source tree.",
             "Worker rows enumerate production spawn_* function declarations in ingest, server and contributor, plus manually audited named daemon supervisor/watch/upload/history/community/estimate/lease/token-cleanup pass entry points; worker HTTP routes are also ordinary route rows. Generic tokio::spawn sites without a spawn_* declaration, other inline tasks, standalone operator binaries and external scheduling/deployment topology are not exhaustively indexed. Worker counts are declaration candidates, not running-process counts.",
             "This extractor does not independently enumerate every CLI subcommand, exported C ABI function, Tauri command adapter, GTK D-Bus activation or native service API. Many delegate to the indexed IPC/domain behavior, but equivalence is not inferred. Native local-service flows (including Insights and mission files) have source notes in their domain models; complete adapter/ABI inventories require additional scanning.",
-            "Owner assignments are heuristic triage. Newly discovered entries default to gap. No row becomes detailed or coarse merely because its subsystem has a model file. Concrete action/observable mappings must be reviewed, and model-check results (if later authorized) remain separate evidence.",
+            "Owner assignments are heuristic triage. Newly discovered entries default to gap. No row becomes detailed or coarse merely because its subsystem has a model file. Concrete action/observable mappings must be reviewed, and selected-promise model-check results remain separate evidence.",
         ],
         "excluded_primary_untracked_paths": previous.get("excluded_primary_untracked_paths", []),
         "entries": rows,

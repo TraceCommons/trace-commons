@@ -8,6 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from proof_checks import selected_for
 
 FLOW = Path(__file__).resolve().parent.parent
 MODELS = FLOW / 'models'
@@ -78,18 +79,17 @@ def main():
         models = [p for p in models if p.stem in args.model]
     evidence = {'kind': 'typechecking and random simulation only; no selected product promises checked',
                 'startedAtUTC': datetime.now(timezone.utc).isoformat(),
-                'sourceBaseline': '8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6',
+                'modelSeedBaseline': '8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6',
+                'selectedSeamsReviewedAt': 'a2e0aa56608f8c403deff679f8b51e76ac2f5ca7',
                 'quintVersion': run(['quint', '--version']), 'nodeVersion': run(['node', '--version']),
                 'pythonVersion': sys.version.split()[0], 'samplesPerModel': args.samples,
                 'maximumStepsPerTrace': args.steps, 'seed': '20261105', 'models': []}
     run(['node', str(FLOW / 'scripts/test_itf.mjs')], out / 'itf-tests.log')
     for model in models:
         name = model.stem
-        cfg = (MODELS / f'{name}.cfg').read_text()
-        if re.search(r'(?m)^\s*(INVARIANT|PROPERTY|CONSTRAINT|ACTION_CONSTRAINT)\b', cfg):
-            raise ValueError(f'{name}: pre-selection config contains a check or exploration constraint')
+        selected_for(FLOW, name)
         if re.search(r'(?m)^\s*temporal\s', model.read_text()):
-            raise ValueError(f'{name}: temporal promise present before owner selection')
+            raise ValueError(f'{name}: temporal checks require a separate authorized checker')
         for suffix in ('.view.mts', '.frames.json', '.md'):
             if not (MODELS / (name + suffix)).is_file():
                 raise ValueError(f'{name}: missing {suffix}')
