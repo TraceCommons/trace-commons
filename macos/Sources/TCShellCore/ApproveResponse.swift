@@ -117,14 +117,21 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
             approved: approved,
             redactions: totalRedactions,
             flagged: flagged,
-            skipped: skipped.map(\.reasonLabel)
+            skipped: skipped.map(\.reasonLabel),
+            includesScrubResult: witnessReview != true || !redactions.isEmpty
         )
     }
 
     /// Group exclusions are separate from skipped entries: those traces were
     /// never selected, and must not disappear from the result explanation.
     public func toast(undoCopy: MonitorUndoCopy?) -> SubmitToast {
-        let base = toast
+        // A group can exclude every entry before previewing any of them.
+        // Its empty redactions map then says no scrub ran, not that a scrub
+        // ran and matched nothing. Keep ordinary processed outcomes intact.
+        let heldOnly = (excludedHeld ?? 0) > 0 && approved == 0 && flagged == 0
+            && redactions.isEmpty && skipped.isEmpty
+        let base = heldOnly
+            ? SubmitToast(line: SubmitToast.approvedClause(approved), offerUndo: false) : toast
         guard let held = excludedHeld, held > 0, let undoCopy else { return base }
         let template = held == 1 ? undoCopy.heldForReviewOne : undoCopy.heldForReview
         let detail = template.replacingOccurrences(of: "{count}", with: String(held))

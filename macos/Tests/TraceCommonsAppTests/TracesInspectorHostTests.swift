@@ -442,7 +442,7 @@ final class TracesInspectorHostTests: XCTestCase {
         await fulfillment(of: [entered], timeout: 2)
         let result = try XCTUnwrap(traces.lastContributedFolder)
         XCTAssertFalse(result.toast.offerUndo)
-        XCTAssertTrue(result.toast.line.hasSuffix("3 traces need individual review."))
+        XCTAssertEqual(result.toast.line, "Nothing approved. 3 traces need individual review.")
         let view = MonitorNotices(place: .traces, traces: traces, home: HomeStore(client: nil), closed: .constant([]))
             .environmentObject(AppModel())
         let png = try await InsightsGetStartedRenderTests.render(AnyView(view), width: 760, height: 400) { true }

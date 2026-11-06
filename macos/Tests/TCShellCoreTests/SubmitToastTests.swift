@@ -20,12 +20,79 @@ final class SubmitToastTests: XCTestCase {
             let response = ApproveResponse(approved: approved, flagged: 0, redactions: [:], skipped: [],
                                            holdSecs: 10, holdUntil: nil, excludedHeld: 3)
             let toast = response.toast(undoCopy: words)
-            XCTAssertTrue(toast.line.hasSuffix("3 traces need individual review."))
+            XCTAssertEqual(
+                toast.line,
+                approved == 0
+                    ? "Nothing approved. 3 traces need individual review."
+                    : "Approved 2. Scrubbing matched nothing. 3 traces need individual review.")
             XCTAssertEqual(toast.offerUndo, approved > 0)
         }
         let singular = ApproveResponse(approved: 0, flagged: 0, redactions: [:], skipped: [],
                                        holdSecs: 10, holdUntil: nil, excludedHeld: 1)
-        XCTAssertTrue(singular.toast(undoCopy: words).line.hasSuffix("1 trace needs individual review."))
+        XCTAssertEqual(singular.toast(undoCopy: words).line, "Nothing approved. 1 trace needs individual review.")
+    }
+
+    func testHeldOnlyGroupOmitsScrubClaimWithoutCopyAndPreservesOtherOutcomes() {
+        let heldOnly = ApproveResponse(approved: 0, flagged: 0, redactions: [:], skipped: [],
+                                      holdSecs: 10, holdUntil: nil, excludedHeld: 30)
+        XCTAssertEqual(heldOnly.toast(undoCopy: nil), SubmitToast(line: "Nothing approved.", offerUndo: false))
+
+        // These responses include work or an ordinary non-group outcome.
+        // They keep the existing scrub accounting and Undo contract.
+        let processed: [ApproveResponse] = [
+            .init(approved: 1, flagged: 0, redactions: [:], skipped: [], holdSecs: 10,
+                  holdUntil: nil, excludedHeld: 30),
+            .init(approved: 0, flagged: 1, redactions: [:], skipped: [], holdSecs: 10,
+                  holdUntil: nil, excludedHeld: 30),
+            .init(approved: 0, flagged: 0, redactions: ["local_path": 1], skipped: [], holdSecs: 10,
+                  holdUntil: nil, excludedHeld: 30),
+            .init(approved: 0, flagged: 0, redactions: ["local_path": 0], skipped: [], holdSecs: 10,
+                  holdUntil: nil, excludedHeld: 30),
+            .init(approved: 0, flagged: 0, redactions: [:],
+                  skipped: [.init(entryID: "already-decided", reasonLabel: "not-pending")],
+                  holdSecs: 10, holdUntil: nil, excludedHeld: 30),
+            .init(approved: 0, flagged: 0, redactions: [:], skipped: [], holdSecs: 10,
+                  holdUntil: nil, excludedHeld: 0),
+            .init(approved: 0, flagged: 0, redactions: [:], skipped: [], holdSecs: 10,
+                  holdUntil: nil),
+        ]
+        for response in processed {
+            XCTAssertEqual(response.toast(undoCopy: nil), response.toast)
+        }
+    }
+
+    func testWitnessReviewWithoutLocalCountsDoesNotClaimAScrubResult() throws {
+        let approved = ApproveResponse(approved: 1, flagged: 0, redactions: [:], skipped: [],
+                                       holdSecs: 10, holdUntil: nil, witnessReview: true)
+        XCTAssertEqual(approved.toast, SubmitToast(line: "Approved.", offerUndo: true))
+        XCTAssertEqual(approved.toast(undoCopy: nil), approved.toast)
+
+        let mixed = ApproveResponse(approved: 2, flagged: 1, redactions: [:],
+                                    skipped: [.init(entryID: "already-decided", reasonLabel: "not-pending")],
+                                    holdSecs: 10, holdUntil: nil, witnessReview: true)
+        XCTAssertEqual(mixed.toast.line, "Approved 2. 1 flagged, 1 not approved: already decided.")
+        XCTAssertTrue(mixed.toast.offerUndo)
+
+        let words = try JSONDecoder().decode(MonitorUndoCopy.self, from: Data(#"{"approval_saved":"APPROVAL SAVED","approved":"{label} approved","unavailable":"Undo unavailable","within":"Undo within {seconds}s","may_have_started":"Upload may already have started.","undoing":"Undoing","redaction_begun":"Data redaction has begun.","held_for_review_one":"1 trace needs individual review.","held_for_review":"{count} traces need individual review."}"#.utf8))
+        let group = ApproveResponse(approved: 1, flagged: 0, redactions: [:], skipped: [],
+                                    holdSecs: 10, holdUntil: nil, excludedHeld: 2, witnessReview: true)
+        XCTAssertEqual(group.toast(undoCopy: words),
+                       SubmitToast(line: "Approved. 2 traces need individual review.", offerUndo: true))
+    }
+
+    func testWitnessReviewRetainsAvailableScrubCountsAndOrdinaryZeroResults() {
+        let localCounts = ApproveResponse(approved: 1, flagged: 0, redactions: ["local_path": 2], skipped: [],
+                                         holdSecs: 10, holdUntil: nil, witnessReview: true)
+        XCTAssertEqual(localCounts.toast.line, "Approved. 2 redactions applied.")
+        let zeroCount = ApproveResponse(approved: 1, flagged: 0, redactions: ["local_path": 0], skipped: [],
+                                       holdSecs: 10, holdUntil: nil, witnessReview: true)
+        XCTAssertEqual(zeroCount.toast.line, "Approved. Scrubbing matched nothing.")
+        for witness: Bool? in [false, nil] {
+            let ordinary = ApproveResponse(approved: 1, flagged: 0, redactions: [:], skipped: [],
+                                           holdSecs: 10, holdUntil: nil, witnessReview: witness)
+            XCTAssertEqual(ordinary.toast.line, "Approved. Scrubbing matched nothing.")
+            XCTAssertTrue(ordinary.toast.offerUndo)
+        }
     }
 
     func testTheSpecWorkedExamplesRenderExactly() {
