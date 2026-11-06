@@ -33,15 +33,15 @@ use crate::identity::{
 };
 use crate::issuer_client::{ClaimToken, IssuerClient};
 use crate::source::{SessionRef, TraceSource};
+use crate::witness::WITNESS_EXPECTED_MEASUREMENT_CONTROL;
 use crate::witness::inference_record::{self, InferenceAttestationRecord};
 use crate::witness::status::{
     WitnessLastResult, certificate_obtained_for, n_of_m_from_certificate, record_last_result,
 };
 use crate::witness::transport::{
-    GrantedConsent, HttpWitnessTransport, WITNESS_CERTIFICATE_HEADER, WITNESS_SIGNATURE_HEADER,
-    WitnessedEnvelope, parse_witnessed_envelope,
+    GrantedConsent, WITNESS_CERTIFICATE_HEADER, WITNESS_SIGNATURE_HEADER, WitnessedEnvelope,
+    parse_witnessed_envelope,
 };
-use crate::witness::{WITNESS_EXPECTED_MEASUREMENT_CONTROL, witness_session};
 
 /// Select the witness profile from source bytes before receipt lookup or HTTP.
 /// The signup flag enables account-bound evidence, but existing unbound history
@@ -1209,13 +1209,11 @@ impl<'a> SubmitContext<'a> {
             .witness
             .clone()
             .ok_or_else(|| anyhow::anyhow!("witness-not-configured"))?;
-        // The sign-up pins plus any signed accepted-list entry valid now.
-        let trust = crate::witness::accepted_list::trust_with_accepted(
-            &settings,
-            self.store.dir(),
-            Utc::now(),
-        )
-        .map_err(|_| anyhow::anyhow!("witness_expected_measurement_malformed"))?;
+        // Enrollment must already be pinned; signed runtime routing is
+        // resolved after grant, lease and receipt prerequisites below.
+        let trust = settings
+            .trust()
+            .map_err(|_| anyhow::anyhow!("witness_expected_measurement_malformed"))?;
         if !trust.is_pinned() {
             anyhow::bail!("witness_expected_measurement");
         }
@@ -1277,16 +1275,15 @@ impl<'a> SubmitContext<'a> {
         let raw = witness_input_for_profile(raw, &self.effective_cfg, true);
         let (scopes, uses) = granted_consent_for(&self.effective_cfg, &token);
         let granted = GrantedConsent { scopes, uses };
-        let transport = HttpWitnessTransport::new(
-            settings.url.clone(),
-            self.cfg.ingest_url.clone(),
-            std::sync::Arc::new(config_allowlist(self.cfg)),
-            crate::witness::transport::WITNESS_REVIEW_TIMEOUT,
-        )?
-        .with_admission_evidence(true)
-        .with_envelope_limit(self.store.envelope_limit_bytes());
-        let payload = crate::witness::witness_token_session(
-            &transport,
+        let payload = crate::witness::configuration::witness_token_session(
+            self.cfg,
+            &settings,
+            self.store.dir(),
+            crate::witness::configuration::TransportOptions {
+                admission: true,
+                background: false,
+                envelope_limit: self.store.envelope_limit_bytes(),
+            },
             crate::witness::TokenBundleSession {
                 url: &settings.url,
                 trust: &trust,
@@ -1624,7 +1621,7 @@ impl<'a> SubmitContext<'a> {
         raw: RawTraceContribution,
         attested: Option<&crate::routing::attested::AttestedCall>,
         token: &ClaimToken,
-        now: DateTime<Utc>,
+        _now: DateTime<Utc>,
     ) -> std::result::Result<
         (
             TraceContributionEnvelope,
@@ -1637,12 +1634,11 @@ impl<'a> SubmitContext<'a> {
         // A malformed pin and an absent one are different operator mistakes,
         // and a contributor who mistyped a measurement should not be told they
         // configured none.
-        // The sign-up pins plus any signed accepted-list entry valid now
-        // (`witness::accepted_list`). The list only adds candidates; a
-        // malformed sign-up pin is still this refusal.
-        let trust =
-            crate::witness::accepted_list::trust_with_accepted(settings, self.store.dir(), now)
-                .map_err(|_| "witness_expected_measurement_malformed")?;
+        // Runtime endpoint pins are resolved after receipt/profile selection;
+        // malformed enrollment pins retain their distinct refusal label.
+        settings
+            .trust()
+            .map_err(|_| "witness_expected_measurement_malformed")?;
 
         #[cfg(test)]
         if let Some(label) = self
@@ -1663,17 +1659,6 @@ impl<'a> SubmitContext<'a> {
             settings.admission_evidence,
             attested.map(|call| call.request_body()),
         )?;
-        let transport = HttpWitnessTransport::new(
-            settings.url.clone(),
-            self.cfg.ingest_url.clone(),
-            std::sync::Arc::new(config_allowlist(self.cfg)),
-            crate::witness::transport::WITNESS_REVIEW_TIMEOUT,
-        )
-        .map_err(|e| e.refusal_label())?
-        .with_admission_evidence(admission_profile)
-        .with_background_workload(self.background_witness)
-        .with_envelope_limit(self.store.envelope_limit_bytes());
-
         // The source-selected profile is already frozen. Optional legacy
         // receipt failures retain ordinary review; a bound admission call
         // must have its receipt and cannot switch to the window on failure.
@@ -1697,11 +1682,15 @@ impl<'a> SubmitContext<'a> {
         // history or execution claims. Keep the ordinary invited profile intact.
         let raw = witness_input_for_profile(raw, &self.effective_cfg, admission_profile);
         let (scopes, uses) = granted_consent_for(&self.effective_cfg, token);
-        let response = witness_session(
-            &transport,
-            &settings.url,
-            &trust,
-            now.timestamp().max(0) as u64,
+        let response = crate::witness::configuration::witness_session(
+            self.cfg,
+            settings,
+            self.store.dir(),
+            crate::witness::configuration::TransportOptions {
+                admission: admission_profile,
+                background: self.background_witness,
+                envelope_limit: self.store.envelope_limit_bytes(),
+            },
             raw,
             attested,
             &GrantedConsent { scopes, uses },

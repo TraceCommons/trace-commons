@@ -15,6 +15,26 @@
 # configuration. The script is how the two are kept from drifting.
 
 services:
+  # TLS terminates inside this CVM. Cloudflare provides DNS only.
+  # tls-alpn-01 renews without a DNS API credential in the guest.
+  ingress:
+    image: ghcr.io/dstack-tee/dstack-ingress:2.8@sha256:60e682449534715a2f2e5b72326ca4229209c8e26c931c6f34d27e02200ac086
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    environment:
+      CHALLENGE_TYPE: "tls-alpn-01"
+      DOMAIN: "witness.tracecommons.ai"
+      TARGET_ENDPOINT: "witness:8088"
+      GATEWAY_DOMAIN: "gateway.dstack-pha-prod9.phala.network"
+      DNS_SETUP_MODE: "wait"
+      SET_CAA: "false" # Operator creates the printed account-bound CAA.
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - /var/run/tappd.sock:/var/run/tappd.sock
+      - witness-cert-data:/etc/letsencrypt
+      - witness-tls-evidences:/evidences
+
   witness:
     # By digest, never a tag: a tag is a moving target and a measurement
     # pinned over one is pinning nothing.
@@ -28,7 +48,7 @@ services:
     #
     # Replacing this means rebuilding and re-pinning the measurement
     # everywhere it is named -- in ingest and in every client.
-    image: ghcr.io/tracecommons/trace-commons-witness@sha256:75af1945502ebcd88b597993695549553fb011d0ff578aff357657f7e78e2d5c
+    image: ghcr.io/tracecommons/trace-commons-witness@sha256:af99d33f29d2fc9401062f0b3c3ff8bd3304c6fe76d9b8871460e1f6b9e65546
 
     # A restart re-derives the same signing key: dstack's KMS derives the app
     # key from the app id, which does not move. So a restart is invisible to a
@@ -272,3 +292,5 @@ services:
 
 volumes:
   witness-results:
+  witness-cert-data:
+  witness-tls-evidences:

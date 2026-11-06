@@ -5204,6 +5204,13 @@ class ActivityMissionInventoryTests(unittest.TestCase):
         for path in ("/v1/credit-estimate", "/v1/credit-estimate/table/extra", "/v1/credit-estimate/tables"):
             self.assertIsNone(self.inventory.classify_route(path), path)
 
+    def test_signed_witness_configuration_is_registered_as_public(self):
+        route = "/v1/public/witness-configuration"
+        self.assertEqual(self.inventory.classify_route(route), ("STA-001", "CMP-001"))
+        rows = [row for row in self.inventory.build_inventory()["routes"] if row["path"] == route]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["contracts"], ["STA-001", "CMP-001"])
+
     def test_new_catalogue_is_in_inventory_and_unknown_interfaces_still_fail_closed(self):
         inventory = self.inventory.build_inventory()
         catalogue = [row for row in inventory["routes"] if row["path"] == "/v1/activity-missions"]

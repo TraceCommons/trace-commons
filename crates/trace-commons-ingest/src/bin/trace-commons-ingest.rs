@@ -57,6 +57,8 @@ mod usage_region;
 mod witness_accepted_list;
 #[path = "trace_commons_ingest_internal/witness_blocked.rs"]
 mod witness_blocked;
+#[path = "trace_commons_ingest_internal/witness_configuration.rs"]
+mod witness_configuration;
 
 #[cfg(test)]
 use public_run::validate_public_run_provenance;
@@ -1886,6 +1888,12 @@ struct AppState {
     /// (`TRACE_COMMONS_WITNESS_ACCEPTED_LIST_PATH`), read per request. `None`
     /// when unset: the route answers 404.
     witness_accepted_list_path: Option<Arc<std::path::PathBuf>>,
+    /// Optional directory of signed lists keyed by SHA-256 of witness URL.
+    /// Used only for explicit `witness_url` queries; never changes the legacy route.
+    witness_accepted_list_directory: Option<Arc<std::path::PathBuf>>,
+    /// Signed witness endpoints and measurements, served verbatim and read
+    /// per request. `None` when the optional setting is absent or blank.
+    witness_configuration_path: Option<Arc<std::path::PathBuf>>,
     /// What `POST /v1/public/first-run-copy` answers: the default lines, or
     /// the operator's dollar line, validated at boot.
     first_run_copy: Arc<first_run_copy::FirstRunCopyConfig>,
@@ -5373,6 +5381,8 @@ impl AppState {
             referral_network_mark_key,
             first_run_estimate: credit_estimate::first_run_estimate_from_env()?,
             witness_accepted_list_path: witness_accepted_list::path_from_env(),
+            witness_accepted_list_directory: witness_accepted_list::directory_from_env(),
+            witness_configuration_path: witness_configuration::path_from_env(),
             first_run_copy: first_run_copy::config_from_env()?,
             first_run_stats: db_connections.as_ref().map(|connections| {
                 connections.postgres.clone()
@@ -8960,6 +8970,12 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/public/witness-accepted-list",
             get(witness_accepted_list::witness_accepted_list_handler),
+        )
+        // Public operator-signed endpoint and measurement configuration,
+        // fetched before a client has credentials. No ingest gate applies.
+        .route(
+            "/v1/public/witness-configuration",
+            get(witness_configuration::witness_configuration_handler),
         )
         // Same reason: whether this request may send anonymous usage
         // counts (US only). Keeps nothing about the address; false when it

@@ -367,7 +367,7 @@ pub fn assemble_signed_list(payload: String, signatures: Vec<ListSignature>) -> 
     text.into_bytes()
 }
 
-fn signature_verifies(
+pub(crate) fn signature_verifies(
     payload: &[u8],
     signature: &ListSignature,
     trusted_keys: &[[u8; 32]],
