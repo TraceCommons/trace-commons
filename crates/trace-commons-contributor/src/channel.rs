@@ -100,6 +100,10 @@ mod values {
     pub const KEYCHAIN_CLAUDE_USAGE_SERVICE: &str = "trace-commons.claude-usage.token-cache";
 
     pub const NATIVE_ACCOUNT_ORIGIN: &str = "https://ingest.tracecommons.ai";
+    pub const COMMONS_WITNESS_ENROLLMENT_URLS: &[&str] = &[
+        "https://f1654b0beac2ac2afae4235ee3d907096cd8f3de-8088.dstack-pha-prod9.phala.network",
+        "https://witness.tracecommons.ai",
+    ];
     pub const URL_SCHEME: &str = url_scheme!();
     pub const PUBLIC_SITE_HOST: &str = "tracecommons.ai";
     pub const PUBLIC_RUNS_PREFIX: &str = "https://tracecommons.ai/runs/";
@@ -137,6 +141,9 @@ mod values {
         "trace-commons-staging.claude-usage.token-cache";
 
     pub const NATIVE_ACCOUNT_ORIGIN: &str = concat!("https://ingest.", staging_host!());
+    // Staging enrolls without a witness; it never delegates routing to the
+    // production Commons signer/enrollment identities.
+    pub const COMMONS_WITNESS_ENROLLMENT_URLS: &[&str] = &[];
     pub const URL_SCHEME: &str = url_scheme!();
     pub const PUBLIC_SITE_HOST: &str = staging_host!();
     pub const PUBLIC_RUNS_PREFIX: &str = concat!("https://", staging_host!(), "/runs/");
@@ -211,6 +218,9 @@ pub const URL_SCHEME: &str = values::URL_SCHEME;
 pub const DEEP_LINK_PREFIX: &str = concat!(url_scheme!(), "://");
 /// The link that opens the review queue.
 pub const REVIEW_DEEP_LINK: &str = concat!(url_scheme!(), "://review");
+/// Stable enrollment identities allowed to follow Commons signed witness
+/// routing in this channel. Staging is witness-free and delegates none.
+pub const COMMONS_WITNESS_ENROLLMENT_URLS: &[&str] = values::COMMONS_WITNESS_ENROLLMENT_URLS;
 /// The public site's host, where public run pages live.
 pub const PUBLIC_SITE_HOST: &str = values::PUBLIC_SITE_HOST;
 /// The prefix of a public run page.

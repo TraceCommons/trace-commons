@@ -430,6 +430,19 @@ fn digest(host: &str) -> String {
 fn a_staging_build_names_no_production_host() {
     assert_no_literal_outside_the_channel_module();
     assert_eq!(channel::CHANNEL, "staging");
+    assert!(channel::COMMONS_WITNESS_ENROLLMENT_URLS.is_empty());
+    assert!(trace_commons_contributor::witness::configuration::COMMONS_ENROLLMENT_URLS.is_empty());
+    for production_witness in [
+        "https://f1654b0beac2ac2afae4235ee3d907096cd8f3de-8088.dstack-pha-prod9.phala.network",
+        "https://witness.tracecommons.ai",
+        "https://witness.tracecommons.ai/",
+    ] {
+        assert!(
+            !trace_commons_contributor::witness::configuration::is_commons_enrollment(
+                production_witness
+            )
+        );
+    }
     let hosts = channel_hosts();
     assert!(!hosts.is_empty());
     for host in hosts {
@@ -895,6 +908,13 @@ fn the_default_insights_store_is_the_channel_s() {
 #[cfg(not(feature = "near-ai-staging"))]
 #[test]
 fn the_production_identity_values_never_change() {
+    assert_eq!(
+        channel::COMMONS_WITNESS_ENROLLMENT_URLS,
+        &[
+            "https://f1654b0beac2ac2afae4235ee3d907096cd8f3de-8088.dstack-pha-prod9.phala.network",
+            "https://witness.tracecommons.ai",
+        ]
+    );
     assert_eq!(channel::STATE_DIR_NAME, "trace-commons");
     assert_eq!(channel::STATE_DIR_ENV, "TRACE_COMMONS_CONTRIBUTOR_DIR");
     assert_eq!(channel::URL_SCHEME, "tracecommons");

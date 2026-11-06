@@ -3531,6 +3531,7 @@ mod tests {
             );
         }
 
+        #[cfg(not(feature = "near-ai-staging"))]
         #[tokio::test]
         async fn same_version_repairs_release_measurement_holds_even_when_another_process_repairs()
         {
