@@ -2571,7 +2571,7 @@ mod tests {
         service.accounts.select(selection, Generation(0)).unwrap();
         let snapshot = call(&mut service, "managed_snapshot", json!({}), true).unwrap();
         let defaults = snapshot["defaults"].as_array().unwrap();
-        assert_eq!(defaults.len(), 3);
+        assert_eq!(defaults.len(), 4);
         let claude = defaults.iter().find(|d| d["tool"] == "claude").unwrap();
         assert_eq!(claude["account_id"], json!(saved.id));
         let codex = defaults.iter().find(|d| d["tool"] == "codex").unwrap();
@@ -2609,9 +2609,9 @@ mod tests {
             )
             .unwrap();
         let snapshot = call(&mut service, "managed_snapshot", json!({}), true).unwrap();
-        assert_eq!(snapshot["sign_in_accounts"].as_array().unwrap().len(), 3);
+        assert_eq!(snapshot["sign_in_accounts"].as_array().unwrap().len(), 4);
         let defaults = snapshot["defaults"].as_array().unwrap();
-        assert_eq!(defaults.len(), 3);
+        assert_eq!(defaults.len(), 4);
         let opencode = defaults.iter().find(|d| d["tool"] == "opencode").unwrap();
         assert_eq!(opencode["account_id"], json!(account.id));
         assert_eq!(opencode["connection"], "api_key");
