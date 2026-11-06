@@ -47,13 +47,17 @@ public struct SubmitToast: Equatable, Sendable {
     /// response's wire reason labels, in response order; the rendered
     /// sentence uses the human labels, distinct, in the spec table's order,
     /// so neither a wire label nor an entry id ever reaches a contributor.
+    /// `includesScrubResult` is false when the response has no scrub result
+    /// yet, such as an approval queued for the privacy witness.
     public static func render(
         approved: UInt64,
         redactions: UInt64,
         flagged: UInt64,
-        skipped: [String]
+        skipped: [String],
+        includesScrubResult: Bool = true
     ) -> SubmitToast {
-        var clauses = [approvedClause(approved), scrubClause(redactions)]
+        var clauses = [approvedClause(approved)]
+        if includesScrubResult { clauses.append(scrubClause(redactions)) }
 
         if let joined = flaggedAndSkippedClause(flagged, skipped) {
             clauses.append(joined)
@@ -80,7 +84,8 @@ public struct SubmitToast: Equatable, Sendable {
 
     /// Clause 2: what scrubbing did.
     ///
-    /// Always present, including when it did nothing. A count of zero is a
+    /// Present when a scrub result is available, including when it did
+    /// nothing. A count of zero is a
     /// fact the contributor is owed, not an absence to omit -- and it is
     /// the case worth weighing, which is why it is never silently dropped.
     ///

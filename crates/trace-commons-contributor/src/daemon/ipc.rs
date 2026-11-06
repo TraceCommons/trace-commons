@@ -7969,11 +7969,10 @@ pub(super) struct ApprovedBatch {
     pub hold_until: Option<chrono::DateTime<Utc>>,
 }
 
-/// Pin and approve `ids` as a person's approval: build the artifact for any
-/// entry nobody previewed, re-check the pin under the lock that approves,
-/// approve, and save. One implementation for `approve` and for the
-/// first-run picker's `include_past_sessions`, so a selection made there is
-/// pinned and held exactly as a click on a card is.
+/// Approve `ids` as a person's approval: queue ordinary unpreviewed witness
+/// jobs, otherwise build and re-check the exact artifact, then save. One
+/// implementation for `approve` and the first-run picker's
+/// `include_past_sessions`, so both preserve the same approval and undo terms.
 ///
 /// `Err` is a fixed label (`queue-write-failed`); every approval this call
 /// made has then been cancelled again.
@@ -7991,27 +7990,13 @@ pub(super) async fn approve_as_a_person(
         approval_hold_secs,
         person_included,
     } = *terms;
-    // Entries nobody previewed have no artifact behind them. Build one now.
-    //
-    // What is at stake if this is not done, or is done and does not stick:
-    // an entry with no pin is not refused at upload. `approved_envelope_for`
-    // returns `Ok(None)` for a missing pin, and `submit` treats `None` as
-    // "build one" -- so the uploader silently constructs a fresh envelope
-    // and sends it. Approving from the tray without this would mean sending
-    // bytes no contributor was ever shown, reported back as a success.
-    //
-    // The build is async and must not run under the queue lock, so the
-    // entries are cloned out under a short lock of their own and the lock
-    // is retaken for the approve loop below.
-    //
-    // A correction forces a rebuild even for an entry that was previewed:
-    // the pinned artifact was built before the contributor had written
-    // anything, so it carries neither the correction nor the
-    // `correction_included` declaration that enrolls it for the PII backstop,
-    // and credential detection has never run over the text. Re-pinning here
-    // is what makes the approval cover the bytes the correction is part of.
-    // `correction` is only ever `Some` for a single `entry_id`, refused
-    // above otherwise, so this rebuilds exactly one entry.
+    // Ordinary witness submissions without a preview are approved for the
+    // asynchronous privacy check, not pinned to a locally built artifact.
+    // The worker re-checks the source hash, approval terms and send gates,
+    // then pins only the certified result before ingest can see it.
+    // Non-witness submissions still build and pin their exact bytes here.
+    // Corrections keep that path too: a locally unchecked correction must
+    // never bypass credential detection or bind to an older preview.
     let unpinned: Vec<(Uuid, super::queue::QueueEntry)> = {
         let queue = shared.queue.lock().expect("queue lock");
         ids.iter()
@@ -8020,9 +8005,7 @@ pub(super) async fn approve_as_a_person(
             .map(|e| (e.entry_id, e.clone()))
             .collect()
     };
-    // Fixed labels, one per entry that could not be given an artifact.
-    // Nothing here is approved: sending something the contributor was never
-    // shown is worse than a refusal they can see.
+    // Every selected entry is either approved or reported by fixed label.
     let mut skipped: Vec<(Uuid, &'static str)> = Vec::new();
     // What the response's toast is built from: redaction counts summed by
     // category across every entry approve itself built a preview for (an
@@ -8042,7 +8025,51 @@ pub(super) async fn approve_as_a_person(
     // The entries whose refusal has to outlive this response. See the size
     // check below, and the write under the queue lock further down.
     let mut too_large: Vec<Uuid> = Vec::new();
+    let token_contribution = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .token_distributions_contribution;
+    let mut witness_pending = std::collections::HashSet::new();
     for (id, entry) in unpinned {
+        if let Some(cfg) = cfg.filter(|cfg| cfg.witness.is_some() && correction.is_none()) {
+            // Admission is selected from the actual captured request, not
+            // the signup flag: ordinary older history still uses the normal
+            // witness profile on an evidence-enabled enrollment.
+            let transcript = if cfg.witness.as_ref().is_some_and(|w| w.admission_evidence) {
+                let roots = shared.source_roots_with_routing();
+                let sources = crate::source::all_sources(&roots);
+                let Some((source, reference)) = super::find_session(&sources, &entry) else {
+                    skipped.push((id, "session-file-vanished"));
+                    continue;
+                };
+                match super::run_blocking(|| source.load(&reference)) {
+                    Ok(transcript) if transcript.session_hash == entry.session_hash => {
+                        Some(transcript)
+                    }
+                    Ok(_) => {
+                        skipped.push((id, super::queue::REASON_CHANGED));
+                        continue;
+                    }
+                    Err(_) => {
+                        skipped.push((id, "parse-failed"));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            if let Some(label) = super::uploader::unpreviewed_witness_review_refusal(
+                cfg,
+                token_contribution,
+                transcript.as_ref().and_then(|t| t.attested_call.as_deref()),
+            ) {
+                skipped.push((id, label));
+                continue;
+            }
+            witness_pending.insert(id);
+            continue;
+        }
         // An unenrolled build is never pinned -- it is a placeholder
         // -identity artifact, not the one an upload would send -- so there
         // is nothing for approve to do with it. This is an optimisation of
@@ -8141,12 +8168,12 @@ pub(super) async fn approve_as_a_person(
         // declines silently when the envelope could not be written, and when
         // the entry was not `Pending` by the time the pin was attempted.
         // Trusting `Ok` would approve an entry with no
-        // artifact behind it, which is the one thing the uploader does not
-        // catch. An entry that is still unpinned here is left `Pending` for
-        // the contributor to approve again.
+        // artifact behind it, except for the ordinary witness jobs selected
+        // above: those intentionally stay unpinned until certified. Every
+        // other entry still unpinned here is left `Pending`.
         if queue
             .get(id)
-            .is_none_or(|e| e.previewed_envelope_digest.is_none())
+            .is_none_or(|e| e.previewed_envelope_digest.is_none() && !witness_pending.contains(&id))
         {
             // The build reported `Ok` (or this entry had a stale pin to
             // begin with) but nothing is pinned now: `pin_previewed_envelope`
@@ -14122,6 +14149,97 @@ mod tests {
         assert!(!goes_to_the_witness(Some(&cfg), &queue, &[pinned]));
         assert!(!goes_to_the_witness(Some(&cfg), &queue, &[]));
         assert!(!goes_to_the_witness(None, &queue, &[to_witness]));
+    }
+
+    /// Submit without opening a preview queues the asynchronous privacy check,
+    /// including ordinary history on an evidence-enabled enrollment.
+    #[tokio::test]
+    async fn manual_submit_without_preview_queues_the_witness() {
+        for admission_enabled in [false, true] {
+            for group in [false, true] {
+                let (s, id, _dir, _review) = recorded_witness_review().await;
+                let mut cfg = s.store.load_config().unwrap().unwrap();
+                cfg.witness.as_mut().unwrap().admission_evidence = admission_enabled;
+                s.store.save_config(&cfg).unwrap();
+                let project_key = s.queue.lock().unwrap().get(id).unwrap().project_key.clone();
+                let params = if group {
+                    serde_json::json!({"project_id": project_id_for(&project_key)})
+                } else {
+                    serde_json::json!({"entry_id": id})
+                };
+                let response = handle_request_async(&s, &req("approve", params)).await;
+                let result = response.result.expect("approval reply");
+                assert_eq!(result["approved"], 1, "{result}");
+                assert_eq!(result["witness_review"], true, "{result}");
+                assert_eq!(result["skipped"].as_array().unwrap().len(), 0, "{result}");
+                assert!(result["redactions"].as_object().unwrap().is_empty());
+                let queue = s.queue.lock().unwrap();
+                let entry = queue.get(id).unwrap();
+                assert_eq!(entry.state, QueueState::Approved);
+                assert!(!entry.approved_unattended);
+                assert_eq!(entry.approved_scopes.as_ref(), Some(&cfg.consent_scopes));
+                assert_eq!(
+                    entry.approved_inputs.as_deref(),
+                    Some(super::super::preview::input_fingerprint(&cfg, None, false).as_str())
+                );
+                assert!(
+                    entry.previewed_envelope_digest.is_none(),
+                    "only the witness may pin it"
+                );
+                assert!(super::super::witness_worker::needs_witness_job(&cfg, entry));
+                assert!(entry.approved_at.is_some(), "the undo window is preserved");
+                assert!(s.upload_due().is_some());
+                let persisted = super::super::queue::Queue::load(&s.store).unwrap();
+                assert_eq!(persisted.get(id).unwrap().state, QueueState::Approved);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_submit_without_preview_preserves_review_requirements() {
+        for kind in ["tokens", "correction", "local-pin"] {
+            let (s, id, _dir, _review) = recorded_witness_review().await;
+            let mut params = serde_json::json!({"entry_id": id});
+            match kind {
+                "tokens" => s.settings.lock().unwrap().token_distributions_contribution = true,
+                "correction" => {
+                    params["outcome"] = serde_json::json!("failed");
+                    params["correction"] = serde_json::json!("Use the synthetic setting instead.");
+                }
+                "local-pin" => {
+                    s.queue.lock().unwrap().record_previewed_envelope(
+                        id,
+                        "sha256:local",
+                        None,
+                        None,
+                    );
+                }
+                _ => unreachable!(),
+            }
+            let response = handle_request_async(&s, &req("approve", params)).await;
+            let result = response.result.expect("approval reply");
+            let queue = s.queue.lock().unwrap();
+            let entry = queue.get(id).unwrap();
+            if kind == "local-pin" {
+                assert_eq!(result["approved"], 1, "{result}");
+                assert_eq!(
+                    entry.previewed_envelope_digest.as_deref(),
+                    Some("sha256:local")
+                );
+                assert!(
+                    !super::super::witness_worker::needs_witness_job(
+                        &s.store.load_config().unwrap().unwrap(),
+                        entry
+                    ),
+                    "a reviewed local artifact must never silently become an unreviewed witness job"
+                );
+            } else {
+                assert_eq!(result["approved"], 0, "{kind}: {result}");
+                assert_eq!(entry.state, QueueState::Pending);
+                assert!(entry.approved_at.is_none());
+                assert!(s.upload_due().is_none());
+            }
+        }
     }
 
     /// A person's approval asks for an upload pass at the instant its hold
