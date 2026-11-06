@@ -16727,14 +16727,14 @@ mod tests {
             serde_json::json!(["fixture-other"])
         );
         assert_eq!(catalogue_lists().await.1, serde_json::json!(["gone/model"]));
-        // A model NEAR AI lists but Codex is never offered is neither a
-        // Codex favorite nor unavailable: Claude Code's picker shows it.
+        // Formerly excluded Codex models are now available and can be
+        // favorites in either tool's picker.
         let r = favorite(serde_json::json!({"model":"openai/gpt-6.1-sol","favorite":true})).await;
         assert!(r.error.is_none(), "{r:?}");
         assert_eq!(
             catalogue_lists().await,
             (
-                serde_json::json!(["fixture-other"]),
+                serde_json::json!(["fixture-other", "openai/gpt-6.1-sol"]),
                 serde_json::json!(["gone/model"])
             )
         );
@@ -16921,7 +16921,7 @@ mod tests {
                 &s,
                 &req(
                     "managed_launch_redeem",
-                    serde_json::json!({"session_id": prepared["session_id"], "ticket": prepared["ticket"]}),
+                    serde_json::json!({"session_id": prepared["session_id"], "ticket": prepared["ticket"], "native_responses": true}),
                 ),
             )
             .await
@@ -16930,6 +16930,7 @@ mod tests {
         };
 
         let context = redeem("claude").await;
+        assert!(context.get("route_native_responses").is_none());
         let port = context["route_port"].as_u64().expect("a loopback port");
         assert!(port > 0);
         // The model the proxy pinned, so a launcher that must name one
@@ -16984,8 +16985,8 @@ mod tests {
         assert_eq!(
             r.result.expect("catalogue"),
             serde_json::json!({
-                "models":[{"id":"fixture-model","tier":"incognito"},{"id":"fixture-other","name":"Fixture Other","tier":"near_ai"}],
-                "default":"fixture-model",
+                "models":[{"id":"fixture-model","tier":"incognito"},{"id":"fixture-other","name":"Fixture Other","tier":"near_ai"},{"id":"openai/gpt-6.1-sol","tier":"incognito"}],
+                "default":"openai/gpt-6.1-sol",
                 "favorites":[],
                 "unavailable_favorites":[],
                 "tier_order":["near_ai","external","incognito"],
@@ -17139,6 +17140,7 @@ mod tests {
         // A launcher that goes quiet: its proxy stops once the lease runs
         // out, on a clock the test controls, and the session is failed.
         let quiet = redeem("codex").await;
+        assert_eq!(quiet["route_native_responses"], true);
         assert_eq!(routes(&s), 1);
         let now = chrono::Utc::now();
         crate::daemon::managed::sweep(&s, now + chrono::Duration::seconds(30)).await;

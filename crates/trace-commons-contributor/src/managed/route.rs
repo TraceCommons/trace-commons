@@ -97,7 +97,6 @@ impl ManagedRoute {
         let (models, selected_model) = loop {
             if let Some(models) = super::models::fetch(&client, base_url)
                 .await
-                .map(|models| super::models::offered(tool, models))
                 .filter(|models| !models.is_empty())
             {
                 let selected = super::models::select(tool, requested, &models)?;
@@ -136,11 +135,9 @@ trusted_backends = ["nearai"]
 id = "nearai"
 kind = "nearai"
 base_url = {base_url}
-responses_via_chat = {responses_via_chat}
 "#,
                     base_url = toml::Value::String(base_url.into()),
                     bodies = bodies,
-                    responses_via_chat = tool == ToolId::Codex
                 )
                 .as_bytes(),
             )
@@ -397,19 +394,11 @@ mod tests {
             }
             let config = std::fs::read_to_string(route.home.join("config.toml")).unwrap();
             assert!(!config.contains("fixture-"));
-            assert!(config.contains(if route.port() == a.port() {
-                "responses_via_chat = false"
-            } else {
-                "responses_via_chat = true"
-            }));
+            assert!(!config.contains("responses_via_chat"));
             let listed: Vec<&str> = route.models().iter().map(|m| m.id.as_str()).collect();
-            // Codex's routes leave out the model NEAR AI refuses Codex.
-            let offered: Vec<&str> = chat_ids
-                .iter()
-                .copied()
-                .filter(|id| route.port() == a.port() || *id != "openai/gpt-6.1-sol")
-                .collect();
-            assert_eq!(listed, offered);
+            // Every tool sees the catalogue's chat models, including models
+            // previously excluded for old Chat Completions incompatibilities.
+            assert_eq!(listed, chat_ids);
         }
         let seen = seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 9, "{seen:?}");
@@ -452,8 +441,8 @@ mod tests {
         server.abort();
     }
 
-    /// Codex replays an answer as output_text on the next turn. NEAR AI
-    /// accepts that same assistant text only as input_text in request history.
+    /// Codex owns its history, tool definitions and tool execution. NEAR AI's
+    /// native Responses contract accepts those items without reshaping them.
     #[tokio::test]
     async fn native_near_responses_replays_assistant_text_without_losing_history() {
         type Seen = Arc<Mutex<Vec<Value>>>;
@@ -465,7 +454,7 @@ mod tests {
             let rejected = body["input"].as_array().unwrap().iter().any(|item| {
                 item["role"] == "assistant"
                     && item["content"].as_array().is_some_and(|content| {
-                        content.iter().any(|part| part["type"] == "output_text")
+                        content.iter().any(|part| part["type"] == "input_text")
                     })
             });
             if rejected {
@@ -510,8 +499,7 @@ mod tests {
             Uuid::new_v4(),
             ApiKey::new("fixture-codex".into()).unwrap(),
             &endpoint,
-            // Non-Codex routes retain the native Responses lane.
-            ToolId::Claude,
+            ToolId::Codex,
             Some("deepseek/deepseek-v4.1-flash-1017"),
         )
         .await
@@ -520,8 +508,18 @@ mod tests {
         let url = format!("http://127.0.0.1:{}/openai/v1/responses", route.port());
         let first = json!({"type":"message","role":"user",
             "content":[{"type":"input_text","text":"Say OK."}]});
+        let function = json!({"type":"function","name":"probe_echo", "parameters":{"type":"object","properties":{},"additionalProperties":false}});
+        let custom = json!({"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"start: \"marker\""}});
+        let namespace = json!({"type":"namespace","name":"functions","tools":[function.clone()]});
+        let tools = json!([custom, namespace]);
+        let additional_tools = json!({"type":"additional_tools","tools":[function]});
         let history = json!([
             first,
+            additional_tools,
+            {"type":"custom_tool_call","id":"ct_fixture","call_id":"call_patch","name":"apply_patch","input":"marker"},
+            {"type":"custom_tool_call_output","call_id":"call_patch","output":"marker written"},
+            {"type":"function_call","id":"fc_fixture","call_id":"call_echo","namespace":"functions","name":"probe_echo","arguments":"{}"},
+            {"type":"function_call_output","call_id":"call_echo","output":"marker"},
             {"type":"message","role":"assistant","status":"completed",
                 "content":[{"type":"output_text","text":"OK","annotations":[]}]},
             {"type":"message","role":"user",
@@ -531,7 +529,7 @@ mod tests {
         for input in [json!([first]), history.clone()] {
             let result = client
                 .post(&url)
-                .json(&json!({"model":route.default_model(),"input":input,"stream":false}))
+                .json(&json!({"model":route.default_model(),"input":input,"stream":false,"store":false,"tools":tools}))
                 .send()
                 .await
                 .unwrap();
@@ -544,75 +542,72 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0]["input"], json!([first]));
-        let mut expected = history;
-        expected[1]["content"][0]["type"] = json!("input_text");
-        assert_eq!(seen[1]["input"], expected);
+        assert_eq!(seen[1]["input"], history);
+        for request in seen.iter() {
+            assert_eq!(request["tools"], tools);
+            assert_eq!(request["store"], false);
+        }
     }
 
-    /// The hosted model's Responses stream can finish without the tool call
-    /// its Chat stream carries. Codex must receive the call and be able to
-    /// replay its result, rather than silently ending an otherwise successful turn.
+    /// Codex uses NEAR AI's stateless Responses endpoint directly. Its
+    /// streamed tool call and client-executed result survive the next turn.
     #[tokio::test]
-    async fn codex_tools_execute_and_replay_results_through_near_chat() {
+    async fn codex_tools_execute_and_replay_results_through_near_responses() {
         const MODEL: &str = "abliteration/abliterated-model";
-        type Seen = Arc<Mutex<Vec<Value>>>;
+        #[derive(Default)]
+        struct Seen {
+            responses: Mutex<Vec<Value>>,
+            chat: std::sync::atomic::AtomicUsize,
+        }
         fn sse(events: Vec<Value>) -> ([(&'static str, &'static str); 1], String) {
-            let mut body = events
+            let body = events
                 .into_iter()
-                .map(|event| format!("data: {event}\n\n"))
-                .collect::<String>();
-            body.push_str("data: [DONE]\n\n");
+                .map(|event| {
+                    format!(
+                        "event: {}\ndata: {event}\n\n",
+                        event["type"].as_str().unwrap()
+                    )
+                })
+                .collect();
             ([("content-type", "text/event-stream")], body)
         }
-        async fn blank_response() -> ([(&'static str, &'static str); 1], String) {
-            sse(vec![json!({"type":"response.completed","response":{
-                "id":"resp_empty","object":"response","status":"completed",
-                "model":MODEL,"output":[]
-            }})])
-        }
-        async fn chat(
-            State(seen): State<Seen>,
+        async fn response(
+            State(seen): State<Arc<Seen>>,
             Json(body): Json<Value>,
         ) -> ([(&'static str, &'static str); 1], String) {
-            let replay = body["messages"]
+            let replay = body["input"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|message| message["role"] == "tool");
-            seen.lock().unwrap().push(body);
-            let chunk = |delta: Value, finish: Value| {
-                json!({
-                    "id":"chatcmpl_fixture","object":"chat.completion.chunk",
-                    "created":1,"model":MODEL,
-                    "choices":[{"index":0,"delta":delta,"finish_reason":finish}]
-                })
-            };
-            if replay {
-                sse(vec![
-                    chunk(
-                        json!({"role":"assistant","content":"Tool returned synthetic-tool-check."}),
-                        Value::Null,
-                    ),
-                    chunk(json!({}), json!("stop")),
-                ])
+                .any(|item| item["type"] == "function_call_output");
+            seen.responses.lock().unwrap().push(body);
+            let output = if replay {
+                json!({"id":"msg_fixture","type":"message","role":"assistant","status":"completed",
+                    "content":[{"type":"output_text","text":"Tool returned synthetic-tool-check.","annotations":[]}]})
             } else {
-                sse(vec![
-                    chunk(
-                        json!({"role":"assistant","tool_calls":[{
-                            "index":0,"id":"call_probe","type":"function",
-                            "function":{"name":"probe_echo","arguments":"{\"marker\":"}
-                        }]}),
-                        Value::Null,
-                    ),
-                    chunk(
-                        json!({"tool_calls":[{
-                            "index":0,"function":{"arguments":"\"synthetic-tool-check\"}"}
-                        }]}),
-                        Value::Null,
-                    ),
-                    chunk(json!({}), json!("tool_calls")),
-                ])
+                json!({"id":"fc_fixture","type":"function_call","status":"completed",
+                    "call_id":"call_probe","name":"probe_echo",
+                    "arguments":"{\"marker\":\"synthetic-tool-check\"}"})
+            };
+            let mut events = vec![
+                json!({"type":"response.created","response":{"id":"resp_fixture","object":"response","status":"in_progress","output":[]}}),
+                json!({"type":"response.output_item.added","output_index":0,"item":output}),
+            ];
+            if replay {
+                events.push(json!({"type":"response.output_text.delta","item_id":"msg_fixture","output_index":0,"content_index":0,"delta":"Tool returned synthetic-tool-check."}));
+            } else {
+                events.push(json!({"type":"response.function_call_arguments.delta","item_id":"fc_fixture","output_index":0,"delta":output["arguments"]}));
+                events.push(json!({"type":"response.function_call_arguments.done","item_id":"fc_fixture","output_index":0,"arguments":output["arguments"]}));
             }
+            events.extend([
+                json!({"type":"response.output_item.done","output_index":0,"item":output}),
+                json!({"type":"response.completed","response":{"id":"resp_fixture","object":"response","status":"completed","model":MODEL,"output":[output],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}),
+            ]);
+            sse(events)
+        }
+        async fn forbidden_chat(State(seen): State<Arc<Seen>>) -> axum::http::StatusCode {
+            seen.chat.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            axum::http::StatusCode::BAD_GATEWAY
         }
         fn events(body: &str) -> Vec<Value> {
             body.lines()
@@ -621,17 +616,13 @@ mod tests {
                 .map(|data| serde_json::from_str(data).unwrap())
                 .collect()
         }
-        let seen: Seen = Arc::new(Mutex::new(vec![]));
+        let seen = Arc::new(Seen::default());
         let app = Router::new()
-            .route(
-                "/v1/models",
-                get(|| async {
-                    Json(json!({"data":[{"id":MODEL,
-                    "input_modalities":["text"],"output_modalities":["text"]}]}))
-                }),
-            )
-            .route("/v1/responses", post(blank_response))
-            .route("/v1/chat/completions", post(chat))
+            .route("/v1/models", get(|| async {
+                Json(json!({"data":[{"id":MODEL,"input_modalities":["text"],"output_modalities":["text"]}]}))
+            }))
+            .route("/v1/responses", post(response))
+            .route("/v1/chat/completions", post(forbidden_chat))
             .with_state(seen.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -652,21 +643,23 @@ mod tests {
         .unwrap();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let url = format!("http://127.0.0.1:{}/openai/v1/responses", route.port());
-        let tool = json!({"type":"function","name":"probe_echo",
-            "description":"Return a marker",
+        let tool = json!({"type":"function","name":"probe_echo","description":"Return a marker",
             "parameters":{"type":"object","properties":{"marker":{"type":"string"}},
                 "required":["marker"],"additionalProperties":false}});
-        let user = json!({"role":"user","content":[{"type":"input_text",
-            "text":"Call probe_echo with marker synthetic-tool-check."}]});
-        let request = |input: Value, choice: &str| {
+        let user = json!({"role":"user","content":[{"type":"input_text","text":"Call probe_echo with marker synthetic-tool-check."}]});
+        let request = |input: Value, choice: Value| {
             json!({
-                "model":MODEL,"stream":true,"input":input,"tools":[tool],"tool_choice":choice
+                "model":MODEL,"stream":true,"store":false,"input":input,"tools":[tool],
+                "tool_choice":choice,"reasoning":{"effort":"low"}
             })
         };
         let first = client
             .post(&url)
             .header("session-id", "managed-tool-roundtrip")
-            .json(&request(json!([user]), "required"))
+            .json(&request(
+                json!([user]),
+                json!({"type":"function","name":"probe_echo"}),
+            ))
             .send()
             .await
             .unwrap();
@@ -679,23 +672,25 @@ mod tests {
                 event["type"] == "response.output_item.done"
                     && event["item"]["type"] == "function_call"
             })
-            .map(|event| event["item"].clone());
-        let Some(call) = call else {
-            route.shutdown().await;
-            server.abort();
-            panic!("successful Codex turn lost its executable tool call: {first}");
-        };
+            .map(|event| event["item"].clone())
+            .unwrap_or_else(|| {
+                panic!("successful Codex turn lost its executable tool call: {first}")
+            });
+        assert!(
+            first_events
+                .iter()
+                .any(|event| event["type"] == "response.completed")
+        );
         assert_eq!(call["name"], "probe_echo");
         assert_eq!(call["call_id"], "call_probe");
         let arguments: Value = serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap();
         assert_eq!(arguments, json!({"marker":"synthetic-tool-check"}));
-        // A harmless executor echoes the marker from the received arguments.
-        let result = json!({"type":"function_call_output","call_id":call["call_id"],
-            "output":arguments["marker"]});
+        let result = json!({"type":"function_call_output","call_id":call["call_id"],"output":arguments["marker"]});
+        let history = json!([user, call, result]);
         let second = client
             .post(&url)
             .header("session-id", "managed-tool-roundtrip")
-            .json(&request(json!([user, call, result]), "auto"))
+            .json(&request(history.clone(), json!("auto")))
             .send()
             .await
             .unwrap();
@@ -704,12 +699,6 @@ mod tests {
         route.shutdown().await;
         server.abort();
         let second_events = events(&second);
-        assert!(
-            second_events
-                .iter()
-                .any(|event| event["type"] == "response.completed"),
-            "{second}"
-        );
         let text: String = second_events
             .iter()
             .filter(|event| event["type"] == "response.output_text.delta")
@@ -723,41 +712,33 @@ mod tests {
         let message = &completed["response"]["output"][0];
         assert_eq!(message["type"], "message");
         assert_eq!(message["role"], "assistant");
-        assert_eq!(message["content"][0]["text"], text);
-        assert!(second_events.iter().any(|event| {
-            event["type"] == "response.output_item.done" && event["item"] == *message
-        }));
-        let seen = seen.lock().unwrap();
+        assert_eq!(
+            message["content"][0]["text"],
+            "Tool returned synthetic-tool-check."
+        );
+        assert!(
+            second_events
+                .iter()
+                .any(|event| event["type"] == "response.output_item.done"
+                    && event["item"] == *message)
+        );
+        assert_eq!(seen.chat.load(std::sync::atomic::Ordering::Relaxed), 0);
+        let seen = seen.responses.lock().unwrap();
         assert_eq!(seen.len(), 2);
-        assert_eq!(seen[0]["model"], MODEL);
-        assert_eq!(seen[0]["tool_choice"], "required");
-        assert_eq!(seen[0]["tools"][0]["function"]["name"], "probe_echo");
+        for body in seen.iter() {
+            assert_eq!(body["model"], MODEL);
+            assert_eq!(body["store"], false);
+            assert_eq!(body["tools"], json!([tool]));
+            assert_eq!(body["reasoning"], json!({"effort":"low"}));
+            assert!(body.get("previous_response_id").is_none());
+            assert!(body.get("conversation").is_none());
+        }
         assert_eq!(
-            seen[0]["tools"][0]["function"]["parameters"],
-            tool["parameters"]
+            seen[0]["tool_choice"],
+            json!({"type":"function","name":"probe_echo"})
         );
-        assert_eq!(seen[1]["messages"][0], seen[0]["messages"][0]);
-        assert_eq!(seen[1]["messages"].as_array().unwrap().len(), 3);
-        let replay_call = &seen[1]["messages"][1];
-        assert_eq!(replay_call["role"], "assistant");
-        assert_eq!(replay_call["tool_calls"][0]["id"], "call_probe");
-        assert_eq!(
-            replay_call["tool_calls"][0]["function"]["name"],
-            "probe_echo"
-        );
-        let replay_arguments: Value = serde_json::from_str(
-            replay_call["tool_calls"][0]["function"]["arguments"]
-                .as_str()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(replay_arguments, arguments);
-        assert_eq!(
-            seen[1]["messages"][2],
-            json!({
-                "role":"tool","tool_call_id":"call_probe","content":"synthetic-tool-check"
-            })
-        );
+        assert_eq!(seen[1]["tool_choice"], "auto");
+        assert_eq!(seen[1]["input"], history);
     }
 
     /// A real route serves the `statusline` subcommand's line from its

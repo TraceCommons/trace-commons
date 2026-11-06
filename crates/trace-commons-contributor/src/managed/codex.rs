@@ -11,13 +11,11 @@
 //! matching a NEAR AI id such as `openai/gpt-6.1-sol` to its own
 //! `gpt-6.1-sol`. To keep that, the launcher reads the shipped list
 //! (`codex debug models --bundled`) and a model Codex matches keeps its
-//! prompt and its reasoning and context settings under the NEAR AI id
+//! prompt, reasoning, context and client-tool settings under the NEAR AI id
 //! ([`KEPT`]). Every entry's context window is at most what NEAR AI
 //! lists for the model, less its output limit
-//! ([`ChatModel::input_window`]). Every entry's tool settings are basic, because the
-//! shipped ones make Codex send requests NEAR AI refuses. Any other
-//! model gets basic settings with the prompt of Codex's own first listed
-//! model.
+//! ([`ChatModel::input_window`]). Any model Codex does not know gets basic
+//! settings with the prompt of Codex's own first listed model.
 use super::{ManagedError, models::ChatModel};
 use crate::config::ConfigStore;
 use serde_json::{Value, json};
@@ -117,14 +115,11 @@ pub fn catalog(default: &str, models: &[ChatModel], bundled: Option<&Value>) -> 
     json!({ "models": entries })
 }
 
-/// What a model Codex knows keeps of its shipped entry: its prompt and
-/// its reasoning and context settings. Nothing that shapes the tools:
-/// those settings make Codex send what NEAR AI's Responses API refuses
-/// (checked against it with Codex 0.163.0, 2026-10-19):
-/// `use_responses_lite` moves the tools into an `additional_tools` item of
-/// `input` ("data did not match any variant of untagged enum
-/// ResponseInput"), and `apply_patch_tool_type` and `tool_mode` add
-/// `custom` grammar tools ("unknown variant `custom`").
+/// Keep the known model's prompt, limits and native client-tool formats.
+/// NEAR AI's stateless Responses API accepts custom tools and Codex Lite
+/// additional-tools input; the client still owns execution and history.
+/// `model_messages` is a broader permission/approval prompt template, not a
+/// tool-format setting, so the existing base-instructions path remains.
 const KEPT: &[&str] = &[
     "base_instructions",
     "supported_reasoning_levels",
@@ -135,6 +130,11 @@ const KEPT: &[&str] = &[
     "context_window",
     "effective_context_window_percent",
     "input_modalities",
+    "shell_type",
+    "experimental_supported_tools",
+    "use_responses_lite",
+    "tool_mode",
+    "apply_patch_tool_type",
 ];
 
 /// The shipped entry Codex would use for `id`: the longest slug `id`
@@ -390,9 +390,9 @@ mod tests {
         assert_eq!(sol["base_instructions"], "You are Codex (sol).");
         assert_eq!(sol["supported_reasoning_levels"][0]["effort"], "low");
         assert_eq!(sol["context_window"], 272000);
-        // Its tool settings are the basic ones, not Codex's.
-        assert_eq!(sol["shell_type"], "shell_command");
-        assert_eq!(sol["experimental_supported_tools"], json!([]));
+        // Native Responses keeps the tool formats Codex ships for it.
+        assert_eq!(sol["shell_type"], "unified_exec");
+        assert_eq!(sol["experimental_supported_tools"], json!(["clock"]));
         // Longest prefix, as Codex matches it.
         assert_eq!(
             entry("openai/gpt-5.5-pro")["base_instructions"],
@@ -418,11 +418,6 @@ mod tests {
         assert_eq!(odd, plain);
     }
 
-    /// No entry carries Codex's tool settings: NEAR AI refuses the "lite"
-    /// request (`use_responses_lite`) and `custom` grammar tools
-    /// (`apply_patch_tool_type`, `tool_mode`). Codex's own list turns them
-    /// on for every OpenAI model it ships, so a NEAR AI id it matches would
-    /// otherwise inherit them.
     /// Auto mode's reviewer reviews with each entry's own model, never
     /// Codex's hidden `codex-auto-review`, which NEAR AI does not serve.
     #[test]
@@ -437,54 +432,47 @@ mod tests {
     }
 
     #[test]
-    fn no_entry_carries_codex_tool_settings() {
+    fn known_models_preserve_native_tool_settings_and_unknown_models_stay_basic() {
         let models = [
             chat("openai/gpt-6.1-sol", None),
             chat("openai/gpt-6-astra", None),
             chat("anthropic/claude-sonnet-5-5", None),
         ];
         let bundled = bundled();
-        for list in [Some(&bundled), None] {
-            let catalog = catalog("openai/gpt-6.1-sol", &models, list);
-            for entry in catalog["models"].as_array().unwrap() {
-                assert_eq!(entry["use_responses_lite"], false, "{}", entry["slug"]);
+        let native = catalog("openai/gpt-6.1-sol", &models, Some(&bundled));
+        for (index, shipped) in [(0, &bundled["models"][1]), (1, &bundled["models"][0])] {
+            for field in [
+                "shell_type",
+                "experimental_supported_tools",
+                "use_responses_lite",
+                "tool_mode",
+                "apply_patch_tool_type",
+            ] {
+                assert_eq!(native["models"][index][field], shipped[field], "{field}");
             }
+            // Prompt-message templates also carry permission and approval
+            // policy. The catalog keeps its existing base-instructions path.
+            assert!(native["models"][index].get("model_messages").is_none());
+            assert_eq!(
+                native["models"][index]["auto_review_model_override"],
+                native["models"][index]["slug"]
+            );
         }
-        // A known entry is the basic one plus what it keeps: none of the
-        // settings that change the tools Codex sends.
-        let catalog = catalog("openai/gpt-6.1-sol", &models, Some(&bundled));
-        let keys = |entry: &Value| {
-            let mut keys: Vec<String> = entry.as_object().unwrap().keys().cloned().collect();
-            keys.sort();
-            keys
+        let assert_basic = |entry: &Value| {
+            assert_eq!(entry["shell_type"], "shell_command");
+            assert_eq!(entry["experimental_supported_tools"], json!([]));
+            assert_eq!(entry["use_responses_lite"], false);
+            for field in ["tool_mode", "apply_patch_tool_type", "model_messages"] {
+                assert!(entry.get(field).is_none(), "{field}");
+            }
         };
-        let mut expected: Vec<String> = [
-            "slug",
-            "display_name",
-            "visibility",
-            "supported_in_api",
-            "priority",
-            "shell_type",
-            "experimental_supported_tools",
-            "upgrade",
-            "use_responses_lite",
-            "auto_review_model_override",
-        ]
-        .iter()
-        .chain(KEPT)
-        .filter(|field| bundled["models"][1].get(**field).is_some() || !KEPT.contains(field))
-        .map(|field| field.to_string())
-        .collect();
-        expected.sort();
-        expected.dedup();
-        assert_eq!(keys(&catalog["models"][0]), expected);
-        for field in ["tool_mode", "apply_patch_tool_type", "model_messages"] {
-            assert!(catalog["models"][0].get(field).is_none(), "{field}");
+        assert_basic(&native["models"][2]);
+        let without_bundled = catalog("openai/gpt-6.1-sol", &models, None);
+        for entry in without_bundled["models"].as_array().unwrap() {
+            assert_basic(entry);
         }
     }
 
-    /// The catalog file lives under the launcher's own state, readable by
-    /// its owner only, and is gone once the session drops it.
     #[test]
     fn the_catalog_file_is_private_and_removed_when_dropped() {
         let home = tempfile::tempdir().unwrap();

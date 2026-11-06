@@ -27,7 +27,7 @@
 //!    first of [`PRIVATE_PREFERRED`] that is listed; else Claude Code takes
 //!    the newest Anthropic Sonnet and OpenCode the first chat model. Codex
 //!    takes the first of [`CODEX_PREFERRED`] that is listed, from every
-//!    tier, else the newest OpenAI GPT that is not in [`CODEX_REFUSED`].
+//!    tier, else the newest OpenAI GPT.
 //!    "Newest" is the version after the family prefix
 //!    (`anthropic/claude-sonnet-5-5` is 5.5, `openai/gpt-6.1-sol` is 6.1);
 //!    smaller variants (`mini`, `nano`, `lite`) are never the default.
@@ -228,21 +228,10 @@ fn newest_in<'a>(
         .or_else(|| models.find(|m| m.id.starts_with(prefix)))
 }
 
-/// Codex's default on NEAR AI, first listed first: models that answered a
-/// Codex 0.163.0 request (its tools and a reasoning effort) through a
-/// managed session's proxy on 2026-10-19. Newest is not enough for Codex,
-/// because NEAR AI cannot run every GPT with Codex's tools; see
-/// [`CODEX_REFUSED`].
+/// Codex's preferred starting models on NEAR AI, first listed first. Keep
+/// this product ordering separate from compatibility: native Responses also
+/// serves newer models, which remain selectable and may be the fallback.
 pub const CODEX_PREFERRED: &[&str] = &["openai/gpt-6-sol", "openai/gpt-5.6-sol", "openai/gpt-5.5"];
-
-/// Never offered to Codex ([`offered`]): NEAR AI refused each one a Codex
-/// request on 2026-10-19, so it is left out of the picker and cannot be
-/// chosen by name.
-/// - `openai/gpt-6.1-sol`: "Function tools with reasoning_effort are not
-///   supported for gpt-6.1-sol in /v1/chat/completions".
-/// - `openai/gpt-6-astra`: "Native stateless Responses supports
-///   client-managed function tools only".
-pub const CODEX_REFUSED: &[&str] = &["openai/gpt-6.1-sol", "openai/gpt-6-astra"];
 
 /// Claude Code's and OpenCode's default inside a NEAR AI private or
 /// External pool, first listed first ([`default_for`]). NEAR AI lists
@@ -267,19 +256,6 @@ pub const PRIVATE_PREFERRED: &[&str] = &[
     "deepseek/deepseek-v3.2",
 ];
 
-/// The chat models `tool` is offered, in NEAR AI's order: every one, less
-/// [`CODEX_REFUSED`] for Codex. A session's picker lists these, and a
-/// model chosen by name must be one of them.
-pub fn offered(tool: ToolId, models: Vec<ChatModel>) -> Vec<ChatModel> {
-    match tool {
-        ToolId::Codex => models
-            .into_iter()
-            .filter(|m| !CODEX_REFUSED.contains(&m.id.as_str()))
-            .collect(),
-        ToolId::Claude | ToolId::Opencode => models,
-    }
-}
-
 /// The model a tool starts on when none was chosen.
 ///
 /// Claude Code and OpenCode never start on an Incognito model while the
@@ -288,9 +264,9 @@ pub fn offered(tool: ToolId, models: Vec<ChatModel>) -> Vec<ChatModel> {
 /// ([`ModelTier`]'s order: NEAR AI private, then External), and every model
 /// only when it has neither. Within the pool the first of
 /// [`PRIVATE_PREFERRED`] that is listed, then the tool's own preference:
-/// its family, then vendor, then first listed. Codex keeps to the models
-/// NEAR AI is known to run with its tools ([`CODEX_PREFERRED`]), from every
-/// tier. A model the person chose is never replaced ([`select`]).
+/// its family, then vendor, then first listed. Codex starts with the first
+/// listed model in [`CODEX_PREFERRED`], from every tier, then the newest GPT.
+/// A model the person chose is never replaced ([`select`]).
 pub fn default_for(tool: ToolId, models: &[ChatModel]) -> Option<&ChatModel> {
     let best = models
         .iter()
@@ -328,8 +304,6 @@ fn preferred<'a>(
         if let Some(model) = listed(CODEX_PREFERRED, models.clone()) {
             return Some(model);
         }
-        let usable = models.filter(|m| !CODEX_REFUSED.contains(&m.id.as_str()));
-        return pick_in(family, vendor, usable);
     }
     pick_in(family, vendor, models)
 }
@@ -984,10 +958,10 @@ mod tests {
         assert_eq!(default_for(ToolId::Codex, &[]), None);
     }
 
-    /// Codex starts on a model NEAR AI answered with Codex's tools, never
-    /// on one it refused, however new.
+    /// Native Responses support does not change the product's preferred
+    /// starting model. With none listed, the ordinary newest-GPT rule applies.
     #[test]
-    fn codex_defaults_to_a_model_near_ai_runs_with_its_tools() {
+    fn codex_keeps_its_preferred_default_and_falls_back_to_the_newest_gpt() {
         let all = models(&[
             "openai/gpt-6.1-sol",
             "openai/gpt-6-astra",
@@ -998,45 +972,40 @@ mod tests {
             default_for(ToolId::Codex, &all).unwrap().id,
             "openai/gpt-6-sol"
         );
-        // The next preferred when the first is gone.
         let later = models(&["openai/gpt-6.1-sol", "openai/gpt-5.5"]);
         assert_eq!(
             default_for(ToolId::Codex, &later).unwrap().id,
             "openai/gpt-5.5"
         );
-        // None preferred: the newest GPT that is not refused.
         let rest = models(&["openai/gpt-6.1-sol", "openai/gpt-6-astra", "openai/gpt-5.4"]);
         assert_eq!(
             default_for(ToolId::Codex, &rest).unwrap().id,
-            "openai/gpt-5.4"
+            "openai/gpt-6.1-sol"
         );
-        // Only refused models: another vendor's, then nothing refused.
-        let refused = models(&["openai/gpt-6.1-sol", "x/first"]);
-        assert_eq!(default_for(ToolId::Codex, &refused).unwrap().id, "x/first");
+        let native = models(&["openai/gpt-6-astra", "x/first"]);
+        assert_eq!(
+            default_for(ToolId::Codex, &native).unwrap().id,
+            "openai/gpt-6-astra"
+        );
     }
 
-    /// Codex is never offered a model NEAR AI refused it: not in its
-    /// picker, not by name. Other tools are offered every chat model.
+    /// The model picker and explicit selection share the chat catalogue;
+    /// native Responses models are no longer excluded for historical failures.
     #[test]
-    fn codex_is_not_offered_a_refused_model() {
+    fn codex_can_select_the_previously_excluded_native_responses_models() {
         let all = models(&[
             "openai/gpt-6.1-sol",
             "openai/gpt-6-astra",
             "openai/gpt-6-sol",
             "anthropic/claude-sonnet-5-5",
         ]);
-        let codex = offered(ToolId::Codex, all.clone());
+        for model in ["openai/gpt-6.1-sol", "openai/gpt-6-astra"] {
+            assert_eq!(select(ToolId::Codex, Some(model), &all), Ok(model.into()));
+        }
         assert_eq!(
-            ids(&codex),
-            vec!["openai/gpt-6-sol", "anthropic/claude-sonnet-5-5"]
-        );
-        assert_eq!(
-            select(ToolId::Codex, Some("openai/gpt-6.1-sol"), &codex),
+            select(ToolId::Codex, Some("unlisted/model"), &all),
             Err(ManagedError::ModelUnavailable)
         );
-        for tool in [ToolId::Claude, ToolId::Opencode] {
-            assert_eq!(offered(tool, all.clone()), all);
-        }
     }
 
     /// Equal versions pick the same model whatever the catalogue order.
