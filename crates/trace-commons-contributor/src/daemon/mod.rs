@@ -3531,6 +3531,143 @@ mod tests {
             );
         }
 
+        #[tokio::test]
+        async fn same_version_repairs_release_measurement_holds_even_when_another_process_repairs()
+        {
+            use crate::witness::{accepted_list, configuration};
+            use ring::signature::{Ed25519KeyPair, KeyPair};
+            use trace_commons_protocol::witness_accepted_list::{
+                AcceptedEntry, ListSignature, key_id_for,
+            };
+            use trace_commons_protocol::witness_configuration::{
+                WITNESS_CONFIGURATION_SCHEMA, WitnessConfiguration, WitnessEndpoint,
+            };
+            for another_process in [false, true] {
+                let (_dir, shared) = fixture();
+                let dir = shared.store.dir();
+                let now = Utc::now();
+                let secret =
+                    Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+                let signer = Ed25519KeyPair::from_pkcs8(secret.as_ref()).unwrap();
+                let public: [u8; 32] = signer.public_key().as_ref().try_into().unwrap();
+                accepted_list::set_test_keys(dir, vec![public]);
+                let witness = crate::config::WitnessSettings {
+                    admission_evidence: false,
+                    url: configuration::COMMONS_ENROLLMENT_URLS[0].into(),
+                    signing_address: format!("0x{}", "11".repeat(20)),
+                    expected_measurements: vec![format!("mrtd={}", "aa".repeat(48))],
+                };
+                let config = WitnessConfiguration {
+                    schema: WITNESS_CONFIGURATION_SCHEMA.into(),
+                    version: 8,
+                    issued_at: now,
+                    enrollment_urls: vec![witness.url.clone()],
+                    endpoints: vec![WitnessEndpoint {
+                        url: witness.url.clone(),
+                        entries: vec![AcceptedEntry {
+                            signing_address: witness.signing_address.clone(),
+                            measurements: witness.expected_measurements[0].clone(),
+                            not_before: now - chrono::Duration::hours(1),
+                            not_after: now + chrono::Duration::hours(1),
+                            commit: None,
+                        }],
+                    }],
+                };
+                let payload = trace_commons_protocol::canonical_json::to_canonical_string(
+                    &serde_json::to_value(config).unwrap(),
+                )
+                .unwrap();
+                let signature = ListSignature {
+                    key_id: key_id_for(&public),
+                    signature: hex::encode(signer.sign(payload.as_bytes()).as_ref()),
+                };
+                let bytes = serde_json::to_vec(
+                    &serde_json::json!({"payload":payload,"signatures":[signature]}),
+                )
+                .unwrap();
+                configuration::install(dir, &bytes, &[public], &witness.url).unwrap();
+                let mut cfg = crate::commands::unenrolled_preview_config();
+                cfg.witness = Some(witness.clone());
+                cfg.ingest_url = "https://ingest.invalid".into();
+                cfg.allowed_hosts = Some("deny-all-named-hosts.invalid".into());
+                shared.store.save_config(&cfg).unwrap();
+                let mut schedule = accepted_list::ListRefreshSchedule::starting(now);
+                // The supervisor has already seen V8 with no holds outstanding.
+                refresh_witness_accepted_list(&shared, now, &mut schedule).await;
+                let entry_id = queue::entry_id_for("repair-measurement");
+                shared
+                    .queue
+                    .lock()
+                    .unwrap()
+                    .upsert(
+                        queue::QueueEntry {
+                            entry_id,
+                            session_hash: "sha256:repair-measurement".into(),
+                            source: "claude-code".into(),
+                            project_key: "/tmp/repair-measurement".into(),
+                            project_label: "repair-measurement".into(),
+                            path: "/tmp/repair-measurement.jsonl".into(),
+                            size_bytes: 10,
+                            discovered_at: now,
+                            state: queue::QueueState::Pending,
+                            reason_label: Some(
+                                crate::submit::REASON_WITNESS_MEASUREMENT_NOT_ACCEPTED.into(),
+                            ),
+                            ..Default::default()
+                        },
+                        5000,
+                    )
+                    .unwrap();
+                // Damage and repair both happen before the next supervisor read.
+                std::fs::write(dir.join(configuration::CONFIGURATION_FILE), b"damaged").unwrap();
+                if another_process {
+                    std::fs::write(dir.join("repair-document.test-input"), &bytes).unwrap();
+                    std::fs::write(dir.join("repair-public-key.test-input"), public).unwrap();
+                    let output = std::process::Command::new(std::env::current_exe().unwrap())
+                        .args([
+                            "--exact",
+                            "witness::configuration::tests::repair_cache_in_subprocess",
+                            "--nocapture",
+                        ])
+                        .env("TRACE_COMMONS_WITNESS_REPAIR_TEST_DIR", dir)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "repair subprocess failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                } else {
+                    configuration::install(dir, &bytes, &[public], &witness.url).unwrap();
+                }
+                assert_eq!(
+                    configuration::install(dir, &bytes, &[public], &witness.url).unwrap(),
+                    accepted_list::InstallOutcome::NotNewer
+                );
+                refresh_witness_accepted_list(
+                    &shared,
+                    now + chrono::Duration::minutes(1),
+                    &mut schedule,
+                )
+                .await;
+                assert_eq!(
+                    shared
+                        .queue
+                        .lock()
+                        .unwrap()
+                        .get(entry_id)
+                        .unwrap()
+                        .reason_label,
+                    None,
+                    "actual repair must release the hold even after a NotNewer observation"
+                );
+                assert_eq!(
+                    shared.store.load_config().unwrap().unwrap().witness,
+                    Some(witness)
+                );
+            }
+        }
+
         fn fixture() -> (tempfile::TempDir, ipc::DaemonShared) {
             let (dir, store) = crate::config::tests_support::temp_store();
             let shared = ipc::DaemonShared::load(store).unwrap();
