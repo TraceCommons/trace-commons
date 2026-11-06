@@ -54,7 +54,7 @@ screens, with a guarantee enforced by the daemon itself, not by this app --
 
 Set `TC_DEV_DRY_RUN=1` (or `true`) in the environment of the bundled
 debug app: build it with `macos/scripts/make-app-bundle.sh`, then run
-`open -n .build/Near.ai.app --env TC_DEV_DRY_RUN=1`, as `run-demo.sh` does.
+`open -n '.build/Near AI Gateway.app' --env TC_DEV_DRY_RUN=1`, as `run-demo.sh` does.
 An unbundled launch (`.build/debug/TraceCommonsApp` or an Xcode scheme) has
 no Info.plist channel, so it refuses to start by design (staging design,
 section 4.3). The Rust library must be a

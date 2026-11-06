@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assemble Near.ai.app around the SwiftPM executable.
+# Assemble the app bundle (Near AI Gateway.app) around the SwiftPM executable.
 #
 # SwiftPM produces a bare Mach-O; the app needs a bundle so that an Info.plist
 # and a bundle identifier (UNUserNotificationCenter) exist at all. The app is a

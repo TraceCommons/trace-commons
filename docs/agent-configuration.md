@@ -9,7 +9,7 @@ These configuration commands require a build containing this feature in both the
 Use the CLI bundled with the app you want to configure. For the production macOS app:
 
 ```sh
-TC_CLI='/Applications/Near.ai.app/Contents/MacOS/near-ai'
+TC_CLI='/Applications/Near AI Gateway.app/Contents/MacOS/near-ai'
 TC_DIR="$HOME/Library/Application Support/trace-commons"
 "$TC_CLI" --version
 "$TC_CLI" --config-dir "$TC_DIR" --json config show
@@ -19,7 +19,7 @@ TC_DIR="$HOME/Library/Application Support/trace-commons"
 For staging, use both the staging CLI and its separate directory:
 
 ```sh
-TC_CLI='/Applications/Near.ai Staging.app/Contents/MacOS/near-ai'
+TC_CLI='/Applications/Near AI Gateway Staging.app/Contents/MacOS/near-ai'
 TC_DIR="$HOME/Library/Application Support/trace-commons-staging"
 "$TC_CLI" --version
 "$TC_CLI" --config-dir "$TC_DIR" --json config show

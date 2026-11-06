@@ -11,7 +11,7 @@
 # a production credential, comments included.
 #
 # What it produces, from one dispatch:
-#   - `Near.ai Staging.app`, built with TC_CHANNEL=staging, so the bundle
+#   - `Near AI Gateway Staging.app`, built with TC_CHANNEL=staging, so the bundle
 #     identity, entitlements, profile, Sparkle feed and the cargo features of
 #     the dylib and CLI all come from macos/channels/staging.env;
 #   - signed with the same Developer ID as production (Apple has no separate
@@ -269,7 +269,7 @@ jobs:
       # The signed app is launched, not merely inspected: an app carrying a
       # keychain entitlement without its profile is killed at exec.
       - name: Verify entitlements and reach the credential store
-        run: ./scripts/ci/verify-macos-entitlements.sh "macos/.build/Near.ai Staging.app"
+        run: ./scripts/ci/verify-macos-entitlements.sh "macos/.build/Near AI Gateway Staging.app"
 
       # The channel agreement once more on the signed bundle, and the update
       # identity: the feed is the channel file's and the key is the staging
@@ -305,8 +305,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          DMG="Near.ai-Staging-$SHORT_VERSION.dmg"
-          cp "macos/.build/Near.ai Staging.dmg" "dist/$DMG"
+          DMG="Near-AI-Gateway-Staging-$SHORT_VERSION.dmg"
+          cp "macos/.build/Near AI Gateway Staging.dmg" "dist/$DMG"
           ( cd dist && shasum -a 256 "$DMG" > "$DMG.sha256" )
           echo "DMG=$DMG" >> "$GITHUB_ENV"
 
@@ -364,7 +364,7 @@ jobs:
           ./scripts/updates/generate-appcast.sh \
             --short-version "$SHORT_VERSION" \
             --prerelease staging \
-            --title "Near.ai Staging" \
+            --title "Near AI Gateway Staging" \
             --build-version "$BUILD_VERSION" \
             --dmg-url "$DMG_URL" \
             --dmg-path "dist/$DMG" \

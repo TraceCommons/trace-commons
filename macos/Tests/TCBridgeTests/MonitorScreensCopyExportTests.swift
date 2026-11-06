@@ -30,7 +30,7 @@ final class MonitorScreensCopyExportTests: XCTestCase {
         let link = rail.open(section: copy.settingsNav.tools)
         XCTAssertEqual(link.text, "Open " + copy.settingsNav.tools)
         XCTAssertTrue(link.label.hasPrefix(link.text))
-        XCTAssertTrue(link.label.hasSuffix("Near.ai"))
+        XCTAssertTrue(link.label.hasSuffix("Near AI Gateway"))
     }
 
     /// The command-line tool's words: each status line names the link path,

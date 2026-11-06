@@ -990,7 +990,8 @@ fn macos_app_bundle_builds_and_lipos_both_architectures() {
 
     let workflow = read(".github/workflows/release-apps.yml");
     assert!(
-        workflow.contains("Near.ai-${SHORT_VERSION}.dmg") && !workflow.contains("-arm64.dmg"),
+        workflow.contains("Near-AI-Gateway-${SHORT_VERSION}.dmg")
+            && !workflow.contains("-arm64.dmg"),
         "the DMG is universal now, so its filename must not carry an \
          architecture suffix"
     );
@@ -1305,7 +1306,9 @@ fn force_pushed_bump_branches_cannot_carry_a_stale_checksum() {
 fn tap_bumps_prove_they_wrote_this_runs_checksum() {
     let apps = executable_text(&read(".github/workflows/release-apps.yml"));
     assert!(
-        apps.contains("SHA=\"$(awk '{print $1}' dist/macos-dmg/Near.ai-\"$V\".dmg.sha256)\""),
+        apps.contains(
+            "SHA=\"$(awk '{print $1}' dist/macos-dmg/Near-AI-Gateway-\"$V\".dmg.sha256)\""
+        ),
         "the cask bump must read the checksum from this run's own DMG artifact"
     );
     assert!(
@@ -1314,10 +1317,11 @@ fn tap_bumps_prove_they_wrote_this_runs_checksum() {
          the cask before pushing, not merely that a substitution ran"
     );
     assert!(
-        apps.contains("grep -qF '/Near.ai-#{version}.dmg\"' Casks/trace-commons.rb")
-            && apps.contains("grep -qxF '  app \"Near.ai.app\"' Casks/trace-commons.rb"),
+        apps.contains("grep -qF '/Near-AI-Gateway-#{version}.dmg\"' Casks/trace-commons.rb")
+            && apps.contains("grep -qxF '  app \"Near AI Gateway.app\"' Casks/trace-commons.rb")
+            && apps.contains("for OLD in TraceCommons Near.ai; do"),
         "the cask bump must refuse to push a cask whose url or app stanza \
-         still names the pre-rename TraceCommons files"
+         still names the pre-rename TraceCommons or Near.ai files"
     );
 
     let contributor = executable_text(&read(".github/workflows/release-contributor.yml"));

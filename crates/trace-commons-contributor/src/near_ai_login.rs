@@ -456,7 +456,11 @@ const DAEMON_POLL: Duration = Duration::from_millis(500);
 /// How long it waits for that daemon before saying so.
 const DAEMON_WAIT: Duration = Duration::from_secs(30);
 /// No app around this CLI to hand the sign-in to.
-pub(crate) const OPEN_APP: &str = "Open the Near.ai app, then run this command again.";
+pub(crate) const OPEN_APP: &str = concat!(
+    "Open the ",
+    crate::app_name!(),
+    " app, then run this command again."
+);
 
 /// Who answers `login`'s daemon methods.
 #[derive(Debug, PartialEq, Eq)]
@@ -558,11 +562,13 @@ fn forwarded_state_dir<'a>(store_dir: &'a Path, default: Option<&Path>) -> Optio
     (default != Some(store_dir)).then_some(store_dir)
 }
 
-/// The app's name as Finder shows it: "Near.ai", "Near.ai Staging".
+/// The app's name as Finder shows it: its bundle's filename, such as
+/// "Near AI Gateway", "Near AI Gateway Staging", or a former name an
+/// install updated in place still carries.
 fn app_name(app: &Path) -> String {
     app.file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Near.ai".to_string())
+        .unwrap_or_else(|| crate::brand::APP_NAME.to_string())
 }
 
 /// `open` arguments that start the app without bringing it forward (`-g`)

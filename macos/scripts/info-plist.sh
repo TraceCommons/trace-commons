@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Print the Info.plist for Near.ai.app.
+# Print the Info.plist for the app bundle (Near AI Gateway.app).
 #
 # Extracted from make-app-bundle.sh so the version can be injected from a
 # release tag and asserted in a test without a Swift toolchain. The old
@@ -85,7 +85,7 @@ cat <<PLIST
     <!-- Shown in macOS's Automation prompt for the terminal app a Private
          AI launch opens a window in. Wording approved by the owner
          2026-11-03. -->
-    <key>NSAppleEventsUsageDescription</key><string>Near.ai opens Private AI sessions in Terminal.</string>
+    <key>NSAppleEventsUsageDescription</key><string>Near AI Gateway opens Private AI sessions in Terminal.</string>
     <!-- There is no LSUIElement here, and its absence is the decision.
 
          This app was a menu-bar-only utility until a contributor could not

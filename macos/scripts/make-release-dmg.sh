@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build, sign, notarize and staple Near.ai.app, then package it as a DMG.
+# Build, sign, notarize and staple the app bundle (Near AI Gateway.app), then package it as a DMG.
 #
 # This is the release path. `make-app-bundle.sh` remains the development path
 # and stays ad-hoc-signed; nothing here changes it.

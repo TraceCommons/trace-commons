@@ -6264,7 +6264,7 @@ setup refusal's `{terminal}` from `terminal_destination`; from a daemon
 that sends no `launch_destination`, `terminal_destination` serves for both.
 
 `managed_herdr` (boolean, default `false`) is "Group sessions in herdr":
-managed sessions open as tabs of herdr's "Near.ai" workspace, with
+managed sessions open as tabs of herdr's "Near AI Gateway" workspace, with
 `managed_terminal` hosting herdr when no herdr client is running (see
 `docs/managed-sessions.md`). Anything that is not a boolean is `bad_params`
 / `settings-invalid-value`; `set_managed_herdr` writes the same setting. The
@@ -9847,7 +9847,7 @@ tab, whose prompt may hold input not yet run, and the daemon no longer asks
 macOS for the System Events and Accessibility permissions that a new tab
 needed. A launch still sends Apple Events to the terminal app it opens, so
 macOS may still ask once to let the app control that terminal; the bundle's
-`NSAppleEventsUsageDescription` for that prompt is "Near.ai opens Private AI
+`NSAppleEventsUsageDescription` for that prompt is "Near AI Gateway opens Private AI
 sessions in Terminal." (owner, 2026-11-03; both channels).
 
 An older app may still send two fields, which are accepted so that app keeps

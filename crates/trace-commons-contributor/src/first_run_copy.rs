@@ -494,7 +494,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             close: "Close",
         },
         welcome: WelcomeCopy {
-            title: "Welcome to Near AI",
+            title: concat!("Welcome to ", crate::app_name!()),
             body: "Private AI solutions that put you in control of your data.",
             start: "Get started",
         },
@@ -1126,7 +1126,7 @@ mod tests {
     #[test]
     fn the_animated_first_run_has_its_words() {
         let copy = first_run_copy();
-        assert_eq!(copy.welcome.title, "Welcome to Near AI");
+        assert_eq!(copy.welcome.title, "Welcome to Near AI Gateway");
         assert_eq!(
             copy.welcome.body,
             "Private AI solutions that put you in control of your data."

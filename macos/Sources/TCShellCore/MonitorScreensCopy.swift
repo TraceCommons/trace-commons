@@ -56,7 +56,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
     public let kept: String
     public let recentActivity: String
     public let flagged: String
-    /// Raises the main window from the menu bar ("Open Near.ai").
+    /// Raises the main window from the menu bar ("Open Near AI Gateway").
     public let openApp: String
     /// The popover's manual update check (owner, 2026-10-29); `nil` from a
     /// core that predates it.

@@ -1,6 +1,6 @@
 # Staging tester guide
 
-This guide is for people testing the Near.ai Staging app, or the staging
+This guide is for people testing the Near AI Gateway Staging app, or the staging
 command-line contributor on a Linux server. Staging is a test environment. It is not the released app, and it is not the real service.
 
 Read "What works and what does not yet" before you start. Some parts are not
@@ -14,7 +14,7 @@ built yet.
   [releases page](https://github.com/TraceCommons/trace-commons/releases).
   Staging builds are marked "Pre-release". Names look like
   `staging-<date>-<commit>-<run>`. The file is called
-  `Near.ai-Staging-<version>-staging.<run>.dmg`.
+  `Near-AI-Gateway-Staging-<version>-staging.<run>.dmg`.
 
 ## Make a NEAR AI staging account
 
@@ -33,12 +33,12 @@ to the staging service.
 
 1. Download the `.dmg` from the pre-release.
 2. Optional: check the download (see below).
-3. Open the `.dmg` and drag Near.ai Staging to Applications.
+3. Open the `.dmg` and drag Near AI Gateway Staging to Applications.
 4. Open it.
 
 The build is signed with a Developer ID and notarized by Apple.
 
-The staging app installs beside the released Near.ai app. They do not share
+The staging app installs beside the released Near AI Gateway app. They do not share
 anything: not the sign-in, not the keychain items, not the data folder, not
 the updates, and not the `tracecommons-staging://` link scheme. You can keep
 both.
@@ -51,7 +51,7 @@ Each pre-release has a `.sha256` file next to the `.dmg`. Download both into
 the same folder and run:
 
 ```bash
-shasum -a 256 -c Near.ai-Staging-*.dmg.sha256
+shasum -a 256 -c Near-AI-Gateway-Staging-*.dmg.sha256
 ```
 
 It should print `OK`. If it does not, delete the download and tell us.
@@ -59,7 +59,7 @@ It should print `OK`. If it does not, delete the download and tell us.
 You can also check that macOS accepts the app. Drag it to Applications, then:
 
 ```bash
-spctl --assess --type execute --verbose "/Applications/Near.ai Staging.app"
+spctl --assess --type execute --verbose "/Applications/Near AI Gateway Staging.app"
 ```
 
 It should say `accepted` and name the Notarized Developer ID source.
@@ -195,7 +195,7 @@ newer build.
 A server usually has no browser. Pick one:
 
 - **Link it to your account.** On a computer already signed in to staging,
-  run `devices add` (or use "Link a server" in the Near.ai Staging app). On
+  run `devices add` (or use "Link a server" in the Near AI Gateway Staging app). On
   the server, run `near-ai-staging login --code <code>` within 10 minutes.
   The server joins your account and renews its session by itself.
 - **An invite link.** If you were handed a staging invite
@@ -257,12 +257,12 @@ None of this touches a released CLI on the same server.
 
 ## Remove it
 
-1. Quit Near.ai Staging.
-2. Delete Near.ai Staging from Applications.
+1. Quit Near AI Gateway Staging.
+2. Delete Near AI Gateway Staging from Applications.
 3. Delete the data folder `~/Library/Application Support/trace-commons-staging`,
    if you want your staging state gone. The released app's folder,
    `trace-commons` beside it, is separate; leave it alone.
-4. Delete the Near.ai Staging items from Keychain Access, if you want your
+4. Delete the Near AI Gateway Staging items from Keychain Access, if you want your
    staging keys gone.
 
 None of this touches the released app.

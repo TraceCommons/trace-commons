@@ -29,7 +29,7 @@ pub const BUNDLE_ID: &str = "com.superlogical.rex";
 
 /// The label of the Rex session every managed session opens a tab in.
 #[cfg(any(target_os = "macos", test))]
-pub const GROUP_LABEL: &str = "Near.ai";
+pub const GROUP_LABEL: &str = crate::brand::APP_NAME;
 
 /// A Rex id as Rex prints it: `kind`, a colon, and a lowercase hyphenated
 /// UUID (`session:01a1a1cb-...`). Nothing else is kept or passed to `rex`.
@@ -226,7 +226,7 @@ fn app_connected(clients: &[u8]) -> bool {
 }
 
 /// Held while a launch finds or makes the group session and opens its tab
-/// in it, so two launches at once cannot each make a "Near.ai" session.
+/// in it, so two launches at once cannot each make a "Near AI Gateway" session.
 #[cfg(target_os = "macos")]
 static GROUP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -370,7 +370,7 @@ fn open_tab_with(
     Ok(printed(&session, &window, &block))
 }
 
-/// Open `tab` in Rex: start or raise the app, find the "Near.ai" session or
+/// Open `tab` in Rex: start or raise the app, find the "Near AI Gateway" session or
 /// make it, open the tab there and select it. Prints the ids for [`tab`].
 #[cfg(target_os = "macos")]
 pub fn open_tab(tab: &RexTab) -> Result<Vec<u8>, ManagedError> {
@@ -475,13 +475,13 @@ mod tests {
     fn the_group_is_found_by_its_label_whatever_the_listing_calls_its_fields() {
         let listing = format!(
             r#"[{{"id":"session:01a1a1cb-0d4e-7c1a-9f00-000000000009","label":"work"}},
-               {{"session_id":"{SESSION}","name":"Near.ai","windows":3}}]"#
+               {{"session_id":"{SESSION}","name":"Near AI Gateway","windows":3}}]"#
         );
         assert_eq!(group_session(listing.as_bytes()), Some(SESSION.into()));
-        let nested = format!(r#"{{"sessions":[{{"id":"{SESSION}","label":"Near.ai"}}]}}"#);
+        let nested = format!(r#"{{"sessions":[{{"id":"{SESSION}","label":"Near AI Gateway"}}]}}"#);
         assert_eq!(group_session(nested.as_bytes()), Some(SESSION.into()));
         assert_eq!(
-            group_session(br#"[{"id":"session:x","label":"Near.ai"}]"#),
+            group_session(br#"[{"id":"session:x","label":"Near AI Gateway"}]"#),
             None
         );
         assert_eq!(group_session(b"[]"), None);
@@ -623,7 +623,9 @@ mod tests {
     }
 
     fn group() -> Option<String> {
-        Some(format!(r#"[{{"id":"{SESSION}","label":"Near.ai"}}]"#))
+        Some(format!(
+            r#"[{{"id":"{SESSION}","label":"Near AI Gateway"}}]"#
+        ))
     }
 
     /// The launch waits for the app to connect, checks the API revision,
@@ -666,7 +668,7 @@ mod tests {
         assert_eq!(input.as_deref(), Some(rex_tab().request.as_slice()));
     }
 
-    /// With no "Near.ai" session, one is made in the folder.
+    /// With no "Near AI Gateway" session, one is made in the folder.
     #[test]
     fn a_missing_group_session_is_made_in_the_folder() {
         let mut fake = FakeRex::ready(Some("[]".into()));
@@ -675,10 +677,10 @@ mod tests {
             vec![Some(format!(r#"{{"session_id":"{SESSION}"}}"#))],
         );
         assert_eq!(run(&mut fake), Ok(printed(SESSION, WINDOW, BLOCK)));
-        assert!(
-            fake.commands()
-                .contains(&format!("new Near.ai --json -c {}", folder().display()))
-        );
+        assert!(fake.commands().contains(&format!(
+            "new Near AI Gateway --json -c {}",
+            folder().display()
+        )));
     }
 
     /// Anything that fails before `session.new_window` is a refusal, so the

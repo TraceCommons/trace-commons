@@ -71,7 +71,7 @@ if [ "$CHANNEL" = staging ]; then
     Linux/x86_64)              target=x86_64-unknown-linux-gnu ;;
     Linux/aarch64|Linux/arm64) target=aarch64-unknown-linux-gnu ;;
     Darwin/*)
-      die "the staging build for macOS is the Near.ai Staging app. Download the
+      die "the staging build for macOS is the Near AI Gateway Staging app. Download the
 .dmg from the newest staging pre-release:
   https://github.com/$REPO/releases" ;;
     *)

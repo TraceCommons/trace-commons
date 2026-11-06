@@ -120,8 +120,8 @@ if render TC_CHANNEL=staging TC_STAGING_SPARKLE_PUBLIC_ED_KEY=c3RhZ2luZy1rZXktbm
   >"$scratch/staging.plist" 2>"$scratch/err"; then
   s="$scratch/staging.plist"
   has staging "$s" '<key>CFBundleIdentifier</key><string>ai.tracecommons.shell.staging</string>'
-  has staging "$s" '<key>CFBundleName</key><string>Near.ai Staging</string>'
-  has staging "$s" '<key>CFBundleDisplayName</key><string>Near.ai Staging</string>'
+  has staging "$s" '<key>CFBundleName</key><string>Near AI Gateway Staging</string>'
+  has staging "$s" '<key>CFBundleDisplayName</key><string>Near AI Gateway Staging</string>'
   has staging "$s" '<key>TCChannel</key><string>staging</string>'
   has staging "$s" '<key>TCPrivateAICampaignURL</key><string>https://storage.googleapis.com/tc-staging-updates-20261022/staging/private-ai-campaign.json</string>'
   has staging "$s" '<key>CFBundleURLSchemes</key><array><string>tracecommons-staging</string></array>'
@@ -130,7 +130,7 @@ if render TC_CHANNEL=staging TC_STAGING_SPARKLE_PUBLIC_ED_KEY=c3RhZ2luZy1rZXktbm
   has staging "$s" '<key>SUPublicEDKey</key><string>c3RhZ2luZy1rZXktbm90LXJlYWw=</string>'
   lacks staging "$s" '<string>ai.tracecommons.shell</string>'
   lacks staging "$s" '<string>tracecommons</string>'
-  lacks staging "$s" '<string>Near.ai</string>'
+  lacks staging "$s" '<string>Near AI Gateway</string>'
   lacks staging "$s" '<string>production</string>'
   lacks staging "$s" 'tracecommons-flatpak'
   lint "staging" "$s"
@@ -159,7 +159,7 @@ fi
 # terminal app a launch opens. Both channels carry the owner's approved line,
 # read with a strict parser.
 
-events_line="Near.ai opens Private AI sessions in Terminal."
+events_line="Near AI Gateway opens Private AI sessions in Terminal."
 for channel in production staging; do
   if render TC_CHANNEL="$channel" >"$scratch/events-$channel.plist" 2>/dev/null \
     && python3 -I -c '
