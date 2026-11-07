@@ -7095,10 +7095,16 @@ where
         .await?;
     let current_role = client
         .query_one(
+            // The roles this session can SET ROLE to. PostgreSQL 16 added the
+            // `SET` privilege type to `pg_has_role`; on 15 and earlier it is an
+            // error, and membership (`MEMBER`) is exactly what permits SET ROLE.
+            // CASE runs only the branch it needs, so 15 never evaluates `SET`.
             "WITH reachable_roles AS (
                     SELECT oid, rolsuper, rolbypassrls FROM pg_roles
                     WHERE rolname = current_user
-                       OR pg_has_role(session_user, oid, 'SET')
+                       OR CASE WHEN current_setting('server_version_num')::int >= 160000
+                               THEN pg_has_role(session_user, oid, 'SET')
+                               ELSE pg_has_role(session_user, oid, 'MEMBER') END
                  )
                  SELECT
                     current_user AS current_role_name,
