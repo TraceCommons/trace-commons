@@ -509,7 +509,7 @@ final class InferenceParityTests: XCTestCase {
         // cards with the tool buttons, then the calls, then the balance
         // with billing under it (product owner, 2026-10-28).
         let scroll = try XCTUnwrap(views.range(of: "        ScrollView {\n"))
-        let guide = try XCTUnwrap(views.range(of: "                PrivateAIGuideCard(openTraces: openTraces)\n"))
+        let guide = try XCTUnwrap(views.range(of: "                PrivateAIGuideCard(openTraces: openTraces, visibleHeight: visibleHeight)\n"))
         XCTAssertLessThan(scroll.lowerBound, guide.lowerBound)
         XCTAssertLessThan(guide.lowerBound, toggle.lowerBound, "the step-by-step card leads the page")
         XCTAssertLessThan(toggle.lowerBound, managed.lowerBound, "the status follows the steps")
@@ -762,8 +762,9 @@ final class InferenceParityTests: XCTestCase {
     /// The guide card as the owner chose it from mockups (2026-11-05): the
     /// managed copy's words, a dark blue title, the original lock shield in
     /// the corner over the pixel field, the steps as a plain list with thin
-    /// lines between them, and Earn credit opening Traces. Every time, with
-    /// no X (owner, 2026-11-04).
+    /// lines between them, and Earn credit opening Traces. Every time until
+    /// the person closes it with its X (owner, 2026-11-07; no X from
+    /// 2026-11-04), pinned in `PrivateAIGuideCompactTests`.
     func testTheGuideCardIsTheOwnersDesign() throws {
         let views = try String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -774,11 +775,9 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertTrue(card.contains(".foregroundStyle(GlassTokens.Color.guideTitle.color)"))
         XCTAssertTrue(card.contains("Image(systemName: \"lock.shield.fill\")"))
         XCTAssertTrue(card.contains("GetStartedCardField()"))
-        XCTAssertTrue(card.contains("action: index == 0 ? openTraces : nil)"), "Earn credit opens Traces")
+        XCTAssertTrue(card.contains("action: index == 0 ? openTraces : nil, compact: compact)"), "Earn credit opens Traces")
         XCTAssertFalse(card.contains("GetStartedCard("))
         XCTAssertFalse(card.contains("GlassHeroCard("))
-        XCTAssertFalse(card.contains("close:"))
-        XCTAssertFalse(card.contains("@AppStorage"))
         XCTAssertEqual(PrivateAIGuideCard.steps.map { $0.title },
                        ["guide_step_earn_title", "guide_step_start_title", "guide_step_use_title"])
         XCTAssertEqual(PrivateAIGuideCard.steps.map { $0.line }, ["guide_step_earn", "guide_step_start", "guide_step_use"])

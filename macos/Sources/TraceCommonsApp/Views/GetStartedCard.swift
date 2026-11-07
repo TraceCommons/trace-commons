@@ -131,7 +131,7 @@ private struct GetStartedCardStep: View {
 
 /// The card's X: a bare glyph in the secondary ink, primary under the
 /// pointer, as a hero card's X is drawn on its own ground.
-private struct GetStartedCardClose: View {
+struct GetStartedCardClose: View {
     let close: GetStartedCard.Close
     @State private var hovering = false
 

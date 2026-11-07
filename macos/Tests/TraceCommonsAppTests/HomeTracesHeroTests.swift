@@ -6,7 +6,8 @@ import XCTest
 
 /// Home's Traces hero, the product owner's design (2026-10-28, 2026-10-29;
 /// restored 2026-11-05): the first and largest card on Home, with three
-/// illustrated steps, for everyone, every time, with no X. These tests pin
+/// illustrated steps, for everyone, every time until they close it with its
+/// X (2026-11-07), compact when it would push the stats out of view. These tests pin
 /// it; `.github/CODEOWNERS` makes the product owner the reviewer of this
 /// file and of `HomeTracesHero.swift`.
 @MainActor
@@ -18,7 +19,7 @@ final class HomeTracesHeroTests: XCTestCase {
     /// The owner's words.
     func test_theHeroSpeaksTheOwnersWords() throws {
         let words = try XCTUnwrap(MonitorWords.table).homeHistory
-        XCTAssertEqual(words.tracesHeroTitle, "Contribute traces, earn credit, use Private AI")
+        XCTAssertEqual(words.tracesHeroTitle, "Contribute traces. Earn credit. Use Private AI.")
         XCTAssertEqual(
             words.tracesHeroBody,
             "Share the sessions from your AI coding tools. Each accepted trace earns you credit.")
@@ -57,17 +58,21 @@ final class HomeTracesHeroTests: XCTestCase {
         }
     }
 
-    /// For everyone, every time: no X, nothing remembered, no condition
-    /// but the core's words having loaded.
-    func test_theHeroAlwaysShowsAndHasNoX() throws {
+    /// For everyone, every time, until the person closes it with its X
+    /// (product owner, 2026-11-07; it had no X from 2026-11-04). The choice
+    /// is kept under its own key, never the older `home.tracesHeroClosed`,
+    /// and nothing else hides it.
+    func test_theHeroShowsUntilThePersonClosesIt() throws {
         let hero = try Self.text("Views/Monitor/HomeTracesHero.swift")
-        for absent in ["onClose", "closeLabel", "@AppStorage", "close:"] {
-            XCTAssertFalse(hero.contains(absent), absent)
-        }
+        XCTAssertTrue(hero.contains("@AppStorage(Self.closedKey) private var closed = false"))
+        XCTAssertTrue(hero.contains("static let closedKey = \"home.stepsCardClosed\""))
+        XCTAssertTrue(hero.contains("if !closed { card }"))
+        XCTAssertTrue(hero.contains("closeLabel: MonitorWords.close, onClose: { closed = true },"))
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains(
             "    private var tracesHero: some View {\n        if let words {\n"
-                + "            HomeTracesHero(words: words, openTraces: openTraces, openPrivateAI: openPrivateAI)\n"
+                + "            HomeTracesHero(\n"
+                + "                words: words, openTraces: openTraces, openPrivateAI: openPrivateAI, visibleHeight: visibleHeight)\n"
                 + "        }\n    }\n"))
         for absent in ["tracesHeroClosed", "showsTracesWalkthrough"] {
             XCTAssertFalse(home.contains(absent), absent)

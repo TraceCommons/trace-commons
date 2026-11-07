@@ -166,6 +166,8 @@ private struct HomeOverview: View {
     /// Where the NEAR AI sign-in's browser page opens.
     @Environment(\.openURL) private var openURL
     @State private var campaignStore = PrivateAICampaignStore()
+    /// Home's visible height (`HomeTracesHero.visibleHeight`).
+    @State private var visibleHeight: CGFloat = 0
     /// The campaign closed with its X, as it was then (`fingerprint`): it
     /// comes back when the feed changes it (owner, 2026-10-27).
     @AppStorage(HomeClosedCards.campaignKey) private var closedCampaign = ""
@@ -271,6 +273,9 @@ private struct HomeOverview: View {
             }
         }
         .scrollIndicators(.never)
+        // How much of Home shows, so the Traces hero can go compact when
+        // the full card would push the stats out of view (owner, 2026-11-07).
+        .onGeometryChange(for: CGFloat.self, of: \.size.height) { visibleHeight = $0 }
         .task { await campaignStore.refresh() }
         .task(id: missionsEnabled) {
             // Hidden missions read nothing: the drafts inbox stays on disk.
@@ -377,7 +382,8 @@ private struct HomeOverview: View {
     @ViewBuilder
     private var tracesHero: some View {
         if let words {
-            HomeTracesHero(words: words, openTraces: openTraces, openPrivateAI: openPrivateAI)
+            HomeTracesHero(
+                words: words, openTraces: openTraces, openPrivateAI: openPrivateAI, visibleHeight: visibleHeight)
         }
     }
 
