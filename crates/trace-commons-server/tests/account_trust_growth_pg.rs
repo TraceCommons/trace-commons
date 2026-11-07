@@ -1113,6 +1113,10 @@ async fn shadow_evaluations_are_stored_audited_and_reproduced() {
         .unwrap();
     assert_eq!(summary.failed, 0);
     assert_eq!(summary.mode, "shadow");
+    assert!(
+        summary.rejections.is_some(),
+        "a shadow run reports its rejection counts"
+    );
     assert!(summary.tier_distribution.get(&1).copied().unwrap_or(0) >= 1);
     let rows = admin
         .query(

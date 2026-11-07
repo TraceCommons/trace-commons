@@ -327,27 +327,7 @@ pub fn evaluate(
     let penalty_active = latest_penalty
         .is_some_and(|at| as_of < at + chrono::Duration::seconds(policy.penalty_cooldown_seconds));
 
-    // Gate-required status evidence is authoritative about reviewer
-    // independence for the whole UUID. A legacy credit fact for that same
-    // submission cannot override a nonqualifying status classification.
-    // Existing policies continue to ignore the new status source entirely.
-    let status_exclusions: BTreeSet<Uuid> = if policy.require_gate_pass {
-        facts
-            .iter()
-            .filter(|fact| {
-                fact.source_kind == "accepted_submission_status"
-                    && matches!(
-                        fact.outcome.as_str(),
-                        "accepted_self_reviewed"
-                            | "accepted_approver_unknown"
-                            | "accepted_status_inactive"
-                    )
-            })
-            .map(|fact| fact.submission_id)
-            .collect()
-    } else {
-        BTreeSet::new()
-    };
+    let status_exclusions = status_exclusions(policy, &facts);
 
     // Age: since the first acceptance. A floor, not a reward: it never decays.
     let first_accepted = facts
@@ -486,6 +466,151 @@ pub fn evaluate(
     }
 }
 
+/// Gate-required status evidence is authoritative about reviewer
+/// independence for the whole UUID. A legacy credit fact for that same
+/// submission cannot override a nonqualifying status classification.
+/// Existing policies continue to ignore the new status source entirely.
+fn status_exclusions(policy: &GrowthPolicy, facts: &[&EvaluationFact]) -> BTreeSet<Uuid> {
+    if !policy.require_gate_pass {
+        return BTreeSet::new();
+    }
+    facts
+        .iter()
+        .filter(|fact| {
+            fact.source_kind == "accepted_submission_status"
+                && matches!(
+                    fact.outcome.as_str(),
+                    "accepted_self_reviewed"
+                        | "accepted_approver_unknown"
+                        | "accepted_status_inactive"
+                )
+        })
+        .map(|fact| fact.submission_id)
+        .collect()
+}
+
+/// Why facts did not earn units, as counts only: no identifier, hash or
+/// version string. Diagnostic, never an input to the tier.
+///
+/// A gate fact counts under every gate reason it fails, so one run shows
+/// every blocker at once, not just the first. The counts are therefore not
+/// a partition and do not add up to anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RejectionCounts {
+    /// Submissions with acceptance, attestation or gate evidence but no
+    /// acceptance fact the policy counts: for example a status-only
+    /// acceptance under a policy that does not read the status source, or a
+    /// status classification that vetoes the submission.
+    pub no_qualifying_acceptance: u64,
+    /// Gate facts whose evaluator version is not on the allowlist.
+    pub evaluator_not_allowlisted: u64,
+    /// Gate facts whose dedup signal version (NULL read as the legacy v1
+    /// stamp) is not on the allowlist.
+    pub dedup_version_not_allowlisted: u64,
+    /// Gate facts that are not first in their dedup cluster. The inputs read
+    /// a decision with no cluster as not first.
+    pub not_first_in_cluster: u64,
+    /// Gate facts whose outcome is not `evaluated_passed`.
+    pub gate_failed: u64,
+    /// Gate facts that miss the quality floor: no quality, a quality below
+    /// `q_min_micros`, or a calibration version off the allowlist. Always 0
+    /// when the policy sets no floor.
+    pub quality_below_min: u64,
+    /// Status facts classified `accepted_approver_unknown`.
+    pub approver_unknown: u64,
+    /// Gate facts with no dedup signal version stamped (NULL). The inputs do
+    /// not carry `dedup_cluster_id`, so this is the nearest unstamped-dedup
+    /// count they can give; a decision the dedup pass never reached has both
+    /// NULL.
+    pub gate_facts_dedup_unstamped: u64,
+}
+
+impl RejectionCounts {
+    /// Adds `other` into `self`, saturating.
+    pub fn add(&mut self, other: &RejectionCounts) {
+        self.no_qualifying_acceptance = self
+            .no_qualifying_acceptance
+            .saturating_add(other.no_qualifying_acceptance);
+        self.evaluator_not_allowlisted = self
+            .evaluator_not_allowlisted
+            .saturating_add(other.evaluator_not_allowlisted);
+        self.dedup_version_not_allowlisted = self
+            .dedup_version_not_allowlisted
+            .saturating_add(other.dedup_version_not_allowlisted);
+        self.not_first_in_cluster = self
+            .not_first_in_cluster
+            .saturating_add(other.not_first_in_cluster);
+        self.gate_failed = self.gate_failed.saturating_add(other.gate_failed);
+        self.quality_below_min = self
+            .quality_below_min
+            .saturating_add(other.quality_below_min);
+        self.approver_unknown = self.approver_unknown.saturating_add(other.approver_unknown);
+        self.gate_facts_dedup_unstamped = self
+            .gate_facts_dedup_unstamped
+            .saturating_add(other.gate_facts_dedup_unstamped);
+    }
+}
+
+/// The per-reason counts for `(policy, facts with occurred_at <= as_of)`,
+/// read with the same predicates as [`evaluate`]. Pure, order-independent,
+/// and separate from [`Evaluation`] so the stored row and its digest do not
+/// change.
+pub fn rejection_counts(
+    policy: &GrowthPolicy,
+    facts: &[EvaluationFact],
+    as_of: DateTime<Utc>,
+) -> RejectionCounts {
+    let facts: Vec<&EvaluationFact> = facts.iter().filter(|f| f.occurred_at <= as_of).collect();
+    let status_exclusions = status_exclusions(policy, &facts);
+    let mut counts = RejectionCounts::default();
+
+    let mut evidenced: BTreeSet<Uuid> = BTreeSet::new();
+    let mut accepted: BTreeSet<Uuid> = BTreeSet::new();
+    for fact in &facts {
+        if matches!(
+            fact.source_kind.as_str(),
+            "accepted_submission"
+                | "accepted_submission_status"
+                | "attested_submission"
+                | "gate_evaluation"
+        ) {
+            evidenced.insert(fact.submission_id);
+        }
+        if accepted_fact_qualifies(policy, fact) && !status_exclusions.contains(&fact.submission_id)
+        {
+            accepted.insert(fact.submission_id);
+        }
+        if fact.source_kind == "accepted_submission_status"
+            && fact.outcome == "accepted_approver_unknown"
+        {
+            counts.approver_unknown += 1;
+        }
+        if fact.source_kind != "gate_evaluation" {
+            continue;
+        }
+        if fact.outcome != "evaluated_passed" {
+            counts.gate_failed += 1;
+        }
+        if !evaluator_allowlisted(policy, fact) {
+            counts.evaluator_not_allowlisted += 1;
+        }
+        if !quality_clears(policy, fact) {
+            counts.quality_below_min += 1;
+        }
+        if !dedup_version_allowlisted(policy, fact) {
+            counts.dedup_version_not_allowlisted += 1;
+        }
+        if fact.first_in_cluster != Some(true) {
+            counts.not_first_in_cluster += 1;
+        }
+        if fact.dedup_signal_version.is_none() {
+            counts.gate_facts_dedup_unstamped += 1;
+        }
+    }
+    counts.no_qualifying_acceptance = evidenced.difference(&accepted).count() as u64;
+    counts
+}
+
 /// The V126 fact: a v2 witness certificate whose final call ran in a provider
 /// TEE, matching the accepted artifact when recorded. A gateway receipt does
 /// not show which model ran and is never recorded as this outcome.
@@ -505,11 +630,20 @@ fn gate_fact_qualifies(policy: &GrowthPolicy, fact: &EvaluationFact) -> bool {
     if fact.source_kind != "gate_evaluation" || fact.outcome != "evaluated_passed" {
         return false;
     }
-    let evaluator_ok = fact
-        .evaluator_version
+    evaluator_allowlisted(policy, fact)
+        && quality_clears(policy, fact)
+        && dedup_version_allowlisted(policy, fact)
+        && fact.first_in_cluster == Some(true)
+}
+
+fn evaluator_allowlisted(policy: &GrowthPolicy, fact: &EvaluationFact) -> bool {
+    fact.evaluator_version
         .as_ref()
-        .is_some_and(|v| policy.evaluator_versions.contains(v));
-    let quality_ok = match policy.q_min_micros {
+        .is_some_and(|v| policy.evaluator_versions.contains(v))
+}
+
+fn quality_clears(policy: &GrowthPolicy, fact: &EvaluationFact) -> bool {
+    match policy.q_min_micros {
         None => true,
         Some(q_min) => {
             fact.credit_quality_micros.is_some_and(|q| q >= q_min)
@@ -517,17 +651,17 @@ fn gate_fact_qualifies(policy: &GrowthPolicy, fact: &EvaluationFact) -> bool {
                     .credit_quality_calibration_version
                     .is_some_and(|v| policy.credit_quality_calibration_versions.contains(&v))
         }
-    };
-    // NULL means "stamped before V57" and reads as the legacy v1 stamp, as
-    // the dedup sweep reads it: never as unknown.
+    }
+}
+
+/// NULL means "stamped before V57" and reads as the legacy v1 stamp, as the
+/// dedup sweep reads it: never as unknown.
+fn dedup_version_allowlisted(policy: &GrowthPolicy, fact: &EvaluationFact) -> bool {
     let dedup_version = fact
         .dedup_signal_version
         .as_deref()
         .unwrap_or(crate::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION);
-    evaluator_ok
-        && quality_ok
-        && policy.dedup_signal_versions.contains(dedup_version)
-        && fact.first_in_cluster == Some(true)
+    policy.dedup_signal_versions.contains(dedup_version)
 }
 
 /// `sha256` over the sorted, JSON-encoded tuples of every fact that entered
@@ -1786,5 +1920,295 @@ mod tests {
         }
         let _: BTreeMap<String, serde_json::Value> = serde_json::from_str(&rendered).unwrap();
         let _ = WEEK_SECONDS;
+    }
+
+    // ---- per-reason rejection counts --------------------------------------
+
+    const PIPELINE_EVALUATOR: &str =
+        "pipeline:sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// The counts for one qualified submission after `edit` changes its gate
+    /// fact, at t(2) under the test policy.
+    fn counts_with_gate(edit: impl FnOnce(&mut EvaluationFact)) -> RejectionCounts {
+        let mut f = Facts::new();
+        f.qualified(1);
+        edit(f.last_gate());
+        rejection_counts(&policy(), &f.0, t(2))
+    }
+
+    #[test]
+    fn a_qualified_submission_has_no_rejection_reason() {
+        let mut f = Facts::new();
+        f.qualified(1);
+        f.attested(1);
+        assert_eq!(evaluate(&policy(), &f.0, t(2)).units, 2);
+        assert_eq!(
+            rejection_counts(&policy(), &f.0, t(2)),
+            RejectionCounts::default()
+        );
+        assert_eq!(
+            rejection_counts(&policy(), &[], t(2)),
+            RejectionCounts::default()
+        );
+    }
+
+    #[test]
+    fn a_status_only_acceptance_under_the_default_policy_is_no_qualifying_acceptance() {
+        let mut f = Facts::new();
+        f.qualified(1);
+        f.0.iter_mut()
+            .find(|fact| fact.source_kind == "accepted_submission")
+            .unwrap()
+            .source_kind = "accepted_submission_status".into();
+        assert_eq!(evaluate(&policy(), &f.0, t(2)).units, 0);
+        assert_eq!(
+            rejection_counts(&policy(), &f.0, t(2)),
+            RejectionCounts {
+                no_qualifying_acceptance: 1,
+                ..RejectionCounts::default()
+            }
+        );
+        // The gate-required policy reads the status source, so the same
+        // submission qualifies and has no reason.
+        let strict = staging_upload_policy();
+        assert_eq!(evaluate(&strict, &f.0, t(2)).units, 1);
+        assert_eq!(
+            rejection_counts(&strict, &f.0, t(2)),
+            RejectionCounts::default()
+        );
+        // A gate fact with no acceptance at all is also counted once.
+        let mut gate_only = Facts::new();
+        gate_only.qualified(1);
+        gate_only
+            .0
+            .retain(|fact| fact.source_kind != "accepted_submission");
+        assert_eq!(
+            rejection_counts(&policy(), &gate_only.0, t(2)).no_qualifying_acceptance,
+            1
+        );
+        // A penalty or a netting fact alone is not evidence of a submission.
+        let mut adverse = Facts::new();
+        adverse.push("submission_withdrawn", Uuid::new_v4(), "withdrawn", t(1));
+        adverse.push("abuse_penalty", Uuid::new_v4(), "penalized", t(1));
+        assert_eq!(
+            rejection_counts(&policy(), &adverse.0, t(2)),
+            RejectionCounts::default()
+        );
+    }
+
+    #[test]
+    fn an_approver_unknown_status_is_counted_and_vetoes_under_the_strict_policy() {
+        let strict = staging_upload_policy();
+        let mut f = Facts::new();
+        f.qualified(1);
+        f.0.iter_mut()
+            .find(|fact| fact.source_kind == "accepted_submission")
+            .unwrap()
+            .source_kind = "accepted_submission_status".into();
+        f.0.iter_mut()
+            .find(|fact| fact.source_kind == "accepted_submission_status")
+            .unwrap()
+            .outcome = "accepted_approver_unknown".into();
+        assert_eq!(evaluate(&strict, &f.0, t(2)).units, 0);
+        assert_eq!(
+            rejection_counts(&strict, &f.0, t(2)),
+            RejectionCounts {
+                no_qualifying_acceptance: 1,
+                approver_unknown: 1,
+                ..RejectionCounts::default()
+            }
+        );
+        // A self-reviewed status vetoes too, but is not approver_unknown.
+        f.0.iter_mut()
+            .find(|fact| fact.source_kind == "accepted_submission_status")
+            .unwrap()
+            .outcome = "accepted_self_reviewed".into();
+        assert_eq!(
+            rejection_counts(&strict, &f.0, t(2)),
+            RejectionCounts {
+                no_qualifying_acceptance: 1,
+                ..RejectionCounts::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_pipeline_evaluator_is_not_allowlisted_by_a_legacy_allowlist() {
+        let counts =
+            counts_with_gate(|gate| gate.evaluator_version = Some(PIPELINE_EVALUATOR.into()));
+        assert_eq!(
+            counts,
+            RejectionCounts {
+                evaluator_not_allowlisted: 1,
+                ..RejectionCounts::default()
+            }
+        );
+        let missing = counts_with_gate(|gate| gate.evaluator_version = None);
+        assert_eq!(missing.evaluator_not_allowlisted, 1);
+    }
+
+    #[test]
+    fn a_dedup_version_off_the_allowlist_is_counted_and_null_is_unstamped() {
+        let other = counts_with_gate(|gate| {
+            gate.dedup_signal_version = Some("events.v1+fnv1a-2shingle.v1".into())
+        });
+        assert_eq!(
+            other,
+            RejectionCounts {
+                dedup_version_not_allowlisted: 1,
+                ..RejectionCounts::default()
+            }
+        );
+        let unstamped = counts_with_gate(|gate| gate.dedup_signal_version = None);
+        assert_eq!(
+            unstamped,
+            RejectionCounts {
+                dedup_version_not_allowlisted: 1,
+                gate_facts_dedup_unstamped: 1,
+                ..RejectionCounts::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_gate_fact_not_first_in_its_cluster_is_counted() {
+        for first in [Some(false), None] {
+            let counts = counts_with_gate(|gate| gate.first_in_cluster = first);
+            assert_eq!(
+                counts,
+                RejectionCounts {
+                    not_first_in_cluster: 1,
+                    ..RejectionCounts::default()
+                },
+                "{first:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_gate_is_counted() {
+        let counts = counts_with_gate(|gate| gate.outcome = "evaluated_failed".into());
+        assert_eq!(
+            counts,
+            RejectionCounts {
+                gate_failed: 1,
+                ..RejectionCounts::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_quality_miss_is_counted_only_when_the_policy_sets_a_floor() {
+        for edit in [
+            (|gate: &mut EvaluationFact| gate.credit_quality_micros = Some(100_000))
+                as fn(&mut EvaluationFact),
+            |gate| gate.credit_quality_micros = None,
+            |gate| gate.credit_quality_calibration_version = Some(2),
+        ] {
+            assert_eq!(
+                counts_with_gate(edit),
+                RejectionCounts {
+                    quality_below_min: 1,
+                    ..RejectionCounts::default()
+                }
+            );
+        }
+        let no_floor = parse_growth_policy(
+            &with(growth(), "q_min_micros", serde_json::Value::Null),
+            &["growth-test-v1"],
+        )
+        .unwrap();
+        let mut f = Facts::new();
+        f.qualified(1);
+        f.last_gate().credit_quality_micros = Some(100_000);
+        assert_eq!(
+            rejection_counts(&no_floor, &f.0, t(2)),
+            RejectionCounts::default()
+        );
+    }
+
+    #[test]
+    fn the_observed_pipeline_shape_reports_every_blocker_at_once() {
+        // The pilot shape: status-only acceptance, a pipeline evaluator, no
+        // dedup stamp, not first in cluster. Every reason shows in one run.
+        let mut f = Facts::new();
+        for day in [1, 2] {
+            f.qualified(day);
+            let gate = f.last_gate();
+            gate.evaluator_version = Some(PIPELINE_EVALUATOR.into());
+            gate.dedup_signal_version = None;
+            gate.first_in_cluster = Some(false);
+        }
+        f.last_gate().outcome = "evaluated_failed".into();
+        for fact in f.0.iter_mut() {
+            if fact.source_kind == "accepted_submission" {
+                fact.source_kind = "accepted_submission_status".into();
+            }
+        }
+        let evaluation = evaluate(&policy(), &f.0, t(3));
+        assert_eq!((evaluation.units, evaluation.age_seconds), (0, 0));
+        assert_eq!(
+            rejection_counts(&policy(), &f.0, t(3)),
+            RejectionCounts {
+                no_qualifying_acceptance: 2,
+                evaluator_not_allowlisted: 2,
+                dedup_version_not_allowlisted: 2,
+                not_first_in_cluster: 2,
+                gate_failed: 1,
+                quality_below_min: 0,
+                approver_unknown: 0,
+                gate_facts_dedup_unstamped: 2,
+            }
+        );
+        // Facts after as_of are not counted, as evaluate does not read them.
+        assert_eq!(
+            rejection_counts(&policy(), &f.0, t(1)).evaluator_not_allowlisted,
+            1
+        );
+        let mut reversed = f.0.clone();
+        reversed.reverse();
+        assert_eq!(
+            rejection_counts(&policy(), &reversed, t(3)),
+            rejection_counts(&policy(), &f.0, t(3))
+        );
+    }
+
+    #[test]
+    fn rejection_counts_add_and_serialize_as_labels_and_counts_only() {
+        let mut f = Facts::new();
+        let submission = f.qualified(1);
+        f.last_gate().evaluator_version = Some(PIPELINE_EVALUATOR.into());
+        let one = rejection_counts(&policy(), &f.0, t(2));
+        let mut total = RejectionCounts::default();
+        total.add(&one);
+        total.add(&one);
+        assert_eq!(total.evaluator_not_allowlisted, 2);
+        assert_eq!(total.no_qualifying_acceptance, 0);
+        let rendered = serde_json::to_value(&total).unwrap();
+        let keys: Vec<&str> = rendered
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys.into_iter().collect::<BTreeSet<_>>(),
+            [
+                "approver_unknown",
+                "dedup_version_not_allowlisted",
+                "evaluator_not_allowlisted",
+                "gate_failed",
+                "gate_facts_dedup_unstamped",
+                "no_qualifying_acceptance",
+                "not_first_in_cluster",
+                "quality_below_min",
+            ]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+        );
+        assert!(rendered.as_object().unwrap().values().all(|v| v.is_u64()));
+        let text = rendered.to_string();
+        assert!(!text.contains(&submission.to_string()));
+        assert!(!text.contains("pipeline:"));
     }
 }

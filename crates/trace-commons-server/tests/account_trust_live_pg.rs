@@ -737,6 +737,11 @@ async fn an_applied_evaluation_grows_the_allowance_and_falls_back_to_the_base() 
     .await
     .unwrap();
     assert_eq!(applied.mode, "applied");
+    assert_eq!(
+        applied.rejections, None,
+        "an applied run does not claim rejection counts it did not measure"
+    );
+    assert!(shadow.rejections.is_some());
     assert_eq!(applied.failed, 0, "{applied:?}");
     let stored = ingest
         .latest_account_trust_evaluation(&trust, VERSION, "applied")

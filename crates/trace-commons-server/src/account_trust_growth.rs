@@ -23,7 +23,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::account_trust::TrustAccount;
-use crate::account_trust_rule::{Evaluation, GrowthPolicy, evaluate};
+use crate::account_trust_rule::{
+    Evaluation, GrowthPolicy, RejectionCounts, evaluate, rejection_counts,
+};
 use crate::db::Database;
 use crate::error::DatabaseError;
 
@@ -184,6 +186,11 @@ pub struct EvaluateSummary {
     pub units_capped: u64,
     pub failed: u64,
     pub limit_reached: bool,
+    /// Why facts did not earn units, summed over the accounts evaluated:
+    /// labels and counts only. Shadow runs only; an applied run evaluates
+    /// inside the database and reports `null` here rather than zeros it did
+    /// not measure.
+    pub rejections: Option<RejectionCounts>,
 }
 
 /// Evaluates every open account in an anchored tenant that has facts and
@@ -206,6 +213,7 @@ pub async fn evaluate_account_trust(
     let mut summary = EvaluateSummary {
         mode: mode.as_str(),
         growth_policy_version: policy.version().to_string(),
+        rejections: (mode == EvaluationMode::Shadow).then(RejectionCounts::default),
         ..EvaluateSummary::default()
     };
     let mut after: Option<TrustAccount> = None;
@@ -237,6 +245,9 @@ pub async fn evaluate_account_trust(
                         let changed = db
                             .record_account_trust_evaluation(account, SHADOW_MODE, &evaluation)
                             .await?;
+                        if let Some(total) = summary.rejections.as_mut() {
+                            total.add(&rejection_counts(policy, &facts, as_of));
+                        }
                         Ok::<_, DatabaseError>(Some((evaluation, changed)))
                     }
                     .await
