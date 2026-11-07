@@ -9,23 +9,59 @@ import TCShellCore
 /// contribute, earn, use Private AI. It shows for everyone, every time,
 /// and has no X.
 ///
+/// When the full card would push the stats under it out of view, it goes
+/// compact (product owner, 2026-11-07): a smaller title, no line under
+/// it, and each step on one short row, so the stats show without
+/// scrolling. That is a narrow card, or a Home too short for the full
+/// card and the first row of stats. Its X closes it, the
+/// person's choice (product owner, 2026-11-07); the choice is kept under
+/// its own key, so a card closed in an older version does not stay hidden.
+///
 /// This card is the product owner's design. Changes to this file need her
 /// review (`.github/CODEOWNERS`), and `HomeTracesHeroTests` pins it.
 struct HomeTracesHero: View {
     let words: MonitorHomeHistoryCopy
     let openTraces: () -> Void
     let openPrivateAI: () -> Void
+    /// How tall Home's visible area is; zero until Home has said.
+    var visibleHeight: CGFloat = 0
+    /// The card's width, read as it lays out.
+    @State private var width: CGFloat = 0
+    /// The full card's height when last drawn full; a typical one before.
+    @State private var fullHeight: CGFloat = 360
+    /// The person closed the card with its X.
+    @AppStorage(Self.closedKey) private var closed = false
+
+    /// Not `home.tracesHeroClosed`, which older versions wrote.
+    static let closedKey = "home.stepsCardClosed"
+
+    /// Below this width the card is compact.
+    static var compactWidth: CGFloat { 560 }
+    /// What must fit under the full card for the stats to show: the
+    /// no-credit line, the Traces heading and the first row of tiles.
+    static var statsRoom: CGFloat { 200 }
+
+    static func isCompact(width: CGFloat, visibleHeight: CGFloat, fullHeight: CGFloat) -> Bool {
+        if width > 0 && width < compactWidth { return true }
+        return visibleHeight > 0 && fullHeight + statsRoom > visibleHeight
+    }
 
     var body: some View {
-        GlassHeroCard(
+        if !closed { card }
+    }
+
+    private var card: some View {
+        let compact = Self.isCompact(width: width, visibleHeight: visibleHeight, fullHeight: fullHeight)
+        return GlassHeroCard(
             gradient: GlassTokens.Gradient.heroMissions,
             title: words.tracesHeroTitle, subtitle: words.tracesHeroBody,
             actionTitle: words.tracesHeroAction, action: openTraces,
-            contentSpansGraphic: true, actionOnPill: true
+            closeLabel: MonitorWords.close, onClose: { closed = true },
+            contentSpansGraphic: true, actionOnPill: true, compact: compact
         ) {
             HomeHeroRing()
         } content: {
-            HomeHeroSteps(steps: [
+            HomeHeroSteps(compact: compact, steps: [
                 .init(number: 1, systemImage: "apple.terminal",
                       title: words.tracesHeroStepContribute, detail: words.tracesHeroStepContributeDetail,
                       action: openTraces),
@@ -35,6 +71,11 @@ struct HomeTracesHero: View {
                       title: words.tracesHeroStepUse, detail: words.tracesHeroStepUseDetail,
                       action: openPrivateAI),
             ])
+        }
+        .onGeometryChange(for: CGSize.self, of: \.size) { size in
+            width = size.width
+            // Measured only while full, so the compact card never sets it.
+            if !compact { fullHeight = size.height }
         }
     }
 }
@@ -58,14 +99,29 @@ struct HomeHeroSteps: View {
         var id: Int { number }
     }
 
+    /// One short row per step, number and title only, for a narrow card.
+    var compact = false
     let steps: [Step]
 
     static var disc: CGFloat { 30 }
     static var icon: CGFloat { 28 }
+    /// The compact rows' number disc.
+    static var compactDisc: CGFloat { 22 }
 
     var body: some View {
+        if compact {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                ForEach(steps) { HomeHeroStepRow(step: $0) }
+            }
+            .padding(.top, GlassTokens.Space.s1)
+        } else {
+            wide
+        }
+    }
+
+    private var wide: some View {
         let ink = GlassTokens.Color.heroInk.color
-        HStack(alignment: .center, spacing: GlassTokens.Space.s2) {
+        return HStack(alignment: .center, spacing: GlassTokens.Space.s2) {
             ForEach(steps) { step in
                 if step.number > 1 {
                     Image(systemName: "arrow.right")
@@ -138,6 +194,58 @@ struct HomeHeroStepPanel: View {
         .background(shape.fill(ink.opacity(hovering ? 0.16 : 0.08)))
         .contentShape(shape)
         .overlay(shape.strokeBorder(ink.opacity(0.18), lineWidth: 1))
+    }
+}
+
+/// A compact step (owner, 2026-11-07): the numbered disc and the title on
+/// one short row, a chevron on a step that opens a tab, brighter under the
+/// pointer, and then a button that reads the title and line to VoiceOver.
+struct HomeHeroStepRow: View {
+    let step: HomeHeroSteps.Step
+    @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        if let action = step.action {
+            Button(action: action) { row }
+                .buttonStyle(GlassPressStyle())
+                .onHover { inside in
+                    withAnimation(GlassMotion.fast(reduceMotion)) { hovering = inside }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(step.title), \(step.detail)")
+                .accessibilityAddTraits(.isButton)
+        } else {
+            row.accessibilityElement(children: .combine)
+                .accessibilityLabel("\(step.title), \(step.detail)")
+        }
+    }
+
+    private var row: some View {
+        let ink = GlassTokens.Color.heroInk.color
+        let shape = RoundedRectangle(cornerRadius: GlassTier.cardQuiet.radius, style: .continuous)
+        return HStack(spacing: GlassTokens.Space.s2) {
+            Text("\(step.number)")
+                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                .foregroundStyle(ink)
+                .frame(width: HomeHeroSteps.compactDisc, height: HomeHeroSteps.compactDisc)
+                .background(Circle().fill(GlassTokens.Color.heroAccent.color))
+            Text(step.title)
+                .glassType(GlassTokens.TypeScale.bodyStrong)
+                .foregroundStyle(ink)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if step.action != nil {
+                Image(systemName: "chevron.right")
+                    .glassGlyph(11, weight: .semibold)
+                    .foregroundStyle(ink.opacity(0.7))
+            }
+        }
+        .padding(.horizontal, GlassTokens.Space.s2)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(shape.fill(ink.opacity(hovering ? 0.16 : 0.08)))
+        .contentShape(shape)
     }
 }
 
