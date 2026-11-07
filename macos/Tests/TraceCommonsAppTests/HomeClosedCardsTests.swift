@@ -55,7 +55,8 @@ final class HomeClosedCardsTests: XCTestCase {
         XCTAssertTrue(home.contains("@AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true"))
         XCTAssertTrue(home.contains("onClose: { closedCampaign = HomeClosedCards.fingerprint(campaign) }"))
         XCTAssertFalse(home.contains("insightsClosedOn"))
-        XCTAssertFalse(home.contains("tracesHeroClosed"))
+        XCTAssertTrue(home.contains("@AppStorage(HomeClosedCards.tracesHeroKey) private var tracesHeroClosed = false"))
+        XCTAssertTrue(home.contains("onClose: { tracesHeroClosed = true }"))
         let general = try HistoryParityTests.text("Views/Settings/GeneralSection.swift")
         XCTAssertTrue(general.contains("@AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true"))
         XCTAssertTrue(general.contains("Toggle(words.promotionsToggle, isOn: $promotionsOn)"))
@@ -70,16 +71,16 @@ final class HomeClosedCardsTests: XCTestCase {
         XCTAssertFalse(words.promotionsCaption.isEmpty)
     }
 
-    /// The hero card draws an X only when given one: the campaign has one;
-    /// Insights and Missions have none, nor does the Traces walkthrough
-    /// (owner, 2026-11-04).
+    /// The hero card draws an X only when given one: the campaign has one,
+    /// and the Traces hero has one that closes it for good (owner,
+    /// 2026-11-07); Insights and Missions have none (owner, 2026-11-04).
     func testOnlyCardsGivenACloseDrawAnX() throws {
         let hero = try String(contentsOf: Self.packageRoot
             .appendingPathComponent("Sources/TCDesign/Components/HeroCard.swift"), encoding: .utf8)
         XCTAssertTrue(hero.contains("if let onClose {\n                GlassHeroClose(label: closeLabel ?? \"\", action: onClose)"))
         XCTAssertTrue(hero.contains(".foregroundStyle(GlassTokens.Color.heroInk.color"))
         let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
-        XCTAssertEqual(home.components(separatedBy: "onClose:").count - 1, 1)
+        XCTAssertEqual(home.components(separatedBy: "onClose:").count - 1, 2)
         XCTAssertEqual(home.components(separatedBy: "GetStartedCard.Close(").count - 1, 0)
     }
 

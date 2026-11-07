@@ -57,19 +57,23 @@ final class HomeTracesHeroTests: XCTestCase {
         }
     }
 
-    /// For everyone, every time: no X, nothing remembered, no condition
-    /// but the core's words having loaded.
-    func test_theHeroAlwaysShowsAndHasNoX() throws {
+    /// For everyone, new and returning, until its X closes it for good on
+    /// this Mac (owner, 2026-11-07): no other condition but the core's words
+    /// having loaded, and nothing that hides it for returning people.
+    func test_theHeroShowsUntilItsXClosesItForGood() throws {
         let hero = try Self.text("Views/Monitor/HomeTracesHero.swift")
-        for absent in ["onClose", "closeLabel", "@AppStorage", "close:"] {
-            XCTAssertFalse(hero.contains(absent), absent)
-        }
+        XCTAssertTrue(hero.contains("closeLabel: MonitorWords.close, onClose: onClose,"))
+        XCTAssertFalse(hero.contains("@AppStorage"))
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains(
-            "    private var tracesHero: some View {\n        if let words {\n"
-                + "            HomeTracesHero(words: words, openTraces: openTraces, openPrivateAI: openPrivateAI)\n"
+            "    private var tracesHero: some View {\n        if let words, !tracesHeroClosed {\n"
+                + "            HomeTracesHero(words: words, openTraces: openTraces, openPrivateAI: openPrivateAI,\n"
+                + "                           onClose: { tracesHeroClosed = true })\n"
                 + "        }\n    }\n"))
-        for absent in ["tracesHeroClosed", "showsTracesWalkthrough"] {
+        XCTAssertTrue(home.contains(
+            "@AppStorage(HomeClosedCards.tracesHeroKey) private var tracesHeroClosed = false"))
+        XCTAssertEqual(HomeClosedCards.tracesHeroKey, "home.tracesHeroStepsClosed")
+        for absent in ["showsTracesWalkthrough", "finishedFirstRunThisLaunch"] {
             XCTAssertFalse(home.contains(absent), absent)
         }
     }
