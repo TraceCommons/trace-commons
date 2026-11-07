@@ -1887,6 +1887,14 @@ final class AppModel: ObservableObject {
         self?.refreshAfterQueueChange()
     }
 
+    /// Status reads asked for by daemon events. `refreshStatus` keeps only
+    /// its newest read, so events arriving faster than the daemon answers
+    /// would otherwise retire every read before it publishes. One read runs
+    /// at a time and one more follows it, so the last change is still read.
+    private lazy var statusEventRefreshes = RefreshCoalescer(delay: .zero) { [weak self] in
+        await self?.refreshStatus()?.value
+    }
+
     func handle(event: DaemonEvent) {
         switch event {
         case .snapshot(let pending, let status):
@@ -1910,7 +1918,7 @@ final class AppModel: ObservableObject {
             queueChangeRefreshes.request()
         case .statusChanged:
             refreshAutomaticGrant()
-            refreshStatus()
+            statusEventRefreshes.request()
             // The daemon says Private AI's listener state moves under this
             // too (the proxy learning NEAR AI's sign-in on its tick): the
             // menu bar's dot and the windows' stores follow the settings read.
@@ -1975,6 +1983,7 @@ final class AppModel: ObservableObject {
         undoTask?.cancel()
         credentialPoll?.cancel()
         credentialPoll = nil
+        statusEventRefreshes.cancel()
         let subscription = self.subscription
         let daemon = self.daemon
         // Dropped first so no new work can be started from this side while
@@ -4588,7 +4597,10 @@ final class AppModel: ObservableObject {
     ) -> Task<Void, Never>? {
         guard let client else { return nil }
         return Task.detached(priority: .userInitiated) {
-            let outcome = Result { try work(client) }
+            // Off the cooperative pool: the call blocks its thread until the
+            // daemon answers, and a few parked together would stall every
+            // other task in the app (see DaemonWork).
+            let outcome = await DaemonWork.run { Result { try work(client) } }
             await MainActor.run {
                 guard whenCurrent() else { return }
                 switch outcome {

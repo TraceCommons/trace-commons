@@ -196,6 +196,49 @@ final class ScopedGrantHistoryReadsTests: XCTestCase {
         XCTAssertEqual(model.status.queueDepth, 2)
     }
 
+    /// Status events can arrive faster than the daemon answers. They share
+    /// one read at a time, plus one after it, so the newest-read-wins fence in
+    /// `refreshStatus` cannot retire every reply before any publishes.
+    @MainActor
+    func testStatusEventBurstSharesOneReadAndPublishesTheLatest() async throws {
+        let daemon = ScopedReadDaemon()
+        let model = makeModel(daemon)
+        defer { model.shutdown() }
+        let first = ScopedReadReply(statusFrame("a", depth: 1)); defer { first.resume.signal() }
+        daemon.enqueue("status", first)
+        daemon.setDefault("status", statusFrame("a", depth: 7))
+        model.handle(event: .statusChanged)
+        await assertStarted(first)
+        for _ in 0..<20 { model.handle(event: .statusChanged) }
+        XCTAssertEqual(daemon.count("status"), 1, "a burst waits for the read in flight")
+        first.resume.signal()
+        try await waitUntil { model.status.queueDepth == 7 }
+        XCTAssertEqual(daemon.count("status"), 2, "one more read follows the burst")
+        XCTAssertFalse(model.statusReadFailed)
+    }
+
+    /// Daemon calls block their thread until the daemon answers. Many of them
+    /// waiting at once must not stall unrelated reads: they run on the
+    /// daemon-call queue, not Swift's cooperative pool (about one thread per
+    /// core), which a handful of parked calls would otherwise exhaust.
+    @MainActor
+    func testManyParkedDaemonCallsDoNotStallOtherReads() async throws {
+        let daemon = ScopedReadDaemon()
+        let model = makeModel(daemon)
+        defer { model.shutdown() }
+        let parked = (0..<16).map { _ in ScopedReadReply(statusFrame("a", depth: 9)) }
+        defer { parked.forEach { $0.resume.signal() } }
+        parked.forEach { daemon.enqueue("status", $0) }
+        let reads = parked.map { _ in model.refreshStatus() }
+        for reply in parked { await assertStarted(reply) }
+        daemon.setDefault("list_history", ScopedReadDaemon.history("unblocked"))
+        let history = model.refreshHistory()
+        await history.history?.value
+        XCTAssertEqual(model.history.first?.id, "unblocked")
+        parked.forEach { $0.resume.signal() }
+        for read in reads { await read?.value }
+    }
+
     @MainActor
     func testOldStatusCannotReopenAnAccountAfterNewStatusAndHistory() async throws {
         let daemon = ScopedReadDaemon()
