@@ -36,8 +36,12 @@ managed certificate query returned no certificates, but creation returned
 HTTP 409 / resultCode 7460: an existing Developer ID Application Managed
 certificate or pending request prevents creation. The browser certificate
 inventory showed the existing ordinary Developer ID certificate but no
-Cloud-managed Developer ID certificate. This requires resolving the team's
-managed signing state with Apple before claiming signed/notarized success.
+Cloud-managed Developer ID certificate. A subsequent access audit found that the signed-in Admin account has Cloud
+Managed Distribution access but lacks the separate Cloud Managed Developer
+ID permission. The Account Holder should grant that permission before a
+retry. This is a candidate repair, not a confirmed explanation of HTTP 409.
+If the conflict persists with the required access, escalate the managed
+certificate state to Apple. Signed/notarized success remains unproven.
 Other developers report the same contradiction on the
 [Apple Xcode Cloud forum](https://developer.apple.com/forums/topics/developer-tools-and-services/developer-tools-and-services-xcode-cloud).
 
