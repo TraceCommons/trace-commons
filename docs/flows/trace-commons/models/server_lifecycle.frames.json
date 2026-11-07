@@ -1,0 +1,90 @@
+[
+  {
+    "label": "lifecycle-ready",
+    "title": "Logical eligibility and physical presence",
+    "body": "Three submissions cover two tenant/owner identities. A physical index entry, a logical include decision, live submission status and completed processing remain separate fields.",
+    "controls": [
+      "YouWithdrawAnOwnedSubmission",
+      "YouRequestAnExportSnapshot",
+      "YouCompleteYourExportSnapshot"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "index-writing",
+    "title": "Index write in flight",
+    "body": "Settle or rebuild owns a write. A rebuild commits its tenant fence before the write; the modeled row locks delay a concurrent withdrawal until completion or the dispatch deadline.",
+    "controls": [
+      "YouWithdrawAnOwnedSubmission",
+      "YouRequestAnExportSnapshot",
+      "YouCompleteYourExportSnapshot"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "index-cleanup",
+    "title": "Index or payload cleanup pending",
+    "body": "Invalidation and payload deletion are asynchronous. An index outage leaves a pending retry. A call returning after the fence can recreate an entry and reopen pending or completed removal.",
+    "controls": [
+      "YouWithdrawAnOwnedSubmission",
+      "YouRequestAnExportSnapshot",
+      "YouCompleteYourExportSnapshot"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "withdrawal-recorded",
+    "title": "Withdrawal recorded",
+    "body": "An authorized source-session withdrawal marks the session and its mapped submissions, excludes unfinished index work, queues cleanup and invalidates exports. Completed deliveries remain part of recorded distribution reach.",
+    "controls": [
+      "YouWithdrawAnOwnedSubmission",
+      "YouRequestAnExportSnapshot",
+      "YouCompleteYourExportSnapshot"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "retention",
+    "title": "Expiry, hold and purge",
+    "body": "Database-clock expiry removes live eligibility independently of the maintenance status. Legal hold blocks retention expiry marking and purge; queued propagation is represented separately.",
+    "controls": [
+      "YouWithdrawAnOwnedSubmission",
+      "YouRequestAnExportSnapshot",
+      "YouCompleteYourExportSnapshot"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "export-ready",
+    "title": "Export snapshot created",
+    "body": "A ready snapshot pins selected source identities and requester/tenant metadata. Creation is separate from completion and does not establish a delivered export.",
+    "controls": [
+      "YouWithdrawAnOwnedSubmission",
+      "YouRequestAnExportSnapshot",
+      "YouCompleteYourExportSnapshot"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "export-complete",
+    "title": "Export manifest committed",
+    "body": "Completion rechecks source liveness and allowed use while creating the manifest. A later withdrawal can invalidate this snapshot; the historical delivery bit remains set.",
+    "controls": [
+      "YouWithdrawAnOwnedSubmission",
+      "YouRequestAnExportSnapshot",
+      "YouCompleteYourExportSnapshot"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "access-refused",
+    "title": "Request or completion refused",
+    "body": "Owner/tenant mismatch is not found. Missing authorization, invalidated sources, conflicting export metadata or an unavailable rebuild fence prevent the affected operation.",
+    "controls": [
+      "YouWithdrawAnOwnedSubmission",
+      "YouRequestAnExportSnapshot",
+      "YouCompleteYourExportSnapshot"
+    ],
+    "kind": "server"
+  }
+]

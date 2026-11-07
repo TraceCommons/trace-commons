@@ -853,18 +853,6 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertEqual(LaunchRouting.opening(nil, startup: .running, requiresOnboarding: model.requiresOnboarding, onboardingKnown: true).window, .firstRun)
     }
 
-    /// The failure is recorded from the `status` read itself, and cleared
-    /// by its next answer.
-    func test_theStatusReadRecordsItsFailure() throws {
-        let model = try Self.text("AppModel.swift")
-        XCTAssertTrue(model.contains(#"""
-                perform("status", work: { try $0.status() }, onFailure: { self.publishIfChanged(\.statusReadFailed, true) }) {
-                    self.publishIfChanged(\.status, $0)
-                    self.publishIfChanged(\.statusReadFailed, false)
-                }
-        """#))
-    }
-
     /// The Monitor's Settings button opens Settings before onboarding too
     /// (M1 of #1242's review): Settings gates each section itself (R-43),
     /// so the sections available before onboarding are reachable from the

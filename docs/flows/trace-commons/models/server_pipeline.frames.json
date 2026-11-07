@@ -1,0 +1,128 @@
+[
+  {
+    "label": "pipeline_idle",
+    "title": "Versioned processing",
+    "body": "Receipt acceptance commits Admission synchronously. Later Review, Score and Settle use worker leases; immutable bundle identity belongs to each run.",
+    "controls": [
+      "ReviewerClaimsTheHold",
+      "ReviewerApprovesTheHold",
+      "ReviewerRejectsTheHold",
+      "OperatorSuspendsOrResumesThePolicy",
+      "OperatorReleasesThePaidRun",
+      "OperatorFailsThePaidRun"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "pipeline_pending",
+    "title": "Processing is pending",
+    "body": "A run awaits its next Review, Score or Settle phase. Phase commits reset charged attempts. Receipt acceptance and human assessment can create pending work independently of worker responses.",
+    "controls": [
+      "ReviewerClaimsTheHold",
+      "ReviewerApprovesTheHold",
+      "ReviewerRejectsTheHold",
+      "OperatorSuspendsOrResumesThePolicy",
+      "OperatorReleasesThePaidRun",
+      "OperatorFailsThePaidRun"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "pipeline_leased",
+    "title": "Worker phase lease",
+    "body": "Two workers retain separate request snapshots. Expiry permits reclaim; a late result checks token and database-clock lease. Bounded renewal differs from the exclusive human review claim.",
+    "controls": [
+      "ReviewerClaimsTheHold",
+      "ReviewerApprovesTheHold",
+      "ReviewerRejectsTheHold",
+      "OperatorSuspendsOrResumesThePolicy",
+      "OperatorReleasesThePaidRun",
+      "OperatorFailsThePaidRun"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "pipeline_review_hold",
+    "title": "Privacy and Review hold",
+    "body": "The Review-start classifier records a privacy pass before Review. Escalation or Admission quarantine parks the run without charging its claim; a live human claim and phase-bound assessment resolve the hold.",
+    "controls": [
+      "ReviewerClaimsTheHold",
+      "ReviewerApprovesTheHold",
+      "ReviewerRejectsTheHold",
+      "OperatorSuspendsOrResumesThePolicy",
+      "OperatorReleasesThePaidRun",
+      "OperatorFailsThePaidRun"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "pipeline_score_hold",
+    "title": "Score review hold",
+    "body": "The Score policy requested human review before pricing. No award or settlement is seeded. Rejection produces a server zero Score; approval is passed into the policy, and a repeated hold fails terminally.",
+    "controls": [
+      "ReviewerClaimsTheHold",
+      "ReviewerApprovesTheHold",
+      "ReviewerRejectsTheHold",
+      "OperatorSuspendsOrResumesThePolicy",
+      "OperatorReleasesThePaidRun",
+      "OperatorFailsThePaidRun"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "pipeline_retry",
+    "title": "Retry or suspension",
+    "body": "Operational failures spend a finite attempt budget. Missing controls, dependency outages, policy suspension and transient failures return the claim attempt and remain retryable with a bounded delay.",
+    "controls": [
+      "ReviewerClaimsTheHold",
+      "ReviewerApprovesTheHold",
+      "ReviewerRejectsTheHold",
+      "OperatorSuspendsOrResumesThePolicy",
+      "OperatorReleasesThePaidRun",
+      "OperatorFailsThePaidRun"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "pipeline_settle",
+    "title": "Settlement progress boundary",
+    "body": "Persisted selection, terminal instrument progress and a paid leg are distinct from the phase commit. Detailed index, credit and payout effects are owned by server_settlement.",
+    "controls": [
+      "ReviewerClaimsTheHold",
+      "ReviewerApprovesTheHold",
+      "ReviewerRejectsTheHold",
+      "OperatorSuspendsOrResumesThePolicy",
+      "OperatorReleasesThePaidRun",
+      "OperatorFailsThePaidRun"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "pipeline_operator_hold",
+    "title": "Paid run needs an operator",
+    "body": "A finishable Settle run with a paid leg can park when its gate commit is refused permanently. An operator may fail it or grant another commit attempt; a released paid run can be held again.",
+    "controls": [
+      "ReviewerClaimsTheHold",
+      "ReviewerApprovesTheHold",
+      "ReviewerRejectsTheHold",
+      "OperatorSuspendsOrResumesThePolicy",
+      "OperatorReleasesThePaidRun",
+      "OperatorFailsThePaidRun"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "pipeline_terminal",
+    "title": "Processing ended",
+    "body": "Complete and Failed remain distinct in the run record. Review rejection and Admission rejection complete normally. Exhaustion and deterministic refusal can fail, while paid-leg holds retain their separate state.",
+    "controls": [
+      "ReviewerClaimsTheHold",
+      "ReviewerApprovesTheHold",
+      "ReviewerRejectsTheHold",
+      "OperatorSuspendsOrResumesThePolicy",
+      "OperatorReleasesThePaidRun",
+      "OperatorFailsThePaidRun"
+    ],
+    "kind": "server"
+  }
+]

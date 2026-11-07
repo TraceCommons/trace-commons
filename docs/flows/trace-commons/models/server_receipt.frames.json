@@ -1,0 +1,57 @@
+[
+  {
+    "label": "receipt_idle",
+    "title": "Receipt service",
+    "body": "New requests enter with auth-derived tenant and principal. The durable receipt, request bytes, routing owner and per-attempt object remain separate.",
+    "controls": [
+      "OperatorChangesRouting",
+      "OperatorSelectsBundle",
+      "OperatorChangesAdmissionControl"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "receipt_precheck",
+    "title": "Checking the receipt",
+    "body": "Authority and privacy controls precede write-path replay lookup. An early refusal stores nothing. A deterministic local rescrub changes stored source bytes, while raw request bytes keep their replay identity.",
+    "controls": [
+      "OperatorChangesRouting",
+      "OperatorSelectsBundle",
+      "OperatorChangesAdmissionControl"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "receipt_staged",
+    "title": "Staged encrypted receipt",
+    "body": "A short transaction pins the immutable active bundle and counts quota once per key. The encrypted object is written outside that transaction; Admission runs synchronously before final acceptance.",
+    "controls": [
+      "OperatorChangesRouting",
+      "OperatorSelectsBundle",
+      "OperatorChangesAdmissionControl"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "receipt_result",
+    "title": "Receipt transaction result",
+    "body": "A committed receipt and its Admission outcome survive a lost response or post-commit audit failure. Matching bytes replay under the original routing owner; mismatched bytes or ownership are refused.",
+    "controls": [
+      "OperatorChangesRouting",
+      "OperatorSelectsBundle",
+      "OperatorChangesAdmissionControl"
+    ],
+    "kind": "server"
+  },
+  {
+    "label": "receipt_orphans",
+    "title": "Receipt attempt cleanup",
+    "body": "Staged attempts and their objects can outlive failed requests. Cleanup can fail and retry; an attempt whose staging row expired or was swept cannot commit. Quota usage remains counted.",
+    "controls": [
+      "OperatorChangesRouting",
+      "OperatorSelectsBundle",
+      "OperatorChangesAdmissionControl"
+    ],
+    "kind": "server"
+  }
+]

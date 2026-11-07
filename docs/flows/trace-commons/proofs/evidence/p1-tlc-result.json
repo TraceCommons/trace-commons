@@ -1,0 +1,27 @@
+{
+  "model": "client_consent",
+  "command": [
+    "python3",
+    "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/scripts/check_selected.py",
+    "client_consent",
+    "--skill-root",
+    "/private/tmp/tc-flow-promises-tools/plugins",
+    "--out",
+    "/private/tmp/tc-quint-proof-checks/tlc-consent-final/client_consent/check"
+  ],
+  "exitCode": 1,
+  "timedOut": false,
+  "elapsedSeconds": 45.29,
+  "budgetSeconds": 120,
+  "budgetKind": "wall-clock process budget; no model constraint",
+  "modelSha256": "1f00f4582914a737e9f178403d32c557509ab62a9b7d8f6af76b7e4f20b3a045",
+  "configSha256": "71f5db6dab2620dbbb6c4aec089ebd8c371df88d23ed2b33b925b32acc30b352",
+  "viewSha256": "31a2930d704958b04cac687a223e871d148c53ef51cc6d4f3b52bdbeb58db521",
+  "artifactsChangedDuringRun": false,
+  "results": [
+    {
+      "definition": "P1",
+      "status": "breaks"
+    }
+  ]
+}
