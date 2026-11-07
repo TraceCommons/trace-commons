@@ -505,13 +505,13 @@ private struct HomeOverview: View {
 /// The Not contributed card (owner, 2026-10-19): half a hero's height; the
 /// label and the count and size on the left, and the core's call to share
 /// (owner, 2026-10-20) on the right in a translucent card of its own
-/// (owner, 2026-10-27), over its icon as a watermark on the right, as the
-/// tiles'. It is on the standard card fill with no border and nothing
-/// moving on it (owner, 2026-11-02: no shimmer; from 2026-10-27 a soft band
-/// of light crossed it, before that a soft light turned round its edge,
-/// before that a duller band crossed it, before that it had a solid accent
-/// border, and before that a turning glow edge). The whole card is the
-/// button.
+/// (owner, 2026-10-27). No icon (owner, 2026-11-07: its watermark, from
+/// 2026-10-20, is gone, as the tiles' are). It is on the standard card
+/// fill with no border and nothing moving on it (owner, 2026-11-02: no
+/// shimmer; from 2026-10-27 a soft band of light crossed it, before that a
+/// soft light turned round its edge, before that a duller band crossed it,
+/// before that it had a solid accent border, and before that a turning
+/// glow edge). The whole card is the button.
 private struct HomeNotContributedCard: View {
     let title: String
     let count: Int
@@ -571,13 +571,6 @@ private struct HomeNotContributedCard: View {
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
     }
-}
-
-/// Home's stat tile icons (owner, 2026-10-12).
-enum HomeStatIcons {
-    /// Home's Private AI tiles (owner, 2026-10-20).
-    static let calls = "arrow.left.arrow.right"
-    static let verified = "checkmark.shield"
 }
 
 /// Home's Private AI card while NEAR AI is signed out (owner,
@@ -1807,8 +1800,9 @@ private struct HomeStatTile: View {
     /// nil for a tile on the page its number lives on (History's).
     var action: (() -> Void)?
 
-    /// #1146's `StatCard`: a full card, the value bold and tabular, with no
-    /// icon (Ron, 2026-11-05).
+    /// #1146's `StatCard`: a full card, the value bold and tabular. No
+    /// icon (owner, 2026-11-07: the watermark every small card on Home drew
+    /// from 2026-10-20 is gone).
     var body: some View {
         if let action {
             Button(action: action) {
