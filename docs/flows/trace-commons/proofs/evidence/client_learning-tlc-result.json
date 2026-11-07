@@ -1,0 +1,27 @@
+{
+  "model": "client_learning",
+  "command": [
+    "python3",
+    "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/scripts/check_selected.py",
+    "client_learning",
+    "--skill-root",
+    "/private/tmp/tc-flow-promises-tools/plugins",
+    "--out",
+    "/private/tmp/tc-quint-proof-checks/tlc-selected-4/client_learning/check"
+  ],
+  "exitCode": -15,
+  "timedOut": true,
+  "elapsedSeconds": 120.01,
+  "budgetSeconds": 120,
+  "budgetKind": "wall-clock process budget; no model constraint",
+  "modelSha256": "dadc2e60fca0973717bf66e9c5e596b3e1912573febf4965b6eb7774f792b2ad",
+  "configSha256": "6ce46ccebb89efdbe7b9f283418e150dcc57831a8362ea4bc9e99862b7cc1f01",
+  "viewSha256": "9064b88ca49cbd92b7fd5c782fe4583b0df35abf54f28ed40073cf8becd45c00",
+  "artifactsChangedDuringRun": false,
+  "results": [
+    {
+      "definition": "P13",
+      "status": "not checked"
+    }
+  ]
+}

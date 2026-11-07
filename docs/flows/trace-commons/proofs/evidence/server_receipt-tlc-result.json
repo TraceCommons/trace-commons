@@ -1,0 +1,35 @@
+{
+  "model": "server_receipt",
+  "command": [
+    "python3",
+    "/private/tmp/tc-quint-client-server/docs/flows/trace-commons/scripts/check_selected.py",
+    "server_receipt",
+    "--skill-root",
+    "/private/tmp/tc-flow-promises-tools/plugins",
+    "--out",
+    "/private/tmp/tc-quint-proof-checks/tlc-selected-4/server_receipt/check"
+  ],
+  "exitCode": -15,
+  "timedOut": true,
+  "elapsedSeconds": 120.0,
+  "budgetSeconds": 120,
+  "budgetKind": "wall-clock process budget; no model constraint",
+  "modelSha256": "0bceeb8153c5347626dc3676da4cdebb4942fc6301fe9c09a796f76a719cf69e",
+  "configSha256": "dd23bf816b3fe3c2c74251a6bfb9cb2d9504671bac34363fd1267633ad80d9c0",
+  "viewSha256": "ea255f982cba24013b4eae3f83d4cfcb58b56112b8c9ec5de79401f3a0e40640",
+  "artifactsChangedDuringRun": false,
+  "results": [
+    {
+      "definition": "P5",
+      "status": "not checked"
+    },
+    {
+      "definition": "P8",
+      "status": "not checked"
+    },
+    {
+      "definition": "P11",
+      "status": "not checked"
+    }
+  ]
+}
