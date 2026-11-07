@@ -169,13 +169,12 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
 /// Given `onMove`, a movable tab can be dragged along the strip (owner,
 /// 2026-10-30): it follows the pointer, and each time it passes the middle
 /// of a neighbouring movable tab the two trade places (`onMove` with the
-/// dragged value and the one whose place it takes). A movable tab lifts
-/// under the pointer (owner, 2026-11-05; it waited for a held press
-/// before): it pops out of the strip, a little larger and raised on a
-/// control's surface, saying it can be picked up, and a drag moves it
-/// straight away. A click opens a tab, as before; a tab let go where it
-/// was opens too, and one that was moved never does. No tab draws a press
-/// fill (owner, 2026-11-02).
+/// dragged value and the one whose place it takes). A press held for
+/// `liftDelay` lifts the tab first (owner, 2026-11-02): it pops out of the
+/// strip, a little larger and raised on a control's surface, and only then
+/// follows the pointer; a quick drag moves nothing. A click opens a tab, as
+/// before; a tab held and let go where it was opens too, and one that was
+/// moved never does. No tab draws a press fill (owner, 2026-11-02).
 public struct GlassRuleTabs<Value: Hashable>: View {
     private let label: String
     private let segments: [GlassSegment<Value>]
@@ -187,7 +186,7 @@ public struct GlassRuleTabs<Value: Hashable>: View {
     private let movable: (Value) -> Bool
     private let onMove: ((Value, Value) -> Void)?
     @State private var hovered: Value?
-    /// The tab lifted by a press, while the press lasts. SwiftUI
+    /// The tab lifted by a held press, while the press lasts. SwiftUI
     /// clears it however the gesture ends, so a lifted tab always drops.
     @GestureState private var lifted: Value?
     /// The tab being dragged, and how far it sits from its slot.
@@ -236,10 +235,7 @@ public struct GlassRuleTabs<Value: Hashable>: View {
             HStack(spacing: 0) {
                 ForEach(segments) { segment in
                     if onMove != nil, movable(segment.value) {
-                        // Under the pointer, pressed or dragged, a movable
-                        // tab is lifted (owner, 2026-11-05).
-                        let up = hovered == segment.value || lifted == segment.value
-                            || dragging == segment.value
+                        let up = lifted == segment.value || dragging == segment.value
                         tab(segment, lifted: up)
                             .scaleEffect(up ? Self.liftScale : 1)
                             .offset(x: dragging == segment.value ? dragOffset : 0, y: up ? -Self.liftRise : 0)
@@ -353,9 +349,14 @@ public struct GlassRuleTabs<Value: Hashable>: View {
     }
 }
 
-/// Dragging a rule tab to move it (owner, 2026-10-30), lifted under the
-/// pointer and moved by a plain drag (owner, 2026-11-02, 2026-11-05).
+/// Dragging a rule tab to move it (owner, 2026-10-30), once a held press
+/// has lifted it (owner, 2026-11-02).
 extension GlassRuleTabs {
+    /// How long a press is held before the tab lifts.
+    static var liftDelay: Double { 0.35 }
+    /// How far the pointer may wander while the press is held; past it,
+    /// the press lifts nothing and stays a click.
+    static var liftSlop: CGFloat { 6 }
     /// How much larger a lifted tab is, how far it rises, and its shadow.
     static var liftScale: CGFloat { 1.06 }
     static var liftRise: CGFloat { 2 }
@@ -378,14 +379,19 @@ extension GlassRuleTabs {
         abs(translation) >= dragThreshold
     }
 
-    /// A press holds a movable tab lifted (owner, 2026-11-05); a drag then
-    /// moves it with the pointer, and it trades places with a movable
-    /// neighbour once past that neighbour's middle, keeping its place under
-    /// the pointer as the strip reorders.
+    /// A held press lifts a movable tab; then it follows the pointer, and
+    /// trades places with a movable neighbour once past that neighbour's
+    /// middle, keeping its place under the pointer as the strip reorders.
     private func drag(_ value: Value) -> some Gesture {
-        DragGesture(minimumDistance: 0, coordinateSpace: .global)
-            .updating($lifted) { _, state, _ in state = value }
-            .onChanged { gesture in follow(value, translation: gesture.translation.width) }
+        LongPressGesture(minimumDuration: Self.liftDelay, maximumDistance: Self.liftSlop)
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
+            .updating($lifted) { phase, state, _ in
+                if case .second(true, _) = phase { state = value }
+            }
+            .onChanged { phase in
+                guard case .second(true, let gesture) = phase else { return }
+                follow(value, translation: gesture?.translation.width ?? 0)
+            }
             .onEnded { _ in drop() }
     }
 

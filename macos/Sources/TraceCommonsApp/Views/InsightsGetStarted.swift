@@ -66,7 +66,8 @@ struct InsightsGetStartedCard: View {
                       link: start.openTraces.map { GetStartedCard.Link(title: text("analytics_start_choose"), action: $0) }),
                 .init(title: text("analytics_start_step_fill"), detail: text("analytics_start_step_fill_detail"),
                       info: text("analytics_start_step_fill_info")),
-            ])
+            ],
+            pixelField: true)
     }
 }
 

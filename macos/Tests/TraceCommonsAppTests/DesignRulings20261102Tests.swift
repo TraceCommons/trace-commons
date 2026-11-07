@@ -57,17 +57,13 @@ final class DesignRulings20261102Tests: XCTestCase {
         XCTAssertTrue(card.contains("disclosure = SharingDisclosureFlow()"))
     }
 
-    /// Insights' empty state draws the shared getting-started card, which
-    /// has no gradient, graphic or pill, and an X only when given one.
-    /// Home's Traces hero and the Private AI guide are the owner's own
-    /// designs (2026-11-05: `HomeTracesHeroTests`,
-    /// `InferenceParityTests.testTheGuideCardIsTheOwnersDesign`); the guide
-    /// keeps the shared card's pixel field.
+    /// One card for all three: Insights' empty state, the Private AI guide
+    /// and Home's Traces walkthrough draw the same view, which has no
+    /// gradient, graphic or pill, and an X only when given one.
     func test_theThreeGettingStartedCardsAreOneDesign() throws {
         XCTAssertTrue(try Self.text("Views/InsightsGetStarted.swift").contains("GetStartedCard("))
-        XCTAssertFalse(try Self.text("Views/Monitor/InferenceViews.swift").contains("GetStartedCard("))
-        XCTAssertTrue(try Self.text("Views/Monitor/InferenceViews.swift").contains("GetStartedCardField()"))
-        XCTAssertFalse(try Self.text("Views/Monitor/HomeViews.swift").contains("GetStartedCard("))
+        XCTAssertTrue(try Self.text("Views/Monitor/InferenceViews.swift").contains("GetStartedCard("))
+        XCTAssertTrue(try Self.text("Views/Monitor/HomeViews.swift").contains("GetStartedCard("))
         let card = try Self.text("Views/GetStartedCard.swift")
         for absent in ["Gradient", "GlassHeroCard(", "GlassHeroSymbol(", "heroInk", "actionOnPill"] {
             XCTAssertFalse(card.contains(absent), absent)
@@ -77,13 +73,12 @@ final class DesignRulings20261102Tests: XCTestCase {
         XCTAssertTrue(card.contains("Image(systemName: \"arrow.right\")"), "a step's action is a text link")
     }
 
-    /// Private AI is the first section on Home, above Traces and Account,
-    /// under the Traces hero, which leads Home (owner, 2026-11-05).
+    /// Private AI is the first section on Home, above Traces and Account.
     func test_privateAIIsFirstOnHome() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains(
             "return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n"
-                + "            tracesHero\n            noCredit\n            privateAI\n            HomeSection(words?.sectionTraces) {"))
+                + "            noCredit\n            privateAI\n            HomeSection(words?.sectionTraces) {"))
         XCTAssertEqual(home.components(separatedBy: "            privateAI\n").count - 1, 1)
     }
 
@@ -142,16 +137,16 @@ final class DesignRulings20261102Tests: XCTestCase {
         XCTAssertEqual(NudgeGlassCard.style(.notNow(.idleSessions)), .link)
     }
 
-    /// The pixel field is tried on the Private AI tab's card only, out to
-    /// the card's edges and corners, behind its words.
-    func test_thePixelFieldIsOnThePrivateAIGuideOnly() throws {
-        XCTAssertTrue(try Self.text("Views/Monitor/InferenceViews.swift").contains("GetStartedCardField()"))
-        XCTAssertFalse(try Self.text("Views/Monitor/HomeViews.swift").contains("pixelField"))
-        XCTAssertFalse(try Self.text("Views/Monitor/HomeViews.swift").contains("GetStartedCardField"))
-        XCTAssertFalse(try Self.text("Views/InsightsGetStarted.swift").contains("pixelField"))
+    /// The pixel field is on every getting-started card (Ron, 2026-11-05; it
+    /// was tried on the Private AI tab's first), out to the card's edges and
+    /// corners, behind its words. Home's rolls as waves, to tell it apart.
+    func test_thePixelFieldIsOnEveryGettingStartedCard() throws {
+        XCTAssertTrue(try Self.text("Views/Monitor/InferenceViews.swift").contains("pixelField: true"))
+        XCTAssertTrue(try Self.text("Views/Monitor/HomeViews.swift").contains("pixelField: true, fieldPattern: .waves)"))
+        XCTAssertTrue(try Self.text("Views/InsightsGetStarted.swift").contains("pixelField: true"))
         let card = try Self.text("Views/GetStartedCard.swift")
         XCTAssertTrue(card.contains("var pixelField = false"))
-        XCTAssertTrue(card.contains(".background { if pixelField { GetStartedCardField() } }\n        .insightsSection()"))
+        XCTAssertTrue(card.contains(".background { if pixelField { GetStartedCardField(pattern: fieldPattern) } }\n        .insightsSection()"))
         XCTAssertTrue(card.contains(".clipShape(RoundedRectangle(cornerRadius: GlassTokens.Radius.card, style: .continuous))"))
         XCTAssertTrue(card.contains(".padding(.horizontal, -GlassTokens.Space.cardPaddingHorizontal)"))
     }

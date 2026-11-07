@@ -241,7 +241,11 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertTrue(try Self.text("AppModel.swift").contains("credentialPollInterval"))
         XCTAssertFalse(source.contains("palette("), "the card reads the glass status, not the TC palette")
         let balance = try Self.text("Views/BalanceRow.swift")
-        for needle in ["GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(tone))",
+        // The state is the card's subtitle, in words alone (Ron, 2026-11-05).
+        XCTAssertFalse(balance.contains("GlassStatusLabel("))
+        XCTAssertTrue(try Self.text("Views/Monitor/InferenceAccount.swift").contains(
+            "subtitle: BalanceSurface.stateLine(model.balanceStatus, copy: copy, calls: model.balanceCalls)"))
+        for needle in ["BalanceSurface.stateLine(status, copy: copy, calls: model.balanceCalls) == nil",
                        "BalanceSurface.showsFigures(status, calls: model.balanceCalls)"] {
             XCTAssertTrue(balance.contains(needle), "BalanceRow.swift lacks \(needle)")
         }
@@ -509,7 +513,7 @@ final class InferenceParityTests: XCTestCase {
         // cards with the tool buttons, then the calls, then the balance
         // with billing under it (product owner, 2026-10-28).
         let scroll = try XCTUnwrap(views.range(of: "        ScrollView {\n"))
-        let guide = try XCTUnwrap(views.range(of: "                PrivateAIGuideCard(openTraces: openTraces)\n"))
+        let guide = try XCTUnwrap(views.range(of: "                PrivateAIGuideCard()\n"))
         XCTAssertLessThan(scroll.lowerBound, guide.lowerBound)
         XCTAssertLessThan(guide.lowerBound, toggle.lowerBound, "the step-by-step card leads the page")
         XCTAssertLessThan(toggle.lowerBound, managed.lowerBound, "the status follows the steps")
@@ -759,34 +763,24 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertEqual(PrivateAIInspectorView.subtitle(copy, state: nil), copy.subtitle)
     }
 
-    /// The guide card as the owner chose it from mockups (2026-11-05): the
-    /// managed copy's words, a dark blue title, the original lock shield in
-    /// the corner over the pixel field, the steps as a plain list with thin
-    /// lines between them, and Earn credit opening Traces. Every time, with
-    /// no X (owner, 2026-11-04).
-    func testTheGuideCardIsTheOwnersDesign() throws {
+    /// The step-by-step card explains and is not a button: no action, and
+    /// no step link. It is the shared getting-started card (owner,
+    /// 2026-11-02), each step a title over its line.
+    func testTheGuideCardIsNotAButton() throws {
         let views = try String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/InferenceViews.swift"), encoding: .utf8)
         let guide = try XCTUnwrap(views.range(of: "struct PrivateAIGuideCard: View {"))
         let next = try XCTUnwrap(views.range(of: "struct PrivateAIInspectorView: View {"))
         let card = String(views[guide.lowerBound..<next.lowerBound])
-        XCTAssertTrue(card.contains(".foregroundStyle(GlassTokens.Color.guideTitle.color)"))
-        XCTAssertTrue(card.contains("Image(systemName: \"lock.shield.fill\")"))
-        XCTAssertTrue(card.contains("GetStartedCardField()"))
-        XCTAssertTrue(card.contains("action: index == 0 ? openTraces : nil)"), "Earn credit opens Traces")
-        XCTAssertFalse(card.contains("GetStartedCard("))
+        XCTAssertFalse(card.contains("action:"), "the guide card has no action")
+        XCTAssertFalse(card.contains("link:"), "no step links anywhere")
+        XCTAssertTrue(card.contains("GetStartedCard("))
         XCTAssertFalse(card.contains("GlassHeroCard("))
-        XCTAssertFalse(card.contains("close:"))
-        XCTAssertFalse(card.contains("@AppStorage"))
+        XCTAssertTrue(card.contains("close: GetStartedCard.Close(label: MonitorWords.close) { closed = true },"))
         XCTAssertEqual(PrivateAIGuideCard.steps.map { $0.title },
                        ["guide_step_earn_title", "guide_step_start_title", "guide_step_use_title"])
         XCTAssertEqual(PrivateAIGuideCard.steps.map { $0.line }, ["guide_step_earn", "guide_step_start", "guide_step_use"])
-        let window = try String(contentsOf: URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/TraceCommonsApp/Views/MonitorWindowView.swift"), encoding: .utf8)
-        XCTAssertTrue(window.contains(
-            "InferenceTabView(store: inference, openTraces: {\n                        tab = .traces\n"))
     }
 
 }

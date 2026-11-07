@@ -22,11 +22,11 @@ final class DesignRulings20261027Tests: XCTestCase {
 
     /// The call to share sits in a translucent card of its own, to the right
     /// of the label and the count: a card on the card, so it takes the
-    /// nested card's fill, which the watermark shows through.
+    /// nested card's fill.
     func test_theCallToShareSitsInItsOwnCardOnTheRight() throws {
         let body = try Self.notContributedCard()
         let count = try XCTUnwrap(body.range(of: "Text(String(count))"))
-        let column = try XCTUnwrap(body.range(of: ".fixedSize()\n", range: count.upperBound..<body.endIndex))
+        let column = try XCTUnwrap(body.range(of: ".fixedSize(horizontal: detail != nil, vertical: detail != nil)\n", range: count.upperBound..<body.endIndex))
         let detail = try XCTUnwrap(body.range(of: "Text(detail)"))
         let inner = try XCTUnwrap(body.range(of: ".glassTier(.cardQuiet)"))
         let outer = try XCTUnwrap(body.range(of: ".glassTier(.card,"))
