@@ -66,11 +66,11 @@ echo "tauri:  $TAURI_GROUPS"
 test "$NATIVE_GROUPS" = "$TAURI_GROUPS" \
   || { echo "FAIL: macos/ and tauri-desktop/ entitlements request different access groups"; exit 1; }
 
-GOOD="$WORK/good/Near AI Gateway.app"
+GOOD="$WORK/good/Near.ai.app"
 make_bundle "$GOOD"
 codesign --force --sign - --entitlements "$ROOT/macos/entitlements.plist" "$GOOD"
 
-BARE="$WORK/bare/Near AI Gateway.app"
+BARE="$WORK/bare/Near.ai.app"
 make_bundle "$BARE"
 codesign --force --sign - "$BARE"
 
@@ -118,13 +118,13 @@ printf '%s' "$OUT" \
 # entitlements, whose group it may not have.
 STAGING_BUNDLE=ai.tracecommons.shell.staging
 STAGING_PROFILE=TraceCommons-Staging-DeveloperID.provisionprofile
-STAGING="$WORK/staging/Near AI Gateway Staging.app"
+STAGING="$WORK/staging/Near.ai Staging.app"
 make_bundle "$STAGING" "$STAGING_BUNDLE" TraceCommonsApp "$STAGING_PROFILE"
 codesign --force --sign - --entitlements "$ROOT/macos/entitlements-staging.plist" "$STAGING"
 echo "=== fixture: staging bundle with its own entitlements and profile"
 TC_VERIFY_STATIC_ONLY=1 bash "$VERIFY" "$STAGING"
 
-STAGING_AS_PROD="$WORK/staging-as-prod/Near AI Gateway Staging.app"
+STAGING_AS_PROD="$WORK/staging-as-prod/Near.ai Staging.app"
 make_bundle "$STAGING_AS_PROD" "$STAGING_BUNDLE" TraceCommonsApp "$STAGING_PROFILE"
 codesign --force --sign - --entitlements "$ROOT/macos/entitlements.plist" "$STAGING_AS_PROD"
 echo "=== fixture: staging bundle signed with production entitlements must be refused"

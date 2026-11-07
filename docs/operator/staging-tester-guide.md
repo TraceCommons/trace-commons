@@ -14,7 +14,7 @@ built yet.
   [releases page](https://github.com/TraceCommons/trace-commons/releases).
   Staging builds are marked "Pre-release". Names look like
   `staging-<date>-<commit>-<run>`. The file is called
-  `Near-AI-Gateway-Staging-<version>-staging.<run>.dmg`.
+  `Near.ai-Staging-<version>-staging.<run>.dmg`.
 
 ## Make a NEAR AI staging account
 
@@ -51,7 +51,7 @@ Each pre-release has a `.sha256` file next to the `.dmg`. Download both into
 the same folder and run:
 
 ```bash
-shasum -a 256 -c Near-AI-Gateway-Staging-*.dmg.sha256
+shasum -a 256 -c Near.ai-Staging-*.dmg.sha256
 ```
 
 It should print `OK`. If it does not, delete the download and tell us.
@@ -59,7 +59,7 @@ It should print `OK`. If it does not, delete the download and tell us.
 You can also check that macOS accepts the app. Drag it to Applications, then:
 
 ```bash
-spctl --assess --type execute --verbose "/Applications/Near AI Gateway Staging.app"
+spctl --assess --type execute --verbose "/Applications/Near.ai Staging.app"
 ```
 
 It should say `accepted` and name the Notarized Developer ID source.
@@ -262,7 +262,7 @@ None of this touches a released CLI on the same server.
 3. Delete the data folder `~/Library/Application Support/trace-commons-staging`,
    if you want your staging state gone. The released app's folder,
    `trace-commons` beside it, is separate; leave it alone.
-4. Delete the Near AI Gateway Staging items from Keychain Access, if you want your
+4. Delete the Near.ai Staging items from Keychain Access, if you want your
    staging keys gone.
 
 None of this touches the released app.

@@ -98,26 +98,31 @@ impl RexTab {
 }
 
 /// The group session in `rex ls --json`'s output: the session id held by
-/// the first object that also holds the string [`GROUP_LABEL`]. Read by
-/// value, not by field name, because the listing's shape is not published.
+/// the first object that also holds the string [`GROUP_LABEL`], else one
+/// holding a former app name, so a session an older version made keeps
+/// being used after a rename. Read by value, not by field name, because the
+/// listing's shape is not published.
 #[cfg(any(target_os = "macos", test))]
 fn group_session(listing: &[u8]) -> Option<String> {
-    fn walk(value: &Value) -> Option<String> {
+    fn walk(value: &Value, label: &str) -> Option<String> {
         match value {
             Value::Object(fields) => {
                 let own: Vec<&str> = fields.values().filter_map(Value::as_str).collect();
-                if own.contains(&GROUP_LABEL) {
+                if own.contains(&label) {
                     if let Some(id) = own.iter().find(|text| valid_id("session", text)) {
                         return Some(id.to_string());
                     }
                 }
-                fields.values().find_map(walk)
+                fields.values().find_map(|field| walk(field, label))
             }
-            Value::Array(items) => items.iter().find_map(walk),
+            Value::Array(items) => items.iter().find_map(|item| walk(item, label)),
             _ => None,
         }
     }
-    walk(&serde_json::from_slice(listing).ok()?)
+    let listing: Value = serde_json::from_slice(listing).ok()?;
+    std::iter::once(GROUP_LABEL)
+        .chain(crate::brand::FORMER_APP_NAMES.iter().copied())
+        .find_map(|label| walk(&listing, label))
 }
 
 /// The first `kind` id in `output`, JSON or not: `rex new --json` names the
@@ -486,6 +491,19 @@ mod tests {
         );
         assert_eq!(group_session(b"[]"), None);
         assert_eq!(group_session(b"not json"), None);
+    }
+
+    /// A session an older version made under a former name is still the
+    /// group, unless one under the current name exists too.
+    #[test]
+    fn a_former_name_group_is_reused_but_the_current_one_wins() {
+        let other = "session:01a1a1cb-0d4e-7c1a-9f00-000000000009";
+        let former = format!(r#"[{{"id":"{SESSION}","label":"Near.ai"}}]"#);
+        assert_eq!(group_session(former.as_bytes()), Some(SESSION.into()));
+        let both = format!(
+            r#"[{{"id":"{other}","label":"Near.ai"}},{{"id":"{SESSION}","label":"Near AI Gateway"}}]"#
+        );
+        assert_eq!(group_session(both.as_bytes()), Some(SESSION.into()));
     }
 
     #[test]

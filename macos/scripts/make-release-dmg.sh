@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build, sign, notarize and staple the app bundle (Near AI Gateway.app), then package it as a DMG.
+# Build, sign, notarize and staple Near.ai.app, then package it as a DMG.
 #
 # This is the release path. `make-app-bundle.sh` remains the development path
 # and stays ad-hoc-signed; nothing here changes it.
@@ -258,7 +258,7 @@ rm -rf "$DMG_ROOT"
 mkdir -p "$DMG_ROOT"
 ditto "$APP" "$DMG_ROOT/$(basename "$APP")"
 ln -s /Applications "$DMG_ROOT/Applications"
-hdiutil create -volname "$TC_BUNDLE_NAME" -srcfolder "$DMG_ROOT" -size "${DMG_MB}m" -ov -format UDZO "$DMG"
+hdiutil create -volname "$TC_DISPLAY_NAME" -srcfolder "$DMG_ROOT" -size "${DMG_MB}m" -ov -format UDZO "$DMG"
 rm -rf "$DMG_ROOT"
 # Refuse an image without both, and one whose app no longer verifies.
 DMG_CHECK="$WORK/dmg-check"

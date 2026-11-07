@@ -268,14 +268,14 @@ jobs:
       # line; this checks the bytes that ship, the FFI dylib and the bundled
       # CLI included, and fails the release if any of it is there.
       - name: No staging pin verifier in the shipped bundle
-        run: ./scripts/ci/assert-no-staging-markers.sh check "macos/.build/Near AI Gateway.app"
+        run: ./scripts/ci/assert-no-staging-markers.sh check macos/.build/Near.ai.app
 
       # The signed app is launched here, not merely inspected. An app carrying
       # the keychain entitlement without its provisioning profile is killed by
       # the kernel at exec, and nothing else in this pipeline would notice: the
       # DMG builds, signs, notarizes and staples exactly as it should.
       - name: Verify entitlements and reach the credential store
-        run: ./scripts/ci/verify-macos-entitlements.sh "macos/.build/Near AI Gateway.app"
+        run: ./scripts/ci/verify-macos-entitlements.sh macos/.build/Near.ai.app
 
       # make-app-bundle.sh lipos the FFI dylib and passes
       # `swift build --arch arm64 --arch x86_64`, so the DMG is universal and
@@ -286,10 +286,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          # The bundle is "Near AI Gateway.app"; the published asset is
-          # hyphenated so its download URL carries no spaces.
-          OUT="Near-AI-Gateway-${SHORT_VERSION}.dmg"
-          cp "macos/.build/Near AI Gateway.dmg" "dist/$OUT"
+          OUT="Near.ai-${SHORT_VERSION}.dmg"
+          cp macos/.build/Near.ai.dmg "dist/$OUT"
           # The DMG is signed, notarized and stapled by this point, so this
           # checksum already covers the final bytes -- unlike the Windows and
           # CLI paths, where signing happens after packaging and the checksum
@@ -1378,7 +1376,7 @@ jobs:
           # checksum THIS run's macOS job produced, out of the artifact
           # downloaded into dist/. It is the only source of a hash anywhere
           # in this step.
-          SHA="$(awk '{print $1}' dist/macos-dmg/Near-AI-Gateway-"$V".dmg.sha256)"
+          SHA="$(awk '{print $1}' dist/macos-dmg/Near.ai-"$V".dmg.sha256)"
           # Clone with the token IN the remote URL. `gh repo clone` leaves a
           # plain HTTPS remote, and GH_TOKEN authenticates the gh CLI but NOT
           # raw `git push` -- which failed on the first real release with
@@ -1412,18 +1410,14 @@ jobs:
           fi
           sed -i "s/^  sha256 \".*\"/  sha256 \"$SHA\"/" Casks/trace-commons.rb
           # The DMG and the bundle inside it were renamed from TraceCommons to
-          # Near.ai, then to Near AI Gateway. A tap still naming older files
-          # would bump to a url that 404s, so rewrite both stanzas from either
-          # former name here (a no-op once the tap carries the new names) and
-          # refuse to push unless both landed.
-          for OLD in TraceCommons Near.ai; do
-            OLD_RE="${OLD//./\\.}"
-            sed -i "s|/${OLD_RE}-#{version}\\.dmg\"|/Near-AI-Gateway-#{version}.dmg\"|" Casks/trace-commons.rb
-            sed -i "s|^  app \"${OLD_RE}\\.app\"\$|  app \"Near AI Gateway.app\"|" Casks/trace-commons.rb
-          done
-          if ! grep -qF '/Near-AI-Gateway-#{version}.dmg"' Casks/trace-commons.rb \
-            || ! grep -qxF '  app "Near AI Gateway.app"' Casks/trace-commons.rb; then
-            echo "cask does not name Near-AI-Gateway-#{version}.dmg and Near AI Gateway.app; refusing to push a cask that points at a missing asset" >&2
+          # Near.ai. A tap still naming the old files would bump to a url that
+          # 404s, so rewrite both stanzas here (a no-op once the tap carries
+          # the new names) and refuse to push unless both landed.
+          sed -i 's|/TraceCommons-#{version}\.dmg"|/Near.ai-#{version}.dmg"|' Casks/trace-commons.rb
+          sed -i 's|^  app "TraceCommons\.app"$|  app "Near.ai.app"|' Casks/trace-commons.rb
+          if ! grep -qF '/Near.ai-#{version}.dmg"' Casks/trace-commons.rb \
+            || ! grep -qxF '  app "Near.ai.app"' Casks/trace-commons.rb; then
+            echo "cask does not name Near.ai-#{version}.dmg and Near.ai.app; refusing to push a cask that points at a missing asset" >&2
             exit 1
           fi
           # Prove the hash now in the file is the one computed from this
@@ -1583,10 +1577,10 @@ jobs:
           ARGS=()
 
           if [ "$MACOS_RESULT" = success ]; then
-            F="dist/macos-dmg/Near-AI-Gateway-$V.dmg"
+            F="dist/macos-dmg/Near.ai-$V.dmg"
             SHA="$(shasum -a 256 "$F" | awk '{print $1}')"
             SIZE="$(wc -c < "$F" | tr -d ' ')"
-            ARGS+=(--platform "macos-universal=$BASE/Near-AI-Gateway-$V.dmg=$SHA=$SIZE")
+            ARGS+=(--platform "macos-universal=$BASE/Near.ai-$V.dmg=$SHA=$SIZE")
           fi
 
           # Never true on a tag push now that `windows` is dispatch-only,
@@ -1685,8 +1679,8 @@ jobs:
           ./scripts/updates/generate-appcast.sh \
             --short-version "$V" \
             --build-version "$BUILD_VERSION" \
-            --dmg-url "https://github.com/$REPO/releases/download/app-v$V/Near-AI-Gateway-$V.dmg" \
-            --dmg-path "dist/macos-dmg/Near-AI-Gateway-$V.dmg" \
+            --dmg-url "https://github.com/$REPO/releases/download/app-v$V/Near.ai-$V.dmg" \
+            --dmg-path "dist/macos-dmg/Near.ai-$V.dmg" \
             --sign-update "$SIGN_UPDATE" \
             --ed-key-file "$RUNNER_TEMP/sparkle-ed-key" \
             --out dist/updates/appcast.xml

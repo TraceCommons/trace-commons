@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assemble the app bundle (Near AI Gateway.app) around the SwiftPM executable.
+# Assemble Near.ai.app around the SwiftPM executable.
 #
 # SwiftPM produces a bare Mach-O; the app needs a bundle so that an Info.plist
 # and a bundle identifier (UNUserNotificationCenter) exist at all. The app is a
@@ -117,6 +117,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resourc
 
 ./scripts/info-plist.sh "$SHORT_VERSION" "$BUILD_VERSION" \
   > "$APP/Contents/Info.plist"
+# The display name (TC_DISPLAY_NAME). See info-plist-strings.sh.
+mkdir -p "$APP/Contents/Resources/en.lproj"
+./scripts/info-plist-strings.sh > "$APP/Contents/Resources/en.lproj/InfoPlist.strings"
 
 cp "$BIN_DIR/TraceCommonsApp" "$APP/Contents/MacOS/TraceCommonsApp"
 cp "$STAGING_DIR/$DYLIB_NAME" "$APP/Contents/Frameworks/$DYLIB_NAME"

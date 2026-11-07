@@ -120,8 +120,8 @@ if render TC_CHANNEL=staging TC_STAGING_SPARKLE_PUBLIC_ED_KEY=c3RhZ2luZy1rZXktbm
   >"$scratch/staging.plist" 2>"$scratch/err"; then
   s="$scratch/staging.plist"
   has staging "$s" '<key>CFBundleIdentifier</key><string>ai.tracecommons.shell.staging</string>'
-  has staging "$s" '<key>CFBundleName</key><string>Near AI Gateway Staging</string>'
-  has staging "$s" '<key>CFBundleDisplayName</key><string>Near AI Gateway Staging</string>'
+  has staging "$s" '<key>CFBundleName</key><string>Near.ai Staging</string>'
+  has staging "$s" '<key>CFBundleDisplayName</key><string>Near.ai Staging</string>'
   has staging "$s" '<key>TCChannel</key><string>staging</string>'
   has staging "$s" '<key>TCPrivateAICampaignURL</key><string>https://storage.googleapis.com/tc-staging-updates-20261022/staging/private-ai-campaign.json</string>'
   has staging "$s" '<key>CFBundleURLSchemes</key><array><string>tracecommons-staging</string></array>'
@@ -130,7 +130,7 @@ if render TC_CHANNEL=staging TC_STAGING_SPARKLE_PUBLIC_ED_KEY=c3RhZ2luZy1rZXktbm
   has staging "$s" '<key>SUPublicEDKey</key><string>c3RhZ2luZy1rZXktbm90LXJlYWw=</string>'
   lacks staging "$s" '<string>ai.tracecommons.shell</string>'
   lacks staging "$s" '<string>tracecommons</string>'
-  lacks staging "$s" '<string>Near AI Gateway</string>'
+  lacks staging "$s" '<string>Near.ai</string>'
   lacks staging "$s" '<string>production</string>'
   lacks staging "$s" 'tracecommons-flatpak'
   lint "staging" "$s"
@@ -170,6 +170,39 @@ with open(sys.argv[1], "rb") as f:
     pass "$channel: NSAppleEventsUsageDescription is the approved line"
   else
     fail "$channel: NSAppleEventsUsageDescription is missing or not the approved line"
+  fi
+done
+
+# --- display name (owner, 2026-11-06) ----------------------------------------
+#
+# Finder, Launchpad, the app switcher and the app menu show the localized
+# name in en.lproj/InfoPlist.strings, and only because the plist sets
+# LSHasLocalizedDisplayName and keeps CFBundleName equal to the filename an
+# install carries. Each channel names itself; the base names do not move.
+
+strings_script="$repo/macos/scripts/info-plist-strings.sh"
+for pair in "production|Near AI Gateway|Near.ai" "staging|Near AI Gateway Staging|Near.ai Staging"; do
+  IFS='|' read -r channel display base <<<"$pair"
+  expected="$(printf '"CFBundleDisplayName" = "%s";\n"CFBundleName" = "%s";' "$display" "$display")"
+  if strings="$(env -u TC_CHANNEL TC_CHANNEL="$channel" bash "$strings_script" 2>/dev/null)" \
+    && [[ "$strings" == "$expected" ]]; then
+    pass "$channel: InfoPlist.strings names the app $display"
+  else
+    fail "$channel: InfoPlist.strings is not the display name $display"
+  fi
+  if render TC_CHANNEL="$channel" >"$scratch/name-$channel.plist" 2>/dev/null \
+    && python3 -I -c '
+import plistlib, sys
+with open(sys.argv[1], "rb") as f:
+    p = plistlib.load(f)
+ok = (p.get("LSHasLocalizedDisplayName") is True
+      and p.get("CFBundleName") == sys.argv[2]
+      and p.get("CFBundleDisplayName") == sys.argv[2])
+sys.exit(0 if ok else 1)
+' "$scratch/name-$channel.plist" "$base"; then
+    pass "$channel: base names stay $base and the display name is localized"
+  else
+    fail "$channel: the plist does not keep $base and localize its display name"
   fi
 done
 
@@ -235,6 +268,19 @@ if env -u TC_SPARKLE_PUBLIC_ED_KEY TC_CHANNEL=staging \
 else
   pass "a staging file with an empty TC_BUNDLE_ID is refused"
 fi
+
+# The display name is written into a .strings file and a plist unescaped,
+# so it is held to the bundle name's characters.
+for name in 'Near "AI"' "Near/AI" ".Near AI" "Near AI;x"; do
+  sed "s|^TC_DISPLAY_NAME=.*|TC_DISPLAY_NAME=$name|" "$repo/macos/channels/staging.env" \
+    >"$scratch/tree/macos/channels/staging.env"
+  if env -u TC_SPARKLE_PUBLIC_ED_KEY TC_CHANNEL=staging \
+    bash "$scratch/tree/macos/scripts/info-plist.sh" 1.2.3 45 >/dev/null 2>&1; then
+    fail "a staging display name '$name' rendered a plist"
+  else
+    pass "a staging display name '$name' is refused"
+  fi
+done
 
 # The bundle name becomes a path the build script deletes and recreates, so
 # it may not carry a slash or start with a dot.

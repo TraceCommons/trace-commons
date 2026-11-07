@@ -19,6 +19,7 @@
 TC_CHANNEL_KEYS=(
   TC_BUNDLE_ID
   TC_BUNDLE_NAME
+  TC_DISPLAY_NAME
   TC_URL_SCHEME
   TC_URL_TYPE_NAME
   TC_SPARKLE_FEED_URL
@@ -90,6 +91,12 @@ load_channel() {
   # slash, no leading dot, nothing a shell would read as syntax.
   if [[ ! "$TC_BUNDLE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9.\ ]*$ ]]; then
     echo "refusing: $TC_CHANNEL channel file's TC_BUNDLE_NAME must be letters, digits, dots and spaces" >&2
+    return 1
+  fi
+  # The display name is written into a .strings file and a plist: nothing
+  # that needs quoting or escaping in either.
+  if [[ ! "$TC_DISPLAY_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9.\ ]*$ ]]; then
+    echo "refusing: $TC_CHANNEL channel file's TC_DISPLAY_NAME must be letters, digits, dots and spaces" >&2
     return 1
   fi
   # Variable names, used with ${!name}: refuse anything that is not one.

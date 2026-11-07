@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Print the Info.plist for the app bundle (Near AI Gateway.app).
+# Print the Info.plist for Near.ai.app.
 #
 # Extracted from make-app-bundle.sh so the version can be injected from a
 # release tag and asserted in a test without a Swift toolchain. The old
@@ -70,6 +70,13 @@ cat <<PLIST
 <dict>
     <key>CFBundleName</key><string>${TC_BUNDLE_NAME}</string>
     <key>CFBundleDisplayName</key><string>${TC_BUNDLE_NAME}</string>
+    <!-- The name people see, TC_DISPLAY_NAME, comes from
+         Contents/Resources/en.lproj/InfoPlist.strings, which
+         make-app-bundle.sh writes. macOS uses it only while the bundle's
+         filename matches CFBundleName above, so both names above stay what
+         existing installs are called on disk. -->
+    <key>LSHasLocalizedDisplayName</key><true/>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
     <key>CFBundleIdentifier</key><string>${TC_BUNDLE_ID}</string>
     <!-- The channel this bundle is. The app compares it with the linked
          dylib's channel at launch and starts nothing on a mismatch or when

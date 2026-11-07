@@ -68,10 +68,10 @@ Analyze is filled in sample mode too: five saved snapshots from the sample week 
 cd macos
 scripts/make-app-bundle.sh debug                       # first build takes 10-15 min
 TRACE_COMMONS_SAMPLE=normalDay TRACE_COMMONS_INSIGHTS_SAMPLE=1 \
-  '.build/Near AI Gateway.app/Contents/MacOS/TraceCommonsApp'
+  .build/Near.ai.app/Contents/MacOS/TraceCommonsApp
 ```
 
-**To use your real data instead,** ask Claude to "run it with real data", or run `open '.build/Near AI Gateway.app'` without the two variables.
+**To use your real data instead,** ask Claude to "run it with real data", or run `open .build/Near.ai.app` without the two variables.
 
 Quit the installed Near AI Gateway first. Both builds use the same app identity, so only one should run at a time.
 

@@ -2,8 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Near AI Gateway</string>
-    <key>CFBundleDisplayName</key><string>Near AI Gateway</string>
+    <key>CFBundleName</key><string>Near.ai</string>
+    <key>CFBundleDisplayName</key><string>Near.ai</string>
+    <!-- The name people see, TC_DISPLAY_NAME, comes from
+         Contents/Resources/en.lproj/InfoPlist.strings, which
+         make-app-bundle.sh writes. macOS uses it only while the bundle's
+         filename matches CFBundleName above, so both names above stay what
+         existing installs are called on disk. -->
+    <key>LSHasLocalizedDisplayName</key><true/>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
     <key>CFBundleIdentifier</key><string>ai.tracecommons.shell</string>
     <!-- The channel this bundle is. The app compares it with the linked
          dylib's channel at launch and starts nothing on a mismatch or when

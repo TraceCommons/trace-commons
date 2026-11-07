@@ -246,16 +246,23 @@ fn snapshot(herdr: &mut dyn Exchange) -> Result<Value, CallError> {
     result.get("snapshot").cloned().ok_or(CallError::Malformed)
 }
 
-/// The id of the first workspace labelled [`GROUP_LABEL`].
+/// The id of the first workspace labelled [`GROUP_LABEL`], else of the
+/// first one labelled with a former app name, so a workspace an older
+/// version made keeps being used after a rename instead of a second one
+/// being made beside it. New workspaces always take [`GROUP_LABEL`].
 fn group_workspace(snapshot: &Value) -> Option<String> {
-    snapshot
-        .get("workspaces")?
-        .as_array()?
-        .iter()
-        .filter(|w| w.get("label").and_then(Value::as_str) == Some(GROUP_LABEL))
-        .filter_map(|w| w.get("workspace_id").and_then(Value::as_str))
-        .find(|id| valid_public_id(id))
-        .map(str::to_string)
+    let workspaces = snapshot.get("workspaces")?.as_array()?;
+    let labelled = |label: &str| {
+        workspaces
+            .iter()
+            .filter(|w| w.get("label").and_then(Value::as_str) == Some(label))
+            .filter_map(|w| w.get("workspace_id").and_then(Value::as_str))
+            .find(|id| valid_public_id(id))
+            .map(str::to_string)
+    };
+    std::iter::once(GROUP_LABEL)
+        .chain(crate::brand::FORMER_APP_NAMES.iter().copied())
+        .find_map(labelled)
 }
 
 /// The terminal id of the pane `pane_id`.
@@ -563,6 +570,20 @@ mod tests {
 
     fn pong() -> Result<Value, CallError> {
         Ok(json!({"type":"pong","version":"0.9.5","protocol":22}))
+    }
+
+    /// A workspace an older version made under a former name is still the
+    /// group, unless one under the current name exists too.
+    #[test]
+    fn a_former_name_workspace_is_reused_but_the_current_one_wins() {
+        let former = json!({"workspaces":[{"workspace_id":"w1","label":"Near.ai"}]});
+        assert_eq!(group_workspace(&former).as_deref(), Some("w1"));
+        let both = json!({"workspaces":[
+            {"workspace_id":"w1","label":"Near.ai"},
+            {"workspace_id":"w2","label":"Near AI Gateway"}]});
+        assert_eq!(group_workspace(&both).as_deref(), Some("w2"));
+        let neither = json!({"workspaces":[{"workspace_id":"w3","label":"Near AI"}]});
+        assert_eq!(group_workspace(&neither), None);
     }
 
     fn snap(workspaces: Value, panes: Value) -> Result<Value, CallError> {
