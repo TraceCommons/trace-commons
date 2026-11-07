@@ -2,6 +2,7 @@
 """Local integration tests: public-key gates and real universal Mach-O fixtures."""
 import base64
 import json
+import importlib.util
 import os
 from pathlib import Path
 import plistlib
@@ -57,7 +58,7 @@ class PilotTests(unittest.TestCase):
         dylib = app / 'Contents/Frameworks/libtrace_commons_contributor_ffi.dylib'
         subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-arch', 'x86_64', '-dynamiclib', str(ffi_source), '-install_name', '@rpath/' + dylib.name, '-o', str(dylib)], check=True)
         cli_source = Path(cls.temp.name) / 'cli.c'
-        line = 'trace-commons-contributor 1.2.3 (commit ' + metadata['sourceCommit'] + ', built 2026-11-07T00:00:00Z) channel production'
+        line = 'near-ai 1.2.3 (commit ' + metadata['sourceCommit'] + ', built 2026-11-07T00:00:00Z) channel production'
         cli_source.write_text('#include <stdio.h>\nint main(void){puts(' + json.dumps(line) + ');return 0;}\n')
         cli = app / 'Contents/MacOS/near-ai'
         subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-arch', 'x86_64', str(cli_source), '-o', str(cli)], check=True)
@@ -106,6 +107,22 @@ class PilotTests(unittest.TestCase):
         bad = subprocess.run(command, text=True, capture_output=True)
         self.assertNotEqual(bad.returncode, 0)
         self.assertIn('missing hardened runtime', bad.stderr)
+
+    def test_captured_bundled_cli_identity_contract(self):
+        spec = importlib.util.spec_from_file_location('pilot_archive', SOURCE / 'macos/ci_scripts/check-pilot-archive.py')
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        commit = '72f71eff5762194e78bdcf19e6a6dcc6cab3e557'
+        captured = 'near-ai 0.24.13 (commit ' + commit + ', built 2026-11-07T22:56:04Z) channel production'
+        checker.check_cli_identity(captured, '0.24.13', commit)
+        for invalid in (captured.replace('near-ai ', 'trace-commons-contributor ', 1),
+                        captured.replace('channel production', 'channel staging'),
+                        captured.replace(commit, '0' * 40),
+                        captured.replace('0.24.13', '0.24.12'),
+                        captured.replace('2026-11-07T22:56:04Z', 'unknown')):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    checker.check_cli_identity(invalid, '0.24.13', commit)
 
     def test_real_universal_archive_fixture(self):
         result = self.verify(self.archive)

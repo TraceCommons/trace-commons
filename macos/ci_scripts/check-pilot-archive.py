@@ -28,6 +28,16 @@ def check_runtime(binary):
         require(flags and int(flags.group(1), 16) & 0x10000, 'missing hardened runtime: ' + Path(binary).name + ' (' + arch + ')')
 
 
+def check_cli_identity(line, short_version, source_commit):
+    require(re.fullmatch(r'near-ai ' + re.escape(short_version) + r' \(commit ' + re.escape(source_commit) + r', built [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\) channel production', line),
+            'archive CLI version, source or channel')
+
+
+def check_cli_version(binary, short_version, source_commit):
+    line = subprocess.check_output([str(binary), '--version'], text=True).strip()
+    check_cli_identity(line, short_version, source_commit)
+
+
 def check(archive, repo):
     archive, repo = Path(archive), Path(repo)
     generated = repo / 'macos/.xcode-cloud/generated'
@@ -72,8 +82,7 @@ def check(archive, repo):
     require('@rpath/libtrace_commons_contributor_ffi.dylib' in identifier.splitlines()[1:], 'archive dylib install name')
     linked = subprocess.check_output(['otool', '-L', str(binaries[0])], text=True)
     require('@rpath/libtrace_commons_contributor_ffi.dylib' in linked, 'app FFI linkage')
-    cli_version = subprocess.check_output([str(binaries[1]), '--version'], text=True).strip()
-    require(re.fullmatch(r'trace-commons-contributor ' + re.escape(metadata['shortVersion']) + r' \(commit ' + re.escape(metadata['sourceCommit']) + r', built [0-9T:Z-]+\) channel production', cli_version), 'archive CLI version, source or channel')
+    check_cli_version(binaries[1], metadata['shortVersion'], metadata['sourceCommit'])
     # This function reads compile-time channel constants only; it starts no
     # daemon, opens no keychain, and performs no network operations.
     library = ctypes.CDLL(str(dylib))
@@ -91,7 +100,9 @@ def check(archive, repo):
 
 if __name__ == '__main__':
     try:
-        if len(sys.argv) >= 3 and sys.argv[1] == '--check-runtime':
+        if len(sys.argv) == 5 and sys.argv[1] == '--check-cli-version':
+            check_cli_version(sys.argv[2], sys.argv[3], sys.argv[4])
+        elif len(sys.argv) >= 3 and sys.argv[1] == '--check-runtime':
             for binary in sys.argv[2:]:
                 check_runtime(binary)
         else:
