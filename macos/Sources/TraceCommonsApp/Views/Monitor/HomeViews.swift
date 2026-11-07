@@ -350,10 +350,8 @@ private struct HomeOverview: View {
                 Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
                     GridRow {
                         HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
-                                     systemImage: HomeStatIcons.waiting, loading: traces.phase == .loading,
-                                     action: openTraces)
+                                     loading: traces.phase == .loading, action: openTraces)
                         HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(freshRollup),
-                                     systemImage: HomeStatIcons.contributed,
                                      loading: store.isLoading("history_rollup"), action: openHistory)
                     }
                     if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) {
@@ -492,13 +490,13 @@ private struct HomeOverview: View {
 /// The Not contributed card (owner, 2026-10-19): half a hero's height; the
 /// label and the count and size on the left, and the core's call to share
 /// (owner, 2026-10-20) on the right in a translucent card of its own
-/// (owner, 2026-10-27), over its icon as a watermark on the right, as the
-/// tiles'. It is on the standard card fill with no border and nothing
-/// moving on it (owner, 2026-11-02: no shimmer; from 2026-10-27 a soft band
-/// of light crossed it, before that a soft light turned round its edge,
-/// before that a duller band crossed it, before that it had a solid accent
-/// border, and before that a turning glow edge). The whole card is the
-/// button.
+/// (owner, 2026-10-27). No icon (owner, 2026-11-07: its watermark, from
+/// 2026-10-20, is gone, as the tiles' are). It is on the standard card
+/// fill with no border and nothing moving on it (owner, 2026-11-02: no
+/// shimmer; from 2026-10-27 a soft band of light crossed it, before that a
+/// soft light turned round its edge, before that a duller band crossed it,
+/// before that it had a solid accent border, and before that a turning
+/// glow edge). The whole card is the button.
 private struct HomeNotContributedCard: View {
     let title: String
     let count: Int
@@ -529,7 +527,7 @@ private struct HomeNotContributedCard: View {
                 .fixedSize()
                 if let detail {
                     // A card on the card: the nested card's translucent
-                    // fill (`GlassGround`), so the watermark shows through.
+                    // fill (`GlassGround`).
                     Text(detail)
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textSecondary)
@@ -546,9 +544,6 @@ private struct HomeNotContributedCard: View {
             .padding(.horizontal, 12)
             .padding(.vertical, GlassTokens.Space.s5)
             .frame(maxWidth: .infinity, alignment: .leading)
-            // Its icon is the card's watermark, as the tiles' is, behind
-            // the words (owner, 2026-10-20).
-            .glassCardWatermark(HomeStatIcons.uncontributed)
             // The stat tiles' fill and hover.
             .glassTier(.card, hover: GlassTokens.Color.cardHover)
             .contentShape(shape)
@@ -557,20 +552,6 @@ private struct HomeNotContributedCard: View {
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
     }
-}
-
-/// Home's stat tile icons (owner, 2026-10-12).
-enum HomeStatIcons {
-    static let waiting = "hourglass"
-    static let contributed = "checkmark.seal"
-    static let credit = "dollarsign.circle"
-    /// Held on this Mac, not yet shared: local and private.
-    static let uncontributed = "lock.laptopcomputer"
-    /// The NEAR AI balance (owner, 2026-10-19).
-    static let balance = "creditcard"
-    /// Home's Private AI tiles (owner, 2026-10-20).
-    static let calls = "arrow.left.arrow.right"
-    static let verified = "checkmark.shield"
 }
 
 /// Home's Private AI card while NEAR AI is signed out (owner,
@@ -1759,7 +1740,7 @@ struct HomeAccountTiles: View {
                 // No sign-in line under it (owner, 2026-11-02): the Account
                 // heading says "No data - Sign in" instead.
                 HomeStatTile(label: HomeFormat.creditReceivedWord, value: tiles.received,
-                             detail: creditDetail, systemImage: HomeStatIcons.credit,
+                             detail: creditDetail,
                              loading: store.isLoading("history_rollup"), action: openPrivateAI)
                 HomeStatTile(label: HomeFormat.creditPendingTitleWord, value: tiles.pending,
                              loading: store.isLoading("history_rollup", "commons_credit_summary"),
@@ -1769,7 +1750,7 @@ struct HomeAccountTiles: View {
                     BalanceArrivalFlourish(status: model.balanceStatus, calls: model.balanceCalls) { counting in
                         HomeStatTile(label: copy.balanceTitle, value: counting ?? balance.value,
                                      detail: balance.detail, detailInk: balance.detailInk,
-                                     systemImage: HomeStatIcons.balance, action: openPrivateAI)
+                                     action: openPrivateAI)
                     }
                 } else {
                     Color.clear
@@ -1795,27 +1776,24 @@ private struct HomeStatTile: View {
     /// tone.
     var detail: String? = nil
     var detailInk: GlassRGBA? = nil
-    /// The tile's icon (`HomeStatIcons`); nil draws none.
-    var systemImage: String? = nil
     /// The first answer has not come: a placeholder, not a dash or a zero.
     var loading = false
     /// Opens where the number lives, and the whole tile is the button;
     /// nil for a tile on the page its number lives on (History's).
     var action: (() -> Void)?
 
-    /// #1146's `StatCard`: a full card, the value bold and tabular. Its
-    /// icon is the card's watermark on the right (owner, 2026-10-20), as
-    /// every small card on Home draws it.
+    /// #1146's `StatCard`: a full card, the value bold and tabular. No
+    /// icon (owner, 2026-11-07: the watermark every small card on Home drew
+    /// from 2026-10-20 is gone).
     var body: some View {
         if let action {
             Button(action: action) {
-                GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
-                              interactive: true, iconPlacement: .watermark, loading: loading)
+                GlassStatCard(label, value: value, detail: detail, detailInk: detailInk,
+                              interactive: true, loading: loading)
             }
             .buttonStyle(GlassPressStyle())
         } else {
-            GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
-                          iconPlacement: .watermark, loading: loading)
+            GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, loading: loading)
         }
     }
 }
