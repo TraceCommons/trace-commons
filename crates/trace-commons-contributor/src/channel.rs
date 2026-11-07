@@ -109,7 +109,7 @@ mod values {
     pub const PUBLIC_RUNS_PREFIX: &str = "https://tracecommons.ai/runs/";
     pub const INVITE_PLACEHOLDER: &str = "https://issuer.tracecommons.ai/onboard#…";
 
-    pub const NEAR_AI_API_ORIGIN: &str = "https://cloud-api.near.ai";
+    pub const NEAR_AI_API_ORIGIN: &str = "https://cloud-platform.near.ai";
     pub const NEAR_AI_INFERENCE_BASE: &str = "https://cloud-api.near.ai/v1";
     pub const NEAR_AI_DASHBOARD_ORIGIN: &str = "https://cloud.near.ai";
     pub const NEAR_AI_WALLET_RECIPIENT: &str = "cloud.near.ai";
@@ -149,7 +149,7 @@ mod values {
     pub const PUBLIC_RUNS_PREFIX: &str = concat!("https://", staging_host!(), "/runs/");
     pub const INVITE_PLACEHOLDER: &str = concat!("https://issuer.", staging_host!(), "/onboard#…");
 
-    pub const NEAR_AI_API_ORIGIN: &str = "https://cloud-stg-api.near.ai";
+    pub const NEAR_AI_API_ORIGIN: &str = "https://cloud-platform-stg.near.ai";
     pub const NEAR_AI_INFERENCE_BASE: &str = "https://cloud-stg-api.near.ai/v1";
     pub const NEAR_AI_DASHBOARD_ORIGIN: &str = "https://cloud-stg.near.ai";
     /// NEAR AI staging's `NEAR_EXPECTED_RECIPIENT`, from its public
@@ -228,7 +228,10 @@ pub const PUBLIC_RUNS_PREFIX: &str = values::PUBLIC_RUNS_PREFIX;
 /// The example invite shown in an empty invite field.
 pub const INVITE_PLACEHOLDER: &str = values::INVITE_PLACEHOLDER;
 
-/// NEAR AI's API: sign-in, credentials, organisations.
+/// NEAR AI's platform API: sign-in, credentials, organisations, usage and
+/// credits. NEAR AI moved these routes off the inference host (cloud-api) to
+/// cloud-platform, so this is a different host from
+/// [`NEAR_AI_INFERENCE_BASE`], in the same channel.
 pub const NEAR_AI_API_ORIGIN: &str = values::NEAR_AI_API_ORIGIN;
 /// NEAR AI's OpenAI-compatible base: Private AI inference, the model list,
 /// receipts and skill evaluation calls.
@@ -329,15 +332,17 @@ pub struct OtherChannelHost {
 }
 
 /// SHA-256 of each staging host: the staging site (and so every subdomain of
-/// it), the NEAR AI staging API and the NEAR AI staging console. In both
-/// builds: digests only.
+/// it), the NEAR AI staging inference API, the NEAR AI staging platform API
+/// and the NEAR AI staging console. In both builds: digests only.
 pub const STAGING_HOST_DIGESTS: &[&str] = &[
     // The staging site.
     "766d0f9835a64339a1d20708e3257355304aa44509b2b49a65d88980da78d147",
-    // The NEAR AI staging API.
+    // The NEAR AI staging inference API.
     "061787df4438033eeb2502f81dff38864a5242f386169b1f1785788e13c058af",
     // The NEAR AI staging console.
     "0b4df4a714bdf1ffdb0aa062949542e007b0ffb3c93fb2855c0a0361fcf43854",
+    // The NEAR AI staging platform API.
+    "e46b8e07e58bae897a361b6b3087fca46c49b717ae076f60afda1025432a906c",
 ];
 
 /// The other channel's hosts this build refuses as a service origin.
@@ -355,10 +360,15 @@ pub const OTHER_CHANNEL_HOSTS: &[OtherChannelHost] = &[
         sha256: STAGING_HOST_DIGESTS[2],
         subdomains: false,
     },
+    OtherChannelHost {
+        sha256: STAGING_HOST_DIGESTS[3],
+        subdomains: false,
+    },
 ];
 
 /// The other channel's hosts this build refuses as a service origin: the
-/// production site, its ingest and issuer, the NEAR AI API and console. Exact
+/// production site, its ingest and issuer, the NEAR AI inference and platform
+/// APIs and the console. Exact
 /// names: the production apex is the staging site's parent, so a subdomain
 /// match would refuse staging itself.
 #[cfg(feature = "near-ai-staging")]
@@ -383,9 +393,14 @@ pub const OTHER_CHANNEL_HOSTS: &[OtherChannelHost] = &[
         sha256: "da0e9ce4b438f75e3cc3fa69630e81e9afe0e756395af951efaa03032c66589f",
         subdomains: false,
     },
-    // The NEAR AI API.
+    // The NEAR AI inference API.
     OtherChannelHost {
         sha256: "066ae42a7eb4f0bae28df21290e6f3f29c2e2aa7d41da8c88927c62cf111ffcb",
+        subdomains: false,
+    },
+    // The NEAR AI platform API.
+    OtherChannelHost {
+        sha256: "6a22b791423f5bc28493c8ed720dfd68bc435c5c978c4ffd0e2854deb1ec76ca",
         subdomains: false,
     },
     // The NEAR AI console.

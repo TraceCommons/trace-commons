@@ -518,10 +518,13 @@ fn a_default_build_names_no_staging_host() {
     }
 }
 
-/// Sign-in, inference, receipts and the attestation report are one NEAR AI
-/// host in each channel, so a key minted by one is only ever sent to it.
+/// Inference, receipts, the attestation report and the privacy filter are
+/// one NEAR AI host in each channel, so an inference key is only ever sent
+/// to it. Sign-in, credentials, organisations, usage and credits are NEAR
+/// AI's platform host, which NEAR AI split off the inference host; it is
+/// that channel's platform host and no other.
 #[test]
-fn every_near_ai_host_in_a_build_is_one_host() {
+fn the_near_ai_hosts_in_a_build_are_the_channel_s() {
     let host = |url: &str| {
         url::Url::parse(url)
             .unwrap()
@@ -529,19 +532,28 @@ fn every_near_ai_host_in_a_build_is_one_host() {
             .unwrap()
             .to_string()
     };
-    let api = host(channel::NEAR_AI_API_ORIGIN);
-    assert_eq!(host(channel::NEAR_AI_INFERENCE_BASE), api);
-    assert_eq!(host(channel::NEAR_AI_ATTESTATION_GATEWAY), api);
-    assert_eq!(host(channel::NEAR_AI_PRIVACY_FILTER_BASE), api);
+    let inference = host(channel::NEAR_AI_INFERENCE_BASE);
+    assert_eq!(host(channel::NEAR_AI_ATTESTATION_GATEWAY), inference);
+    assert_eq!(host(channel::NEAR_AI_PRIVACY_FILTER_BASE), inference);
+    let (platform, expected_inference) = if cfg!(feature = "near-ai-staging") {
+        ("cloud-platform-stg.near.ai", "cloud-stg-api.near.ai")
+    } else {
+        ("cloud-platform.near.ai", "cloud-api.near.ai")
+    };
+    assert_eq!(inference, expected_inference);
+    assert_eq!(host(channel::NEAR_AI_API_ORIGIN), platform);
+    // The platform API is an origin: no path, no trailing slash. Every
+    // route appends its own `/v1/...`.
+    assert_eq!(channel::NEAR_AI_API_ORIGIN, format!("https://{platform}"));
+    assert_eq!(
+        channel::NEAR_AI_INFERENCE_BASE,
+        format!("https://{inference}/v1")
+    );
     // The dashboard and the wallet recipient are the console host, a
     // different name, but the same channel's.
     assert_eq!(
         host(channel::NEAR_AI_DASHBOARD_ORIGIN),
         channel::NEAR_AI_WALLET_RECIPIENT
-    );
-    assert_eq!(
-        channel::NEAR_AI_INFERENCE_BASE,
-        format!("{}/v1", channel::NEAR_AI_API_ORIGIN)
     );
 }
 
@@ -559,6 +571,8 @@ fn a_production_build_refuses_a_staging_ingest_origin() {
         format!("https://{staging_site}"),
         format!("https://INGEST.{}", staging_site.to_uppercase()),
         "https://cloud-stg-api.near.ai/v1".to_string(),
+        "https://cloud-platform-stg.near.ai".to_string(),
+        "https://Cloud-Platform-Stg.near.ai./v1/organizations".to_string(),
     ] {
         assert!(
             channel::refuse_other_channel_origin(&origin).is_err(),
@@ -567,6 +581,8 @@ fn a_production_build_refuses_a_staging_ingest_origin() {
     }
     for origin in [
         channel::NATIVE_ACCOUNT_ORIGIN,
+        channel::NEAR_AI_API_ORIGIN,
+        channel::NEAR_AI_INFERENCE_BASE,
         "https://issuer.tracecommons.ai",
         "https://ingest.example",
         "http://127.0.0.1:3907",
@@ -631,6 +647,7 @@ fn a_staging_build_refuses_a_production_ingest_origin() {
         "https://tracecommons.ai",
         "https://www.tracecommons.ai",
         "https://cloud-api.near.ai/v1",
+        "https://cloud-platform.near.ai",
         "https://cloud.near.ai",
     ] {
         assert!(
@@ -639,6 +656,8 @@ fn a_staging_build_refuses_a_production_ingest_origin() {
         );
     }
     channel::refuse_other_channel_origin(channel::NATIVE_ACCOUNT_ORIGIN).unwrap();
+    channel::refuse_other_channel_origin(channel::NEAR_AI_API_ORIGIN).unwrap();
+    channel::refuse_other_channel_origin(channel::NEAR_AI_INFERENCE_BASE).unwrap();
     channel::refuse_other_channel_origin("https://ingest.example").unwrap();
 }
 
