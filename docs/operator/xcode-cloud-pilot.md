@@ -9,14 +9,38 @@ provenance paths remain authoritative.
 ## Current setup
 
 The Near.ai macOS app record exists in App Store Connect: app ID `6832109427`,
-bundle ID `ai.tracecommons.shell`, Iqlusion team `KXSWJN7WY8`. An app record is
-not a completed Cloud setup. At preparation time, no GitHub source provider
-was connected and the first Cloud workflow still required onboarding from
-native Xcode. No real Cloud archive, managed signing, or notarization result
-has been demonstrated by these local checks. Updated Apple program terms,
-if required, need the account holder's review and acceptance.
+bundle ID `ai.tracecommons.shell`, Iqlusion team `KXSWJN7WY8`. The repository
+is connected to Cloud product `3eff5e74-a518-4a99-927d-481130210e75`.
 
-## Finish onboarding
+Workflow `59025125-A8A9-4F65-9D19-8E504576C729` (NearAI Cloud pilot) uses
+manual branch starts, a clean macOS archive, restricted editing, and a
+Notarize macOS post-action. Both production public verification keys are
+configured. The preparation script defaults `TC_CHANNEL` to `production`.
+No App Store Connect or TestFlight distribution action is enabled.
+
+The first API-triggered run is build 1,
+`0b18e328-d3e5-4286-9286-bb10703b4cc1`, at source commit
+`a3cdad51a9f9a39cced44a9a23adcd6e0ea7f999`. Starting the build does not prove
+successful signing or notarization; inspect its final results and artifacts.
+
+## Trigger from automation
+
+GitHub Actions can use an App Store Connect API key stored in GitHub secrets
+to trigger builds, poll results, and retrieve artifacts. Native Xcode is only
+needed for initial onboarding. With the `asc` CLI authenticated:
+
+```sh
+asc xcode-cloud run --workflow-id 59025125-A8A9-4F65-9D19-8E504576C729 \
+  --branch xcode-cloud-release-pilot --clean
+asc xcode-cloud status --run-id BUILD_RUN_ID
+asc xcode-cloud doctor --run-id BUILD_RUN_ID
+```
+
+Verify the returned source commit. Publishing must wait for successful
+notarization and independent artifact verification. This pilot does not yet
+add a GitHub Actions trigger or replace the release workflow.
+
+## Reproduce workflow setup
 
 1. Open `macos/NearAI.xcodeproj` in native Xcode and select the shared
    `NearAI-Cloud` scheme. Start Xcode Cloud onboarding with the Iqlusion team
@@ -25,8 +49,8 @@ if required, need the account holder's review and acceptance.
    and scheme, a reviewed pilot branch, macOS, Release, and an Archive action.
    Use an Xcode 26 or newer image that supports Icon Composer `.icon` assets.
    Do not install XcodeGen on Cloud or regenerate the project there.
-3. Configure the Archive action for **Developer ID** distribution and the
-   Cloud notarization post-action. These are workflow settings, not shell
+3. Add the **Notarize (macOS Only)** post-action to the Archive action.
+   Require restricted editing and a clean build. These are workflow settings, not shell
    signing commands. Keep external distribution and App Store/TestFlight
    upload actions disabled. Use manual starts while qualifying the pilot.
 4. Configure these workflow environment variables:
