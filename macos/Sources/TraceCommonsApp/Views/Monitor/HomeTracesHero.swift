@@ -28,8 +28,9 @@ struct HomeTracesHero: View {
     var visibleHeight: CGFloat = 0
     /// The card's width, read as it lays out.
     @State private var width: CGFloat = 0
-    /// The full card's height when last drawn full; a typical one before.
-    @State private var fullHeight: CGFloat = 360
+    /// The full card's height at the card's width, from a hidden full copy,
+    /// so it is known while the card is compact too; zero until measured.
+    @State private var fullHeight: CGFloat = 0
     /// The person closed the card with its X.
     @AppStorage(Self.closedKey) private var closed = false
 
@@ -44,7 +45,7 @@ struct HomeTracesHero: View {
 
     static func isCompact(width: CGFloat, visibleHeight: CGFloat, fullHeight: CGFloat) -> Bool {
         if width > 0 && width < compactWidth { return true }
-        return visibleHeight > 0 && fullHeight + statsRoom > visibleHeight
+        return visibleHeight > 0 && fullHeight > 0 && fullHeight + statsRoom > visibleHeight
     }
 
     var body: some View {
@@ -53,7 +54,21 @@ struct HomeTracesHero: View {
 
     private var card: some View {
         let compact = Self.isCompact(width: width, visibleHeight: visibleHeight, fullHeight: fullHeight)
-        return GlassHeroCard(
+        return hero(compact: compact)
+            .onGeometryChange(for: CGFloat.self, of: \.size.width) { width = $0 }
+            .background(alignment: .top) {
+                // The full card at this width, never drawn or read, for its
+                // height.
+                hero(compact: false)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .hidden()
+                    .accessibilityHidden(true)
+                    .onGeometryChange(for: CGFloat.self, of: \.size.height) { fullHeight = $0 }
+            }
+    }
+
+    private func hero(compact: Bool) -> some View {
+        GlassHeroCard(
             gradient: GlassTokens.Gradient.heroMissions,
             title: words.tracesHeroTitle, subtitle: words.tracesHeroBody,
             actionTitle: words.tracesHeroAction, action: openTraces,
@@ -72,11 +87,6 @@ struct HomeTracesHero: View {
                       title: words.tracesHeroStepUse, detail: words.tracesHeroStepUseDetail,
                       action: openPrivateAI),
             ])
-        }
-        .onGeometryChange(for: CGSize.self, of: \.size) { size in
-            width = size.width
-            // Measured only while full, so the compact card never sets it.
-            if !compact { fullHeight = size.height }
         }
     }
 }
