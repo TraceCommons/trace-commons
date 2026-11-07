@@ -14,6 +14,8 @@ use std::{
 use uuid::Uuid;
 
 pub const STAGING: &str = "managed-opencode-exports";
+/// The economizer's plugin, in a session's own profile.
+const ECONOMIZER_PLUGIN: &str = "trace-commons-economizer.js";
 const EXPORT_LIMIT: u64 = 16 * 1024 * 1024;
 
 pub fn valid_model(model: &str) -> bool {
@@ -174,6 +176,7 @@ pub struct OpenCodeSession {
     cwd: PathBuf,
     id: Uuid,
     version: Version,
+    economizer: Option<crate::economizer::launch::OpencodePlan>,
 }
 
 impl OpenCodeSession {
@@ -199,7 +202,32 @@ impl OpenCodeSession {
             cwd: std::fs::canonicalize(cwd).map_err(|_| ManagedError::InvalidRequest)?,
             id,
             version,
+            economizer: None,
         })
+    }
+
+    /// Run the economizer's plugin in this launch, and leave out the tools
+    /// it names ([`crate::economizer::launch::opencode`]). Only v1, the
+    /// version it was checked on, takes it.
+    pub fn economize(&mut self, plan: crate::economizer::launch::OpencodePlan) {
+        if self.version == Version::V1 {
+            self.economizer = Some(plan);
+        }
+    }
+
+    /// Write the economizer's plugin into this session's profile, and
+    /// return its `plugin` entry. None when there is no plan or it cannot
+    /// be written: the launch then runs without it, still `--pure`.
+    fn economizer_plugin(&self) -> Option<String> {
+        let plan = self.economizer.as_ref()?;
+        let path = self.root.join(ECONOMIZER_PLUGIN);
+        crate::config::write_atomic_0600(
+            &self.root,
+            &path,
+            plan.plugin(&self.session_id()).as_bytes(),
+        )
+        .ok()?;
+        Some(reqwest::Url::from_file_path(&path).ok()?.to_string())
     }
 
     fn session_id(&self) -> String {
@@ -313,14 +341,32 @@ impl OpenCodeSession {
         }) {
             options["headers"] = json!({"x-ironwire-session-id":self.session_id()});
         }
+        // v1's `--pure` keeps every external plugin out, ours too. The
+        // economizer's launch drops it and loads only its own plugin: the
+        // profile's configuration directories are this session's alone,
+        // project configuration is off ([`isolate`]), and checked on
+        // OpenCode 1.19.5, neither a project's `opencode.json` plugin nor
+        // its `.opencode/plugin(s)` directory loads.
+        let mut pure = true;
         let config = match self.version {
-            Version::V1 => json!({
-                "model":selected,"small_model":small,"share":"disabled",
-                "enabled_providers":["trace-managed"],
-                "provider":{"trace-managed":{"npm":"@ai-sdk/openai-compatible","name":"Managed connection",
-                    "options":options,"models":listed
-                }}
-            }),
+            Version::V1 => {
+                let mut config = json!({
+                    "model":selected,"small_model":small,"share":"disabled",
+                    "enabled_providers":["trace-managed"],
+                    "provider":{"trace-managed":{"npm":"@ai-sdk/openai-compatible","name":"Managed connection",
+                        "options":options,"models":listed
+                    }}
+                });
+                if let Some(plugin) = self.economizer_plugin() {
+                    pure = false;
+                    config["plugin"] = json!([plugin]);
+                    let tools = self.economizer.as_ref().map(|plan| plan.tools());
+                    if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
+                        config["tools"] = serde_json::Value::Object(tools);
+                    }
+                }
+                config
+            }
             Version::V2 => {
                 let mut settings = options;
                 let headers = settings.as_object_mut().and_then(|s| s.remove("headers"));
@@ -345,7 +391,9 @@ impl OpenCodeSession {
         command
             .env("OPENCODE_CONFIG_CONTENT", config.to_string())
             .env("TRACE_COMMONS_OPENCODE_KEY", key);
-        self.version.interactive(&mut command);
+        if pure {
+            self.version.interactive(&mut command);
+        }
         command.args(["--session", &self.session_id()]);
         // v2 takes --model on `run`, but not on the interactive root command.
         // Its explicit model selection lives in the isolated configuration.
@@ -431,6 +479,7 @@ impl OpenCodeSession {
             cwd: std::fs::canonicalize(cwd).map_err(|_| ManagedError::InvalidRequest)?,
             id: plan.session,
             version: plan.version,
+            economizer: None,
         })
     }
 
@@ -566,6 +615,7 @@ mod tests {
             cwd: dir.path().into(),
             id: Uuid::new_v4(),
             version: Version::V2,
+            economizer: None,
         };
         let command = session
             .command("fixture-model", "http://127.0.0.1:4321/v1", "synthetic-key")
@@ -650,6 +700,7 @@ mod tests {
                 cwd: dir.path().into(),
                 id: Uuid::new_v4(),
                 version,
+                economizer: None,
             };
             for (background, expected) in [
                 (None, "z-ai/glm-5.3-flash"),
@@ -699,6 +750,7 @@ mod tests {
             cwd: dir.path().into(),
             id: Uuid::new_v4(),
             version: Version::V1,
+            economizer: None,
         };
         let command = session
             .command_with_models(
@@ -755,6 +807,81 @@ mod tests {
         );
     }
 
+    /// The economizer's v1 launch loads its own plugin, written into the
+    /// session's profile with the session's id and the hook program, and
+    /// turns off the tools it leaves out. Dropping `--pure` is what lets the
+    /// plugin load. v2 is not given it.
+    #[test]
+    fn economizer_plugin_is_the_only_plugin_a_v1_launch_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = crate::economizer::launch::OpencodePlan {
+            argv: vec!["/opt/near ai/near-ai".into(), "economizer-hook".into()],
+            tools_off: vec!["todowrite".into()],
+        };
+        let model = [super::super::models::ChatModel {
+            id: "fixture-model".into(),
+            ..Default::default()
+        }];
+        let mut session = OpenCodeSession {
+            title: "Managed session",
+            root: dir.path().join("profile"),
+            native: dir.path().join("opencode"),
+            cwd: dir.path().into(),
+            id: Uuid::new_v4(),
+            version: Version::V1,
+            economizer: None,
+        };
+        session.economize(plan.clone());
+        let command = session
+            .command_with_models("fixture-model", None, &model, "https://x.invalid/v1", "k")
+            .unwrap();
+        let args: Vec<_> = command.get_args().map(|v| v.to_str().unwrap()).collect();
+        assert!(!args.contains(&"--pure"), "{args:?}");
+        let config = command
+            .get_envs()
+            .find(|(key, _)| *key == "OPENCODE_CONFIG_CONTENT")
+            .and_then(|(_, value)| value)
+            .unwrap();
+        let config: serde_json::Value = serde_json::from_str(config.to_str().unwrap()).unwrap();
+        let path = session.root.join(ECONOMIZER_PLUGIN);
+        assert_eq!(
+            config["plugin"],
+            json!([reqwest::Url::from_file_path(&path).unwrap().to_string()])
+        );
+        assert_eq!(config["tools"], json!({"todowrite": false}));
+        let plugin = std::fs::read_to_string(&path).unwrap();
+        assert!(plugin.contains(&format!("\"session\":\"{}\"", session.session_id())));
+        assert!(plugin.contains("\"/opt/near ai/near-ai\""));
+        assert!(!plugin.contains("__TRACE_COMMONS_SETTINGS__"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        // Without the economizer, v1 stays `--pure` with no plugin.
+        session.economizer = None;
+        let command = session
+            .command_with_models("fixture-model", None, &model, "https://x.invalid/v1", "k")
+            .unwrap();
+        let args: Vec<_> = command.get_args().map(|v| v.to_str().unwrap()).collect();
+        assert_eq!(args[0], "--pure");
+
+        // v2 is never given it.
+        let mut v2 = OpenCodeSession {
+            title: "Managed session",
+            root: dir.path().join("profile-2"),
+            native: dir.path().join("opencode"),
+            cwd: dir.path().into(),
+            id: Uuid::new_v4(),
+            version: Version::V2,
+            economizer: None,
+        };
+        v2.economize(plan);
+        assert!(v2.economizer.is_none());
+    }
+
     /// Each listed model carries NEAR AI's window and output limit in both
     /// config versions; a model NEAR AI gives no window for carries none,
     /// and a missing output limit is OpenCode's own, never above the window.
@@ -782,6 +909,7 @@ mod tests {
                 cwd: dir.path().into(),
                 id: Uuid::new_v4(),
                 version,
+                economizer: None,
             };
             if version == Version::V2 && ensure_v2_system_configuration_absent().is_err() {
                 continue;
