@@ -18,10 +18,32 @@ Notarize macOS post-action. Both production public verification keys are
 configured. The preparation script defaults `TC_CHANNEL` to `production`.
 No App Store Connect or TestFlight distribution action is enabled.
 
-The first API-triggered run is build 1,
-`0b18e328-d3e5-4286-9286-bb10703b4cc1`, at source commit
-`a3cdad51a9f9a39cced44a9a23adcd6e0ea7f999`. Starting the build does not prove
-successful signing or notarization; inspect its final results and artifacts.
+## Qualification results
+
+Build 1 (`0b18e328-d3e5-4286-9286-bb10703b4cc1`) exposed Rust 1.96's
+release debug-strip alignment defect under Xcode 27. The scoped strip override
+and alignment regression below resolve that failure.
+
+Build 2 (`441d132b-aafe-4dba-ae8d-2cbea6d4611b`) at source commit
+`20f7e18b6198d59f9c8908c0bda3bb485f98944c` compiled and archived the app and
+passed the post-build archive validator. Independent inspection of the
+downloaded archive confirmed source/version/channel, the production Sparkle
+key, both architectures for app/CLI/FFI, aligned LINKEDIT string pools, and
+hardened runtime for both Rust binaries.
+
+The overall run failed at Developer ID export, before notarization. Apple's
+managed certificate query returned no certificates, but creation returned
+HTTP 409 / resultCode 7460: an existing Developer ID Application Managed
+certificate or pending request prevents creation. The browser certificate
+inventory showed the existing ordinary Developer ID certificate but no
+Cloud-managed Developer ID certificate. This requires resolving the team's
+managed signing state with Apple before claiming signed/notarized success.
+Other developers report the same contradiction on the
+[Apple Xcode Cloud forum](https://developer.apple.com/forums/topics/developer-tools-and-services/developer-tools-and-services-xcode-cloud).
+
+Retain build 2's Developer ID `IDEDistributionProvisioning.log` and workflow
+ID above for Apple Support. No certificate was revoked and no app was
+published or installed. Production release publishing remains on GitHub.
 
 ## Trigger from automation
 
