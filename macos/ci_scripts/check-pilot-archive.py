@@ -28,6 +28,16 @@ def check_runtime(binary):
         require(flags and int(flags.group(1), 16) & 0x10000, 'missing hardened runtime: ' + Path(binary).name + ' (' + arch + ')')
 
 
+def check_linkedit(binary):
+    arches = subprocess.check_output(['lipo', '-archs', str(binary)], text=True).split()
+    require(arches, 'no binary architectures')
+    for arch in arches:
+        commands = subprocess.check_output(['otool', '-l', '-arch', arch, str(binary)], text=True)
+        offsets = re.findall(r'^\s*stroff ([0-9]+)$', commands, re.MULTILINE)
+        require(len(offsets) == 1 and int(offsets[0]) % 8 == 0,
+                'misaligned LINKEDIT string pool: ' + Path(binary).name + ' (' + arch + ')')
+
+
 def check_cli_identity(line, short_version, source_commit):
     require(re.fullmatch(r'near-ai ' + re.escape(short_version) + r' \(commit ' + re.escape(source_commit) + r', built [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\) channel production', line),
             'archive CLI version, source or channel')
@@ -76,6 +86,8 @@ def check(archive, repo):
     for binary in binaries:
         arches = subprocess.check_output(['lipo', '-archs', str(binary)], text=True).split()
         require(set(arches) == {'arm64', 'x86_64'} and len(arches) == 2, 'archive binary architectures')
+    for binary in binaries:
+        check_linkedit(binary)
     check_runtime(binaries[1])
     check_runtime(dylib)
     identifier = subprocess.check_output(['otool', '-D', str(dylib)], text=True)
@@ -100,7 +112,10 @@ def check(archive, repo):
 
 if __name__ == '__main__':
     try:
-        if len(sys.argv) == 5 and sys.argv[1] == '--check-cli-version':
+        if len(sys.argv) >= 3 and sys.argv[1] == '--check-linkedit':
+            for binary in sys.argv[2:]:
+                check_linkedit(binary)
+        elif len(sys.argv) == 5 and sys.argv[1] == '--check-cli-version':
             check_cli_version(sys.argv[2], sys.argv[3], sys.argv[4])
         elif len(sys.argv) >= 3 and sys.argv[1] == '--check-runtime':
             for binary in sys.argv[2:]:

@@ -11,6 +11,10 @@ if [[ "$MODE" == --release-universal ]] && ! git -C "$REPO_ROOT" diff --quiet HE
   exit 1
 fi
 export RUSTFLAGS='-D warnings' CARGO_INCREMENTAL=0
+# Rust 1.96's default release debug stripping can leave LC_SYMTAB.stroff
+# four-byte aligned; Xcode 27 rejects these dylibs. Preserve the linker's
+# valid layout without changing Rust flags or the pinned toolchain.
+export CARGO_PROFILE_RELEASE_STRIP=none
 export TC_PILOT_MODE="$MODE" TC_PILOT_ROOT="$REPO_ROOT"
 /usr/bin/python3 <<'PY'
 import base64, os, re
@@ -82,5 +86,6 @@ install_name_tool -id "@rpath/$DYLIB" "$FFI_DIR/$DYLIB"
 # re-signing must preserve these flags for the notarized distribution.
 codesign --force --sign - --options runtime --timestamp=none "$FFI_DIR/$DYLIB"
 codesign --force --sign - --options runtime --timestamp=none "$FFI_DIR/near-ai"
+/usr/bin/python3 "$REPO_ROOT/macos/ci_scripts/check-pilot-archive.py" --check-linkedit "$FFI_DIR/$DYLIB" "$FFI_DIR/near-ai"
 /usr/bin/python3 "$REPO_ROOT/macos/ci_scripts/check-pilot-archive.py" --check-runtime "$FFI_DIR/$DYLIB" "$FFI_DIR/near-ai"
 echo 'Prepared private pilot native build inputs.'

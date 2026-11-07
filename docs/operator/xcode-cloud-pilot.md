@@ -72,7 +72,12 @@ add a GitHub Actions trigger or replace the release workflow.
 `ci_post_clone.sh` installs Rust `1.96.0` with both Apple targets. If rustup is
 absent, it downloads official rustup-init `1.29.3` and verifies its pinned
 host-specific SHA-256 before execution. No sudo or Python/npm dependencies
-are needed. Rust commands use `RUSTFLAGS="-D warnings" CARGO_INCREMENTAL=0`.
+are needed. Rust commands use `RUSTFLAGS="-D warnings" CARGO_INCREMENTAL=0` and
+`CARGO_PROFILE_RELEASE_STRIP=none`. Rust 1.96's default release debug-strip
+pass can misalign the Mach-O string pool, which Xcode 27's linker rejects
+([Rust #157750](https://github.com/rust-lang/rust/issues/157750)). The pilot
+preserves the native linker's layout and checks every staged and archived
+binary slice's string-pool alignment after staging and signing.
 
 `ci_pre_xcodebuild.sh` builds the FFI and `near-ai` with `--locked --release`
 for arm64 and x86_64, merges and checks both architectures, and sets the
@@ -107,6 +112,8 @@ xcodebuild -list -project macos/NearAI.xcodeproj
 xcodebuild -project macos/NearAI.xcodeproj -scheme NearAI-Cloud \
   -configuration Release -destination 'generic/platform=macOS' -showBuildSettings
 /usr/bin/python3 macos/ci_scripts/test-pilot.py
+# Requires the pinned Rust toolchain and both macOS targets from ci_post_clone.sh.
+/usr/bin/python3 macos/ci_scripts/test-linkedit.py
 ```
 
 Metadata-only mode builds no Rust binaries. For a local diagnostic build,
