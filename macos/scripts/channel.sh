@@ -106,6 +106,15 @@ load_channel() {
       return 1
     fi
   done
+  TC_FEATURE_PROFILE="${TC_FEATURE_PROFILE:-$TC_CHANNEL}"
+  local feature_identity
+  feature_identity="$(python3 "$channels_dir/../../scripts/feature-flags/profile.py" --channel "$TC_CHANNEL" --profile "$TC_FEATURE_PROFILE")" || return 1
+  TC_FEATURE_PROFILE_DIGEST="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["profile_digest"])' <<< "$feature_identity")" || return 1
+  # Testing shares staging identity, but never moves the staging update feed.
+  if [[ "$TC_FEATURE_PROFILE" == testing ]]; then
+    TC_SPARKLE_FEED_URL="${TC_SPARKLE_FEED_URL%/appcast.xml}/testing/appcast.xml"
+  fi
+  export TC_FEATURE_PROFILE
 }
 
 # The channel a bundled `near-ai --version` reports: the word after
@@ -190,5 +199,7 @@ with open(sys.argv[1], "rb") as f:
     echo "FATAL: URL scheme mismatch: $TC_CHANNEL channel file $TC_URL_SCHEME, FFI library $lib_scheme" >&2
     return 1
   fi
+  python3 "$(dirname "${BASH_SOURCE[0]}")/../../scripts/feature-flags/profile.py" \
+    --channel "$TC_CHANNEL" --profile "$TC_FEATURE_PROFILE" --app "$app" || return 1
   echo "verified channel $TC_CHANNEL: Info.plist, near-ai and the FFI library agree"
 }

@@ -16,6 +16,8 @@
          dylib's channel at launch and starts nothing on a mismatch or when
          this key is missing (staging design, section 4.3). -->
     <key>TCChannel</key><string>production</string>
+    <key>TCFeatureEnvironment</key><string>production</string>
+    <key>TCFeatureProfileDigest</key><string>77412cfa4fe58e0fe4b59a713a2b60ba43a902a9c031700cb991bbeb66861b0b</string>
     <key>TCPrivateAICampaignURL</key><string>https://storage.googleapis.com/tracecommons-flatpak/updates/private-ai-campaign.json</string>
     <key>CFBundleExecutable</key><string>TraceCommonsApp</string>
     <key>CFBundlePackageType</key><string>APPL</string>
