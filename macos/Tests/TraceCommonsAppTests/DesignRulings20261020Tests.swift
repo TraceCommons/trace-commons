@@ -40,9 +40,8 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertFalse(body.contains("strokeBorder"), "the border is back")
         XCTAssertFalse(body.contains("glassCardBeacon"), "the beacon is back")
         XCTAssertFalse(body.contains("Shimmer"), "the shimmer is back")
-        let mark = try XCTUnwrap(body.range(of: ".glassCardWatermark("))
-        let tier = try XCTUnwrap(body.range(of: ".glassTier(.card,"))
-        XCTAssertLessThan(mark.lowerBound, tier.lowerBound)
+        // Its watermark is gone too (owner, 2026-11-07).
+        XCTAssertFalse(body.contains("glassCardWatermark"), "the watermark is back")
     }
 
     /// The card's line is the core's call to share; an older core's plain
@@ -206,32 +205,5 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertTrue(card.contains(
             "Spacer(minLength: GlassTokens.Space.s4)\n                // The re-read control at the head's trailing end"))
         XCTAssertTrue(card.contains("GlassRefreshButton(refresh.label, title: refresh.title, small: true,"))
-    }
-
-    /// Home's small cards draw their icons as watermarks (owner,
-    /// 2026-10-20): large on the right, tilted as the promotions' graphics
-    /// are, cut off by the card's edges, behind the words, a little faded.
-    func test_homesSmallCardsCarryWatermarks() throws {
-        XCTAssertEqual(GlassCardWatermark.angle, -12)
-        XCTAssertLessThan(GlassCardWatermark.opacity, 1)
-        XCTAssertGreaterThan(GlassCardWatermark.opacity, 0.4)
-        XCTAssertGreaterThan(GlassCardWatermark.bleed.width, 0)
-        XCTAssertGreaterThan(GlassCardWatermark.bleed.height, 0)
-        let home = try Self.text("Views/Monitor/HomeViews.swift")
-        XCTAssertEqual(home.components(separatedBy: "iconPlacement: .watermark").count - 1, 2)
-        XCTAssertTrue(home.contains(".glassCardWatermark(HomeStatIcons.uncontributed)"))
-        // Behind the words and over the fill: before the card's tier.
-        for icon in ["uncontributed"] {
-            let mark = try XCTUnwrap(home.range(of: ".glassCardWatermark(HomeStatIcons.\(icon))"))
-            let tier = try XCTUnwrap(home.range(of: ".glassTier(.card", range: mark.upperBound..<home.endIndex))
-            XCTAssertLessThan(home.distance(from: mark.upperBound, to: tier.lowerBound), 200, icon)
-        }
-        let card = try String(
-            contentsOf: GlassSurfaceRulesTests.root.deletingLastPathComponent()
-                .appendingPathComponent("TCDesign/Components/StatCard.swift"),
-            encoding: .utf8)
-        XCTAssertTrue(card.contains(
-            ".glassCardWatermark(iconPlacement == .watermark ? systemImage : nil)\n        .glassTier(.card,"))
-        XCTAssertTrue(card.contains(".clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))"))
     }
 }

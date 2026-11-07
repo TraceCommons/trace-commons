@@ -74,7 +74,7 @@ final class HomeViewTests: XCTestCase {
         let home = try Self.flat("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed), "
-                + "systemImage: HomeStatIcons.waiting, loading: traces.phase == .loading, action: openTraces)"))
+                + "loading: traces.phase == .loading, action: openTraces)"))
         XCTAssertFalse(home.contains("store.status?.decisionsOwed"), "Home reads waiting from a second store")
     }
 
@@ -91,7 +91,7 @@ final class HomeViewTests: XCTestCase {
         // No sign-in line under it (owner, 2026-11-02): the heading's.
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: HomeFormat.creditReceivedWord, value: tiles.received, "
-                + "detail: creditDetail, systemImage: HomeStatIcons.credit, "
+                + "detail: creditDetail, "
                 + "loading: store.isLoading(\"history_rollup\"), action: openPrivateAI)"))
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: HomeFormat.creditPendingTitleWord, value: tiles.pending, "
@@ -113,8 +113,8 @@ final class HomeViewTests: XCTestCase {
         XCTAssertFalse(home.contains("glassCardBeacon"), "the beacon is back")
         XCTAssertFalse(home.contains("strokeBorder(Self.border"), "the border is back")
         XCTAssertFalse(home.contains(".overlay(GlassGlowEdge("), "the glow edge is back")
-        // Its icon is the card's watermark, as the tiles' (owner, 2026-10-20).
-        XCTAssertTrue(home.contains(".glassCardWatermark(HomeStatIcons.uncontributed)"))
+        // No icon, as the tiles have none (owner, 2026-11-07).
+        XCTAssertFalse(home.contains("glassCardWatermark"), "a card's watermark is back")
         let card = try XCTUnwrap(home.range(of: "private struct HomeNotContributedCard: View {"))
         XCTAssertFalse(home[card.upperBound...].prefix(2500).contains("Gradient.heroMissions"), "the dark gradient is back")
         // The figure counts while credit arrives (`BalanceArrivalFlourish`),
@@ -124,7 +124,7 @@ final class HomeViewTests: XCTestCase {
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: copy.balanceTitle, value: counting ?? balance.value, "
                 + "detail: balance.detail, detailInk: balance.detailInk, "
-                + "systemImage: HomeStatIcons.balance, action: openPrivateAI)"))
+                + "action: openPrivateAI)"))
         let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))
         let upsell = try XCTUnwrap(home.range(of: "notContributed(uncontributed, title: title)"))
         let credit = try XCTUnwrap(home.range(of: "HomeStatTile(label: HomeFormat.creditPendingWord"))
@@ -132,7 +132,7 @@ final class HomeViewTests: XCTestCase {
         XCTAssertLessThan(upsell.lowerBound, credit.lowerBound, "Not contributed sits under Waiting and Contributed")
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(freshRollup), "
-                + "systemImage: HomeStatIcons.contributed, loading: store.isLoading(\"history_rollup\"), "
+                + "loading: store.isLoading(\"history_rollup\"), "
                 + "action: openHistory)"))
         // The credit summary after a failed read is no summary (D6 then
         // shows a dash). The condition gates the figure but is not drawn
