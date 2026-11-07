@@ -26818,7 +26818,7 @@ async fn a_disabled_immutability_trigger_fails_the_audit_control() {
         .unwrap();
     // The rest of the check runs as the runtime login, which cannot bypass
     // row-level security, so the isolation control can pass.
-    tx.batch_execute(&format!("SET LOCAL ROLE {RUNTIME_ROLE}"))
+    tx.batch_execute(&format!("SET LOCAL SESSION AUTHORIZATION {RUNTIME_ROLE}"))
         .await
         .unwrap();
     let disabled = pipeline_control_health(&tx, &["phase_outcomes"])
@@ -26918,7 +26918,7 @@ async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
         tx.batch_execute(change)
             .await
             .unwrap_or_else(|error| panic!("{case}: {error}"));
-        tx.batch_execute(&format!("SET LOCAL ROLE {RUNTIME_ROLE}"))
+        tx.batch_execute(&format!("SET LOCAL SESSION AUTHORIZATION {RUNTIME_ROLE}"))
             .await
             .unwrap();
         let controls = pipeline_control_health(&tx, &tables).await.unwrap();
@@ -26947,7 +26947,7 @@ async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
              GRANT pipeline_control_test_policy_role TO pipeline_control_test_reader;
              CREATE POLICY pipeline_control_test_role_open ON pipeline_runs
                  FOR SELECT TO pipeline_control_test_policy_role USING (true);
-             SET LOCAL ROLE pipeline_control_test_reader"
+             SET LOCAL SESSION AUTHORIZATION pipeline_control_test_reader"
         ))
         .await
         .unwrap_or_else(|error| panic!("{case}: {error}"));
@@ -26962,7 +26962,7 @@ async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
         !as_owner.tenant_isolation_passed,
         "a role that bypasses row-level security fails the isolation control"
     );
-    tx.batch_execute(&format!("SET LOCAL ROLE {RUNTIME_ROLE}"))
+    tx.batch_execute(&format!("SET LOCAL SESSION AUTHORIZATION {RUNTIME_ROLE}"))
         .await
         .unwrap();
     let as_runtime = pipeline_control_health(&tx, &tables).await.unwrap();

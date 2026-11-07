@@ -4983,9 +4983,65 @@ impl Database for PgBackend {
         near_account_id: &str,
         label: Option<&str>,
     ) -> Result<(), DatabaseError> {
-        self.ensure_trace_tenant(tenant_id).await?;
+        if !self
+            .enroll_near_identity(
+                tenant_id,
+                account_id,
+                public_key,
+                near_account_id,
+                label,
+                true,
+            )
+            .await?
+        {
+            return Err(DatabaseError::Pool("near_identity_account_not_open".into()));
+        }
+        Ok(())
+    }
+
+    async fn enroll_near_identity(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        public_key: &str,
+        near_account_id: &str,
+        label: Option<&str>,
+        strong_session: bool,
+    ) -> Result<bool, DatabaseError> {
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
-        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // This gate needs a new snapshot after waiting for the account lock,
+        // regardless of the connection's configured default isolation level.
+        let tx = client
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::ReadCommitted)
+            .start()
+            .await?;
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant_id],
+        )
+        .await?;
+        // FOR UPDATE (not NO KEY UPDATE) also conflicts with the KEY SHARE
+        // acquired by the immediate composite account FKs on identity/anchor
+        // inserts and destination moves. Thus provisioning and merges cannot
+        // commit an unseen strong addition across this admission point. Anchor
+        // revival already holds this same account lock in near_ai_rebind.
+        let account = tx
+            .query_opt(
+                "SELECT 1 FROM trace_accounts
+              WHERE tenant_id = trace_current_tenant_id() AND account_id = $1
+                AND closed_at IS NULL FOR UPDATE",
+                &[&account_id],
+            )
+            .await?;
+        if account.is_none() {
+            return Ok(false);
+        }
+        // A separate statement AFTER the lock wait is essential: READ COMMITTED
+        // now sees a strong writer that committed while we were waiting.
+        if !strong_session && active_strong_authenticator_count(&tx, &account_id).await? != 0 {
+            return Ok(false);
+        }
         tx.execute(
             "INSERT INTO trace_near_identities (
                 tenant_id, public_key, near_account_id, account_id, label, created_at
@@ -4997,7 +5053,7 @@ impl Database for PgBackend {
         .await
         .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        Ok(())
+        Ok(true)
     }
 
     async fn load_near_identity_for_login(
@@ -5129,6 +5185,14 @@ impl Database for PgBackend {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Serialize removals and the remaining-key result with enrollment.
+        tx.query_opt(
+            "SELECT 1 FROM trace_accounts
+              WHERE tenant_id = trace_current_tenant_id() AND account_id = $1
+              FOR UPDATE",
+            &[&account_id],
+        )
+        .await?;
         // account-scoped soft-delete: an unknown / already-revoked / other-account
         // key affects zero rows.
         let removed = tx
@@ -6900,10 +6964,15 @@ fn refuse_if_enumeration_is_ambiguous(
 /// The catalog half of `Database::trace_corpus_rls_diagnostics`, on `client`
 /// (a pooled connection or an open transaction), for `tables`: whether each
 /// is a table in the current schema with row-level security enabled and
-/// forced and the tenant policy installed with the expected expression, and
-/// whether the current role can bypass it (a superuser, `BYPASSRLS`, or the
-/// owner of a table that does not force it). The versioned pipeline's control
-/// health reads its tables' isolation through the same check (Zaki review 1,
+/// forced, with the expected tenant policy and no unexpected applicable
+/// permissive alternative widening it. V69/V71 reward tables intentionally
+/// reserve the tenant policy for their exact definer guard roles; V56 permits
+/// only its exact scoped community drain read/mark policies. Restrictive policies only intersect
+/// the admitted rows and are supported. PostgreSQL's USAGE membership check
+/// follows transitive inheritance; SET membership alone does not apply a
+/// policy. Ownership and bypass checks also include roles the session can
+/// assume, including inherited ownership after that transition. The versioned
+/// pipeline's control health reads its tables' isolation through the same check (Zaki review 1,
 /// round 2, finding 10). `tenant_context_transaction_local` is left `false`:
 /// that probe opens a transaction of its own, which only the caller holding
 /// a whole connection can run.
@@ -6929,13 +6998,83 @@ where
                     c.relrowsecurity,
                     c.relforcerowsecurity,
                     COALESCE(p.has_policy, false) AS has_policy,
-                    COALESCE(p.expression_matches, false) AS expression_matches
+                    COALESCE(p.expression_matches, false)
+                    AND NOT EXISTS (
+                        SELECT 1 FROM pg_policy alternative
+                        WHERE alternative.polrelid = c.oid
+                          AND alternative.polpermissive
+                          AND EXISTS (
+                              SELECT 1 FROM unnest(alternative.polroles) policy_role(oid)
+                              WHERE CASE WHEN policy_role.oid = 0 THEN true
+                                  ELSE pg_has_role(current_user, policy_role.oid, 'USAGE') END
+                          )
+                          AND (CASE alternative.polcmd
+                              WHEN 'r' THEN pg_get_expr(alternative.polqual, c.oid) = ANY($2)
+                              WHEN 'd' THEN pg_get_expr(alternative.polqual, c.oid) = ANY($2)
+                              WHEN 'a' THEN pg_get_expr(alternative.polwithcheck, c.oid) = ANY($2)
+                              WHEN 'w' THEN
+                                  pg_get_expr(alternative.polqual, c.oid) = ANY($2)
+                                  AND pg_get_expr(COALESCE(alternative.polwithcheck, alternative.polqual), c.oid) = ANY($2)
+                              WHEN '*' THEN
+                                  pg_get_expr(alternative.polqual, c.oid) = ANY($2)
+                                  AND pg_get_expr(COALESCE(alternative.polwithcheck, alternative.polqual), c.oid) = ANY($2)
+                              ELSE false
+                          END) IS NOT TRUE
+                          AND (
+                              c.relname = 'trace_community_withdrawal_evictions'
+                              AND alternative.polroles = ARRAY[0::oid]
+                              AND (
+                                  (
+                                      alternative.polname = 'trace_community_drain_read'
+                                      AND alternative.polcmd = 'r'
+                                      AND pg_get_expr(alternative.polqual, c.oid) IN (
+                                          'trace_community_drain_scope()',
+                                          'public.trace_community_drain_scope()'
+                                      )
+                                      AND alternative.polwithcheck IS NULL
+                                  ) OR (
+                                      alternative.polname = 'trace_community_drain_mark'
+                                      AND alternative.polcmd = 'w'
+                                      AND pg_get_expr(alternative.polqual, c.oid) IN (
+                                          '(trace_community_drain_scope() AND (drained_at IS NULL))',
+                                          '(public.trace_community_drain_scope() AND (drained_at IS NULL))'
+                                      )
+                                      AND pg_get_expr(alternative.polwithcheck, c.oid) IN (
+                                          '(trace_community_drain_scope() AND (drained_at IS NOT NULL))',
+                                          '(public.trace_community_drain_scope() AND (drained_at IS NOT NULL))'
+                                      )
+                                  )
+                              )
+                          ) IS NOT TRUE
+                    ) AS expression_matches
                  FROM pg_class c
                  JOIN pg_namespace n ON n.oid = c.relnamespace
                  LEFT JOIN LATERAL (
                     SELECT
                         true AS has_policy,
                         pol.polcmd = '*'
+                            AND pol.polpermissive
+                            AND CASE
+                                WHEN c.relname IN (
+                                    'trace_reward_operators', 'trace_reward_programs',
+                                    'trace_reward_reservations', 'trace_reward_decisions',
+                                    'trace_reward_awards', 'trace_reward_invalidations'
+                                ) THEN pol.polroles = ARRAY[(
+                                    SELECT oid FROM pg_roles WHERE rolname = 'trace_reward_guard'
+                                )]
+                                WHEN c.relname IN (
+                                    'trace_reward_offers', 'trace_reward_offer_controls',
+                                    'trace_reward_participant_logins', 'trace_reward_principals',
+                                    'trace_reward_principal_accounts', 'trace_reward_participant_reservations'
+                                ) THEN pol.polroles = ARRAY[(
+                                    SELECT oid FROM pg_roles WHERE rolname = 'trace_reward_participant_guard'
+                                )]
+                                ELSE EXISTS (
+                                    SELECT 1 FROM unnest(pol.polroles) policy_role(oid)
+                                    WHERE CASE WHEN policy_role.oid = 0 THEN true
+                                        ELSE pg_has_role(current_user, policy_role.oid, 'USAGE') END
+                                )
+                            END
                             AND pg_get_expr(pol.polqual, pol.polrelid) = ANY($2)
                             AND pg_get_expr(pol.polwithcheck, pol.polrelid) = ANY($2)
                             AS expression_matches
@@ -6956,34 +7095,41 @@ where
         .await?;
     let current_role = client
         .query_one(
-            "SELECT
+            "WITH reachable_roles AS (
+                    SELECT oid, rolsuper, rolbypassrls FROM pg_roles
+                    WHERE rolname = current_user
+                       OR pg_has_role(session_user, oid, 'SET')
+                 )
+                 SELECT
                     current_user AS current_role_name,
                     EXISTS (
                         SELECT 1
                         FROM pg_class c
                         JOIN pg_namespace n ON n.oid = c.relnamespace
-                        JOIN pg_roles r ON r.oid = c.relowner
                         WHERE n.nspname = current_schema()
                           AND c.relkind = 'r'
                           AND c.relname = ANY($1)
-                          AND r.rolname = current_user
+                          AND EXISTS (
+                              SELECT 1 FROM reachable_roles r
+                              WHERE pg_has_role(r.oid, c.relowner, 'USAGE')
+                          )
                     ) AS owns_trace_tables,
                     EXISTS (
                         SELECT 1
                         FROM pg_class c
                         JOIN pg_namespace n ON n.oid = c.relnamespace
-                        JOIN pg_roles r ON r.oid = c.relowner
                         WHERE n.nspname = current_schema()
                           AND c.relkind = 'r'
                           AND c.relname = ANY($1)
-                          AND r.rolname = current_user
+                          AND EXISTS (
+                              SELECT 1 FROM reachable_roles r
+                              WHERE pg_has_role(r.oid, c.relowner, 'USAGE')
+                          )
                           AND NOT c.relforcerowsecurity
                     ) AS owns_unforced_trace_tables,
-                    COALESCE((
-                        SELECT rolsuper OR rolbypassrls
-                        FROM pg_roles
-                        WHERE rolname = current_user
-                    ), false) AS bypass_role",
+                    EXISTS (
+                        SELECT 1 FROM reachable_roles WHERE rolsuper OR rolbypassrls
+                    ) AS bypass_role",
             &[&expected_tables],
         )
         .await?;

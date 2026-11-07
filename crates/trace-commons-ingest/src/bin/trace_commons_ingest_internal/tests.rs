@@ -3,6 +3,18 @@
 
 use super::*;
 
+#[path = "tests/export_expiry_tests.rs"]
+mod export_expiry_tests;
+
+#[path = "tests/bootstrap_atomicity_tests.rs"]
+mod bootstrap_atomicity_tests;
+
+#[path = "tests/legacy_data_authorization_tests.rs"]
+mod legacy_data_authorization_tests;
+
+#[path = "tests/scope_escalation_tests.rs"]
+mod scope_escalation_tests;
+
 #[path = "tests/multitenant_settlement_tests.rs"]
 mod multitenant_settlement_tests;
 
@@ -16131,7 +16143,13 @@ async fn tenant_policy_blocks_privileged_revocation_but_not_owner_revocation() {
     let mut record = read_submission_record(temp.path(), "tenant-a", submission_id)
         .expect("submission record reads")
         .expect("submission record exists");
-    record.auth_principal_ref = legacy_principal_ref();
+    record.auth_principal_ref = state
+        .tokens
+        .get("token-a")
+        .expect("owner credential")
+        .legacy_principal_ref
+        .clone()
+        .expect("same-credential historical alias");
     write_submission_record(temp.path(), &record)
         .expect("legacy-principal submission record writes");
 
@@ -31372,7 +31390,7 @@ async fn vector_index_drill_records_smoke_evidence_without_writing_vectors() {
 }
 
 #[tokio::test]
-async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
+async fn maintenance_legal_hold_preserves_expired_payload_without_exporting_it() {
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut tokens = BTreeMap::new();
@@ -31662,8 +31680,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         }),
     )
     .await
-    .expect("legal-hold trace remains exportable while held");
-    assert_eq!(export.item_count, 1);
+    .expect("legal hold preserves the payload without extending export eligibility");
+    assert_eq!(export.item_count, 0);
 }
 
 #[tokio::test]
@@ -81655,8 +81673,8 @@ fn submission_record_with_principal(auth_principal_ref: &str) -> TraceCommonsSub
 }
 
 /// (a) An account set of {principal_a} sees ONLY principal_a's record — not
-/// principal_b's, and crucially NOT the `legacy_principal_ref()` wildcard that
-/// the legacy reviewer/contributor surface honours. Pure set membership.
+/// principal_b's, and crucially NOT unknown `legacy_principal_ref()` ownership.
+/// Pure set membership, without the reviewer surface's privileged access.
 #[test]
 fn visible_for_account_is_set_membership_only_no_legacy_wildcard() {
     let set = AccountPrincipalSet::from_iter_for_test_only(["principal_a".to_string()]);

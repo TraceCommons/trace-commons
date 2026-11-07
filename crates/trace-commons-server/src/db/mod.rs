@@ -1484,6 +1484,8 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Trusted strong-authenticator insertion. Request enrollment must use
+    /// `enroll_near_identity`, passing strength from the authenticated session.
     /// Insert a registered NEAR access key for `account_id`. `public_key` is the
     /// globally-UNIQUE NEAR access key (`ed25519:...`) used by the unauthenticated
     /// login resolver to map key -> tenant; `near_account_id` is the human-readable
@@ -1499,6 +1501,29 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<(), DatabaseError> {
         Err(DatabaseError::Pool(
             "insert_near_identity not implemented".to_string(),
+        ))
+    }
+
+    /// Atomically admit and insert a verified wallet identity. A weak session
+    /// may insert only when this account has no active strong authenticator at
+    /// the serialized admission point. `strong_session` MUST come from the
+    /// authenticated context, never a request field. False means refusal (an
+    /// existing authenticator or an account that is no longer open).
+    ///
+    /// Implementations must serialize the count and insert with all additions
+    /// or revivals of strong authenticators, including NEAR AI anchors and
+    /// account merges. Never fall back to a separate count followed by insert.
+    async fn enroll_near_identity(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _public_key: &str,
+        _near_account_id: &str,
+        _label: Option<&str>,
+        _strong_session: bool,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "atomic near identity enrollment not implemented".to_string(),
         ))
     }
 
