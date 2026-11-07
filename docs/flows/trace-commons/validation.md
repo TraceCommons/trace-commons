@@ -1,19 +1,17 @@
-# Structural validation evidence
+# Validation evidence
 
-Finished UTC: `2026-11-06T22:44:33.073854+00:00` (includes the scoped contribution refresh).
+Structural run finished UTC: `2026-11-06T23:26:58.557479+00:00`.
 
 Quint `0.33.0`, Node `v26.13.0`, Python `3.12.8`.
 
-Model seed: `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`; selected source seams reviewed at `a2e0aa56608f8c403deff679f8b51e76ac2f5ca7`.
-
 **14 models typechecked; 155 frame/control projections matched; 1,792 sampled traces and 180,992 sampled states passed view validation.**
 
-These are structural checks and random simulation, not exhaustive safety verification. Selected safety checks are reported separately in [proof results](proofs/results.md). Unobserved actions and frames, model hashes and exact commands are in [validation.json](validation.json).
+Random simulation is structural validation, not a safety proof. The [complete induction results](proofs/results.md) separately establish all 13 selected model hypotheses. [validation.json](validation.json) records model/view/frame hashes, exact commands and unobserved actions/frames.
 
-| Model | Sampled traces | Sampled states | Observed frames / declared frames | Unobserved actions |
+| Model | Traces | Sampled states | Observed / declared frames | Unobserved actions |
 | --- | ---: | ---: | ---: | ---: |
-| client_consent | 128 | 12,928 | 4 / 4 | 3 |
-| client_contribution | 128 | 12,928 | 13 / 16 | 24 |
+| client_consent | 128 | 12,928 | 4 / 4 | 4 |
+| client_contribution | 128 | 12,928 | 11 / 16 | 31 |
 | client_learning | 128 | 12,928 | 14 / 18 | 19 |
 | client_providers | 128 | 12,928 | 8 / 8 | 12 |
 | client_services | 128 | 12,928 | 16 / 19 | 18 |
@@ -27,6 +25,19 @@ These are structural checks and random simulation, not exhaustive safety verific
 | server_receipt | 128 | 12,928 | 5 / 5 | 4 |
 | server_settlement | 128 | 12,928 | 5 / 6 | 19 |
 
-The source inventory self-tests and pinned-tree comparison are independent checks. Changed source fingerprints are invalidated in coverage rather than silently retained. The current source index has 925 correspondence gaps.
+## Source and native validation
 
-Source-method replays use synthetic clients and exact extracted method bodies; they are not installed-app UI integration tests. HTML review frames do not establish native visual fidelity. No production Rust, Swift, application manifest or dependency lockfile changes are part of this work.
+The original model seed and initial correspondence review are preserved in the JSON. Current repaired native source hashes, complete native-suite results, proof certificates and source regressions are recorded in [the evidence manifest](proofs/evidence/manifest.json). This is a source-review argument plus tests, not executable-source equivalence. The source inventory retains explicit gaps.
+
+The native regression suite has 24 deterministic tests. The original freshness-guard bypass produced 55 assertion failures; the initial-owner regression separately failed before its fix. Restored focused tests passed. Callback tasks are awaited directly, without a drain sleep. A separate reviewer approved the final native repair.
+
+During integration, these failures were diagnosed and resolved:
+
+- `ContributionAccountTests.testResponseForOldLifecycleIsDiscardedDespiteSameEnrollment`: its fixture parked every RPC, including new background grant/history reads, starving the cooperative pool. The fixture now parks only its account operation, returns valid empty background frames, and bounds its wait. All four account tests pass.
+- `FirstRunDaemonAdaptorTests.test_anUnconfirmedGrantCarriesALabelTheCoreKnows`: supplied a valid owner-status fixture so the test reaches its intended grant refusal; the precise refusal-label assertion is preserved.
+- `MonitorNavigationTests.test_theStatusReadRecordsItsFailure`: replaced the obsolete implementation-string assertion with an actual current status failure/recovery regression.
+- `CredentialRenewalTests.testExpiredSessionRetainsKeyAndOffersSignInWithoutAChooser` and `InferenceDuringOnboardingTests.testSignInRendersOnInferenceWhileOnboardingIsRequired`: failed in the restricted rendering runtime. Both unchanged image/OCR tests passed with normal approved AppKit/Vision access. Final native-suite status uses that environment.
+
+Inventory self-tests/comparison, ITF decoder controls, proof-runner negative controls and generated JavaScript parsing are separate checks. Historical counterexample charts are retained under `proofs/historical`; they are not displayed as current-model statecharts. HTML frames do not establish native visual fidelity.
+
+No application dependency or Rust production source changed. The exact current FFI build and four license-boundary tests passed. Merge, release and deployment remain separate operations.

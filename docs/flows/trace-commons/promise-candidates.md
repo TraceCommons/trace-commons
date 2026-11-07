@@ -28,7 +28,7 @@ gets a final processing result.”** This is not proposed as an unconditional
 guarantee: human-review decisions, policy suspension, retries and permanent
 refusals need explicit scope and fairness before it can be encoded.
 
-The owner may select all P1–P13, a subset by ID, or revise their wording.
-Selecting them authorizes checking, not changing production behavior or
-weakening a promise when it fails. Each selected result must later be reported
-as holds, breaks, or not checked under the documented finite bounds.
+The owner selected all P1–P13. The subsequent request to “investigate and fix
+all of these” authorized the native repairs in this PR. The wording above is
+preserved; complete current results and assumptions are in the proof report.
+Changes to a promise remain the owner's decision.

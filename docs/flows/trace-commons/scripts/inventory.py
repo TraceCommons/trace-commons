@@ -20,7 +20,7 @@ import sys
 import tarfile
 from pathlib import Path
 
-BASELINE = "a2e0aa56608f8c403deff679f8b51e76ac2f5ca7"
+BASELINE = "91dc6e8b8d7ef8c0b755cafaa3f0647a199f8c07"
 HERE = Path(__file__).resolve().parent.parent
 ROOT = HERE.parents[2]
 INGEST = "crates/trace-commons-ingest/src/"

@@ -1,7 +1,7 @@
 // Source projection refreshed at a2e0aa566; owner selected P1-P13 on 2026-11-06.
 module client_consent {
   type Folder = { mode: str, askUnder: int, byGrant: bool, terms: bool, fromNow: bool, recorded: bool, heldPath: bool, listingCurrent: bool, projectAtGrant: bool, completedAuthorization: bool }
-  type Entry = { state: str, unknown: bool, onDisk: bool, origin: str, scopeOk: bool, inputOk: bool, pin: bool, hold: str, candidate: bool, overrideHeld: bool }
+  type Entry = { state: str, unknown: bool, onDisk: bool, origin: str, scopeOk: bool, inputOk: bool, pin: bool, hold: str, candidate: bool, overrideHeld: bool, automaticAuthorizationCompleted: bool }
   var s: {
     screen: str, selected: int, displayedSharing: str, sharingRead: str, sourceRoot: int, folders: int -> Folder, entries: int -> Entry,
     grant: bool, grantId: int, generation: int, includeExisting: bool,
@@ -11,7 +11,7 @@ module client_consent {
     request: str, requestInclude: bool, keepAsks: bool, shownWitnessCurrent: bool,
     audit: bool, build: str, buildEntry: int, buildCurrent: bool,
     check: str, checkEntry: int, checkDisposition: str, notice: bool,
-    firstRun: str, firstRunAsk: bool, sharingReadCurrent: bool, proofP1: bool
+    firstRun: str, firstRunAsk: bool, sharingReadCurrent: bool, sharingGrantCompleted: bool, sharingStale: bool, proofP1: bool, grantMutation: bool, withdrawalCall: str, withdrawalReturnToAsk: bool
   }
   val vars = s
   pure def controls(frame: str): Set[str] =
@@ -26,7 +26,7 @@ module client_consent {
     else if (o == "ask") "ask"
     else if (e.unknown) "ask"
     else if (o == "auto") "auto" else own(f)
-  pure def waiting(e: Entry): Entry = { ...e, state: "pending", origin: "none", scopeOk: false, inputOk: false, pin: false, hold: "none", candidate: false }
+  pure def waiting(e: Entry): Entry = { ...e, state: "pending", origin: "none", scopeOk: false, inputOk: false, pin: false, hold: "none", candidate: false, automaticAuthorizationCompleted: false }
   pure def held(e: Entry, why: str): Entry = { ...waiting(e), hold: why }
   pure def restrict(e: Entry, mode: str): Entry =
     if (mode == "never" and e.state == "pending") { ...e, state: "refused", hold: "project_ignored" }
@@ -34,7 +34,7 @@ module client_consent {
       if (mode == "never") { ...e, state: "refused", hold: "project_ignored" } else waiting(e)
     else e
   pure def blankFolder: Folder = { mode: "ask", askUnder: -1, byGrant: false, terms: true, fromNow: false, recorded: false, heldPath: false, listingCurrent: false, projectAtGrant: false, completedAuthorization: false }
-  pure def blankEntry(unknown: bool): Entry = { state: "pending", unknown: unknown, onDisk: true, origin: "none", scopeOk: false, inputOk: false, pin: false, hold: "none", candidate: false, overrideHeld: false }
+  pure def blankEntry(unknown: bool): Entry = { state: "pending", unknown: unknown, onDisk: true, origin: "none", scopeOk: false, inputOk: false, pin: false, hold: "none", candidate: false, overrideHeld: false, automaticAuthorizationCompleted: false }
   action init = {
     nondet otherUnknown = Set(false, true).oneOf()
     s' = {
@@ -47,7 +47,7 @@ module client_consent {
     request: "none", requestInclude: true, keepAsks: true, shownWitnessCurrent: true,
     audit: false, build: "none", buildEntry: 0, buildCurrent: true,
     check: "none", checkEntry: 0, checkDisposition: "none", notice: false,
-    firstRun: "none", firstRunAsk: false, sharingReadCurrent: false, proofP1: true
+    firstRun: "none", firstRunAsk: false, sharingReadCurrent: false, sharingGrantCompleted: false, sharingStale: false, proofP1: true, grantMutation: false, withdrawalCall: "none", withdrawalReturnToAsk: true
     }
   }
   // SharingChoiceCard.swift:16-21,202-249. Picking Automatic opens disclosures.
@@ -89,12 +89,12 @@ module client_consent {
     nondet keep = Set(false, true).oneOf()
     all {
       (s.request == "disclosure" or (s.screen == "consent_internal" and s.request == "none")),
-      s' = { ...s, request: "validate", screen: "consent_saving", requestInclude: include, keepAsks: keep, audit: false }
+      s' = { ...s, request: "validate", screen: "consent_saving", grantMutation: true, sharingReadCurrent: false, sharingStale: s.sharingStale or s.sharingRead != "none", sharingRead: "none", requestInclude: include, keepAsks: keep, audit: false }
     }
   }
   action TheGrantPreconditionsRefuseTheRequest = all {
     s.request == "validate" and (not(s.scopeChosen) or not(s.shownWitnessCurrent)),
-    s' = { ...s, request: "refused", screen: "consent_internal" }
+    s' = { ...s, request: "refused", screen: "consent_internal", grantMutation: false, sharingReadCurrent: false, sharingStale: s.sharingStale or s.sharingRead != "none", sharingRead: "none" }
   }
   action TheGrantAuditIsRecorded = all {
     s.request == "validate" and s.scopeChosen and s.shownWitnessCurrent,
@@ -102,13 +102,13 @@ module client_consent {
   }
   action TheGrantAuditOrPolicyWriteFails = all {
     s.request == "validate" or s.request == "save",
-    s' = { ...s, request: "refused", screen: "consent_internal" }
+    s' = { ...s, request: "refused", screen: "consent_internal", grantMutation: false, sharingReadCurrent: false, sharingStale: s.sharingStale or s.sharingRead != "none", sharingRead: "none" }
   }
   // Canonical fresh identities: invalidate every prior equality reference.
   // Include-existing increments generation twice in source; only final equality matters.
   action TheFreshGrantIsSaved = all {
     s.request == "save" and s.audit,
-    s' = { ...s, grant: true, sharingReadCurrent: false, grantId: 3 - s.grantId, generation: 3 - s.generation,
+    s' = { ...s, grant: true, sharingReadCurrent: false, sharingStale: s.sharingStale or s.sharingRead != "none", sharingRead: "none", grantId: 3 - s.grantId, generation: 3 - s.generation,
       grantTerms: true, includeExisting: s.requestInclude, sourceRecorded: false,
       jobCurrent: false, request: "reply", override: if(s.requestInclude) "none" else s.override, overrideAuthorization: if(s.requestInclude) false else s.overrideAuthorization,
       folders: Set(0, 1).mapBy(i => { val f = s.folders.get(i)
@@ -118,16 +118,16 @@ module client_consent {
         fromNow: if(s.requestInclude and f.mode == "auto") false else f.fromNow } }) }
   }
   action TheGrantReplyArrives = all {
-    s.request == "reply", s' = { ...s, request: "none", screen: "consent_internal" }
+    s.request == "reply", s' = { ...s, request: "none", screen: "consent_internal", grantMutation: false, sharingReadCurrent: false, sharingStale: s.sharingStale or s.sharingRead != "none", sharingRead: "none" }
   }
   // ipc.rs:4170,5258-5273; SharingChoiceCard.swift:16-21. Read and UI callback differ.
   action TheSharingChoiceRequestsTheSavedGrant = all {
-    s.sharingRead == "none",
-    s' = { ...s, sharingRead: if(s.grant and s.includeExisting) "automatic" else "ask", sharingReadCurrent: s.grant }
+    not(s.grantMutation) and s.withdrawalCall == "none",
+    s' = { ...s, sharingRead: if(s.grant and s.includeExisting) "automatic" else "ask", sharingReadCurrent: true, sharingGrantCompleted: s.grant and s.includeExisting, sharingStale: s.sharingStale or s.sharingRead != "none" }
   }
   action TheSharingChoiceReceivesTheSavedGrant = all {
-    s.sharingRead != "none",
-    s' = { ...s, displayedSharing: s.sharingRead, sharingRead: "none", proofP1: s.proofP1 and (s.sharingRead != "automatic" or (s.grant and s.sharingReadCurrent)) }
+    s.sharingRead != "none" and s.sharingReadCurrent and not(s.grantMutation) and s.withdrawalCall == "none",
+    s' = { ...s, displayedSharing: s.sharingRead, sharingRead: "none", proofP1: s.proofP1 and (s.sharingRead != "automatic" or (s.sharingGrantCompleted and s.sharingReadCurrent)) }
   }
   action TheRefusedGrantIsAcknowledged = all {
     s.request == "refused", s' = { ...s, request: "none", firstRun: if(s.firstRun == "grant") "fallback" else s.firstRun }
@@ -136,11 +136,41 @@ module client_consent {
   action YouWithdrawTheGrant = {
     nondet returnToAsk = Set(false, true).oneOf()
     all {
-      s.screen == "consent_internal" and s.grant,
-      s' = { ...s, grant: false, sharingReadCurrent: false, jobCurrent: false, displayedSharing: "ask",
-        folders: Set(0, 1).mapBy(i => { val f = s.folders.get(i)
-        if(returnToAsk and f.byGrant and f.mode == "auto") blankFolder else f }) }
+      s.screen == "consent_internal" and s.withdrawalCall == "none",
+      s' = { ...s, withdrawalCall: "request", withdrawalReturnToAsk: returnToAsk, sharingReadCurrent: false, sharingStale: s.sharingStale or s.sharingRead != "none", sharingRead: "none" }
     }
+  }
+  // The daemon write and the native mutation completion are distinct boundaries.
+  action TheGrantWithdrawalIsSaved = all {
+    s.withdrawalCall == "request",
+    s' = { ...s, grant: false, sharingReadCurrent: false, sharingStale: s.sharingStale or s.sharingRead != "none", sharingRead: "none", jobCurrent: false, withdrawalCall: "reply",
+      folders: Set(0, 1).mapBy(i => { val f = s.folders.get(i)
+        if(s.withdrawalReturnToAsk and f.byGrant and f.mode == "auto") blankFolder else f }) }
+  }
+  action TheGrantWithdrawalReplyArrives = all {
+    s.withdrawalCall == "reply",
+    s' = { ...s, withdrawalCall: "none", sharingReadCurrent: false, sharingStale: s.sharingStale or s.sharingRead != "none", sharingRead: "none" }
+  }
+  action TheGrantWithdrawalFails = all {
+    s.withdrawalCall == "request",
+    s' = { ...s, withdrawalCall: "none", sharingReadCurrent: false, sharingStale: s.sharingStale or s.sharingRead != "none", sharingRead: "none" }
+  }
+  // A stale native callback is consumed without publication or read bookkeeping.
+  action TheSharingChoiceDiscardsAStaleGrantRead = {
+    nondet morePending = Set(false, true).oneOf()
+    all {
+      s.sharingStale,
+      s' = { ...s, sharingStale: morePending }
+    }
+  }
+  // Processing status/resync notifications requests current state; it does not
+  // synchronously know about a daemon mutation whose event has not arrived.
+  action TheGrantStatusNotificationIsProcessed = all {
+    s' = { ...s,
+      sharingStale: s.sharingStale or s.sharingRead != "none",
+      sharingRead: if(not(s.grantMutation) and s.withdrawalCall == "none") (if(s.grant and s.includeExisting) "automatic" else "ask") else "none",
+      sharingReadCurrent: not(s.grantMutation) and s.withdrawalCall == "none",
+      sharingGrantCompleted: s.grant and s.includeExisting }
   }
   // watcher.rs:197-228,523-595: captured identity before listing, then record.
   action TheWatcherStartsAFullSourceListing = all {
@@ -241,7 +271,7 @@ module client_consent {
       (not(s.folders.get(i).fromNow) or (s.folders.get(i).recorded and not(s.folders.get(i).heldPath))) and
       (s.override != "auto" or s.folders.get(i).mode == "auto" or (s.overrideRecorded and not(s.entries.get(i).overrideHeld))) and
       not(s.folders.get(i).byGrant and s.entries.get(i).onDisk and not(s.grant and s.includeExisting)),
-      s' = { ...s, entries: s.entries.set(i, { ...s.entries.get(i), state: "approved", origin: "automatic", scopeOk: true, inputOk: true, pin: true }), proofP1: s.proofP1 and ((s.folders.get(i).mode == "auto" and s.folders.get(i).completedAuthorization) or (s.override == "auto" and s.overrideAuthorization)) }
+      s' = { ...s, entries: s.entries.set(i, { ...s.entries.get(i), state: "approved", origin: "automatic", automaticAuthorizationCompleted: (s.folders.get(i).mode == "auto" and s.folders.get(i).completedAuthorization) or (s.override == "auto" and s.overrideAuthorization), scopeOk: true, inputOk: true, pin: true }), proofP1: s.proofP1 and ((s.folders.get(i).mode == "auto" and s.folders.get(i).completedAuthorization) or (s.override == "auto" and s.overrideAuthorization)) }
     }
   }
   // ipc.rs:7286-7440,7867-7947: captured build can finish after settings change.
@@ -278,12 +308,12 @@ module client_consent {
         (not(s.folders.get(i).fromNow) or (s.folders.get(i).recorded and not(s.folders.get(i).heldPath))) and
         (s.override != "auto" or s.folders.get(i).mode == "auto" or (s.overrideRecorded and not(s.entries.get(i).overrideHeld))) and
         not(s.folders.get(i).byGrant and s.entries.get(i).onDisk and not(s.grant and s.includeExisting)))),
-      s' = { ...s, entries: s.entries.set(i, { ...s.entries.get(i), candidate: true }) } }
+      s' = { ...s, entries: s.entries.set(i, { ...s.entries.get(i), candidate: true }), proofP1: s.proofP1 and (s.entries.get(i).origin != "automatic" or s.entries.get(i).automaticAuthorizationCompleted) } }
   }
   action TheUploaderClaimsAnApproval = {
     nondet i = Set(0, 1).oneOf()
     all { s.check == "none" and s.override != "never" and s.scopeChosen and s.entries.get(i).state == "approved" and s.entries.get(i).scopeOk and s.entries.get(i).candidate,
-      s' = { ...s, entries: s.entries.set(i, { ...s.entries.get(i), state: "uploading", candidate: false }) } }
+      s' = { ...s, entries: s.entries.set(i, { ...s.entries.get(i), state: "uploading", candidate: false }), proofP1: s.proofP1 and (s.entries.get(i).origin != "automatic" or s.entries.get(i).automaticAuthorizationCompleted) } }
   }
   action TheUploaderHoldsChangedInputs = {
     nondet i = Set(0, 1).oneOf()
@@ -306,11 +336,11 @@ module client_consent {
   }
   action TheFirstRunReachesItsGrant = all {
     s.firstRun == "scopes" and s.scopeChosen and s.scopeCall == "none" and s.request == "none",
-    s' = { ...s, firstRun: "grant", request: "validate", requestInclude: true, keepAsks: true, audit: false }
+    s' = { ...s, firstRun: "grant", request: "validate", grantMutation: true, sharingReadCurrent: false, sharingStale: s.sharingStale or s.sharingRead != "none", sharingRead: "none", requestInclude: true, keepAsks: true, audit: false }
   }
   action TheFirstRunFallsBackToAsk = all {
     s.firstRun == "fallback",
-    s' = { ...s, firstRun: "complete_refused", grant: false, sharingReadCurrent: false, jobCurrent: false, displayedSharing: "ask",
+    s' = { ...s, firstRun: "complete_refused", grant: false, sharingReadCurrent: false, sharingStale: s.sharingStale or s.sharingRead != "none", sharingRead: "none", jobCurrent: false, displayedSharing: "ask",
       folders: Set(0, 1).mapBy(i => { val f = s.folders.get(i)
         if(f.byGrant and f.mode == "auto") blankFolder else f }) }
   }
@@ -326,6 +356,7 @@ module client_consent {
     YouChooseConsentScopes, TheStandingGrantsAdoptChosenScopes, TheScopeChoiceIsWritten, TheScopeWriteOrAuditFails,
     YouConfirmAnAutomaticGrant, TheGrantPreconditionsRefuseTheRequest, TheGrantAuditIsRecorded, TheGrantAuditOrPolicyWriteFails,
     TheFreshGrantIsSaved, TheGrantReplyArrives, TheSharingChoiceRequestsTheSavedGrant, TheSharingChoiceReceivesTheSavedGrant, TheRefusedGrantIsAcknowledged, YouWithdrawTheGrant,
+    TheGrantWithdrawalIsSaved, TheGrantWithdrawalReplyArrives, TheGrantWithdrawalFails, TheSharingChoiceDiscardsAStaleGrantRead, TheGrantStatusNotificationIsProcessed,
     TheWatcherStartsAFullSourceListing, TheSourceListingIsRecorded, TheSourceListingFails, ANewSessionArrives,
     TheGrantArmsAnEligibleFolder, YouChangeTheFolderRule, YouChangeTheGlobalRule, TheEnvelopeTermsWiden, TheSourceRootChanges,
     TheGrantSweepVoidsChangedTerms, TheNextEnvelopeTermsChangeBecomesPossible, TheWitnessDisclosureChanges,

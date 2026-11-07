@@ -80,7 +80,8 @@ def main():
     evidence = {'kind': 'typechecking and random simulation only; no selected product promises checked',
                 'startedAtUTC': datetime.now(timezone.utc).isoformat(),
                 'modelSeedBaseline': '8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6',
-                'selectedSeamsReviewedAt': 'a2e0aa56608f8c403deff679f8b51e76ac2f5ca7',
+                'initialSelectedSeamReviewBase': 'a2e0aa56608f8c403deff679f8b51e76ac2f5ca7',
+                'sourceCorrespondenceEvidence': 'proofs/evidence/manifest.json; source review is separate from structural checks',
                 'quintVersion': run(['quint', '--version']), 'nodeVersion': run(['node', '--version']),
                 'pythonVersion': sys.version.split()[0], 'samplesPerModel': args.samples,
                 'maximumStepsPerTrace': args.steps, 'seed': '20261105', 'models': []}

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "source_commit": "a2e0aa56608f8c403deff679f8b51e76ac2f5ca7",
+  "source_commit": "91dc6e8b8d7ef8c0b755cafaa3f0647a199f8c07",
   "discovery_worktree_commit": "8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6",
   "scope": "Pinned source interface inventory; selected-promise checks and proof results are separate evidence.",
   "discovery": {
@@ -108,12 +108,12 @@
       "line_count": 2003
     },
     "crates/trace-commons-contributor/src/daemon/ipc.rs": {
-      "sha256": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
-      "line_count": 25134
+      "sha256": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
+      "line_count": 25136
     },
     "crates/trace-commons-contributor/src/daemon/managed.rs": {
-      "sha256": "89bb9b45266902a496c8d11edc436b4257a21252d2b5efd6719a67ed763cfca4",
-      "line_count": 4820
+      "sha256": "2bbdbf11c9afa47e4f067d65d3b964183c8390281b105f42361d02231a3a1872",
+      "line_count": 4882
     },
     "crates/trace-commons-contributor/src/daemon/mod.rs": {
       "sha256": "8f01774b4d11a2ae4b1af84fc2c0ab7934f8a83305329a00d8eaa25039332671",
@@ -616,7 +616,7 @@
       "line_count": 207
     },
     "macos/Sources/TraceCommonsApp/Views/Settings/AccountSection.swift": {
-      "sha256": "4d6073a3bb374ba0a67307426da15e756649c32a85995830ddb8a207fe24c659",
+      "sha256": "88b06b07ff25e737c16f7e325222e460b8517151a6beac161d055eeedab27da1",
       "line_count": 381
     },
     "macos/Sources/TraceCommonsApp/Views/Settings/ChangesSection.swift": {
@@ -628,7 +628,7 @@
       "line_count": 59
     },
     "macos/Sources/TraceCommonsApp/Views/Settings/ConsentSection.swift": {
-      "sha256": "a6823569d9d681036466deca58d0147ba048ce3b7637c75d31d7b2362dd5288a",
+      "sha256": "f2c2ecbeabe0219d9b99721f48e61233473f36a648572ae71aa5012043e0cc10",
       "line_count": 123
     },
     "macos/Sources/TraceCommonsApp/Views/Settings/GeneralSection.swift": {
@@ -676,7 +676,7 @@
       "line_count": 218
     },
     "macos/Sources/TraceCommonsApp/Views/Settings/ProjectsSection.swift": {
-      "sha256": "fb5e497bffa09ced8c21aaab652477e0f9c8652d489293b0276c2c8bf6d15d58",
+      "sha256": "110eaf5e6baf2fb04028ff18c9662ea2bfa587c3ad3b3d3d7a46039d9ece3554",
       "line_count": 569
     },
     "macos/Sources/TraceCommonsApp/Views/Settings/PublicProfileSection.swift": {
@@ -1145,7 +1145,7 @@
         "line": 1745
       },
       "inventory_role": "worker declaration or named periodic pass",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1155,15 +1155,15 @@
       "discovery": "background spawner declaration; runtime enablement and call graph require separate audit"
     },
     {
-      "id": "client_worker:managed::lease_pass:crates/trace-commons-contributor/src/daemon/managed.rs:1576",
+      "id": "client_worker:managed::lease_pass:crates/trace-commons-contributor/src/daemon/managed.rs:1584",
       "kind": "client_worker",
       "identifier": "managed::lease_pass",
       "source": {
         "path": "crates/trace-commons-contributor/src/daemon/managed.rs",
-        "line": 1576
+        "line": 1584
       },
       "inventory_role": "worker declaration or named periodic pass",
-      "source_signature": "89bb9b45266902a496c8d11edc436b4257a21252d2b5efd6719a67ed763cfca4",
+      "source_signature": "2bbdbf11c9afa47e4f067d65d3b964183c8390281b105f42361d02231a3a1872",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1173,15 +1173,15 @@
       "discovery": "audited periodic daemon pass entry point; scheduling/restart occurs in the supervisor"
     },
     {
-      "id": "client_worker:spawn_abandoned_collection:crates/trace-commons-contributor/src/daemon/managed.rs:1660",
+      "id": "client_worker:spawn_abandoned_collection:crates/trace-commons-contributor/src/daemon/managed.rs:1668",
       "kind": "client_worker",
       "identifier": "spawn_abandoned_collection",
       "source": {
         "path": "crates/trace-commons-contributor/src/daemon/managed.rs",
-        "line": 1660
+        "line": 1668
       },
       "inventory_role": "worker declaration or named periodic pass",
-      "source_signature": "89bb9b45266902a496c8d11edc436b4257a21252d2b5efd6719a67ed763cfca4",
+      "source_signature": "2bbdbf11c9afa47e4f067d65d3b964183c8390281b105f42361d02231a3a1872",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1191,15 +1191,15 @@
       "discovery": "background spawner declaration; runtime enablement and call graph require separate audit"
     },
     {
-      "id": "client_worker:spawn_single_collection:crates/trace-commons-contributor/src/daemon/managed.rs:1679",
+      "id": "client_worker:spawn_single_collection:crates/trace-commons-contributor/src/daemon/managed.rs:1687",
       "kind": "client_worker",
       "identifier": "spawn_single_collection",
       "source": {
         "path": "crates/trace-commons-contributor/src/daemon/managed.rs",
-        "line": 1679
+        "line": 1687
       },
       "inventory_role": "worker declaration or named periodic pass",
-      "source_signature": "89bb9b45266902a496c8d11edc436b4257a21252d2b5efd6719a67ed763cfca4",
+      "source_signature": "2bbdbf11c9afa47e4f067d65d3b964183c8390281b105f42361d02231a3a1872",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1433,7 +1433,7 @@
         "line": 4086
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1464,7 +1464,7 @@
         "line": 4087
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1495,7 +1495,7 @@
         "line": 4088
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1518,7 +1518,7 @@
         "line": 4089
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1541,7 +1541,7 @@
         "line": 4090
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1564,7 +1564,7 @@
         "line": 4091
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1595,7 +1595,7 @@
         "line": 4092
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1626,7 +1626,7 @@
         "line": 4093
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1657,7 +1657,7 @@
         "line": 4094
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1688,7 +1688,7 @@
         "line": 4095
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1719,7 +1719,7 @@
         "line": 4096
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1750,7 +1750,7 @@
         "line": 4097
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1781,7 +1781,7 @@
         "line": 4098
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1812,7 +1812,7 @@
         "line": 4099
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1843,7 +1843,7 @@
         "line": 4100
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1874,7 +1874,7 @@
         "line": 4101
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1905,7 +1905,7 @@
         "line": 4102
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1936,7 +1936,7 @@
         "line": 4103
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1967,7 +1967,7 @@
         "line": 4104
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -1998,7 +1998,7 @@
         "line": 4105
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2029,7 +2029,7 @@
         "line": 4106
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2060,7 +2060,7 @@
         "line": 4107
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2091,7 +2091,7 @@
         "line": 4108
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2122,7 +2122,7 @@
         "line": 4109
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2153,7 +2153,7 @@
         "line": 4110
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2176,7 +2176,7 @@
         "line": 4125
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2199,7 +2199,7 @@
         "line": 4126
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2222,7 +2222,7 @@
         "line": 4127
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2245,7 +2245,7 @@
         "line": 4128
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2268,7 +2268,7 @@
         "line": 4129
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2291,7 +2291,7 @@
         "line": 4130
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2314,7 +2314,7 @@
         "line": 4131
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2337,7 +2337,7 @@
         "line": 4132
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2360,7 +2360,7 @@
         "line": 4133
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2383,7 +2383,7 @@
         "line": 4134
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2406,7 +2406,7 @@
         "line": 4135
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2429,7 +2429,7 @@
         "line": 4136
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2456,7 +2456,7 @@
         "line": 4137
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2479,7 +2479,7 @@
         "line": 4138
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2502,7 +2502,7 @@
         "line": 4141
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2525,7 +2525,7 @@
         "line": 4142
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2548,7 +2548,7 @@
         "line": 4143
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2571,7 +2571,7 @@
         "line": 4144
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2594,7 +2594,7 @@
         "line": 4145
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2617,7 +2617,7 @@
         "line": 4146
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2640,7 +2640,7 @@
         "line": 4147
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2663,7 +2663,7 @@
         "line": 4148
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2686,7 +2686,7 @@
         "line": 4149
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2709,7 +2709,7 @@
         "line": 4150
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2732,7 +2732,7 @@
         "line": 4153
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2755,7 +2755,7 @@
         "line": 4154
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2778,7 +2778,7 @@
         "line": 4166
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2801,7 +2801,7 @@
         "line": 4189
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2824,7 +2824,7 @@
         "line": 4224
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2847,7 +2847,7 @@
         "line": 4225
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2870,7 +2870,7 @@
         "line": 4226
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2893,7 +2893,7 @@
         "line": 4227
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2916,7 +2916,7 @@
         "line": 4230
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2939,7 +2939,7 @@
         "line": 4233
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2962,7 +2962,7 @@
         "line": 4234
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -2985,7 +2985,7 @@
         "line": 4235
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3008,7 +3008,7 @@
         "line": 4236
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3031,7 +3031,7 @@
         "line": 4237
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3054,7 +3054,7 @@
         "line": 4238
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3077,7 +3077,7 @@
         "line": 4239
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3100,7 +3100,7 @@
         "line": 4240
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3123,7 +3123,7 @@
         "line": 4241
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3146,7 +3146,7 @@
         "line": 4242
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3169,7 +3169,7 @@
         "line": 4243
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3192,7 +3192,7 @@
         "line": 4244
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3215,7 +3215,7 @@
         "line": 4245
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3238,7 +3238,7 @@
         "line": 4248
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3261,7 +3261,7 @@
         "line": 4249
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3284,7 +3284,7 @@
         "line": 4250
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3307,7 +3307,7 @@
         "line": 4251
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3330,7 +3330,7 @@
         "line": 4272
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3357,7 +3357,7 @@
         "line": 4298
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3380,7 +3380,7 @@
         "line": 4299
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3403,7 +3403,7 @@
         "line": 4300
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3430,7 +3430,7 @@
         "line": 4301
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3453,7 +3453,7 @@
         "line": 4307
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3476,7 +3476,7 @@
         "line": 4313
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3499,7 +3499,7 @@
         "line": 4314
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3526,7 +3526,7 @@
         "line": 4315
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3549,7 +3549,7 @@
         "line": 4316
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_learning",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3572,7 +3572,7 @@
         "line": 4317
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3595,7 +3595,7 @@
         "line": 4318
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3618,7 +3618,7 @@
         "line": 4331
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3641,7 +3641,7 @@
         "line": 4332
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3664,7 +3664,7 @@
         "line": 4346
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3687,7 +3687,7 @@
         "line": 4363
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3710,7 +3710,7 @@
         "line": 4364
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3733,7 +3733,7 @@
         "line": 4365
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3756,7 +3756,7 @@
         "line": 4366
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3779,7 +3779,7 @@
         "line": 4381
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3802,7 +3802,7 @@
         "line": 4416
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3825,7 +3825,7 @@
         "line": 4433
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3848,7 +3848,7 @@
         "line": 4434
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3871,7 +3871,7 @@
         "line": 4435
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3894,7 +3894,7 @@
         "line": 4436
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3917,7 +3917,7 @@
         "line": 4437
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3940,7 +3940,7 @@
         "line": 4438
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3963,7 +3963,7 @@
         "line": 4448
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -3986,7 +3986,7 @@
         "line": 4455
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4009,7 +4009,7 @@
         "line": 4463
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4036,7 +4036,7 @@
         "line": 4465
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4059,7 +4059,7 @@
         "line": 4470
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4082,7 +4082,7 @@
         "line": 4471
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4105,7 +4105,7 @@
         "line": 4472
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4128,7 +4128,7 @@
         "line": 4478
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4151,7 +4151,7 @@
         "line": 4489
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4174,7 +4174,7 @@
         "line": 7348
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4197,7 +4197,7 @@
         "line": 7349
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4220,7 +4220,7 @@
         "line": 7350
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4243,7 +4243,7 @@
         "line": 7351
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4266,7 +4266,7 @@
         "line": 7352
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4289,7 +4289,7 @@
         "line": 7353
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4312,7 +4312,7 @@
         "line": 7354
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4335,7 +4335,7 @@
         "line": 7355
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4358,7 +4358,7 @@
         "line": 7356
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4381,7 +4381,7 @@
         "line": 7357
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4404,7 +4404,7 @@
         "line": 7358
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4427,7 +4427,7 @@
         "line": 7359
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4450,7 +4450,7 @@
         "line": 7360
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4473,7 +4473,7 @@
         "line": 7361
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4496,7 +4496,7 @@
         "line": 7362
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4519,7 +4519,7 @@
         "line": 7363
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4542,7 +4542,7 @@
         "line": 7364
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4565,7 +4565,7 @@
         "line": 7365
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4588,7 +4588,7 @@
         "line": 7368
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4611,7 +4611,7 @@
         "line": 7372
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4634,7 +4634,7 @@
         "line": 7373
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4657,7 +4657,7 @@
         "line": 7377
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4680,7 +4680,7 @@
         "line": 7378
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4703,7 +4703,7 @@
         "line": 7379
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4726,7 +4726,7 @@
         "line": 7388
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4749,7 +4749,7 @@
         "line": 7389
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4772,7 +4772,7 @@
         "line": 7390
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4795,7 +4795,7 @@
         "line": 7399
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4818,7 +4818,7 @@
         "line": 7402
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4841,7 +4841,7 @@
         "line": 7403
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4864,7 +4864,7 @@
         "line": 7404
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4887,7 +4887,7 @@
         "line": 7407
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4910,7 +4910,7 @@
         "line": 7410
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4933,7 +4933,7 @@
         "line": 7414
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4956,7 +4956,7 @@
         "line": 7421
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -4979,7 +4979,7 @@
         "line": 7422
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5002,7 +5002,7 @@
         "line": 7424
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5025,7 +5025,7 @@
         "line": 7425
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5048,7 +5048,7 @@
         "line": 7426
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5071,7 +5071,7 @@
         "line": 7427
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5094,7 +5094,7 @@
         "line": 7428
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5117,7 +5117,7 @@
         "line": 7429
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5140,7 +5140,7 @@
         "line": 7430
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5163,7 +5163,7 @@
         "line": 7431
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5186,7 +5186,7 @@
         "line": 7432
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5209,7 +5209,7 @@
         "line": 7433
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5232,7 +5232,7 @@
         "line": 7434
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5255,7 +5255,7 @@
         "line": 7435
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5278,7 +5278,7 @@
         "line": 7438
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5301,7 +5301,7 @@
         "line": 7439
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5324,7 +5324,7 @@
         "line": 7442
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5347,7 +5347,7 @@
         "line": 7443
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5370,7 +5370,7 @@
         "line": 7446
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5393,7 +5393,7 @@
         "line": 7449
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5416,7 +5416,7 @@
         "line": 7452
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5439,7 +5439,7 @@
         "line": 7455
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5462,7 +5462,7 @@
         "line": 7458
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5485,7 +5485,7 @@
         "line": 7459
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5508,7 +5508,7 @@
         "line": 7460
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5531,7 +5531,7 @@
         "line": 7461
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5554,7 +5554,7 @@
         "line": 7462
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5577,7 +5577,7 @@
         "line": 7463
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5600,7 +5600,7 @@
         "line": 7464
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5623,7 +5623,7 @@
         "line": 7465
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5646,7 +5646,7 @@
         "line": 7466
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5669,7 +5669,7 @@
         "line": 7467
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5692,7 +5692,7 @@
         "line": 7468
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5715,7 +5715,7 @@
         "line": 7469
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5738,7 +5738,7 @@
         "line": 7470
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5761,7 +5761,7 @@
         "line": 7476
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_learning",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5784,7 +5784,7 @@
         "line": 7477
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_learning",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5807,7 +5807,7 @@
         "line": 7478
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_learning",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5830,7 +5830,7 @@
         "line": 7481
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_learning",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5853,7 +5853,7 @@
         "line": 7484
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_learning",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5876,7 +5876,7 @@
         "line": 7487
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_learning",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5899,7 +5899,7 @@
         "line": 7490
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5922,7 +5922,7 @@
         "line": 7491
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5945,7 +5945,7 @@
         "line": 7492
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -5968,7 +5968,7 @@
         "line": 7493
       },
       "inventory_role": "dispatched IPC method",
-      "source_signature": "ddd032a36aca875eea9e72dac446faed77e906a3a4b6920c08c2c4f5a61a1c79",
+      "source_signature": "5f0719b7df507fda034d0cf569f5d4a051e23c21919c58289ea0676d6a329f1d",
       "owner_model": "client_services",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -21246,7 +21246,7 @@
         "line": 13
       },
       "inventory_role": "presentation declaration candidate; independent reachability unresolved",
-      "source_signature": "4d6073a3bb374ba0a67307426da15e756649c32a85995830ddb8a207fe24c659",
+      "source_signature": "88b06b07ff25e737c16f7e325222e460b8517151a6beac161d055eeedab27da1",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -21265,7 +21265,7 @@
         "line": 144
       },
       "inventory_role": "presentation declaration candidate; independent reachability unresolved",
-      "source_signature": "4d6073a3bb374ba0a67307426da15e756649c32a85995830ddb8a207fe24c659",
+      "source_signature": "88b06b07ff25e737c16f7e325222e460b8517151a6beac161d055eeedab27da1",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -21284,7 +21284,7 @@
         "line": 196
       },
       "inventory_role": "presentation declaration candidate; independent reachability unresolved",
-      "source_signature": "4d6073a3bb374ba0a67307426da15e756649c32a85995830ddb8a207fe24c659",
+      "source_signature": "88b06b07ff25e737c16f7e325222e460b8517151a6beac161d055eeedab27da1",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -21303,7 +21303,7 @@
         "line": 222
       },
       "inventory_role": "presentation declaration candidate; independent reachability unresolved",
-      "source_signature": "4d6073a3bb374ba0a67307426da15e756649c32a85995830ddb8a207fe24c659",
+      "source_signature": "88b06b07ff25e737c16f7e325222e460b8517151a6beac161d055eeedab27da1",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -21322,7 +21322,7 @@
         "line": 268
       },
       "inventory_role": "presentation declaration candidate; independent reachability unresolved",
-      "source_signature": "4d6073a3bb374ba0a67307426da15e756649c32a85995830ddb8a207fe24c659",
+      "source_signature": "88b06b07ff25e737c16f7e325222e460b8517151a6beac161d055eeedab27da1",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -21341,7 +21341,7 @@
         "line": 288
       },
       "inventory_role": "presentation declaration candidate; independent reachability unresolved",
-      "source_signature": "4d6073a3bb374ba0a67307426da15e756649c32a85995830ddb8a207fe24c659",
+      "source_signature": "88b06b07ff25e737c16f7e325222e460b8517151a6beac161d055eeedab27da1",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -21360,7 +21360,7 @@
         "line": 324
       },
       "inventory_role": "presentation declaration candidate; independent reachability unresolved",
-      "source_signature": "4d6073a3bb374ba0a67307426da15e756649c32a85995830ddb8a207fe24c659",
+      "source_signature": "88b06b07ff25e737c16f7e325222e460b8517151a6beac161d055eeedab27da1",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -21379,7 +21379,7 @@
         "line": 352
       },
       "inventory_role": "presentation declaration candidate; independent reachability unresolved",
-      "source_signature": "4d6073a3bb374ba0a67307426da15e756649c32a85995830ddb8a207fe24c659",
+      "source_signature": "88b06b07ff25e737c16f7e325222e460b8517151a6beac161d055eeedab27da1",
       "owner_model": "client_shell",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -21455,24 +21455,13 @@
         "line": 45
       },
       "inventory_role": "presentation declaration candidate; independent reachability unresolved",
-      "source_signature": "a6823569d9d681036466deca58d0147ba048ce3b7637c75d31d7b2362dd5288a",
-      "owner_model": "client_consent",
-      "classification": "coarse-interface",
-      "rationale": "Only folder policy and scope transaction behavior are projected; native row editing, list identities, all section controls and error presentation are outside this coarse section mapping.",
+      "source_signature": "f2c2ecbeabe0219d9b99721f48e61233473f36a648572ae71aa5012043e0cc10",
+      "owner_model": "client_contribution",
+      "classification": "gap",
+      "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
       "observable_state": "Handler result or visible destination; full implementation state is not inferred by this scanner.",
-      "model_actions": [
-        "YouChangeTheFolderRule",
-        "YouChooseConsentScopes",
-        "TheStandingGrantsAdoptChosenScopes",
-        "TheScopeChoiceIsWritten",
-        "TheScopeWriteOrAuditFails"
-      ],
-      "modeled_observables": [
-        "s.folders",
-        "s.entries",
-        "s.scopeChosen",
-        "s.scopeCall"
-      ],
+      "model_actions": [],
+      "modeled_observables": [],
       "platform": "macOS native",
       "discovery": "SwiftUI View declaration candidate; may be a component rather than a separately reachable screen"
     },
@@ -21485,7 +21474,7 @@
         "line": 99
       },
       "inventory_role": "presentation declaration candidate; independent reachability unresolved",
-      "source_signature": "a6823569d9d681036466deca58d0147ba048ce3b7637c75d31d7b2362dd5288a",
+      "source_signature": "f2c2ecbeabe0219d9b99721f48e61233473f36a648572ae71aa5012043e0cc10",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -21838,7 +21827,7 @@
         "line": 25
       },
       "inventory_role": "presentation declaration candidate; independent reachability unresolved",
-      "source_signature": "fb5e497bffa09ced8c21aaab652477e0f9c8652d489293b0276c2c8bf6d15d58",
+      "source_signature": "110eaf5e6baf2fb04028ff18c9662ea2bfa587c3ad3b3d3d7a46039d9ece3554",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -21857,7 +21846,7 @@
         "line": 129
       },
       "inventory_role": "presentation declaration candidate; independent reachability unresolved",
-      "source_signature": "fb5e497bffa09ced8c21aaab652477e0f9c8652d489293b0276c2c8bf6d15d58",
+      "source_signature": "110eaf5e6baf2fb04028ff18c9662ea2bfa587c3ad3b3d3d7a46039d9ece3554",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -21876,7 +21865,7 @@
         "line": 168
       },
       "inventory_role": "presentation declaration candidate; independent reachability unresolved",
-      "source_signature": "fb5e497bffa09ced8c21aaab652477e0f9c8652d489293b0276c2c8bf6d15d58",
+      "source_signature": "110eaf5e6baf2fb04028ff18c9662ea2bfa587c3ad3b3d3d7a46039d9ece3554",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",
@@ -21895,7 +21884,7 @@
         "line": 555
       },
       "inventory_role": "presentation declaration candidate; independent reachability unresolved",
-      "source_signature": "fb5e497bffa09ced8c21aaab652477e0f9c8652d489293b0276c2c8bf6d15d58",
+      "source_signature": "110eaf5e6baf2fb04028ff18c9662ea2bfa587c3ad3b3d3d7a46039d9ece3554",
       "owner_model": "client_contribution",
       "classification": "gap",
       "rationale": "Entry point discovered; no concrete model action and observable-state correspondence has been audited. Owner is a triage assignment, not a coverage claim.",

@@ -91,3 +91,68 @@ lifecycle. Sampling can miss counterexamples and does not establish exhaustive
 safety. Model/frame control comparisons are checked independently by the flow
 validator. TLC execution and result status belong to the integrated proof
 evidence; this note does not claim a TLC pass.
+
+## Complete induction obligations
+
+The proof-only `server_settlement_induction.qnt` and
+`server_lifecycle_induction.qnt` import the corresponding model unchanged. Each
+harness enumerates an arbitrary record by independently choosing every field
+from its full finite domain. These choices retain all original identity counts,
+strings and set/map dimensions; unused combinations are an overapproximation.
+`Domain` is checked as a postcondition, so reachable-state lifting does not
+assume that actions stay in the domain without checking it.
+
+For each harness the three formal obligations are:
+
+1. Original `init` establishes `Strength and Domain` (zero transitions).
+2. Every arbitrary `Domain and Strength` state, followed by the complete
+   original `step`, establishes `Strength and Domain` (one transition).
+3. Every arbitrary `Domain and Strength` state satisfies the original named
+   promises (`P9`, or `P10 and P11`), checked separately (zero transitions).
+
+The one-transition obligation starts from all inductive states, rather than
+states reachable within one transition of the product initializer. Together
+with initiation and domain closure this is induction for arbitrary finite
+execution length, not a short-depth product BMC claim. All world steps and every
+original action remain in `originalStep = step`. No production behavior or
+original model transition is changed by these harnesses.
+
+Settlement strengthening records that only credit legs have commit counts,
+positive counts imply ledger membership/completed legs, an in-flight instrument
+is dispatched, NEAR progress implies a committed credit, an observed NEAR key
+has already left initial/pending states, an in-flight NEAR call has a committed
+backing credit, and each run's two award legs agree on whether they remain
+unseeded.
+Lifecycle strengthening requires stored item ownership even for `none`
+snapshots: initialization has empty items, creation fills them using tenant
+filtering, and subsequent actions preserve the items/tenant pair. These are
+reachable-state facts proved by the obligations, not additional runtime guards.
+
+Early arbitrary-state counterexamples demonstrated why these supporting facts
+are needed. A fictitious `none` snapshot containing another tenant's items can
+be invalidated by withdrawal; an observed NEAR key paired with `near = none`
+can coexist with a fictitious uncommitted credit. Neither combination is created
+by initialization or an original transition from the final strengthened set.
+An arbitrary unseeded credit leg paired with a dispatched external leg is
+another excluded initial combination: the original Score transition seeds both
+legs atomically. They are not reachable product violations or production bug
+findings. Their pre-strengthening traces are retained with the proof run logs.
+
+All four final obligations completed for both harnesses on 2026-11-06 with
+Quint 0.33.0 / Apalache 0.62.1 / Java 21. Initiation, full-step consecution and
+implication returned `NoError`, `[ok] No violation found`, and exit 0. The
+nonvacuity query (`arbitraryInit`, invariant `false`, zero steps) returned an
+actual state-0 counterexample and exit 1, establishing the arbitrary inductive
+state set is nonempty. All four phases share identical model/harness hashes.
+The integrated proof evidence preserves exact commands, logs, hashes and tool
+classification; earlier bounded timeouts remain historical incomplete attempts.
+
+Reproduce positive phases with `quint verify <harness> --step originalStep`,
+using `--init originalInit --invariant InductionTarget --max-steps 0` for
+initiation, `--init arbitraryInit --invariant InductionTarget --max-steps 1`
+for consecution, and `--init arbitraryInit --invariant Conclusion --max-steps 0`
+for implication. Check nonvacuity with `--init arbitraryInit --invariant false
+--max-steps 0`; its counterexample is the required successful result. Use an
+isolated Apalache endpoint and temporary working directory. A bare zero exit
+code is insufficient: Apalache can report an unsupported expression while
+Quint exits 0. Require completed checker verdicts as above.

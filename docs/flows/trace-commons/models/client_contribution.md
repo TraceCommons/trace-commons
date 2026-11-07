@@ -6,7 +6,7 @@ Original source baseline: `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`; relevant s
 
 Two identified traces (`entries[0]`, `entries[1]`) have separate queue state, source revision, offered revision, pinned-byte identity, artifact existence, approved scopes/inputs, manual/unattended origin, holds, undo deadline, retry deadline/budget, submission ID, proof receipt, account owner and history verdict. The eight actual queue states are Pending, Approved, Uploading, Uploaded, Refused, Failed, Expired, Superseded (`crates/trace-commons-contributor/src/daemon/queue.rs:33-66`); `absent` is only the pre-discovery model state. UI selection, preview entry and uploader entry stay distinct, allowing a response for one trace while another is selected.
 
-Source/input/scope revisions are bounded to one change (0→1), two accounts (1→2), two envelope identities (one per trace), one uploader and preview, and a retry ladder 0→1→2. The numeric retry thresholds, queue/day caps and times are abstract relations, not actual constants. Witness saturation/rate-limit deferral consumes no modeled attempt.
+Source/input/scope revisions are bounded to one change (0→1), two account identities (1↔2, including ABA), two envelope identities (one per trace), one uploader and preview, and a retry ladder 0→1→2. The numeric retry thresholds, queue/day caps and times are abstract relations, not actual constants. Witness saturation/rate-limit deferral consumes no modeled attempt.
 
 ## Source anchors
 
@@ -61,7 +61,7 @@ product guarantees. Owner selection is now recorded separately; current invarian
 
 HTTP 429 may arrive after a send starts, so `TheIngestRateLimitDefersTheSend` is enabled in both checking (local pacing) and sending (remote refusal). Its observer compares the next approval against the original approval and preserves the attempt budget.
 
-`historyPending` retains one captured request per represented account across an account change, and `historyEntry` binds the response row independently of later UI selection. Both old and new requests can be pending simultaneously. Empty snapshots can publish too. `displayedHistoryOwner` records the last publisher; P12 monitors the publication event, rather than requiring an already displayed snapshot disappear at the instant an account changes. Repeated requests within one account are coalesced in this finite bound; arbitrary same-account request multiplicity is outside it. Current AppModel `refreshHistory`/`perform` callbacks lack an account/client freshness check.
+`historyPending` represents the latest request independently of `historyStale`, an at-least-one aggregate for older callbacks per account. Starting a newer read moves previous pending captures to stale; old callbacks remain enabled as discard transitions and never become current again when the same account returns. The stale class can retain residual callbacks, overapproximating arbitrary multiplicity. Both success and failure outcomes of stale requests have no UI/read/error effect. `historyEntry` captures the latest target row; `displayedHistoryOwner` is retained across owner changes. P12 observes publication events, not immediate deletion of previously displayed data. Native scoped-read generations now enforce these guards; account/client invalidation and background refetch are separately represented.
 
 The asynchronous witness worker added after the original baseline remains a coarse external witness decision in this model: shared `send_gates`/`load_approved` are reviewed, but job scheduling, worker admission identities and witness-pin recovery are not proved here.
 
@@ -76,3 +76,7 @@ it on send. Post-claim consent changes remain enabled. A new pass checks the
 new captured scopes and requires approval matching those scopes. The earlier
 P2 counterexample is historical evidence of the corrected abstraction mismatch.
 See the Rust source-helper replay in [client proof notes](../proofs/client-notes.md).
+
+## Complete selected-property induction
+
+The final model has a complete, independently reviewed P2/P3/P4/P12 induction certificate over all 76 original transitions. The proof-only harness imports the full step and checks domain closure, strengthening initiation/preservation, implication and nonvacuity. See [client proof notes](../proofs/client-notes.md) for exact hashes, commands, callback multiplicity abstraction, historical counterexamples and source limits. Earlier sampled/capped results are not the final verdict.

@@ -1,7 +1,8 @@
 # TraceCommons current-behavior flow models
 
 Model seed baseline: `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`.
-Inventory and selected source seams reviewed at `a2e0aa56608f8c403deff679f8b51e76ac2f5ca7`.
+Current source inventory: native repair commit `91dc6e8b8d7ef8c0b755cafaa3f0647a199f8c07`.
+Selected proof/source hashes and review boundaries are recorded in the evidence manifest.
 Workflow: [bkase flow-promises](https://github.com/bkase/plugins/blob/6f35f6ae6b3581c499bdfcae080932b4ffa7e281/pstack/skills/flow-promises/SKILL.md),
 pinned at `6f35f6ae6b3581c499bdfcae080932b4ffa7e281`.
 
@@ -14,15 +15,17 @@ and [composition correspondence](composition.md) delimit the model's scope.
 
 ## Status
 
-The owner selected all 13 [candidate guarantees](promise-candidates.md). They
-are encoded as 15 safety predicates across seven model families. See the
-[proof results](proofs/results.md) for counterexamples, source replays and
-checks that remain incomplete. No production behavior changes are included.
+All 13 owner-selected [safety hypotheses](promise-candidates.md) now hold in
+seven reviewed models, with 15 checked seam predicates. Complete induction
+certificates replace the earlier inconclusive exploration runs. See the
+[proof results](proofs/results.md) for commands, source repairs, historical
+counterexamples, assumptions and retained evidence.
 
+The native history/grant callback races are repaired in this PR. Model safety,
+source regressions, native tests and deployed behavior remain separate claims.
 [Structural validation](validation.md) covers typechecking, frame/control
-agreement and random simulation. Those checks are separate from safety
-verification. Neither establishes automatic equivalence with executable code.
-This work does not describe a live deployment configuration.
+agreement and random simulation. None establishes automatic equivalence with
+all executable code or describes a live deployment configuration.
 
 ## Model families
 
@@ -49,11 +52,11 @@ memory safety, OS isolation, or deployed configuration. Detailed domain
 checks do not imply a proof of the abstract composition, and the composition
 does not establish correspondence with executable Rust/Swift automatically.
 
-The refreshed source index has 1,013 declaration/boundary rows: 59 detailed
-projections, 29 coarse interfaces, and 925 unresolved correspondence rows.
-Changed source fingerprints invalidate previous mappings until reviewed again.
-These counts describe mapping granularity, not verified behavior. Platform
-notes outside the selected seams retain their original seed baseline.
+The [pinned source inventory](coverage.md) retains explicit detailed mappings,
+coarse interfaces and unresolved correspondence gaps. Changed fingerprints
+invalidate prior mappings until reviewed again. Mapping counts do not measure
+verified behavior. Selected proof/source seams have separate correspondence
+notes and file hashes; broad platform notes retain their stated seed baseline.
 
 ## Reproduce structural validation
 
@@ -77,12 +80,22 @@ traces. Its evidence lists unobserved frames and actions; random traces do
 not establish exhaustive reachability or deadlock freedom. Retain temporary
 logs outside this design seed.
 
-## Select and check promises
+## Reproduce selected checks
 
-The recorded owner choice is in `promise-selection.json`. The checker refuses
-unselected definitions, stale output folders and exploration constraints.
-Only safety invariants were selected; no progress or fairness theorem is
-claimed. Observers record transition events without granting new behavior.
+The owner choice is recorded in `promise-selection.json`. To reproduce the
+complete current safety proofs, use:
+
+```sh
+python3 docs/flows/trace-commons/scripts/run_induction.py \
+  --spec docs/flows/trace-commons/proofs/induction-selection.json \
+  --out /private/tmp/tc-induction-NEW --endpoint localhost:8860 --seconds 600
+```
+
+The exclusive endpoint prevents concurrent checker requests from mixing.
+Domains/strengthening are proof-only; original full transitions remain checked.
+No progress or fairness guarantee is claimed. The earlier TLC workflow below
+can still be used for exploration and statecharts, but its bounded reruns are
+not substitutes for completed safety proofs.
 
 For a pinned tool checkout and a **new** output directory:
 

@@ -1,8 +1,7 @@
 {
   "kind": "typechecking and random simulation only; no selected product promises checked",
-  "startedAtUTC": "2026-11-06T22:34:51.727147+00:00",
+  "startedAtUTC": "2026-11-06T23:24:50.037542+00:00",
   "modelSeedBaseline": "8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6",
-  "selectedSeamsReviewedAt": "a2e0aa56608f8c403deff679f8b51e76ac2f5ca7",
   "quintVersion": "0.33.0",
   "nodeVersion": "v26.13.0",
   "pythonVersion": "3.12.8",
@@ -14,7 +13,7 @@
       "name": "client_consent",
       "typecheck": "passed",
       "controlFrames": 4,
-      "modelSha256": "1f00f4582914a737e9f178403d32c557509ab62a9b7d8f6af76b7e4f20b3a045",
+      "modelSha256": "b4c00c7f25ddda740375cf589463facd5b2e251924b6908cee7ae9bcbb156b87",
       "viewSha256": "31a2930d704958b04cac687a223e871d148c53ef51cc6d4f3b52bdbeb58db521",
       "framesSha256": "ccf3ece4b28a2aef613f99049e8214c72845e8e830d2687e5a00d94f4550736c",
       "simulationCommand": [
@@ -35,7 +34,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-proof-checks/structural-current/client_consent-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-repaired-all/client_consent-{seq}.json"
       ],
       "declaredActions": [
         "ANewSessionArrives",
@@ -49,7 +48,11 @@
         "TheGrantAuditOrPolicyWriteFails",
         "TheGrantPreconditionsRefuseTheRequest",
         "TheGrantReplyArrives",
+        "TheGrantStatusNotificationIsProcessed",
         "TheGrantSweepVoidsChangedTerms",
+        "TheGrantWithdrawalFails",
+        "TheGrantWithdrawalIsSaved",
+        "TheGrantWithdrawalReplyArrives",
         "TheInFlightSendFinishes",
         "TheManualEnvelopeBuildFailsOrIsOvertaken",
         "TheManualEnvelopeBuildFinishes",
@@ -59,6 +62,7 @@
         "TheRefusedGrantIsAcknowledged",
         "TheScopeChoiceIsWritten",
         "TheScopeWriteOrAuditFails",
+        "TheSharingChoiceDiscardsAStaleGrantRead",
         "TheSharingChoiceReceivesTheSavedGrant",
         "TheSharingChoiceRequestsTheSavedGrant",
         "TheSourceListingFails",
@@ -86,6 +90,7 @@
         "init"
       ],
       "unobservedActions": [
+        "TheFirstRunAppliesItsAskRuleAfterTheGrant",
         "TheGrantArmsAnEligibleFolder",
         "TheQueueRechecksTheApprovalOrigin",
         "TheUploaderChoosesAPolicyRetraction"
@@ -95,7 +100,7 @@
       "name": "client_contribution",
       "typecheck": "passed",
       "controlFrames": 16,
-      "modelSha256": "8aa6f3a4bcddfffcb3c1333b6e9d42c0f8ab88ff1af974dde448cf5716c04a00",
+      "modelSha256": "e612dbe9c2cdb247e0eaaa4ed2797f51d276ce1e3d744a8ca2c265fc24aae264",
       "viewSha256": "5e36604c509dae123ec9c885cacc5eeab53c694ea15853733ccdbdff96a66673",
       "framesSha256": "019624ddda73881adf3806814926a467c140cb31e689d2ed338bcdae105574c1",
       "simulationCommand": [
@@ -116,11 +121,12 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-client-contribution-final-structural/client_contribution-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-repaired-all/client_contribution-{seq}.json"
       ],
       "declaredActions": [
         "TheApprovalBuildPinsAndApproves",
         "TheAskPolicyReturnsAnUnattendedApprovalToWaiting",
+        "TheBackgroundHistoryRefreshBegins",
         "TheBackoffPasses",
         "TheChangedScopeRevokesApproval",
         "TheCurrentAccountChanges",
@@ -129,10 +135,12 @@
         "TheDailyCapResets",
         "TheEnrollmentDisappears",
         "TheEnrollmentReturns",
+        "TheHistoryReadDiscardsAStaleSnapshot",
         "TheHistoryReadFails",
         "TheHistoryReadFindsASettledVerdict",
         "TheHistoryReadFindsPreviousAccount",
         "TheHistoryReadFindsProcessing",
+        "TheHistoryReadOwnerIsInvalidated",
         "TheHistoryReadPublishesAnEmptySnapshot",
         "TheHistoryReadReflectsWithdrawal",
         "TheIngestRateLimitDefersTheSend",
@@ -196,27 +204,34 @@
       ],
       "unobservedActions": [
         "TheAskPolicyReturnsAnUnattendedApprovalToWaiting",
+        "TheBackoffPasses",
+        "TheDaemonRestartsDuringAnUpload",
         "TheHistoryReadFindsASettledVerdict",
         "TheHistoryReadFindsPreviousAccount",
         "TheHistoryReadFindsProcessing",
         "TheHistoryReadReflectsWithdrawal",
+        "TheIngestRateLimitDefersTheSend",
+        "TheManualScrubSettingRetractsAnUnattendedApproval",
         "TheNetworkFailsDuringSend",
         "TheNetworkReturns",
         "TheNeverFolderRefusesAnUnattendedApproval",
+        "ThePrivacyFilterRefusesTheTrace",
         "ThePrivacyOrWitnessReviewHoldsTheTrace",
         "TheRedactionRetryBudgetIsSpent",
         "TheRetryBudgetIsSpent",
         "TheSendSucceedsWithProofReceipt",
         "TheSendSucceedsWithoutProofReceipt",
+        "TheStandingGrantApprovesATrace",
         "TheUnreferencedPreviewPinIsReleased",
         "TheUploadPassesItsPreconditions",
+        "TheUploaderClaimsTheApproval",
         "TheUploaderRefusesMissingEnrollment",
         "TheUploaderReoffersChangedInputsOrMissingPin",
         "TheUploaderSupersedesChangedSource",
         "TheWithdrawalNeedsAnAccountSession",
         "TheWithdrawalRequestFails",
         "TheWithdrawalRequestSucceeds",
-        "YouApproveThePinnedPreview",
+        "TheWitnessIsAtCapacity",
         "YouRetryAFailedTrace",
         "YouWithdrawTheContributedTrace"
       ]
@@ -246,7 +261,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-proof-checks/structural-current/client_learning-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-repaired-all/client_learning-{seq}.json"
       ],
       "declaredActions": [
         "TheChangedSkillCannotBeRolledBack",
@@ -351,7 +366,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-proof-checks/structural-current/client_providers-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-repaired-all/client_providers-{seq}.json"
       ],
       "declaredActions": [
         "AnotherClientChangesDefault",
@@ -472,7 +487,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-proof-checks/structural-current/client_services-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-repaired-all/client_services-{seq}.json"
       ],
       "declaredActions": [
         "AnOlderBrowserCallbackArrives",
@@ -602,7 +617,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-proof-checks/structural-current/client_shell-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-repaired-all/client_shell-{seq}.json"
       ],
       "declaredActions": [
         "ADeepLinkWaitsForOnboarding",
@@ -717,7 +732,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-proof-checks/structural-current/end_to_end-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-repaired-all/end_to_end-{seq}.json"
       ],
       "declaredActions": [
         "TheAccountRailAccrues",
@@ -879,7 +894,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-proof-checks/structural-current/platform_clients-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-repaired-all/platform_clients-{seq}.json"
       ],
       "declaredActions": [
         "EnrollmentAnswers",
@@ -972,7 +987,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-proof-checks/structural-current/server_identity-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-repaired-all/server_identity-{seq}.json"
       ],
       "declaredActions": [
         "TheAccountRequestPresentsCredentials",
@@ -1034,7 +1049,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-proof-checks/structural-current/server_interfaces-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-repaired-all/server_interfaces-{seq}.json"
       ],
       "declaredActions": [
         "TheAnonymousBoundaryAcceptsTheRequest",
@@ -1109,7 +1124,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-proof-checks/structural-current/server_lifecycle-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-repaired-all/server_lifecycle-{seq}.json"
       ],
       "declaredActions": [
         "TheAllowedUseEvidenceChanges",
@@ -1180,7 +1195,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-proof-checks/structural-current/server_pipeline-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-repaired-all/server_pipeline-{seq}.json"
       ],
       "declaredActions": [
         "OperatorFailsThePaidRun",
@@ -1262,7 +1277,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-proof-checks/structural-current/server_receipt-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-repaired-all/server_receipt-{seq}.json"
       ],
       "declaredActions": [
         "OperatorChangesAdmissionControl",
@@ -1321,7 +1336,7 @@
         "--verbosity",
         "1",
         "--out-itf",
-        "/private/tmp/tc-quint-proof-checks/structural-current/server_settlement-{seq}.json"
+        "/private/tmp/tc-quint-proof-checks/structural-repaired-all/server_settlement-{seq}.json"
       ],
       "declaredActions": [
         "AnotherWorkerReclaimsTheLease",
@@ -1414,7 +1429,6 @@
       "observedActions": [
         "ANewSessionArrives",
         "TheEnvelopeTermsWiden",
-        "TheFirstRunAppliesItsAskRuleAfterTheGrant",
         "TheFirstRunFallsBackToAsk",
         "TheFirstRunReachesItsGrant",
         "TheFreshGrantIsSaved",
@@ -1422,7 +1436,11 @@
         "TheGrantAuditOrPolicyWriteFails",
         "TheGrantPreconditionsRefuseTheRequest",
         "TheGrantReplyArrives",
+        "TheGrantStatusNotificationIsProcessed",
         "TheGrantSweepVoidsChangedTerms",
+        "TheGrantWithdrawalFails",
+        "TheGrantWithdrawalIsSaved",
+        "TheGrantWithdrawalReplyArrives",
         "TheInFlightSendFinishes",
         "TheManualEnvelopeBuildFailsOrIsOvertaken",
         "TheManualEnvelopeBuildFinishes",
@@ -1431,6 +1449,7 @@
         "TheRefusedGrantIsAcknowledged",
         "TheScopeChoiceIsWritten",
         "TheScopeWriteOrAuditFails",
+        "TheSharingChoiceDiscardsAStaleGrantRead",
         "TheSharingChoiceReceivesTheSavedGrant",
         "TheSharingChoiceRequestsTheSavedGrant",
         "TheSourceListingFails",
@@ -1470,32 +1489,28 @@
       "sampledStates": 12928,
       "observedActions": [
         "TheApprovalBuildPinsAndApproves",
-        "TheBackoffPasses",
+        "TheBackgroundHistoryRefreshBegins",
         "TheChangedScopeRevokesApproval",
         "TheCurrentAccountChanges",
-        "TheDaemonRestartsDuringAnUpload",
         "TheDailyCapIsReached",
         "TheDailyCapResets",
         "TheEnrollmentDisappears",
         "TheEnrollmentReturns",
+        "TheHistoryReadDiscardsAStaleSnapshot",
         "TheHistoryReadFails",
+        "TheHistoryReadOwnerIsInvalidated",
         "TheHistoryReadPublishesAnEmptySnapshot",
-        "TheIngestRateLimitDefersTheSend",
-        "TheManualScrubSettingRetractsAnUnattendedApproval",
         "TheOfferExpires",
         "ThePinnedArtifactIsLost",
         "ThePreviewFails",
         "ThePreviewPinsAnEnvelope",
-        "ThePrivacyFilterRefusesTheTrace",
         "TheSelectedTraceRowIsRendered",
         "TheSourcePermissionIsLost",
         "TheSourcePermissionReturns",
         "TheSourceSessionChanges",
-        "TheStandingGrantApprovesATrace",
         "TheUndoWindowPasses",
-        "TheUploaderClaimsTheApproval",
         "TheWatcherDiscoversATrace",
-        "TheWitnessIsAtCapacity",
+        "YouApproveThePinnedPreview",
         "YouChangeConsentScopes",
         "YouChangeEnvelopeInputs",
         "YouChooseProjectAsk",
@@ -1527,18 +1542,18 @@
         "contribution_held",
         "contribution_history",
         "contribution_kept",
-        "contribution_offline",
         "contribution_pending",
         "contribution_policy",
         "contribution_preview",
         "contribution_preview_busy",
-        "contribution_refused",
-        "contribution_uploading"
+        "contribution_refused"
       ],
       "unobservedFrames": [
         "contribution_failed",
+        "contribution_offline",
         "contribution_superseded",
-        "contribution_uploaded"
+        "contribution_uploaded",
+        "contribution_uploading"
       ]
     },
     {
@@ -2269,13 +2284,7 @@
       ]
     }
   ],
-  "finishedAtUTC": "2026-11-06T22:44:33.073854+00:00",
-  "scopedRefreshes": [
-    {
-      "model": "client_contribution",
-      "finishedAtUTC": "2026-11-06T22:44:33.073854+00:00",
-      "reason": "Record actual pass-context scopes in the approval observer; preserve source guards",
-      "evidenceKind": "typechecking and random simulation only; no selected product promises checked"
-    }
-  ]
+  "finishedAtUTC": "2026-11-06T23:26:58.557479+00:00",
+  "initialSelectedSeamReviewBase": "a2e0aa56608f8c403deff679f8b51e76ac2f5ca7",
+  "sourceCorrespondenceEvidence": "proofs/evidence/manifest.json; source review is separate from structural checks"
 }

@@ -2,7 +2,7 @@
 
 This is a source-discovery index, not a claim that the entire application is modeled. Owner assignment only identifies the model that should reconcile an entry. A row stays a visible gap until its concrete model actions and observable fields are audited. `coarse-interface` identifies a deliberately abstract interaction; it does not cover handler internals.
 
-Source tree: `a2e0aa56608f8c403deff679f8b51e76ac2f5ca7`. Original discovery worktree: `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`. Only files in the pinned Git tree are scanned. The primary checkout and its untracked additions are excluded.
+Source tree: `91dc6e8b8d7ef8c0b755cafaa3f0647a199f8c07`. Original discovery worktree: `8218cc8ae408eb9c2c8a16d5768d9f6e0f7f83d6`. Only files in the pinned Git tree are scanned. The primary checkout and its untracked additions are excluded.
 
 Run from the repository root:
 
@@ -24,13 +24,13 @@ The writer retains audited annotations in coverage.json only while the row ID an
 | native_entry | 15 | 5 | 5 | 5 |
 | navigation | 86 | 48 | 1 | 37 |
 | route | 329 | 2 | 9 | 318 |
-| screen | 340 | 3 | 14 | 323 |
+| screen | 340 | 3 | 13 | 324 |
 | server_worker | 25 | 1 | 0 | 24 |
 
 | Candidate owner | Detailed | Coarse interface | Gaps |
 | --- | ---: | ---: | ---: |
-| client_consent | 1 | 1 | 0 |
-| client_contribution | 0 | 1 | 99 |
+| client_consent | 1 | 0 | 0 |
+| client_contribution | 0 | 1 | 100 |
 | client_learning | 0 | 2 | 57 |
 | client_providers | 0 | 6 | 0 |
 | client_services | 0 | 0 | 159 |

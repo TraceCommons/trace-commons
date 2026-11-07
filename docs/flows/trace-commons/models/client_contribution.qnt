@@ -28,11 +28,16 @@ module client_contribution {
     withdrawalCall: str,
     historyRead: str,
     historyPending: int -> bool,
+    historyCurrent: int -> bool,
+    historyStale: int -> bool,
     historyEntry: int -> int,
     displayedHistoryOwner: int,
     proof: { P2: bool, P3: bool, P4: bool, P12: bool }
   }
   val vars = s
+  // A bit means at least one stale callback; it never becomes the latest slot.
+  pure def retainStale(pending: int -> bool, stale: int -> bool): int -> bool =
+    Set(1, 2).mapBy(owner => pending.get(owner) or stale.get(owner))
 
   pure def controls(frame: str): Set[str] =
     if (frame == "contribution_empty") Set("Choose other trace", "Policy", "History")
@@ -81,6 +86,8 @@ module client_contribution {
     withdrawalCall: "none",
     historyRead: "unread",
     historyPending: Map(1 -> false, 2 -> false),
+    historyCurrent: Map(1 -> false, 2 -> false),
+    historyStale: Map(1 -> false, 2 -> false),
     historyEntry: Map(1 -> 0, 2 -> 0),
     displayedHistoryOwner: 0,
     proof: { P2: true, P3: true, P4: true, P12: true }
@@ -476,14 +483,18 @@ module client_contribution {
   // crates/trace-commons-contributor/src/daemon/history.rs:312-349
   action YouRefreshHistory = all {
     controls(s.screen).contains("Refresh history"),
-    s' = { ...s, historyRead: "loading", historyPending: s.historyPending.set(s.account, true), historyEntry: s.historyEntry.set(s.account, s.selected) }
+    s' = { ...s, historyRead: "loading", historyPending: Map(1 -> false, 2 -> false).set(s.account, true), historyStale: retainStale(s.historyPending, s.historyStale), historyCurrent: Map(1 -> false, 2 -> false).set(s.account, true), historyEntry: s.historyEntry.set(s.account, s.selected) }
   }
+  action TheBackgroundHistoryRefreshBegins = all {
+    s' = { ...s, historyRead: "loading", historyPending: Map(1 -> false, 2 -> false).set(s.account, true), historyStale: retainStale(s.historyPending, s.historyStale), historyCurrent: Map(1 -> false, 2 -> false).set(s.account, true), historyEntry: s.historyEntry.set(s.account, s.selected) }
+  }
+
 
   // crates/trace-commons-contributor/src/daemon/history.rs:90-105,349-492
   action TheHistoryReadFindsProcessing = {
     nondet owner = Set(1, 2).oneOf()
     all {
-    s.historyPending.get(owner) and s.entries.get(s.historyEntry.get(owner)).withdrawal != "confirmed" and s.entries.get(s.historyEntry.get(owner)).submission != 0,
+    s.historyPending.get(owner) and s.historyCurrent.get(owner) and owner == s.account and s.entries.get(s.historyEntry.get(owner)).withdrawal != "confirmed" and s.entries.get(s.historyEntry.get(owner)).submission != 0,
     s' = { ...s, entries: s.entries.set(s.historyEntry.get(owner), { ...s.entries.get(s.historyEntry.get(owner)), history: "processing" }), historyRead: "answered", historyPending: s.historyPending.set(owner, false), displayedHistoryOwner: owner, proof: { ...s.proof, P12: s.proof.P12 and owner == s.account } }
     }
   }
@@ -492,7 +503,7 @@ module client_contribution {
   action TheHistoryReadFindsASettledVerdict = {
     nondet owner = Set(1, 2).oneOf()
     all {
-    s.historyPending.get(owner) and s.entries.get(s.historyEntry.get(owner)).withdrawal != "confirmed" and s.entries.get(s.historyEntry.get(owner)).submission != 0,
+    s.historyPending.get(owner) and s.historyCurrent.get(owner) and owner == s.account and s.entries.get(s.historyEntry.get(owner)).withdrawal != "confirmed" and s.entries.get(s.historyEntry.get(owner)).submission != 0,
     s' = { ...s, entries: s.entries.set(s.historyEntry.get(owner), { ...s.entries.get(s.historyEntry.get(owner)), history: "accepted" }), historyRead: "answered", historyPending: s.historyPending.set(owner, false), displayedHistoryOwner: owner, proof: { ...s.proof, P12: s.proof.P12 and owner == s.account } }
     }
   }
@@ -501,7 +512,7 @@ module client_contribution {
   action TheHistoryReadFindsPreviousAccount = {
     nondet owner = Set(1, 2).oneOf()
     all {
-    s.historyPending.get(owner) and s.entries.get(s.historyEntry.get(owner)).submission != 0 and s.entries.get(s.historyEntry.get(owner)).account != s.account,
+    s.historyPending.get(owner) and s.historyCurrent.get(owner) and owner == s.account and s.entries.get(s.historyEntry.get(owner)).submission != 0 and s.entries.get(s.historyEntry.get(owner)).account != s.account,
     s' = { ...s, entries: s.entries.set(s.historyEntry.get(owner), { ...s.entries.get(s.historyEntry.get(owner)), history: "previous_account" }), historyRead: "answered", historyPending: s.historyPending.set(owner, false), displayedHistoryOwner: owner, proof: { ...s.proof, P12: s.proof.P12 and owner == s.account } }
     }
   }
@@ -510,24 +521,43 @@ module client_contribution {
   action TheHistoryReadFails = {
     nondet owner = Set(1, 2).oneOf()
     all {
-      s.historyPending.get(owner),
+      s.historyPending.get(owner) and s.historyCurrent.get(owner) and owner == s.account,
       s' = { ...s, historyRead: "failed", historyPending: s.historyPending.set(owner, false) }
     }
   }
 
   // AppModel.swift refreshHistory/perform: even an empty old snapshot can publish.
+  // Native whenCurrent gate consumes a stale success/failure before all UI effects.
+  action TheHistoryReadDiscardsAStaleSnapshot = {
+    nondet owner = Set(1, 2).oneOf()
+    nondet morePending = Set(false, true).oneOf()
+    all {
+      s.historyStale.get(owner),
+      s' = { ...s, historyStale: s.historyStale.set(owner, morePending) }
+    }
+  }
+
+  // Begin/end account operations and client changes invalidate request ownership.
+  action TheHistoryReadOwnerIsInvalidated = all {
+    Set(1, 2).exists(owner => s.historyPending.get(owner)),
+    s' = { ...s, historyStale: retainStale(s.historyPending, s.historyStale), historyPending: Map(1 -> false, 2 -> false), historyCurrent: Map(1 -> false, 2 -> false) }
+  }
+
   action TheHistoryReadPublishesAnEmptySnapshot = {
     nondet owner = Set(1, 2).oneOf()
     all {
-      s.historyPending.get(owner),
+      s.historyPending.get(owner) and s.historyCurrent.get(owner) and owner == s.account,
       s' = { ...s, historyRead: "answered", historyPending: s.historyPending.set(owner, false), displayedHistoryOwner: owner, proof: { ...s.proof, P12: s.proof.P12 and owner == s.account } }
     }
   }
 
   // crates/trace-commons-contributor/src/daemon/history.rs:329-349 [authority boundary input]
-  action TheCurrentAccountChanges = all {
-    s.account == 1,
-    s' = { ...s, account: 2, historyRead: "unread" }
+  action TheCurrentAccountChanges = {
+    nondet account = Set(1, 2).oneOf()
+    all {
+      account != s.account,
+      s' = { ...s, account: account, historyRead: "unread", historyStale: retainStale(s.historyPending, s.historyStale), historyPending: Map(1 -> false, 2 -> false), historyCurrent: Map(1 -> false, 2 -> false) }
+    }
   }
 
 
@@ -540,7 +570,7 @@ module client_contribution {
   // macos/Sources/TraceCommonsApp/AppModel.swift:3673-3679
   action TheWithdrawalRequestSucceeds = all {
     s.withdrawalCall == "request",
-    s' = { ...s, entries: s.entries.set(s.withdrawalEntry, { ...s.entries.get(s.withdrawalEntry), withdrawal: "confirmed" }), withdrawalCall: "none", historyRead: "loading", historyPending: s.historyPending.set(s.account, true), historyEntry: s.historyEntry.set(s.account, s.selected) }
+    s' = { ...s, entries: s.entries.set(s.withdrawalEntry, { ...s.entries.get(s.withdrawalEntry), withdrawal: "confirmed" }), withdrawalCall: "none", historyRead: "loading", historyPending: Map(1 -> false, 2 -> false).set(s.account, true), historyStale: retainStale(s.historyPending, s.historyStale), historyCurrent: Map(1 -> false, 2 -> false).set(s.account, true), historyEntry: s.historyEntry.set(s.account, s.selected) }
   }
   // macos/Sources/TraceCommonsApp/AppModel.swift:3680-3688
   action TheWithdrawalNeedsAnAccountSession = all {
@@ -556,7 +586,7 @@ module client_contribution {
   action TheHistoryReadReflectsWithdrawal = {
     nondet owner = Set(1, 2).oneOf()
     all {
-    s.historyPending.get(owner) and s.entries.get(s.historyEntry.get(owner)).withdrawal == "confirmed",
+    s.historyPending.get(owner) and s.historyCurrent.get(owner) and owner == s.account and s.entries.get(s.historyEntry.get(owner)).withdrawal == "confirmed",
     s' = { ...s, entries: s.entries.set(s.historyEntry.get(owner), { ...s.entries.get(s.historyEntry.get(owner)), history: "withdrawn" }), historyRead: "answered", historyPending: s.historyPending.set(owner, false), displayedHistoryOwner: owner, proof: { ...s.proof, P12: s.proof.P12 and owner == s.account } }
     }
   }
@@ -670,11 +700,14 @@ module client_contribution {
     TheDaemonRestartsDuringAnUpload,
     YouOpenHistory,
     YouRefreshHistory,
+    TheBackgroundHistoryRefreshBegins,
     TheHistoryReadFindsProcessing,
     TheHistoryReadFindsASettledVerdict,
     TheHistoryReadFindsPreviousAccount,
     TheHistoryReadFails,
     TheHistoryReadPublishesAnEmptySnapshot,
+    TheHistoryReadDiscardsAStaleSnapshot,
+    TheHistoryReadOwnerIsInvalidated,
     TheCurrentAccountChanges
   }
 }
