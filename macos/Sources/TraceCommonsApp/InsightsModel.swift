@@ -35,6 +35,25 @@ final class InsightsModel {
     /// is no daemon to ask), so the get-started card is not drawn while the
     /// first answer is on its way.
     private(set) var weekSettled = false
+    /// Only an explicit daemon answer distinguishes disabled from unavailable.
+    private(set) var localAnalysisEnabled: Bool?
+    private(set) var enablingLocalAnalysis = false
+
+    func enableLocalAnalysis(using write: @MainActor () async -> Bool) async {
+        guard localAnalysisEnabled == false, !enablingLocalAnalysis else { return }
+        enablingLocalAnalysis = true
+        defer { enablingLocalAnalysis = false }
+        let token = generation
+        let confirmed = await write()
+        guard generation == token else { return }
+        guard confirmed else {
+            error = MonitorWords.table?.requestFailed ?? "insights-operation-failed"
+            return
+        }
+        error = nil
+        await loadWeek()
+    }
+
     private var task: Task<Void, Never>?
     private var generation = UUID()
     private var active = false
@@ -60,11 +79,13 @@ final class InsightsModel {
     /// A later failure drops an earlier T week whole.
     func loadWeek(isoWeek: String? = nil) async {
         let generation = UUID(); weekGeneration = generation
-        guard let weekReader else { showSavedFeed(notice: false); weekSettled = true; return }
+        guard let weekReader else { localAnalysisEnabled = nil; showSavedFeed(notice: false); weekSettled = true; return }
         let outcome: Result<DaemonData.InsightsWeek, Error>
         do { outcome = .success(try await weekReader(isoWeek)) } catch { outcome = .failure(error) }
         guard weekGeneration == generation else { return }
         weekSettled = true
+        if case .success(let week) = outcome { localAnalysisEnabled = week.enabled }
+        else { localAnalysisEnabled = nil }
         switch outcome {
         case .success(let week) where week.showsCounterPass:
             weekFeed = .counterPass; counterWeek = week; counterPassNoticeKey = nil

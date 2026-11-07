@@ -364,6 +364,65 @@ final class InsightsWeekFeedTests: XCTestCase {
     }
 
     @MainActor
+    func testLocalAnalysisEnableConfirmsAndRefreshes() async throws {
+        let off = try Self.week(#"{"enabled": false, "feed": "counter_pass"}"#)
+        let on = try Self.week(Self.counted)
+        let state = AnalysisState()
+        let model = model({ _ in await state.value(off: off, on: on) })
+        await model.loadWeek()
+        XCTAssertEqual(model.localAnalysisEnabled, false)
+        await model.enableLocalAnalysis { await state.enable(); return true }
+        XCTAssertEqual(model.localAnalysisEnabled, true)
+        XCTAssertEqual(model.weekFeed, .counterPass)
+        XCTAssertFalse(model.enablingLocalAnalysis)
+    }
+
+    @MainActor
+    func testRefusedLocalAnalysisEnableStaysOffAndRetryable() async throws {
+        let off = try Self.week(#"{"enabled": false, "feed": "counter_pass"}"#)
+        let model = model({ _ in off })
+        await model.loadWeek()
+        await model.enableLocalAnalysis { false }
+        XCTAssertEqual(model.localAnalysisEnabled, false)
+        XCTAssertEqual(model.error, try XCTUnwrap(MonitorWords.table).requestFailed)
+        XCTAssertFalse(model.enablingLocalAnalysis)
+    }
+
+    @MainActor
+    func testUnavailableAnalysisIsNotOff() async {
+        let model = model({ _ in throw InsightsError.invalidResponse })
+        await model.loadWeek()
+        XCTAssertNil(model.localAnalysisEnabled)
+    }
+
+    @MainActor
+    func testEnableDoesNotDuplicateWritesOrWriteWhenAlreadyEnabled() async throws {
+        let off = try Self.week(#"{"enabled": false, "feed": "counter_pass"}"#)
+        let model = model({ _ in off })
+        await model.loadWeek()
+        var writes = 0
+        await model.enableLocalAnalysis {
+            writes += 1
+            await model.enableLocalAnalysis { writes += 1; return true }
+            return false
+        }
+        XCTAssertEqual(writes, 1)
+        let on = try Self.week(Self.counted)
+        let enabled = self.model({ _ in on })
+        await enabled.loadWeek()
+        await enabled.enableLocalAnalysis { writes += 1; return true }
+        XCTAssertEqual(writes, 1)
+    }
+
+    private actor AnalysisState {
+        var enabled = false
+        func enable() { enabled = true }
+        func value(off: DaemonData.InsightsWeek, on: DaemonData.InsightsWeek) -> DaemonData.InsightsWeek {
+            enabled ? on : off
+        }
+    }
+
+    @MainActor
     func testAnEnabledReadableWeekShowsFeedT() async throws {
         let week = try Self.week(Self.counted)
         let model = model({ _ in week })
