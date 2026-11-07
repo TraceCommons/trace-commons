@@ -17,6 +17,12 @@
 //! `attested_unit_weight` units toward a tier, and a tier may require a
 //! number of attested units. A policy may explicitly require a passed gate
 //! even for attested submissions; the default preserves the attestation bypass.
+//!
+//! Acceptance comes from the credit ledger by default. A policy may set
+//! `acceptance_source: "status"` to also count the server's own acceptance
+//! of the submission (the V137 `accepted_submission_status` fact), which is
+//! the only acceptance the versioned pipeline produces. That choice is
+//! independent of `require_gate_pass`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -35,6 +41,20 @@ const MAX_TIERS: usize = 8;
 const MAX_ALLOWLIST: usize = 64;
 const WEEK_DAYS: i64 = 7;
 const WEEK_SECONDS: i64 = WEEK_DAYS * 86_400;
+
+/// Where a `tiered-v1` policy reads acceptance from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AcceptanceSource {
+    /// An `accepted_submission` fact only: the submission is accepted and has
+    /// a credit-ledger `accepted` event. Existing policies, unchanged.
+    #[default]
+    Ledger,
+    /// Also an `accepted_submission_status` fact: the server accepted the
+    /// submission, whatever its credit event type. Reviewer-independence
+    /// exclusions on that fact then veto the whole submission.
+    Status,
+}
 
 /// One row of the tier table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +79,9 @@ pub struct GrowthPolicy {
     /// Whether attestation must also satisfy the allowlisted passed gate.
     /// False preserves existing policies' attestation bypass.
     require_gate_pass: bool,
+    /// Which acceptance facts count. `require_gate_pass` also counts status
+    /// acceptance, as it did before this field existed.
+    acceptance_source: AcceptanceSource,
     /// `None` runs the rule on gate pass alone: decision 2 of the spec lets
     /// the first shadow run do that while credit-quality V3 settles.
     q_min_micros: Option<i64>,
@@ -93,6 +116,14 @@ impl GrowthPolicy {
     pub fn require_gate_pass(&self) -> bool {
         self.require_gate_pass
     }
+    pub fn acceptance_source(&self) -> AcceptanceSource {
+        self.acceptance_source
+    }
+    /// Whether `accepted_submission_status` facts count as acceptance, and
+    /// so whether their reviewer-independence exclusions apply.
+    fn counts_status_acceptance(&self) -> bool {
+        self.require_gate_pass || self.acceptance_source == AcceptanceSource::Status
+    }
     /// `min(bounded_allowance * m_tier, allowance_ceiling)`. The top tier's
     /// product is checked at parse time, so no tier can overflow.
     pub fn effective_allowance(&self, tier: u32) -> i64 {
@@ -116,6 +147,8 @@ struct RawGrowth {
     attested_unit_weight: Option<u32>,
     #[serde(default)]
     require_gate_pass: bool,
+    #[serde(default)]
+    acceptance_source: AcceptanceSource,
     q_min_micros: Option<i64>,
     penalty_cooldown_seconds: i64,
     evaluation_max_age_seconds: i64,
@@ -240,6 +273,7 @@ pub fn parse_growth_policy(
         weekly_cap: raw.weekly_cap,
         attested_unit_weight,
         require_gate_pass: raw.require_gate_pass,
+        acceptance_source: raw.acceptance_source,
         q_min_micros: raw.q_min_micros,
         penalty_cooldown_seconds: raw.penalty_cooldown_seconds,
         evaluation_max_age_seconds: raw.evaluation_max_age_seconds,
@@ -469,9 +503,10 @@ pub fn evaluate(
 /// Gate-required status evidence is authoritative about reviewer
 /// independence for the whole UUID. A legacy credit fact for that same
 /// submission cannot override a nonqualifying status classification.
-/// Existing policies continue to ignore the new status source entirely.
+/// Policies that do not count status acceptance (the ledger default without
+/// `require_gate_pass`) continue to ignore the status source entirely.
 fn status_exclusions(policy: &GrowthPolicy, facts: &[&EvaluationFact]) -> BTreeSet<Uuid> {
-    if !policy.require_gate_pass {
+    if !policy.counts_status_acceptance() {
         return BTreeSet::new();
     }
     facts
@@ -617,7 +652,8 @@ pub fn rejection_counts(
 fn accepted_fact_qualifies(policy: &GrowthPolicy, fact: &EvaluationFact) -> bool {
     fact.outcome == "accepted"
         && (fact.source_kind == "accepted_submission"
-            || (policy.require_gate_pass && fact.source_kind == "accepted_submission_status"))
+            || (policy.counts_status_acceptance()
+                && fact.source_kind == "accepted_submission_status"))
 }
 
 fn attested_fact_qualifies(fact: &EvaluationFact) -> bool {
@@ -1227,6 +1263,206 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// The live runbook policy (docs/operator/account-trust.md, "The
+    /// policy") with `<BASE>` 100, `<CEILING>` 800, the gate version
+    /// `gate-v1` and the dedup version the test facts carry, plus `extra`
+    /// merged into its growth object.
+    fn runbook_policy(extra: serde_json::Value) -> GrowthPolicy {
+        let mut json = serde_json::json!({
+            "version": "earned-trust-live-2026-10-11.1",
+            "processing_cost_bound": 1,
+            "bounded_allowance": 100,
+            "period": {"mode": "fixed", "seconds": 604800},
+            "growth_rule": "tiered-v1",
+            "growth": {
+                "window_seconds": 7257600,
+                "weekly_cap": 10,
+                "attested_unit_weight": 2,
+                "q_min_micros": null,
+                "credit_quality_calibration_versions": [],
+                "penalty_cooldown_seconds": 7776000,
+                "evaluation_max_age_seconds": 172800,
+                "allowance_ceiling": 800,
+                "evaluator_versions": ["gate-v1"],
+                "dedup_signal_versions": ["events.v2+simhash.v2"],
+                "tiers": [
+                    {"units": 0,  "active_weeks": 0, "age_seconds": 0,       "multiplier": 1},
+                    {"units": 10, "active_weeks": 2, "age_seconds": 1209600, "multiplier": 2},
+                    {"units": 30, "active_weeks": 4, "age_seconds": 3628800, "multiplier": 4, "attested_units": 5},
+                    {"units": 60, "active_weeks": 8, "age_seconds": 7257600, "multiplier": 8, "attested_units": 10}
+                ]
+            }
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            json["growth"][key] = value.clone();
+        }
+        parse_growth_policy(&json.to_string(), &["earned-trust-live-2026-10-11.1"]).unwrap()
+    }
+
+    /// Turns every `accepted_submission` fact into the status kind, the only
+    /// acceptance the versioned pipeline produces.
+    fn status_only(mut facts: Facts) -> Facts {
+        for fact in &mut facts.0 {
+            if fact.source_kind == "accepted_submission" {
+                fact.source_kind = "accepted_submission_status".into();
+            }
+        }
+        facts
+    }
+
+    #[test]
+    fn acceptance_source_defaults_to_the_ledger_and_parses_only_its_two_values() {
+        assert_eq!(policy().acceptance_source(), AcceptanceSource::Ledger);
+        assert_eq!(
+            runbook_policy(serde_json::json!({})).acceptance_source(),
+            AcceptanceSource::Ledger
+        );
+        let explicit = parse_growth_policy(
+            &with(growth(), "acceptance_source", "ledger".into()),
+            &["growth-test-v1"],
+        )
+        .unwrap();
+        assert_eq!(policy(), explicit, "explicit ledger is the default");
+        let status = parse_growth_policy(
+            &with(growth(), "acceptance_source", "status".into()),
+            &["growth-test-v1"],
+        )
+        .unwrap();
+        assert_eq!(status.acceptance_source(), AcceptanceSource::Status);
+        assert!(
+            !status.require_gate_pass(),
+            "status acceptance leaves require_gate_pass alone"
+        );
+        for refused in [
+            serde_json::json!("Status"),
+            serde_json::json!("LEDGER"),
+            serde_json::json!("both"),
+            serde_json::json!(""),
+            serde_json::json!(null),
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!(["status"]),
+        ] {
+            assert!(
+                parse_growth_policy(
+                    &with(growth(), "acceptance_source", refused.clone()),
+                    &["growth-test-v1"]
+                )
+                .is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_acceptance_source_counts_a_status_only_acceptance_with_a_qualifying_gate() {
+        let mut facts = Facts::new();
+        facts.qualified(1);
+        let facts = status_only(facts);
+        assert!(
+            facts
+                .0
+                .iter()
+                .all(|fact| fact.source_kind != "accepted_submission")
+        );
+
+        let status = runbook_policy(serde_json::json!({"acceptance_source": "status"}));
+        let e = evaluate(&status, &facts.0, t(3));
+        assert_eq!(e.age_seconds, 2 * DAY);
+        assert!(e.age_seconds > 0);
+        assert_eq!((e.units, e.attested_units, e.active_weeks), (1, 0, 1));
+        assert_eq!(
+            rejection_counts(&status, &facts.0, t(3)).no_qualifying_acceptance,
+            0
+        );
+
+        // The runbook policy as it stands, and with the default spelled
+        // out, ignores the status fact: no age, no units.
+        for ledger in [
+            runbook_policy(serde_json::json!({})),
+            runbook_policy(serde_json::json!({"acceptance_source": "ledger"})),
+        ] {
+            let e = evaluate(&ledger, &facts.0, t(3));
+            assert_eq!((e.age_seconds, e.units, e.tier), (0, 0, 0));
+            assert_eq!(
+                rejection_counts(&ledger, &facts.0, t(3)).no_qualifying_acceptance,
+                1
+            );
+        }
+
+        // A status fact and a ledger fact for one submission are one unit.
+        let mut both = Facts::new();
+        let submission = both.qualified(1);
+        both.push(
+            "accepted_submission_status",
+            submission,
+            "accepted",
+            t(1) + chrono::Duration::seconds(5),
+        );
+        assert_eq!(evaluate(&status, &both.0, t(3)).units, 1);
+
+        // Status acceptance still needs the qualifying gate.
+        let mut failed = status_only({
+            let mut f = Facts::new();
+            f.qualified(1);
+            f
+        });
+        failed.last_gate().outcome = "evaluated_failed".into();
+        let e = evaluate(&status, &failed.0, t(3));
+        assert_eq!(e.units, 0);
+        assert!(e.age_seconds > 0, "age counts acceptance, not the gate");
+    }
+
+    #[test]
+    fn status_acceptance_source_keeps_the_attestation_bypass() {
+        let status = runbook_policy(serde_json::json!({"acceptance_source": "status"}));
+        assert!(!status.require_gate_pass());
+        let mut facts = Facts::new();
+        facts.attested(1);
+        let facts = status_only(facts);
+        assert!(facts.0.iter().all(|f| f.source_kind != "gate_evaluation"));
+        let e = evaluate(&status, &facts.0, t(2));
+        // One attested submission at the runbook's attested weight of 2.
+        assert_eq!((e.attested_units, e.units, e.active_weeks), (1, 2, 1));
+        assert!(e.age_seconds > 0);
+
+        // A failed gate does not stop it either.
+        let mut failed = Facts::new();
+        let submission = failed.attested(1);
+        failed.push("gate_evaluation", submission, "evaluated_failed", t(1));
+        let failed = status_only(failed);
+        assert_eq!(evaluate(&status, &failed.0, t(2)).attested_units, 1);
+
+        // require_gate_pass still removes the bypass under status acceptance.
+        let strict = runbook_policy(serde_json::json!({
+            "acceptance_source": "status",
+            "require_gate_pass": true,
+        }));
+        assert_eq!(evaluate(&strict, &facts.0, t(2)).units, 0);
+        assert_eq!(evaluate(&strict, &failed.0, t(2)).units, 0);
+    }
+
+    #[test]
+    fn status_acceptance_source_applies_the_reviewer_exclusions() {
+        let status = runbook_policy(serde_json::json!({"acceptance_source": "status"}));
+        let ledger = runbook_policy(serde_json::json!({}));
+        for outcome in [
+            "accepted_self_reviewed",
+            "accepted_approver_unknown",
+            "accepted_status_inactive",
+        ] {
+            // The ledger says accepted, the status fact says the approval is
+            // not independent: under status acceptance the status veto wins.
+            let mut facts = Facts::new();
+            let submission = facts.qualified(1);
+            facts.push("accepted_submission_status", submission, outcome, t(1));
+            let e = evaluate(&status, &facts.0, t(3));
+            assert_eq!((e.units, e.age_seconds), (0, 0), "{outcome}");
+            // The ledger default ignores the status fact, as before.
+            assert_eq!(evaluate(&ledger, &facts.0, t(3)).units, 1, "{outcome}");
+        }
     }
 
     // ---- parser -----------------------------------------------------------

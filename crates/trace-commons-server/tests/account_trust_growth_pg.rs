@@ -2524,3 +2524,145 @@ async fn legacy_only_retained_sources_get_strict_lifecycle_and_reviewer_exclusio
         assert_eq!(units().await, (0, 1));
     }
 }
+
+/// The versioned pipeline's SettledNoveltyUtility leg writes its credit as
+/// `novelty_utility`, never `accepted`, so the ledger acceptance source sees
+/// nothing. `acceptance_source: "status"` counts the server's acceptance of
+/// the submission instead, and the passed, first-in-cluster gate earns the
+/// unit through the real recorder and evaluation inputs.
+#[tokio::test]
+async fn status_acceptance_source_earns_a_unit_for_a_novelty_utility_only_submission() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(
+        &fx,
+        "tc_account_trust_status_source_login",
+        "trace_account_trust_worker",
+    )
+    .await;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let tenant = anchored_tenant();
+    let owner = principal();
+    let account = seed_account(admin, &tenant, &[&owner]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let accepted_at = Utc::now() - chrono::Duration::seconds(60);
+    let (submission, trace) =
+        seed_submission(admin, &tenant, &owner, "accepted", accepted_at).await;
+    seed_credit(
+        admin,
+        &tenant,
+        submission,
+        trace,
+        "novelty_utility",
+        "pipeline",
+        "pipeline_worker",
+        accepted_at,
+    )
+    .await;
+    let gate = seed_clustered_decision(
+        admin,
+        &tenant,
+        submission,
+        Some(Uuid::new_v4()),
+        accepted_at,
+    )
+    .await;
+
+    let candidates = worker
+        .list_account_trust_fact_candidates(&trust, 100)
+        .await
+        .unwrap();
+    assert!(
+        !candidates.contains(&TrustFactSource::AcceptedSubmission(submission)),
+        "no ledger acceptance without an accepted credit event"
+    );
+    assert!(candidates.contains(&TrustFactSource::AcceptedSubmissionStatus(submission)));
+    assert!(candidates.contains(&TrustFactSource::GateEvaluation(gate)));
+    for source in candidates {
+        worker
+            .record_account_trust_fact(&trust, source)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        worker
+            .record_account_trust_fact(
+                &trust,
+                TrustFactSource::AcceptedSubmissionStatus(submission)
+            )
+            .await
+            .unwrap(),
+        Some(TrustFactOutcome::Accepted),
+        "a novelty_utility credit event is not an accepted event, so the approver check never fires"
+    );
+    assert_eq!(
+        worker
+            .record_account_trust_fact(&trust, TrustFactSource::GateEvaluation(gate))
+            .await
+            .unwrap(),
+        Some(TrustFactOutcome::EvaluatedPassed)
+    );
+
+    let status_policy = |source: Option<&str>| {
+        let mut json = serde_json::json!({
+            "version": "growth-status-source-test-v1",
+            "processing_cost_bound": 10,
+            "bounded_allowance": 100,
+            "period": {"mode": "fixed", "seconds": 604800},
+            "growth_rule": "tiered-v1",
+            "growth": {
+                "window_seconds": 3650 * 86400,
+                "weekly_cap": 10,
+                "q_min_micros": null,
+                "penalty_cooldown_seconds": 0,
+                "evaluation_max_age_seconds": 86400,
+                "allowance_ceiling": 300,
+                "evaluator_versions": ["gate-v1"],
+                "dedup_signal_versions": [DEDUP_V2],
+                "tiers": [
+                    {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                    {"units": 1, "active_weeks": 1, "age_seconds": 0, "multiplier": 2}
+                ]
+            }
+        });
+        if let Some(source) = source {
+            json["growth"]["acceptance_source"] = source.into();
+        }
+        trace_commons_server::account_trust_rule::parse_growth_policy(
+            &json.to_string(),
+            &["growth-status-source-test-v1"],
+        )
+        .unwrap()
+    };
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let status = trace_commons_server::account_trust_rule::evaluate(
+        &status_policy(Some("status")),
+        &inputs,
+        now,
+    );
+    assert_eq!((status.units, status.active_weeks, status.tier), (1, 1, 1));
+    assert!(status.age_seconds > 0);
+    for ledger in [status_policy(None), status_policy(Some("ledger"))] {
+        let e = trace_commons_server::account_trust_rule::evaluate(&ledger, &inputs, now);
+        assert_eq!(
+            (e.units, e.age_seconds, e.tier),
+            (0, 0, 0),
+            "the ledger default ignores status acceptance"
+        );
+    }
+    let (applied, _) = worker
+        .evaluate_and_record_applied_account_trust(&trust, &status_policy(Some("status")))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(applied.units, 1);
+}
