@@ -179,6 +179,23 @@ fn safe_label(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+'))
 }
 
+/// An `evaluator_versions` entry: any `safe_label`, or the gate policy
+/// version the versioned pipeline writes on its Settle decisions,
+/// `pipeline:` followed by a bundle id (`sha256:` and 64 lowercase hex,
+/// `versioned_pipeline::is_bundle_id`). The pipeline form is matched exactly
+/// like any other label: no wildcard, no prefix family. It is accepted for
+/// evaluator versions only; dedup signal versions stay `safe_label`.
+fn evaluator_label(value: &str) -> bool {
+    match value.strip_prefix(PIPELINE_EVALUATOR_PREFIX) {
+        Some(bundle_id) => crate::versioned_pipeline::is_bundle_id(bundle_id),
+        None => safe_label(value),
+    }
+}
+
+/// The prefix the versioned pipeline puts before a bundle id when it writes
+/// `trace_gate_decisions.gate_policy_version` on Settle.
+const PIPELINE_EVALUATOR_PREFIX: &str = "pipeline:";
+
 /// Parses a `tiered-v1` growth policy: the base policy fields exactly as
 /// `parse_bounded_policy` takes them, plus `"growth_rule": "tiered-v1"` and a
 /// `growth` object. The base fields are validated by `parse_bounded_policy`
@@ -213,8 +230,8 @@ pub fn parse_growth_policy(
         }
         None => raw.credit_quality_calibration_versions.is_empty(),
     };
-    let labels_ok = |labels: &[String]| {
-        !labels.is_empty() && labels.len() <= MAX_ALLOWLIST && labels.iter().all(|l| safe_label(l))
+    let labels_ok = |labels: &[String], label_ok: fn(&str) -> bool| {
+        !labels.is_empty() && labels.len() <= MAX_ALLOWLIST && labels.iter().all(|l| label_ok(l))
     };
     if raw.window_seconds <= 0
         || raw.weekly_cap == 0
@@ -229,8 +246,8 @@ pub fn parse_growth_policy(
             .allowance_ceiling
             .checked_add(base.processing_cost_bound())
             .is_none()
-        || !labels_ok(&raw.evaluator_versions)
-        || !labels_ok(&raw.dedup_signal_versions)
+        || !labels_ok(&raw.evaluator_versions, evaluator_label)
+        || !labels_ok(&raw.dedup_signal_versions, safe_label)
         || raw.tiers.is_empty()
         || raw.tiers.len() > MAX_TIERS
     {
@@ -2446,5 +2463,202 @@ mod tests {
         let text = rendered.to_string();
         assert!(!text.contains(&submission.to_string()));
         assert!(!text.contains("pipeline:"));
+    }
+
+    // ---- pipeline evaluator labels in evaluator_versions -------------------
+
+    /// A bundle id other than `PIPELINE_EVALUATOR`'s.
+    const OTHER_PIPELINE_EVALUATOR: &str =
+        "pipeline:sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+    fn growth_with_evaluators(evaluators: serde_json::Value) -> String {
+        with(growth(), "evaluator_versions", evaluators)
+    }
+
+    #[test]
+    fn a_pipeline_evaluator_label_parses_and_matches_exactly() {
+        assert_eq!(PIPELINE_EVALUATOR.len(), 80, "over safe_label's 64 bytes");
+        let policy = parse_growth_policy(
+            &growth_with_evaluators(serde_json::json!([PIPELINE_EVALUATOR])),
+            &["growth-test-v1"],
+        )
+        .expect("a pipeline bundle label is a valid evaluator version");
+        assert!(policy.evaluator_versions.contains(PIPELINE_EVALUATOR));
+
+        let units_for = |evaluator: Option<&str>| {
+            let mut f = Facts::new();
+            f.qualified(1);
+            f.last_gate().evaluator_version = evaluator.map(Into::into);
+            evaluate(&policy, &f.0, t(2)).units
+        };
+        assert_eq!(units_for(Some(PIPELINE_EVALUATOR)), 1);
+        assert_eq!(
+            units_for(Some(OTHER_PIPELINE_EVALUATOR)),
+            0,
+            "another bundle id is a different era"
+        );
+        assert_eq!(units_for(Some("gate-v1")), 0, "legacy era not listed");
+        assert_eq!(
+            units_for(Some(PIPELINE_EVALUATOR.to_ascii_uppercase().as_str())),
+            0,
+            "matching is exact, not case-folded"
+        );
+        assert_eq!(units_for(None), 0);
+
+        let both = parse_growth_policy(
+            &growth_with_evaluators(serde_json::json!(["gate-v1", PIPELINE_EVALUATOR])),
+            &["growth-test-v1"],
+        )
+        .unwrap();
+        let mut f = Facts::new();
+        f.qualified(1);
+        f.qualified(1);
+        f.last_gate().evaluator_version = Some(PIPELINE_EVALUATOR.into());
+        assert_eq!(
+            evaluate(&both, &f.0, t(2)).units,
+            2,
+            "legacy and pipeline eras count side by side"
+        );
+    }
+
+    #[test]
+    fn malformed_pipeline_evaluator_labels_are_refused() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let refused = [
+            format!("pipeline:sha256:{}", hex.to_ascii_uppercase()),
+            "pipeline:*".to_string(),
+            "pipeline:sha256:*".to_string(),
+            "pipeline:".to_string(),
+            "pipeline:sha256:".to_string(),
+            "pipeline:sha256:XYZ".to_string(),
+            format!("pipeline:sha256:{}", &hex[1..]),
+            format!("pipeline:sha256:{hex}0"),
+            format!("pipeline:sha256:{}g", &hex[1..]),
+            format!("pipeline:sha512:{hex}"),
+            format!("pipeline:{hex}"),
+            format!("pipeline:sha256:{hex} "),
+            format!(" pipeline:sha256:{hex}"),
+            format!("pipeline::sha256:{hex}"),
+            format!("Pipeline:sha256:{hex}"),
+            format!("sha256:{hex}"),
+            "pipeline:gate-v1".to_string(),
+            "a".repeat(65),
+            "gate:v1".to_string(),
+        ];
+        for label in &refused {
+            assert!(
+                parse_growth_policy(
+                    &growth_with_evaluators(serde_json::json!([label])),
+                    &["growth-test-v1"],
+                )
+                .is_err(),
+                "evaluator label {label:?} must be refused"
+            );
+            assert!(
+                parse_growth_policy(
+                    &growth_with_evaluators(serde_json::json!(["gate-v1", label])),
+                    &["growth-test-v1"],
+                )
+                .is_err(),
+                "one bad label refuses the whole list: {label:?}"
+            );
+        }
+        assert!(
+            parse_growth_policy(
+                &growth_with_evaluators(serde_json::json!(["a".repeat(64)])),
+                &["growth-test-v1"],
+            )
+            .is_ok(),
+            "a 64-byte plain label is still accepted"
+        );
+    }
+
+    #[test]
+    fn pipeline_evaluator_labels_keep_the_allowlist_cap() {
+        let label = |i: usize| format!("pipeline:sha256:{i:064x}");
+        let at_cap: Vec<String> = (0..MAX_ALLOWLIST).map(label).collect();
+        assert!(
+            parse_growth_policy(
+                &growth_with_evaluators(serde_json::json!(at_cap)),
+                &["growth-test-v1"],
+            )
+            .is_ok()
+        );
+        let over: Vec<String> = (0..=MAX_ALLOWLIST).map(label).collect();
+        assert!(
+            parse_growth_policy(
+                &growth_with_evaluators(serde_json::json!(over)),
+                &["growth-test-v1"],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn dedup_signal_versions_and_policy_versions_do_not_take_the_pipeline_form() {
+        assert!(
+            parse_growth_policy(
+                &with(
+                    growth(),
+                    "dedup_signal_versions",
+                    serde_json::json!([PIPELINE_EVALUATOR]),
+                ),
+                &["growth-test-v1"],
+            )
+            .is_err(),
+            "dedup signal versions stay strict"
+        );
+        // The bounded-admission parser validates its own version labels and
+        // does not share the evaluator rule.
+        let mut json: serde_json::Value = serde_json::from_str(&policy_json(growth())).unwrap();
+        json["version"] = PIPELINE_EVALUATOR.into();
+        let json = json.to_string();
+        assert!(parse_growth_policy(&json, &[PIPELINE_EVALUATOR]).is_err());
+        assert!(parse_bounded_policy(&json, &[PIPELINE_EVALUATOR]).is_err());
+        let bounded = |version: &str| {
+            serde_json::json!({
+                "version": version,
+                "processing_cost_bound": 10,
+                "bounded_allowance": 100,
+                "period": {"mode": "fixed", "seconds": 604800},
+                "growth_rule": "none",
+            })
+            .to_string()
+        };
+        assert!(
+            parse_bounded_policy(&bounded("bounded-test-v1"), &["bounded-test-v1"]).is_ok(),
+            "control: the bounded policy is otherwise valid"
+        );
+        assert!(parse_bounded_policy(&bounded(PIPELINE_EVALUATOR), &[PIPELINE_EVALUATOR]).is_err());
+    }
+
+    /// The shadow policy deployed on the pilot on 2026-11-07, verbatim (tiers
+    /// from docs/operator/account-trust.md). It must keep parsing, and must
+    /// still parse with a pipeline bundle label appended.
+    const PILOT_SHADOW_POLICY_2026_11_07: &str = r#"{"version":"earned-trust-shadow-2026-11-07.1","processing_cost_bound":1,"bounded_allowance":100,"period":{"mode":"fixed","seconds":604800},"growth_rule":"tiered-v1","growth":{"window_seconds":7257600,"weekly_cap":10,"attested_unit_weight":2,"q_min_micros":null,"credit_quality_calibration_versions":[],"penalty_cooldown_seconds":7776000,"evaluation_max_age_seconds":172800,"allowance_ceiling":800,"evaluator_versions":["pilot-2026-05"],"dedup_signal_versions":["events.v1+fnv1a-3shingle-set.v2"],"tiers":[{"units":0,"active_weeks":0,"age_seconds":0,"multiplier":1},{"units":10,"active_weeks":2,"age_seconds":1209600,"multiplier":2},{"units":30,"active_weeks":4,"age_seconds":3628800,"multiplier":4,"attested_units":5},{"units":60,"active_weeks":8,"age_seconds":7257600,"multiplier":8,"attested_units":10}]}}"#;
+
+    #[test]
+    fn the_deployed_pilot_shadow_policy_still_parses() {
+        let version = "earned-trust-shadow-2026-11-07.1";
+        let policy = parse_growth_policy(PILOT_SHADOW_POLICY_2026_11_07, &[version])
+            .expect("the deployed shadow policy parses");
+        assert_eq!(
+            policy.evaluator_versions,
+            BTreeSet::from(["pilot-2026-05".to_string()])
+        );
+        assert_eq!(policy.base().bounded_allowance(), 100);
+        assert_eq!(policy.allowance_ceiling, 800);
+        assert_eq!(policy.tiers().len(), 4);
+
+        let mut json: serde_json::Value =
+            serde_json::from_str(PILOT_SHADOW_POLICY_2026_11_07).unwrap();
+        json["growth"]["evaluator_versions"] =
+            serde_json::json!(["pilot-2026-05", PIPELINE_EVALUATOR]);
+        let widened = parse_growth_policy(&json.to_string(), &[version])
+            .expect("the shadow policy with a pipeline era appended parses");
+        assert_eq!(
+            widened.evaluator_versions,
+            BTreeSet::from(["pilot-2026-05".to_string(), PIPELINE_EVALUATOR.to_string()])
+        );
     }
 }

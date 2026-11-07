@@ -2858,3 +2858,112 @@ async fn pipeline_acceptance_is_server_acceptance_only_with_pipeline_evidence() 
         }
     }
 }
+
+/// A `pipeline_settle` gate decision surfaces through the evaluation inputs
+/// with `evaluator_version = 'pipeline:' || bundle_id`, the string the
+/// versioned pipeline's Settle writes, and a policy that lists exactly that
+/// label counts it. Another bundle's label does not.
+#[tokio::test]
+async fn a_pipeline_settle_decision_surfaces_with_its_pipeline_evaluator_label() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(
+        &fx,
+        "tc_account_trust_pipeline_evaluator_login",
+        "trace_account_trust_worker",
+    )
+    .await;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let tenant = anchored_tenant();
+    let owner = principal();
+    let account = seed_account(admin, &tenant, &[&owner]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let accepted_at = Utc::now() - chrono::Duration::seconds(60);
+    let submission =
+        seed_qualified(admin, &tenant, &owner, Some(Uuid::new_v4()), accepted_at).await;
+    let bundle_id = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    assert!(trace_commons_server::versioned_pipeline::is_bundle_id(
+        &bundle_id
+    ));
+    let label = format!("pipeline:{bundle_id}");
+    let gate: Uuid = admin
+        .query_one(
+            "UPDATE trace_gate_decisions
+                SET source='pipeline_settle', pipeline_run_id=$3, gate_policy_version=$4
+              WHERE tenant_id=$1 AND submission_id=$2
+              RETURNING decision_id",
+            &[&tenant, &submission, &Uuid::new_v4(), &label],
+        )
+        .await
+        .unwrap()
+        .get(0);
+
+    for source in worker
+        .list_account_trust_fact_candidates(&trust, 100)
+        .await
+        .unwrap()
+    {
+        worker
+            .record_account_trust_fact(&trust, source)
+            .await
+            .unwrap();
+    }
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    let fact = inputs
+        .iter()
+        .find(|f| f.source_kind == "gate_evaluation" && f.source_id == gate)
+        .expect("the pipeline_settle gate fact is an input");
+    assert_eq!(fact.outcome, "evaluated_passed");
+    assert_eq!(fact.evaluator_version.as_deref(), Some(label.as_str()));
+
+    let policy = |evaluator: &str| {
+        let json = serde_json::json!({
+            "version": "growth-pipeline-evaluator-test-v1",
+            "processing_cost_bound": 10,
+            "bounded_allowance": 100,
+            "period": {"mode": "fixed", "seconds": 604800},
+            "growth_rule": "tiered-v1",
+            "growth": {
+                "window_seconds": 3650 * 86400,
+                "weekly_cap": 10,
+                "q_min_micros": null,
+                "penalty_cooldown_seconds": 0,
+                "evaluation_max_age_seconds": 86400,
+                "allowance_ceiling": 300,
+                "evaluator_versions": ["gate-v1-unused", evaluator],
+                "dedup_signal_versions": [DEDUP_V2],
+                "tiers": [
+                    {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                    {"units": 1, "active_weeks": 1, "age_seconds": 0, "multiplier": 2}
+                ]
+            }
+        });
+        trace_commons_server::account_trust_rule::parse_growth_policy(
+            &json.to_string(),
+            &["growth-pipeline-evaluator-test-v1"],
+        )
+        .expect("a pipeline evaluator label parses")
+    };
+    let now = Utc::now();
+    let listed = trace_commons_server::account_trust_rule::evaluate(&policy(&label), &inputs, now);
+    assert_eq!((listed.units, listed.tier), (1, 1));
+    let other = format!(
+        "pipeline:sha256:{}",
+        Uuid::new_v4().simple().to_string().repeat(2)
+    );
+    let unlisted =
+        trace_commons_server::account_trust_rule::evaluate(&policy(&other), &inputs, now);
+    assert_eq!(
+        (unlisted.units, unlisted.tier),
+        (0, 0),
+        "another bundle's label does not count this decision"
+    );
+}
