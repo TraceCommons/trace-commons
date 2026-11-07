@@ -258,12 +258,13 @@ struct ManagedSessionsSection: View {
             GlassIconCard(
                 systemImage: "terminal", title: model.managedText("title"),
                 subtitle: snapshot.sessions.isEmpty ? [model.managedText("empty")] : [],
+                flushContent: true,
                 content: {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                         if !snapshot.sessions.isEmpty {
                             LazyVStack(spacing: 0) {
                                 ForEach(Array(snapshot.sessions.enumerated()), id: \.element.id) { index, session in
-                                    GlassTableRow(first: index == 0) { sessionRow(session) }
+                                    GlassTableRow(first: index == 0, horizontalInset: 0) { sessionRow(session) }
                                 }
                             }
                         }

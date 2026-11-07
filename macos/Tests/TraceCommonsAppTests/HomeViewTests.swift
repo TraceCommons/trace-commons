@@ -96,12 +96,18 @@ final class HomeViewTests: XCTestCase {
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: HomeFormat.creditPendingTitleWord, value: tiles.pending, "
                 + "loading: store.isLoading(\"history_rollup\", \"commons_credit_summary\"), action: openPrivateAI)"))
-        // What is not contributed is an upsell two tiles tall across both
-        // columns, under Waiting and Contributed (owner, 2026-10-19), and
+        // What is not contributed is an upsell across both columns, under
+        // Waiting and Contributed, while it has a call to share (owner,
+        // 2026-10-19), else a third tile on their line (Ron, 2026-11-05); and
         // the NEAR AI balance sits beside Credit.
         XCTAssertTrue(home.contains(
-            "if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) { "
+            "if uncontributed.count > 0, uncontributed.detail(words) != nil, "
+                + "let title = HomeFormat.cardHeading(words?.uncontributed) { "
                 + "GridRow { notContributed(uncontributed, title: title) .gridCellColumns(2) } }"))
+        XCTAssertTrue(home.contains(
+            "if uncontributed.count > 0, uncontributed.detail(words) == nil, "
+                + "let title = HomeFormat.cardHeading(words?.uncontributed) { "
+                + "notContributed(uncontributed, title: title) }"))
         // Slim, on the standard card fill under a solid accent border
         // (owner, 2026-10-20: it had no fill and a turning glow edge).
         XCTAssertTrue(home.contains("detail: uncontributed.detail(words), action: openTraces)"))
@@ -123,8 +129,7 @@ final class HomeViewTests: XCTestCase {
         // 2026-10-27), and nothing beside the dash (owner, 2026-11-02).
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: copy.balanceTitle, value: counting ?? balance.value, "
-                + "detail: balance.detail, detailInk: balance.detailInk, "
-                + "action: openPrivateAI)"))
+                + "detail: balance.detail, detailInk: balance.detailInk, action: openPrivateAI)"))
         let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))
         let upsell = try XCTUnwrap(home.range(of: "notContributed(uncontributed, title: title)"))
         let credit = try XCTUnwrap(home.range(of: "HomeStatTile(label: HomeFormat.creditPendingWord"))

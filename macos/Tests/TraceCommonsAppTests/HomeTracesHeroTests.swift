@@ -74,7 +74,7 @@ final class HomeTracesHeroTests: XCTestCase {
                 + "            HomeTracesHero(\n"
                 + "                words: words, openTraces: openTraces, openPrivateAI: openPrivateAI, visibleHeight: visibleHeight)\n"
                 + "        }\n    }\n"))
-        for absent in ["tracesHeroClosed", "showsTracesWalkthrough"] {
+        for absent in ["tracesHeroClosed", "showsTracesWalkthrough", "finishedFirstRunThisLaunch"] {
             XCTAssertFalse(home.contains(absent), absent)
         }
     }

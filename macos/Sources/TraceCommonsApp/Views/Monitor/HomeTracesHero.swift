@@ -6,8 +6,9 @@ import TCShellCore
 /// 2026-11-05): the first and largest card on Home, saying what
 /// contributing is and that it earns credit, with Start earning on its
 /// pill. Under its line, the three steps across the whole card:
-/// contribute, earn, use Private AI. It shows for everyone, every time,
-/// and has no X.
+/// contribute, earn, use Private AI. It shows for everyone, new and
+/// returning, until its X closes it for good on this Mac (owner,
+/// 2026-11-07).
 ///
 /// When the full card would push the stats under it out of view, it goes
 /// compact (product owner, 2026-11-07): a smaller title, no line under

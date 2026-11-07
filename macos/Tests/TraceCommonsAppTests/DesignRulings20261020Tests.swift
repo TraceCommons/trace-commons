@@ -42,6 +42,7 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertFalse(body.contains("Shimmer"), "the shimmer is back")
         // Its watermark is gone too (owner, 2026-11-07).
         XCTAssertFalse(body.contains("glassCardWatermark"), "the watermark is back")
+        XCTAssertTrue(body.contains(".glassTier(.card,"))
     }
 
     /// The card's line is the core's call to share; an older core's plain

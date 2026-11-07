@@ -55,7 +55,7 @@ final class HomeClosedCardsTests: XCTestCase {
         XCTAssertTrue(home.contains("@AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true"))
         XCTAssertTrue(home.contains("onClose: { closedCampaign = HomeClosedCards.fingerprint(campaign) }"))
         XCTAssertFalse(home.contains("insightsClosedOn"))
-        XCTAssertFalse(home.contains("tracesHeroClosed"))
+        XCTAssertFalse(home.contains("tracesHeroClosed"), "the Traces hero keeps its own key (`HomeTracesHero.closedKey`)")
         let general = try HistoryParityTests.text("Views/Settings/GeneralSection.swift")
         XCTAssertTrue(general.contains("@AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true"))
         XCTAssertTrue(general.contains("Toggle(words.promotionsToggle, isOn: $promotionsOn)"))
@@ -70,9 +70,9 @@ final class HomeClosedCardsTests: XCTestCase {
         XCTAssertFalse(words.promotionsCaption.isEmpty)
     }
 
-    /// The hero card draws an X only when given one: the campaign has one;
-    /// Insights and Missions have none, nor does the Traces walkthrough
-    /// (owner, 2026-11-04).
+    /// The hero card draws an X only when given one: the campaign has one on
+    /// Home, the Traces hero has its own in `HomeTracesHero` (owner,
+    /// 2026-11-07); Insights and Missions have none (owner, 2026-11-04).
     func testOnlyCardsGivenACloseDrawAnX() throws {
         let hero = try String(contentsOf: Self.packageRoot
             .appendingPathComponent("Sources/TCDesign/Components/HeroCard.swift"), encoding: .utf8)

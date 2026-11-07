@@ -158,20 +158,28 @@
         { "hex": "#0091fd", "at": 1 }
       ]
     },
+    "heroCampaignCard": {
+      "angle": 120,
+      "note": "Home's campaign card (Ron, 2026-11-05): a solid navy as dark as the plain cards, both stops the same. heroCampaign itself stays, since the flow map and the library graphics take its brand blue.",
+      "stops": [
+        { "hex": "#081538", "at": 0 },
+        { "hex": "#081538", "at": 1 }
+      ]
+    },
     "heroMissions": {
       "angle": 120,
-      "note": "Missions: deep navy to the NEAR AI accent (owner, 2026-10-20: the accent replaced the purple; it was indigo to violet).",
+      "note": "Missions: a solid navy, both stops the same (Ron, 2026-11-05; it was deep navy to the NEAR AI accent).",
       "stops": [
-        { "hex": "#06264a", "at": 0 },
-        { "hex": "#035ca3", "at": 1 }
+        { "hex": "#07152f", "at": 0 },
+        { "hex": "#07152f", "at": 1 }
       ]
     },
     "heroInsights": {
       "angle": 120,
-      "note": "Insights: deep sea blue to the accent blue.",
+      "note": "Insights: a solid deep sea blue, both stops the same (Ron, 2026-11-05).",
       "stops": [
-        { "hex": "#073b55", "at": 0 },
-        { "hex": "#1f7aa8", "at": 1 }
+        { "hex": "#07202b", "at": 0 },
+        { "hex": "#07202b", "at": 1 }
       ]
     },
     "paneFill": { "angle": 160, "stops": [

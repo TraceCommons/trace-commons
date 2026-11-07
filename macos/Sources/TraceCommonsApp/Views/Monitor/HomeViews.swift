@@ -120,7 +120,8 @@ struct TracesHistoryPage: View {
 ///
 /// A closed campaign comes back when what the feed says for it changes;
 /// promotions off hides the campaign card altogether (owner, 2026-10-27).
-/// The Insights card has no X and always shows (owner, 2026-11-04).
+/// The Insights card has no X and always shows (owner, 2026-11-04). The
+/// Traces hero keeps its own X and key (`HomeTracesHero.closedKey`).
 enum HomeClosedCards {
     /// The fingerprint of the campaign as it was when closed.
     static let campaignKey = "home.closedCampaignFingerprint"
@@ -201,15 +202,13 @@ private struct HomeOverview: View {
            HomeClosedCards.showsCampaign(
                HomeClosedCards.fingerprint(campaign), closed: closedCampaign, promotionsOn: promotionsOn) {
             GlassHeroCard(
-                gradient: GlassTokens.Gradient.heroCampaign,
+                gradient: GlassTokens.Gradient.heroCampaignCard,
                 title: campaign.title, subtitle: campaign.body,
                 actionTitle: campaign.actionTitle, action: { openURL(campaign.actionURL) },
                 closeLabel: MonitorWords.close, onClose: { closedCampaign = HomeClosedCards.fingerprint(campaign) }
             ) {
                 if let image = campaignStore.image {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFit()
+                    GlassHeroSymbol(image: image)
                 } else {
                     GlassHeroSymbol(campaign.symbol)
                 }
@@ -345,8 +344,9 @@ private struct HomeOverview: View {
         // 2026-11-02: back at the top, where it was before 2026-10-28), then
         // Traces (the tiles and what is not contributed across both columns),
         // then Account (Credit and the NEAR AI balance). The Traces hero
-        // leads Home, over every section, for everyone, every time, with no
-        // X (product owner, 2026-10-28, 2026-10-29; restored 2026-11-05).
+        // leads Home, over every section, for everyone, new and returning,
+        // until its X closes it for good (product owner, 2026-10-28,
+        // 2026-10-29; restored 2026-11-05; X 2026-11-07).
         return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             tracesHero
             noCredit
@@ -358,8 +358,15 @@ private struct HomeOverview: View {
                                      loading: traces.phase == .loading, action: openTraces)
                         HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(freshRollup),
                                      loading: store.isLoading("history_rollup"), action: openHistory)
+                        // With nothing to say beyond its count, it is a
+                        // third tile on this line (Ron, 2026-11-05).
+                        if uncontributed.count > 0, uncontributed.detail(words) == nil,
+                           let title = HomeFormat.cardHeading(words?.uncontributed) {
+                            notContributed(uncontributed, title: title)
+                        }
                     }
-                    if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) {
+                    if uncontributed.count > 0, uncontributed.detail(words) != nil,
+                       let title = HomeFormat.cardHeading(words?.uncontributed) {
                         GridRow {
                             notContributed(uncontributed, title: title)
                                 .gridCellColumns(2)
@@ -378,7 +385,8 @@ private struct HomeOverview: View {
     }
 
     /// Home's Traces hero, the product owner's design (`HomeTracesHero`).
-    /// Drawn once the core's words have loaded.
+    /// Drawn once the core's words have loaded, until its X closes it for
+    /// good on this Mac (owner, 2026-11-07).
     @ViewBuilder
     private var tracesHero: some View {
         if let words {
@@ -458,7 +466,8 @@ private struct HomeOverview: View {
     }
 
     /// What waits on this Mac, not yet contributed, across both columns
-    /// (owner, 2026-10-19): a slim card with a solid accent border, a large
+    /// while it has a call to share, else a tile beside the other two
+    /// (owner, 2026-10-19; Ron, 2026-11-05): a slim card with a solid accent border, a large
     /// icon on the left, how many traces and their size, and the core's
     /// call to share. The whole card opens Traces. Drawn only while
     /// something waits.
@@ -514,10 +523,13 @@ private struct HomeNotContributedCard: View {
         let shape = RoundedRectangle(cornerRadius: GlassTier.card.radius, style: .continuous)
         Button(action: action) {
             HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                VStack(alignment: .leading, spacing: detail == nil ? 0 : GlassTokens.Space.s1) {
                     Text(title)
                         .glassType(GlassTokens.TypeScale.eyebrow)
                         .foregroundStyle(GlassColor.textTertiary)
+                        // A third of the row's width is tight for its word.
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                     HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
                         Text(String(count))
                             .glassType(GlassTokens.TypeScale.heading.weight(.bold))
@@ -530,7 +542,9 @@ private struct HomeNotContributedCard: View {
                         }
                     }
                 }
-                .fixedSize()
+                // Beside the line it keeps its own width; as a tile it takes
+                // the column's, the same as the tiles beside it.
+                .fixedSize(horizontal: detail != nil, vertical: detail != nil)
                 if let detail {
                     // A card on the card: the nested card's translucent
                     // fill (`GlassGround`).
@@ -542,14 +556,13 @@ private struct HomeNotContributedCard: View {
                         .padding(.vertical, GlassTokens.Space.s4)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .glassTier(.cardQuiet)
-                } else {
-                    Spacer(minLength: 0)
                 }
             }
             // The tiles' inset, so its words start where theirs do.
             .padding(.horizontal, 12)
             .padding(.vertical, GlassTokens.Space.s5)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // As tall as the tiles beside it on one line.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             // The stat tiles' fill and hover.
             .glassTier(.card, hover: GlassTokens.Color.cardHover)
             .contentShape(shape)
@@ -1755,8 +1768,7 @@ struct HomeAccountTiles: View {
                     let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
                     BalanceArrivalFlourish(status: model.balanceStatus, calls: model.balanceCalls) { counting in
                         HomeStatTile(label: copy.balanceTitle, value: counting ?? balance.value,
-                                     detail: balance.detail, detailInk: balance.detailInk,
-                                     action: openPrivateAI)
+                                     detail: balance.detail, detailInk: balance.detailInk, action: openPrivateAI)
                     }
                 } else {
                     Color.clear
