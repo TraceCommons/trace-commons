@@ -217,6 +217,33 @@ final class ScopedGrantHistoryReadsTests: XCTestCase {
         XCTAssertFalse(model.statusReadFailed)
     }
 
+    /// Launch reads history, its rollup and the automatic grant once each,
+    /// after status says whose they are: when status sets the account, when
+    /// it answers with no account, and when the status read fails.
+    @MainActor
+    func testStartupReadsAccountScopedDataOnceAfterStatus() async throws {
+        let cases: [(String, String)] = [
+            ("sets the account", statusFrame("a", depth: 1)),
+            ("no account", ScopedReadDaemon.frame(#"{"logged_in":false}"#)),
+            ("status fails", ScopedReadDaemon.failure),
+        ]
+        for (label, statusReply) in cases {
+            let daemon = ScopedReadDaemon()
+            daemon.setDefault("status", statusReply)
+            let model = AppModel()
+            model.setClientForTesting(DaemonClient(daemon: daemon))
+            defer { model.shutdown() }
+            model.refreshAll()
+            try await waitUntil { model.historyAnswered && model.automaticGrant != nil }
+            // Anything retired and asked again would land in this window.
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertEqual(daemon.count("list_history"), 1, label)
+            XCTAssertEqual(daemon.count("history_rollup"), 1, label)
+            XCTAssertEqual(daemon.count("automatic_grant"), 1, label)
+            XCTAssertEqual(daemon.count("status"), 1, label)
+        }
+    }
+
     /// Daemon calls block their thread until the daemon answers. Many of them
     /// waiting at once must not stall unrelated reads: they run on the
     /// daemon-call queue, not Swift's cooperative pool (about one thread per
