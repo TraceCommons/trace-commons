@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.24.11" date="2026-11-06">
+      <description>
+        <p>The app is now called Near AI Gateway. Account, organization, usage and credit requests go to NEAR AI's new account service, and NEAR Mobile wallet sign-in works again.</p>
+      </description>
+    </release>
     <release version="0.24.10" date="2026-11-06">
       <description>
         <p>Lets you review and submit ordinary traces without inference receipts, and keeps reviewed traces valid when the Commons privacy-check server changes its signing key under a signed update. Traces whose call needs a receipt still require one.</p>
