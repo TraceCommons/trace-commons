@@ -22,6 +22,8 @@ struct InferenceTabView: View {
     /// Opens the Private AI section of Settings.
     var onOpenSettings: () -> Void = {}
     @EnvironmentObject private var model: AppModel
+    /// The ledger's visible height (`PrivateAIGuideCard.visibleHeight`).
+    @State private var visibleHeight: CGFloat = 0
 
     /// The core's analytics words (`tc_insights_copy_json`), for each
     /// call's ledger counters.
@@ -65,8 +67,8 @@ struct InferenceTabView: View {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 // The owner's order (2026-10-09, 2026-10-10, 2026-10-19),
                 // with the inspector closed on this tab: the Private AI
-                // step-by-step card leads, with no X (product owner,
-                // 2026-10-28, 2026-11-04), then the status (a static dot and the
+                // step-by-step card leads, until its X closes it (product
+                // owner, 2026-10-28; owner, 2026-11-07), then the status (a static dot and the
                 // core's sentence; the owner set aside a switch here on
                 // 2026-10-19), then the managed cards, whose tool buttons
                 // are how Private AI runs, then the calls, then the NEAR AI
@@ -75,7 +77,7 @@ struct InferenceTabView: View {
                 // where the switch, the tools and the connection are. The offer and the NEAR AI
                 // sign-in are popover notices over the tab
                 // (`MonitorNotices`).
-                PrivateAIGuideCard(openTraces: openTraces)
+                PrivateAIGuideCard(openTraces: openTraces, visibleHeight: visibleHeight)
                 PrivateAIInspectorView(store: store)
                 // Only with several NEAR AI organizations and no choice made
                 // (owner request, 2026-10-23); otherwise draws nothing.
@@ -87,6 +89,9 @@ struct InferenceTabView: View {
             }
         }
         .scrollIndicators(.never)
+        // How much of the tab shows, so the guide can go compact when the
+        // full card would push what is under it out of view (owner, 2026-11-07).
+        .onGeometryChange(for: CGFloat.self, of: \.size.height) { visibleHeight = $0 }
     }
 
     /// The window's totals, the models and the calls, as the core read them.
@@ -381,16 +386,34 @@ struct InferenceTabView: View {
 /// `inference-inspector.tsx` draws it, and the inspector now stays closed
 /// there). No title of its own: the tab names it (owner, 2026-10-10).
 /// How Private AI works, step by step (product owner, 2026-10-28): first on
-/// the tab, in the managed copy's words, every time and with no X (owner,
-/// 2026-11-04). Redrawn on 2026-11-05 from the owner's mockups: the title
-/// large and dark blue (`guideTitle`), the original card's lock shield faint
-/// in the top corner over the pixel field, and the three steps as a plain
-/// list, each a bold number and title over its line, a thin line between
-/// them. Earn credit opens Traces, where traces are shared.
+/// the tab, in the managed copy's words. Redrawn on 2026-11-05 from the
+/// owner's mockups: the title large and dark blue (`guideTitle`), the
+/// original card's lock shield faint in the top corner over the pixel
+/// field, and the three steps as a plain list, each a bold number and title
+/// over its line, a thin line between them. Earn credit opens Traces, where
+/// traces are shared.
+///
+/// Like Home's 3-steps card (owner, 2026-11-07): compact when the full card
+/// would push what is under it out of view, either a card narrower than
+/// Home's compact width or a tab too short for the full card and the start
+/// of the status and tools under it. Compact is a smaller title, no line
+/// under it, and each step on one short row. Its X closes it, the person's
+/// choice, kept under its own key; it had no X from 2026-11-04.
 struct PrivateAIGuideCard: View {
     /// Opens the Traces tab, for the Earn credit step.
     var openTraces: () -> Void = {}
+    /// How tall the tab's visible area is; zero until the tab has said.
+    var visibleHeight: CGFloat = 0
     @EnvironmentObject private var model: AppModel
+    /// The card's width, read as it lays out.
+    @State private var width: CGFloat = 0
+    /// The full card's height at the card's width, from a hidden full copy,
+    /// so it is known while the card is compact too.
+    @State private var fullHeight: CGFloat = 0
+    /// The person closed the card with its X.
+    @AppStorage(Self.closedKey) private var closed = false
+
+    static let closedKey = "privateAI.guideCardClosed"
 
     /// Each step's title, then its line.
     static let steps = [
@@ -399,11 +422,39 @@ struct PrivateAIGuideCard: View {
         (title: "guide_step_use_title", line: "guide_step_use"),
     ]
 
+    /// Below this width the card is compact: Home's.
+    static var compactWidth: CGFloat { HomeTracesHero.compactWidth }
+    /// What must fit under the full card: the tab's status heading, its
+    /// line, and the top of the first tools card.
+    static var contentRoom: CGFloat { 200 }
+
+    static func isCompact(width: CGFloat, visibleHeight: CGFloat, fullHeight: CGFloat) -> Bool {
+        if width > 0 && width < compactWidth { return true }
+        return visibleHeight > 0 && fullHeight > 0 && fullHeight + contentRoom > visibleHeight
+    }
+
     var body: some View {
+        if !closed {
+            let compact = Self.isCompact(width: width, visibleHeight: visibleHeight, fullHeight: fullHeight)
+            guide(compact: compact, close: .init(label: MonitorWords.close, action: { closed = true }))
+                .onGeometryChange(for: CGFloat.self, of: \.size.width) { width = $0 }
+                .background(alignment: .top) {
+                    // The full card at this width, never drawn or read, for
+                    // its height.
+                    guide(compact: false, close: nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .hidden()
+                        .accessibilityHidden(true)
+                        .onGeometryChange(for: CGFloat.self, of: \.size.height) { fullHeight = $0 }
+                }
+        }
+    }
+
+    private func guide(compact: Bool, close: GetStartedCard.Close?) -> PrivateAIGuide {
         PrivateAIGuide(
             title: model.managedText("guide_title"), lead: model.managedText("guide_body"),
             steps: Self.steps.map { (model.managedText($0.title), model.managedText($0.line)) },
-            openTraces: openTraces)
+            openTraces: openTraces, compact: compact, close: close)
     }
 }
 
@@ -413,19 +464,29 @@ struct PrivateAIGuide: View {
     let lead: String
     let steps: [(title: String, line: String)]
     let openTraces: () -> Void
+    /// The short form (`PrivateAIGuideCard.isCompact`).
+    var compact = false
+    /// The X, in the title's row as the getting-started card has it.
+    var close: GetStartedCard.Close?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s9) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                Text(title)
-                    .glassType(GlassTokens.TypeScale.number.weight(.heavy))
-                    .foregroundStyle(GlassTokens.Color.guideTitle.color)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityAddTraits(.isHeader)
-                Text(lead)
-                    .glassType(GlassTokens.TypeScale.title.weight(.medium))
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: compact ? GlassTokens.Space.s3 : GlassTokens.Space.s9) {
+            HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    Text(title)
+                        .glassType((compact ? GlassTokens.TypeScale.title : GlassTokens.TypeScale.number).weight(.heavy))
+                        .foregroundStyle(GlassTokens.Color.guideTitle.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityAddTraits(.isHeader)
+                    if !compact {
+                        Text(lead)
+                            .glassType(GlassTokens.TypeScale.title.weight(.medium))
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if let close { GetStartedCardClose(close: close) }
             }
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
@@ -433,10 +494,12 @@ struct PrivateAIGuide: View {
                         Rectangle()
                             .fill(GlassTokens.Color.heroAccent.color.opacity(0.25))
                             .frame(height: 1)
-                            .padding(.leading, GlassTokens.Space.s10 + GlassTokens.Space.s8)
+                            .padding(.leading, compact
+                                ? GlassTokens.Space.s2
+                                : GlassTokens.Space.s10 + GlassTokens.Space.s8)
                     }
                     PrivateAIGuideStep(number: index + 1, title: step.title, line: step.line,
-                                       action: index == 0 ? openTraces : nil)
+                                       action: index == 0 ? openTraces : nil, compact: compact)
                 }
             }
         }
@@ -447,7 +510,7 @@ struct PrivateAIGuide: View {
                 // The original card's lock shield (product owner, 2026-10-28),
                 // faint and tilted in the corner.
                 Image(systemName: "lock.shield.fill")
-                    .glassGlyph(120, weight: .regular)
+                    .glassGlyph(compact ? 72 : 120, weight: .regular)
                     .foregroundStyle(GlassTokens.Color.heroAccent.color.opacity(0.18))
                     .rotationEffect(.degrees(-12))
                     .offset(x: 10, y: -14)
@@ -458,13 +521,15 @@ struct PrivateAIGuide: View {
     }
 }
 
-/// One step: its number and title in bold over its line. With an action,
-/// the whole row is a button.
+/// One step: its number and title in bold over its line, or, compact, the
+/// number and title on one short row with a chevron when it opens a tab.
+/// With an action, the whole row is a button.
 private struct PrivateAIGuideStep: View {
     let number: Int
     let title: String
     let line: String
     let action: (() -> Void)?
+    var compact = false
     @State private var hovering = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -476,13 +541,42 @@ private struct PrivateAIGuideStep: View {
                     withAnimation(GlassMotion.fast(reduceMotion)) { hovering = inside }
                 }
                 .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(title), \(line)")
                 .accessibilityAddTraits(.isButton)
         } else {
             row.accessibilityElement(children: .combine)
+                .accessibilityLabel("\(title), \(line)")
         }
     }
 
+    @ViewBuilder
     private var row: some View {
+        if compact { short } else { full }
+    }
+
+    private var short: some View {
+        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+            Text(String(number))
+                .glassType(GlassTokens.TypeScale.bodyStrong)
+                .monospacedDigit()
+                .foregroundStyle(GlassColor.textPrimary)
+            Text(title)
+                .glassType(GlassTokens.TypeScale.bodyStrong)
+                .foregroundStyle(hovering ? GlassTokens.Color.guideTitle.color : GlassColor.textPrimary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if action != nil {
+                Image(systemName: "chevron.right")
+                    .glassGlyph(11, weight: .semibold)
+                    .foregroundStyle(GlassColor.textSecondary)
+            }
+        }
+        .padding(.horizontal, GlassTokens.Space.s2)
+        .padding(.vertical, GlassTokens.Space.s2)
+        .contentShape(Rectangle())
+    }
+
+    private var full: some View {
         HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s6) {
             Text(String(number))
                 .glassType(GlassTokens.TypeScale.heading.weight(.heavy))

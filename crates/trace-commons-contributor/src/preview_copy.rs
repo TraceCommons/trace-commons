@@ -1428,7 +1428,8 @@ pub struct MonitorHomeHistoryCopy {
     /// contributing is and what it earns, and the way into Traces.
     /// Approved by the product owner 2026-10-28; the title gained ", use
     /// Private AI" on 2026-10-29 (product owner). Restored as the owner
-    /// wrote it on 2026-11-05.
+    /// wrote it on 2026-11-05; three sentences rather than a list (product
+    /// owner, 2026-11-07).
     pub traces_hero_title: &'static str,
     pub traces_hero_body: &'static str,
     pub traces_hero_action: &'static str,
@@ -1790,7 +1791,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             section_account: "Account",
             account_no_data: "No data",
             private_ai_sign_in: "Sign in to NEAR AI to get started.",
-            traces_hero_title: "Contribute traces, earn credit, use Private AI",
+            traces_hero_title: "Contribute traces. Earn credit. Use Private AI.",
             traces_hero_body: "Share the sessions from your AI coding tools. Each accepted trace earns you credit.",
             traces_hero_action: "Start earning",
             traces_hero_step_contribute: "Contribute traces",

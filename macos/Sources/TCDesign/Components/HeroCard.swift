@@ -35,6 +35,10 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     /// a plain panel, so the caller's content can hold buttons of its own
     /// (owner, 2026-10-29: Home's Traces hero's steps each open a tab).
     private let actionOnPill: Bool
+    /// A narrow card's form (product owner, 2026-11-07): the title in the
+    /// smaller title type and no subtitle, so the card takes less of a
+    /// narrow window. The caller decides when, from the width it has.
+    private let compact: Bool
     private let graphic: Graphic
     private let content: Content
     @State private var hovering = false
@@ -45,6 +49,7 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
         actionTitle: String? = nil, action: (() -> Void)? = nil,
         closeLabel: String? = nil, onClose: (() -> Void)? = nil,
         contentSpansGraphic: Bool = false, titleSpansGraphic: Bool = false, actionOnPill: Bool = false,
+        compact: Bool = false,
         @ViewBuilder graphic: () -> Graphic, @ViewBuilder content: () -> Content
     ) {
         self.gradient = gradient
@@ -57,6 +62,7 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
         self.contentSpansGraphic = contentSpansGraphic
         self.titleSpansGraphic = titleSpansGraphic
         self.actionOnPill = actionOnPill
+        self.compact = compact
         self.graphic = graphic()
         self.content = content()
     }
@@ -90,6 +96,8 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     /// The title's face: larger and heavier than a card title, as a hero's
     /// is (the references' display type, on the system face).
     static var titleType: GlassTypeStyle { GlassTokens.TypeScale.display.weight(.heavy) }
+    /// The compact card's title (`compact`).
+    static var compactTitleType: GlassTypeStyle { GlassTokens.TypeScale.title.weight(.heavy) }
 
     public var body: some View {
         Group {
@@ -118,7 +126,7 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
         let shape = RoundedRectangle(cornerRadius: GlassTier.card.radius, style: .continuous)
         return words
             .padding(.trailing, contentSpansGraphic ? 0 : Self.graphicReserve)
-            .frame(maxWidth: .infinity, minHeight: Self.minHeight, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: compact ? nil : Self.minHeight, alignment: .leading)
             .background(alignment: .trailing) {
                 // Behind the words, sized to the card, past its edges.
                 graphic
@@ -143,11 +151,11 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 Text(title)
-                    .glassType(Self.titleType)
+                    .glassType(compact ? Self.compactTitleType : Self.titleType)
                     .foregroundStyle(GlassTokens.Color.heroInk.color)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityAddTraits(.isHeader)
-                if let subtitle {
+                if let subtitle, !compact {
                     Text(subtitle)
                         .glassType(GlassTokens.TypeScale.label.weight(.regular))
                         .foregroundStyle(GlassTokens.Color.heroInk.color.opacity(0.88))

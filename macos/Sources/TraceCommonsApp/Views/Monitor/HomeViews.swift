@@ -120,13 +120,11 @@ struct TracesHistoryPage: View {
 ///
 /// A closed campaign comes back when what the feed says for it changes;
 /// promotions off hides the campaign card altogether (owner, 2026-10-27).
-/// The Insights card has no X and always shows (owner, 2026-11-04). A
-/// closed Traces hero stays closed (owner, 2026-11-07).
+/// The Insights card has no X and always shows (owner, 2026-11-04). The
+/// Traces hero keeps its own X and key (`HomeTracesHero.closedKey`).
 enum HomeClosedCards {
     /// The fingerprint of the campaign as it was when closed.
     static let campaignKey = "home.closedCampaignFingerprint"
-    /// Set once the Traces hero's X is pressed; it does not come back.
-    static let tracesHeroKey = "home.tracesHeroStepsClosed"
     /// Settings' "Show promotions on Home", on by default.
     static let promotionsKey = "home.showsPromotions"
 
@@ -169,14 +167,13 @@ private struct HomeOverview: View {
     /// Where the NEAR AI sign-in's browser page opens.
     @Environment(\.openURL) private var openURL
     @State private var campaignStore = PrivateAICampaignStore()
+    /// Home's visible height (`HomeTracesHero.visibleHeight`).
+    @State private var visibleHeight: CGFloat = 0
     /// The campaign closed with its X, as it was then (`fingerprint`): it
     /// comes back when the feed changes it (owner, 2026-10-27).
     @AppStorage(HomeClosedCards.campaignKey) private var closedCampaign = ""
     /// Settings' "Show promotions on Home": off, no campaign card.
     @AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true
-    /// The Traces hero closed with its X: closed for good on this Mac
-    /// (owner, 2026-11-07).
-    @AppStorage(HomeClosedCards.tracesHeroKey) private var tracesHeroClosed = false
 
     /// The rollup, or nil after a failed `history_rollup` read
     /// (`SummaryFacts.fresh`): a stale one is not shown as current.
@@ -275,6 +272,9 @@ private struct HomeOverview: View {
             }
         }
         .scrollIndicators(.never)
+        // How much of Home shows, so the Traces hero can go compact when
+        // the full card would push the stats out of view (owner, 2026-11-07).
+        .onGeometryChange(for: CGFloat.self, of: \.size.height) { visibleHeight = $0 }
         .task { await campaignStore.refresh() }
         .task(id: missionsEnabled) {
             // Hidden missions read nothing: the drafts inbox stays on disk.
@@ -389,9 +389,9 @@ private struct HomeOverview: View {
     /// good on this Mac (owner, 2026-11-07).
     @ViewBuilder
     private var tracesHero: some View {
-        if let words, !tracesHeroClosed {
-            HomeTracesHero(words: words, openTraces: openTraces, openPrivateAI: openPrivateAI,
-                           onClose: { tracesHeroClosed = true })
+        if let words {
+            HomeTracesHero(
+                words: words, openTraces: openTraces, openPrivateAI: openPrivateAI, visibleHeight: visibleHeight)
         }
     }
 
