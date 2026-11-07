@@ -73,7 +73,7 @@ TRACE_COMMONS_SAMPLE=normalDay TRACE_COMMONS_INSIGHTS_SAMPLE=1 \
 
 **To use your real data instead,** ask Claude to "run it with real data", or run `open .build/Near.ai.app` without the two variables.
 
-Quit the installed Near.ai first. Both builds use the same app identity, so only one should run at a time.
+Quit the installed Near AI Gateway first. Both builds use the same app identity, so only one should run at a time.
 
 ## Known open items
 

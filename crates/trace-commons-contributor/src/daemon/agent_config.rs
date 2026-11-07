@@ -59,7 +59,7 @@ pub(crate) fn schema() -> Value {
         ),
         (
             "managed_herdr",
-            "Open managed sessions as tabs of herdr's Near.ai workspace, hosted by managed_terminal.",
+            "Open managed sessions as tabs of herdr's Near AI Gateway workspace, hosted by managed_terminal.",
         ),
         (
             "verdicts_offer_pending",

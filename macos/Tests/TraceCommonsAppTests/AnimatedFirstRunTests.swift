@@ -46,7 +46,7 @@ final class AnimatedFirstRunTests: XCTestCase {
     /// Ron's words on Welcome, and Get started into Tools.
     func test_welcomeReadsRonsWords() throws {
         let welcome = try words().welcome
-        XCTAssertEqual(welcome.title, "Welcome to Near AI")
+        XCTAssertEqual(welcome.title, "Welcome to Near AI Gateway")
         XCTAssertEqual(welcome.body, "Private AI solutions that put you in control of your data.")
         XCTAssertEqual(FirstRunNavigation.next(FirstRunState()).step, .tools)
     }

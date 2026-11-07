@@ -11,7 +11,7 @@ final class FirstRunCopyExportTests: XCTestCase {
         XCTAssertEqual(copy.frame.quickSetup, "Quick setup")
         XCTAssertEqual(copy.frame.back, "Back")
         // The animated first run's own groups decode from the same table.
-        XCTAssertEqual(copy.welcome.title, "Welcome to Near AI")
+        XCTAssertEqual(copy.welcome.title, "Welcome to Near AI Gateway")
         XCTAssertEqual(copy.frame.stepTraces, "Traces")
         XCTAssertEqual(copy.traces.foundCredit, "We have detected some traces that can earn you credit.")
         XCTAssertTrue(copy.privateAi.canConnect.contains("{total}"))

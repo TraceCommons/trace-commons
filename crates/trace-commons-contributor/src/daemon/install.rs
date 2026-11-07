@@ -165,10 +165,10 @@ mod tests {
         let unit = systemd_unit_text("/x", "/y");
         if crate::channel::near_ai_staging() {
             assert_eq!(UNIT_FILE_NAME, "trace-commons-contributor-staging.service");
-            assert!(unit.contains("Description=Near.ai background uploader (staging)\n"));
+            assert!(unit.contains("Description=Near AI Gateway background uploader (staging)\n"));
         } else {
             assert_eq!(UNIT_FILE_NAME, "trace-commons-contributor.service");
-            assert!(unit.contains("Description=Near.ai background uploader\n"));
+            assert!(unit.contains("Description=Near AI Gateway background uploader\n"));
         }
     }
 

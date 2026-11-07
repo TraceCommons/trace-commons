@@ -50,7 +50,7 @@ pub struct ManagedService {
     /// Opens a session in a terminal ([`terminal::launch`]). A field so
     /// tests record the call rather than open a real terminal.
     launch_terminal: LaunchTerminal,
-    /// Opens a session as a tab of herdr's "Near.ai" workspace
+    /// Opens a session as a tab of herdr's "Near AI Gateway" workspace
     /// ([`herdr::launch`]), when "Group sessions in herdr" is on. A field
     /// for the same reason.
     launch_herdr: LaunchTerminal,
