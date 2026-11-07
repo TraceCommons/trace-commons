@@ -2117,6 +2117,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "witness_blocked_days",
         include_str!("../../../../migrations/V154__witness_blocked_days.sql"),
     ),
+    // V155: a 'pipeline_worker' accepted credit event is server acceptance,
+    // not an approver-unknown human one, when the pipeline's own Review
+    // approved the submission or its Settle gate decision exists.
+    (
+        155,
+        "pipeline_acceptance_is_server_acceptance",
+        include_str!("../../../../migrations/V155__pipeline_acceptance_is_server_acceptance.sql"),
+    ),
 ];
 
 /// The body of `create_or_reuse_account`, inside a transaction already under

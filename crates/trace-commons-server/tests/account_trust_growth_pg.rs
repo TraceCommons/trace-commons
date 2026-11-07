@@ -2666,3 +2666,195 @@ async fn status_acceptance_source_earns_a_unit_for_a_novelty_utility_only_submis
         .unwrap();
     assert_eq!(applied.units, 1);
 }
+
+/// A versioned-pipeline run for `submission` whose Review approved it
+/// (approved_revision_id set), the state the Review commit leaves beside the
+/// submission's move to `accepted` (V155's first leg).
+async fn seed_approved_pipeline_run(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    submission: Uuid,
+    trace: Uuid,
+) -> Uuid {
+    let hash = |seed: Uuid| format!("sha256:{}", seed.simple().to_string().repeat(2));
+    let source_ref = Uuid::new_v4();
+    let approved_ref = Uuid::new_v4();
+    for object_ref in [source_ref, approved_ref] {
+        admin
+            .execute(
+                "INSERT INTO trace_object_refs(tenant_id,submission_id,object_ref_id,artifact_kind,
+                    object_store,object_key,content_sha256,encryption_key_ref,size_bytes)
+                 VALUES($1,$2,$3,'submitted_envelope','seed-store',$4,$5,'seed-key-ref',0)",
+                &[
+                    &tenant,
+                    &submission,
+                    &object_ref,
+                    &format!("seed/{object_ref}"),
+                    &hash(object_ref),
+                ],
+            )
+            .await
+            .unwrap();
+    }
+    let run = Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO pipeline_runs(tenant_id,run_id,submission_id,trace_id,bundle_id,
+                request_idempotency_key,request_content_hash,source_object_ref_id,
+                next_phase,state,admission_decision,privacy_pass_required,
+                approved_revision_id,approved_object_ref_id,approved_content_hash)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,'settle','pending','admit',FALSE,$9,$10,$11)",
+            &[
+                &tenant,
+                &run,
+                &submission,
+                &trace,
+                &hash(Uuid::new_v4()),
+                &hash(Uuid::new_v4()),
+                &hash(source_ref),
+                &source_ref,
+                &Uuid::new_v4(),
+                &approved_ref,
+                &hash(approved_ref),
+            ],
+        )
+        .await
+        .unwrap();
+    run
+}
+
+/// V155: a PipelineScore Settle writes its `accepted` credit event as
+/// `pipeline_worker` with no review_decision row. That is server acceptance
+/// when the pipeline itself accepted the submission (an approved run, or its
+/// own `pipeline_settle` gate decision), so both the stored
+/// accepted_submission outcome and the read-time status outcome are
+/// `accepted`. The role string alone is not enough, and a non-pipeline
+/// actor with no approval row still fails closed as approver-unknown, even
+/// on a pipeline-approved submission.
+#[tokio::test]
+async fn pipeline_acceptance_is_server_acceptance_only_with_pipeline_evidence() {
+    use trace_commons_server::versioned_pipeline_credit::PIPELINE_CREDIT_ACTOR_ROLE;
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(
+        &fx,
+        "tc_account_trust_pipeline_accept_login",
+        "trace_account_trust_worker",
+    )
+    .await;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let tenant = anchored_tenant();
+    let owner = principal();
+    let account = seed_account(admin, &tenant, &[&owner]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let accepted_at = Utc::now() - chrono::Duration::seconds(60);
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Evidence {
+        ApprovedRun,
+        SettleGateDecision,
+        None,
+    }
+    // (credit actor role, pipeline evidence, expected outcome)
+    let cases = [
+        (
+            PIPELINE_CREDIT_ACTOR_ROLE,
+            Evidence::ApprovedRun,
+            TrustFactOutcome::Accepted,
+        ),
+        (
+            PIPELINE_CREDIT_ACTOR_ROLE,
+            Evidence::SettleGateDecision,
+            TrustFactOutcome::Accepted,
+        ),
+        (
+            PIPELINE_CREDIT_ACTOR_ROLE,
+            Evidence::None,
+            TrustFactOutcome::AcceptedApproverUnknown,
+        ),
+        (
+            "reviewer",
+            Evidence::ApprovedRun,
+            TrustFactOutcome::AcceptedApproverUnknown,
+        ),
+        (
+            "reviewer",
+            Evidence::SettleGateDecision,
+            TrustFactOutcome::AcceptedApproverUnknown,
+        ),
+        ("system", Evidence::None, TrustFactOutcome::Accepted),
+    ];
+    let mut expected = Vec::new();
+    for (role, evidence, outcome) in cases {
+        let (submission, trace) =
+            seed_submission(admin, &tenant, &owner, "accepted", accepted_at).await;
+        // Evidence lands before the credit event, as Review commits before
+        // Settle writes credit.
+        match evidence {
+            Evidence::ApprovedRun => {
+                seed_approved_pipeline_run(admin, &tenant, submission, trace).await;
+            }
+            Evidence::SettleGateDecision => {
+                let decision =
+                    seed_gate_decision(admin, &tenant, submission, true, accepted_at).await;
+                admin
+                    .execute(
+                        "UPDATE trace_gate_decisions SET source='pipeline_settle',pipeline_run_id=$3
+                          WHERE tenant_id=$1 AND decision_id=$2",
+                        &[&tenant, &decision, &Uuid::new_v4()],
+                    )
+                    .await
+                    .unwrap();
+            }
+            Evidence::None => {}
+        }
+        seed_credit(
+            admin,
+            &tenant,
+            submission,
+            trace,
+            "accepted",
+            "pipeline",
+            role,
+            accepted_at,
+        )
+        .await;
+        for source in [
+            TrustFactSource::AcceptedSubmission(submission),
+            TrustFactSource::AcceptedSubmissionStatus(submission),
+        ] {
+            assert_eq!(
+                worker
+                    .record_account_trust_fact(&trust, source)
+                    .await
+                    .unwrap(),
+                Some(outcome),
+                "{source:?} with credit actor {role} and evidence {evidence:?}"
+            );
+        }
+        expected.push((submission, role, evidence, outcome));
+    }
+
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    for (submission, role, evidence, outcome) in expected {
+        for kind in ["accepted_submission", "accepted_submission_status"] {
+            let fact = inputs
+                .iter()
+                .find(|f| f.source_kind == kind && f.submission_id == submission)
+                .unwrap_or_else(|| panic!("{kind} input for actor {role}, evidence {evidence:?}"));
+            assert_eq!(
+                fact.outcome,
+                outcome.as_str(),
+                "{kind} input with credit actor {role} and evidence {evidence:?}"
+            );
+        }
+    }
+}
