@@ -32111,6 +32111,59 @@ async fn account_trust_shadow_routes_record_evaluate_explain_and_drill() {
             .unwrap();
     }
 
+    // Two submissions that earn nothing, so the evaluate summary names why:
+    // one accepted with credit whose gate decision came from a pipeline
+    // bundle the legacy allowlist does not name, and one accepted by status
+    // alone (no credit row) under a policy that does not read that source.
+    let pipeline_evaluator = format!("pipeline:sha256:{}", "b".repeat(64));
+    for (gate_version, credited) in [(pipeline_evaluator.as_str(), true), ("gate-v1", false)] {
+        let at = Utc::now() - chrono::Duration::days(10);
+        let submission = Uuid::new_v4();
+        let trace = Uuid::new_v4();
+        admin
+            .execute(
+                "INSERT INTO trace_submissions(tenant_id,submission_id,trace_id,auth_principal_ref,
+                    schema_version,consent_policy_version,retention_policy_id,status,privacy_risk,
+                    redaction_pipeline_version,redaction_hash,received_at)
+                 VALUES($1,$2,$3,$4,'v1','v1','test','accepted','low','test',$5,$6)",
+                &[&tenant, &submission, &trace, &owner, &"a".repeat(64), &at],
+            )
+            .await
+            .unwrap();
+        if credited {
+            admin
+                .execute(
+                    "INSERT INTO trace_credit_ledger(tenant_id,credit_event_id,submission_id,trace_id,
+                        credit_account_ref,event_type,points_delta,reason,actor_principal_ref,
+                        actor_role,settlement_state,occurred_at)
+                     VALUES($1,$2,$3,$4,'fixture','accepted','0','fixture',$5,'system','pending',$6)",
+                    &[&tenant, &Uuid::new_v4(), &submission, &trace, &owner, &at],
+                )
+                .await
+                .unwrap();
+        }
+        admin
+            .execute(
+                "INSERT INTO trace_gate_decisions(tenant_id,decision_id,submission_id,
+                    gate_policy_version,gate_version_hash,perplexity_micros,tail_fraction_micros,
+                    perplexity_passed,novelty_score_micros,nearest_neighbor_hash,novelty_passed,
+                    embedding_evidence_hash,attestation_chain_hash,decided_at,dedup_cluster_id,
+                    dedup_signal_version)
+                 VALUES($1,$2,$3,$4,$5,1,1,TRUE,1,$5,TRUE,$5,$5,$6,$7,'events.v2+simhash.v2')",
+                &[
+                    &tenant,
+                    &Uuid::new_v4(),
+                    &submission,
+                    &gate_version,
+                    &"a".repeat(64),
+                    &at,
+                    &Uuid::new_v4(),
+                ],
+            )
+            .await
+            .unwrap();
+    }
+
     // A policy version unique to this run, so the drill checks only its rows.
     let version = format!("e2e-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let policy = serde_json::json!({
@@ -32203,6 +32256,31 @@ async fn account_trust_shadow_routes_record_evaluate_explain_and_drill() {
     assert_eq!(status, StatusCode::OK, "{evaluated}");
     assert_eq!(evaluated["mode"], "shadow");
     assert!(evaluated["tier_distribution"]["1"].as_u64().unwrap_or(0) >= 1);
+    // The run scans every tenant's accounts, so other tests' rows may add to
+    // these totals: assert a floor, not an exact value.
+    let rejections = &evaluated["rejections"];
+    assert!(
+        rejections["evaluator_not_allowlisted"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1,
+        "{evaluated}"
+    );
+    assert!(
+        rejections["no_qualifying_acceptance"].as_u64().unwrap_or(0) >= 1,
+        "{evaluated}"
+    );
+    for label in [
+        "dedup_version_not_allowlisted",
+        "not_first_in_cluster",
+        "gate_failed",
+        "quality_below_min",
+        "approver_unknown",
+        "gate_facts_dedup_unstamped",
+    ] {
+        assert!(rejections[label].is_u64(), "{label}: {evaluated}");
+    }
+    assert!(!evaluated.to_string().contains(&pipeline_evaluator));
     for body in [&recorded, &evaluated] {
         let text = body.to_string();
         assert!(!text.contains(&tenant) && !text.contains(&account.to_string()));

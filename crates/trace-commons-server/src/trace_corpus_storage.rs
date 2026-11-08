@@ -3848,6 +3848,31 @@ pub trait TraceCorpusStore: Send + Sync {
         Ok(())
     }
 
+    /// [`Self::update_trace_gate_decision_dedup`], but only while the row has
+    /// no cluster (`dedup_cluster_id IS NULL`). Returns whether a row was
+    /// written: `false` when the row is already clustered or does not exist.
+    /// Used by the versioned pipeline's Settle stamp, whose row may be
+    /// offered again or already stamped by the re-derivation pass; a second
+    /// stamp must never move a row between clusters. Implementations MUST
+    /// scope by `tenant_id` (forced RLS) and write the four columns in one
+    /// statement. Defaults to a log-once warning and `Ok(false)`, so a backend
+    /// without a real impl leaves the row unclustered, which earned trust
+    /// reads as not first in any cluster.
+    async fn update_trace_gate_decision_dedup_if_unset(
+        &self,
+        _tenant_id: &str,
+        _decision_id: Uuid,
+        _write: DedupAssignmentWrite,
+    ) -> Result<bool, DatabaseError> {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "update_trace_gate_decision_dedup_if_unset called on a backend without a real impl"
+            );
+        });
+        Ok(false)
+    }
+
     /// Update ONLY the two cluster columns (`dedup_cluster_id`,
     /// `dedup_cluster_size`) for the decision row identified by `(tenant_id,
     /// decision_id)`. The simhash and its version stamp are left exactly as

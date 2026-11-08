@@ -45763,8 +45763,9 @@ fn placeholder_settle_outcome() -> StoredPhaseResult {
 
 /// Spec C-D1 to C-D3: a compatibility run that reaches Settle writes exactly
 /// one `trace_gate_decisions` row, from its Score evidence, marked as the
-/// pipeline's and naming its run; the legacy-only columns stay NULL for the
-/// sweeps to fill.
+/// pipeline's and naming its run; the legacy-only columns stay NULL, except
+/// the four dedup columns, which Settle stamps after its commit (owner
+/// decision O4).
 #[tokio::test]
 async fn settle_writes_one_gate_decision_row_per_submission() {
     let Some(backend) = runtime_backend(4).await else {
@@ -45886,11 +45887,245 @@ async fn settle_writes_one_gate_decision_row_per_submission() {
     assert_eq!(row.vector_index_snapshot_id, None);
     assert_eq!(row.agent_prose_perplexity_micros, None);
     assert_eq!(row.attributed_token_fraction_micros, None);
+    assert_eq!(row.composite_score_micros, None);
+    // Owner decision O4: the pipeline stamps dedup after Settle, under the
+    // active algorithm, over its source envelope's metadata-free render.
+    let source = service.load_source_bytes(&run).await.unwrap();
+    let algorithm = trace_commons_server::dedup_simhash::ACTIVE_DEDUP_ALGORITHM;
+    assert_eq!(
+        row.dedup_simhash,
+        Some(
+            algorithm
+                .simhash(&trace_commons_server::trace_gate_service::dedup_canonical_text(&source))
+                as i64
+        )
+    );
+    assert!(row.dedup_cluster_id.is_some(), "{row:?}");
+    assert!(
+        row.dedup_cluster_size.is_some_and(|size| size >= 1),
+        "{row:?}"
+    );
+    assert_eq!(
+        row.dedup_signal_version.as_deref(),
+        Some(
+            trace_commons_server::trace_gate_service::dedup_signal_version_for(algorithm).as_str()
+        )
+    );
+    assert_eq!(
+        row.dedup_signal_version.as_deref(),
+        Some("events.v1+fnv1a-3shingle-set.v2")
+    );
+}
+
+/// `runtime_backend`, with a gate driver pool as well (the login
+/// `gate_driver_backend` provisions), so the Settle stamp's cluster
+/// candidate read (`list_dedup_cluster_candidates`, V145) and the dedup
+/// re-derivation lister reach the cluster table as they do in production.
+async fn runtime_backend_with_gate_driver(pool_size: usize) -> Option<Arc<PgBackend>> {
+    runtime_backend(pool_size).await?;
+    // Provisions the gate driver login once per process.
+    let _ = gate_driver_backend().await;
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL").ok()?;
+    let mut runtime_url = reqwest::Url::parse(&url).expect("parse test URL");
+    runtime_url
+        .set_username(RUNTIME_ROLE)
+        .expect("set runtime user");
+    let mut gate_url = reqwest::Url::parse(&url).expect("parse test URL");
+    gate_url
+        .set_username("trace_gate_driver_pipeline_test")
+        .expect("set the gate driver user");
+    let mut config = DatabaseConfig::from_postgres_url(runtime_url.as_str(), pool_size);
+    config.gate_driver_url = Some(SecretString::from(gate_url.to_string()));
+    Some(Arc::new(
+        PgBackend::new(&config)
+            .await
+            .expect("connect as runtime role with a gate driver pool"),
+    ))
+}
+
+/// An `envelope` whose one capture turn says `text`, so a test can give two
+/// submissions the same render without sharing it with every other test's
+/// fixture (dedup clusters are cross-tenant).
+async fn envelope_saying(submission_id: uuid::Uuid, text: &str) -> TraceContributionEnvelope {
+    let now = chrono::Utc::now();
+    let raw = RawTraceContribution::from_capture_turns(
+        &[RawTraceCaptureTurn {
+            user_input: text.to_string(),
+            response: Some("Done.".to_string()),
+            tool_calls: Vec::new(),
+            started_at: now,
+            completed_at: Some(now + chrono::Duration::seconds(1)),
+            state: Some("complete".to_string()),
+        }],
+        RecordedTraceContributionOptions {
+            include_message_text: true,
+            ..RecordedTraceContributionOptions::default()
+        },
+    );
+    let mut envelope = DeterministicTraceRedactor::try_default()
+        .unwrap()
+        .redact_trace(raw)
+        .await
+        .unwrap();
+    envelope.submission_id = submission_id;
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    envelope
+}
+
+/// Plain words spelled from a random UUID's nibbles: text no other fixture
+/// renders, with nothing a redactor would rewrite.
+fn unique_words() -> String {
+    const WORDS: [&str; 16] = [
+        "amber", "basalt", "cedar", "delta", "ember", "fjord", "garnet", "harbor", "iris",
+        "juniper", "kestrel", "lagoon", "meadow", "nectar", "orchid", "pebble",
+    ];
+    uuid::Uuid::new_v4()
+        .as_bytes()
+        .iter()
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .map(|nibble| WORDS[usize::from(nibble)])
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The cross-tenant first-in-cluster boolean earned trust reads (V114),
+/// asked as the owner under the tenant's context.
+async fn first_in_cluster(tenant_id: &str, submission_id: uuid::Uuid) -> bool {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let first: bool = tx
+        .query_one(
+            "SELECT trace_account_trust_first_in_cluster($1,$2)",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .expect("ask first_in_cluster")
+        .get(0);
+    tx.commit().await.unwrap();
+    first
+}
+
+/// Owner decision O4: two pipeline submissions whose envelopes render the
+/// same text (Hamming 0 under the active algorithm) join one dedup cluster
+/// at Settle; the earlier is first in it, the later is not, and the later's
+/// size snapshot counts the earlier.
+#[tokio::test]
+async fn settle_clusters_near_identical_pipeline_submissions_together() {
+    let Some(backend) = runtime_backend_with_gate_driver(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-dedup-{}", uuid::Uuid::new_v4());
+    let text = format!("Inspect the clustering fixture: {}.", unique_words());
+    let first_env = envelope_saying(uuid::Uuid::new_v4(), &text).await;
+    let first =
+        submit_envelope_and_complete(&service, &tenant, RECEIPT_PRINCIPAL, &first_env).await;
+    assert_eq!(first.state, PipelineRunState::Complete, "{first:?}");
+    let second_env = envelope_saying(uuid::Uuid::new_v4(), &text).await;
+    let second =
+        submit_envelope_and_complete(&service, &tenant, RECEIPT_PRINCIPAL, &second_env).await;
+    assert_eq!(second.state, PipelineRunState::Complete, "{second:?}");
+
+    let first_row = gate_decision_rows(&tenant, first.submission_id).await;
+    let second_row = gate_decision_rows(&tenant, second.submission_id).await;
+    assert_eq!(first_row.len(), 1, "{first_row:?}");
+    assert_eq!(second_row.len(), 1, "{second_row:?}");
+    let (first_row, second_row) = (&first_row[0], &second_row[0]);
+    assert_eq!(first_row.dedup_simhash, second_row.dedup_simhash);
+    assert!(first_row.dedup_cluster_id.is_some(), "{first_row:?}");
+    assert_eq!(
+        first_row.dedup_cluster_id, second_row.dedup_cluster_id,
+        "the same render joins the same cluster"
+    );
+    assert_eq!(first_row.dedup_cluster_size, Some(1));
+    assert_eq!(second_row.dedup_cluster_size, Some(2));
+    assert!(first_in_cluster(&tenant, first.submission_id).await);
+    assert!(!first_in_cluster(&tenant, second.submission_id).await);
+}
+
+/// The backfill for rows written before the Settle stamp: the dedup
+/// re-derivation pass (`POST /v1/admin/rederive-dedup`) enumerates every
+/// gate decision row with no source filter, so a `pipeline_settle` row with
+/// NULL dedup columns is on its work list, read as the legacy stamp; and the
+/// guarded stamp fills such a row while leaving a stamped one alone.
+#[tokio::test]
+async fn an_unstamped_pipeline_row_is_on_the_rederive_work_list() {
+    let Some(backend) = runtime_backend_with_gate_driver(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-rederive-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    let decision_id = expected_pipeline_decision_id(&tenant, run.run_id);
+    // A row written before the stamp existed.
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        let cleared = tx
+            .execute(
+                "UPDATE trace_gate_decisions
+                    SET dedup_simhash = NULL, dedup_cluster_id = NULL,
+                        dedup_cluster_size = NULL, dedup_signal_version = NULL
+                  WHERE tenant_id = $1 AND decision_id = $2 AND source = 'pipeline_settle'",
+                &[&tenant, &decision_id],
+            )
+            .await
+            .unwrap();
+        assert_eq!(cleared, 1);
+        tx.commit().await.unwrap();
+    }
+    let db: &dyn trace_commons_server::db::Database = backend.as_ref();
+    let listed = db.list_dedup_rederive_rows(i64::MAX).await.unwrap();
+    let row = listed
+        .iter()
+        .find(|row| row.tenant_id == tenant && row.decision_id == decision_id)
+        .expect("the pipeline row is on the rederive work list");
+    assert_eq!(row.submission_id, run.submission_id);
     assert_eq!(row.dedup_simhash, None);
     assert_eq!(row.dedup_cluster_id, None);
-    assert_eq!(row.dedup_cluster_size, None);
-    assert_eq!(row.dedup_signal_version, None);
-    assert_eq!(row.composite_score_micros, None);
+    assert_eq!(
+        row.effective_signal_version(),
+        trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION
+    );
+
+    // The guarded writer fills the NULL row in one statement, then refuses
+    // to move it.
+    let stamp = trace_commons_server::trace_gate_service::dedup_signal_version_for(
+        trace_commons_server::dedup_simhash::ACTIVE_DEDUP_ALGORITHM,
+    );
+    let cluster = uuid::Uuid::new_v4();
+    let write =
+        |cluster_id: uuid::Uuid| trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
+            dedup_simhash: 7,
+            dedup_cluster_id: cluster_id,
+            dedup_cluster_size: 1,
+            dedup_signal_version: stamp.clone(),
+        };
+    assert!(
+        db.update_trace_gate_decision_dedup_if_unset(&tenant, decision_id, write(cluster))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !db.update_trace_gate_decision_dedup_if_unset(
+            &tenant,
+            decision_id,
+            write(uuid::Uuid::new_v4())
+        )
+        .await
+        .unwrap(),
+        "a clustered row is never moved"
+    );
+    let rows = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(rows[0].dedup_cluster_id, Some(cluster));
+    assert_eq!(rows[0].dedup_simhash, Some(7));
+    assert_eq!(
+        rows[0].dedup_signal_version.as_deref(),
+        Some(stamp.as_str())
+    );
 }
 
 /// Spec C-D2: the row is idempotent per run. Settle's commit cannot run
@@ -46973,6 +47208,20 @@ async fn consumers_see_pipeline_rows() {
         }),
         "the pipeline row is a gate evaluation fact candidate"
     );
+    // V156's precondition for the outcome below: this run credited nothing.
+    let credited: i64 = tx
+        .query_one(
+            "SELECT count(*) FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND pipeline_run_id = $2 AND instrument_id = 'trace_credit'",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .expect("count the run's Trace Credit ledger rows")
+        .get(0);
+    assert_eq!(
+        credited, 0,
+        "the compatibility run is zero-delta, so V156 reads its gate row as not passed"
+    );
     let outcome: Option<String> = tx
         .query_one(
             "SELECT trace_record_account_trust_fact($1, $2, 'gate_evaluation', $3)",
@@ -46981,10 +47230,14 @@ async fn consumers_see_pipeline_rows() {
         .await
         .expect("record the gate evaluation fact")
         .get(0);
+    // V156 (O3): a pipeline row passes on the pipeline's own credit, not on
+    // perplexity AND novelty. This compatibility run is zero-delta (no
+    // award, no Trace Credit ledger row), so the recorder reads it as a
+    // failed gate even though it passed both.
     assert_eq!(
         outcome.as_deref(),
-        Some("evaluated_passed"),
-        "an accepted pipeline submission that passed both gates"
+        Some("evaluated_failed"),
+        "an accepted pipeline submission that passed both gates but was credited nothing"
     );
     tx.commit().await.unwrap();
 }
