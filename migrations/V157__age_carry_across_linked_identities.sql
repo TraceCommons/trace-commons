@@ -43,8 +43,15 @@
 --    first pass after it; there is no migration-time backfill.
 -- 5. Removal in the event's own transaction: revoking a tenant link and
 --    marking a legacy tenant pooled each delete the carries they invalidate
---    (triggers). Deleting a link cascades. Every removal bumps the
---    generation through (2). A proving device revoked in the legacy tenant,
+--    (triggers). Both triggers take the tenant link's lock (V81, V146) before
+--    deleting, as the refresh does before reading: they sort, and so fire,
+--    before V146's and V148's own triggers on the same event, so they cannot
+--    rely on those to have taken it. A refresh holding the lock is waited
+--    for and its carry is then seen and deleted; a refresh that waits sees
+--    the revocation or the pooled row and carries nothing. Deleting a link
+--    cascades (its row lock conflicts with the carry's foreign-key lock, so
+--    it waits for the refresh too). Every removal bumps the generation
+--    through (2). A proving device revoked in the legacy tenant,
 --    or a legacy submission withdrawn, is reconciled by the next refresh;
 --    age only ever reaches a tier through an applied evaluation, which the
 --    next pass recomputes.
@@ -223,7 +230,11 @@ GRANT EXECUTE ON FUNCTION public.trace_account_trust_refresh_carried_age(TEXT, U
     TO trace_account_trust_worker;
 
 -- 5a. Revoking a tenant link removes its carry, in the revoking
--- transaction. SECURITY DEFINER under the link's own (account) tenant.
+-- transaction. SECURITY DEFINER under the link's own (account) tenant. The
+-- tenant link's lock first, so a refresh that read the link live has
+-- committed its carry before the DELETE takes its snapshot. Taking it
+-- before any carry or frontier row lock also keeps the lock order the
+-- refresh uses (advisory lock, then carry, then frontier).
 CREATE FUNCTION public.trace_account_trust_link_revocation_drops_carry()
 RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
@@ -233,6 +244,7 @@ BEGIN
     IF OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL THEN
         RETURN NEW;
     END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || NEW.legacy_tenant_id, 0));
     PERFORM set_config('trace_commons.trace_tenant_id', NEW.tenant_id, true);
     DELETE FROM public.trace_account_trust_carried_age c
      WHERE c.tenant_id = NEW.tenant_id AND c.link_id = NEW.link_id;
@@ -248,7 +260,8 @@ CREATE TRIGGER trace_account_trust_link_revocation_drops_carry
 
 -- 5b. Marking a legacy tenant pooled removes every carry from it. Runs
 -- under the legacy tenant's context; each carry is deleted under its own
--- account tenant's.
+-- account tenant's. Takes the tenant link's lock first, as 5a does: the
+-- refresh reads the pooled set under it.
 CREATE FUNCTION public.trace_account_trust_pooled_tenant_drops_carries()
 RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
@@ -256,6 +269,7 @@ DECLARE
     v_prior TEXT := current_setting('trace_commons.trace_tenant_id', true);
     v_link RECORD;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || NEW.tenant_id, 0));
     FOR v_link IN
         SELECT l.tenant_id, l.link_id FROM public.trace_legacy_invite_links l
          WHERE l.legacy_tenant_id = NEW.tenant_id

@@ -4119,3 +4119,174 @@ async fn pooled_unproven_and_unlinked_identities_carry_no_age() {
     assert!(carried_rows(admin, &tenant, owner).await.is_empty());
     assert!(trust_generation(admin, &tenant, owner).await > carried);
 }
+
+/// Waits until `pid` is blocked on an advisory lock. Counts polls, not wall
+/// time, and fails the test if the backend never gets there.
+async fn wait_for_advisory_wait(observer: &deadpool_postgres::Object, pid: i32) {
+    for _ in 0..2_000 {
+        let waiting: bool = observer
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                  WHERE pid=$1 AND wait_event_type='Lock' AND wait_event='advisory')",
+                &[&pid],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if waiting {
+            return;
+        }
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("backend {pid} never waited on the tenant link's advisory lock");
+}
+
+/// Review of V157: a revocation or pooling that runs while a refresh holds
+/// the tenant link's lock must still remove the carry the refresh commits,
+/// and move the generation for it. The removal triggers take the same lock
+/// before they delete, so they wait for the refresh and then see its row.
+/// Without that, the revocation deletes nothing (the carry is uncommitted),
+/// the refresh commits a carry for a revoked link, and the generation does
+/// not move; with a carry already present, the two deadlock instead.
+#[tokio::test]
+async fn a_removal_racing_a_refresh_waits_for_it_and_removes_its_carry() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let pool = fx.admin_db.raw_pool_for_tests_and_diagnostics();
+    let observer = pool.get().await.unwrap();
+    let now = Utc::now();
+    let day = chrono::Duration::days(1);
+
+    for (phase, existing_carry) in [
+        ("revocation", false),
+        ("revocation", true),
+        ("pooled", false),
+        ("pooled", true),
+    ] {
+        let tenant = anchored_tenant();
+        let account = seed_account(admin, &tenant, &[&principal()]).await;
+        let legacy = seed_legacy_link(admin, &tenant, account).await;
+        seed_submission(
+            admin,
+            &legacy.legacy_tenant,
+            &legacy.proven,
+            "accepted",
+            now - day * 30,
+        )
+        .await;
+        if existing_carry {
+            // A carry from an earlier pass, which the racing refresh's
+            // upsert locks again.
+            let mut conn = pool.get().await.unwrap();
+            let tx = conn.transaction().await.unwrap();
+            tx.execute(
+                "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+                &[&tenant],
+            )
+            .await
+            .unwrap();
+            let held: i32 = tx
+                .query_one(
+                    "SELECT trace_account_trust_refresh_carried_age($1,$2)",
+                    &[&tenant, &account],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(held, 1);
+            tx.commit().await.unwrap();
+            assert_eq!(carried_rows(admin, &tenant, account).await.len(), 1);
+        }
+        let before = trust_generation(admin, &tenant, account).await;
+
+        // The refresh's transaction takes the tenant link's lock first, as
+        // the refresh does on its way to the link.
+        let mut refresh_conn = pool.get().await.unwrap();
+        let refresh = refresh_conn.transaction().await.unwrap();
+        refresh
+            .execute(
+                "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+                &[&tenant],
+            )
+            .await
+            .unwrap();
+        refresh
+            .execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || $1, 0))",
+                &[&legacy.legacy_tenant],
+            )
+            .await
+            .unwrap();
+
+        // The removal starts and waits on that lock.
+        let removal_conn = pool.get().await.unwrap();
+        let removal_pid: i32 = removal_conn
+            .query_one("SELECT pg_backend_pid()", &[])
+            .await
+            .unwrap()
+            .get(0);
+        let link = legacy.link;
+        let legacy_tenant = legacy.legacy_tenant.clone();
+        let removal = tokio::spawn(async move {
+            if phase == "revocation" {
+                removal_conn
+                    .execute(
+                        "UPDATE trace_legacy_invite_links SET revoked_at=now() WHERE link_id=$1",
+                        &[&link],
+                    )
+                    .await
+            } else {
+                removal_conn
+                    .execute(
+                        "INSERT INTO trace_legacy_invite_pooled_tenants(tenant_id,reason_label)
+                         VALUES($1,'shared event invite')",
+                        &[&legacy_tenant],
+                    )
+                    .await
+            }
+        });
+        wait_for_advisory_wait(&observer, removal_pid).await;
+
+        // The refresh still sees the link live and the tenant unpooled
+        // (neither change has committed) and writes its carry.
+        let carried: i32 = refresh
+            .query_one(
+                "SELECT trace_account_trust_refresh_carried_age($1,$2)",
+                &[&tenant, &account],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{phase} (existing carry {existing_carry}): refresh: {e}"))
+            .get(0);
+        assert_eq!(carried, 1, "{phase}: the refresh carries the live link");
+        refresh.commit().await.unwrap();
+        removal
+            .await
+            .unwrap()
+            .unwrap_or_else(|e| panic!("{phase} (existing carry {existing_carry}): removal: {e}"));
+
+        assert!(
+            carried_rows(admin, &tenant, account).await.is_empty(),
+            "{phase} (existing carry {existing_carry}): no carry survives the removal"
+        );
+        // A new carry moves the generation once and its removal once more;
+        // an existing, unchanged carry is not rewritten, so only its
+        // removal moves it.
+        let expected = if existing_carry {
+            before + 1
+        } else {
+            before + 2
+        };
+        assert_eq!(
+            trust_generation(admin, &tenant, account).await,
+            expected,
+            "{phase} (existing carry {existing_carry}): the removal moves the generation"
+        );
+    }
+}
