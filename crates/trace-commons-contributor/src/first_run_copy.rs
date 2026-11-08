@@ -513,8 +513,8 @@ pub fn first_run_copy() -> FirstRunCopy {
                 accept: "I accept the Terms of Service",
                 terms: "Terms of Service",
                 privacy: "Privacy Policy",
-                terms_url: "https://tracecommons.ai/about/tnc/",
-                privacy_url: "https://tracecommons.ai/about/privacy/",
+                terms_url: crate::channel::TERMS_URL,
+                privacy_url: crate::channel::PRIVACY_URL,
             },
         },
         join: JoinCopy {

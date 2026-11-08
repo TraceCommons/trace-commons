@@ -48,8 +48,8 @@ final class FirstRunCopyExportTests: XCTestCase {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         let legal = try XCTUnwrap(copy.welcome.legal)
         XCTAssertEqual(legal.accept, "I accept the Terms of Service")
-        XCTAssertEqual(legal.termsUrl.absoluteString, "https://tracecommons.ai/about/tnc/")
-        XCTAssertEqual(legal.privacyUrl.absoluteString, "https://tracecommons.ai/about/privacy/")
+        XCTAssertEqual(legal.termsUrl.absoluteString, "https://\(LinkedChannel.siteHost)/about/tnc/")
+        XCTAssertEqual(legal.privacyUrl.absoluteString, "https://\(LinkedChannel.siteHost)/about/privacy/")
     }
 
     func testOlderWelcomeExportsRemainCompatible() throws {

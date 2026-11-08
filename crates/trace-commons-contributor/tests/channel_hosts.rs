@@ -992,3 +992,20 @@ fn an_override_to_the_other_channel_directory_is_refused_before_it_is_opened() {
     assert!(!stderr.contains("state-dir-other-channel"), "{stderr}");
     assert!(own.exists());
 }
+
+#[test]
+fn welcome_legal_links_use_the_channels_public_site() {
+    let legal = trace_commons_contributor::first_run_copy::first_run_copy()
+        .welcome
+        .legal;
+    for (value, path) in [
+        (legal.terms_url, "/about/tnc/"),
+        (legal.privacy_url, "/about/privacy/"),
+    ] {
+        let url = reqwest::Url::parse(value).expect("absolute legal URL");
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some(channel::PUBLIC_SITE_HOST));
+        assert_eq!(url.path(), path);
+        assert!(channel::HOST_VALUES.contains(&value));
+    }
+}
