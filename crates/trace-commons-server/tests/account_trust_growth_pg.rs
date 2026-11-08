@@ -3347,3 +3347,277 @@ async fn a_pipeline_gate_fact_passes_on_pipeline_credit_not_the_conjunction() {
         "the worker cannot call the pipeline credit helper directly"
     );
 }
+
+/// A pipeline-settled, credited, accepted submission in the shape Settle
+/// writes it before the dedup stamp: `source='pipeline_settle'`, the
+/// pipeline's evaluator label, both booleans FALSE, and all four dedup
+/// columns NULL. Returns `(submission, gate decision)`.
+async fn seed_unstamped_pipeline_decision(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    owner: &str,
+    label: &str,
+    withheld: Option<&str>,
+    at_time: DateTime<Utc>,
+) -> (Uuid, Uuid) {
+    let (submission, trace) = seed_submission(admin, tenant, owner, "accepted", at_time).await;
+    let run = Uuid::new_v4();
+    if withheld.is_none() {
+        seed_pipeline_credit(admin, tenant, submission, trace, run, "1.5", at_time).await;
+    }
+    let gate = seed_gate_decision(admin, tenant, submission, false, at_time).await;
+    admin
+        .execute(
+            "UPDATE trace_gate_decisions
+                SET source='pipeline_settle',pipeline_run_id=$3,gate_policy_version=$4,
+                    perplexity_passed=FALSE,novelty_passed=FALSE,credit_withheld_reason=$5,
+                    credit_quality_micros=900000,credit_quality_calibration_version=3
+              WHERE tenant_id=$1 AND decision_id=$2",
+            &[&tenant, &gate, &run, &label, &withheld],
+        )
+        .await
+        .unwrap();
+    (submission, gate)
+}
+
+/// Owner decision O4, end to end below Settle: a pipeline row with no
+/// dedup stamp earns no unit (no cluster reads as not first, and a NULL
+/// stamp as the legacy one); the shared inline stamp the pipeline's Settle
+/// calls (`dedup_inline::record_inline_dedup`, `OnlyIfUnset`) writes all
+/// four columns under the active algorithm's stamp, after which the same
+/// account earns a unit under a policy that lists the pipeline label and
+/// that stamp. A second stamp leaves the row's cluster as it was.
+#[tokio::test]
+async fn an_inline_dedup_stamp_lets_a_pipeline_only_account_earn_a_unit() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(
+        &fx,
+        "tc_account_trust_pipeline_dedup_login",
+        "trace_account_trust_worker",
+    )
+    .await;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let tenant = anchored_tenant();
+    let owner = principal();
+    let account = seed_account(admin, &tenant, &[&owner]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let accepted_at = Utc::now() - chrono::Duration::seconds(60);
+    let bundle_id = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    let label = format!("pipeline:{bundle_id}");
+    let (submission, gate) =
+        seed_unstamped_pipeline_decision(admin, &tenant, &owner, &label, None, accepted_at).await;
+    for source in [
+        TrustFactSource::GateEvaluation(gate),
+        TrustFactSource::AcceptedSubmissionStatus(submission),
+    ] {
+        worker
+            .record_account_trust_fact(&trust, source)
+            .await
+            .unwrap();
+    }
+    let active_stamp = trace_commons_server::trace_gate_service::dedup_signal_version_for(
+        trace_commons_server::dedup_simhash::ACTIVE_DEDUP_ALGORITHM,
+    );
+    assert_eq!(active_stamp, "events.v1+fnv1a-3shingle-set.v2");
+    let policy = || {
+        let json = serde_json::json!({
+            "version": "growth-pipeline-dedup-test-v1",
+            "processing_cost_bound": 10,
+            "bounded_allowance": 100,
+            "period": {"mode": "fixed", "seconds": 604800},
+            "growth_rule": "tiered-v1",
+            "growth": {
+                "window_seconds": 3650 * 86400,
+                "weekly_cap": 10,
+                "q_min_micros": null,
+                "penalty_cooldown_seconds": 0,
+                "evaluation_max_age_seconds": 86400,
+                "allowance_ceiling": 300,
+                "acceptance_source": "status",
+                "evaluator_versions": [label],
+                "dedup_signal_versions": [active_stamp],
+                "tiers": [
+                    {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                    {"units": 1, "active_weeks": 1, "age_seconds": 0, "multiplier": 2}
+                ]
+            }
+        });
+        trace_commons_server::account_trust_rule::parse_growth_policy(
+            &json.to_string(),
+            &["growth-pipeline-dedup-test-v1"],
+        )
+        .unwrap()
+    };
+    let gate_fact = |inputs: &[trace_commons_server::account_trust_rule::EvaluationFact]| {
+        inputs
+            .iter()
+            .find(|f| f.source_kind == "gate_evaluation" && f.source_id == gate)
+            .cloned()
+            .expect("the gate fact is an input")
+    };
+
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    assert_eq!(gate_fact(&inputs).outcome, "evaluated_passed");
+    assert_eq!(gate_fact(&inputs).first_in_cluster, Some(false));
+    assert_eq!(
+        trace_commons_server::account_trust_rule::evaluate(&policy(), &inputs, Utc::now()).units,
+        0,
+        "an unstamped pipeline row earns nothing"
+    );
+
+    // A random simhash far from every other fixture: a new cluster.
+    let simhash = i64::from_le_bytes(Uuid::new_v4().as_bytes()[..8].try_into().unwrap());
+    let outcome = trace_commons_server::dedup_inline::record_inline_dedup(
+        &fx.admin_db,
+        &tenant,
+        gate,
+        simhash,
+        &active_stamp,
+        trace_commons_server::dedup_inline::InlineDedupWrite::OnlyIfUnset,
+    )
+    .await;
+    let trace_commons_server::dedup_inline::InlineDedupOutcome::Written {
+        dedup_cluster_id,
+        dedup_cluster_size,
+        dedup_signal_version,
+    } = outcome
+    else {
+        panic!("the first stamp writes: {outcome:?}");
+    };
+    assert_eq!(dedup_cluster_size, 1);
+    assert_eq!(dedup_signal_version, active_stamp);
+    let stored = admin
+        .query_one(
+            "SELECT dedup_simhash,dedup_cluster_id,dedup_cluster_size,dedup_signal_version
+               FROM trace_gate_decisions WHERE tenant_id=$1 AND decision_id=$2",
+            &[&tenant, &gate],
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.get::<_, Option<i64>>(0), Some(simhash));
+    assert_eq!(stored.get::<_, Option<Uuid>>(1), Some(dedup_cluster_id));
+    assert_eq!(stored.get::<_, Option<i32>>(2), Some(1));
+    assert_eq!(
+        stored.get::<_, Option<String>>(3).as_deref(),
+        Some(active_stamp.as_str())
+    );
+
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    assert_eq!(gate_fact(&inputs).first_in_cluster, Some(true));
+    assert_eq!(
+        gate_fact(&inputs).dedup_signal_version.as_deref(),
+        Some(active_stamp.as_str())
+    );
+    assert_eq!(
+        trace_commons_server::account_trust_rule::evaluate(&policy(), &inputs, Utc::now()).units,
+        1,
+        "the stamped pipeline row earns its unit"
+    );
+
+    // Settle can be offered again; the guarded stamp never moves the row.
+    let again = trace_commons_server::dedup_inline::record_inline_dedup(
+        &fx.admin_db,
+        &tenant,
+        gate,
+        simhash ^ 1,
+        &active_stamp,
+        trace_commons_server::dedup_inline::InlineDedupWrite::OnlyIfUnset,
+    )
+    .await;
+    assert_eq!(
+        again,
+        trace_commons_server::dedup_inline::InlineDedupOutcome::AlreadySet
+    );
+    let kept = admin
+        .query_one(
+            "SELECT dedup_simhash,dedup_cluster_id FROM trace_gate_decisions
+              WHERE tenant_id=$1 AND decision_id=$2",
+            &[&tenant, &gate],
+        )
+        .await
+        .unwrap();
+    assert_eq!(kept.get::<_, Option<i64>>(0), Some(simhash));
+    assert_eq!(kept.get::<_, Option<Uuid>>(1), Some(dedup_cluster_id));
+}
+
+/// Owner decision O4: a submission the pipeline refused as a duplicate
+/// (`credit_withheld_reason` a duplicate label) is never first in its
+/// cluster, even when it is the only member of a cluster of its own. A
+/// non-duplicate pipeline row alone in its own cluster stays first.
+#[tokio::test]
+async fn a_pipeline_duplicate_verdict_is_never_first_in_its_cluster() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(
+        &fx,
+        "tc_account_trust_pipeline_duplicate_login",
+        "trace_account_trust_worker",
+    )
+    .await;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let tenant = anchored_tenant();
+    let owner = principal();
+    let account = seed_account(admin, &tenant, &[&owner]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let accepted_at = Utc::now() - chrono::Duration::seconds(60);
+    let label = format!(
+        "pipeline:sha256:{}",
+        Uuid::new_v4().simple().to_string().repeat(2)
+    );
+    let mut gates = Vec::new();
+    for withheld in [
+        None,
+        Some(trace_commons_server::versioned_pipeline::PIPELINE_SKIPPED_DUPLICATE_LABEL),
+        Some(trace_commons_server::versioned_pipeline::PIPELINE_CACHED_DUPLICATE_LABEL),
+    ] {
+        let (submission, gate) =
+            seed_unstamped_pipeline_decision(admin, &tenant, &owner, &label, withheld, accepted_at)
+                .await;
+        // Each alone in a cluster of its own.
+        admin
+            .execute(
+                "UPDATE trace_gate_decisions SET dedup_cluster_id=$3,dedup_signal_version=$4
+                  WHERE tenant_id=$1 AND decision_id=$2",
+                &[&tenant, &gate, &Uuid::new_v4(), &DEDUP_V2],
+            )
+            .await
+            .unwrap();
+        worker
+            .record_account_trust_fact(&trust, TrustFactSource::GateEvaluation(gate))
+            .await
+            .unwrap();
+        gates.push((withheld, submission, gate));
+    }
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    for (withheld, _, gate) in &gates {
+        let fact = inputs
+            .iter()
+            .find(|f| f.source_kind == "gate_evaluation" && f.source_id == *gate)
+            .expect("the gate fact is an input");
+        assert_eq!(
+            fact.first_in_cluster,
+            Some(withheld.is_none()),
+            "{withheld:?}: a duplicate verdict is never first; a credited row alone in its cluster is"
+        );
+    }
+}

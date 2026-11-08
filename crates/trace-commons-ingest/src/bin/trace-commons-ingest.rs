@@ -57647,102 +57647,21 @@ async fn evaluate_and_record_gate(
 
     // Shadow-mode cross-trace dedup (simhash-only in v1; embedding side deferred).
     // Best-effort: a failure logs hash-only and never blocks the gate decision.
-    let dedup_simhash = decision.dedup_simhash; // computed inside the gate service (Part A)
-    // Which renderer and simhash algorithm produced the value above. Rows
-    // stamped differently are not comparable to it, however close the two
-    // numbers are, so this scopes the candidate set below (V57, #211).
-    //
-    // Normalised the same way the candidates are. A stored row reads its
-    // stamp through `effective_signal_version`, which maps NULL and empty
-    // alike to the legacy name; the incoming one used to be taken raw. A gate
-    // service returning `""` would then match no candidate at all -- every
-    // submission a permanent singleton, `dup_pen = 1`, duplicates earning
-    // full credit -- and nothing would report an error. Both sides must
-    // normalise, or neither does.
-    let dedup_signal_version = if decision.dedup_signal_version.is_empty() {
-        trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION.to_string()
-    } else {
-        decision.dedup_signal_version.clone()
-    };
-    // The constants belong to the algorithm that derived the value: the
-    // gate service stamped `ACTIVE_DEDUP_ALGORITHM`, so its tau applies.
-    let dedup_constants = trace_commons_server::dedup_simhash::ACTIVE_DEDUP_ALGORITHM.constants();
-    // One candidate per CLUSTER, keyed by the cluster's REPRESENTATIVE (its
-    // earliest-decided member) simhash, with the cluster's size across every
-    // tenant -- the same candidates the batch route
-    // (`run_recluster_dedup_pass`) assigns against, so inline and batch
-    // clustering cannot disagree on membership.
-    //
-    // Read from the cluster table (V145) and only within tau: no candidate
-    // past tau can match, because the embedding signal is `None` here, so
-    // the assignment below is exactly what a full enumeration would give.
-    // Before V145 this enumerated every gate decision ever recorded on every
-    // submission. A failed read still clusters against nothing, as it did,
-    // but now says so.
-    //
-    // Each candidate carries its representative's stamp: a row may only join
-    // a cluster derived the same way it was. No version filter here --
-    // `assign_cluster` refuses a differently stamped candidate itself, so the
-    // gate is in one place and a new call site cannot forget it.
-    let cluster_rows = match db
-        .list_dedup_cluster_candidates(dedup_simhash, dedup_constants.tau_hamming)
-        .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::warn!(
-                tenant_hash = %sha256_prefixed(tenant_id),
-                error_hash = %safe_display_error_hash(&error),
-                "dedup cluster candidate read failed; clustering against no candidates"
-            );
-            Vec::new()
-        }
-    };
-    let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate<'_>> = cluster_rows
-        .iter()
-        .map(|row| trace_commons_server::dedup_assign::ClusterCandidate {
-            cluster_id: row.dedup_cluster_id,
-            size: row.member_count,
-            simhash: row.representative_simhash as u64,
-            embed_cosine_micros: None,
-            signal_version: row.effective_signal_version(),
-        })
-        .collect();
-    let cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
-        dedup_simhash as u64,
-        &dedup_signal_version,
-        &candidates,
-        dedup_constants,
-    ) {
-        trace_commons_server::dedup_assign::ClusterAssignment::Existing(id) => id,
-        trace_commons_server::dedup_assign::ClusterAssignment::New => uuid::Uuid::new_v4(),
-    };
-    let existing_size = cluster_rows
-        .iter()
-        .find(|row| row.dedup_cluster_id == cluster_id)
-        .map_or(0, |row| row.member_count);
-    let new_size = i32::try_from(existing_size + 1).unwrap_or(i32::MAX);
-    // Inline only sets THIS row's size snapshot; existing members' sizes are
-    // refreshed by the Task 7 batch route.
-    if let Err(error) = db
-        .update_trace_gate_decision_dedup(
-            tenant_id,
-            decision_id,
-            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
-                dedup_simhash,
-                dedup_cluster_id: cluster_id,
-                dedup_cluster_size: new_size,
-                dedup_signal_version,
-            },
-        )
-        .await
-    {
-        tracing::warn!(
-            tenant_hash = %sha256_prefixed(tenant_id),
-            error_hash = %safe_display_error_hash(&error),
-            "shadow dedup inline write failed (non-fatal)"
-        );
-    }
+    // The simhash was computed inside the gate service (Part A), under the
+    // stamp it reports. The assignment itself -- candidates from the V145
+    // cluster table within tau, `assign_cluster`, the four-column write --
+    // is shared with the versioned pipeline's Settle
+    // (`dedup_inline::record_inline_dedup`), so the two paths cannot cluster
+    // differently. This row was inserted a moment ago, so it overwrites.
+    let _ = trace_commons_server::dedup_inline::record_inline_dedup(
+        db.as_ref(),
+        tenant_id,
+        decision_id,
+        decision.dedup_simhash,
+        &decision.dedup_signal_version,
+        trace_commons_server::dedup_inline::InlineDedupWrite::Overwrite,
+    )
+    .await;
 
     // Shadow-mode correction value (S5). Runs only when the envelope actually
     // carried a contributor correction — `correction_simhash` is `None`

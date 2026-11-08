@@ -21,6 +21,11 @@
 --   evaluated_failed  otherwise (a zero-credit run, a duplicate-withheld
 --                     run, a NoveltyUtility-withheld run).
 --
+-- Owner decision O4: the evaluation inputs also read first_in_cluster as
+-- FALSE for a submission whose pipeline_settle row carries a duplicate label,
+-- so an attested upload the pipeline refused as a duplicate earns no unit
+-- even when its simhash formed a cluster of its own.
+--
 -- The instrument is pinned to trace_credit: other instruments (planned
 -- multi-instrument settlement) are payouts, not the pipeline's verdict on the
 -- trace. event_type is not read: PipelineScore writes 'accepted', the
@@ -133,8 +138,18 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
            CASE WHEN f.source_kind='gate_evaluation' THEN g.gate_policy_version ELSE f.evaluator_version END,
            f.occurred_at,g.credit_quality_micros,g.credit_quality_calibration_version,
            g.dedup_signal_version,
+           -- O4: a submission the pipeline refused as a duplicate is never
+           -- first in its cluster, whatever simhash cluster it formed. The
+           -- gate path is closed by the outcome above (evaluated_failed);
+           -- this closes the attested path, which reads first_in_cluster
+           -- alone.
            CASE WHEN f.source_kind IN ('gate_evaluation','attested_submission')
-                THEN public.trace_account_trust_first_in_cluster(f.tenant_id,f.submission_id) END
+                THEN public.trace_account_trust_first_in_cluster(f.tenant_id,f.submission_id)
+                     AND NOT EXISTS (
+                         SELECT 1 FROM public.trace_gate_decisions dup
+                          WHERE dup.tenant_id=f.tenant_id AND dup.submission_id=f.submission_id
+                            AND dup.source='pipeline_settle'
+                            AND dup.credit_withheld_reason IN ('skipped_duplicate','cached')) END
       FROM public.trace_account_trust_facts f
       LEFT JOIN public.trace_submissions s ON s.tenant_id=f.tenant_id AND s.submission_id=f.submission_id
       LEFT JOIN public.trace_gate_decisions g ON f.source_kind='gate_evaluation'

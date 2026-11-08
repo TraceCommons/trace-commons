@@ -9554,7 +9554,15 @@ mod tests {
             "c.instrument_id='{}'",
             trace_commons_gate_api::pipeline::TRACE_CREDIT_INSTRUMENT_ID
         );
+        // O4: a pipeline duplicate verdict makes the submission non-first.
+        let duplicate_not_first = format!(
+            "dup.source='pipeline_settle'\n                            AND dup.credit_withheld_reason IN ('{}','{}')",
+            crate::versioned_pipeline::PIPELINE_SKIPPED_DUPLICATE_LABEL,
+            crate::versioned_pipeline::PIPELINE_CACHED_DUPLICATE_LABEL,
+        );
         for required in [
+            duplicate_not_first.as_str(),
+            "THEN public.trace_account_trust_first_in_cluster(f.tenant_id,f.submission_id)\n                     AND NOT EXISTS (",
             "CREATE FUNCTION trace_account_trust_pipeline_gate_credited(p_tenant TEXT,p_decision UUID)",
             "ALTER FUNCTION trace_account_trust_pipeline_gate_credited(TEXT,UUID) OWNER TO trace_account_admission_guard;",
             "REVOKE ALL ON FUNCTION trace_account_trust_pipeline_gate_credited(TEXT,UUID) FROM PUBLIC;",
