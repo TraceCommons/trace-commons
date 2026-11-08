@@ -199,6 +199,18 @@ pub struct WelcomeCopy {
     /// only path, where nothing is shared so "Start sharing" would be
     /// false: DRAFT, NEEDS APPROVAL (2026-11-04) for that reuse.
     pub start: &'static str,
+    /// First-run UI placeholder, requested 2026-11-07. It is not a legal
+    /// acceptance receipt or a trace-sharing consent grant.
+    pub legal: WelcomeLegalCopy,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WelcomeLegalCopy {
+    pub accept: &'static str,
+    pub terms: &'static str,
+    pub privacy: &'static str,
+    pub terms_url: &'static str,
+    pub privacy_url: &'static str,
 }
 
 /// Traces: what the watched tools' traces could earn. The titles and
@@ -497,6 +509,13 @@ pub fn first_run_copy() -> FirstRunCopy {
             title: concat!("Welcome to ", crate::app_name!()),
             body: "Private AI solutions that put you in control of your data.",
             start: "Get started",
+            legal: WelcomeLegalCopy {
+                accept: "I accept the Terms of Service",
+                terms: "Terms of Service",
+                privacy: "Privacy Policy",
+                terms_url: "https://tracecommons.ai/about/tnc/",
+                privacy_url: "https://tracecommons.ai/about/privacy/",
+            },
         },
         join: JoinCopy {
             title_light: "Sign in and choose an org for ",

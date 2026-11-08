@@ -120,6 +120,12 @@ struct WelcomeScreen: View {
                 .buttonStyle(GlassButtonStyle(.primary, size: .stage))
                 .modifier(Rise(amount: WelcomeScreenLayout.risen(
                     after: elapsed, delay: WelcomeScreenLayout.buttonDelay, reduceMotion: reduceMotion)))
+                if let legal = copy.welcome.legal {
+                    FirstRunLegalPlaceholder(copy: legal)
+                        .padding(.top, GlassTokens.Space.s6)
+                        .modifier(Rise(amount: WelcomeScreenLayout.risen(
+                            after: elapsed, delay: WelcomeScreenLayout.buttonDelay, reduceMotion: reduceMotion)))
+                }
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -148,6 +154,29 @@ struct WelcomeScreen: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(copy.welcome.title)
         .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// UI-only placeholder. This local check is not persisted, sent to the daemon,
+/// or used as a sharing grant. Final legal acceptance is a separate integration.
+struct FirstRunLegalPlaceholder: View {
+    let copy: FirstRunCopy.Welcome.Legal
+    @State private var accepted = false
+
+    var body: some View {
+        VStack(spacing: GlassTokens.Space.s2) {
+            Toggle(copy.accept, isOn: $accepted)
+                .toggleStyle(GlassCheckboxStyle())
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: GlassTokens.Space.s4) {
+                Link(copy.terms, destination: copy.termsUrl)
+                Link(copy.privacy, destination: copy.privacyUrl)
+            }
+            .glassType(GlassTokens.TypeScale.caption)
+        }
+        .frame(maxWidth: 340)
     }
 }
 
