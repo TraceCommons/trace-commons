@@ -135,8 +135,16 @@ fn button(tag: &str) -> Result<String> {
     }
     let title = crate::private_inference_copy::credential_provider_title(tag)
         .ok_or_else(|| anyhow!("near_ai_credential_provider_unknown"))?;
+    // Bundled vector marks keep this loopback page self-contained under its CSP.
+    let logo = match tag {
+        "near" => include_str!("provider_near.svg"),
+        "github" => include_str!("provider_github.svg"),
+        "google" => include_str!("provider_google.svg"),
+        _ => "",
+    }
+    .trim();
     let mut html = format!(
-        "<button type=\"submit\" name=\"provider\" value=\"{tag}\">{}</button>\n",
+        "<button type=\"submit\" name=\"provider\" value=\"{tag}\">{logo}{}</button>\n",
         escape(title)
     );
     if tag == "near" {
