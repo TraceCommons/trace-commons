@@ -9629,7 +9629,6 @@ mod tests {
             "SUPERUSER",
             "DISABLE ROW LEVEL SECURITY",
             "GRANT EXECUTE",
-            "TO PUBLIC",
             "::NUMERIC",
             // PostgreSQL 16-only syntax; the pilot runs 15.
             "WITH INHERIT",
@@ -9644,6 +9643,16 @@ mod tests {
                 "V156 must not contain `{forbidden}`"
             );
         }
+        // `TO PUBLIC` as two whole tokens: `INSERT INTO public.t` is not a
+        // grant, and a grant split across lines still is.
+        let tokens: Vec<&str> = upper
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert!(
+            !tokens.windows(2).any(|w| w == ["TO", "PUBLIC"]),
+            "V156 must not grant anything TO PUBLIC"
+        );
     }
 }
 
@@ -9743,7 +9752,6 @@ mod v157_tests {
         for forbidden in [
             "SUPERUSER",
             "DISABLE ROW LEVEL SECURITY",
-            "TO PUBLIC",
             "BYPASSRLS LOGIN",
             // PostgreSQL 16-only syntax; the pilot runs 15.
             "WITH INHERIT",
@@ -9758,6 +9766,16 @@ mod v157_tests {
                 "V157 must not contain `{forbidden}`"
             );
         }
+        // `TO PUBLIC` as two whole tokens: `INSERT INTO public.t` is not a
+        // grant, and a grant split across lines still is.
+        let tokens: Vec<&str> = upper
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert!(
+            !tokens.windows(2).any(|w| w == ["TO", "PUBLIC"]),
+            "V157 must not grant anything TO PUBLIC"
+        );
         // The only BYPASSRLS spellings are the NOBYPASSRLS role and its check.
         assert_eq!(
             upper.matches("BYPASSRLS").count(),

@@ -2404,11 +2404,11 @@ mod tests {
                 }
             );
         }
-        let no_floor = parse_growth_policy(
-            &with(growth(), "q_min_micros", serde_json::Value::Null),
-            &["growth-test-v1"],
-        )
-        .unwrap();
+        // A null floor names no quality era, as the parser requires.
+        let mut g = growth();
+        g["q_min_micros"] = serde_json::Value::Null;
+        g["credit_quality_calibration_versions"] = serde_json::json!([]);
+        let no_floor = parse_growth_policy(&policy_json(g), &["growth-test-v1"]).unwrap();
         let mut f = Facts::new();
         f.qualified(1);
         f.last_gate().credit_quality_micros = Some(100_000);
