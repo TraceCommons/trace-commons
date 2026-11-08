@@ -115,10 +115,55 @@ fn parse_callback(target: &str, state: &str) -> Result<Option<String>> {
     }
 }
 
+/// Only fixed copy enters this page; callback fields and errors are never
+/// reflected, and no script is needed to complete a verifier-bound exchange.
+fn result_page(success: bool) -> String {
+    include_str!("sign_in_result.html")
+        .replace("__RESULT__", if success { "success" } else { "error" })
+        .replace(
+            "__HEADING__",
+            if success {
+                "You're signed in"
+            } else {
+                "Sign-in couldn't finish"
+            },
+        )
+        .replace(
+            "__MESSAGE__",
+            if success {
+                "Your NEAR AI account is connected. Return to __APP_NAME__ to continue."
+            } else {
+                "Return to __APP_NAME__ and start sign-in again."
+            },
+        )
+        .replace("__APP_NAME__", crate::brand::APP_NAME)
+}
+
 async fn respond(stream: &mut tokio::net::TcpStream, status: &str, body: &str) {
+    respond_with_type(stream, status, "text/plain; charset=utf-8", body).await;
+}
+
+async fn respond_result(stream: &mut tokio::net::TcpStream, status: &str, success: bool) {
+    respond_with_type(
+        stream,
+        status,
+        "text/html; charset=utf-8",
+        &result_page(success),
+    )
+    .await;
+}
+
+async fn respond_with_type(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    kind: &str,
+    body: &str,
+) {
     let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\
-         Cache-Control: no-store\r\nPragma: no-cache\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n\
+         Cache-Control: no-store\r\nPragma: no-cache\r\nReferrer-Policy: no-referrer\r\n\
+         Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'\r\n\
+         Connection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = tokio::time::timeout(CONNECTION_TIMEOUT, stream.write_all(response.as_bytes())).await;
@@ -177,24 +222,20 @@ where
                 // Acknowledge only after exchange, mint and durable replacement.
                 // Exactly one matching callback can invoke this FnOnce.
                 let outcome = finish(code).await;
-                respond(
+                respond_result(
                     &mut stream,
                     if outcome.is_ok() {
                         "200 OK"
                     } else {
                         "500 Internal Server Error"
                     },
-                    if outcome.is_ok() {
-                        "Completed."
-                    } else {
-                        "Sign-in setup failed."
-                    },
+                    outcome.is_ok(),
                 )
                 .await;
                 return outcome;
             }
             Ok(None) => {
-                respond(&mut stream, "400 Bad Request", "Sign-in setup failed.").await;
+                respond_result(&mut stream, "400 Bad Request", false).await;
                 bail!("near_ai_credential_refused")
             }
             Err(_) => {
@@ -359,6 +400,20 @@ mod tests {
                 "HTTP/1.1 500"
             }));
             assert!(!response.contains("synthetic-secret-error"));
+            assert!(response.contains("Content-Type: text/html; charset=utf-8"));
+            assert!(response.contains("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'"));
+            assert!(response.contains("Cache-Control: no-store"));
+            assert!(response.contains("Referrer-Policy: no-referrer"));
+            assert!(response.contains("aria-label=\"NEAR AI\""));
+            assert!(response.contains(if succeeds {
+                "You're signed in"
+            } else {
+                "Sign-in couldn't finish"
+            }));
+            assert!(response.contains("You can close this tab."));
+            assert!(!response.contains("<script"));
+            assert!(!response.contains("location.hash"));
+            assert!(!response.contains("__APP_NAME__"));
             assert_eq!(task.await.unwrap().is_ok(), succeeds);
         }
     }
