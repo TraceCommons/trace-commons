@@ -51,6 +51,43 @@ final class AnimatedFirstRunTests: XCTestCase {
         XCTAssertEqual(FirstRunNavigation.next(FirstRunState()).step, .tools)
     }
 
+    @MainActor
+    func testWelcomeRequiresExplicitTermsAcceptanceBeforeAdvancing() throws {
+        let daemon = RecordingFirstRunDaemon()
+        let runner = FirstRunRunner(state: FirstRunState(), daemon: daemon)
+        let legal = try XCTUnwrap(words().welcome.legal)
+        XCTAssertFalse(runner.termsAccepted)
+        XCTAssertFalse(runner.canLeaveWelcome(legal: legal))
+        runner.continueFromWelcome(legal: legal)
+        XCTAssertEqual(runner.state.step, .welcome)
+
+        runner.termsAccepted = true
+        XCTAssertTrue(runner.canLeaveWelcome(legal: legal))
+        runner.termsAccepted = false
+        runner.continueFromWelcome(legal: legal)
+        XCTAssertEqual(runner.state.step, .welcome, "unchecking closes the gate again")
+
+        runner.termsAccepted = true
+        runner.continueFromWelcome(legal: legal)
+        XCTAssertEqual(runner.state.step, .tools)
+        runner.continueFromWelcome(legal: legal)
+        XCTAssertEqual(runner.state.step, .tools, "a repeated action cannot skip a step")
+        runner.state = FirstRunNavigation.back(runner.state)
+        XCTAssertTrue(runner.termsAccepted, "Back retains the explicit answer in this first run")
+        XCTAssertTrue(daemon.log.isEmpty, "acceptance is not a trace-sharing grant")
+    }
+
+    @MainActor
+    func testWelcomeCannotBypassAcceptanceWhenLegalCopyIsUnavailable() {
+        let daemon = RecordingFirstRunDaemon()
+        let runner = FirstRunRunner(state: FirstRunState(), daemon: daemon)
+        runner.termsAccepted = true
+        XCTAssertFalse(runner.canLeaveWelcome(legal: nil))
+        runner.continueFromWelcome(legal: nil)
+        XCTAssertEqual(runner.state.step, .welcome)
+        XCTAssertTrue(daemon.log.isEmpty)
+    }
+
     // MARK: Uses
 
     /// On Ask the orb waits at the review gate while the gate fills green
