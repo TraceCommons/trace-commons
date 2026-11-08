@@ -115,13 +115,14 @@ struct WelcomeScreen: View {
                         after: elapsed, delay: WelcomeScreenLayout.bodyDelay, reduceMotion: reduceMotion)))
                     .padding(.bottom, 38)
                 Button(copy.welcome.start) {
-                    runner.state = FirstRunNavigation.next(runner.state)
+                    runner.continueFromWelcome(legal: copy.welcome.legal)
                 }
                 .buttonStyle(GlassButtonStyle(.primary, size: .stage))
+                .disabled(!runner.canLeaveWelcome(legal: copy.welcome.legal))
                 .modifier(Rise(amount: WelcomeScreenLayout.risen(
                     after: elapsed, delay: WelcomeScreenLayout.buttonDelay, reduceMotion: reduceMotion)))
                 if let legal = copy.welcome.legal {
-                    FirstRunLegalPlaceholder(copy: legal)
+                    FirstRunLegalPlaceholder(copy: legal, accepted: $runner.termsAccepted)
                         .padding(.top, GlassTokens.Space.s6)
                         .modifier(Rise(amount: WelcomeScreenLayout.risen(
                             after: elapsed, delay: WelcomeScreenLayout.buttonDelay, reduceMotion: reduceMotion)))
@@ -157,11 +158,11 @@ struct WelcomeScreen: View {
     }
 }
 
-/// UI-only placeholder. This local check is not persisted, sent to the daemon,
-/// or used as a sharing grant. Final legal acceptance is a separate integration.
+/// The runner owns acceptance and enforces it before leaving Welcome.
+/// This checkbox never grants trace-sharing permission.
 struct FirstRunLegalPlaceholder: View {
     let copy: FirstRunCopy.Welcome.Legal
-    @State private var accepted = false
+    @Binding var accepted: Bool
 
     var body: some View {
         VStack(spacing: GlassTokens.Space.s2) {

@@ -120,6 +120,8 @@ enum FirstRunFailure: Equatable {
 @MainActor
 final class FirstRunRunner: ObservableObject {
     @Published var state: FirstRunState
+    /// Explicit first-run acceptance, retained when navigating Back.
+    @Published var termsAccepted = false
     @Published var failure: FirstRunFailure?
     /// The last invite the daemon looked up and found valid.
     @Published private(set) var lookup: DaemonData.InviteLookup?
@@ -168,6 +170,15 @@ final class FirstRunRunner: ObservableObject {
         self.state = state
         self.daemon = daemon
         self.finishedNotice = finishedNotice
+    }
+
+    func canLeaveWelcome(legal: FirstRunCopy.Welcome.Legal?) -> Bool {
+        state.step == .welcome && legal != nil && termsAccepted
+    }
+
+    func continueFromWelcome(legal: FirstRunCopy.Welcome.Legal?) {
+        guard canLeaveWelcome(legal: legal) else { return }
+        state = FirstRunNavigation.next(state)
     }
 
     /// Run the calls for `point`. Leaving Tools moves on to the next step
