@@ -3621,3 +3621,501 @@ async fn a_pipeline_duplicate_verdict_is_never_first_in_its_cluster() {
         );
     }
 }
+
+/// A V157 fixture: a legacy tenant, its live invite-onboarded device, a live
+/// V81 tenant link from `account` to it, and the link's claim record for that
+/// device (V148), naming `proven` as the device's signed-upload principal.
+struct LegacyLink {
+    link: Uuid,
+    legacy_tenant: String,
+    device: String,
+    proven: String,
+}
+
+fn hex64() -> String {
+    Uuid::new_v4().simple().to_string().repeat(2)
+}
+
+async fn seed_legacy_link(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    account: Uuid,
+) -> LegacyLink {
+    let legacy_tenant = format!("tenant-{}", hex64());
+    let device = format!("sha256:{}", hex64());
+    let invite = format!("sha256:{}", hex64());
+    let proven = format!("principal_sha256:{}", hex64());
+    let link = Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1) ON CONFLICT DO NOTHING",
+            &[&legacy_tenant],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO device_keys(device_key_id,tenant_id,public_key,invite_subject_hash,onboarding_origin)
+             VALUES($1,$2,'fixture-key',$3,'invite')",
+            &[&device, &legacy_tenant, &invite],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_legacy_invite_links(link_id,tenant_id,account_id,legacy_tenant_id,
+                device_key_id,invite_subject_hash,nonce,issued_at,device_signature,linked_at,
+                server_kid,server_signature)
+             VALUES($1,$2,$3,$4,$5,$6,$7,1,'fixture-signature',1,'fixture-kid','fixture-signature')",
+            &[&link, &tenant, &account, &legacy_tenant, &device, &invite, &hex64()],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_legacy_link_claimed_principals(tenant_id,legacy_link_hash,device_key_id,principal_ref)
+             VALUES($1,trace_legacy_link_hash($2),$3,$4)",
+            &[&legacy_tenant, &link, &device, &proven],
+        )
+        .await
+        .unwrap();
+    LegacyLink {
+        link,
+        legacy_tenant,
+        device,
+        proven,
+    }
+}
+
+async fn carried_rows(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    account: Uuid,
+) -> Vec<(Uuid, DateTime<Utc>)> {
+    admin
+        .query(
+            "SELECT link_id, first_contribution_at FROM trace_account_trust_carried_age
+              WHERE tenant_id=$1 AND account_id=$2 ORDER BY link_id",
+            &[&tenant, &account],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+}
+
+async fn trust_generation(admin: &deadpool_postgres::Object, tenant: &str, account: Uuid) -> i64 {
+    admin
+        .query_one(
+            "SELECT generation FROM trace_account_trust_frontiers WHERE tenant_id=$1 AND account_id=$2",
+            &[&tenant, &account],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+fn carried_age_policy() -> trace_commons_server::account_trust_rule::GrowthPolicy {
+    let json = serde_json::json!({
+        "version": "growth-carried-age-test-v1",
+        "processing_cost_bound": 10,
+        "bounded_allowance": 100,
+        "period": {"mode": "fixed", "seconds": 86400},
+        "growth_rule": "tiered-v1",
+        "growth": {
+            "window_seconds": 3650 * 86400,
+            "weekly_cap": 10,
+            "q_min_micros": null,
+            "penalty_cooldown_seconds": 0,
+            "evaluation_max_age_seconds": 86400,
+            "allowance_ceiling": 300,
+            "acceptance_source": "status",
+            "carried_age": true,
+            "evaluator_versions": ["gate-v1"],
+            "dedup_signal_versions": [DEDUP_V2],
+            "tiers": [
+                {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                {"units": 1, "active_weeks": 1, "age_seconds": 86400, "multiplier": 2}
+            ]
+        }
+    });
+    trace_commons_server::account_trust_rule::parse_growth_policy(
+        &json.to_string(),
+        &["growth-carried-age-test-v1"],
+    )
+    .unwrap()
+}
+
+/// V157 (owner decision O6): a live, non-pooled, device-proven tenant link
+/// carries the legacy tenant's first accepted contribution as account age.
+/// Only an accepted, unwithdrawn, unrevoked submission under a principal the
+/// link's claim recorded counts. A carry write moves the generation, an
+/// unchanged refresh does not, the inputs surface it as a carried row the
+/// rule reads for age only, and revoking the link removes it in the
+/// revoking transaction and moves the generation again.
+#[tokio::test]
+async fn a_proven_legacy_link_carries_age_until_it_is_revoked() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(&fx, "tc_carried_age_worker", "trace_account_trust_worker").await;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    assert!(worker.tiered_account_trust_runtime_ready().await.unwrap());
+    let tenant = anchored_tenant();
+    let account = seed_account(admin, &tenant, &[&principal()]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let legacy = seed_legacy_link(admin, &tenant, account).await;
+    let now = Utc::now();
+    let day = chrono::Duration::days(1);
+
+    // Earlier rows that must not carry: another principal's acceptance, a
+    // withdrawn one, a revoked one and a not-yet-accepted one, all under or
+    // around the proven principal.
+    seed_submission(
+        admin,
+        &legacy.legacy_tenant,
+        &principal(),
+        "accepted",
+        now - day * 90,
+    )
+    .await;
+    let (withdrawn, _) = seed_submission(
+        admin,
+        &legacy.legacy_tenant,
+        &legacy.proven,
+        "accepted",
+        now - day * 80,
+    )
+    .await;
+    admin
+        .execute(
+            "UPDATE trace_submissions SET withdrawn_at=now() WHERE tenant_id=$1 AND submission_id=$2",
+            &[&legacy.legacy_tenant, &withdrawn],
+        )
+        .await
+        .unwrap();
+    let (revoked, _) = seed_submission(
+        admin,
+        &legacy.legacy_tenant,
+        &legacy.proven,
+        "accepted",
+        now - day * 70,
+    )
+    .await;
+    admin
+        .execute(
+            "UPDATE trace_submissions SET revoked_at=now() WHERE tenant_id=$1 AND submission_id=$2",
+            &[&legacy.legacy_tenant, &revoked],
+        )
+        .await
+        .unwrap();
+    seed_submission(
+        admin,
+        &legacy.legacy_tenant,
+        &legacy.proven,
+        "received",
+        now - day * 60,
+    )
+    .await;
+    // The first that counts, and a later one that does not change it.
+    let (first, _) = seed_submission(
+        admin,
+        &legacy.legacy_tenant,
+        &legacy.proven,
+        "accepted",
+        now - day * 40,
+    )
+    .await;
+    seed_submission(
+        admin,
+        &legacy.legacy_tenant,
+        &legacy.proven,
+        "accepted",
+        now - day * 10,
+    )
+    .await;
+    let first_at: DateTime<Utc> = admin
+        .query_one(
+            "SELECT COALESCE(reviewed_at,received_at) FROM trace_submissions WHERE tenant_id=$1 AND submission_id=$2",
+            &[&legacy.legacy_tenant, &first],
+        )
+        .await
+        .unwrap()
+        .get(0);
+
+    let before = trust_generation(admin, &tenant, account).await;
+    assert_eq!(
+        worker
+            .refresh_account_trust_carried_age(&trust)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        carried_rows(admin, &tenant, account).await,
+        vec![(legacy.link, first_at)]
+    );
+    let carried = trust_generation(admin, &tenant, account).await;
+    assert!(
+        carried > before,
+        "a new carry invalidates prior evaluations"
+    );
+    assert_eq!(
+        worker
+            .refresh_account_trust_carried_age(&trust)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        trust_generation(admin, &tenant, account).await,
+        carried,
+        "an unchanged refresh writes nothing"
+    );
+
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    let carried_inputs: Vec<_> = inputs
+        .iter()
+        .filter(|f| {
+            f.source_kind == trace_commons_server::account_trust_rule::CARRIED_ACCOUNT_AGE_KIND
+        })
+        .collect();
+    assert_eq!(carried_inputs.len(), 1);
+    assert_eq!(carried_inputs[0].source_id, legacy.link);
+    assert_eq!(
+        carried_inputs[0].outcome,
+        trace_commons_server::account_trust_rule::CARRIED_ACCOUNT_AGE_OUTCOME
+    );
+    assert_eq!(carried_inputs[0].occurred_at, first_at);
+    let evaluation =
+        trace_commons_server::account_trust_rule::evaluate(&carried_age_policy(), &inputs, now);
+    assert_eq!(evaluation.age_seconds, (now - first_at).num_seconds());
+    assert_eq!(
+        (evaluation.units, evaluation.tier),
+        (0, 0),
+        "age only, never a unit"
+    );
+    assert_eq!(
+        trace_commons_server::account_trust_rule::evaluate(&shadow_policy(), &inputs, now)
+            .age_seconds,
+        0,
+        "a policy without carried_age ignores the carry"
+    );
+
+    // The worker pass refreshes too, and reports counts only.
+    let pass = trace_commons_server::account_trust_growth::record_account_trust_facts(
+        worker.as_ref(),
+        Some(10_000),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(pass.carried_age_failed, 0);
+    assert!(pass.carried_age_accounts >= 1);
+    assert_eq!(trust_generation(admin, &tenant, account).await, carried);
+
+    // Revocation removes the carry in its own transaction.
+    admin
+        .execute(
+            "UPDATE trace_legacy_invite_links SET revoked_at=now() WHERE link_id=$1",
+            &[&legacy.link],
+        )
+        .await
+        .unwrap();
+    assert!(carried_rows(admin, &tenant, account).await.is_empty());
+    let revoked_generation = trust_generation(admin, &tenant, account).await;
+    assert!(
+        revoked_generation > carried,
+        "revocation invalidates the carried evaluation"
+    );
+    assert!(
+        worker
+            .account_trust_evaluation_inputs(&trust)
+            .await
+            .unwrap()
+            .iter()
+            .all(|f| f.source_kind
+                != trace_commons_server::account_trust_rule::CARRIED_ACCOUNT_AGE_KIND)
+    );
+    assert_eq!(
+        worker
+            .refresh_account_trust_carried_age(&trust)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        trust_generation(admin, &tenant, account).await,
+        revoked_generation
+    );
+}
+
+/// V157: nothing carries from a pooled tenant, through a revoked proving
+/// device, to an account that holds no link, or under another tenant's
+/// context; marking a tenant pooled and deleting a link each remove a live
+/// carry and move the generation.
+#[tokio::test]
+async fn pooled_unproven_and_unlinked_identities_carry_no_age() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(
+        &fx,
+        "tc_carried_age_refusal_worker",
+        "trace_account_trust_worker",
+    )
+    .await;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let day = chrono::Duration::days(1);
+
+    // Pooling a carried tenant removes the carry.
+    let tenant = anchored_tenant();
+    let account = seed_account(admin, &tenant, &[&principal()]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let pooled = seed_legacy_link(admin, &tenant, account).await;
+    seed_submission(
+        admin,
+        &pooled.legacy_tenant,
+        &pooled.proven,
+        "accepted",
+        now - day * 30,
+    )
+    .await;
+    assert_eq!(
+        worker
+            .refresh_account_trust_carried_age(&trust)
+            .await
+            .unwrap(),
+        1
+    );
+    let carried = trust_generation(admin, &tenant, account).await;
+    admin
+        .execute(
+            "INSERT INTO trace_legacy_invite_pooled_tenants(tenant_id,reason_label) VALUES($1,'shared event invite')",
+            &[&pooled.legacy_tenant],
+        )
+        .await
+        .unwrap();
+    assert!(carried_rows(admin, &tenant, account).await.is_empty());
+    assert!(trust_generation(admin, &tenant, account).await > carried);
+    assert_eq!(
+        worker
+            .refresh_account_trust_carried_age(&trust)
+            .await
+            .unwrap(),
+        0
+    );
+
+    // A revoked proving device proves nothing.
+    let tenant = anchored_tenant();
+    let account = seed_account(admin, &tenant, &[&principal()]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let unproven = seed_legacy_link(admin, &tenant, account).await;
+    seed_submission(
+        admin,
+        &unproven.legacy_tenant,
+        &unproven.proven,
+        "accepted",
+        now - day * 30,
+    )
+    .await;
+    admin
+        .execute(
+            "UPDATE device_keys SET revoked_at=now() WHERE tenant_id=$1 AND device_key_id=$2",
+            &[&unproven.legacy_tenant, &unproven.device],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        worker
+            .refresh_account_trust_carried_age(&trust)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(carried_rows(admin, &tenant, account).await.is_empty());
+
+    // A second account in the same tenant, without a link of its own,
+    // carries nothing from the first account's legacy tenant.
+    let tenant = anchored_tenant();
+    let owner = seed_account(admin, &tenant, &[&principal()]).await;
+    let other = seed_account(admin, &tenant, &[&principal()]).await;
+    let other_trust = find(&worker, &tenant, other).await;
+    let owned = seed_legacy_link(admin, &tenant, owner).await;
+    seed_submission(
+        admin,
+        &owned.legacy_tenant,
+        &owned.proven,
+        "accepted",
+        now - day * 30,
+    )
+    .await;
+    assert_eq!(
+        worker
+            .refresh_account_trust_carried_age(&other_trust)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(carried_rows(admin, &tenant, other).await.is_empty());
+
+    // Under another tenant's context the refresh is refused.
+    let mut raw = fx
+        .admin_db
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let tx = raw.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&anchored_tenant()],
+    )
+    .await
+    .unwrap();
+    let refused = tx
+        .query_one(
+            "SELECT trace_account_trust_refresh_carried_age($1,$2)",
+            &[&tenant, &owner],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.as_db_error().map(|e| e.message()),
+        Some("account_trust_carry_refused")
+    );
+    drop(tx);
+
+    // Deleting a link cascades to its carry and moves the generation.
+    let owner_trust = find(&worker, &tenant, owner).await;
+    assert_eq!(
+        worker
+            .refresh_account_trust_carried_age(&owner_trust)
+            .await
+            .unwrap(),
+        1
+    );
+    let carried = trust_generation(admin, &tenant, owner).await;
+    admin
+        .execute(
+            "DELETE FROM trace_legacy_invite_links WHERE link_id=$1",
+            &[&owned.link],
+        )
+        .await
+        .unwrap();
+    assert!(carried_rows(admin, &tenant, owner).await.is_empty());
+    assert!(trust_generation(admin, &tenant, owner).await > carried);
+}

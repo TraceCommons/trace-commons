@@ -53,6 +53,11 @@ pub struct RecordFactsSummary {
     pub failed: u64,
     /// The limit stopped the run before every account was visited.
     pub limit_reached: bool,
+    /// Accounts holding at least one carried age (V157) after the run.
+    pub carried_age_accounts: u64,
+    /// Accounts whose carried-age refresh failed; their previous carry, if
+    /// any, stands until the next run (a revocation still removes it).
+    pub carried_age_failed: u64,
 }
 
 /// Walks every open account in an anchored tenant and records its missing
@@ -86,6 +91,19 @@ pub async fn record_account_trust_facts(
                 break 'pages;
             }
             summary.accounts_scanned += 1;
+            if !dry_run {
+                match db.refresh_account_trust_carried_age(account).await {
+                    Ok(0) => {}
+                    Ok(_) => summary.carried_age_accounts += 1,
+                    Err(error) => {
+                        summary.carried_age_failed += 1;
+                        tracing::warn!(
+                            error_label = %database_error_label(&error),
+                            "earned-trust carried-age refresh skipped one account"
+                        );
+                    }
+                }
+            }
             let candidates = db
                 .list_account_trust_fact_candidates(account, remaining)
                 .await?;

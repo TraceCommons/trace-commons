@@ -23,6 +23,13 @@
 //! of the submission (the V137 `accepted_submission_status` fact), which is
 //! the only acceptance the versioned pipeline produces. That choice is
 //! independent of `require_gate_pass`.
+//!
+//! Carried age (owner decision O6, V157): a policy may set `carried_age:
+//! true` to let an account's age start at the first accepted contribution
+//! of a legacy identity it proved through a live, non-pooled tenant link.
+//! The evaluation inputs surface that time as a [`CARRIED_ACCOUNT_AGE_KIND`]
+//! row; the rule reads it for age alone, never as acceptance, a unit or an
+//! active week. Absent or false, the row is ignored.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -41,6 +48,12 @@ const MAX_TIERS: usize = 8;
 const MAX_ALLOWLIST: usize = 64;
 const WEEK_DAYS: i64 = 7;
 const WEEK_SECONDS: i64 = WEEK_DAYS * 86_400;
+
+/// The evaluation-input kind V157 writes for a carried first-contribution
+/// time, with outcome [`CARRIED_ACCOUNT_AGE_OUTCOME`].
+pub const CARRIED_ACCOUNT_AGE_KIND: &str = "carried_account_age";
+/// The outcome of a [`CARRIED_ACCOUNT_AGE_KIND`] row.
+pub const CARRIED_ACCOUNT_AGE_OUTCOME: &str = "carried";
 
 /// Where a `tiered-v1` policy reads acceptance from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -82,6 +95,9 @@ pub struct GrowthPolicy {
     /// Which acceptance facts count. `require_gate_pass` also counts status
     /// acceptance, as it did before this field existed.
     acceptance_source: AcceptanceSource,
+    /// Whether a carried first-contribution time (V157) may start the
+    /// account's age. False keeps existing policies' age unchanged.
+    carried_age: bool,
     /// `None` runs the rule on gate pass alone: decision 2 of the spec lets
     /// the first shadow run do that while credit-quality V3 settles.
     q_min_micros: Option<i64>,
@@ -119,6 +135,9 @@ impl GrowthPolicy {
     pub fn acceptance_source(&self) -> AcceptanceSource {
         self.acceptance_source
     }
+    pub fn carried_age(&self) -> bool {
+        self.carried_age
+    }
     /// Whether `accepted_submission_status` facts count as acceptance, and
     /// so whether their reviewer-independence exclusions apply.
     fn counts_status_acceptance(&self) -> bool {
@@ -149,6 +168,8 @@ struct RawGrowth {
     require_gate_pass: bool,
     #[serde(default)]
     acceptance_source: AcceptanceSource,
+    #[serde(default)]
+    carried_age: bool,
     q_min_micros: Option<i64>,
     penalty_cooldown_seconds: i64,
     evaluation_max_age_seconds: i64,
@@ -291,6 +312,7 @@ pub fn parse_growth_policy(
         attested_unit_weight,
         require_gate_pass: raw.require_gate_pass,
         acceptance_source: raw.acceptance_source,
+        carried_age: raw.carried_age,
         q_min_micros: raw.q_min_micros,
         penalty_cooldown_seconds: raw.penalty_cooldown_seconds,
         evaluation_max_age_seconds: raw.evaluation_max_age_seconds,
@@ -380,7 +402,9 @@ pub fn evaluate(
 
     let status_exclusions = status_exclusions(policy, &facts);
 
-    // Age: since the first acceptance. A floor, not a reward: it never decays.
+    // Age: since the first acceptance, or since a carried first contribution
+    // of a proven older identity when the policy allows it (V157), whichever
+    // is earlier. A floor, not a reward: it never decays.
     let first_accepted = facts
         .iter()
         .filter(|f| {
@@ -388,7 +412,16 @@ pub fn evaluate(
         })
         .map(|f| f.occurred_at)
         .min();
-    let age_seconds = first_accepted.map_or(0, |at| (as_of - at).num_seconds().max(0));
+    let first_carried = facts
+        .iter()
+        .filter(|f| policy.carried_age && carried_age_fact(f))
+        .map(|f| f.occurred_at)
+        .min();
+    let first_contribution = match (first_accepted, first_carried) {
+        (Some(own), Some(carried)) => Some(own.min(carried)),
+        (own, carried) => own.or(carried),
+    };
+    let age_seconds = first_contribution.map_or(0, |at| (as_of - at).num_seconds().max(0));
 
     let window_start = as_of - chrono::Duration::seconds(policy.window_seconds);
     // Per week: (plain units, attested units).
@@ -671,6 +704,11 @@ fn accepted_fact_qualifies(policy: &GrowthPolicy, fact: &EvaluationFact) -> bool
         && (fact.source_kind == "accepted_submission"
             || (policy.counts_status_acceptance()
                 && fact.source_kind == "accepted_submission_status"))
+}
+
+/// A V157 carried first-contribution time. Read for age only.
+fn carried_age_fact(fact: &EvaluationFact) -> bool {
+    fact.source_kind == CARRIED_ACCOUNT_AGE_KIND && fact.outcome == CARRIED_ACCOUNT_AGE_OUTCOME
 }
 
 fn attested_fact_qualifies(fact: &EvaluationFact) -> bool {
@@ -2660,5 +2698,181 @@ mod tests {
             widened.evaluator_versions,
             BTreeSet::from(["pilot-2026-05".to_string(), PIPELINE_EVALUATOR.to_string()])
         );
+    }
+
+    /// A V157 carried first-contribution row, as the evaluation inputs
+    /// surface it: the link id stands in for both ids.
+    fn carried(facts: &mut Facts, at: DateTime<Utc>) -> Uuid {
+        let link = Uuid::new_v4();
+        facts.0.push(EvaluationFact {
+            source_kind: CARRIED_ACCOUNT_AGE_KIND.into(),
+            source_id: link,
+            submission_id: link,
+            outcome: CARRIED_ACCOUNT_AGE_OUTCOME.into(),
+            evaluator_version: None,
+            occurred_at: at,
+            credit_quality_micros: None,
+            credit_quality_calibration_version: None,
+            dedup_signal_version: None,
+            first_in_cluster: None,
+        });
+        link
+    }
+
+    fn carried_policy() -> GrowthPolicy {
+        parse_growth_policy(
+            &with(growth(), "carried_age", true.into()),
+            &["growth-test-v1"],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn carried_age_defaults_to_off_and_parses_only_a_boolean() {
+        assert!(!policy().carried_age());
+        assert!(!runbook_policy(serde_json::json!({})).carried_age());
+        let explicit = parse_growth_policy(
+            &with(growth(), "carried_age", false.into()),
+            &["growth-test-v1"],
+        )
+        .unwrap();
+        assert_eq!(policy(), explicit, "explicit false is the default");
+        assert!(carried_policy().carried_age());
+        for refused in [
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::json!(null),
+            serde_json::json!({"enabled": true}),
+        ] {
+            assert!(
+                parse_growth_policy(
+                    &with(growth(), "carried_age", refused.clone()),
+                    &["growth-test-v1"]
+                )
+                .is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn carried_age_starts_age_at_the_earlier_of_own_and_carried_contribution() {
+        let policy = carried_policy();
+        let mut facts = Facts::new();
+        facts.qualified(30);
+        carried(&mut facts, t(0));
+        let e = evaluate(&policy, &facts.0, t(35));
+        assert_eq!(e.age_seconds, 35 * DAY, "carried time is earlier");
+        assert_eq!(e.age_weeks, 5);
+        assert_eq!(e.units, 1, "units are the account's own only");
+        assert_eq!(e.active_weeks, 1);
+
+        // An own acceptance earlier than the carried time wins.
+        let mut facts = Facts::new();
+        facts.qualified(2);
+        carried(&mut facts, t(10));
+        assert_eq!(evaluate(&policy, &facts.0, t(12)).age_seconds, 10 * DAY);
+
+        // Two links: the earliest carried time.
+        let mut facts = Facts::new();
+        facts.qualified(30);
+        carried(&mut facts, t(20));
+        carried(&mut facts, t(5));
+        assert_eq!(evaluate(&policy, &facts.0, t(30)).age_seconds, 25 * DAY);
+    }
+
+    #[test]
+    fn carried_age_alone_gives_age_but_no_unit_week_or_tier() {
+        let policy = carried_policy();
+        let mut facts = Facts::new();
+        carried(&mut facts, t(0));
+        let e = evaluate(&policy, &facts.0, t(40));
+        assert_eq!(e.age_seconds, 40 * DAY);
+        assert_eq!((e.units, e.active_weeks, e.attested_units), (0, 0, 0));
+        assert_eq!(
+            e.tier, 0,
+            "age alone never reaches a tier with a unit floor"
+        );
+        assert_eq!(
+            rejection_counts(&policy, &facts.0, t(40)),
+            RejectionCounts::default(),
+            "a carried row is neither evidence nor a rejection"
+        );
+    }
+
+    #[test]
+    fn carried_age_lifts_a_tier_only_once_own_units_and_weeks_are_there() {
+        let policy = carried_policy();
+        let mut facts = Facts::new();
+        // Tier 1 needs 3 units, 2 active weeks and 7 days of age. Days 3 and
+        // 4 fall in one epoch week, day 8 in the next.
+        facts.qualified(3);
+        facts.qualified(4);
+        facts.qualified(8);
+        let own = evaluate(&policy, &facts.0, t(8));
+        assert_eq!((own.units, own.active_weeks), (3, 2));
+        assert_eq!(own.age_seconds, 5 * DAY);
+        assert_eq!(own.tier, 0, "own age alone is 5 days, short of 7");
+        carried(&mut facts, t(-30));
+        // Before day 8 there are only two units: still tier 0.
+        assert_eq!(evaluate(&policy, &facts.0, t(7)).tier, 0);
+        // At day 8 the units and weeks are own, the age is carried.
+        let e = evaluate(&policy, &facts.0, t(8));
+        assert_eq!((e.tier, e.units, e.active_weeks), (1, 3, 2));
+        assert_eq!(e.age_seconds, 38 * DAY);
+        assert_eq!(e.effective_allowance, 200);
+    }
+
+    #[test]
+    fn carried_age_is_ignored_without_the_policy_flag_or_with_another_outcome() {
+        let mut facts = Facts::new();
+        facts.qualified(30);
+        carried(&mut facts, t(0));
+        assert_eq!(
+            evaluate(&policy(), &facts.0, t(31)).age_seconds,
+            DAY,
+            "the default policy reads its own acceptance only"
+        );
+        let mut alone = Facts::new();
+        carried(&mut alone, t(0));
+        assert_eq!(evaluate(&policy(), &alone.0, t(31)).age_seconds, 0);
+
+        let mut other = Facts::new();
+        let link = carried(&mut other, t(0));
+        other.0[0].outcome = "accepted".into();
+        assert_eq!(other.0[0].submission_id, link);
+        assert_eq!(
+            evaluate(&carried_policy(), &other.0, t(31)).age_seconds,
+            0,
+            "only the 'carried' outcome carries"
+        );
+    }
+
+    #[test]
+    fn a_carried_row_is_never_acceptance_and_is_part_of_the_digest() {
+        let policy = carried_policy();
+        let mut facts = Facts::new();
+        let link = carried(&mut facts, t(0));
+        // A gate pass naming the carried row's id still earns nothing: the
+        // carried row is not an acceptance.
+        facts.push("gate_evaluation", link, "evaluated_passed", t(1));
+        let e = evaluate(&policy, &facts.0, t(2));
+        assert_eq!(e.units, 0);
+        assert_eq!(e.age_seconds, 2 * DAY);
+        let without: Vec<EvaluationFact> = facts
+            .0
+            .iter()
+            .filter(|f| f.source_kind != CARRIED_ACCOUNT_AGE_KIND)
+            .cloned()
+            .collect();
+        assert_ne!(
+            evaluate(&policy, &without, t(2)).facts_digest,
+            e.facts_digest,
+            "a stored evaluation records the carry it read"
+        );
+        // A carry dated after as_of is not read.
+        let mut later = Facts::new();
+        carried(&mut later, t(5));
+        assert_eq!(evaluate(&policy, &later.0, t(2)).age_seconds, 0);
     }
 }

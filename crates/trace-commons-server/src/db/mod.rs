@@ -534,6 +534,17 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "account_trust_worker_unavailable".into(),
         ))
     }
+    /// Re-derives this account's carried age (V157) from its live,
+    /// non-pooled, device-proven tenant links, writing only what changed.
+    /// Returns how many carries the account holds afterwards.
+    async fn refresh_account_trust_carried_age(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+    ) -> Result<u32, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_worker_unavailable".into(),
+        ))
+    }
     /// Every fact of one account with the gate fields the rule reads.
     async fn account_trust_evaluation_inputs(
         &self,

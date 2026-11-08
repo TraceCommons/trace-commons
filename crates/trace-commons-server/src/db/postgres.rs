@@ -2133,6 +2133,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "pipeline_credit_is_a_passed_gate",
         include_str!("../../../../migrations/V156__pipeline_credit_is_a_passed_gate.sql"),
     ),
+    // V157: account age carries across a live, non-pooled, device-proven
+    // V81 tenant link to the legacy tenant's first accepted contribution;
+    // units are still earned fresh. Revocation and pooling remove the carry.
+    (
+        157,
+        "age_carry_across_linked_identities",
+        include_str!("../../../../migrations/V157__age_carry_across_linked_identities.sql"),
+    ),
 ];
 
 /// The body of `create_or_reuse_account`, inside a transaction already under
@@ -2475,6 +2483,13 @@ impl Database for PgBackend {
         limit: i64,
     ) -> Result<Vec<crate::account_trust::TrustFactSource>, DatabaseError> {
         PgBackend::list_account_trust_fact_candidates(self, account, limit).await
+    }
+
+    async fn refresh_account_trust_carried_age(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+    ) -> Result<u32, DatabaseError> {
+        PgBackend::refresh_account_trust_carried_age(self, account).await
     }
 
     async fn account_trust_evaluation_inputs(
@@ -9629,6 +9644,126 @@ mod tests {
                 "V156 must not contain `{forbidden}`"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod v157_tests {
+    /// V157 (owner decision O6): account age carries across a live,
+    /// non-pooled, device-proven tenant link. The carry lives in the
+    /// account's tenant under forced RLS, every write moves the evaluation
+    /// generation, revocation and pooling remove it in their own
+    /// transaction, the evaluation inputs re-check the link at read time,
+    /// and nothing the PostgreSQL 15 pilot lacks is used.
+    #[test]
+    fn v157_carries_age_only_through_a_live_proven_link() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        let file_marker = format!(
+            "migrations/V{}__age_carry_across_linked_identities.sql",
+            157
+        );
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            2,
+            "V157 must be named exactly twice: by the MIGRATIONS table and by this test"
+        );
+        assert!(
+            super::MIGRATIONS
+                .iter()
+                .any(|(version, name, _)| *version == 157
+                    && *name == "age_carry_across_linked_identities"),
+            "V157 must record itself under its own file stem"
+        );
+        let sql =
+            include_str!("../../../../migrations/V157__age_carry_across_linked_identities.sql");
+        let code: String = sql
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for required in [
+            "CREATE TABLE trace_account_trust_carried_age (",
+            "link_id UUID NOT NULL REFERENCES trace_legacy_invite_links(link_id) ON DELETE CASCADE,",
+            "CHECK (tenant_id ~ '^(near-|nearai-)[0-9a-f]{64}$'),",
+            "ALTER TABLE trace_account_trust_carried_age FORCE ROW LEVEL SECURITY;",
+            "USING (tenant_id = trace_current_tenant_id())",
+            "AFTER INSERT OR UPDATE OR DELETE ON trace_account_trust_carried_age\n    FOR EACH ROW EXECUTE FUNCTION trace_account_trust_advance_frontier();",
+            "CREATE ROLE trace_account_trust_carry_guard NOLOGIN NOBYPASSRLS;",
+            "CREATE FUNCTION public.trace_account_trust_refresh_carried_age(p_tenant TEXT, p_account UUID)",
+            "p_tenant IS DISTINCT FROM public.trace_current_tenant_id()",
+            "OWNER TO trace_account_trust_carry_guard;",
+            "TO trace_account_trust_worker;",
+            // The proof: the link's own claim record, a live proving device,
+            // not pooled, an accepted and unwithdrawn submission.
+            "c.legacy_link_hash = public.trace_legacy_link_hash(v_link.link_id)",
+            "d.onboarding_origin = 'invite'",
+            "public.trace_near_provisioned_devices n",
+            "public.trace_legacy_invite_pooled_tenants p",
+            "s.status IN ('accepted', 'expired', 'purged')",
+            "s.withdrawn_at IS NULL AND s.revoked_at IS NULL",
+            "min(COALESCE(s.reviewed_at, s.received_at))",
+            // An unchanged refresh writes nothing, so it bumps nothing.
+            "WHERE c.first_contribution_at IS DISTINCT FROM EXCLUDED.first_contribution_at;",
+            // Removal in the event's transaction.
+            "AFTER UPDATE OF revoked_at ON trace_legacy_invite_links",
+            "AFTER INSERT ON trace_legacy_invite_pooled_tenants",
+            // The inputs read live carries only.
+            "CREATE OR REPLACE FUNCTION trace_account_trust_evaluation_inputs(",
+            "SELECT 'carried_account_age'::text,c.link_id,c.link_id,'carried'::text,",
+            "AND l.account_id=c.account_id AND l.revoked_at IS NULL",
+            // V156's body is kept.
+            "public.trace_account_trust_pipeline_gate_credited(p_tenant,f.source_id)",
+        ] {
+            assert!(code.contains(required), "V157 is missing `{required}`");
+        }
+        assert_eq!(
+            code.matches(crate::account_trust_rule::CARRIED_ACCOUNT_AGE_KIND)
+                .count(),
+            1,
+            "the inputs name the carried kind the rule reads, once"
+        );
+        for role in [
+            "trace_account_trust_carry_guard",
+            "trace_account_admission_guard",
+            "trace_account_trust_evaluation_guard",
+        ] {
+            assert!(
+                code.contains(&format!("GRANT {role} TO CURRENT_USER;")),
+                "V157 takes {role} for its own statements"
+            );
+            assert_eq!(
+                code.matches(&format!("GRANT {role} TO CURRENT_USER;"))
+                    .count(),
+                code.matches(&format!("REVOKE {role} FROM CURRENT_USER;"))
+                    .count(),
+                "V157 must revoke {role} from the migrator as often as it grants it"
+            );
+        }
+        let upper = code.to_uppercase();
+        for forbidden in [
+            "SUPERUSER",
+            "DISABLE ROW LEVEL SECURITY",
+            "TO PUBLIC",
+            "BYPASSRLS LOGIN",
+            // PostgreSQL 16-only syntax; the pilot runs 15.
+            "WITH INHERIT",
+            "WITH SET",
+            "'SET')",
+            "JSON_OBJECT(",
+            "JSON_ARRAY(",
+            " IS JSON",
+        ] {
+            assert!(
+                !upper.contains(forbidden),
+                "V157 must not contain `{forbidden}`"
+            );
+        }
+        // The only BYPASSRLS spellings are the NOBYPASSRLS role and its check.
+        assert_eq!(
+            upper.matches("BYPASSRLS").count(),
+            upper.matches("NOBYPASSRLS").count() + 1,
+            "V157 names BYPASSRLS only as NOBYPASSRLS and in the privilege check"
+        );
     }
 }
 
