@@ -2896,8 +2896,8 @@ mod tests {
             .replace("<BUNDLE_HEX>", &bundle_hex);
         let version: serde_json::Value = serde_json::from_str(&filled).expect("valid json");
         let version = version["version"].as_str().unwrap().to_string();
-        let policy = parse_growth_policy(&filled, &[version.as_str()])
-            .expect("the runbook template parses");
+        let policy =
+            parse_growth_policy(&filled, &[version.as_str()]).expect("the runbook template parses");
 
         assert_eq!(policy.acceptance_source(), AcceptanceSource::Status);
         assert!(policy.carried_age());
