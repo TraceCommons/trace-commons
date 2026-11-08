@@ -2875,4 +2875,66 @@ mod tests {
         carried(&mut later, t(5));
         assert_eq!(evaluate(&policy, &later.0, t(2)).age_seconds, 0);
     }
+
+    /// The runbook's live policy, read from the document itself so the
+    /// document cannot drift from the parser.
+    #[test]
+    fn the_runbook_live_policy_template_parses_with_its_placeholders_filled() {
+        let doc = include_str!("../../../docs/operator/account-trust.md");
+        let after = doc
+            .split("### The policy\n")
+            .nth(1)
+            .expect("the runbook has a 'The policy' section");
+        let block = after
+            .split("```json\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n```").next())
+            .expect("the section holds a json block");
+        let bundle_hex = "a".repeat(64);
+        let filled = block
+            .replace("PILOT_GATE_POLICY_VERSION", "pilot-2026-05")
+            .replace("<BUNDLE_HEX>", &bundle_hex);
+        let version: serde_json::Value = serde_json::from_str(&filled).expect("valid json");
+        let version = version["version"].as_str().unwrap().to_string();
+        let policy = parse_growth_policy(&filled, &[version.as_str()])
+            .expect("the runbook template parses");
+
+        assert_eq!(policy.acceptance_source(), AcceptanceSource::Status);
+        assert!(policy.carried_age());
+        assert_eq!(
+            policy.evaluator_versions,
+            BTreeSet::from([
+                "pilot-2026-05".to_string(),
+                format!("pipeline:sha256:{bundle_hex}"),
+            ])
+        );
+        assert_eq!(
+            *policy.base().period(),
+            crate::account_trust::PolicyPeriod::Fixed { seconds: 86_400 }
+        );
+        assert_eq!(policy.base().bounded_allowance(), 100);
+        assert_eq!(policy.allowance_ceiling(), 800);
+        let tiers: Vec<(u32, u32, i64, i64, u32)> = policy
+            .tiers()
+            .iter()
+            .map(|t| {
+                (
+                    t.units,
+                    t.active_weeks,
+                    t.age_seconds,
+                    t.multiplier,
+                    t.attested_units,
+                )
+            })
+            .collect();
+        assert_eq!(
+            tiers,
+            vec![
+                (0, 0, 0, 1, 0),
+                (10, 1, 86_400, 2, 0),
+                (30, 4, 3_628_800, 4, 5),
+                (60, 8, 7_257_600, 8, 10),
+            ]
+        );
+    }
 }
