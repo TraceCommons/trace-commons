@@ -382,8 +382,11 @@ Plan the switch for a quiet hour, and make it a separate reviewed change.
 ### Rollout checklist for a pipeline bundle
 
 1. Before activating a bundle, read its id (`pipeline-activation.md`).
-2. Append `pipeline:sha256:<hex>` to `evaluator_versions`. Never remove the
-   earlier entries.
+2. Append `pipeline:sha256:<hex>` to `evaluator_versions`. Do not remove an
+   entry while its decisions are inside `window_seconds`: they still earn
+   units. The list holds at most 64 entries, and a longer one fails to parse,
+   so ingest refuses the policy at startup. Before it fills, drop the oldest
+   ids whose last decision is older than `window_seconds`.
 3. Bump `version` and `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION`
    together, then restart ingest. Every activation needs this bump, because
    the bundle id changes with any policy it holds. A forgotten bump leaves
@@ -520,6 +523,12 @@ and ignores the rest.
   once; spend already recorded stays, so nobody gets a fresh allowance from
   the switch. Unset the scheduler variables too, or startup refuses a
   scheduler with nothing to evaluate (unless a shadow candidate is set).
+- **Rolling the binary back:** an ingest built before V155-V157 refuses a
+  growth policy that sets `acceptance_source` or `carried_age` (unknown
+  fields are refused), so it would not start. Put the previous
+  `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON` and `_VERSION` back with the
+  old binary. The migrations stay. The old binary matches fact kinds by
+  name, so it ignores V157's `carried_account_age` rows.
 - **The scheduler dies or its token expires:** every applied evaluation goes
   stale within `evaluation_max_age_seconds` and every account falls to the
   base allowance. That is the fail-safe direction; liveness escalates the
