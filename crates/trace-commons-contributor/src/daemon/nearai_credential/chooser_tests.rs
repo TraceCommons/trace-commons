@@ -425,11 +425,19 @@ async fn a_sign_in_naming_no_login_opens_the_page_on_its_own_listener() {
 async fn choosing_github_redirects_to_its_login_returning_to_the_same_port() {
     let (_directory, store) = crate::config::tests_support::temp_store();
     let (_url, location, port, id) = choose_in_browser(&store, "github").await;
-    let expected = crate::daemon::nearai_credential::api::CloudApi::live()
-        .unwrap()
-        .authorize_url("github", port)
-        .unwrap();
-    assert_eq!(location, expected);
+    let url = reqwest::Url::parse(&location).unwrap();
+    assert_eq!(url.path(), "/v1/auth/github");
+    let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
+    assert_eq!(
+        query["frontend_callback"],
+        format!(
+            "http://127.0.0.1:{port}{}",
+            crate::daemon::nearai_credential::loopback::CALLBACK_PATH
+        )
+    );
+    assert_eq!(query["client_id"], "trace-commons");
+    assert_eq!(query["code_challenge_method"], "S256");
+    assert_eq!(query["code_challenge"].len(), 43);
     crate::daemon::nearai_credential::ceremony::cancel(store.dir(), Some(&id)).unwrap();
 }
 
@@ -499,46 +507,41 @@ async fn the_page_marks_the_login_the_commons_last_accepted() {
     crate::daemon::nearai_credential::ceremony::cancel(store.dir(), Some(id)).unwrap();
 }
 
-/// The OAuth leg's deposit secret is its own: the chooser's state is in the
-/// page's address (browser history, the opener's argv, the CLI's output), so
-/// a deposit bound to it is refused.
+/// OAuth state is independent from the chooser state, and bearer-token
+/// callbacks cannot downgrade the code exchange.
 #[cfg(not(feature = "near-ai-staging"))]
 #[tokio::test]
-async fn the_oauth_deposit_is_bound_to_a_secret_no_url_carries() {
-    use crate::daemon::nearai_credential::loopback::{CALLBACK_PATH, DEPOSIT_PATH};
+async fn the_oauth_state_is_independent_and_token_callbacks_are_refused() {
+    use crate::daemon::nearai_credential::loopback::CALLBACK_PATH;
     let (_directory, store) = crate::config::tests_support::temp_store();
-    let (url, _location, port, id) = choose_in_browser(&store, "github").await;
-    let chooser_state = url
+    let (chooser_url, location, port, id) = choose_in_browser(&store, "github").await;
+    let chooser_state = chooser_url
         .query_pairs()
-        .find(|(name, _)| name == "state")
+        .find(|(key, _)| key == "state")
         .unwrap()
         .1
         .into_owned();
-    let address: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
-    let authority = format!("127.0.0.1:{port}");
-    let bounce = send(address, get(&authority, CALLBACK_PATH)).await;
-    assert_eq!(status(&bounce), "HTTP/1.1 200 OK", "{bounce}");
-    let deposit_state = bounce
-        .split("body: \"state=")
-        .nth(1)
-        .and_then(|rest| rest.split('&').next())
+    let authorization = reqwest::Url::parse(&location).unwrap();
+    let state = authorization
+        .query_pairs()
+        .find(|(key, _)| key == "state")
         .unwrap()
-        .to_owned();
-    assert!(crate::daemon::nearai_credential::loopback::state_shaped(
-        &deposit_state
-    ));
-    assert_ne!(deposit_state, chooser_state);
-    assert!(!bounce.contains(&chooser_state));
-    let body = format!("state={chooser_state}&ua=Mozilla%2F5.0&token=jwt&refresh_token=rt_x");
-    let refused = send(
-        address,
-        format!(
-            "POST {DEPOSIT_PATH} HTTP/1.1\r\nHost: {authority}\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        ),
-    )
-    .await;
-    assert_eq!(status(&refused), "HTTP/1.1 400 Bad Request", "{refused}");
+        .1
+        .into_owned();
+    assert_ne!(state, chooser_state);
+    let authority = format!("127.0.0.1:{port}");
+    let address = format!("127.0.0.1:{port}").parse().unwrap();
+    for query in [
+        format!("code=synthetic&state={chooser_state}"),
+        format!("token=jwt&refresh_token=rt&state={state}"),
+    ] {
+        let refused = send(
+            address,
+            format!("GET {CALLBACK_PATH}?{query} HTTP/1.1\r\nHost: {authority}\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(status(&refused), "HTTP/1.1 400 Bad Request");
+    }
     crate::daemon::nearai_credential::ceremony::cancel(store.dir(), Some(&id)).unwrap();
 }
 

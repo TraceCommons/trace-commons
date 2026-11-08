@@ -22,7 +22,9 @@
 //! `cloud-api.near.ai`, which keeps inference, to `cloud-platform.near.ai`
 //! (staging `cloud-platform-stg.near.ai`), per NEAR AI (2026-11-06).
 
-use super::loopback::{CALLBACK_PATH, SessionTokens};
+#[cfg(test)]
+use super::loopback::CALLBACK_PATH;
+use super::loopback::SessionTokens;
 use crate::daemon::nearai_credential::near_wallet::VerifiedNearWalletSignIn;
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
@@ -403,11 +405,16 @@ impl CloudApi {
     /// wrong by one character produces a failure with nothing in it to show a
     /// contributor or write to a log. Refusing locally is the only way this
     /// can ever be diagnosed.
-    pub fn authorize_url(&self, provider: &str, port: u16) -> Result<String> {
+    pub fn authorize_url(
+        &self,
+        provider: &str,
+        port: u16,
+        pkce: &super::loopback::Pkce,
+    ) -> Result<String> {
         if !PROVIDERS.contains(&provider) {
             bail!("near_ai_credential_provider_unknown")
         }
-        let callback = format!("http://127.0.0.1:{port}{CALLBACK_PATH}");
+        let callback = super::loopback::callback_url(port)?;
         let parsed = reqwest::Url::parse(&callback)?;
         // The service's own rules, restated so a change to CALLBACK_PATH that
         // violates one fails here instead of at an empty 400. `[::1]` and
@@ -425,8 +432,47 @@ impl CloudApi {
         }
         let mut url = self.url(&format!("/v1/auth/{provider}"))?;
         url.query_pairs_mut()
-            .append_pair("frontend_callback", &callback);
+            .append_pair("frontend_callback", &callback)
+            .append_pair("client_id", "trace-commons")
+            .append_pair("code_challenge", &pkce.challenge())
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("state", &pkce.state);
         Ok(url.into())
+    }
+
+    /// Redeem once against the pinned origin. No bearer is sent and redirects
+    /// are refused by the client; server errors never escape as raw bodies.
+    pub(super) async fn redeem_native_code(
+        &self,
+        code: &str,
+        pkce: &super::loopback::Pkce,
+        port: u16,
+    ) -> Result<AuthenticatedSession> {
+        let response = self
+            .http
+            .post(self.url("/v1/auth/native/token")?)
+            .json(&serde_json::json!({
+                "grant_type": "authorization_code", "client_id": "trace-commons",
+                "code": code, "code_verifier": pkce.verifier(),
+                "redirect_uri": super::loopback::callback_url(port)?,
+            }))
+            .send()
+            .await
+            .map_err(|_| anyhow!("near_ai_credential_unavailable"))?;
+        let tokens: AccessAndRefreshToken = Self::decode(response).await?;
+        if tokens.access_token.is_empty()
+            || tokens.refresh_token.is_empty()
+            || tokens.refresh_token_expiration <= Utc::now()
+        {
+            bail!("near_ai_credential_unexpected")
+        }
+        Ok(AuthenticatedSession {
+            session: SessionTokens {
+                access_token: tokens.access_token,
+                refresh_token: tokens.refresh_token,
+            },
+            refresh_token_expires_at: tokens.refresh_token_expiration,
+        })
     }
 
     /// One session-authenticated call, decoded.
@@ -1312,13 +1358,28 @@ mod tests {
     #[test]
     fn the_callback_offered_to_the_service_satisfies_every_rule_it_enforces() {
         let api = CloudApi::live().unwrap();
-        let url = api.authorize_url("github", 49721).unwrap();
+        let url = api
+            .authorize_url(
+                "github",
+                49721,
+                &super::super::loopback::Pkce::new().unwrap(),
+            )
+            .unwrap();
         let parsed = reqwest::Url::parse(&url).unwrap();
         let pinned = reqwest::Url::parse(CLOUD_API_ORIGIN).unwrap();
         assert_eq!(parsed.host_str(), pinned.host_str());
         #[cfg(not(feature = "near-ai-staging"))]
         assert_eq!(parsed.host_str(), Some("cloud-platform.near.ai"));
         assert_eq!(parsed.path(), "/v1/auth/github");
+        let parameters: std::collections::HashMap<_, _> = parsed.query_pairs().collect();
+        assert_eq!(
+            parameters.get("client_id").map(|v| v.as_ref()),
+            Some("trace-commons")
+        );
+        assert_eq!(
+            parameters.get("code_challenge_method").map(|v| v.as_ref()),
+            Some("S256")
+        );
         let callback = parsed
             .query_pairs()
             .find(|(k, _)| k == "frontend_callback")
@@ -1332,9 +1393,18 @@ mod tests {
             format!("http://127.0.0.1:49721{CALLBACK_PATH}"),
             "{callback}"
         );
-        assert!(api.authorize_url("google", 1).is_ok());
-        assert!(api.authorize_url("near", 1).is_err());
-        assert!(api.authorize_url("../admin", 1).is_err());
+        assert!(
+            api.authorize_url("google", 1, &super::super::loopback::Pkce::new().unwrap())
+                .is_ok()
+        );
+        assert!(
+            api.authorize_url("near", 1, &super::super::loopback::Pkce::new().unwrap())
+                .is_err()
+        );
+        assert!(
+            api.authorize_url("../admin", 1, &super::super::loopback::Pkce::new().unwrap())
+                .is_err()
+        );
     }
 
     /// cloud-api binds a refresh token to the normalized User-Agent of
@@ -1410,5 +1480,115 @@ mod staging_origin_tests {
     #[test]
     fn the_origin_passes_the_pinned_client_checks() {
         assert!(CloudApi::live().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod native_pkce_tests {
+    use super::*;
+    use axum::{
+        Json, Router,
+        http::{HeaderMap, StatusCode},
+        routing::post,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    async fn serve(router: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn native_code_exchange_and_refresh_use_the_native_agent_without_browser_tokens() {
+        let pkce = super::super::loopback::Pkce::new().unwrap();
+        let expected_verifier = pkce.verifier().to_owned();
+        let count = Arc::new(AtomicUsize::new(0));
+        let captured = count.clone();
+        let router = Router::new().route("/v1/auth/native/token", post(move |headers: HeaderMap, Json(body): Json<serde_json::Value>| {
+            let expected_verifier=expected_verifier.clone(); let captured=captured.clone();
+            async move {
+                captured.fetch_add(1,Ordering::SeqCst);
+                assert!(!headers.contains_key("authorization"));
+                assert_eq!(headers["user-agent"], USER_AGENT);
+                assert_eq!(body,serde_json::json!({"grant_type":"authorization_code","client_id":"trace-commons","code":"one-time-code","code_verifier":expected_verifier,"redirect_uri":format!("http://127.0.0.1:49721{CALLBACK_PATH}")}));
+                Json(serde_json::json!({"access_token":"access-secret","refresh_token":"refresh-secret","refresh_token_expiration":(Utc::now()+chrono::Duration::days(7)).to_rfc3339()}))
+            }
+        })).route("/v1/users/me/access-tokens",post(|headers: HeaderMap|async move {
+            assert_eq!(headers["user-agent"],USER_AGENT);
+            assert_eq!(headers["authorization"],"Bearer refresh-secret");
+            Json(serde_json::json!({"access_token":"rotated-access","refresh_token":"rotated-refresh","refresh_token_expiration":(Utc::now()+chrono::Duration::days(7)).to_rfc3339()}))
+        }));
+        let api = CloudApi::for_test(&serve(router).await).unwrap();
+        let url = api.authorize_url("github", 49721, &pkce).unwrap();
+        assert!(!url.contains(pkce.verifier()));
+        assert!(!url.contains("access-secret"));
+        let session = api
+            .redeem_native_code("one-time-code", &pkce, 49721)
+            .await
+            .unwrap();
+        let refreshed = api
+            .refresh_session(&session.session.refresh_token, USER_AGENT)
+            .await
+            .unwrap();
+        assert_eq!(refreshed.session.refresh_token, "rotated-refresh");
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn native_exchange_never_follows_redirects_or_retries_a_refusal() {
+        for status in [
+            StatusCode::MOVED_PERMANENTLY,
+            StatusCode::FOUND,
+            StatusCode::SEE_OTHER,
+            StatusCode::TEMPORARY_REDIRECT,
+            StatusCode::PERMANENT_REDIRECT,
+            StatusCode::BAD_REQUEST,
+            StatusCode::NOT_FOUND,
+        ] {
+            let count = Arc::new(AtomicUsize::new(0));
+            let captured = count.clone();
+            let redirected = count.clone();
+            let router = Router::new()
+                .route(
+                    "/v1/auth/native/token",
+                    post(move || {
+                        let captured = captured.clone();
+                        async move {
+                            captured.fetch_add(1, Ordering::SeqCst);
+                            (status, [("location", "/capture")], "synthetic-secret-error")
+                        }
+                    }),
+                )
+                .route(
+                    "/capture",
+                    axum::routing::any(move || {
+                        let redirected = redirected.clone();
+                        async move {
+                            redirected.fetch_add(1, Ordering::SeqCst);
+                            StatusCode::OK
+                        }
+                    }),
+                );
+            let api = CloudApi::for_test(&serve(router).await).unwrap();
+            let error = api
+                .redeem_native_code(
+                    "one-time-code",
+                    &super::super::loopback::Pkce::new().unwrap(),
+                    49721,
+                )
+                .await
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(!error.contains("synthetic-secret-error"));
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+        }
     }
 }

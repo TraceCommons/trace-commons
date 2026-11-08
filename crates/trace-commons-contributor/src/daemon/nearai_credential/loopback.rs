@@ -1,61 +1,16 @@
-//! The loopback half of NEAR AI sign-in: a listener that survives the fact
-//! that the tokens never reach it directly.
-//!
-//! cloud-api's OAuth finish is shaped for a single-page web app. It redirects
-//! to the `frontend_callback` it was given with the credentials in the URL
-//! *fragment* -- `#token=...&refresh_token=...` -- and a browser never sends a
-//! fragment to a server. A listener that merely accepts the redirect therefore
-//! receives a bare `GET /callback` and nothing else, forever. The standard
-//! native-OAuth answer, and the one here, is a bounce: answer the redirect
-//! with a tiny local page whose script reads `location.hash` and posts it back
-//! to a second path on the same listener.
-//!
-//! Three constraints on the callback URL are the service's, confirmed against
-//! the deployed build rather than read off its source, and all three are load-
-//! bearing here:
-//!
-//! - The scheme must be `http` and the host must be the literal `127.0.0.1` or
-//!   `localhost`. `https://127.0.0.1` is refused, and so is `[::1]` -- which is
-//!   why this binds IPv4 explicitly and never `::1`.
-//! - The URL may carry **no query and no fragment**. So the callback path is
-//!   bare and nothing about this ceremony can be smuggled through it.
-//! - A refusal is an HTTP 400 with an **empty body**. There is no error detail
-//!   to relay, so a mis-formed callback gives a contributor nothing; getting
-//!   the URL right locally is the only defence.
-//!
-//! Nothing in this module logs, formats or returns a token. [`SessionTokens`]
-//! has a hand-written `Debug` that says only whether the fields are populated,
-//! for the same reason the rest of this crate is hash-only: a credential that
-//! reaches a log line has escaped.
+//! Native OAuth callback: receive a one-time code bound to app-held PKCE.
+//! Tokens and the verifier never pass through the browser. Host validation,
+//! per-connection limits and the caller's ceremony deadline bound this listener.
 
 use anyhow::{Result, anyhow, bail};
 use base64::Engine;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
-/// Where the service is told to send the browser. Bare -- no query, no
-/// fragment -- because `validate_frontend_callback` refuses either.
 pub const CALLBACK_PATH: &str = "/trace-commons/near-ai/callback";
-/// The service refuses a longer agent than this outright, so a deposit
-/// carrying one could never be refreshed and is refused at the door.
-const MAX_USER_AGENT_BYTES: usize = 512;
-/// Where the served page posts the fragment it read. This one is ours alone;
-/// the service never sees it, so it may carry a body.
-pub const DEPOSIT_PATH: &str = "/trace-commons/near-ai/deposit";
-
-/// Body bytes accepted from one deposit. A JWT plus an `rt_` token is a few
-/// hundred; this is generous and still bounded.
 const MAX_BODY_BYTES: usize = 8192;
-/// How long one connection may take to deliver its request.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The session credentials a successful Cloud sign-in returns.
-///
-/// A session, never an inference credential: every management route on
-/// cloud-api is `session_token`-only and every inference route is
-/// `api_key`-only, with no fallback in either direction. The access token
-/// authorizes management calls, including minting the inference key. The
-/// refresh token is retained in OS storage for subsequent account reads.
 pub struct SessionTokens {
     pub access_token: String,
     pub refresh_token: String,
@@ -92,143 +47,83 @@ pub fn random_state() -> Result<String> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
-/// The page served to the browser at [`CALLBACK_PATH`].
-///
-/// Branded but entirely local: styles, artwork and script are embedded,
-/// with no fonts, images or other resources fetched from anywhere. A remote
-/// fetch would tell a third party the moment a contributor signed in, from
-/// a document whose own URL fragment is a live session token.
-///
-/// `state` is interpolated into a JavaScript string literal. It is always this
-/// module's own base64url output, so it cannot contain a quote or a backslash,
-/// and [`bounce_page`] refuses anything else rather than trusting that.
-fn bounce_page(state: &str) -> Result<String> {
-    if !state_shaped(state) {
-        bail!("near_ai_credential_callback_invalid")
-    }
-    Ok(include_str!("sign_in.html")
-        .replace("__APP_NAME__", crate::brand::APP_NAME)
-        .replace("__DEPOSIT_PATH__", DEPOSIT_PATH)
-        .replace("__STATE__", state))
+/// One attempt's secret. Deliberately not Debug or Clone: a verifier never
+/// belongs in the browser, persisted configuration, or diagnostics.
+pub struct Pkce {
+    verifier: String,
+    pub state: String,
 }
 
-/// One completed browser sign-in: the tokens, and the agent that earned them.
-///
-/// The agent is carried because cloud-api binds a refresh token to the
-/// normalized User-Agent of the request that created the session, and for the
-/// OAuth providers that request is the browser's, not ours. Without it the
-/// stored session is refused on its first refresh and cannot be recovered by
-/// signing in again.
-pub struct BrowserSession {
-    pub tokens: SessionTokens,
-    pub user_agent: String,
+impl Pkce {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            verifier: random_state()?,
+            state: random_state()?,
+        })
+    }
+
+    pub fn challenge(&self) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(ring::digest::digest(&ring::digest::SHA256, self.verifier.as_bytes()).as_ref())
+    }
+
+    pub(super) fn verifier(&self) -> &str {
+        &self.verifier
+    }
 }
 
-/// Decode one deposit body into the session tokens it carries.
-///
-/// The `state` check is the whole of the local binding, and its limit should
-/// be stated rather than implied: it stops a process that did not see the page
-/// we served from posting a token of its own choosing, and it does not stop
-/// one that did. Loopback is not a boundary between local processes on any
-/// platform this ships to. What it buys is that the port is ephemeral, the
-/// window is one ceremony long, and a blind poster is refused -- which is the
-/// same bar the enrollment ceremony's callback holds itself to.
-fn parse_deposit(body: &str, state: &str) -> Result<BrowserSession> {
-    if body.len() > MAX_BODY_BYTES {
+pub(super) fn callback_url(port: u16) -> Result<String> {
+    if port == 0 {
         bail!("near_ai_credential_callback_invalid")
     }
-    // Reuse the URL parser rather than hand-rolling form decoding: the values
-    // arrive percent-encoded and `query_pairs` is the same decoder the
-    // enrollment callback already trusts.
-    let url = reqwest::Url::parse(&format!("http://127.0.0.1/?{body}"))?;
-    let mut seen_state = None;
-    let mut access_token = None;
-    let mut refresh_token = None;
-    let mut user_agent = None;
-    for (key, value) in url.query_pairs() {
-        let slot = match key.as_ref() {
-            "state" => &mut seen_state,
-            // Ours, not the service's: the page reports `navigator.userAgent`
-            // so the refresh can present the agent the session was created
-            // with. A fragment never carries this name, so it cannot collide.
-            "ua" => &mut user_agent,
-            // cloud-api names the access token `token` in the fragment and
-            // the refresh token `refresh_token`. Not a typo, and not ours to
-            // rename on the wire.
-            "token" => &mut access_token,
-            "refresh_token" => &mut refresh_token,
-            _ => continue,
-        };
-        // A repeated key is a malformed deposit, not a last-one-wins.
-        if slot.is_some() {
+    Ok(format!("http://127.0.0.1:{port}{CALLBACK_PATH}"))
+}
+
+/// None is a matching-state provider refusal. Invalid or unsolicited requests
+/// are ignored without consuming the attempt; no legacy token fields are taken.
+fn parse_callback(target: &str, state: &str) -> Result<Option<String>> {
+    if target.len() > 4096 || target.contains('#') {
+        bail!("near_ai_credential_callback_invalid")
+    }
+    let query = target
+        .strip_prefix(CALLBACK_PATH)
+        .and_then(|suffix| suffix.strip_prefix('?'))
+        .ok_or_else(|| anyhow!("near_ai_credential_callback_invalid"))?;
+    let mut seen = std::collections::HashMap::new();
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        if !matches!(key.as_ref(), "code" | "state" | "error")
+            || seen.insert(key.into_owned(), value.into_owned()).is_some()
+        {
             bail!("near_ai_credential_callback_invalid")
         }
-        *slot = Some(value.into_owned());
     }
-    if seen_state.as_deref() != Some(state) {
+    if seen.get("state").map(String::as_str) != Some(state) {
         bail!("near_ai_credential_callback_invalid")
     }
-    let access_token =
-        access_token.ok_or_else(|| anyhow!("near_ai_credential_callback_invalid"))?;
-    let refresh_token =
-        refresh_token.ok_or_else(|| anyhow!("near_ai_credential_callback_invalid"))?;
-    let user_agent = user_agent.unwrap_or_default();
-    if access_token.is_empty() || refresh_token.is_empty() {
-        bail!("near_ai_credential_callback_invalid")
+    match (seen.remove("code"), seen.remove("error")) {
+        (Some(code), None)
+            if !code.is_empty()
+                && code.len() <= 1024
+                && code
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b)) =>
+        {
+            Ok(Some(code))
+        }
+        (None, Some(error)) if !error.is_empty() && error.len() <= 128 => Ok(None),
+        _ => bail!("near_ai_credential_callback_invalid"),
     }
-    // A browser that reported no agent cannot be refreshed later, and the
-    // failure would land minutes afterwards on a screen that says nothing
-    // about sign-in. Refuse it here, where the contributor is still looking
-    // at the page that caused it.
-    if user_agent.trim().is_empty() || user_agent.len() > MAX_USER_AGENT_BYTES {
-        bail!("near_ai_credential_callback_invalid")
-    }
-    Ok(BrowserSession {
-        tokens: SessionTokens {
-            access_token,
-            refresh_token,
-        },
-        user_agent,
-    })
 }
 
-/// One request, as the routes below need it.
-struct Incoming {
-    method: String,
-    path: String,
-    body: String,
-}
-
-async fn respond(stream: &mut tokio::net::TcpStream, status: &str, kind: &str, body: &str) {
+async fn respond(stream: &mut tokio::net::TcpStream, status: &str, body: &str) {
     let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n\
-         Cache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\
+         Cache-Control: no-store\r\nPragma: no-cache\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = tokio::time::timeout(CONNECTION_TIMEOUT, stream.write_all(response.as_bytes())).await;
 }
 
-/// Serve the bounce until one valid deposit arrives.
-///
-/// Unrelated local requests are answered and ignored rather than consuming the
-/// listener: a browser that prefetches, a probe, or a stray `GET /favicon.ico`
-/// must not end the ceremony. The caller bounds the total wait; this bounds
-/// each connection. A valid deposit is acknowledged only after `finish` succeeds.
-pub async fn receive_session<T, F, Fut>(
-    listener: tokio::net::TcpListener,
-    state: &str,
-    finish: F,
-) -> Result<T>
-where
-    F: FnOnce(BrowserSession) -> Fut,
-    Fut: std::future::Future<Output = Result<T>>,
-{
-    receive_session_after(listener, state, None, finish).await
-}
-
-/// [`receive_session`] on the listener the chooser was served from: another
-/// choice from that page (`stale`) ends the attempt with the chooser's own
-/// refusal rather than leaving it to time out.
 pub(super) async fn receive_session_after<T, F, Fut>(
     listener: tokio::net::TcpListener,
     state: &str,
@@ -236,85 +131,59 @@ pub(super) async fn receive_session_after<T, F, Fut>(
     finish: F,
 ) -> Result<T>
 where
-    F: FnOnce(BrowserSession) -> Fut,
+    F: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
-    let page = bounce_page(state)?;
+    if !state_shaped(state) {
+        bail!("near_ai_credential_callback_invalid")
+    }
     let authority = format!("127.0.0.1:{}", listener.local_addr()?.port());
     loop {
         let (mut stream, _) = listener.accept().await?;
-        let request = match tokio::time::timeout(
+        let request = tokio::time::timeout(
             CONNECTION_TIMEOUT,
             super::loopback_http::read_request(&mut stream, &authority, MAX_BODY_BYTES),
         )
-        .await
-        {
-            Ok(Ok((head, body))) => {
-                if stale.is_some_and(|stale| stale.matches(&head, &body, &authority)) {
-                    respond(
-                        &mut stream,
-                        "400 Bad Request",
-                        "text/plain; charset=utf-8",
-                        super::chooser::STALE_CHOICE_BODY,
-                    )
-                    .await;
-                    bail!(super::chooser::STALE_CHOICE)
-                }
-                Incoming {
-                    method: head.method,
-                    path: head.target,
-                    body: String::from_utf8_lossy(&body).into_owned(),
-                }
-            }
-            Ok(Err(_)) => {
-                respond(
-                    &mut stream,
-                    "400 Bad Request",
-                    "text/plain; charset=utf-8",
-                    "This callback was not accepted.",
-                )
-                .await;
-                continue;
-            }
-            Err(_) => continue,
+        .await;
+        let Ok(Ok((head, body))) = request else {
+            respond(
+                &mut stream,
+                "400 Bad Request",
+                "This callback was not accepted.",
+            )
+            .await;
+            continue;
         };
-        // The service appends the fragment to the callback URL; a browser
-        // strips it before the request, so the path is exact.
-        if request.method == "GET" && request.path == CALLBACK_PATH {
+        if stale.is_some_and(|stale| stale.matches(&head, &body, &authority)) {
             respond(
                 &mut stream,
-                "200 OK",
-                "text/html; charset=utf-8",
-                page.as_str(),
+                "400 Bad Request",
+                super::chooser::STALE_CHOICE_BODY,
+            )
+            .await;
+            bail!(super::chooser::STALE_CHOICE)
+        }
+        if head.method != "GET" || !body.is_empty() || head.speculative() {
+            respond(
+                &mut stream,
+                "400 Bad Request",
+                "This callback was not accepted.",
             )
             .await;
             continue;
         }
-        if request.method != "POST" || request.path != DEPOSIT_PATH {
-            respond(
-                &mut stream,
-                "404 Not Found",
-                "text/plain; charset=utf-8",
-                "Not found.",
-            )
-            .await;
-            continue;
-        }
-        match parse_deposit(&request.body, state) {
-            Ok(session) => {
-                // Receiving tokens is not success: key minting and durable
-                // credential replacement must finish before the browser is told
-                // to return to a signed-in app. Never expose the service error.
-                let outcome = finish(session).await;
-                let status = if outcome.is_ok() {
-                    "200 OK"
-                } else {
-                    "500 Internal Server Error"
-                };
+        match parse_callback(&head.target, state) {
+            Ok(Some(code)) => {
+                // Acknowledge only after exchange, mint and durable replacement.
+                // Exactly one matching callback can invoke this FnOnce.
+                let outcome = finish(code).await;
                 respond(
                     &mut stream,
-                    status,
-                    "text/plain; charset=utf-8",
+                    if outcome.is_ok() {
+                        "200 OK"
+                    } else {
+                        "500 Internal Server Error"
+                    },
                     if outcome.is_ok() {
                         "Completed."
                     } else {
@@ -324,14 +193,17 @@ where
                 .await;
                 return outcome;
             }
+            Ok(None) => {
+                respond(&mut stream, "400 Bad Request", "Sign-in setup failed.").await;
+                bail!("near_ai_credential_refused")
+            }
             Err(_) => {
                 respond(
                     &mut stream,
                     "400 Bad Request",
-                    "text/plain; charset=utf-8",
                     "This callback was not accepted.",
                 )
-                .await;
+                .await
             }
         }
     }
@@ -342,251 +214,152 @@ mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
 
-    /// Post one deposit and read the status line back.
-    async fn deposit(address: std::net::SocketAddr, body: &str) -> String {
-        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-        stream
-            .write_all(
-                format!(
-                    "POST {DEPOSIT_PATH} HTTP/1.1\r\nHost: {address}\r\nContent-Length: {}\r\n\r\n{body}",
-                    body.len()
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).await.unwrap();
-        String::from_utf8_lossy(&response)
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .to_string()
+    #[test]
+    fn pkce_matches_rfc7636_and_attempts_are_independent() {
+        let pkce = Pkce {
+            verifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk".into(),
+            state: "state".into(),
+        };
+        assert_eq!(
+            pkce.challenge(),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+        let first = Pkce::new().unwrap();
+        let second = Pkce::new().unwrap();
+        assert_eq!(first.verifier().len(), 43);
+        assert_ne!(first.verifier(), first.state);
+        assert_ne!(first.verifier(), second.verifier());
+        assert_ne!(first.state, second.state);
     }
 
     #[test]
-    fn a_deposit_is_accepted_only_with_this_ceremonys_state() {
-        let tokens = parse_deposit(
-            "state=abc&ua=Mozilla/5.0%20Test&token=jwt&refresh_token=rt_x",
-            "abc",
-        )
-        .unwrap();
-        assert_eq!(tokens.tokens.access_token, "jwt");
-        assert_eq!(tokens.tokens.refresh_token, "rt_x");
-        assert_eq!(tokens.user_agent, "Mozilla/5.0 Test");
-        // A different ceremony's state, or none at all, is refused: this is
-        // the whole of the local binding and it must not be optional.
-        assert!(
-            parse_deposit(
-                "state=other&ua=Mozilla/5.0%20Test&token=jwt&refresh_token=rt_x",
-                "abc"
+    fn callbacks_require_unambiguous_code_and_matching_state() {
+        assert_eq!(
+            parse_callback(
+                &format!("{CALLBACK_PATH}?code=one-time&state=state"),
+                "state"
             )
-            .is_err()
+            .unwrap(),
+            Some("one-time".into())
         );
         assert!(
-            parse_deposit("ua=Mozilla/5.0%20Test&token=jwt&refresh_token=rt_x", "abc").is_err()
-        );
-        // Half a credential is not a credential.
-        assert!(parse_deposit("state=abc&ua=Mozilla/5.0%20Test&token=jwt", "abc").is_err());
-        assert!(
-            parse_deposit("state=abc&ua=Mozilla/5.0%20Test&refresh_token=rt_x", "abc").is_err()
-        );
-        assert!(
-            parse_deposit(
-                "state=abc&ua=Mozilla/5.0%20Test&token=&refresh_token=rt_x",
-                "abc"
+            parse_callback(
+                &format!("{CALLBACK_PATH}?error=denied&state=state"),
+                "state"
             )
-            .is_err()
+            .unwrap()
+            .is_none()
         );
-        // A repeated key is malformed, never last-one-wins: a page that
-        // appended a second `state=` must not be able to overwrite the first.
-        assert!(
-            parse_deposit(
-                "state=abc&state=abc&ua=Mozilla/5.0%20Test&token=j&refresh_token=r",
-                "abc"
-            )
-            .is_err()
-        );
-        assert!(
-            parse_deposit(
-                "state=abc&ua=Mozilla/5.0%20Test&token=j&token=j2&refresh_token=r",
-                "abc"
-            )
-            .is_err()
-        );
-        // The agent is as load-bearing as the tokens: a deposit without one
-        // produces a session that cannot ever be refreshed, and the refusal
-        // has to land here rather than minutes later on an unrelated screen.
-        assert!(parse_deposit("state=abc&token=jwt&refresh_token=rt_x", "abc").is_err());
-        assert!(parse_deposit("state=abc&ua=&token=jwt&refresh_token=rt_x", "abc").is_err());
-        assert!(parse_deposit("state=abc&ua=%20%20&token=jwt&refresh_token=rt_x", "abc").is_err());
-        // And one the service would refuse outright is refused here instead.
-        let oversized = "x".repeat(MAX_USER_AGENT_BYTES + 1);
-        assert!(
-            parse_deposit(
-                &format!("state=abc&ua={oversized}&token=jwt&refresh_token=rt_x"),
-                "abc"
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn the_served_page_reaches_only_this_listener_and_quotes_nothing_it_was_given() {
-        let state = random_state().unwrap();
-        let page = bounce_page(&state).unwrap();
-        assert!(page.contains(DEPOSIT_PATH));
-        assert!(page.contains(&state));
-        // No third party learns that a contributor signed in, and nothing is
-        // fetched from a document whose own fragment is a live token.
-        assert!(!page.contains("http://"), "{page}");
-        assert!(!page.contains("https://"), "{page}");
-        // A state that could break out of the JavaScript string literal is
-        // refused rather than escaped.
-        for hostile in ["\";alert(1)//", "a'b", "a\\b", "", &"a".repeat(65)] {
-            assert!(bounce_page(hostile).is_err(), "{hostile}");
+        for suffix in [
+            "",
+            "?code=c",
+            "?code=c&state=wrong",
+            "?code=c&state=state&state=state",
+            "?code=c&state=state&code=c",
+            "?code=c&error=denied&state=state",
+            "?token=jwt&refresh_token=rt&state=state",
+            "?code=c&state=state&extra=x",
+            "?error=denied",
+            "?code=&state=state",
+            "?code=c&state=state#token=jwt",
+            "/other?code=c&state=state",
+        ] {
+            assert!(
+                parse_callback(&format!("{CALLBACK_PATH}{suffix}"), "state").is_err(),
+                "{suffix}"
+            );
         }
     }
 
-    #[test]
-    fn a_session_never_prints_itself() {
-        let rendered = format!(
-            "{:?}",
-            SessionTokens {
-                access_token: "jwt-secret".into(),
-                refresh_token: "rt_secret".into(),
-            }
-        );
-        assert!(!rendered.contains("secret"), "{rendered}");
-    }
-
-    #[tokio::test]
-    async fn the_redirect_is_answered_with_the_bounce_and_the_deposit_completes_it() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let state = random_state().unwrap();
-        let task = tokio::spawn({
-            let state = state.clone();
-            async move { receive_session(listener, &state, |tokens| async { Ok(tokens) }).await }
-        });
-
-        // The browser's redirect arrives with the fragment already stripped.
-        // Answering it must not end the ceremony -- if it did, the tokens
-        // would never arrive at all.
+    async fn send(address: std::net::SocketAddr, method: &str, target: &str, host: &str) -> String {
         let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
         stream
-            .write_all(
-                format!("GET {CALLBACK_PATH} HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes(),
-            )
+            .write_all(format!("{method} {target} HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes())
             .await
             .unwrap();
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).await.unwrap();
-        let response = String::from_utf8_lossy(&response);
-        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
-        assert!(response.contains(DEPOSIT_PATH), "{response}");
-
-        // An unrelated local request is answered and ignored, not consumed.
-        assert_eq!(
-            deposit(address, "state=wrong&token=j&refresh_token=r").await,
-            "HTTP/1.1 400 Bad Request"
-        );
-        assert_eq!(
-            deposit(
-                address,
-                &format!("state={state}&ua=Mozilla/5.0%20Test&token=jwt&refresh_token=rt_x")
-            )
-            .await,
-            "HTTP/1.1 200 OK"
-        );
-        let tokens = task.await.unwrap().unwrap();
-        assert_eq!(tokens.tokens.access_token, "jwt");
-        assert_eq!(tokens.tokens.refresh_token, "rt_x");
-        assert_eq!(tokens.user_agent, "Mozilla/5.0 Test");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        response
     }
 
     #[tokio::test]
-    async fn browser_success_waits_for_credential_setup_to_finish() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            receive_session(listener, "state", |tokens| async move {
-                assert_eq!(tokens.tokens.refresh_token, "rt_x");
-                started_tx.send(()).unwrap();
-                finish_rx.await.unwrap();
-                Ok(())
-            })
-            .await
-        });
-        let mut browser = tokio::spawn(async move {
-            deposit(
-                address,
-                "state=state&ua=Mozilla/5.0%20Test&token=jwt&refresh_token=rt_x",
-            )
-            .await
-        });
-        started_rx.await.unwrap();
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut browser)
-                .await
-                .is_err()
-        );
-        finish_tx.send(()).unwrap();
-        assert_eq!(browser.await.unwrap(), "HTTP/1.1 200 OK");
-        server.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn valid_browser_login_does_not_report_success_when_setup_fails() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            receive_session(listener, "state", |_tokens| async {
-                Err::<(), _>(anyhow!("synthetic credential storage failure"))
-            })
-            .await
-        });
-        assert_eq!(
-            deposit(
-                address,
-                "state=state&ua=Mozilla/5.0%20Test&token=jwt&refresh_token=rt_x"
-            )
-            .await,
-            "HTTP/1.1 500 Internal Server Error"
-        );
-        assert!(server.await.unwrap().is_err());
-    }
-
-    #[tokio::test]
-    async fn a_deposit_split_across_packets_still_arrives_whole() {
+    async fn unsolicited_and_legacy_callbacks_do_not_consume_the_attempt() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
-            receive_session(listener, "state", |tokens| async { Ok(tokens) }).await
+            receive_session_after(listener, "state", None, |code| async move { Ok(code) }).await
         });
-        let body = "state=state&ua=Mozilla/5.0%20Test&token=jwt&refresh_token=rt_x";
-        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-        stream
-            .write_all(format!("POST {DEPOSIT_PATH} HTTP/1.1\r\nHost: 127.0").as_bytes())
-            .await
-            .unwrap();
-        tokio::task::yield_now().await;
-        stream
-            .write_all(
-                format!(
-                    ".0.1:{}\r\nContent-Length: {}\r\n\r\n",
-                    address.port(),
-                    body.len()
+        for (method, suffix, host) in [
+            ("GET", "", address.to_string()),
+            ("POST", "?code=c&state=state", address.to_string()),
+            ("GET", "?code=c&state=wrong", address.to_string()),
+            (
+                "GET",
+                "?token=jwt&refresh_token=rt&state=state",
+                address.to_string(),
+            ),
+            ("GET", "?code=c&state=state", "evil.example".into()),
+        ] {
+            let response = send(address, method, &format!("{CALLBACK_PATH}{suffix}"), &host).await;
+            assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+            assert!(!task.is_finished());
+        }
+        let response = send(
+            address,
+            "GET",
+            &format!("{CALLBACK_PATH}?code=secret-code&state=state"),
+            &address.to_string(),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 200"));
+        assert!(!response.contains("secret-code"));
+        assert!(!response.contains("state=state"));
+        assert_eq!(task.await.unwrap().unwrap(), "secret-code");
+    }
+
+    #[tokio::test]
+    async fn browser_success_waits_for_credential_setup_and_failures_are_fixed() {
+        for succeeds in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                receive_session_after(listener, "state", None, |_| async move {
+                    start_tx.send(()).unwrap();
+                    done_rx.await.unwrap();
+                    if succeeds {
+                        Ok(())
+                    } else {
+                        Err(anyhow!("synthetic-secret-error"))
+                    }
+                })
+                .await
+            });
+            let mut browser = tokio::spawn(async move {
+                send(
+                    address,
+                    "GET",
+                    &format!("{CALLBACK_PATH}?code=c&state=state"),
+                    &address.to_string(),
                 )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-        tokio::task::yield_now().await;
-        // The body itself arrives after the headers, in its own packet.
-        stream.write_all(body.as_bytes()).await.unwrap();
-        assert_eq!(task.await.unwrap().unwrap().tokens.refresh_token, "rt_x");
+                .await
+            });
+            start_rx.await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), &mut browser)
+                    .await
+                    .is_err()
+            );
+            done_tx.send(()).unwrap();
+            let response = browser.await.unwrap();
+            assert!(response.starts_with(if succeeds {
+                "HTTP/1.1 200"
+            } else {
+                "HTTP/1.1 500"
+            }));
+            assert!(!response.contains("synthetic-secret-error"));
+            assert_eq!(task.await.unwrap().is_ok(), succeeds);
+        }
     }
 }
