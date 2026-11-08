@@ -2125,6 +2125,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "pipeline_acceptance_is_server_acceptance",
         include_str!("../../../../migrations/V155__pipeline_acceptance_is_server_acceptance.sql"),
     ),
+    // V156: a pipeline_settle gate decision passes when the pipeline
+    // credited the submission (positive trace_credit ledger row for its run,
+    // no duplicate withholding), not by perplexity AND novelty.
+    (
+        156,
+        "pipeline_credit_is_a_passed_gate",
+        include_str!("../../../../migrations/V156__pipeline_credit_is_a_passed_gate.sql"),
+    ),
 ];
 
 /// The body of `create_or_reuse_account`, inside a transaction already under
@@ -9505,6 +9513,114 @@ mod tests {
              tenant-context helpers for application paths and an explicit test hook for \
              raw RLS probes"
         );
+    }
+
+    /// V156 (owner decision O3): a `pipeline_settle` gate decision passes
+    /// when the pipeline credited the submission. The predicate lives in one
+    /// helper that both the recorder and the evaluation inputs call, names
+    /// the pipeline's own duplicate labels and Trace Credit instrument (read
+    /// here from the Rust constants, so a renamed label fails this test), is
+    /// invalidated by a `credit_withheld_reason` change, and uses nothing the
+    /// PostgreSQL 15 pilot lacks.
+    #[test]
+    fn v156_derives_a_pipeline_gate_outcome_from_its_credit() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        let file_marker = format!("migrations/V{}__pipeline_credit_is_a_passed_gate.sql", 156);
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            2,
+            "V156 must be named exactly twice: by the MIGRATIONS table and by this test"
+        );
+        assert!(
+            super::MIGRATIONS
+                .iter()
+                .any(|(version, name, _)| *version == 156
+                    && *name == "pipeline_credit_is_a_passed_gate"),
+            "V156 must record itself under its own file stem"
+        );
+        let sql = include_str!("../../../../migrations/V156__pipeline_credit_is_a_passed_gate.sql");
+        let code: String = sql
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let duplicates = format!(
+            "g.credit_withheld_reason NOT IN ('{}','{}')",
+            crate::versioned_pipeline::PIPELINE_SKIPPED_DUPLICATE_LABEL,
+            crate::versioned_pipeline::PIPELINE_CACHED_DUPLICATE_LABEL,
+        );
+        let instrument = format!(
+            "c.instrument_id='{}'",
+            trace_commons_gate_api::pipeline::TRACE_CREDIT_INSTRUMENT_ID
+        );
+        for required in [
+            "CREATE FUNCTION trace_account_trust_pipeline_gate_credited(p_tenant TEXT,p_decision UUID)",
+            "ALTER FUNCTION trace_account_trust_pipeline_gate_credited(TEXT,UUID) OWNER TO trace_account_admission_guard;",
+            "REVOKE ALL ON FUNCTION trace_account_trust_pipeline_gate_credited(TEXT,UUID) FROM PUBLIC;",
+            "p_tenant IS NOT DISTINCT FROM public.trace_current_tenant_id()",
+            "g.source='pipeline_settle'",
+            "g.credit_withheld_reason IS NULL",
+            duplicates.as_str(),
+            "c.pipeline_run_id=g.pipeline_run_id",
+            instrument.as_str(),
+            "c.points_delta ~ '^[0-9]+([.][0-9]+)?$'",
+            "c.points_delta ~ '[1-9]'",
+            "CREATE OR REPLACE FUNCTION trace_account_trust_evaluation_inputs(",
+            "CREATE OR REPLACE FUNCTION trace_record_account_trust_fact(",
+            "CREATE OR REPLACE FUNCTION trace_account_trust_advance_gate_frontiers()",
+            "OLD.source,OLD.pipeline_run_id,OLD.credit_withheld_reason)",
+            "NEW.source,NEW.pipeline_run_id,NEW.credit_withheld_reason)",
+            "GRANT SELECT (credit_withheld_reason,pipeline_run_id)\n    ON trace_gate_decisions TO trace_account_admission_guard;",
+            "GRANT SELECT (points_delta,pipeline_run_id,instrument_id)\n    ON trace_credit_ledger TO trace_account_admission_guard;",
+            "UPDATE public.trace_account_trust_frontiers SET generation=generation+1",
+            // Legacy rows keep the conjunction and the never-promote rule.
+            "WHEN f.outcome IS DISTINCT FROM 'evaluated_passed' THEN f.outcome",
+            "WHEN v_perplexity AND v_novelty THEN 'evaluated_passed'",
+        ] {
+            assert!(code.contains(required), "V156 is missing `{required}`");
+        }
+        assert_eq!(
+            code.matches("public.trace_account_trust_pipeline_gate_credited(")
+                .count(),
+            2,
+            "the recorder and the evaluation inputs must both call the one predicate"
+        );
+        // Every guard role granted to the migrator is revoked again.
+        for role in [
+            "trace_account_admission_guard",
+            "trace_account_trust_input_guard",
+            "trace_account_trust_evaluation_guard",
+        ] {
+            assert_eq!(
+                code.matches(&format!("GRANT {role} TO CURRENT_USER;"))
+                    .count(),
+                code.matches(&format!("REVOKE {role} FROM CURRENT_USER;"))
+                    .count(),
+                "V156 must revoke {role} from the migrator as often as it grants it"
+            );
+        }
+        let upper = code.to_uppercase();
+        for forbidden in [
+            "BYPASSRLS",
+            "SUPERUSER",
+            "DISABLE ROW LEVEL SECURITY",
+            "GRANT EXECUTE",
+            "TO PUBLIC",
+            "::NUMERIC",
+            // PostgreSQL 16-only syntax; the pilot runs 15.
+            "WITH INHERIT",
+            "WITH SET",
+            "'SET')",
+            "JSON_OBJECT(",
+            "JSON_ARRAY(",
+            " IS JSON",
+        ] {
+            assert!(
+                !upper.contains(forbidden),
+                "V156 must not contain `{forbidden}`"
+            );
+        }
     }
 }
 

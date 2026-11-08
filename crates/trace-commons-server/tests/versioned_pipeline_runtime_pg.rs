@@ -46973,6 +46973,20 @@ async fn consumers_see_pipeline_rows() {
         }),
         "the pipeline row is a gate evaluation fact candidate"
     );
+    // V156's precondition for the outcome below: this run credited nothing.
+    let credited: i64 = tx
+        .query_one(
+            "SELECT count(*) FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND pipeline_run_id = $2 AND instrument_id = 'trace_credit'",
+            &[&tenant, &run.run_id],
+        )
+        .await
+        .expect("count the run's Trace Credit ledger rows")
+        .get(0);
+    assert_eq!(
+        credited, 0,
+        "the compatibility run is zero-delta, so V156 reads its gate row as not passed"
+    );
     let outcome: Option<String> = tx
         .query_one(
             "SELECT trace_record_account_trust_fact($1, $2, 'gate_evaluation', $3)",
@@ -46981,10 +46995,14 @@ async fn consumers_see_pipeline_rows() {
         .await
         .expect("record the gate evaluation fact")
         .get(0);
+    // V156 (O3): a pipeline row passes on the pipeline's own credit, not on
+    // perplexity AND novelty. This compatibility run is zero-delta (no
+    // award, no Trace Credit ledger row), so the recorder reads it as a
+    // failed gate even though it passed both.
     assert_eq!(
         outcome.as_deref(),
-        Some("evaluated_passed"),
-        "an accepted pipeline submission that passed both gates"
+        Some("evaluated_failed"),
+        "an accepted pipeline submission that passed both gates but was credited nothing"
     );
     tx.commit().await.unwrap();
 }

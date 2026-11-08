@@ -2891,13 +2891,25 @@ async fn a_pipeline_settle_decision_surfaces_with_its_pipeline_evaluator_label()
         &bundle_id
     ));
     let label = format!("pipeline:{bundle_id}");
+    let run = Uuid::new_v4();
+    // V156: a pipeline row passes on the pipeline's own credit, so the run
+    // credits the submission, as Settle does before it writes the row.
+    let trace: Uuid = admin
+        .query_one(
+            "SELECT trace_id FROM trace_submissions WHERE tenant_id=$1 AND submission_id=$2",
+            &[&tenant, &submission],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    seed_pipeline_credit(admin, &tenant, submission, trace, run, "1.5", accepted_at).await;
     let gate: Uuid = admin
         .query_one(
             "UPDATE trace_gate_decisions
                 SET source='pipeline_settle', pipeline_run_id=$3, gate_policy_version=$4
               WHERE tenant_id=$1 AND submission_id=$2
               RETURNING decision_id",
-            &[&tenant, &submission, &Uuid::new_v4(), &label],
+            &[&tenant, &submission, &run, &label],
         )
         .await
         .unwrap()
@@ -2965,5 +2977,373 @@ async fn a_pipeline_settle_decision_surfaces_with_its_pipeline_evaluator_label()
         (unlisted.units, unlisted.tier),
         (0, 0),
         "another bundle's label does not count this decision"
+    );
+}
+
+/// The ledger row a versioned-pipeline Settle leg writes for `run`: the
+/// Trace Credit instrument, the SettledNoveltyUtility event type and actor
+/// role, and V94's pipeline shape (run, Score outcome and instrument all
+/// set).
+async fn seed_pipeline_credit(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    submission: Uuid,
+    trace: Uuid,
+    run: Uuid,
+    points_delta: &str,
+    occurred_at: DateTime<Utc>,
+) -> Uuid {
+    let event = Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_credit_ledger(tenant_id,credit_event_id,submission_id,trace_id,
+                credit_account_ref,event_type,points_delta,reason,actor_principal_ref,actor_role,
+                settlement_state,occurred_at,pipeline_run_id,score_outcome_id,instrument_id)
+             VALUES($1,$2,$3,$4,'fixture','novelty_utility',$5,'fixture','pipeline',
+                    $6,'pending',$7,$8,$9,$10)",
+            &[
+                &tenant,
+                &event,
+                &submission,
+                &trace,
+                &points_delta,
+                &trace_commons_server::versioned_pipeline_credit::PIPELINE_CREDIT_ACTOR_ROLE,
+                &occurred_at,
+                &run,
+                &Uuid::new_v4(),
+                &trace_commons_gate_api::pipeline::TRACE_CREDIT_INSTRUMENT_ID,
+            ],
+        )
+        .await
+        .unwrap();
+    event
+}
+
+/// V156 (owner decision O3): a `pipeline_settle` gate decision passes when
+/// the pipeline accepted and credited the submission -- a positive Trace
+/// Credit ledger row for its run and no duplicate withholding -- whatever its
+/// perplexity/novelty booleans. A pipeline row that credited nothing, or
+/// whose credit was withheld as a duplicate, fails even with both booleans
+/// TRUE. A legacy row keeps perplexity AND novelty, credit or not. The
+/// recorder stores the same outcome the inputs re-derive; a fact stored
+/// under V137's conjunction reads as passed once credited; and a later
+/// duplicate withholding invalidates the account's evaluation and fails the
+/// fact.
+#[tokio::test]
+async fn a_pipeline_gate_fact_passes_on_pipeline_credit_not_the_conjunction() {
+    let Some(fx) = fixture().await else {
+        return;
+    };
+    let admin = &fx.admin;
+    let worker = login_with_role(
+        &fx,
+        "tc_account_trust_pipeline_credit_login",
+        "trace_account_trust_worker",
+    )
+    .await;
+    fx.admin_db
+        .enable_external_account_trust_growth()
+        .await
+        .unwrap();
+    let tenant = anchored_tenant();
+    let owner = principal();
+    let account = seed_account(admin, &tenant, &[&owner]).await;
+    let trust = find(&worker, &tenant, account).await;
+    let accepted_at = Utc::now() - chrono::Duration::seconds(60);
+    let bundle_id = format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+    let label = format!("pipeline:{bundle_id}");
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Case {
+        /// Credited, both booleans FALSE: passes.
+        CreditedGateFailing,
+        /// Both booleans TRUE, credit withheld as a duplicate, no ledger row.
+        DuplicateWithheld,
+        /// Both booleans TRUE, a zero ledger row, no withholding.
+        ZeroCredit,
+        /// A legacy row whose booleans fail, with a positive pipeline-shaped
+        /// credit for an unrelated run: still the conjunction.
+        LegacyGateFailing,
+    }
+    // A pipeline row (case, perplexity/novelty, points, withheld reason).
+    let cases = [
+        (
+            Case::CreditedGateFailing,
+            false,
+            Some("2.25"),
+            None,
+            TrustFactOutcome::EvaluatedPassed,
+        ),
+        (
+            Case::DuplicateWithheld,
+            true,
+            None,
+            Some(trace_commons_server::versioned_pipeline::PIPELINE_SKIPPED_DUPLICATE_LABEL),
+            TrustFactOutcome::EvaluatedFailed,
+        ),
+        (
+            Case::ZeroCredit,
+            true,
+            Some("0"),
+            None,
+            TrustFactOutcome::EvaluatedFailed,
+        ),
+        (
+            Case::LegacyGateFailing,
+            false,
+            Some("3"),
+            None,
+            TrustFactOutcome::EvaluatedFailed,
+        ),
+    ];
+    let mut gates = Vec::new();
+    for (case, passed, points, withheld, expected) in cases {
+        let (submission, trace) =
+            seed_submission(admin, &tenant, &owner, "accepted", accepted_at).await;
+        let run = Uuid::new_v4();
+        if let Some(points) = points {
+            seed_pipeline_credit(admin, &tenant, submission, trace, run, points, accepted_at).await;
+        }
+        let gate = seed_clustered_decision(
+            admin,
+            &tenant,
+            submission,
+            Some(Uuid::new_v4()),
+            accepted_at,
+        )
+        .await;
+        if case == Case::LegacyGateFailing {
+            admin
+                .execute(
+                    "UPDATE trace_gate_decisions SET perplexity_passed=$3,novelty_passed=$3
+                      WHERE tenant_id=$1 AND decision_id=$2",
+                    &[&tenant, &gate, &passed],
+                )
+                .await
+                .unwrap();
+        } else {
+            admin
+                .execute(
+                    "UPDATE trace_gate_decisions
+                        SET source='pipeline_settle',pipeline_run_id=$3,gate_policy_version=$4,
+                            perplexity_passed=$5,novelty_passed=$5,credit_withheld_reason=$6
+                      WHERE tenant_id=$1 AND decision_id=$2",
+                    &[&tenant, &gate, &run, &label, &passed, &withheld],
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            worker
+                .record_account_trust_fact(&trust, TrustFactSource::GateEvaluation(gate))
+                .await
+                .unwrap(),
+            Some(expected),
+            "{case:?}: the recorder stores the pipeline credit verdict"
+        );
+        assert_eq!(
+            worker
+                .record_account_trust_fact(
+                    &trust,
+                    TrustFactSource::AcceptedSubmissionStatus(submission)
+                )
+                .await
+                .unwrap(),
+            Some(TrustFactOutcome::Accepted),
+            "{case:?}: server acceptance"
+        );
+        gates.push((case, gate, expected));
+    }
+
+    // A fact recorded before V156 holds V137's conjunction. Stand one in
+    // directly: a credited, gate-failing pipeline row stored as failed.
+    let (stale_submission, stale_trace) =
+        seed_submission(admin, &tenant, &owner, "accepted", accepted_at).await;
+    let stale_run = Uuid::new_v4();
+    seed_pipeline_credit(
+        admin,
+        &tenant,
+        stale_submission,
+        stale_trace,
+        stale_run,
+        "0.000001",
+        accepted_at,
+    )
+    .await;
+    let stale_gate = seed_clustered_decision(
+        admin,
+        &tenant,
+        stale_submission,
+        Some(Uuid::new_v4()),
+        accepted_at,
+    )
+    .await;
+    admin
+        .execute(
+            "UPDATE trace_gate_decisions
+                SET source='pipeline_settle',pipeline_run_id=$3,gate_policy_version=$4,
+                    perplexity_passed=FALSE,novelty_passed=FALSE
+              WHERE tenant_id=$1 AND decision_id=$2",
+            &[&tenant, &stale_gate, &stale_run, &label],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_account_trust_facts(tenant_id,account_id,source_kind,source_id,
+                submission_id,outcome,evaluator_version,occurred_at)
+             VALUES($1,$2,'gate_evaluation',$3,$4,'evaluated_failed',$5,$6)",
+            &[
+                &tenant,
+                &account,
+                &stale_gate,
+                &stale_submission,
+                &label,
+                &accepted_at,
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        worker
+            .record_account_trust_fact(
+                &trust,
+                TrustFactSource::AcceptedSubmissionStatus(stale_submission)
+            )
+            .await
+            .unwrap(),
+        Some(TrustFactOutcome::Accepted)
+    );
+
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    let outcome_of = |inputs: &[trace_commons_server::account_trust_rule::EvaluationFact],
+                      gate: Uuid| {
+        inputs
+            .iter()
+            .find(|f| f.source_kind == "gate_evaluation" && f.source_id == gate)
+            .map(|f| f.outcome.clone())
+            .expect("the gate fact is an input")
+    };
+    for (case, gate, expected) in &gates {
+        assert_eq!(
+            outcome_of(&inputs, *gate),
+            expected.as_str(),
+            "{case:?}: the inputs re-derive what the recorder stored"
+        );
+    }
+    assert_eq!(
+        outcome_of(&inputs, stale_gate),
+        "evaluated_passed",
+        "a pipeline fact stored under the conjunction reads from its credit"
+    );
+
+    let policy = || {
+        let json = serde_json::json!({
+            "version": "growth-pipeline-credit-test-v1",
+            "processing_cost_bound": 10,
+            "bounded_allowance": 100,
+            "period": {"mode": "fixed", "seconds": 604800},
+            "growth_rule": "tiered-v1",
+            "growth": {
+                "window_seconds": 3650 * 86400,
+                "weekly_cap": 10,
+                "q_min_micros": null,
+                "penalty_cooldown_seconds": 0,
+                "evaluation_max_age_seconds": 86400,
+                "allowance_ceiling": 300,
+                "acceptance_source": "status",
+                "evaluator_versions": ["gate-v1", label],
+                "dedup_signal_versions": [DEDUP_V2],
+                "tiers": [
+                    {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                    {"units": 1, "active_weeks": 1, "age_seconds": 0, "multiplier": 2}
+                ]
+            }
+        });
+        trace_commons_server::account_trust_rule::parse_growth_policy(
+            &json.to_string(),
+            &["growth-pipeline-credit-test-v1"],
+        )
+        .unwrap()
+    };
+    let evaluation =
+        trace_commons_server::account_trust_rule::evaluate(&policy(), &inputs, Utc::now());
+    assert_eq!(
+        evaluation.units, 2,
+        "only the two credited pipeline submissions earn a unit; the duplicate, the \
+         zero-credit run and the failing legacy row do not"
+    );
+
+    // A later duplicate withholding on the credited row invalidates the
+    // account's evaluation and fails the fact.
+    let (applied, _) = worker
+        .evaluate_and_record_applied_account_trust(&trust, &policy())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(applied.units, 2);
+    let generation = || async {
+        admin
+            .query_one(
+                "SELECT generation FROM trace_account_trust_frontiers
+                  WHERE tenant_id=$1 AND account_id=$2",
+                &[&tenant, &account],
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0)
+    };
+    let before = generation().await;
+    let credited = gates
+        .iter()
+        .find(|(case, _, _)| *case == Case::CreditedGateFailing)
+        .map(|(_, gate, _)| *gate)
+        .unwrap();
+    admin
+        .execute(
+            "UPDATE trace_gate_decisions SET credit_withheld_reason=$3
+              WHERE tenant_id=$1 AND decision_id=$2",
+            &[
+                &tenant,
+                &credited,
+                &trace_commons_server::versioned_pipeline::PIPELINE_CACHED_DUPLICATE_LABEL,
+            ],
+        )
+        .await
+        .unwrap();
+    assert!(
+        generation().await > before,
+        "a credit_withheld_reason change bumps the account's generation"
+    );
+    let inputs = worker
+        .account_trust_evaluation_inputs(&trust)
+        .await
+        .unwrap();
+    assert_eq!(outcome_of(&inputs, credited), "evaluated_failed");
+    let evaluation =
+        trace_commons_server::account_trust_rule::evaluate(&policy(), &inputs, Utc::now());
+    assert_eq!(evaluation.units, 1);
+
+    // The predicate is private to its guard: the worker reaches it only
+    // through the recorder and the evaluation inputs.
+    let raw = worker
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(
+        raw.query_one(
+            "SELECT trace_account_trust_pipeline_gate_credited('tenant',NULL)",
+            &[]
+        )
+        .await
+        .unwrap_err()
+        .code()
+        .map(|code| code.code()),
+        Some("42501"),
+        "the worker cannot call the pipeline credit helper directly"
     );
 }
