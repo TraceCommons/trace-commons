@@ -211,6 +211,37 @@ pub struct WelcomeLegalCopy {
     pub privacy: &'static str,
     pub terms_url: &'static str,
     pub privacy_url: &'static str,
+    /// The disabled checkbox's hint until the terms have been scrolled to
+    /// the end. DRAFT, NEEDS APPROVAL.
+    pub scroll_hint: &'static str,
+    /// While the terms document loads. DRAFT, NEEDS APPROVAL.
+    pub loading: &'static str,
+    /// When the terms document could not be loaded. DRAFT, NEEDS APPROVAL.
+    pub failed: &'static str,
+    /// Re-runs the load after `failed`. DRAFT, NEEDS APPROVAL.
+    pub retry: &'static str,
+    /// Under the terms while the published version has `in_effect: false`
+    /// (the current documents are not valid, owner 2026-11-09). DRAFT,
+    /// NEEDS APPROVAL.
+    pub not_in_effect: &'static str,
+    /// The terms sheet's accept button, after new terms are published.
+    /// DRAFT, NEEDS APPROVAL.
+    pub accept_button: &'static str,
+}
+
+/// New Terms of Service after onboarding: the Home notice and the menu bar
+/// row the owner asked for (2026-11-09). Their wording is DRAFT, NEEDS
+/// APPROVAL (copy guide rule 9).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TermsHoldCopy {
+    /// DRAFT, NEEDS APPROVAL.
+    pub notice_title: &'static str,
+    /// DRAFT, NEEDS APPROVAL.
+    pub notice_body: &'static str,
+    /// The notice's one button; opens the terms sheet. DRAFT, NEEDS APPROVAL.
+    pub review: &'static str,
+    /// The menu bar dropdown's row. DRAFT, NEEDS APPROVAL.
+    pub menu_row: &'static str,
 }
 
 /// Traces: what the watched tools' traces could earn. The titles and
@@ -479,6 +510,7 @@ pub struct FirstRunCopy {
     pub uses: UsesCopy,
     pub traces: TracesCopy,
     pub private_ai: PrivateAiCopy,
+    pub terms_hold: TermsHoldCopy,
 }
 
 #[must_use]
@@ -515,6 +547,13 @@ pub fn first_run_copy() -> FirstRunCopy {
                 privacy: "Privacy Policy",
                 terms_url: crate::channel::TERMS_URL,
                 privacy_url: crate::channel::PRIVACY_URL,
+                // DRAFT, NEEDS APPROVAL (the six strings below).
+                scroll_hint: "Scroll to the end to accept",
+                loading: "Loading the Terms of Service",
+                failed: "Couldn't load the Terms of Service. Check your connection.",
+                retry: "Try again",
+                not_in_effect: "These terms are a draft and are not yet in effect.",
+                accept_button: "Accept",
             },
         },
         join: JoinCopy {
@@ -673,6 +712,14 @@ pub fn first_run_copy() -> FirstRunCopy {
             title_bold: "Private AI",
             can_connect: "of {total} tools can connect",
             can_connect_one: "of {total} tool can connect",
+        },
+        // DRAFT, NEEDS APPROVAL (all four): new notices the owner asked
+        // for on 2026-11-09; their wording is not approved yet.
+        terms_hold: TermsHoldCopy {
+            notice_title: "New Terms of Service",
+            notice_body: "Uploads are paused until you accept.",
+            review: "Review terms",
+            menu_row: "Uploads paused: new Terms of Service",
         },
     }
 }
@@ -1270,5 +1317,48 @@ mod tests {
         assert_eq!(line(serde_json::json!({"traces": null})), None);
         assert_eq!(line(serde_json::json!({})), None);
         assert_eq!(traces_estimate_line_json("not json"), None);
+    }
+
+    /// The terms reader's and the terms hold's strings are all present, and
+    /// the labels (buttons, a hint, a row, a title) end without a period;
+    /// only the sentences do.
+    #[test]
+    fn terms_strings_are_present_and_labels_have_no_trailing_period() {
+        let copy = first_run_copy();
+        let legal = &copy.welcome.legal;
+        let hold = &copy.terms_hold;
+        let labels = [
+            legal.scroll_hint,
+            legal.loading,
+            legal.retry,
+            legal.accept_button,
+            hold.notice_title,
+            hold.review,
+            hold.menu_row,
+        ];
+        for label in labels {
+            assert!(!label.trim().is_empty(), "empty label");
+            assert!(!label.ends_with('.'), "{label}");
+        }
+        for sentence in [legal.failed, legal.not_in_effect, hold.notice_body] {
+            assert!(!sentence.trim().is_empty(), "empty sentence");
+            assert!(sentence.ends_with('.'), "{sentence}");
+        }
+        assert_eq!(legal.scroll_hint, "Scroll to the end to accept");
+        assert_eq!(legal.loading, "Loading the Terms of Service");
+        assert_eq!(
+            legal.failed,
+            "Couldn't load the Terms of Service. Check your connection."
+        );
+        assert_eq!(legal.retry, "Try again");
+        assert_eq!(
+            legal.not_in_effect,
+            "These terms are a draft and are not yet in effect."
+        );
+        assert_eq!(legal.accept_button, "Accept");
+        assert_eq!(hold.notice_title, "New Terms of Service");
+        assert_eq!(hold.notice_body, "Uploads are paused until you accept.");
+        assert_eq!(hold.review, "Review terms");
+        assert_eq!(hold.menu_row, "Uploads paused: new Terms of Service");
     }
 }
