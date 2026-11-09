@@ -122,6 +122,7 @@ pub mod skill_loop;
 pub mod state;
 pub mod stored_cloud_credentials;
 pub(crate) mod subscription_usage;
+pub mod terms_state;
 #[cfg(test)]
 pub(crate) mod test_paths;
 #[cfg(test)]
