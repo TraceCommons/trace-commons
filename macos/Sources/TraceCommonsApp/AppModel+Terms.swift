@@ -23,8 +23,6 @@ struct TermsHoldSurface: Equatable {
     let body: String
     let review: String
     let menuRow: String
-    /// Always false: the notice has no X and no Not now.
-    let closable = false
 
     static func of(held: Bool, words: FirstRunCopy.TermsHold?) -> TermsHoldSurface? {
         guard held, let words else { return nil }

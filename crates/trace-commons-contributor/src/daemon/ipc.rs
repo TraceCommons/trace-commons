@@ -7437,6 +7437,9 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "legacy_invite_migrate" => super::legacy_migration::handle_migrate(shared, req).await,
         "near_ai_credential_start" => super::nearai_credential::handle_start(shared, req).await,
         "near_ai_credential_migrate" => super::nearai_credential::handle_migrate(shared, req).await,
+        // Also on the sync path, which decides the answer; here the site is
+        // checked again first when the version named is not the cached one.
+        "terms_accept" => super::terms_state::handle_accept_async(shared, req).await,
         // Both of these answer identically on the sync path -- they are in
         // `handle_request` too, and that is what defines the response. The
         // override exists so the reconcile that makes the answer true of the
@@ -20634,7 +20637,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 112, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 84, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 85, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

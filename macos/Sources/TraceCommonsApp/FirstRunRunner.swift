@@ -184,12 +184,19 @@ final class FirstRunRunner: ObservableObject {
         self.finishedNotice = finishedNotice
     }
 
-    func canLeaveWelcome(legal: FirstRunCopy.Welcome.Legal?) -> Bool {
-        state.step == .welcome && legal != nil && acceptedTerms != nil
+    /// Welcome may be left only with a loaded document (`terms`, Welcome's
+    /// loader) that is the one accepted, version and hash. `acceptedTerms`
+    /// outlives Back while Welcome's loader starts over, so an acceptance
+    /// alone does not open the step while the terms load or after they
+    /// failed (spec section 2).
+    func canLeaveWelcome(legal: FirstRunCopy.Welcome.Legal?, terms: FetchedTerms?) -> Bool {
+        guard state.step == .welcome, legal != nil, let acceptedTerms, let terms else { return false }
+        return acceptedTerms.version == terms.document.version
+            && acceptedTerms.contentSHA256 == terms.contentSHA256
     }
 
-    func continueFromWelcome(legal: FirstRunCopy.Welcome.Legal?) {
-        guard canLeaveWelcome(legal: legal) else { return }
+    func continueFromWelcome(legal: FirstRunCopy.Welcome.Legal?, terms: FetchedTerms?) {
+        guard canLeaveWelcome(legal: legal, terms: terms) else { return }
         state = FirstRunNavigation.next(state)
     }
 

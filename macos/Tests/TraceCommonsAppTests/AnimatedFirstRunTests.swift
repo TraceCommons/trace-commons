@@ -55,6 +55,13 @@ final class AnimatedFirstRunTests: XCTestCase {
         version: "2026-08-22-draft", contentSHA256: String(repeating: "a", count: 64),
         acceptedAt: Date(timeIntervalSince1970: 1_762_689_600))
 
+    /// The document `accepted` names, as loaded on Welcome.
+    private static let loaded = FetchedTerms(
+        document: TermsDocument(
+            version: "2026-08-22-draft", effective: "2026-08-22", inEffect: false, title: "T",
+            blocks: [.paragraph("p")]),
+        contentSHA256: String(repeating: "a", count: 64))
+
     /// Welcome is left only with terms that were read and accepted: the
     /// runner holds the accepted version and hash, unticking takes it back,
     /// and Back keeps it.
@@ -63,21 +70,22 @@ final class AnimatedFirstRunTests: XCTestCase {
         let daemon = RecordingFirstRunDaemon()
         let runner = FirstRunRunner(state: FirstRunState(), daemon: daemon)
         let legal = try XCTUnwrap(words().welcome.legal)
+        let terms = Self.loaded
         XCTAssertNil(runner.acceptedTerms)
-        XCTAssertFalse(runner.canLeaveWelcome(legal: legal))
-        runner.continueFromWelcome(legal: legal)
+        XCTAssertFalse(runner.canLeaveWelcome(legal: legal, terms: terms))
+        runner.continueFromWelcome(legal: legal, terms: terms)
         XCTAssertEqual(runner.state.step, .welcome)
 
         runner.acceptedTerms = Self.accepted
-        XCTAssertTrue(runner.canLeaveWelcome(legal: legal))
+        XCTAssertTrue(runner.canLeaveWelcome(legal: legal, terms: terms))
         runner.acceptedTerms = nil
-        runner.continueFromWelcome(legal: legal)
+        runner.continueFromWelcome(legal: legal, terms: terms)
         XCTAssertEqual(runner.state.step, .welcome, "unticking closes the gate again")
 
         runner.acceptedTerms = Self.accepted
-        runner.continueFromWelcome(legal: legal)
+        runner.continueFromWelcome(legal: legal, terms: terms)
         XCTAssertEqual(runner.state.step, .tools)
-        runner.continueFromWelcome(legal: legal)
+        runner.continueFromWelcome(legal: legal, terms: terms)
         XCTAssertEqual(runner.state.step, .tools, "a repeated action cannot skip a step")
         runner.state = FirstRunNavigation.back(runner.state)
         XCTAssertEqual(runner.acceptedTerms, Self.accepted, "Back retains the accepted terms")
@@ -100,7 +108,7 @@ final class AnimatedFirstRunTests: XCTestCase {
         await failing.load()
         XCTAssertEqual(failing.state, .failed("terms-unavailable"))
         runner.acceptedTerms = failing.acceptance(at: now)
-        XCTAssertFalse(runner.canLeaveWelcome(legal: legal))
+        XCTAssertFalse(runner.canLeaveWelcome(legal: legal, terms: failing.terms))
 
         let document = TermsDocument(
             version: "v1", effective: "2026-08-22", inEffect: false, title: "T",
@@ -112,7 +120,39 @@ final class AnimatedFirstRunTests: XCTestCase {
         let acceptance = try XCTUnwrap(loading.acceptance(at: now))
         XCTAssertEqual(acceptance, AcceptedTerms(version: "v1", contentSHA256: fetched.contentSHA256, acceptedAt: now))
         runner.acceptedTerms = acceptance
-        XCTAssertTrue(runner.canLeaveWelcome(legal: legal))
+        XCTAssertTrue(runner.canLeaveWelcome(legal: legal, terms: loading.terms))
+    }
+
+    /// An acceptance kept from an earlier visit (Back to Welcome rebuilds
+    /// the screen and its loader) does not open Welcome on its own: the
+    /// document it names has to be loaded again, so Continue stays shut
+    /// while the terms load, after they failed, and for another document.
+    @MainActor
+    func testRetainedAcceptanceNeedsTheSameDocumentLoaded() async throws {
+        let legal = try XCTUnwrap(words().welcome.legal)
+        let runner = FirstRunRunner(state: FirstRunState(), daemon: RecordingFirstRunDaemon())
+        runner.acceptedTerms = Self.accepted
+
+        let pending = TermsLoader(fetch: { .failure(TCTermsRefusal(label: "terms-unavailable")) })
+        XCTAssertEqual(pending.state, .loading)
+        XCTAssertFalse(runner.canLeaveWelcome(legal: legal, terms: pending.terms), "loading")
+        await pending.load()
+        XCTAssertEqual(pending.state, .failed("terms-unavailable"))
+        XCTAssertFalse(runner.canLeaveWelcome(legal: legal, terms: pending.terms), "failed")
+        runner.continueFromWelcome(legal: legal, terms: pending.terms)
+        XCTAssertEqual(runner.state.step, .welcome)
+
+        let otherHash = FetchedTerms(
+            document: Self.loaded.document, contentSHA256: String(repeating: "f", count: 64))
+        XCTAssertFalse(runner.canLeaveWelcome(legal: legal, terms: otherHash), "another hash")
+        let otherVersion = FetchedTerms(
+            document: TermsDocument(
+                version: "2026-12-01", effective: "2026-12-01", inEffect: true, title: "T",
+                blocks: [.paragraph("p")]),
+            contentSHA256: Self.loaded.contentSHA256)
+        XCTAssertFalse(runner.canLeaveWelcome(legal: legal, terms: otherVersion), "another version")
+
+        XCTAssertTrue(runner.canLeaveWelcome(legal: legal, terms: Self.loaded), "the same document")
     }
 
     @MainActor
@@ -120,8 +160,8 @@ final class AnimatedFirstRunTests: XCTestCase {
         let daemon = RecordingFirstRunDaemon()
         let runner = FirstRunRunner(state: FirstRunState(), daemon: daemon)
         runner.acceptedTerms = Self.accepted
-        XCTAssertFalse(runner.canLeaveWelcome(legal: nil))
-        runner.continueFromWelcome(legal: nil)
+        XCTAssertFalse(runner.canLeaveWelcome(legal: nil, terms: Self.loaded))
+        runner.continueFromWelcome(legal: nil, terms: Self.loaded)
         XCTAssertEqual(runner.state.step, .welcome)
         XCTAssertTrue(daemon.log.isEmpty)
     }

@@ -117,10 +117,10 @@ struct WelcomeScreen: View {
                         after: elapsed, delay: WelcomeScreenLayout.bodyDelay, reduceMotion: reduceMotion)))
                     .padding(.bottom, 38)
                 Button(copy.welcome.start) {
-                    runner.continueFromWelcome(legal: copy.welcome.legal)
+                    runner.continueFromWelcome(legal: copy.welcome.legal, terms: termsLoader.terms)
                 }
                 .buttonStyle(GlassButtonStyle(.primary, size: .stage))
-                .disabled(!runner.canLeaveWelcome(legal: copy.welcome.legal))
+                .disabled(!runner.canLeaveWelcome(legal: copy.welcome.legal, terms: termsLoader.terms))
                 .modifier(Rise(amount: WelcomeScreenLayout.risen(
                     after: elapsed, delay: WelcomeScreenLayout.buttonDelay, reduceMotion: reduceMotion)))
                 if let legal = copy.welcome.legal {

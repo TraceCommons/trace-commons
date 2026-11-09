@@ -40,9 +40,22 @@ final class TermsHoldTests: XCTestCase {
 
     /// Like the gate hold's notice, it goes only when its cause does, and
     /// it is not the user's pause.
+    /// Read from the notice as `MonitorNotices` builds it: no X
+    /// (`closeLabel`/`onClose`), no other close path, and one button, the
+    /// review.
     func testNoticeHasNoCloseAction() throws {
-        let hold = try XCTUnwrap(TermsHoldSurface.of(held: true, words: try words()))
-        XCTAssertFalse(hold.closable)
+        let notices = try String(
+            contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent("Views/Monitor/MonitorNotices.swift"),
+            encoding: .utf8)
+        let start = try XCTUnwrap(notices.range(of: "private var termsHoldItems: [GlassPopoverItem] {"))
+        let end = try XCTUnwrap(notices.range(of: "\n    }\n", range: start.upperBound..<notices.endIndex))
+        let item = String(notices[start.lowerBound..<end.upperBound])
+        XCTAssertTrue(item.contains("GlassPopoverNotice(title: hold.title)"), "the scan reads the notice")
+        XCTAssertTrue(item.contains("Button(hold.review) { model.reviewNewTerms() }"), "the scan reads the notice")
+        for closer in ["closeLabel", "onClose", "close(", "closed", "notNow", "dismiss"] {
+            XCTAssertFalse(item.contains(closer), "the terms notice has no close action: \(closer)")
+        }
+        XCTAssertEqual(item.components(separatedBy: "Button(").count - 1, 1, "one button, the review")
         XCTAssertEqual(TermsHoldSurface.noticeID, "terms-hold")
         let model = AppModel()
         model.setStatusForTesting(held(true))

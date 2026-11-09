@@ -3248,10 +3248,13 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
     // when it matters most. Ignored entirely under `Interval`, which the
     // generic `Tz` parameter never touches.
     let local_tz = chrono::Local;
-    // Entries waiting only because of the terms hold do not age out under
-    // it (spec section 5): nothing is lost to the hold.
-    let blocked = shared.health.lock().expect("health lock").blocks_expiry()
-        || shared.terms_held.load(Ordering::SeqCst);
+    // The terms hold is deliberately not a blocker here (spec section 5:
+    // expiry skips only entries waiting because of the hold). The hold
+    // keeps `Approved` entries waiting, and `expire` never touches those;
+    // a `Pending` entry waits for the contributor's review (an armed
+    // folder's are approved by the watcher whatever the hold), so its
+    // review timeout runs as usual.
+    let blocked = shared.health.lock().expect("health lock").blocks_expiry();
 
     let (queue_changed, pending_count, digest) = {
         let mut queue = shared.queue.lock().expect("queue lock");
@@ -7618,44 +7621,54 @@ mod tests {
             );
         }
 
+        /// Spec section 5: expiry does not run against entries waiting only
+        /// because of the hold. The hold delays `Approved` entries, which
+        /// never age out; a `Pending` entry waits for the contributor's own
+        /// review (an armed folder's entries are approved by the watcher
+        /// whatever the hold), so review expiry runs as it does without one.
         #[tokio::test]
         async fn held_entries_do_not_expire() {
             let dir = tempfile::tempdir().unwrap();
             let shared = load(dir.path());
             let now = at("2026-11-09T12:00:00Z");
             let ttl_days = shared.settings.lock().unwrap().queue_ttl_days;
-            let id = {
+            let old = now - chrono::Duration::days(ttl_days + 1);
+            let (approved, pending) = {
                 let mut q = shared.queue.lock().expect("queue lock");
-                let e = queue::QueueEntry {
+                let a = queue::QueueEntry {
                     entry_id: uuid::Uuid::new_v4(),
-                    session_hash: "sha256:terms-held-old".to_string(),
-                    project_key: "/w/old".to_string(),
-                    discovered_at: now - chrono::Duration::days(ttl_days + 1),
+                    session_hash: "sha256:terms-held-approved".to_string(),
+                    project_key: "/w/approved".to_string(),
+                    discovered_at: old,
                     ..Default::default()
                 };
-                let id = e.entry_id;
-                q.upsert(e, 100).unwrap();
-                id
+                let p = queue::QueueEntry {
+                    entry_id: uuid::Uuid::new_v4(),
+                    session_hash: "sha256:terms-held-pending".to_string(),
+                    project_key: "/w/pending".to_string(),
+                    discovered_at: old,
+                    ..Default::default()
+                };
+                let (a_id, p_id) = (a.entry_id, p.entry_id);
+                q.upsert(a, 100).unwrap();
+                q.upsert(p, 100).unwrap();
+                assert!(q.approve(a_id, &[], None, None, None, None));
+                (a_id, p_id)
             };
-            assert_eq!(
-                shared.queue.lock().unwrap().get(id).unwrap().state,
-                queue::QueueState::Pending
-            );
             terms_state::apply_fetch(&shared, now, Ok(fetched("v2", true)));
+            assert!(shared.terms_held.load(Ordering::SeqCst));
 
             expire_and_digest(&shared, now);
+            let q = shared.queue.lock().unwrap();
             assert_eq!(
-                shared.queue.lock().unwrap().get(id).unwrap().state,
-                queue::QueueState::Pending,
-                "held entries do not age out"
+                q.get(approved).unwrap().state,
+                queue::QueueState::Approved,
+                "an entry the hold keeps waiting does not age out"
             );
-
-            accept(&shared, "v2");
-            expire_and_digest(&shared, now);
             assert_eq!(
-                shared.queue.lock().unwrap().get(id).unwrap().state,
+                q.get(pending).unwrap().state,
                 queue::QueueState::Expired,
-                "once the hold lifts, expiry runs as before"
+                "review expiry is not suspended by the hold"
             );
         }
 

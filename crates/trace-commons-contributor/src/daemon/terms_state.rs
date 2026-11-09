@@ -288,6 +288,35 @@ struct AcceptParams {
     accepted_at: DateTime<Utc>,
 }
 
+/// IPC `terms_accept` as the socket answers it: when the version named is
+/// not the cached published one, the site is checked again first, then
+/// [`handle_accept`] decides. The cached version only moves on the six-hourly
+/// re-check, while the app reads the live document, so without this a
+/// version published between two re-checks would be refused as stale until
+/// the next one. A failed re-check changes nothing, and the refusal stands.
+pub(crate) async fn handle_accept_async(shared: &DaemonShared, req: &Request) -> Response {
+    let named = serde_json::from_value::<AcceptParams>(req.params.clone())
+        .ok()
+        .filter(|params| {
+            TermsAcceptanceRequest {
+                terms_version: params.version.clone(),
+                content_sha256: params.content_sha256.clone(),
+                accepted_at: params.accepted_at,
+            }
+            .validate(Utc::now())
+            .is_ok()
+        })
+        .map(|params| params.version);
+    let lags = {
+        let state = shared.terms.lock().expect("terms lock");
+        matches!((&state.published, &named), (Some(published), Some(version)) if &published.version != version)
+    };
+    if lags {
+        let _ = refresh_terms(shared, Utc::now()).await;
+    }
+    handle_accept(shared, req)
+}
+
 /// IPC `terms_accept {version, content_sha256, accepted_at}`: replace the
 /// acceptance with what the app rendered and lift the hold. Answers
 /// `{"held": bool}`. Refused with `terms-version-stale` when another version
@@ -687,6 +716,76 @@ mod daemon_tests {
         assert_eq!(error.message, TERMS_VERSION_STALE);
         assert!(shared.terms_held.load(Ordering::SeqCst), "the hold stays");
         assert!(shared.terms.lock().unwrap().accepted.is_none());
+    }
+
+    fn live(shared: &DaemonShared, fetched: Result<&str, &'static str>) {
+        *shared.terms_fetch_override.lock().unwrap() =
+            Some(fetched.map(|version| crate::terms::FetchedTerms {
+                document: trace_commons_protocol::terms::TermsDocument {
+                    schema_version: trace_commons_protocol::terms::TERMS_SCHEMA_VERSION.into(),
+                    version: version.into(),
+                    effective: "2026-12-01".into(),
+                    in_effect: true,
+                    title: "Terms".into(),
+                    blocks: vec![trace_commons_protocol::terms::TermsBlock::Paragraph {
+                        text: "Terms text.".into(),
+                    }],
+                },
+                content_sha256: hash('b'),
+            }));
+    }
+
+    /// The daemon's cached published version lags the site: the person
+    /// read the newer one, which is current. The daemon checks the site
+    /// again before refusing, and accepts.
+    #[tokio::test]
+    async fn accept_of_a_version_newer_than_the_cached_one_rechecks_and_succeeds() {
+        let (_dir, shared) = fixture();
+        publish(&shared, "v-b", true);
+        live(&shared, Ok("v-c"));
+        let reply = handle_request_async(&shared, &req("terms_accept", accept_params("v-c"))).await;
+        assert!(reply.error.is_none(), "{:?}", reply.error);
+        assert_eq!(reply.result.unwrap()["held"], false);
+        assert!(!shared.terms_held.load(Ordering::SeqCst));
+        let saved = TermsState::load(&shared.store).unwrap();
+        assert_eq!(saved.accepted.as_ref().unwrap().version, "v-c");
+        assert_eq!(saved.published.as_ref().unwrap().version, "v-c");
+    }
+
+    /// The re-check confirms the cached version: the person read an older
+    /// one, and is refused.
+    #[tokio::test]
+    async fn accept_still_refused_when_the_recheck_confirms_another_version() {
+        let (_dir, shared) = fixture();
+        publish(&shared, "v-b", true);
+        live(&shared, Ok("v-b"));
+        let reply = handle_request_async(&shared, &req("terms_accept", accept_params("v-a"))).await;
+        assert_eq!(reply.error.expect("refused").message, TERMS_VERSION_STALE);
+        assert!(shared.terms_held.load(Ordering::SeqCst));
+        assert!(shared.terms.lock().unwrap().accepted.is_none());
+    }
+
+    /// A failed re-check changes nothing and the refusal stands: a version
+    /// the daemon cannot confirm is never recorded.
+    #[tokio::test]
+    async fn accept_refused_when_the_recheck_fails() {
+        let (_dir, shared) = fixture();
+        publish(&shared, "v-b", true);
+        live(&shared, Err(crate::terms::TERMS_UNAVAILABLE));
+        let reply = handle_request_async(&shared, &req("terms_accept", accept_params("v-c"))).await;
+        assert_eq!(reply.error.expect("refused").message, TERMS_VERSION_STALE);
+        assert!(shared.terms_held.load(Ordering::SeqCst));
+        assert_eq!(
+            shared
+                .terms
+                .lock()
+                .unwrap()
+                .published
+                .as_ref()
+                .unwrap()
+                .version,
+            "v-b"
+        );
     }
 
     #[test]
