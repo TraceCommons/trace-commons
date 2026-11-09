@@ -48,6 +48,8 @@ mod referral_tests;
 mod removed_account_routes_tests;
 #[path = "tests/reward_participant_tests.rs"]
 mod reward_participant_tests;
+#[path = "tests/terms_acceptance_tests.rs"]
+mod terms_acceptance_tests;
 
 /// Shorthand for the direct-call handler tests. See [SubmitBody::for_test].
 fn submit_body(envelope: TraceContributionEnvelope) -> SubmitBody {

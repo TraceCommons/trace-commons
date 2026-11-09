@@ -47,6 +47,8 @@ mod referral_admin;
 mod referral_routes;
 #[path = "trace_commons_ingest_internal/rewards.rs"]
 mod rewards;
+#[path = "trace_commons_ingest_internal/terms_acceptance.rs"]
+mod terms_acceptance;
 #[path = "trace_commons_ingest_internal/token_bundles.rs"]
 mod token_bundles;
 #[path = "trace_commons_ingest_internal/upload_allowance.rs"]
@@ -8748,6 +8750,11 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
             admission::account_status_handler,
         )
         .post("/v1/account/invites/redeem", account_invite_redeem_handler)
+        .post_with_body_limit(
+            trace_commons_protocol::terms::TERMS_ACCEPTANCE_PATH,
+            terms_acceptance::handler,
+            4096,
+        )
         .merge(legacy_invite_link_routes::routes())
         .merge(inference_connection_routes::routes())
         // Payout recipient links (payout spec section 5): start, confirm and
@@ -23596,11 +23603,7 @@ async fn account_logout_handler(
         &ctx.actor_ref,
         "success",
         serde_json::json!({
-            "auth_method": match ctx.auth_method {
-                AccountAuthMethod::SessionCookie => "session_cookie",
-                AccountAuthMethod::DeviceBearer => "device_bearer",
-                AccountAuthMethod::NativeToken => "native_token",
-            },
+            "auth_method": ctx.auth_method.as_str(),
             "revoked": revoked,
         }),
     )
