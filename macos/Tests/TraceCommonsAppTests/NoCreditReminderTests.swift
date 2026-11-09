@@ -26,17 +26,24 @@ final class NoCreditReminderTests: XCTestCase {
         XCTAssertFalse(NoCreditNotice.showsOnHome(loggedIn: false, scopes: []))
     }
 
-    func test_itIsOneAmberLineAtTheTopOfHomeWithNoX() throws {
+    func test_itIsOneAmberLineUnderTheTracesHeadingWithNoX() throws {
         let notice = try source("Views/NoCreditNotice.swift")
         XCTAssertTrue(notice.contains(".foregroundStyle(GlassStatus.ask.color)"))
         XCTAssertTrue(notice.contains(".fill(GlassStatus.ask.color.opacity(0.12))"))
-        XCTAssertTrue(notice.contains(".buttonStyle(GlassButtonStyle(.link))"))
+        // Open Settings is a glass pill, not a link (Ron, 2026-11-09).
+        XCTAssertTrue(notice.contains(".buttonStyle(GlassButtonStyle(.glass))"))
+        XCTAssertFalse(notice.contains(".buttonStyle(GlassButtonStyle(.link))"))
         XCTAssertFalse(notice.contains(".outside"), "never red")
         XCTAssertFalse(notice.contains("xmark"))
         XCTAssertFalse(notice.contains("@AppStorage"), "nothing remembers it closed")
-        // Over Private AI, the first section on Home.
+        // Under the Traces heading, over its cards (Ron, 2026-11-09; it led
+        // Home from 2026-11-05), and nowhere else.
         let home = try source("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("cardGap) {\n            noCredit\n            privateAI"))
+        let traces = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionTraces) {\n"))
+        let line = try XCTUnwrap(home.range(of: "                noCredit\n                if showsTracesWalkthrough {",
+                                            range: traces.upperBound..<home.endIndex))
+        XCTAssertLessThan(traces.upperBound, line.lowerBound)
+        XCTAssertEqual(home.components(separatedBy: "noCredit\n").count - 1, 1, "drawn once")
         XCTAssertTrue(home.contains("perform: openSettings)"))
         let window = try source("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains("openSettings: { navigation.requestSettings(at: .consent) },"))
