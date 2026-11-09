@@ -155,6 +155,12 @@ later.
     build check fails if the content hash changed but the version did not
     (compare against the previous build's committed `terms.lock`).
   - `effective`: ISO date.
+  - `in_effect`: boolean. The current draft text is published with
+    `false` (planning call, 2026-11-09, from "the current documents are
+    not valid"). A version with `in_effect: false` never starts an upload
+    hold; first run still requires scrolling and accepting and shows a
+    not-in-effect line. Publishing valid terms means a new version with
+    `true`.
   - `title`.
   - `blocks`: ordered list of `{ "kind": "heading" | "paragraph" |
     "list" | "table" | "callout", ... }` (owner chose to extend the
