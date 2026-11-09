@@ -17,10 +17,10 @@ use crate::trace_invite_registry::InviteTenantMode;
 pub mod first_run_stats;
 pub mod postgres;
 pub mod postgres_inference_connection;
-mod postgres_terms_acceptance;
 mod postgres_legacy_payout_carry;
 mod postgres_payout;
 mod postgres_referral;
+mod postgres_terms_acceptance;
 pub mod witness_blocked;
 #[doc(hidden)]
 pub use postgres_referral::REFERRAL_RESOLVER_ASSUME_SQL;

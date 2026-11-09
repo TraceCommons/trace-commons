@@ -26,11 +26,22 @@ pub struct TermsDocument {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TermsBlock {
-    Heading { text: String },
-    Paragraph { text: String },
-    List { items: Vec<String> },
-    Table { header: Vec<String>, rows: Vec<Vec<String>> },
-    Callout { text: String },
+    Heading {
+        text: String,
+    },
+    Paragraph {
+        text: String,
+    },
+    List {
+        items: Vec<String>,
+    },
+    Table {
+        header: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
+    Callout {
+        text: String,
+    },
 }
 
 impl TermsBlock {
@@ -191,7 +202,11 @@ mod tests {
 
     #[test]
     fn refuses_relative_and_javascript_links() {
-        for target in ["[x](/a)", "[x](javascript:alert(1))", "[x](http://a.example)"] {
+        for target in [
+            "[x](/a)",
+            "[x](javascript:alert(1))",
+            "[x](http://a.example)",
+        ] {
             let bytes = doc_with(|v| {
                 v["blocks"] = serde_json::json!([{"kind": "paragraph", "text": target}]);
             });
