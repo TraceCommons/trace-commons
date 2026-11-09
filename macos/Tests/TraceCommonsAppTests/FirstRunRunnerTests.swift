@@ -954,6 +954,23 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertEqual(daemon.termsRecorded.count, 1, "handed over once per first run")
     }
 
+    /// A first run that began with the daemon already running (it is not
+    /// started again) still hands the terms over, once, at its first commit.
+    func testTermsHandedOverWhenTheDaemonWasAlreadyRunning() async {
+        let daemon = RecordingFirstRunDaemon()
+        var state = onFolders()
+        state.step = .tools
+        state.daemonStarted = true
+        state.startedSettingsJSON = state.sessionRoots.settingsJSON()
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        runner.acceptedTerms = Self.accepted
+        await runner.commit(.leaveTools)
+        XCTAssertFalse(daemon.log.contains { if case .startDaemon = $0 { return true }; return false })
+        XCTAssertEqual(daemon.termsRecorded.map(\.terms), [Self.accepted])
+        await runner.commit(.leaveTools)
+        XCTAssertEqual(daemon.termsRecorded.count, 1)
+    }
+
     /// Nothing accepted, nothing handed over.
     func testNoTermsNoHandOff() async {
         let daemon = RecordingFirstRunDaemon()

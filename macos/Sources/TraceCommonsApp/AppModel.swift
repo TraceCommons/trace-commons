@@ -1454,8 +1454,10 @@ final class AppModel: ObservableObject {
     /// The terms the sheet shows, fetched again each time it opens so the
     /// person accepts what they read.
     var termsHoldLoader = TermsLoader()
+    #if DEBUG
     /// Test seam: answers `terms_accept` in place of the daemon.
     var termsAcceptForTesting: ((AcceptedTerms) throws -> Bool)?
+    #endif
     /// A tool whose launch dialog the menu bar's popover asked for (owner,
     /// 2026-10-19); the Private AI tab opens the dialog and clears it.
     @Published var pendingManagedLaunch: String?

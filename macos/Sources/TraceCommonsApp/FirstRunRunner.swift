@@ -222,6 +222,9 @@ final class FirstRunRunner: ObservableObject {
             failure = .startFailed
             return
         }
+        // A first run that began with the daemon already running has no
+        // `.startDaemon` to follow: hand the terms over at its first commit.
+        if state.daemonStarted { await handOverTerms() }
         for call in FirstRunPlan.calls(for: state, at: point) {
             guard await run(call) else { return }
         }

@@ -86,12 +86,17 @@ extension AppModel {
 
     private func termsAcceptOutcome(_ terms: AcceptedTerms) async -> TermsAcceptOutcome {
         let result: Result<Bool, Error>
+        #if DEBUG
         if let seam = termsAcceptForTesting {
-            result = Result { try seam(terms) }
-        } else {
-            guard let client = daemonClientForTerms else { return .failed("daemon-unavailable") }
-            result = await DaemonWork.run { Result { try client.termsAccept(terms) } }
+            return Self.outcome(Result { try seam(terms) })
         }
+        #endif
+        guard let client = daemonClientForTerms else { return .failed("daemon-unavailable") }
+        result = await DaemonWork.run { Result { try client.termsAccept(terms) } }
+        return Self.outcome(result)
+    }
+
+    private static func outcome(_ result: Result<Bool, Error>) -> TermsAcceptOutcome {
         switch result {
         case .success:
             return .accepted

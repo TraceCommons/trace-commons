@@ -116,7 +116,11 @@ struct TermsReader: View {
             if autoload, case .loading = loader.state { await loader.load() }
         }
         .onChange(of: loader.state) { _, state in
-            gate = TermsScrollGate()
+            // A new load starts reading from the top. Not on `.loaded`: a
+            // document that fits reports its frame once, possibly before this
+            // runs, and resetting then would never unlock it. Every load
+            // passes through `.loading` first.
+            if case .loaded = state {} else { gate = TermsScrollGate() }
             // A different document than the one accepted: ask again.
             if let accepted, case .loaded(let terms) = state,
                 accepted.version != terms.document.version
