@@ -294,6 +294,7 @@ struct AcceptParams {
 /// re-check, while the app reads the live document, so without this a
 /// version published between two re-checks would be refused as stale until
 /// the next one. A failed re-check changes nothing, and the refusal stands.
+/// No re-check in a developer dry run.
 pub(crate) async fn handle_accept_async(shared: &DaemonShared, req: &Request) -> Response {
     let named = serde_json::from_value::<AcceptParams>(req.params.clone())
         .ok()
@@ -311,7 +312,9 @@ pub(crate) async fn handle_accept_async(shared: &DaemonShared, req: &Request) ->
         let state = shared.terms.lock().expect("terms lock");
         matches!((&state.published, &named), (Some(published), Some(version)) if &published.version != version)
     };
-    if lags {
+    // A developer dry run reaches no network, as the tick's own re-check
+    // does not: the cached version decides.
+    if lags && !shared.dev_dry_run {
         let _ = refresh_terms(shared, Utc::now()).await;
     }
     handle_accept(shared, req)
@@ -786,6 +789,21 @@ mod daemon_tests {
                 .version,
             "v-b"
         );
+    }
+
+    /// A developer dry run reaches no network (`DEV_DRY_RUN_LOCAL_METHODS`
+    /// lists `terms_accept` as local-only), so there is no re-check and the
+    /// cached version decides.
+    #[tokio::test]
+    async fn accept_does_not_recheck_in_a_developer_dry_run() {
+        let (_dir, mut shared) = fixture();
+        shared.dev_dry_run = true;
+        publish(&shared, "v-b", true);
+        live(&shared, Ok("v-c"));
+        let reply = handle_request_async(&shared, &req("terms_accept", accept_params("v-c"))).await;
+        assert_eq!(reply.error.expect("refused").message, TERMS_VERSION_STALE);
+        let published = shared.terms.lock().unwrap().published.clone().unwrap();
+        assert_eq!(published.version, "v-b", "nothing was fetched");
     }
 
     #[test]

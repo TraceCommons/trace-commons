@@ -912,9 +912,8 @@ async fn run_tick(shared: &Arc<ipc::DaemonShared>, dry_run: bool, state: &mut Ti
             nearai_credential::arrivals::poll(shared, now),
         )
         .await;
-    // Terms of Service, ahead of expiry so this tick's hold decides what
-    // ages out: re-check the published version when due (start, then every
-    // six hours), then post an acceptance owed to the configured org. Both
+    // Terms of Service: re-check the published version when due (start,
+    // then every six hours), then post an acceptance owed to the configured org. Both
     // reach the network, so a dry run and a developer dry run skip them; the
     // hold persisted from an earlier check still applies. A failed fetch
     // changes nothing (`terms_state::apply_fetch`).
