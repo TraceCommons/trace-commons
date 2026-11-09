@@ -1230,7 +1230,12 @@ mod tests {
     fn no_two_keys_carry_the_same_string() {
         // The Private AI step's name and its title's bold half read the
         // same; one names a step, the other ends a sentence.
-        const MAY_DIVERGE: &[&[&str]] = &[&[".frame.step_private_ai", ".private_ai.title_bold"]];
+        // The terms reader's retry and Rules' retry read the same today; one
+        // reloads a document over the network, the other rescans folders.
+        const MAY_DIVERGE: &[&[&str]] = &[
+            &[".frame.step_private_ai", ".private_ai.title_bold"],
+            &[".rules.retry", ".welcome.legal.retry"],
+        ];
         fn leaves(value: &serde_json::Value, path: &str, out: &mut Vec<(String, String)>) {
             match value {
                 serde_json::Value::String(text) => out.push((text.clone(), path.to_owned())),
