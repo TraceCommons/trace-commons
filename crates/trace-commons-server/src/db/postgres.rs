@@ -8825,6 +8825,7 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
+            include_str!("../../../../migrations/V158__account_terms_acceptances.sql"),
             include_str!("../../../../migrations/V154__witness_blocked_days.sql"),
             include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
             include_str!("../../../../migrations/V142__referral_rewards.sql"),
@@ -8877,6 +8878,7 @@ mod tests {
             include_str!("../../../../migrations/V131__starter_plausibility_features.sql"),
         ];
         let force_rls_migrations = [
+            include_str!("../../../../migrations/V158__account_terms_acceptances.sql"),
             include_str!("../../../../migrations/V154__witness_blocked_days.sql"),
             include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
             include_str!("../../../../migrations/V142__referral_rewards.sql"),
@@ -9829,8 +9831,9 @@ mod v158_tests {
         let file_marker = format!("migrations/V{}__account_terms_acceptances.sql", 158);
         assert_eq!(
             THIS_FILE.matches(&file_marker).count(),
-            2,
-            "V158 must be named exactly twice: by the MIGRATIONS table and by this test"
+            4,
+            "V158 must be named exactly four times: by the MIGRATIONS table, by the \
+             RLS registry test's central-policy and force-RLS lists, and by this test"
         );
         assert!(
             super::MIGRATIONS
