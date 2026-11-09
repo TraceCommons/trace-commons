@@ -331,7 +331,12 @@ struct MonitorWindowView: View {
                             tracesPage = .history
                         },
                         openInsights: { tab = .insights },
-                        openSettings: { navigation.requestSettings(at: .consent) },
+                        // Records the section, then opens the Settings window,
+                        // as the gear and the Private AI tab's link do.
+                        openSettings: {
+                            navigation.requestSettings(at: .consent)
+                            openWindow(id: WindowID.settings)
+                        },
                         insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts,
                         missionsEnabled: model.missionsShown, inference: inference)
                 case .insights:

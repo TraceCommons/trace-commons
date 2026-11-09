@@ -46,7 +46,10 @@ final class NoCreditReminderTests: XCTestCase {
         XCTAssertEqual(home.components(separatedBy: "noCredit\n").count - 1, 1, "drawn once")
         XCTAssertTrue(home.contains("perform: openSettings)"))
         let window = try source("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains("openSettings: { navigation.requestSettings(at: .consent) },"))
+        // Open Settings opens the Settings window at the data uses, not just
+        // the section a later window would open at.
+        XCTAssertTrue(window.contains(
+            "openSettings: {\n                            navigation.requestSettings(at: .consent)\n                            openWindow(id: WindowID.settings)\n                        },"))
         // No pop-up in first run (owner, 2026-11-05).
         let join = try source("Views/FirstRun/JoinScreen.swift")
         XCTAssertFalse(join.contains("NoCreditNotice"))
