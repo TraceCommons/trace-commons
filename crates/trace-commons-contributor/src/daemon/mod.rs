@@ -772,6 +772,9 @@ struct TickState {
     /// The signed witness accepted-measurements list's fetch schedule: due
     /// at start, then about daily (`witness::accepted_list`).
     witness_list_schedule: crate::witness::accepted_list::ListRefreshSchedule,
+    /// When the published Terms of Service are fetched again: at start,
+    /// then every six hours (`terms_state::TermsSchedule`).
+    terms_schedule: terms_state::TermsSchedule,
     /// Whether this process has re-read the witness-risk holds under the
     /// current rule (`release_witness_risk_holds_once`).
     witness_risk_holds_rechecked: bool,
@@ -790,6 +793,7 @@ impl TickState {
             witness_list_schedule: crate::witness::accepted_list::ListRefreshSchedule::starting(
                 now,
             ),
+            terms_schedule: terms_state::TermsSchedule::starting(),
             witness_risk_holds_rechecked: false,
             second_look_holds_rechecked: false,
         }
@@ -908,12 +912,17 @@ async fn run_tick(shared: &Arc<ipc::DaemonShared>, dry_run: bool, state: &mut Ti
             nearai_credential::arrivals::poll(shared, now),
         )
         .await;
-    // Terms of Service: post an acceptance owed to the configured org. It
-    // reaches ingest, so a dry run and a developer dry run skip it.
+    // Terms of Service, ahead of expiry so this tick's hold decides what
+    // ages out: re-check the published version when due (start, then every
+    // six hours), then post an acceptance owed to the configured org. Both
+    // reach the network, so a dry run and a developer dry run skip them; the
+    // hold persisted from an earlier check still applies. A failed fetch
+    // changes nothing (`terms_state::apply_fetch`).
+    let terms_schedule = &mut state.terms_schedule;
     guards
         .run(shared, "terms", async {
             if !dry_run && !shared.dev_dry_run {
-                let _ = terms_state::post_pending(shared, now).await;
+                terms_state::tick(shared, now, terms_schedule).await;
             }
         })
         .await;
@@ -1243,6 +1252,12 @@ async fn drain_approved(
     if shared.uploads_held.load(Ordering::SeqCst) {
         return Ok(());
     }
+    // Held until the published in-effect Terms of Service version is
+    // accepted (`terms_state`). Its own flag, never the pause: approved
+    // entries stay approved and go out once it lifts.
+    if shared.terms_held.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     // K2 (#1173): a dev dry run sends nothing, and leaves every entry as it
     // is. Refusing an entry here would record a final `Refused`, and an
     // approved session would never upload once the dry run ended.
@@ -1531,7 +1546,9 @@ async fn drain_approved(
             // `unenroll` is settling uploads: nothing new goes in flight.
             // Checked under the queue lock `unenroll` checks `Uploading`
             // under, so the two cannot interleave.
-            if shared.uploads_held.load(Ordering::SeqCst) {
+            if shared.uploads_held.load(Ordering::SeqCst)
+                || shared.terms_held.load(Ordering::SeqCst)
+            {
                 break;
             }
             drop(policy);
@@ -3231,7 +3248,10 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
     // when it matters most. Ignored entirely under `Interval`, which the
     // generic `Tz` parameter never touches.
     let local_tz = chrono::Local;
-    let blocked = shared.health.lock().expect("health lock").blocks_expiry();
+    // Entries waiting only because of the terms hold do not age out under
+    // it (spec section 5): nothing is lost to the hold.
+    let blocked = shared.health.lock().expect("health lock").blocks_expiry()
+        || shared.terms_held.load(Ordering::SeqCst);
 
     let (queue_changed, pending_count, digest) = {
         let mut queue = shared.queue.lock().expect("queue lock");
@@ -7465,6 +7485,239 @@ mod tests {
             ipc::EstimateTableSlot::built_in()
         );
         assert!(!schedule.due(start));
+    }
+
+    /// The Terms of Service hold: the re-check, what it stops, and what it
+    /// keeps from ageing out (`terms_state`).
+    mod terms_hold {
+        use super::*;
+        use crate::terms::FetchedTerms;
+        use trace_commons_protocol::terms::{TermsBlock, TermsDocument};
+
+        fn fetched(version: &str, in_effect: bool) -> FetchedTerms {
+            FetchedTerms {
+                document: TermsDocument {
+                    schema_version: trace_commons_protocol::terms::TERMS_SCHEMA_VERSION.into(),
+                    version: version.into(),
+                    effective: "2026-12-01".into(),
+                    in_effect,
+                    title: "Terms".into(),
+                    blocks: vec![TermsBlock::Paragraph {
+                        text: "Terms text.".into(),
+                    }],
+                },
+                content_sha256: std::iter::repeat_n('c', 64).collect(),
+            }
+        }
+
+        fn load(dir: &std::path::Path) -> Arc<ipc::DaemonShared> {
+            let store = crate::config::ConfigStore::open(dir.join("state")).unwrap();
+            Arc::new(ipc::DaemonShared::load(store).unwrap())
+        }
+
+        fn accept(shared: &ipc::DaemonShared, version: &str) {
+            let reply = ipc::handle_request(
+                shared,
+                &ipc::Request {
+                    id: 1,
+                    method: "terms_accept".into(),
+                    params: serde_json::json!({
+                        "version": version,
+                        "content_sha256": std::iter::repeat_n('c', 64).collect::<String>(),
+                        "accepted_at": Utc::now(),
+                    }),
+                },
+            );
+            assert!(reply.error.is_none(), "{:?}", reply.error);
+        }
+
+        #[tokio::test]
+        async fn a_new_in_effect_version_starts_the_hold() {
+            let dir = tempfile::tempdir().unwrap();
+            let shared = load(dir.path());
+            accept(&shared, "v1");
+            *shared.terms_fetch_override.lock().unwrap() = Some(Ok(fetched("v2", true)));
+            let mut events = shared.events.subscribe();
+            let mut schedule = terms_state::TermsSchedule::starting();
+            terms_state::tick(&shared, at("2026-11-09T12:00:00Z"), &mut schedule).await;
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+            assert_eq!(shared.status_value()["terms_version_owed"], "v2");
+            let mut names = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                names.push(event.event);
+            }
+            assert!(names.iter().any(|e| e == ipc::EVENT_STATUS_CHANGED));
+            // The same version again moves nothing.
+            terms_state::apply_fetch(&shared, at("2026-11-09T18:00:00Z"), Ok(fetched("v2", true)));
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+        }
+
+        #[tokio::test]
+        async fn a_failed_fetch_never_starts_a_hold() {
+            let dir = tempfile::tempdir().unwrap();
+            let shared = load(dir.path());
+            // No override: the fetch is unavailable.
+            let mut schedule = terms_state::TermsSchedule::starting();
+            terms_state::tick(&shared, at("2026-11-09T12:00:00Z"), &mut schedule).await;
+            assert!(!shared.terms_held.load(Ordering::SeqCst));
+            assert!(shared.terms.lock().unwrap().published.is_none());
+            // Nor does a refused document, and neither lifts a hold.
+            terms_state::apply_fetch(&shared, at("2026-11-09T12:00:00Z"), Ok(fetched("v2", true)));
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+            terms_state::apply_fetch(
+                &shared,
+                at("2026-11-09T18:00:00Z"),
+                Err("terms-schema-unknown"),
+            );
+            assert!(
+                shared.terms_held.load(Ordering::SeqCst),
+                "a failure keeps the hold"
+            );
+            assert_eq!(
+                shared
+                    .terms
+                    .lock()
+                    .unwrap()
+                    .published
+                    .as_ref()
+                    .unwrap()
+                    .version,
+                "v2"
+            );
+        }
+
+        #[tokio::test]
+        async fn held_uploads_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            let shared = load(dir.path());
+            let id = seed_contributor_approval(&shared);
+            terms_state::apply_fetch(&shared, at("2026-08-08T12:00:00Z"), Ok(fetched("v2", true)));
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+            let before = shared.queue.lock().expect("queue lock").get(id).cloned();
+
+            drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+                .await
+                .unwrap();
+
+            let held = shared.queue.lock().expect("queue lock").get(id).cloned();
+            assert_eq!(held, before, "held exactly as it was, not sent");
+            assert_eq!(held.unwrap().state, queue::QueueState::Approved);
+
+            accept(&shared, "v2");
+            drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+                .await
+                .unwrap();
+            let released = shared.queue.lock().expect("queue lock").get(id).cloned();
+            assert_eq!(
+                released.map(|e| (e.state, e.reason_label)),
+                Some((
+                    queue::QueueState::Failed,
+                    Some("session-file-vanished".to_string())
+                )),
+                "released: the pass reached the send"
+            );
+        }
+
+        #[tokio::test]
+        async fn held_entries_do_not_expire() {
+            let dir = tempfile::tempdir().unwrap();
+            let shared = load(dir.path());
+            let now = at("2026-11-09T12:00:00Z");
+            let ttl_days = shared.settings.lock().unwrap().queue_ttl_days;
+            let id = {
+                let mut q = shared.queue.lock().expect("queue lock");
+                let e = queue::QueueEntry {
+                    entry_id: uuid::Uuid::new_v4(),
+                    session_hash: "sha256:terms-held-old".to_string(),
+                    project_key: "/w/old".to_string(),
+                    discovered_at: now - chrono::Duration::days(ttl_days + 1),
+                    ..Default::default()
+                };
+                let id = e.entry_id;
+                q.upsert(e, 100).unwrap();
+                id
+            };
+            assert_eq!(
+                shared.queue.lock().unwrap().get(id).unwrap().state,
+                queue::QueueState::Pending
+            );
+            terms_state::apply_fetch(&shared, now, Ok(fetched("v2", true)));
+
+            expire_and_digest(&shared, now);
+            assert_eq!(
+                shared.queue.lock().unwrap().get(id).unwrap().state,
+                queue::QueueState::Pending,
+                "held entries do not age out"
+            );
+
+            accept(&shared, "v2");
+            expire_and_digest(&shared, now);
+            assert_eq!(
+                shared.queue.lock().unwrap().get(id).unwrap().state,
+                queue::QueueState::Expired,
+                "once the hold lifts, expiry runs as before"
+            );
+        }
+
+        #[tokio::test]
+        async fn hold_survives_restart_without_network() {
+            let dir = tempfile::tempdir().unwrap();
+            {
+                let shared = load(dir.path());
+                accept(&shared, "v1");
+                terms_state::apply_fetch(
+                    &shared,
+                    at("2026-11-09T12:00:00Z"),
+                    Ok(fetched("v2", true)),
+                );
+                assert!(shared.terms_held.load(Ordering::SeqCst));
+            }
+            // A new process, offline: the persisted published version holds.
+            let shared = load(dir.path());
+            assert!(shared.terms_held.load(Ordering::SeqCst));
+            assert_eq!(shared.status_value()["terms_hold"], true);
+            let mut schedule = terms_state::TermsSchedule::starting();
+            terms_state::tick(&shared, at("2026-11-09T13:00:00Z"), &mut schedule).await;
+            assert!(
+                shared.terms_held.load(Ordering::SeqCst),
+                "an offline start keeps it"
+            );
+        }
+
+        #[tokio::test]
+        async fn recheck_runs_at_start_then_every_six_hours() {
+            let start = at("2026-11-09T12:00:00Z");
+            let mut schedule = terms_state::TermsSchedule::starting();
+            assert!(schedule.due(start));
+            schedule.attempted(start);
+            assert!(!schedule.due(start));
+            assert!(!schedule.due(start + chrono::Duration::seconds(6 * 60 * 60 - 1)));
+            assert!(schedule.due(start + chrono::Duration::hours(6)));
+
+            // Through the pass: the check time moves only when due.
+            let dir = tempfile::tempdir().unwrap();
+            let shared = load(dir.path());
+            *shared.terms_fetch_override.lock().unwrap() = Some(Ok(fetched("v1", false)));
+            let checked = |shared: &ipc::DaemonShared| {
+                shared
+                    .terms
+                    .lock()
+                    .unwrap()
+                    .published
+                    .as_ref()
+                    .map(|p| p.checked_at)
+            };
+            let mut schedule = terms_state::TermsSchedule::starting();
+            terms_state::tick(&shared, start, &mut schedule).await;
+            assert_eq!(checked(&shared), Some(start));
+            terms_state::tick(&shared, start + chrono::Duration::hours(1), &mut schedule).await;
+            assert_eq!(checked(&shared), Some(start), "not due an hour later");
+            let later = start + chrono::Duration::hours(6);
+            terms_state::tick(&shared, later, &mut schedule).await;
+            assert_eq!(checked(&shared), Some(later));
+            // A draft never holds.
+            assert!(!shared.terms_held.load(Ordering::SeqCst));
+        }
     }
 }
 

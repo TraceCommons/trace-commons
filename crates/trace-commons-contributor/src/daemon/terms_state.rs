@@ -151,6 +151,106 @@ impl TermsState {
     }
 }
 
+/// How often the daemon re-reads the published document after start.
+pub(crate) const TERMS_RECHECK_SECS: i64 = 6 * 60 * 60;
+
+/// When the published document is fetched again: due at once, then
+/// [`TERMS_RECHECK_SECS`] after each attempt, successful or not.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TermsSchedule {
+    next_at: Option<DateTime<Utc>>,
+}
+
+impl TermsSchedule {
+    /// Due on the first tick.
+    pub(crate) fn starting() -> Self {
+        Self { next_at: None }
+    }
+
+    pub(crate) fn due(&self, now: DateTime<Utc>) -> bool {
+        self.next_at.is_none_or(|at| now >= at)
+    }
+
+    pub(crate) fn attempted(&mut self, now: DateTime<Utc>) {
+        self.next_at = Some(now + chrono::Duration::seconds(TERMS_RECHECK_SECS));
+    }
+}
+
+/// The daemon's terms pass: re-check the published version when due, then
+/// post an owed acceptance.
+pub(crate) async fn tick(shared: &DaemonShared, now: DateTime<Utc>, schedule: &mut TermsSchedule) {
+    if schedule.due(now) {
+        schedule.attempted(now);
+        let _ = refresh_terms(shared, now).await;
+    }
+    let _ = post_pending(shared, now).await;
+}
+
+/// Fetch the published document and record its version. A failed fetch
+/// logs its label and changes nothing: it never starts a hold and never
+/// lifts one.
+pub(crate) async fn refresh_terms(shared: &DaemonShared, now: DateTime<Utc>) -> Result<()> {
+    let fetched = fetch_for_daemon(shared).await;
+    apply_fetch(shared, now, fetched);
+    Ok(())
+}
+
+#[cfg(not(test))]
+async fn fetch_for_daemon(
+    _shared: &DaemonShared,
+) -> Result<crate::terms::FetchedTerms, &'static str> {
+    crate::terms::fetch_published().await
+}
+
+/// Tests never reach the live document: they set `terms_fetch_override`.
+#[cfg(test)]
+async fn fetch_for_daemon(
+    shared: &DaemonShared,
+) -> Result<crate::terms::FetchedTerms, &'static str> {
+    shared
+        .terms_fetch_override
+        .lock()
+        .expect("terms override lock")
+        .clone()
+        .unwrap_or(Err(crate::terms::TERMS_UNAVAILABLE))
+}
+
+/// Record a fetch's outcome. On success the published version, hash and
+/// `in_effect` replace the saved ones, `terms_held` follows, and
+/// `status_changed` is published when the hold or the owed version moved.
+pub(crate) fn apply_fetch(
+    shared: &DaemonShared,
+    now: DateTime<Utc>,
+    fetched: Result<crate::terms::FetchedTerms, &'static str>,
+) {
+    let fetched = match fetched {
+        Ok(fetched) => fetched,
+        Err(label) => {
+            tracing::warn!(reason = label, "terms not checked");
+            return;
+        }
+    };
+    let owed_before = shared.terms.lock().expect("terms lock").version_owed();
+    let published = PublishedTerms {
+        version: fetched.document.version,
+        content_sha256: fetched.content_sha256,
+        in_effect: fetched.document.in_effect,
+        checked_at: now,
+    };
+    match store_and_note(shared, |state| {
+        state.published = Some(published);
+        Ok(())
+    }) {
+        Ok(((), held_moved)) => {
+            let owed_after = shared.terms.lock().expect("terms lock").version_owed();
+            if held_moved || owed_before != owed_after {
+                shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+            }
+        }
+        Err(label) => tracing::warn!(reason = label, "terms not recorded"),
+    }
+}
+
 /// A failed post, and when the same post may be tried again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PostRetry {
@@ -211,12 +311,17 @@ pub(crate) fn handle_accept(shared: &DaemonShared, req: &Request) -> Response {
         content_sha256: request.content_sha256,
         accepted_at: request.accepted_at,
     };
-    match store_and_note(shared, |state| state.accept(accepted)) {
-        Ok(_) => {}
+    let lifted = match store_and_note(shared, |state| state.accept(accepted)) {
+        Ok(((), moved)) => moved,
         Err(TERMS_VERSION_STALE) => {
             return Response::err(req.id, ERR_BAD_PARAMS, TERMS_VERSION_STALE);
         }
         Err(label) => return Response::err(req.id, ERR_UNAVAILABLE, label),
+    };
+    // Uploads resume at once rather than at the next poll: the ordinary
+    // pass, with every other gate (the contributor's pause among them).
+    if lifted {
+        shared.request_upload_at(Utc::now());
     }
     // A new acceptance is posted at the next tick, not after an old backoff.
     *shared.terms_post_retry.lock().expect("terms retry lock") = None;
@@ -684,6 +789,9 @@ mod daemon_tests {
         cfg.ingest_url = ingest_url.into();
         cfg.tenant_id = tenant.into();
         shared.store.save_config(&cfg).unwrap();
+        // Rebind the session to the config just saved, as
+        // `account_contribution`'s rotation test does after a change.
+        account_auth::clear_token(&shared.store).unwrap();
         publish_native_session(&shared.store, "account-a");
     }
 

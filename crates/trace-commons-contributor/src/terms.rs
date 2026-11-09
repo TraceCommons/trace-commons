@@ -207,7 +207,11 @@ mod tests {
             fetch(&base, "/legal/terms.json").await,
             Err(TERMS_UNAVAILABLE)
         );
-        assert_eq!(followed.load(Ordering::SeqCst), 0, "the redirect was followed");
+        assert_eq!(
+            followed.load(Ordering::SeqCst),
+            0,
+            "the redirect was followed"
+        );
     }
 
     #[tokio::test]
@@ -280,9 +284,7 @@ mod tests {
     async fn refuses_bad_schema() {
         let base = serve(Router::new().route(
             "/legal/terms.json",
-            get(|| async {
-                FIXTURE.replace("trace_commons.terms.v1", "trace_commons.terms.v2")
-            }),
+            get(|| async { FIXTURE.replace("trace_commons.terms.v1", "trace_commons.terms.v2") }),
         ))
         .await;
         assert_eq!(

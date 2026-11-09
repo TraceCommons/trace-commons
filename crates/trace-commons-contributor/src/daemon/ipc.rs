@@ -1008,6 +1008,12 @@ pub struct DaemonShared {
     /// When a failed acceptance post may be tried again, and for which
     /// tenant and acceptance. In-memory only: a restart tries at once.
     pub(crate) terms_post_retry: Mutex<Option<super::terms_state::PostRetry>>,
+    /// Tests only: what the daemon's terms fetch returns instead of reaching
+    /// the network. `None` is an unavailable fetch, so no test ever fetches
+    /// the live document.
+    #[cfg(test)]
+    pub(crate) terms_fetch_override:
+        Mutex<Option<Result<crate::terms::FetchedTerms, &'static str>>>,
     /// Raised to stop an upload in flight now: the upload pass races each
     /// entry's upload against a change here, drops it, and returns the entry
     /// to `Approved`. A count in a watch channel, so a raise between the
@@ -1673,6 +1679,8 @@ impl DaemonShared {
             terms_held: AtomicBool::new(terms_held),
             terms: Mutex::new(terms),
             terms_post_retry: Mutex::new(None),
+            #[cfg(test)]
+            terms_fetch_override: Mutex::new(None),
             upload_interrupt: tokio::sync::watch::Sender::new(0),
             shutdown: AtomicBool::new(false),
             shutdown_signal: Arc::new(Notify::new()),
