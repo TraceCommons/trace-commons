@@ -751,7 +751,7 @@ struct MonitorNotices: View {
                 .disabled(model.privateInferenceBusy)
             })
         }
-        if let snapshot = model.managedSnapshot, !snapshot.nearAiSignedIn {
+        if let snapshot = model.managedSnapshot, !ManagedSessionsSection.showsSignedIn(snapshot) {
             items.append(GlassPopoverItem(id: "near-ai-sign-in") {
                 GlassPopoverNotice(
                     title: model.managedText("near_ai"), closeLabel: closeWord, onClose: close("near-ai-sign-in")

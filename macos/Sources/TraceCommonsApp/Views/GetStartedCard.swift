@@ -5,7 +5,8 @@ import TCDesign
 /// owner, 2026-11-02: the Private AI tab's guide and Home's Traces
 /// walkthrough take the Insights card's design, formatting and layout).
 ///
-/// A title, then an optional line under it, then numbered steps: each a
+/// A title, then an optional line under it, then numbered steps, each in a
+/// translucent card of its own: a
 /// small number in a disc, a title and one short line, with an "i" after
 /// the line holding a step's longer explanation, and the step's action, if
 /// it has one, as a text link with an arrow under it. Given `close`, a
@@ -65,7 +66,9 @@ struct GetStartedCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 if let close { GetStartedCardClose(close: close) }
             }
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s9) {
+            // Each step in a card of its own, as close together as Home's
+            // stat tiles (Ron, 2026-11-09).
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
                     GetStartedCardStep(number: index + 1, step: step)
                 }
@@ -81,7 +84,7 @@ struct GetStartedCard: View {
 /// The pixel field, out to the card's own edges and corners: the card's
 /// content sits inside its padding, so the field reaches back out by that
 /// padding and is cut to the card's corner radius.
-struct GetStartedCardField: View {
+private struct GetStartedCardField: View {
     /// Three nearby blues: the kept blue, the chart blue and first run's
     /// pale beam core, which the cells drift between.
     static let palette = [GlassTokens.Color.dataKept, GlassTokens.Color.chartSeries1,
@@ -132,6 +135,14 @@ private struct GetStartedCardStep: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        // A box of its own (Ron, 2026-11-09), laid out as the Not
+        // contributed card's line under its count, but darker than the card
+        // around it: the well's fill and inset edge, at the nested card's
+        // corner radius, not the well's pill.
+        .padding(.horizontal, GlassTokens.Space.s6)
+        .padding(.vertical, GlassTokens.Space.s4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassTier(.well, radius: GlassTokens.Radius.cardQuiet)
         .accessibilityElement(children: .contain)
     }
 }

@@ -3,10 +3,12 @@ import TCShellCore
 import XCTest
 @testable import TraceCommonsApp
 
-/// Home's Kimi campaign card closes with a small X (owner, 2026-10-27). A
-/// closed campaign comes back when what the feed says changes, and Settings
-/// can turn the campaign card off altogether. The Insights card and the
-/// Traces walkthrough have no X (owner, 2026-11-04).
+/// Home's campaign card closes with a small X (owner, 2026-10-27; kept by
+/// the product owner, 2026-11-09). A closed campaign comes back when what
+/// the feed says changes, and Settings can turn the campaign card off
+/// altogether. The Insights card has no X (Ron, 2026-11-09), and a close
+/// saved by an earlier build no longer hides it. The Traces walkthrough
+/// keeps its own X.
 @MainActor
 final class HomeClosedCardsTests: XCTestCase {
     private func campaign(id: String = "kimi-k3", title: String = "Kimi K3.1 Pro",
@@ -49,17 +51,28 @@ final class HomeClosedCardsTests: XCTestCase {
         XCTAssertFalse(HomeClosedCards.showsCampaign(print, closed: "something-else", promotionsOn: false))
     }
 
+    /// The Insights card always shows, whatever an earlier build saved
+    /// about closing it.
+    func testTheInsightsCardHasNoClose() throws {
+        let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
+        XCTAssertTrue(home.contains("if let insightsHeading {\n                    GlassHeroCard("))
+        for gone in ["insightsClosedOn", "home.insightsCardClosedOn", "showsInsights("] {
+            XCTAssertFalse(home.contains(gone), gone)
+        }
+    }
+
     func testHomeAndSettingsReadTheSameKeys() throws {
         let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains("@AppStorage(HomeClosedCards.campaignKey) private var closedCampaign = \"\""))
         XCTAssertTrue(home.contains("@AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true"))
         XCTAssertTrue(home.contains("onClose: { closedCampaign = HomeClosedCards.fingerprint(campaign) }"))
-        XCTAssertFalse(home.contains("insightsClosedOn"))
-        XCTAssertFalse(home.contains("tracesHeroClosed"), "the Traces hero keeps its own key (`HomeTracesHero.closedKey`)")
+        XCTAssertTrue(home.contains("@AppStorage(HomeClosedCards.tracesHeroKey) private var tracesHeroClosed = false"))
+        XCTAssertTrue(home.contains("close: GetStartedCard.Close(label: MonitorWords.close) { tracesHeroClosed = true },"))
         let general = try HistoryParityTests.text("Views/Settings/GeneralSection.swift")
         XCTAssertTrue(general.contains("@AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true"))
         XCTAssertTrue(general.contains("Toggle(words.promotionsToggle, isOn: $promotionsOn)"))
-        XCTAssertNotEqual(HomeClosedCards.campaignKey, HomeClosedCards.promotionsKey)
+        XCTAssertEqual(Set([HomeClosedCards.campaignKey, HomeClosedCards.promotionsKey,
+                            HomeClosedCards.tracesHeroKey]).count, 3)
     }
 
     /// The switch's words are the core's, and say what it does.
@@ -70,9 +83,10 @@ final class HomeClosedCardsTests: XCTestCase {
         XCTAssertFalse(words.promotionsCaption.isEmpty)
     }
 
-    /// The hero card draws an X only when given one: the campaign has one on
-    /// Home, the Traces hero has its own in `HomeTracesHero` (owner,
-    /// 2026-11-07); Insights and Missions have none (owner, 2026-11-04).
+    /// The hero card draws an X only when given one: the campaign has one
+    /// on Home (product owner, 2026-11-09); Insights (Ron, 2026-11-09) and
+    /// Missions have none. The Traces walkthrough is the getting-started
+    /// card, with its own X.
     func testOnlyCardsGivenACloseDrawAnX() throws {
         let hero = try String(contentsOf: Self.packageRoot
             .appendingPathComponent("Sources/TCDesign/Components/HeroCard.swift"), encoding: .utf8)
@@ -80,7 +94,8 @@ final class HomeClosedCardsTests: XCTestCase {
         XCTAssertTrue(hero.contains(".foregroundStyle(GlassTokens.Color.heroInk.color"))
         let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
         XCTAssertEqual(home.components(separatedBy: "onClose:").count - 1, 1)
-        XCTAssertEqual(home.components(separatedBy: "GetStartedCard.Close(").count - 1, 0)
+        XCTAssertEqual(home.components(separatedBy: "closeLabel:").count - 1, 1)
+        XCTAssertEqual(home.components(separatedBy: "GetStartedCard.Close(").count - 1, 1)
     }
 
     private static var packageRoot: URL {
