@@ -114,20 +114,37 @@ struct TracesHistoryPage: View {
 }
 
 /// Home's card switches, kept in this Mac's defaults; nothing leaves the
-/// machine: Settings' switch for the campaign card, and the Traces hero
-/// closed with its X.
+/// machine: the campaign card closed with its X, Settings' switch for it,
+/// and the Traces hero closed with its X.
 ///
-/// The campaign and Insights cards have no X (Ron, 2026-11-05 and
-/// 2026-11-09), and a close from an earlier build no longer hides them:
-/// with no X, one would have hidden a card for good. Promotions off still
-/// hides the campaign card (owner, 2026-10-27).
+/// The campaign card keeps its X (product owner, 2026-11-09), and a closed
+/// campaign comes back when what the feed says for it changes; promotions
+/// off hides it altogether (owner, 2026-10-27). The Insights card has no X
+/// (Ron, 2026-11-09), and a close from an earlier build no longer hides it.
 enum HomeClosedCards {
+    /// The fingerprint of the campaign as it was when closed.
+    static let campaignKey = "home.closedCampaignFingerprint"
     /// Settings' "Show promotions on Home", on by default.
     static let promotionsKey = "home.showsPromotions"
     /// The Traces hero was closed with its X (owner, 2026-11-02). It stays
     /// closed on this Mac: what it explains does not change, and Traces
     /// and Private AI keep their tabs.
     static let tracesHeroKey = "home.tracesHeroClosed"
+
+    /// Everything the campaign card shows, so any change in the feed --
+    /// under the same id or a new one -- is a different fingerprint. New
+    /// art behind the same image URL is not: the feed changes the URL with
+    /// the art.
+    static func fingerprint(_ campaign: PrivateAICampaign) -> String {
+        [campaign.id, campaign.title, campaign.body, campaign.actionTitle, campaign.actionURL.absoluteString,
+         campaign.symbol, campaign.imageURL?.absoluteString ?? ""].joined(separator: "\u{1F}")
+    }
+
+    /// A campaign shows while promotions are on and it is not the one the
+    /// person closed, as it was then.
+    static func showsCampaign(_ fingerprint: String, closed: String, promotionsOn: Bool) -> Bool {
+        promotionsOn && fingerprint != closed
+    }
 }
 
 private struct HomeOverview: View {
@@ -153,6 +170,9 @@ private struct HomeOverview: View {
     /// Where the NEAR AI sign-in's browser page opens.
     @Environment(\.openURL) private var openURL
     @State private var campaignStore = PrivateAICampaignStore()
+    /// The campaign closed with its X, as it was then (`fingerprint`): it
+    /// comes back when the feed changes it (owner, 2026-10-27).
+    @AppStorage(HomeClosedCards.campaignKey) private var closedCampaign = ""
     /// Settings' "Show promotions on Home": off, no campaign card.
     @AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true
     /// The Traces hero, closed with its X: gone from Home on this Mac.
@@ -184,11 +204,14 @@ private struct HomeOverview: View {
     /// A native promotion, available from compiled copy before its remote refresh.
     @ViewBuilder
     private var campaign: some View {
-        if let campaign = campaignStore.campaign, promotionsOn {
+        if let campaign = campaignStore.campaign,
+           HomeClosedCards.showsCampaign(
+               HomeClosedCards.fingerprint(campaign), closed: closedCampaign, promotionsOn: promotionsOn) {
             GlassHeroCard(
                 gradient: GlassTokens.Gradient.heroCampaignCard,
                 title: campaign.title, subtitle: campaign.body,
-                actionTitle: campaign.actionTitle, action: { openURL(campaign.actionURL) }
+                actionTitle: campaign.actionTitle, action: { openURL(campaign.actionURL) },
+                closeLabel: MonitorWords.close, onClose: { closedCampaign = HomeClosedCards.fingerprint(campaign) }
             ) {
                 if let image = campaignStore.image {
                     GlassHeroSymbol(image: image)

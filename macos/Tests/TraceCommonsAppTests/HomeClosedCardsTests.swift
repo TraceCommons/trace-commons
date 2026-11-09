@@ -1,36 +1,78 @@
 #if DEBUG
+import TCShellCore
 import XCTest
 @testable import TraceCommonsApp
 
-/// Home's campaign and Insights cards have no X: the campaign lost its X on
-/// 2026-11-05 and Insights on 2026-11-09 (Ron). A close saved by an earlier
-/// build no longer hides either card, since with no X it would have hidden
-/// it for good. Settings can still turn the campaign card off altogether,
-/// and the Traces walkthrough keeps its own X.
+/// Home's campaign card closes with a small X (owner, 2026-10-27; kept by
+/// the product owner, 2026-11-09). A closed campaign comes back when what
+/// the feed says changes, and Settings can turn the campaign card off
+/// altogether. The Insights card has no X (Ron, 2026-11-09), and a close
+/// saved by an earlier build no longer hides it. The Traces walkthrough
+/// keeps its own X.
 @MainActor
 final class HomeClosedCardsTests: XCTestCase {
-    /// The campaign card shows while promotions are on, whatever an earlier
-    /// build saved about closing it; the Insights card always shows.
-    func testOnlySettingsSwitchHidesThePromotions() throws {
+    private func campaign(id: String = "kimi-k3", title: String = "Kimi K3.1 Pro",
+                          body: String = "Try Kimi with Private AI.", action: String = "Try Kimi",
+                          url: String = "https://near.ai/models/kimi", symbol: String = "cpu",
+                          image: String? = "https://assets.example/native/kimi.png") throws -> PrivateAICampaign {
+        var json: [String: Any] = [
+            "schema_version": 1, "id": id, "title": title, "body": body,
+            "action_title": action, "action_url": url, "symbol": symbol,
+        ]
+        if let image { json["image_url"] = image }
+        return try JSONDecoder().decode(PrivateAICampaign.self, from: JSONSerialization.data(withJSONObject: json))
+    }
+
+    /// Closed, it stays closed while the feed says the same thing; any
+    /// change to what the card shows, under the same id or a new one,
+    /// brings it back once.
+    func testAClosedCampaignComesBackWhenItsContentChanges() throws {
+        let shown = try campaign()
+        let closed = HomeClosedCards.fingerprint(shown)
+        XCTAssertTrue(HomeClosedCards.showsCampaign(HomeClosedCards.fingerprint(shown), closed: "", promotionsOn: true))
+        XCTAssertFalse(HomeClosedCards.showsCampaign(HomeClosedCards.fingerprint(try campaign()), closed: closed,
+                                                     promotionsOn: true), "unchanged: still closed")
+        for changed in [
+            try campaign(id: "kimi-k4"), try campaign(title: "Kimi K3.2"), try campaign(body: "Now faster."),
+            try campaign(action: "Open Kimi"), try campaign(url: "https://near.ai/models/kimi-k3"),
+            try campaign(symbol: "bolt"), try campaign(image: "https://assets.example/native/kimi-2.png"),
+            try campaign(image: nil),
+        ] {
+            XCTAssertTrue(HomeClosedCards.showsCampaign(HomeClosedCards.fingerprint(changed), closed: closed,
+                                                        promotionsOn: true), "\(changed) shows again")
+        }
+    }
+
+    /// Settings' switch off hides the campaign card whatever the feed says,
+    /// closed or not.
+    func testPromotionsOffHidesTheCampaignCard() throws {
+        let print = HomeClosedCards.fingerprint(try campaign())
+        XCTAssertFalse(HomeClosedCards.showsCampaign(print, closed: "", promotionsOn: false))
+        XCTAssertFalse(HomeClosedCards.showsCampaign(print, closed: "something-else", promotionsOn: false))
+    }
+
+    /// The Insights card always shows, whatever an earlier build saved
+    /// about closing it.
+    func testTheInsightsCardHasNoClose() throws {
         let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("if let campaign = campaignStore.campaign, promotionsOn {"))
         XCTAssertTrue(home.contains("if let insightsHeading {\n                    GlassHeroCard("))
-        // The keys an earlier build saved its closes under are read no more.
-        for gone in ["closedCampaign", "insightsClosedOn", "home.closedCampaignFingerprint",
-                     "home.insightsCardClosedOn", "showsCampaign(", "showsInsights("] {
+        for gone in ["insightsClosedOn", "home.insightsCardClosedOn", "showsInsights("] {
             XCTAssertFalse(home.contains(gone), gone)
         }
     }
 
     func testHomeAndSettingsReadTheSameKeys() throws {
         let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
+        XCTAssertTrue(home.contains("@AppStorage(HomeClosedCards.campaignKey) private var closedCampaign = \"\""))
         XCTAssertTrue(home.contains("@AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true"))
+        XCTAssertTrue(home.contains("onClose: { closedCampaign = HomeClosedCards.fingerprint(campaign) }"))
         XCTAssertTrue(home.contains("@AppStorage(HomeClosedCards.tracesHeroKey) private var tracesHeroClosed = false"))
         XCTAssertTrue(home.contains("close: GetStartedCard.Close(label: MonitorWords.close) { tracesHeroClosed = true },"))
         let general = try HistoryParityTests.text("Views/Settings/GeneralSection.swift")
         XCTAssertTrue(general.contains("@AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true"))
         XCTAssertTrue(general.contains("Toggle(words.promotionsToggle, isOn: $promotionsOn)"))
-        XCTAssertNotEqual(HomeClosedCards.promotionsKey, HomeClosedCards.tracesHeroKey)
+        XCTAssertEqual(Set([HomeClosedCards.campaignKey, HomeClosedCards.promotionsKey,
+                            HomeClosedCards.tracesHeroKey]).count, 3)
     }
 
     /// The switch's words are the core's, and say what it does.
@@ -41,18 +83,18 @@ final class HomeClosedCardsTests: XCTestCase {
         XCTAssertFalse(words.promotionsCaption.isEmpty)
     }
 
-    /// The hero card draws an X only when given one, and no Home hero is
-    /// given one: not the campaign (Ron, 2026-11-05), not Insights (Ron,
-    /// 2026-11-09), not Missions. The Traces walkthrough is the
-    /// getting-started card since 2026-11-02 (owner), with its own X.
+    /// The hero card draws an X only when given one: the campaign has one
+    /// on Home (product owner, 2026-11-09); Insights (Ron, 2026-11-09) and
+    /// Missions have none. The Traces walkthrough is the getting-started
+    /// card, with its own X.
     func testOnlyCardsGivenACloseDrawAnX() throws {
         let hero = try String(contentsOf: Self.packageRoot
             .appendingPathComponent("Sources/TCDesign/Components/HeroCard.swift"), encoding: .utf8)
         XCTAssertTrue(hero.contains("if let onClose {\n                GlassHeroClose(label: closeLabel ?? \"\", action: onClose)"))
         XCTAssertTrue(hero.contains(".foregroundStyle(GlassTokens.Color.heroInk.color"))
         let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
-        XCTAssertEqual(home.components(separatedBy: "onClose:").count - 1, 0)
-        XCTAssertEqual(home.components(separatedBy: "closeLabel:").count - 1, 0)
+        XCTAssertEqual(home.components(separatedBy: "onClose:").count - 1, 1)
+        XCTAssertEqual(home.components(separatedBy: "closeLabel:").count - 1, 1)
         XCTAssertEqual(home.components(separatedBy: "GetStartedCard.Close(").count - 1, 1)
     }
 
