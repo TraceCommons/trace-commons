@@ -13,6 +13,11 @@ enum FirstRunStageLayout {
     /// stage lays out in it and scales down to fit a smaller host.
     static let canvas = CGSize(width: 860, height: 760)
 
+    /// How small a Uses-ring satellite starts before it pops in: a seed of
+    /// the orb, never zero, so it grows from something rather than out of
+    /// nowhere.
+    static let satelliteSeedScale: CGFloat = 0.5
+
     /// The step thread's position of a step: nil on Welcome, which shows
     /// no thread.
     static func threadIndex(of step: FirstRunStep) -> Int? {
