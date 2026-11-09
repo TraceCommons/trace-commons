@@ -51,37 +51,75 @@ final class AnimatedFirstRunTests: XCTestCase {
         XCTAssertEqual(FirstRunNavigation.next(FirstRunState()).step, .tools)
     }
 
+    private static let accepted = AcceptedTerms(
+        version: "2026-08-22-draft", contentSHA256: String(repeating: "a", count: 64),
+        acceptedAt: Date(timeIntervalSince1970: 1_762_689_600))
+
+    /// Welcome is left only with terms that were read and accepted: the
+    /// runner holds the accepted version and hash, unticking takes it back,
+    /// and Back keeps it.
     @MainActor
-    func testWelcomeRequiresExplicitTermsAcceptanceBeforeAdvancing() throws {
+    func testWelcomeRequiresScrolledAcceptance() throws {
         let daemon = RecordingFirstRunDaemon()
         let runner = FirstRunRunner(state: FirstRunState(), daemon: daemon)
         let legal = try XCTUnwrap(words().welcome.legal)
-        XCTAssertFalse(runner.termsAccepted)
+        XCTAssertNil(runner.acceptedTerms)
         XCTAssertFalse(runner.canLeaveWelcome(legal: legal))
         runner.continueFromWelcome(legal: legal)
         XCTAssertEqual(runner.state.step, .welcome)
 
-        runner.termsAccepted = true
+        runner.acceptedTerms = Self.accepted
         XCTAssertTrue(runner.canLeaveWelcome(legal: legal))
-        runner.termsAccepted = false
+        runner.acceptedTerms = nil
         runner.continueFromWelcome(legal: legal)
-        XCTAssertEqual(runner.state.step, .welcome, "unchecking closes the gate again")
+        XCTAssertEqual(runner.state.step, .welcome, "unticking closes the gate again")
 
-        runner.termsAccepted = true
+        runner.acceptedTerms = Self.accepted
         runner.continueFromWelcome(legal: legal)
         XCTAssertEqual(runner.state.step, .tools)
         runner.continueFromWelcome(legal: legal)
         XCTAssertEqual(runner.state.step, .tools, "a repeated action cannot skip a step")
         runner.state = FirstRunNavigation.back(runner.state)
-        XCTAssertTrue(runner.termsAccepted, "Back retains the explicit answer in this first run")
+        XCTAssertEqual(runner.acceptedTerms, Self.accepted, "Back retains the accepted terms")
         XCTAssertTrue(daemon.log.isEmpty, "acceptance is not a trace-sharing grant")
+        XCTAssertTrue(daemon.termsRecorded.isEmpty, "nothing is handed over before the daemon starts")
+    }
+
+    /// While the terms load, or after they failed to, there is nothing to
+    /// accept, so Welcome stays shut; once loaded, accepting names exactly
+    /// the version and hash on screen.
+    @MainActor
+    func testWelcomeBlockedWhileLoadingAndFailed() async throws {
+        let legal = try XCTUnwrap(words().welcome.legal)
+        let runner = FirstRunRunner(state: FirstRunState(), daemon: RecordingFirstRunDaemon())
+        let now = Date(timeIntervalSince1970: 1_762_689_600)
+
+        let failing = TermsLoader(fetch: { .failure(TCTermsRefusal(label: "terms-unavailable")) })
+        XCTAssertEqual(failing.state, .loading)
+        XCTAssertNil(failing.acceptance(at: now), "nothing to accept while loading")
+        await failing.load()
+        XCTAssertEqual(failing.state, .failed("terms-unavailable"))
+        runner.acceptedTerms = failing.acceptance(at: now)
+        XCTAssertFalse(runner.canLeaveWelcome(legal: legal))
+
+        let document = TermsDocument(
+            version: "v1", effective: "2026-08-22", inEffect: false, title: "T",
+            blocks: [.paragraph("p")])
+        let fetched = FetchedTerms(document: document, contentSHA256: String(repeating: "b", count: 64))
+        let loading = TermsLoader(fetch: { .success(fetched) })
+        await loading.load()
+        XCTAssertEqual(loading.state, .loaded(fetched))
+        let acceptance = try XCTUnwrap(loading.acceptance(at: now))
+        XCTAssertEqual(acceptance, AcceptedTerms(version: "v1", contentSHA256: fetched.contentSHA256, acceptedAt: now))
+        runner.acceptedTerms = acceptance
+        XCTAssertTrue(runner.canLeaveWelcome(legal: legal))
     }
 
     @MainActor
     func testWelcomeCannotBypassAcceptanceWhenLegalCopyIsUnavailable() {
         let daemon = RecordingFirstRunDaemon()
         let runner = FirstRunRunner(state: FirstRunState(), daemon: daemon)
-        runner.termsAccepted = true
+        runner.acceptedTerms = Self.accepted
         XCTAssertFalse(runner.canLeaveWelcome(legal: nil))
         runner.continueFromWelcome(legal: nil)
         XCTAssertEqual(runner.state.step, .welcome)

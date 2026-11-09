@@ -4699,6 +4699,12 @@ extension AppModel: FirstRunDaemon {
         }
     }
 
+    func recordTermsAcceptance(_ terms: AcceptedTerms) async -> Bool {
+        let result = await firstRunCall { client in try client.termsAccept(terms) }
+        guard case .success = result else { return false }
+        return true
+    }
+
     func setSourceSettings(settingsJSON: String) async -> Bool {
         let result = await firstRunCall { client in
             // Only the serialized input crosses to the worker. The untyped

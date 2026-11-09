@@ -120,6 +120,15 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
     /// What each finished first run handed over, in order.
     var finished: [String?] = []
     func firstRunFinished(notice: String?) { finished.append(notice) }
+
+    /// `terms_accept` is not a plan call (`FirstRunCall`), so each hand-off
+    /// is kept on its own, with how many plan calls were logged before it.
+    private(set) var termsRecorded: [(terms: AcceptedTerms, afterCalls: Int)] = []
+    var termsAnswer = true
+    func recordTermsAcceptance(_ terms: AcceptedTerms) async -> Bool {
+        termsRecorded.append((terms, log.count))
+        return termsAnswer
+    }
 }
 
 /// The failure each call reports when the daemon refuses it.
@@ -917,5 +926,57 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertNotEqual(runner.failure, .startFailed)
         XCTAssertEqual(runner.state.startedSettingsJSON, held)
         XCTAssertEqual(runner.state.step, .join)
+    }
+
+    // MARK: Terms of Service
+
+    private static let accepted = AcceptedTerms(
+        version: "2026-08-22-draft", contentSHA256: String(repeating: "a", count: 64),
+        acceptedAt: Date(timeIntervalSince1970: 1_762_689_600))
+
+    /// The terms accepted on Welcome go to the daemon exactly once, right
+    /// after it first starts, and not again on a later commit.
+    func testTermsHandedToDaemonOnceAfterStart() async throws {
+        let daemon = RecordingFirstRunDaemon()
+        var state = onFolders()
+        state.step = .tools
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        runner.acceptedTerms = Self.accepted
+        await runner.commit(.leaveTools)
+        let json = try XCTUnwrap(state.sessionRoots.settingsJSON())
+        XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: json)])
+        XCTAssertEqual(daemon.termsRecorded.count, 1)
+        XCTAssertEqual(daemon.termsRecorded.first?.terms, Self.accepted)
+        XCTAssertEqual(daemon.termsRecorded.first?.afterCalls, 1, "after .startDaemon")
+        XCTAssertTrue(runner.termsHandedOver)
+
+        await runner.commit(.signIn)
+        XCTAssertEqual(daemon.termsRecorded.count, 1, "handed over once per first run")
+    }
+
+    /// Nothing accepted, nothing handed over.
+    func testNoTermsNoHandOff() async {
+        let daemon = RecordingFirstRunDaemon()
+        var state = onFolders()
+        state.step = .tools
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        await runner.commit(.leaveTools)
+        XCTAssertTrue(daemon.termsRecorded.isEmpty)
+    }
+
+    /// A refused hand-off does not fail the first run: the step moves on and
+    /// no failure is reported. The daemon's terms hold asks again later.
+    func testRefusedHandOffDoesNotFailFirstRun() async {
+        let daemon = RecordingFirstRunDaemon()
+        daemon.termsAnswer = false
+        var state = onFolders()
+        state.step = .tools
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        runner.acceptedTerms = Self.accepted
+        await runner.commit(.leaveTools)
+        XCTAssertNil(runner.failure)
+        XCTAssertTrue(runner.state.daemonStarted)
+        XCTAssertEqual(runner.state.step, .privateAI)
+        XCTAssertEqual(daemon.termsRecorded.count, 1)
     }
 }
