@@ -471,6 +471,13 @@ extension DaemonData {
         /// chosen; `nil` otherwise, and from a daemon predating it. A label,
         /// never shown as text.
         public let consentHold: String?
+        /// `true` while an in-effect Terms of Service version is published
+        /// that this person has not accepted: the daemon uploads nothing.
+        /// Separate from `paused`. `nil` from a daemon predating it.
+        public let termsHold: Bool?
+        /// The version owed while `termsHold`; `nil` otherwise. A version
+        /// id, never shown as text.
+        public let termsVersionOwed: String?
         public let paused: Bool?
         /// Authoritative admission capacity, including eligible Approved entries.
         /// Missing on older daemons; unknown must never establish recovery.
@@ -554,6 +561,8 @@ extension DaemonData {
             case accountScope = "account_scope"
             case consentScopes = "consent_scopes"
             case consentHold = "consent_hold"
+            case termsHold = "terms_hold"
+            case termsVersionOwed = "terms_version_owed"
             case paused
             case queueAtCapacity = "queue_at_capacity"
             case queueCapacityUsed = "queue_capacity_used"
