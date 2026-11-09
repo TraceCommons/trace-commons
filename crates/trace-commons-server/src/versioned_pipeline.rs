@@ -6233,8 +6233,10 @@ impl PgPipelineStore {
     /// leg pays. Only a minimal-reference run writes none: its evidence
     /// carries none of the legacy fields (C-D1). Every column comes from the committed Score
     /// outcome, the bound package's Score configuration hash and the run's
-    /// Trace Credit leg (C-D3); the legacy-only columns stay NULL for the
-    /// sweeps to fill.
+    /// Trace Credit leg (C-D3); the legacy-only columns stay NULL, except
+    /// the four dedup columns, which `commit_settle_from_progress` stamps
+    /// after the commit (`stamp_settled_gate_decision_dedup`, owner decision
+    /// O4).
     ///
     /// The decision id is a UUIDv5 over the tenant and the run (C-D2), and
     /// offering this run's row twice is a no-op. Returns whether a row was
@@ -15686,7 +15688,65 @@ impl PipelineService {
             Err(error) => return Err(error.into()),
         };
         self.inject_crash(PipelineCrashPoint::AfterSettleCommit)?;
+        // Owner decision O4: the pipeline stamps dedup on its own gate
+        // decision row, after the commit, best-effort.
+        self.stamp_settled_gate_decision_dedup(&updated).await;
         Ok(updated)
+    }
+
+    /// Stamps the cross-trace dedup columns (simhash, cluster id, cluster
+    /// size, signal version) on the run's `pipeline_settle` gate decision
+    /// row, after Settle committed it (owner decision O4). The assignment is
+    /// `main`'s inline one (`dedup_inline::record_inline_dedup`), so pipeline
+    /// and legacy rows cluster together under the same rule.
+    ///
+    /// The simhash is derived under `ACTIVE_DEDUP_ALGORITHM` over the
+    /// metadata-free render (`dedup_canonical_text`) of the submission's
+    /// source envelope: the `submitted_envelope` object the receipt staged,
+    /// which is the object `main`'s re-derivation pass loads for the same
+    /// submission, so the inline stamp and a later re-derivation agree. The
+    /// plaintext never leaves this method; only the 64-bit value is written.
+    ///
+    /// Best-effort and fail-closed: the Settle commit already happened and
+    /// is never undone. A failed read or write logs a label and the tenant
+    /// storage ref, never the error text, and leaves the row unclustered,
+    /// which earned trust reads as not first in any cluster until the
+    /// re-derivation pass reaches it. The write is guarded by
+    /// `dedup_cluster_id IS NULL`, so a row already stamped keeps its
+    /// cluster, and a run that wrote no row (a minimal-reference bundle, a
+    /// rejected Score hold) matches nothing.
+    async fn stamp_settled_gate_decision_dedup(&self, run: &PipelineRunRecord) {
+        let source = match self.load_source_bytes(run).await {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                tracing::warn!(
+                    error_class = "pipeline_settle_dedup_source_unreadable",
+                    tenant_storage_ref = pipeline_tenant_storage_ref(&run.tenant_id).as_str(),
+                    "pipeline settle dedup stamp skipped; the row stays unclustered"
+                );
+                return;
+            }
+        };
+        let algorithm = crate::dedup_simhash::ACTIVE_DEDUP_ALGORITHM;
+        let simhash =
+            algorithm.simhash(&crate::trace_gate_service::dedup_canonical_text(&source)) as i64;
+        let signal_version = crate::trace_gate_service::dedup_signal_version_for(algorithm);
+        let outcome = crate::dedup_inline::record_inline_dedup(
+            self.backend.as_ref(),
+            &run.tenant_id,
+            pipeline_gate_decision_id(&run.tenant_id, run.run_id),
+            simhash,
+            &signal_version,
+            crate::dedup_inline::InlineDedupWrite::OnlyIfUnset,
+        )
+        .await;
+        if outcome == crate::dedup_inline::InlineDedupOutcome::WriteFailed {
+            tracing::warn!(
+                error_class = "pipeline_settle_dedup_write_failed",
+                tenant_storage_ref = pipeline_tenant_storage_ref(&run.tenant_id).as_str(),
+                "pipeline settle dedup stamp failed; the row stays unclustered"
+            );
+        }
     }
 
     /// The Trace Credit account a run's credit settles to: the submission's

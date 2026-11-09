@@ -44,4 +44,24 @@ final class FirstRunCopyExportTests: XCTestCase {
         XCTAssertNotEqual(blanked, json)
         XCTAssertNil(FirstRunCopy.decode(blanked))
     }
+    func testWelcomeLegalPlaceholderDecodesPublishedLinks() throws {
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        let legal = try XCTUnwrap(copy.welcome.legal)
+        XCTAssertEqual(legal.accept, "I accept the Terms of Service")
+        XCTAssertEqual(legal.termsUrl.absoluteString, "https://\(LinkedChannel.siteHost)/about/tnc/")
+        XCTAssertEqual(legal.privacyUrl.absoluteString, "https://\(LinkedChannel.siteHost)/about/privacy/")
+    }
+
+    func testOlderWelcomeExportsRemainCompatible() throws {
+        let json = try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())
+        var tree = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        var welcome = try XCTUnwrap(tree["welcome"] as? [String: Any])
+        welcome.removeValue(forKey: "legal")
+        tree["welcome"] = welcome
+        let old = String(decoding: try JSONSerialization.data(withJSONObject: tree), as: UTF8.self)
+        let copy = try XCTUnwrap(FirstRunCopy.decode(old))
+        XCTAssertNil(copy.welcome.legal)
+        XCTAssertEqual(copy.welcome.start, "Get started")
+    }
+
 }

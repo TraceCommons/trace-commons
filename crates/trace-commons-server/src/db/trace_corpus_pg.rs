@@ -7183,6 +7183,41 @@ impl TraceCorpusStore for PgBackend {
         Ok(())
     }
 
+    async fn update_trace_gate_decision_dedup_if_unset(
+        &self,
+        tenant_id: &str,
+        decision_id: Uuid,
+        write: crate::trace_corpus_storage::DedupAssignmentWrite,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // The same four-column, one-statement write as
+        // `update_trace_gate_decision_dedup` (V57), guarded so a row that
+        // already has a cluster keeps it.
+        let written = tx
+            .execute(
+                "UPDATE trace_gate_decisions
+                    SET dedup_simhash = $3,
+                        dedup_cluster_id = $4,
+                        dedup_cluster_size = $5,
+                        dedup_signal_version = $6
+                 WHERE tenant_id = $1 AND decision_id = $2
+                   AND dedup_cluster_id IS NULL",
+                &[
+                    &tenant_id,
+                    &decision_id,
+                    &write.dedup_simhash,
+                    &write.dedup_cluster_id,
+                    &write.dedup_cluster_size,
+                    &write.dedup_signal_version,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(written == 1)
+    }
+
     async fn update_trace_gate_decision_dedup_cluster(
         &self,
         tenant_id: &str,

@@ -107,6 +107,8 @@ mod values {
     pub const URL_SCHEME: &str = url_scheme!();
     pub const PUBLIC_SITE_HOST: &str = "tracecommons.ai";
     pub const PUBLIC_RUNS_PREFIX: &str = "https://tracecommons.ai/runs/";
+    pub const TERMS_URL: &str = "https://tracecommons.ai/about/tnc/";
+    pub const PRIVACY_URL: &str = "https://tracecommons.ai/about/privacy/";
     pub const INVITE_PLACEHOLDER: &str = "https://issuer.tracecommons.ai/onboard#…";
 
     pub const NEAR_AI_API_ORIGIN: &str = "https://cloud-platform.near.ai";
@@ -147,6 +149,8 @@ mod values {
     pub const URL_SCHEME: &str = url_scheme!();
     pub const PUBLIC_SITE_HOST: &str = staging_host!();
     pub const PUBLIC_RUNS_PREFIX: &str = concat!("https://", staging_host!(), "/runs/");
+    pub const TERMS_URL: &str = concat!("https://", staging_host!(), "/about/tnc/");
+    pub const PRIVACY_URL: &str = concat!("https://", staging_host!(), "/about/privacy/");
     pub const INVITE_PLACEHOLDER: &str = concat!("https://issuer.", staging_host!(), "/onboard#…");
 
     pub const NEAR_AI_API_ORIGIN: &str = "https://cloud-platform-stg.near.ai";
@@ -225,6 +229,9 @@ pub const COMMONS_WITNESS_ENROLLMENT_URLS: &[&str] = values::COMMONS_WITNESS_ENR
 pub const PUBLIC_SITE_HOST: &str = values::PUBLIC_SITE_HOST;
 /// The prefix of a public run page.
 pub const PUBLIC_RUNS_PREFIX: &str = values::PUBLIC_RUNS_PREFIX;
+/// Legal pages on this channel's public site.
+pub const TERMS_URL: &str = values::TERMS_URL;
+pub const PRIVACY_URL: &str = values::PRIVACY_URL;
 /// The example invite shown in an empty invite field.
 pub const INVITE_PLACEHOLDER: &str = values::INVITE_PLACEHOLDER;
 
@@ -310,6 +317,8 @@ pub const HOST_VALUES: &[&str] = &[
     NATIVE_ACCOUNT_ORIGIN,
     PUBLIC_SITE_HOST,
     PUBLIC_RUNS_PREFIX,
+    TERMS_URL,
+    PRIVACY_URL,
     INVITE_PLACEHOLDER,
     NEAR_AI_API_ORIGIN,
     NEAR_AI_INFERENCE_BASE,

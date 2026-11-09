@@ -49,6 +49,16 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let title: String
         public let body: String
         public let start: String
+        /// Absent in older core exports; those retain their existing Welcome.
+        public let legal: Legal?
+
+        public struct Legal: Decodable, Equatable, Sendable {
+            public let accept: String
+            public let terms: String
+            public let privacy: String
+            public let termsUrl: URL
+            public let privacyUrl: URL
+        }
     }
 
     public struct Join: Decodable, Equatable, Sendable {

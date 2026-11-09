@@ -301,37 +301,38 @@ threshold; it counts `attested_unit_weight` units (default 1) toward the
 tier, under the same weekly cap; and a tier may require `attested_units`
 (default 0). A provider-TEE attested upload the gate never assigned a dedup
 cluster is not first in any cluster, so it earns nothing until the dedup pass
-reaches it.
+reaches it (the pipeline stamps its own decisions after Settle).
 
 ### The policy
 
-For user testing, with a weekly period. Replace `<BASE>` (100 recommended)
-and `<CEILING>` (`<BASE>` times 8: 800 for 100), and
-`PILOT_GATE_POLICY_VERSION` with the gate policy version in effect (query D1
-in the growth-tier draft: `SELECT gate_policy_version, count(*) FROM
-trace_gate_decisions GROUP BY 1`). Every number is a first draft.
+For user testing, with a daily period. Every number is a first draft.
+Replace `PILOT_GATE_POLICY_VERSION` with the legacy gate policy version in
+effect, and `<BUNDLE_HEX>` with each pipeline bundle id's 64 hex digits (one
+entry per bundle, see below).
 
 ```json
 {
-  "version": "earned-trust-live-2026-10-11.1",
+  "version": "earned-trust-live-2026-11-07.1",
   "processing_cost_bound": 1,
-  "bounded_allowance": <BASE>,
-  "period": {"mode": "fixed", "seconds": 604800},
+  "bounded_allowance": 100,
+  "period": {"mode": "fixed", "seconds": 86400},
   "growth_rule": "tiered-v1",
   "growth": {
     "window_seconds": 7257600,
     "weekly_cap": 10,
     "attested_unit_weight": 2,
+    "acceptance_source": "status",
+    "carried_age": true,
     "q_min_micros": null,
     "credit_quality_calibration_versions": [],
     "penalty_cooldown_seconds": 7776000,
     "evaluation_max_age_seconds": 172800,
-    "allowance_ceiling": <CEILING>,
-    "evaluator_versions": ["PILOT_GATE_POLICY_VERSION"],
+    "allowance_ceiling": 800,
+    "evaluator_versions": ["PILOT_GATE_POLICY_VERSION", "pipeline:sha256:<BUNDLE_HEX>"],
     "dedup_signal_versions": ["events.v1+fnv1a-3shingle-set.v2"],
     "tiers": [
       {"units": 0,  "active_weeks": 0, "age_seconds": 0,       "multiplier": 1},
-      {"units": 10, "active_weeks": 2, "age_seconds": 1209600, "multiplier": 2},
+      {"units": 10, "active_weeks": 1, "age_seconds": 86400,   "multiplier": 2},
       {"units": 30, "active_weeks": 4, "age_seconds": 3628800, "multiplier": 4, "attested_units": 5},
       {"units": 60, "active_weeks": 8, "age_seconds": 7257600, "multiplier": 8, "attested_units": 10}
     ]
@@ -339,26 +340,87 @@ trace_gate_decisions GROUP BY 1`). Every number is a first draft.
 }
 ```
 
-Tier 1 needs no attestation, so contributors without NEAR AI inference can
-still earn. `attested_unit_weight` 2 and the tier 2 and 3 `attested_units`
-are proposals for review, not decided values. Setting the policy is a version
+The allowance is per day: 100, then 200, 400 and 800 at tiers 1 to 3.
+`weekly_cap` still limits the units one calendar week can add, whatever the
+period. Tier 1 needs no attestation, so contributors without NEAR AI
+inference can still earn. `attested_unit_weight` 2 and the tier 2 and 3
+`attested_units` are proposals for review. Setting the policy is a version
 bump: `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION` must equal `version`.
-Spend in the current fixed bucket carries across versions, so switching from
-a lifetime period to a weekly one is a separate reviewed change and a weekly
-bucket starts counting from its boundary.
+
+Fields that matter for the versioned pipeline:
+
+- `acceptance_source` is `"ledger"` (the default) or `"status"`. `"status"`
+  also counts the server's own acceptance (an `accepted_submission_status`
+  fact), which is the only acceptance the pipeline leaves. `require_gate_pass`
+  keeps its meaning: attestation no longer bypasses the gate.
+- `evaluator_versions` takes plain labels and `pipeline:sha256:<64 lowercase
+  hex>` labels, matched exactly. No wildcard exists. `dedup_signal_versions`
+  stays plain labels only.
+- `carried_age` lets a live, non-pooled, device-proven link to an older
+  identity start the account's age at that identity's first accepted
+  contribution (V157). Units and active weeks are still earned fresh.
+  Unlinking removes the carry and sends the account to base until the next
+  tick.
+
+Pipeline evaluator labels. The pipeline writes `pipeline:<bundle id>` as the
+gate policy version of its decisions. List the ones in use:
+
+```sql
+SELECT gate_policy_version, count(*) FROM trace_gate_decisions
+ WHERE source = 'pipeline_settle' GROUP BY 1 ORDER BY 2 DESC;
+```
+
+Keep the legacy label in the list so earlier contributions still count.
+
+Switching an existing weekly account to the daily period. A bucket id carries
+its length (`fixed:604800:N` and `fixed:86400:M` never match), and spend is
+summed per bucket id, so nothing crashes and nothing is counted twice. The
+first daily bucket starts at 0 spend whatever was spent earlier in the week,
+so an account may spend up to its allowance again on the day of the switch.
+Plan the switch for a quiet hour, and make it a separate reviewed change.
+
+### Rollout checklist for a pipeline bundle
+
+1. Before activating a bundle, read its id (`pipeline-activation.md`).
+2. Append `pipeline:sha256:<hex>` to `evaluator_versions`. Do not remove an
+   entry while its decisions are inside `window_seconds`: they still earn
+   units. The list holds at most 64 entries, and a longer one fails to parse,
+   so ingest refuses the policy at startup. Before it fills, drop the oldest
+   ids whose last decision is older than `window_seconds`.
+3. Bump `version` and `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION`
+   together, then restart ingest. Every activation needs this bump, because
+   the bundle id changes with any policy it holds. A forgotten bump leaves
+   new contributions unqualified and stops nothing else.
+4. After the next scheduler tick, read
+   `evaluate-account-trust?mode=shadow`. Its `rejections` object counts, per
+   reason, the facts that did not earn units: `no_qualifying_acceptance`,
+   `evaluator_not_allowlisted`, `dedup_version_not_allowlisted`,
+   `not_first_in_cluster`, `gate_failed`, `quality_below_min`,
+   `approver_unknown` and `gate_facts_dedup_unstamped`. A gate fact counts
+   under every reason it fails, so the numbers do not add up. A large
+   `evaluator_not_allowlisted` means step 2 was missed.
+5. The pipeline stamps dedup on its decisions after Settle. For decisions
+   settled before that, run `POST /v1/admin/rederive-dedup` (dry run first).
+   `gate_facts_dedup_unstamped` should fall to 0.
+6. A pipeline-accepted submission with credit counts as a passed gate even if
+   its perplexity or novelty flag is false. A zero-credit one, or one
+   withheld as a duplicate, does not.
+7. The record pass reports `carried_age_accounts` and `carried_age_failed`.
+   A non-zero `carried_age_failed` means a link could not be read; those
+   accounts keep their own age.
 
 ### Switching growth live
 
-1. Apply migrations through V126, and confirm V115's frontier backfill left
+1. Apply migrations through V157, and confirm V115's frontier backfill left
    no account without a frontier row (the query under the external contract
    below).
 2. Grant the ingest login `trace_account_trust_worker` beside
    `trace_account_admission_runtime`. Check, as the ingest login:
    `SELECT pg_has_role(current_user,'trace_account_trust_worker','MEMBER')`.
 3. Run the shadow candidate with the same growth object for at least a day and
-   read `evaluate-account-trust?mode=shadow` and the drill. Fix any
-   `evaluator_versions` or `dedup_signal_versions` that leave every account at
-   tier 0.
+   read `evaluate-account-trust?mode=shadow` and the drill. Use the
+   `rejections` counts to fix any `evaluator_versions` or
+   `dedup_signal_versions` that leave every account at tier 0.
 4. Mint the scheduler token: an EdDSA-signed tenant token with
    `"role":"account_trust_worker"`, any non-empty `tenant_id` (the routes
    enumerate every anchored tenant), a `sub`, a `jti`, and an `exp` within
@@ -371,7 +433,7 @@ bucket starts counting from its boundary.
 5. Set the policy and the scheduler, then restart ingest:
 
    ```
-   TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION=earned-trust-live-2026-10-11.1
+   TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION=earned-trust-live-2026-11-07.1
    TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON='<the policy, minified>'
    TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_ENABLED=true
    TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_TOKEN=<the token>
@@ -461,6 +523,12 @@ and ignores the rest.
   once; spend already recorded stays, so nobody gets a fresh allowance from
   the switch. Unset the scheduler variables too, or startup refuses a
   scheduler with nothing to evaluate (unless a shadow candidate is set).
+- **Rolling the binary back:** an ingest built before V155-V157 refuses a
+  growth policy that sets `acceptance_source` or `carried_age` (unknown
+  fields are refused), so it would not start. Put the previous
+  `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON` and `_VERSION` back with the
+  old binary. The migrations stay. The old binary matches fact kinds by
+  name, so it ignores V157's `carried_account_age` rows.
 - **The scheduler dies or its token expires:** every applied evaluation goes
   stale within `evaluation_max_age_seconds` and every account falls to the
   base allowance. That is the fail-safe direction; liveness escalates the

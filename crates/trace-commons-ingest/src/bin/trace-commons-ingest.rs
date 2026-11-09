@@ -23953,15 +23953,34 @@ async fn account_near_enroll_finish_handler(
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
-    db.insert_near_identity(
-        &ctx.tenant_id,
-        ctx.account_id.as_uuid(),
-        &body.public_key,
-        &body.account_id,
-        label,
-    )
-    .await
-    .map_err(internal_error)?;
+    let enrolled = db
+        .enroll_near_identity(
+            &ctx.tenant_id,
+            ctx.account_id.as_uuid(),
+            &body.public_key,
+            &body.account_id,
+            label,
+            ctx.is_strong_session(),
+        )
+        .await
+        .map_err(internal_error)?;
+    if !enrolled {
+        // The RPC can outlive another enrollment, provisioning or merge. Only
+        // the database's serialized count+insert grants the bootstrap exception.
+        db.append_account_audit(
+            &ctx.tenant_id,
+            "account_authenticator_gate_denied",
+            &ctx.actor_ref,
+            "denied",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(internal_error)?;
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "a NEAR wallet sign-in is required to change authenticators",
+        ));
+    }
 
     // Hash-only / label-only audit. Records ONLY whether a label was supplied —
     // never the public key, NEAR account id, nonce, or signature.
@@ -45330,6 +45349,15 @@ async fn run_dataset_replay_export_job(
         .iter()
         .map(|item| item.submission_id)
         .collect::<Vec<_>>();
+    // Body reads and provenance lookups can await past a source's deadline.
+    // Recheck current metadata before publishing the export manifest or body.
+    fail_export_job_on_error(
+        state,
+        &job,
+        "replay export job failure",
+        revalidate_replay_export_sources(state, tenant, &source_submission_ids).await,
+    )
+    .await?;
     let source_submission_ids_hash =
         source_submission_ids_hash("replay_dataset", &source_submission_ids);
 
@@ -55494,7 +55522,7 @@ async fn run_benchmark_conversion_job(
         state,
         &job,
         "benchmark export job failure",
-        revalidate_db_export_sources(
+        revalidate_derived_export_sources(
             state,
             tenant,
             &source_submission_ids,
@@ -56038,7 +56066,7 @@ async fn run_ranker_training_candidates_export_job(
         state,
         &job,
         "ranker candidate export job failure",
-        revalidate_db_export_sources(
+        revalidate_derived_export_sources(
             state,
             tenant,
             &source_submission_ids,
@@ -56385,7 +56413,7 @@ async fn run_ranker_training_pairs_export_job(
         state,
         &job,
         "ranker pair export job failure",
-        revalidate_db_export_sources(
+        revalidate_derived_export_sources(
             state,
             tenant,
             &source_submission_ids,
@@ -57619,102 +57647,21 @@ async fn evaluate_and_record_gate(
 
     // Shadow-mode cross-trace dedup (simhash-only in v1; embedding side deferred).
     // Best-effort: a failure logs hash-only and never blocks the gate decision.
-    let dedup_simhash = decision.dedup_simhash; // computed inside the gate service (Part A)
-    // Which renderer and simhash algorithm produced the value above. Rows
-    // stamped differently are not comparable to it, however close the two
-    // numbers are, so this scopes the candidate set below (V57, #211).
-    //
-    // Normalised the same way the candidates are. A stored row reads its
-    // stamp through `effective_signal_version`, which maps NULL and empty
-    // alike to the legacy name; the incoming one used to be taken raw. A gate
-    // service returning `""` would then match no candidate at all -- every
-    // submission a permanent singleton, `dup_pen = 1`, duplicates earning
-    // full credit -- and nothing would report an error. Both sides must
-    // normalise, or neither does.
-    let dedup_signal_version = if decision.dedup_signal_version.is_empty() {
-        trace_commons_server::dedup_assign::LEGACY_DEDUP_SIGNAL_VERSION.to_string()
-    } else {
-        decision.dedup_signal_version.clone()
-    };
-    // The constants belong to the algorithm that derived the value: the
-    // gate service stamped `ACTIVE_DEDUP_ALGORITHM`, so its tau applies.
-    let dedup_constants = trace_commons_server::dedup_simhash::ACTIVE_DEDUP_ALGORITHM.constants();
-    // One candidate per CLUSTER, keyed by the cluster's REPRESENTATIVE (its
-    // earliest-decided member) simhash, with the cluster's size across every
-    // tenant -- the same candidates the batch route
-    // (`run_recluster_dedup_pass`) assigns against, so inline and batch
-    // clustering cannot disagree on membership.
-    //
-    // Read from the cluster table (V145) and only within tau: no candidate
-    // past tau can match, because the embedding signal is `None` here, so
-    // the assignment below is exactly what a full enumeration would give.
-    // Before V145 this enumerated every gate decision ever recorded on every
-    // submission. A failed read still clusters against nothing, as it did,
-    // but now says so.
-    //
-    // Each candidate carries its representative's stamp: a row may only join
-    // a cluster derived the same way it was. No version filter here --
-    // `assign_cluster` refuses a differently stamped candidate itself, so the
-    // gate is in one place and a new call site cannot forget it.
-    let cluster_rows = match db
-        .list_dedup_cluster_candidates(dedup_simhash, dedup_constants.tau_hamming)
-        .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::warn!(
-                tenant_hash = %sha256_prefixed(tenant_id),
-                error_hash = %safe_display_error_hash(&error),
-                "dedup cluster candidate read failed; clustering against no candidates"
-            );
-            Vec::new()
-        }
-    };
-    let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate<'_>> = cluster_rows
-        .iter()
-        .map(|row| trace_commons_server::dedup_assign::ClusterCandidate {
-            cluster_id: row.dedup_cluster_id,
-            size: row.member_count,
-            simhash: row.representative_simhash as u64,
-            embed_cosine_micros: None,
-            signal_version: row.effective_signal_version(),
-        })
-        .collect();
-    let cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
-        dedup_simhash as u64,
-        &dedup_signal_version,
-        &candidates,
-        dedup_constants,
-    ) {
-        trace_commons_server::dedup_assign::ClusterAssignment::Existing(id) => id,
-        trace_commons_server::dedup_assign::ClusterAssignment::New => uuid::Uuid::new_v4(),
-    };
-    let existing_size = cluster_rows
-        .iter()
-        .find(|row| row.dedup_cluster_id == cluster_id)
-        .map_or(0, |row| row.member_count);
-    let new_size = i32::try_from(existing_size + 1).unwrap_or(i32::MAX);
-    // Inline only sets THIS row's size snapshot; existing members' sizes are
-    // refreshed by the Task 7 batch route.
-    if let Err(error) = db
-        .update_trace_gate_decision_dedup(
-            tenant_id,
-            decision_id,
-            trace_commons_server::trace_corpus_storage::DedupAssignmentWrite {
-                dedup_simhash,
-                dedup_cluster_id: cluster_id,
-                dedup_cluster_size: new_size,
-                dedup_signal_version,
-            },
-        )
-        .await
-    {
-        tracing::warn!(
-            tenant_hash = %sha256_prefixed(tenant_id),
-            error_hash = %safe_display_error_hash(&error),
-            "shadow dedup inline write failed (non-fatal)"
-        );
-    }
+    // The simhash was computed inside the gate service (Part A), under the
+    // stamp it reports. The assignment itself -- candidates from the V145
+    // cluster table within tau, `assign_cluster`, the four-column write --
+    // is shared with the versioned pipeline's Settle
+    // (`dedup_inline::record_inline_dedup`), so the two paths cannot cluster
+    // differently. This row was inserted a moment ago, so it overwrites.
+    let _ = trace_commons_server::dedup_inline::record_inline_dedup(
+        db.as_ref(),
+        tenant_id,
+        decision_id,
+        decision.dedup_simhash,
+        &decision.dedup_signal_version,
+        trace_commons_server::dedup_inline::InlineDedupWrite::Overwrite,
+    )
+    .await;
 
     // Shadow-mode correction value (S5). Runs only when the envelope actually
     // carried a contributor correction — `correction_simhash` is `None`
@@ -61174,8 +61121,7 @@ async fn collect_ranker_training_candidates(
     for record in records
         .into_iter()
         .filter(|record| record.status == requested_status)
-        .filter(|record| matches!(record.status, TraceCorpusStatus::Accepted))
-        .filter(|record| !record.is_revoked())
+        .filter(|record| record.is_export_eligible())
         .filter(|record| {
             query
                 .privacy_risk
@@ -63286,12 +63232,10 @@ fn ensure_record_matches_privileged_action_policy_abac(
 /// ABAC subset check for privileged actions whose *target* (not an existing
 /// record) carries the consent-scope / allowed-use surface. Used by grant and
 /// tenant-policy mutation handlers where the action defines new scopes/uses
-/// directly. Every entry in `target_scopes` / `target_uses` must be contained
-/// in both the tenant signed-claim allowlists (when those allowlists are
-/// non-empty) and the privileged-action policy allowlists (when present). An
-/// empty tenant allowlist means unrestricted, matching
-/// `enforce_scoped_token_requested_scope` semantics; an empty policy allowlist
-/// means the policy does not restrict that dimension.
+/// directly. The target's effective permissions must be contained in both the
+/// signed-claim and privileged-action policy ceilings. Empty lists mean
+/// unrestricted on both sides, matching the runtime policy/grant consumers:
+/// an empty target therefore exceeds any nonempty ceiling for that dimension.
 fn ensure_action_target_matches_privileged_action_policy_abac(
     target_scopes: &BTreeSet<ConsentScope>,
     target_uses: &BTreeSet<TraceAllowedUse>,
@@ -63336,7 +63280,8 @@ fn target_subset_of_allowlist(
     target: &BTreeSet<ConsentScope>,
     allowlist: &BTreeSet<ConsentScope>,
 ) -> bool {
-    allowlist.is_empty() || target.iter().all(|scope| allowlist.contains(scope))
+    allowlist.is_empty()
+        || (!target.is_empty() && target.iter().all(|scope| allowlist.contains(scope)))
 }
 
 fn target_subset_of_use_allowlist(
@@ -63344,9 +63289,10 @@ fn target_subset_of_use_allowlist(
     allowlist: &BTreeSet<TraceAllowedUse>,
 ) -> bool {
     allowlist.is_empty()
-        || target
-            .iter()
-            .all(|allowed_use| allowlist.contains(allowed_use))
+        || (!target.is_empty()
+            && target
+                .iter()
+                .all(|allowed_use| allowlist.contains(allowed_use)))
 }
 
 fn trace_revocation_reason_for_request(
@@ -63779,32 +63725,31 @@ fn principal_owns_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionR
 }
 
 fn principal_owns_submission_ref(auth: &TenantAuth, auth_principal_ref: &str) -> bool {
-    auth_principal_ref == legacy_principal_ref()
-        || auth.matches_stored_principal(auth_principal_ref)
+    // The global historical sentinel records unknown ownership. Only the
+    // credential's canonical principal or its exact historical alias proves
+    // ownership; reviewer/admin recovery is authorized by the calling surface.
+    auth.matches_stored_principal(auth_principal_ref)
 }
 
 fn principal_owns_storage_submission(
     auth: &TenantAuth,
     record: &StorageTraceSubmissionRecord,
 ) -> bool {
-    record.auth_principal_ref == legacy_principal_ref()
-        || auth.matches_stored_principal(&record.auth_principal_ref)
+    principal_owns_submission_ref(auth, &record.auth_principal_ref)
 }
 
 fn principal_can_self_revoke_submission(
     auth: &TenantAuth,
     record: &TraceCommonsSubmissionRecord,
 ) -> bool {
-    auth.matches_stored_principal(&record.auth_principal_ref)
-        || (record.auth_principal_ref == legacy_principal_ref() && !auth.role.can_review())
+    principal_owns_submission_ref(auth, &record.auth_principal_ref)
 }
 
 fn principal_can_self_revoke_storage_submission(
     auth: &TenantAuth,
     record: &StorageTraceSubmissionRecord,
 ) -> bool {
-    auth.matches_stored_principal(&record.auth_principal_ref)
-        || (record.auth_principal_ref == legacy_principal_ref() && !auth.role.can_review())
+    principal_owns_submission_ref(auth, &record.auth_principal_ref)
 }
 
 fn visible_submission_records(
@@ -63818,9 +63763,9 @@ fn visible_submission_records(
 }
 
 /// Account-scope broadening for the contributor credit read surface (Slice 3b).
-/// A record is visible iff the legacy own-principal predicate admits it OR the
+/// A record is visible iff the own-principal/reviewer predicate admits it OR the
 /// caller's account-principal set contains the record's `auth_principal_ref`.
-/// `scope == None` reproduces the EXACT pre-3b own-principal behavior. The
+/// `scope == None` retains own-principal/reviewer visibility. The
 /// per-event credit filter (`can_access_credit_event_scoped`) and the
 /// credit-handler sum-filter consume the SAME `scope`, so the visible record set
 /// and the scalar credit sums stay consistent. Only ever BROADENS; the caller
@@ -63846,8 +63791,7 @@ fn visible_submission_records_scoped(
 }
 
 /// Account read-surface visibility. SET-membership ONLY. Deliberately has NO
-/// `can_review()` short-circuit and NO `legacy_principal_ref()` wildcard (unlike
-/// `visible_submission_records`): an account sees a submission iff its
+/// `can_review()` short-circuit: an account sees a submission iff its
 /// `auth_principal_ref` is in the account's active principal set. Takes the
 /// `AccountPrincipalSet` newtype, which the legacy `&TenantAuth` helpers cannot
 /// accept and which is producible only by `expand_account_principals`
@@ -63895,9 +63839,8 @@ fn visible_submission_records_for_account(
 /// Account-only visibility predicate for credit-ledger events, paired with
 /// `visible_submission_records_for_account` immediately above. Pure
 /// `&AccountPrincipalSet` set-membership, same as its sibling: NO
-/// `can_review()` short-circuit and NO `legacy_principal_ref()` wildcard
-/// (unlike `visible_credit_events`/`can_access_credit_event_scoped`, which
-/// serve the reviewer/contributor surface and must keep both).
+/// `can_review()` short-circuit (unlike the reviewer/contributor surface).
+/// Unknown historical ownership never supplies a wildcard on either surface.
 ///
 /// Unlike its submission sibling, this one IS on the request path
 /// (`GET /v1/account/credit-summary`): the credit ledger has no per-principal
@@ -63927,15 +63870,13 @@ fn visible_credit_events_for_account(
 }
 
 fn can_access_credit_event(auth: &TenantAuth, event: &TraceCommonsCreditLedgerRecord) -> bool {
-    auth.role.can_review()
-        || event.auth_principal_ref == legacy_principal_ref()
-        || auth.matches_stored_principal(&event.auth_principal_ref)
+    auth.role.can_review() || auth.matches_stored_principal(&event.auth_principal_ref)
 }
 
 /// Account-scope broadening for the contributor credit surface (Slice 3b). An
-/// event is visible iff the legacy own-principal predicate admits it OR the
+/// event is visible iff the own-principal/reviewer predicate admits it OR the
 /// caller's account-principal set (active links only) contains the event's
-/// `auth_principal_ref`. `scope == None` is the EXACT pre-3b behavior: an
+/// `auth_principal_ref`. `scope == None` keeps own-principal visibility: an
 /// unlinked caller (no account) sees only its own principal. This only ever
 /// BROADENS — `None` never widens, and a resolution error upstream denies the
 /// request before this is reached (fail-closed). The account-principal set is
@@ -74607,13 +74548,80 @@ async fn append_derived_source_read_audits(
     Ok(appended)
 }
 
+// Revalidate against the same metadata authority used for replay selection.
+// An optional DB mirror must neither override current file expiry nor turn an
+// otherwise file-backed export into a DB-only operation.
+async fn revalidate_replay_export_sources(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_ids: &[Uuid],
+) -> anyhow::Result<()> {
+    if state.db_replay_export_reads_for_tenant(&tenant.tenant_id) {
+        anyhow::ensure!(
+            state.db_mirror.is_some(),
+            "replay export metadata unavailable"
+        );
+        revalidate_db_export_sources(state, tenant, submission_ids, false).await?;
+    } else {
+        revalidate_file_export_sources(state, tenant, submission_ids)?;
+    }
+    Ok(())
+}
+
+// Derived selection uses the reviewer metadata authority. Keep the existing
+// DB/provenance checks, then check file authority AFTER those awaited lookups
+// so an optional stale mirror cannot hide a deadline or revocation change.
+async fn revalidate_derived_export_sources(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_ids: &[Uuid],
+    require_object_refs: bool,
+) -> anyhow::Result<BTreeMap<Uuid, Uuid>> {
+    let database_authority = state.db_reviewer_reads_for_tenant(&tenant.tenant_id);
+    anyhow::ensure!(
+        !(database_authority || require_object_refs) || state.db_mirror.is_some(),
+        "derived export metadata unavailable"
+    );
+    let refs =
+        revalidate_db_export_sources(state, tenant, submission_ids, require_object_refs).await?;
+    if !database_authority && state.db_mirror.is_some() {
+        revalidate_file_export_sources(state, tenant, submission_ids)?;
+    }
+    Ok(refs)
+}
+
+fn revalidate_file_export_sources(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_ids: &[Uuid],
+) -> anyhow::Result<()> {
+    let mut earliest_deadline: Option<DateTime<Utc>> = None;
+    for submission_id in submission_ids.iter().copied().collect::<BTreeSet<_>>() {
+        let record = read_submission_record(&state.root, &tenant.tenant_id, submission_id)?
+            .with_context(|| format!("missing export source {submission_id}"))?;
+        anyhow::ensure!(
+            record.tenant_id == tenant.tenant_id && record.is_export_eligible(),
+            "trace export source {submission_id} is no longer eligible"
+        );
+        ensure_retention_metadata_within_server_policy(&record)?;
+        earliest_deadline = earliest_deadline.into_iter().chain(record.expires_at).min();
+    }
+    anyhow::ensure!(
+        earliest_deadline.is_none_or(|deadline| deadline > Utc::now()),
+        "trace export source is no longer eligible"
+    );
+    Ok(())
+}
+
 async fn revalidate_db_export_sources(
     state: &AppState,
     tenant: &TenantAuth,
     submission_ids: &[Uuid],
     require_object_refs: bool,
 ) -> anyhow::Result<BTreeMap<Uuid, Uuid>> {
+    let mut earliest_deadline: Option<DateTime<Utc>> = None;
     let Some(db) = state.db_mirror.as_ref() else {
+        revalidate_file_export_sources(state, tenant, submission_ids)?;
         return Ok(BTreeMap::new());
     };
 
@@ -74631,9 +74639,13 @@ async fn revalidate_db_export_sources(
         anyhow::ensure!(
             record.status == StorageTraceCorpusStatus::Accepted
                 && record.revoked_at.is_none()
-                && record.purged_at.is_none(),
-            "trace export source {submission_id} is no longer accepted"
+                && record.purged_at.is_none()
+                && record
+                    .expires_at
+                    .is_none_or(|deadline| deadline > Utc::now()),
+            "trace export source {submission_id} is no longer eligible"
         );
+        earliest_deadline = earliest_deadline.into_iter().chain(record.expires_at).min();
         // Rescrubbed first, then submitted: a released-backstop source has
         // only an active `rescrubbed_envelope` ref, and that is the envelope
         // the export must derive from.
@@ -74652,6 +74664,11 @@ async fn revalidate_db_export_sources(
             anyhow::bail!("missing active envelope object ref for {submission_id}");
         }
     }
+    // A later source/object-ref lookup can outlive an earlier source's deadline.
+    anyhow::ensure!(
+        earliest_deadline.is_none_or(|deadline| deadline > Utc::now()),
+        "trace export source is no longer eligible"
+    );
     Ok(object_ref_ids)
 }
 
@@ -80325,7 +80342,12 @@ impl TraceCommonsSubmissionRecord {
     }
 
     fn is_export_eligible(&self) -> bool {
-        self.status == TraceCorpusStatus::Accepted && !self.is_revoked()
+        self.is_export_eligible_at(Utc::now())
+    }
+
+    fn is_export_eligible_at(&self, now: DateTime<Utc>) -> bool {
+        self.status == TraceCorpusStatus::Accepted
+            && self.expires_at.is_none_or(|deadline| deadline > now)
     }
 
     fn is_benchmark_eligible(&self) -> bool {
@@ -84202,10 +84224,8 @@ impl TraceCommonsTenantCreditResponse {
         }
 
         let tenant_wide_credit_view = auth.role.can_review();
-        let legacy_wildcard_principal_ref = legacy_principal_ref();
-        let legacy_wildcard_principal_ref = legacy_wildcard_principal_ref.as_str();
         // Slice 3b: a credit `account_ref` is visible to this caller iff it is the
-        // caller's own principal, the legacy wildcard, a principal on the caller's
+        // caller's own principal, a principal on the caller's
         // account (active links only), OR the caller's own account-settlement key.
         // Two keying schemes flow through this closure:
         // - credit EVENTS carry a raw `auth_principal_ref` matched by the
@@ -84217,7 +84237,7 @@ impl TraceCommonsTenantCreditResponse {
         //   roll-ups would zero out. The account-keyed arm is inert for the event
         //   path (an `auth_principal_ref` never has the `account:` shape).
         // `account_scope`/`account_id == None` (unlinked caller / file-only path)
-        // reproduces the pre-3b own-principal predicate exactly. The SAME scope
+        // retains own-principal visibility. The SAME scope
         // drives the per-event credit filter, so the visible record list and these
         // scalar sums stay consistent.
         let account_settlement_key =
@@ -84225,7 +84245,6 @@ impl TraceCommonsTenantCreditResponse {
         let account_ref_visible = |account_ref: &str| -> bool {
             tenant_wide_credit_view
                 || auth.matches_stored_principal(account_ref)
-                || account_ref == legacy_wildcard_principal_ref
                 || account_scope.is_some_and(|scope| scope.contains(account_ref))
                 || account_settlement_key
                     .as_deref()

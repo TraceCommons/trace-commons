@@ -2117,6 +2117,30 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "witness_blocked_days",
         include_str!("../../../../migrations/V154__witness_blocked_days.sql"),
     ),
+    // V155: a 'pipeline_worker' accepted credit event is server acceptance,
+    // not an approver-unknown human one, when the pipeline's own Review
+    // approved the submission or its Settle gate decision exists.
+    (
+        155,
+        "pipeline_acceptance_is_server_acceptance",
+        include_str!("../../../../migrations/V155__pipeline_acceptance_is_server_acceptance.sql"),
+    ),
+    // V156: a pipeline_settle gate decision passes when the pipeline
+    // credited the submission (positive trace_credit ledger row for its run,
+    // no duplicate withholding), not by perplexity AND novelty.
+    (
+        156,
+        "pipeline_credit_is_a_passed_gate",
+        include_str!("../../../../migrations/V156__pipeline_credit_is_a_passed_gate.sql"),
+    ),
+    // V157: account age carries across a live, non-pooled, device-proven
+    // V81 tenant link to the legacy tenant's first accepted contribution;
+    // units are still earned fresh. Revocation and pooling remove the carry.
+    (
+        157,
+        "age_carry_across_linked_identities",
+        include_str!("../../../../migrations/V157__age_carry_across_linked_identities.sql"),
+    ),
 ];
 
 /// The body of `create_or_reuse_account`, inside a transaction already under
@@ -2459,6 +2483,13 @@ impl Database for PgBackend {
         limit: i64,
     ) -> Result<Vec<crate::account_trust::TrustFactSource>, DatabaseError> {
         PgBackend::list_account_trust_fact_candidates(self, account, limit).await
+    }
+
+    async fn refresh_account_trust_carried_age(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+    ) -> Result<u32, DatabaseError> {
+        PgBackend::refresh_account_trust_carried_age(self, account).await
     }
 
     async fn account_trust_evaluation_inputs(
@@ -4983,9 +5014,65 @@ impl Database for PgBackend {
         near_account_id: &str,
         label: Option<&str>,
     ) -> Result<(), DatabaseError> {
-        self.ensure_trace_tenant(tenant_id).await?;
+        if !self
+            .enroll_near_identity(
+                tenant_id,
+                account_id,
+                public_key,
+                near_account_id,
+                label,
+                true,
+            )
+            .await?
+        {
+            return Err(DatabaseError::Pool("near_identity_account_not_open".into()));
+        }
+        Ok(())
+    }
+
+    async fn enroll_near_identity(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        public_key: &str,
+        near_account_id: &str,
+        label: Option<&str>,
+        strong_session: bool,
+    ) -> Result<bool, DatabaseError> {
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
-        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // This gate needs a new snapshot after waiting for the account lock,
+        // regardless of the connection's configured default isolation level.
+        let tx = client
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::ReadCommitted)
+            .start()
+            .await?;
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&tenant_id],
+        )
+        .await?;
+        // FOR UPDATE (not NO KEY UPDATE) also conflicts with the KEY SHARE
+        // acquired by the immediate composite account FKs on identity/anchor
+        // inserts and destination moves. Thus provisioning and merges cannot
+        // commit an unseen strong addition across this admission point. Anchor
+        // revival already holds this same account lock in near_ai_rebind.
+        let account = tx
+            .query_opt(
+                "SELECT 1 FROM trace_accounts
+              WHERE tenant_id = trace_current_tenant_id() AND account_id = $1
+                AND closed_at IS NULL FOR UPDATE",
+                &[&account_id],
+            )
+            .await?;
+        if account.is_none() {
+            return Ok(false);
+        }
+        // A separate statement AFTER the lock wait is essential: READ COMMITTED
+        // now sees a strong writer that committed while we were waiting.
+        if !strong_session && active_strong_authenticator_count(&tx, &account_id).await? != 0 {
+            return Ok(false);
+        }
         tx.execute(
             "INSERT INTO trace_near_identities (
                 tenant_id, public_key, near_account_id, account_id, label, created_at
@@ -4997,7 +5084,7 @@ impl Database for PgBackend {
         .await
         .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        Ok(())
+        Ok(true)
     }
 
     async fn load_near_identity_for_login(
@@ -5129,6 +5216,14 @@ impl Database for PgBackend {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // Serialize removals and the remaining-key result with enrollment.
+        tx.query_opt(
+            "SELECT 1 FROM trace_accounts
+              WHERE tenant_id = trace_current_tenant_id() AND account_id = $1
+              FOR UPDATE",
+            &[&account_id],
+        )
+        .await?;
         // account-scoped soft-delete: an unknown / already-revoked / other-account
         // key affects zero rows.
         let removed = tx
@@ -6900,10 +6995,15 @@ fn refuse_if_enumeration_is_ambiguous(
 /// The catalog half of `Database::trace_corpus_rls_diagnostics`, on `client`
 /// (a pooled connection or an open transaction), for `tables`: whether each
 /// is a table in the current schema with row-level security enabled and
-/// forced and the tenant policy installed with the expected expression, and
-/// whether the current role can bypass it (a superuser, `BYPASSRLS`, or the
-/// owner of a table that does not force it). The versioned pipeline's control
-/// health reads its tables' isolation through the same check (Zaki review 1,
+/// forced, with the expected tenant policy and no unexpected applicable
+/// permissive alternative widening it. V69/V71 reward tables intentionally
+/// reserve the tenant policy for their exact definer guard roles; V56 permits
+/// only its exact scoped community drain read/mark policies. Restrictive policies only intersect
+/// the admitted rows and are supported. PostgreSQL's USAGE membership check
+/// follows transitive inheritance; SET membership alone does not apply a
+/// policy. Ownership and bypass checks also include roles the session can
+/// assume, including inherited ownership after that transition. The versioned
+/// pipeline's control health reads its tables' isolation through the same check (Zaki review 1,
 /// round 2, finding 10). `tenant_context_transaction_local` is left `false`:
 /// that probe opens a transaction of its own, which only the caller holding
 /// a whole connection can run.
@@ -6929,13 +7029,83 @@ where
                     c.relrowsecurity,
                     c.relforcerowsecurity,
                     COALESCE(p.has_policy, false) AS has_policy,
-                    COALESCE(p.expression_matches, false) AS expression_matches
+                    COALESCE(p.expression_matches, false)
+                    AND NOT EXISTS (
+                        SELECT 1 FROM pg_policy alternative
+                        WHERE alternative.polrelid = c.oid
+                          AND alternative.polpermissive
+                          AND EXISTS (
+                              SELECT 1 FROM unnest(alternative.polroles) policy_role(oid)
+                              WHERE CASE WHEN policy_role.oid = 0 THEN true
+                                  ELSE pg_has_role(current_user, policy_role.oid, 'USAGE') END
+                          )
+                          AND (CASE alternative.polcmd
+                              WHEN 'r' THEN pg_get_expr(alternative.polqual, c.oid) = ANY($2)
+                              WHEN 'd' THEN pg_get_expr(alternative.polqual, c.oid) = ANY($2)
+                              WHEN 'a' THEN pg_get_expr(alternative.polwithcheck, c.oid) = ANY($2)
+                              WHEN 'w' THEN
+                                  pg_get_expr(alternative.polqual, c.oid) = ANY($2)
+                                  AND pg_get_expr(COALESCE(alternative.polwithcheck, alternative.polqual), c.oid) = ANY($2)
+                              WHEN '*' THEN
+                                  pg_get_expr(alternative.polqual, c.oid) = ANY($2)
+                                  AND pg_get_expr(COALESCE(alternative.polwithcheck, alternative.polqual), c.oid) = ANY($2)
+                              ELSE false
+                          END) IS NOT TRUE
+                          AND (
+                              c.relname = 'trace_community_withdrawal_evictions'
+                              AND alternative.polroles = ARRAY[0::oid]
+                              AND (
+                                  (
+                                      alternative.polname = 'trace_community_drain_read'
+                                      AND alternative.polcmd = 'r'
+                                      AND pg_get_expr(alternative.polqual, c.oid) IN (
+                                          'trace_community_drain_scope()',
+                                          'public.trace_community_drain_scope()'
+                                      )
+                                      AND alternative.polwithcheck IS NULL
+                                  ) OR (
+                                      alternative.polname = 'trace_community_drain_mark'
+                                      AND alternative.polcmd = 'w'
+                                      AND pg_get_expr(alternative.polqual, c.oid) IN (
+                                          '(trace_community_drain_scope() AND (drained_at IS NULL))',
+                                          '(public.trace_community_drain_scope() AND (drained_at IS NULL))'
+                                      )
+                                      AND pg_get_expr(alternative.polwithcheck, c.oid) IN (
+                                          '(trace_community_drain_scope() AND (drained_at IS NOT NULL))',
+                                          '(public.trace_community_drain_scope() AND (drained_at IS NOT NULL))'
+                                      )
+                                  )
+                              )
+                          ) IS NOT TRUE
+                    ) AS expression_matches
                  FROM pg_class c
                  JOIN pg_namespace n ON n.oid = c.relnamespace
                  LEFT JOIN LATERAL (
                     SELECT
                         true AS has_policy,
                         pol.polcmd = '*'
+                            AND pol.polpermissive
+                            AND CASE
+                                WHEN c.relname IN (
+                                    'trace_reward_operators', 'trace_reward_programs',
+                                    'trace_reward_reservations', 'trace_reward_decisions',
+                                    'trace_reward_awards', 'trace_reward_invalidations'
+                                ) THEN pol.polroles = ARRAY[(
+                                    SELECT oid FROM pg_roles WHERE rolname = 'trace_reward_guard'
+                                )]
+                                WHEN c.relname IN (
+                                    'trace_reward_offers', 'trace_reward_offer_controls',
+                                    'trace_reward_participant_logins', 'trace_reward_principals',
+                                    'trace_reward_principal_accounts', 'trace_reward_participant_reservations'
+                                ) THEN pol.polroles = ARRAY[(
+                                    SELECT oid FROM pg_roles WHERE rolname = 'trace_reward_participant_guard'
+                                )]
+                                ELSE EXISTS (
+                                    SELECT 1 FROM unnest(pol.polroles) policy_role(oid)
+                                    WHERE CASE WHEN policy_role.oid = 0 THEN true
+                                        ELSE pg_has_role(current_user, policy_role.oid, 'USAGE') END
+                                )
+                            END
                             AND pg_get_expr(pol.polqual, pol.polrelid) = ANY($2)
                             AND pg_get_expr(pol.polwithcheck, pol.polrelid) = ANY($2)
                             AS expression_matches
@@ -6956,34 +7126,47 @@ where
         .await?;
     let current_role = client
         .query_one(
-            "SELECT
+            // The roles this session can SET ROLE to. PostgreSQL 16 added the
+            // `SET` privilege type to `pg_has_role`; on 15 and earlier it is an
+            // error, and membership (`MEMBER`) is exactly what permits SET ROLE.
+            // CASE runs only the branch it needs, so 15 never evaluates `SET`.
+            "WITH reachable_roles AS (
+                    SELECT oid, rolsuper, rolbypassrls FROM pg_roles
+                    WHERE rolname = current_user
+                       OR CASE WHEN current_setting('server_version_num')::int >= 160000
+                               THEN pg_has_role(session_user, oid, 'SET')
+                               ELSE pg_has_role(session_user, oid, 'MEMBER') END
+                 )
+                 SELECT
                     current_user AS current_role_name,
                     EXISTS (
                         SELECT 1
                         FROM pg_class c
                         JOIN pg_namespace n ON n.oid = c.relnamespace
-                        JOIN pg_roles r ON r.oid = c.relowner
                         WHERE n.nspname = current_schema()
                           AND c.relkind = 'r'
                           AND c.relname = ANY($1)
-                          AND r.rolname = current_user
+                          AND EXISTS (
+                              SELECT 1 FROM reachable_roles r
+                              WHERE pg_has_role(r.oid, c.relowner, 'USAGE')
+                          )
                     ) AS owns_trace_tables,
                     EXISTS (
                         SELECT 1
                         FROM pg_class c
                         JOIN pg_namespace n ON n.oid = c.relnamespace
-                        JOIN pg_roles r ON r.oid = c.relowner
                         WHERE n.nspname = current_schema()
                           AND c.relkind = 'r'
                           AND c.relname = ANY($1)
-                          AND r.rolname = current_user
+                          AND EXISTS (
+                              SELECT 1 FROM reachable_roles r
+                              WHERE pg_has_role(r.oid, c.relowner, 'USAGE')
+                          )
                           AND NOT c.relforcerowsecurity
                     ) AS owns_unforced_trace_tables,
-                    COALESCE((
-                        SELECT rolsuper OR rolbypassrls
-                        FROM pg_roles
-                        WHERE rolname = current_user
-                    ), false) AS bypass_role",
+                    EXISTS (
+                        SELECT 1 FROM reachable_roles WHERE rolsuper OR rolbypassrls
+                    ) AS bypass_role",
             &[&expected_tables],
         )
         .await?;
@@ -9344,6 +9527,260 @@ mod tests {
             "PgBackend must not expose its raw pool as a normal public API; use the \
              tenant-context helpers for application paths and an explicit test hook for \
              raw RLS probes"
+        );
+    }
+
+    /// V156 (owner decision O3): a `pipeline_settle` gate decision passes
+    /// when the pipeline credited the submission. The predicate lives in one
+    /// helper that both the recorder and the evaluation inputs call, names
+    /// the pipeline's own duplicate labels and Trace Credit instrument (read
+    /// here from the Rust constants, so a renamed label fails this test), is
+    /// invalidated by a `credit_withheld_reason` change, and uses nothing the
+    /// PostgreSQL 15 pilot lacks.
+    #[test]
+    fn v156_derives_a_pipeline_gate_outcome_from_its_credit() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        let file_marker = format!("migrations/V{}__pipeline_credit_is_a_passed_gate.sql", 156);
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            2,
+            "V156 must be named exactly twice: by the MIGRATIONS table and by this test"
+        );
+        assert!(
+            super::MIGRATIONS
+                .iter()
+                .any(|(version, name, _)| *version == 156
+                    && *name == "pipeline_credit_is_a_passed_gate"),
+            "V156 must record itself under its own file stem"
+        );
+        let sql = include_str!("../../../../migrations/V156__pipeline_credit_is_a_passed_gate.sql");
+        let code: String = sql
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let duplicates = format!(
+            "g.credit_withheld_reason NOT IN ('{}','{}')",
+            crate::versioned_pipeline::PIPELINE_SKIPPED_DUPLICATE_LABEL,
+            crate::versioned_pipeline::PIPELINE_CACHED_DUPLICATE_LABEL,
+        );
+        let instrument = format!(
+            "c.instrument_id='{}'",
+            trace_commons_gate_api::pipeline::TRACE_CREDIT_INSTRUMENT_ID
+        );
+        // O4: a pipeline duplicate verdict makes the submission non-first.
+        let duplicate_not_first = format!(
+            "dup.source='pipeline_settle'\n                            AND dup.credit_withheld_reason IN ('{}','{}')",
+            crate::versioned_pipeline::PIPELINE_SKIPPED_DUPLICATE_LABEL,
+            crate::versioned_pipeline::PIPELINE_CACHED_DUPLICATE_LABEL,
+        );
+        for required in [
+            duplicate_not_first.as_str(),
+            "THEN public.trace_account_trust_first_in_cluster(f.tenant_id,f.submission_id)\n                     AND NOT EXISTS (",
+            "CREATE FUNCTION trace_account_trust_pipeline_gate_credited(p_tenant TEXT,p_decision UUID)",
+            "ALTER FUNCTION trace_account_trust_pipeline_gate_credited(TEXT,UUID) OWNER TO trace_account_admission_guard;",
+            "REVOKE ALL ON FUNCTION trace_account_trust_pipeline_gate_credited(TEXT,UUID) FROM PUBLIC;",
+            "p_tenant IS NOT DISTINCT FROM public.trace_current_tenant_id()",
+            "g.source='pipeline_settle'",
+            "g.credit_withheld_reason IS NULL",
+            duplicates.as_str(),
+            "c.pipeline_run_id=g.pipeline_run_id",
+            instrument.as_str(),
+            "c.points_delta ~ '^[0-9]+([.][0-9]+)?$'",
+            "c.points_delta ~ '[1-9]'",
+            "CREATE OR REPLACE FUNCTION trace_account_trust_evaluation_inputs(",
+            "CREATE OR REPLACE FUNCTION trace_record_account_trust_fact(",
+            "CREATE OR REPLACE FUNCTION trace_account_trust_advance_gate_frontiers()",
+            "OLD.source,OLD.pipeline_run_id,OLD.credit_withheld_reason)",
+            "NEW.source,NEW.pipeline_run_id,NEW.credit_withheld_reason)",
+            "GRANT SELECT (credit_withheld_reason,pipeline_run_id)\n    ON trace_gate_decisions TO trace_account_admission_guard;",
+            "GRANT SELECT (points_delta,pipeline_run_id,instrument_id)\n    ON trace_credit_ledger TO trace_account_admission_guard;",
+            "UPDATE public.trace_account_trust_frontiers SET generation=generation+1",
+            // Legacy rows keep the conjunction and the never-promote rule.
+            "WHEN f.outcome IS DISTINCT FROM 'evaluated_passed' THEN f.outcome",
+            "WHEN v_perplexity AND v_novelty THEN 'evaluated_passed'",
+        ] {
+            assert!(code.contains(required), "V156 is missing `{required}`");
+        }
+        assert_eq!(
+            code.matches("public.trace_account_trust_pipeline_gate_credited(")
+                .count(),
+            2,
+            "the recorder and the evaluation inputs must both call the one predicate"
+        );
+        // Every guard role granted to the migrator is revoked again.
+        for role in [
+            "trace_account_admission_guard",
+            "trace_account_trust_input_guard",
+            "trace_account_trust_evaluation_guard",
+        ] {
+            assert_eq!(
+                code.matches(&format!("GRANT {role} TO CURRENT_USER;"))
+                    .count(),
+                code.matches(&format!("REVOKE {role} FROM CURRENT_USER;"))
+                    .count(),
+                "V156 must revoke {role} from the migrator as often as it grants it"
+            );
+        }
+        let upper = code.to_uppercase();
+        for forbidden in [
+            "BYPASSRLS",
+            "SUPERUSER",
+            "DISABLE ROW LEVEL SECURITY",
+            "GRANT EXECUTE",
+            "::NUMERIC",
+            // PostgreSQL 16-only syntax; the pilot runs 15.
+            "WITH INHERIT",
+            "WITH SET",
+            "'SET')",
+            "JSON_OBJECT(",
+            "JSON_ARRAY(",
+            " IS JSON",
+        ] {
+            assert!(
+                !upper.contains(forbidden),
+                "V156 must not contain `{forbidden}`"
+            );
+        }
+        // `TO PUBLIC` as two whole tokens: `INSERT INTO public.t` is not a
+        // grant, and a grant split across lines still is.
+        let tokens: Vec<&str> = upper
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert!(
+            !tokens.windows(2).any(|w| w == ["TO", "PUBLIC"]),
+            "V156 must not grant anything TO PUBLIC"
+        );
+    }
+}
+
+#[cfg(test)]
+mod v157_tests {
+    /// V157 (owner decision O6): account age carries across a live,
+    /// non-pooled, device-proven tenant link. The carry lives in the
+    /// account's tenant under forced RLS, every write moves the evaluation
+    /// generation, revocation and pooling remove it in their own
+    /// transaction, the evaluation inputs re-check the link at read time,
+    /// and nothing the PostgreSQL 15 pilot lacks is used.
+    #[test]
+    fn v157_carries_age_only_through_a_live_proven_link() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        let file_marker = format!(
+            "migrations/V{}__age_carry_across_linked_identities.sql",
+            157
+        );
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            2,
+            "V157 must be named exactly twice: by the MIGRATIONS table and by this test"
+        );
+        assert!(
+            super::MIGRATIONS
+                .iter()
+                .any(|(version, name, _)| *version == 157
+                    && *name == "age_carry_across_linked_identities"),
+            "V157 must record itself under its own file stem"
+        );
+        let sql =
+            include_str!("../../../../migrations/V157__age_carry_across_linked_identities.sql");
+        let code: String = sql
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for required in [
+            "CREATE TABLE trace_account_trust_carried_age (",
+            "link_id UUID NOT NULL REFERENCES trace_legacy_invite_links(link_id) ON DELETE CASCADE,",
+            "CHECK (tenant_id ~ '^(near-|nearai-)[0-9a-f]{64}$'),",
+            "ALTER TABLE trace_account_trust_carried_age FORCE ROW LEVEL SECURITY;",
+            "USING (tenant_id = trace_current_tenant_id())",
+            "AFTER INSERT OR UPDATE OR DELETE ON trace_account_trust_carried_age\n    FOR EACH ROW EXECUTE FUNCTION trace_account_trust_advance_frontier();",
+            "CREATE ROLE trace_account_trust_carry_guard NOLOGIN NOBYPASSRLS;",
+            "CREATE FUNCTION public.trace_account_trust_refresh_carried_age(p_tenant TEXT, p_account UUID)",
+            "p_tenant IS DISTINCT FROM public.trace_current_tenant_id()",
+            "OWNER TO trace_account_trust_carry_guard;",
+            "TO trace_account_trust_worker;",
+            // The proof: the link's own claim record, a live proving device,
+            // not pooled, an accepted and unwithdrawn submission.
+            "c.legacy_link_hash = public.trace_legacy_link_hash(v_link.link_id)",
+            "d.onboarding_origin = 'invite'",
+            "public.trace_near_provisioned_devices n",
+            "public.trace_legacy_invite_pooled_tenants p",
+            "s.status IN ('accepted', 'expired', 'purged')",
+            "s.withdrawn_at IS NULL AND s.revoked_at IS NULL",
+            "min(COALESCE(s.reviewed_at, s.received_at))",
+            // An unchanged refresh writes nothing, so it bumps nothing.
+            "WHERE c.first_contribution_at IS DISTINCT FROM EXCLUDED.first_contribution_at;",
+            // Removal in the event's transaction.
+            "AFTER UPDATE OF revoked_at ON trace_legacy_invite_links",
+            "AFTER INSERT ON trace_legacy_invite_pooled_tenants",
+            // The inputs read live carries only.
+            "CREATE OR REPLACE FUNCTION trace_account_trust_evaluation_inputs(",
+            "SELECT 'carried_account_age'::text,c.link_id,c.link_id,'carried'::text,",
+            "AND l.account_id=c.account_id AND l.revoked_at IS NULL",
+            // V156's body is kept.
+            "public.trace_account_trust_pipeline_gate_credited(p_tenant,f.source_id)",
+        ] {
+            assert!(code.contains(required), "V157 is missing `{required}`");
+        }
+        assert_eq!(
+            code.matches(crate::account_trust_rule::CARRIED_ACCOUNT_AGE_KIND)
+                .count(),
+            1,
+            "the inputs name the carried kind the rule reads, once"
+        );
+        for role in [
+            "trace_account_trust_carry_guard",
+            "trace_account_admission_guard",
+            "trace_account_trust_evaluation_guard",
+        ] {
+            assert!(
+                code.contains(&format!("GRANT {role} TO CURRENT_USER;")),
+                "V157 takes {role} for its own statements"
+            );
+            assert_eq!(
+                code.matches(&format!("GRANT {role} TO CURRENT_USER;"))
+                    .count(),
+                code.matches(&format!("REVOKE {role} FROM CURRENT_USER;"))
+                    .count(),
+                "V157 must revoke {role} from the migrator as often as it grants it"
+            );
+        }
+        let upper = code.to_uppercase();
+        for forbidden in [
+            "SUPERUSER",
+            "DISABLE ROW LEVEL SECURITY",
+            "BYPASSRLS LOGIN",
+            // PostgreSQL 16-only syntax; the pilot runs 15.
+            "WITH INHERIT",
+            "WITH SET",
+            "'SET')",
+            "JSON_OBJECT(",
+            "JSON_ARRAY(",
+            " IS JSON",
+        ] {
+            assert!(
+                !upper.contains(forbidden),
+                "V157 must not contain `{forbidden}`"
+            );
+        }
+        // `TO PUBLIC` as two whole tokens: `INSERT INTO public.t` is not a
+        // grant, and a grant split across lines still is.
+        let tokens: Vec<&str> = upper
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert!(
+            !tokens.windows(2).any(|w| w == ["TO", "PUBLIC"]),
+            "V157 must not grant anything TO PUBLIC"
+        );
+        // The only BYPASSRLS spellings are the NOBYPASSRLS role and its check.
+        assert_eq!(
+            upper.matches("BYPASSRLS").count(),
+            upper.matches("NOBYPASSRLS").count() + 1,
+            "V157 names BYPASSRLS only as NOBYPASSRLS and in the privilege check"
         );
     }
 }

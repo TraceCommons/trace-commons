@@ -4065,6 +4065,144 @@ async fn raw_trace_corpus_rls_requires_matching_transaction_local_tenant_context
 }
 
 #[tokio::test]
+async fn pg_rls_readiness_rejects_policy_and_role_composition_widening() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run all migrations");
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let tx = client.transaction().await.unwrap();
+    let suffix = Uuid::new_v4().simple().to_string();
+    let runtime = format!("rls_runtime_{suffix}");
+    let group = format!("rls_group_{suffix}");
+    let unrelated = format!("rls_other_{suffix}");
+    let owner = format!("rls_owner_{suffix}");
+    let bypass = format!("rls_bypass_{suffix}");
+    tx.batch_execute(&with_role_ddl_lock(&format!(
+        "CREATE ROLE {runtime} NOSUPERUSER NOBYPASSRLS;
+         CREATE ROLE {group} NOSUPERUSER NOBYPASSRLS;
+         CREATE ROLE {unrelated} NOSUPERUSER NOBYPASSRLS;
+         CREATE ROLE {owner} NOSUPERUSER NOBYPASSRLS;
+         CREATE ROLE {bypass} NOSUPERUSER BYPASSRLS;
+         GRANT USAGE ON SCHEMA public TO {runtime};
+         GRANT SELECT ON trace_referral_codes TO {runtime};
+         GRANT trace_referral_resolver TO {runtime} WITH INHERIT FALSE, SET TRUE;"
+    )))
+    .await
+    .expect("provision transaction-scoped roles");
+
+    // Each mutation rolls back, including its role graph and policy changes.
+    // The baseline is the complete migrated schema, not a synthetic policy.
+    let cases = [
+        ("explicit resolver only", String::new(), true, false, false),
+        ("unrelated permissive reader", format!(
+            "CREATE POLICY rls_extra ON trace_referral_codes FOR SELECT TO {unrelated} USING (true)"
+        ), true, false, false),
+        ("restrictive addition", format!(
+            "CREATE POLICY rls_extra ON trace_referral_codes AS RESTRICTIVE TO {runtime} USING (true) WITH CHECK (true)"
+        ), true, false, false),
+        ("tenant-scoped permissive addition", format!(
+            "CREATE POLICY rls_extra ON trace_referral_codes FOR SELECT TO {runtime} USING (tenant_id = trace_current_tenant_id())"
+        ), true, false, false),
+        ("runtime permissive reader", format!(
+            "CREATE POLICY rls_extra ON trace_referral_codes FOR SELECT TO {runtime} USING (true)"
+        ), false, false, false),
+        ("public permissive writer", "CREATE POLICY rls_extra ON trace_referral_codes FOR INSERT TO PUBLIC WITH CHECK (true)".to_string(), false, false, false),
+        ("inherited resolver", format!(
+            "GRANT trace_referral_resolver TO {runtime} WITH INHERIT TRUE, SET TRUE"
+        ), false, false, false),
+        ("nested inherited resolver", format!(
+            "GRANT trace_referral_resolver TO {group} WITH INHERIT TRUE, SET TRUE;
+             GRANT {group} TO {runtime} WITH INHERIT TRUE, SET TRUE"
+        ), false, false, false),
+        ("inapplicable named policy", format!(
+            "ALTER POLICY trace_corpus_tenant_isolation ON trace_referral_codes TO {unrelated}"
+        ), false, false, false),
+        ("restrictive named policy", "DROP POLICY trace_corpus_tenant_isolation ON trace_referral_codes;
+            CREATE POLICY trace_corpus_tenant_isolation ON trace_referral_codes AS RESTRICTIVE
+            USING (tenant_id = trace_current_tenant_id()) WITH CHECK (tenant_id = trace_current_tenant_id())".to_string(), false, false, false),
+        ("nested inherited owner", format!(
+            "ALTER TABLE trace_referral_codes OWNER TO {owner};
+             GRANT {owner} TO {group} WITH INHERIT TRUE, SET FALSE;
+             GRANT {group} TO {runtime} WITH INHERIT TRUE, SET FALSE"
+        ), false, true, false),
+        ("assumable owner", format!(
+            "ALTER TABLE trace_referral_codes OWNER TO {owner};
+             GRANT {owner} TO {runtime} WITH INHERIT FALSE, SET TRUE"
+        ), false, true, false),
+        ("assumable inherited owner", format!(
+            "ALTER TABLE trace_referral_codes OWNER TO {owner};
+             GRANT {owner} TO {group} WITH INHERIT TRUE, SET FALSE;
+             GRANT {group} TO {runtime} WITH INHERIT FALSE, SET TRUE"
+        ), false, true, false),
+        ("nested assumable bypass", format!(
+            "GRANT {bypass} TO {group} WITH INHERIT FALSE, SET TRUE;
+             GRANT {group} TO {runtime} WITH INHERIT FALSE, SET TRUE"
+        ), false, false, true),
+        ("inherited unassumable bypass attributes are not inherited", format!(
+            "GRANT {bypass} TO {runtime} WITH INHERIT TRUE, SET FALSE"
+        ), true, false, false),
+        ("reward guard policy role drift", "ALTER POLICY trace_corpus_tenant_isolation ON trace_reward_programs TO PUBLIC".to_string(), false, false, false),
+        ("participant guard policy role drift", "ALTER POLICY trace_corpus_tenant_isolation ON trace_reward_principals TO PUBLIC".to_string(), false, false, false),
+        ("reward guard policy expression drift", "ALTER POLICY trace_corpus_tenant_isolation ON trace_reward_programs USING (true)".to_string(), false, false, false),
+        ("reward guard policy check drift", "ALTER POLICY trace_corpus_tenant_isolation ON trace_reward_principals WITH CHECK (true)".to_string(), false, false, false),
+        ("reward guard policy name drift", "ALTER POLICY trace_corpus_tenant_isolation ON trace_reward_programs RENAME TO renamed_guard".to_string(), false, false, false),
+        ("reward additional permissive policy", "CREATE POLICY rls_extra ON trace_reward_programs FOR SELECT TO PUBLIC USING (true)".to_string(), false, false, false),
+        ("drain policy name drift", "ALTER POLICY trace_community_drain_read ON trace_community_withdrawal_evictions RENAME TO renamed_drain".to_string(), false, false, false),
+        ("drain policy role drift", format!("ALTER POLICY trace_community_drain_read ON trace_community_withdrawal_evictions TO {runtime}"), false, false, false),
+        ("drain policy expression drift", "ALTER POLICY trace_community_drain_read ON trace_community_withdrawal_evictions USING (true)".to_string(), false, false, false),
+        ("drain update check drift", "ALTER POLICY trace_community_drain_mark ON trace_community_withdrawal_evictions WITH CHECK (trace_community_drain_scope())".to_string(), false, false, false),
+        ("drain update using drift", "ALTER POLICY trace_community_drain_mark ON trace_community_withdrawal_evictions USING (trace_community_drain_scope())".to_string(), false, false, false),
+        ("drain policy command drift", "DROP POLICY trace_community_drain_read ON trace_community_withdrawal_evictions;
+            CREATE POLICY trace_community_drain_read ON trace_community_withdrawal_evictions
+            FOR ALL USING (trace_community_drain_scope()) WITH CHECK (trace_community_drain_scope())".to_string(), false, false, false),
+        ("drain policy table drift", "CREATE POLICY trace_community_drain_read ON trace_referral_codes FOR SELECT USING (trace_community_drain_scope())".to_string(), false, false, false),
+    ];
+    for (label, mutation, ready, owns, bypasses) in cases {
+        tx.batch_execute("SAVEPOINT composition_case")
+            .await
+            .unwrap();
+        tx.batch_execute(&mutation).await.unwrap();
+        tx.batch_execute(&format!("SET LOCAL SESSION AUTHORIZATION {runtime}"))
+            .await
+            .unwrap();
+        let diagnostics = trace_commons_server::db::postgres::trace_corpus_rls_catalog_diagnostics(
+            &*tx,
+            TRACE_COMMONS_RLS_TABLES,
+        )
+        .await
+        .expect("actual catalog diagnostic");
+        assert_eq!(
+            diagnostics.tables_isolated(),
+            ready,
+            "{label}: {diagnostics:?}"
+        );
+        assert_eq!(diagnostics.current_role_owns_trace_tables, owns, "{label}");
+        assert_eq!(diagnostics.current_role_bypasses_rls, bypasses, "{label}");
+        tx.batch_execute("RESET SESSION AUTHORIZATION; ROLLBACK TO SAVEPOINT composition_case")
+            .await
+            .unwrap();
+    }
+    // Even a safe current role must not conceal a privileged session login.
+    tx.batch_execute(&format!("SET LOCAL ROLE {runtime}"))
+        .await
+        .unwrap();
+    let diagnostics = trace_commons_server::db::postgres::trace_corpus_rls_catalog_diagnostics(
+        &*tx,
+        TRACE_COMMONS_RLS_TABLES,
+    )
+    .await
+    .unwrap();
+    assert!(!diagnostics.tables_isolated());
+    assert!(diagnostics.current_role_bypasses_rls);
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn pg_trace_corpus_rls_diagnostics_report_policy_coverage() {
     let Some(backend) = postgres_backend().await else {
         return;
@@ -4091,7 +4229,11 @@ async fn pg_trace_corpus_rls_diagnostics_report_policy_coverage() {
     );
     assert!(diagnostics.missing_policy_tables.is_empty());
     assert!(diagnostics.rls_disabled_tables.is_empty());
-    assert!(diagnostics.policy_expression_mismatch_tables.is_empty());
+    // A superuser is a member of every policy role according to PostgreSQL;
+    // its applicable cross-tenant policies correctly fail composition checks.
+    if !diagnostics.current_role_bypasses_rls {
+        assert!(diagnostics.policy_expression_mismatch_tables.is_empty());
+    }
     assert_eq!(
         diagnostics.force_rls_enabled_count,
         diagnostics.expected_table_count

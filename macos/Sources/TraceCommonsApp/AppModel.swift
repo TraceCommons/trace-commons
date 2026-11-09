@@ -356,6 +356,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var status: DaemonStatus = .unknown {
         didSet {
             if status.accountScope != oldValue.accountScope {
+                accountScopedReadsAwaitStatus = false
                 invalidateAccountScopedReads()
                 refreshHistory()
                 refreshAutomaticGrant()
@@ -1902,6 +1903,7 @@ final class AppModel: ObservableObject {
             applyPendingUpdate(pending)
             recordRead("status", answered: true)
             publishIfChanged(\.status, status)
+            startAccountScopedReadsIfAwaitingStatus()
         case .previewReady(let result):
             applyPreviewOutcome(result)
         case .witnessReviewReady(let entryID, let failure):
@@ -2036,10 +2038,12 @@ final class AppModel: ObservableObject {
 
     func refreshAll() {
         refreshManagedSessions()
+        // Before `refreshStatus`: its answer, even a failure, starts the
+        // account-scoped reads (`accountScopedReadsAwaitStatus`).
+        accountScopedReadsAwaitStatus = client != nil
         refreshStatus()
         refreshQueue()
-        refreshHistory()
-        refreshProjects()
+        refreshProjectList()
         refreshSettings()
         refreshConsentOptions()
         refreshOutcomeCounts()
@@ -2073,7 +2077,10 @@ final class AppModel: ObservableObject {
                 && self.statusReadGeneration === generation
         }
         return perform("status", work: { try $0.status() }, whenCurrent: current,
-                       onFailure: { self.publishIfChanged(\.statusReadFailed, true) }) {
+                       onFailure: {
+                           self.publishIfChanged(\.statusReadFailed, true)
+                           self.startAccountScopedReadsIfAwaitingStatus()
+                       }) {
             self.publishCurrentStatus($0, whenCurrent: current)
         }
     }
@@ -2109,9 +2116,14 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func refreshProjects() -> Task<Void, Never>? {
+        refreshProjectList()
+        return refreshAutomaticGrant()
+    }
+
+    /// The projects and the arming offer, without the account-scoped grant.
+    private func refreshProjectList() {
         perform("list_projects", work: { try $0.listProjects() }) { self.publishIfChanged(\.projects, $0) }
         refreshArmingOffer()
-        return refreshAutomaticGrant()
     }
 
     /// A grant snapshot captured during a write cannot establish its result.
@@ -4548,7 +4560,23 @@ final class AppModel: ObservableObject {
         recordRead("status", answered: true)
         publishIfChanged(\.status, fresh)
         publishIfChanged(\.statusReadFailed, false)
+        startAccountScopedReadsIfAwaitingStatus()
         return true
+    }
+
+    /// Set by `refreshAll` until status first answers. History, its rollup
+    /// and the automatic grant are scoped to the account status names, so a
+    /// read started before it would be retired when status sets the owner
+    /// and asked again. They wait for that answer instead: an owner change
+    /// starts them from `status`'s `didSet`, and an answer that leaves the
+    /// owner as it was (or a failed read) starts them here, once.
+    private var accountScopedReadsAwaitStatus = false
+
+    private func startAccountScopedReadsIfAwaitingStatus() {
+        guard accountScopedReadsAwaitStatus else { return }
+        accountScopedReadsAwaitStatus = false
+        refreshHistory()
+        refreshAutomaticGrant()
     }
 
     /// First-run fallback reads were silent on failure; preserve that UX
@@ -4565,7 +4593,10 @@ final class AppModel: ObservableObject {
         }
         let outcome = await DaemonWork.run { Result { try client.status() } }
         guard current() else { return .stale }
-        guard case .success(let fresh) = outcome else { return .unavailable }
+        guard case .success(let fresh) = outcome else {
+            startAccountScopedReadsIfAwaitingStatus()
+            return .unavailable
+        }
         return publishCurrentStatus(fresh, whenCurrent: current) ? .published : .stale
     }
 

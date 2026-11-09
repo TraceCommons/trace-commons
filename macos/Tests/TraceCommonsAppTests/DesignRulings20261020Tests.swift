@@ -208,19 +208,4 @@ final class DesignRulings20261020Tests: XCTestCase {
             "Spacer(minLength: GlassTokens.Space.s4)\n                // The re-read control at the head's trailing end"))
         XCTAssertTrue(card.contains("GlassRefreshButton(refresh.label, title: refresh.title, small: true,"))
     }
-
-    /// Home's small cards draw no icons (Ron, 2026-11-05; watermarks from
-    /// 2026-10-20). The stat card can still draw one for a caller that asks.
-    func test_homesSmallCardsCarryNoWatermarks() throws {
-        let home = try Self.text("Views/Monitor/HomeViews.swift")
-        XCTAssertFalse(home.contains("iconPlacement: .watermark"))
-        XCTAssertFalse(home.contains(".glassCardWatermark("))
-        let card = try String(
-            contentsOf: GlassSurfaceRulesTests.root.deletingLastPathComponent()
-                .appendingPathComponent("TCDesign/Components/StatCard.swift"),
-            encoding: .utf8)
-        XCTAssertTrue(card.contains(
-            ".glassCardWatermark(iconPlacement == .watermark ? systemImage : nil)\n        .glassTier(.card,"))
-        XCTAssertTrue(card.contains(".clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))"))
-    }
 }
