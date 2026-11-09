@@ -908,6 +908,15 @@ async fn run_tick(shared: &Arc<ipc::DaemonShared>, dry_run: bool, state: &mut Ti
             nearai_credential::arrivals::poll(shared, now),
         )
         .await;
+    // Terms of Service: post an acceptance owed to the configured org. It
+    // reaches ingest, so a dry run and a developer dry run skip it.
+    guards
+        .run(shared, "terms", async {
+            if !dry_run && !shared.dev_dry_run {
+                let _ = terms_state::post_pending(shared, now).await;
+            }
+        })
+        .await;
     let expiry = guards
         .run(shared, "expire", async {
             expire_and_digest(shared, now);
