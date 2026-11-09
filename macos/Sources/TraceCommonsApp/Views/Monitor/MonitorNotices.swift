@@ -148,7 +148,9 @@ struct MonitorNotices: View {
             items += privateAIItems
         case .homeHistory:
             items += historyOffers
-        case .home, .insights:
+        case .home:
+            items += termsHoldItems
+        case .insights:
             break
         }
         items += actionItems
@@ -537,6 +539,29 @@ struct MonitorNotices: View {
             })
         }
         return items
+    }
+
+    // MARK: Home
+
+    /// New Terms of Service are owed (spec section 5): uploads are held
+    /// until the person accepts. No X and no Not now, as the gate hold's
+    /// notice: it goes only when the hold does. Its one button raises the
+    /// terms sheet (`TermsHoldPresenter`).
+    private var termsHoldItems: [GlassPopoverItem] {
+        guard let hold = model.termsHold else { return [] }
+        return [
+            GlassPopoverItem(id: TermsHoldSurface.noticeID) {
+                GlassPopoverNotice(title: hold.title) {
+                    GlassNoticeMark(systemImage: "doc.text", tint: GlassStatus.ask.color)
+                } summary: {
+                    Text(hold.body)
+                } details: { EmptyView() } actions: {
+                    Button(hold.review) { model.reviewNewTerms() }
+                        .buttonStyle(GlassButtonStyle(.primary))
+                        .lineLimit(1)
+                }
+            }
+        ]
     }
 
     /// The undos: a keep, a folder's Submit all, a trace's Contribute, and

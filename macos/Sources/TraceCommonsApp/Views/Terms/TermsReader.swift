@@ -70,6 +70,9 @@ struct TermsReader: View {
     @ObservedObject var loader: TermsLoader
     let accepted: AcceptedTerms?
     let onAccepted: (AcceptedTerms?) -> Void
+    /// Whether the reader starts its own first load. The sheet loads on
+    /// opening instead, so it fetches afresh every time.
+    let autoload: Bool
 
     @State private var gate = TermsScrollGate()
     @AccessibilityFocusState private var lastBlockFocused: Bool
@@ -77,12 +80,13 @@ struct TermsReader: View {
 
     init(
         copy: FirstRunCopy.Welcome.Legal, loader: TermsLoader, accepted: AcceptedTerms?,
-        onAccepted: @escaping (AcceptedTerms?) -> Void
+        autoload: Bool = true, onAccepted: @escaping (AcceptedTerms?) -> Void
     ) {
         self.copy = copy
         self.loader = loader
         self.accepted = accepted
         self.onAccepted = onAccepted
+        self.autoload = autoload
     }
 
     var body: some View {
@@ -108,7 +112,9 @@ struct TermsReader: View {
                 .glassType(GlassTokens.TypeScale.caption)
         }
         .frame(maxWidth: TermsReaderLayout.width)
-        .task { if case .loading = loader.state { await loader.load() } }
+        .task {
+            if autoload, case .loading = loader.state { await loader.load() }
+        }
         .onChange(of: loader.state) { _, state in
             gate = TermsScrollGate()
             // A different document than the one accepted: ask again.

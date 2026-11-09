@@ -1447,6 +1447,15 @@ final class AppModel: ObservableObject {
     /// host has gone (`FirstRunDaemon.firstRunFinished`). The core's
     /// sentence; dismissed by the person.
     @Published var firstRunNotice: String?
+    /// The new-terms sheet is up (`TermsHoldPresenter`), raised by Home's
+    /// terms notice or the menu bar's row. Closing it without accepting
+    /// leaves the hold, and the notice with it.
+    @Published var termsSheetOpen = false
+    /// The terms the sheet shows, fetched again each time it opens so the
+    /// person accepts what they read.
+    var termsHoldLoader = TermsLoader()
+    /// Test seam: answers `terms_accept` in place of the daemon.
+    var termsAcceptForTesting: ((AcceptedTerms) throws -> Bool)?
     /// A tool whose launch dialog the menu bar's popover asked for (owner,
     /// 2026-10-19); the Private AI tab opens the dialog and clears it.
     @Published var pendingManagedLaunch: String?
@@ -1465,6 +1474,9 @@ final class AppModel: ObservableObject {
         }
     }
     private var clientReadGeneration = ReadEpoch()
+    /// The daemon client, for the terms sheet's `terms_accept`
+    /// (`AppModel+Terms.swift`).
+    var daemonClientForTerms: DaemonClient? { client }
     private var accountReadGeneration = ReadEpoch()
     private var statusReadGeneration = ReadEpoch()
     private var historyReadGeneration = ReadEpoch()
