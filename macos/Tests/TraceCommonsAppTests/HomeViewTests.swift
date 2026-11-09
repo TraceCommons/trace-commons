@@ -119,8 +119,8 @@ final class HomeViewTests: XCTestCase {
         XCTAssertFalse(home.contains("glassCardBeacon"), "the beacon is back")
         XCTAssertFalse(home.contains("strokeBorder(Self.border"), "the border is back")
         XCTAssertFalse(home.contains(".overlay(GlassGlowEdge("), "the glow edge is back")
-        // No icon, as the tiles have none (owner, 2026-11-07).
-        XCTAssertFalse(home.contains("glassCardWatermark"), "a card's watermark is back")
+        // No icon, as the tiles have none (Ron, 2026-11-05).
+        XCTAssertFalse(home.contains(".glassCardWatermark("))
         let card = try XCTUnwrap(home.range(of: "private struct HomeNotContributedCard: View {"))
         XCTAssertFalse(home[card.upperBound...].prefix(2500).contains("Gradient.heroMissions"), "the dark gradient is back")
         // The figure counts while credit arrives (`BalanceArrivalFlourish`),

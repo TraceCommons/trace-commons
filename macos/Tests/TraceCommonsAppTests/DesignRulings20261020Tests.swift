@@ -40,8 +40,7 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertFalse(body.contains("strokeBorder"), "the border is back")
         XCTAssertFalse(body.contains("glassCardBeacon"), "the beacon is back")
         XCTAssertFalse(body.contains("Shimmer"), "the shimmer is back")
-        // Its watermark is gone too (owner, 2026-11-07).
-        XCTAssertFalse(body.contains("glassCardWatermark"), "the watermark is back")
+        XCTAssertFalse(body.contains(".glassCardWatermark("), "the icon is back (Ron, 2026-11-05)")
         XCTAssertTrue(body.contains(".glassTier(.card,"))
     }
 
@@ -69,8 +68,8 @@ final class DesignRulings20261020Tests: XCTestCase {
     /// Home's groups are titled, in the owner's words. The order is the
     /// Private AI first again (owner, 2026-11-02; the 2026-10-28 ruling put
     /// it under Traces and Account), then Traces, then Account. The Traces
-    /// hero leads Home, over every section (owner, 2026-10-28; restored
-    /// 2026-11-05).
+    /// hero, when it shows, takes the Traces cards' place under the heading
+    /// (owner, 2026-11-02; it sat above the heading from 2026-10-29).
     func test_homesSectionsAreTitledInOrder() throws {
         let words = try XCTUnwrap(MonitorWords.table).homeHistory
         XCTAssertEqual(words.sectionPrivateAI, "Private AI")
@@ -78,7 +77,7 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertEqual(words.sectionAccount, "Account")
         XCTAssertEqual(words.privateAISignIn, "Sign in to NEAR AI to get started.")
         let home = try Self.text("Views/Monitor/HomeViews.swift")
-        let hero = try XCTUnwrap(home.range(of: "            tracesHero\n            noCredit\n            privateAI\n"))
+        let hero = try XCTUnwrap(home.range(of: "                    tracesHero\n                } else {\n                    Grid("))
         let traces = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionTraces) {"))
         let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))
         let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount, accessory: accountSignIn) {"))
@@ -87,9 +86,9 @@ final class DesignRulings20261020Tests: XCTestCase {
         let credit = try XCTUnwrap(home.range(of: "HomeStatTile(label: HomeFormat.creditPendingWord"))
         XCTAssertNil(home.range(of: "            privateAI\n", range: tiles.upperBound..<home.endIndex),
                      "Private AI is back under Account")
-        XCTAssertLessThan(hero.lowerBound, privateAI.lowerBound)
         XCTAssertLessThan(privateAI.lowerBound, traces.lowerBound)
-        XCTAssertLessThan(traces.lowerBound, waiting.lowerBound)
+        XCTAssertLessThan(traces.lowerBound, hero.lowerBound)
+        XCTAssertLessThan(hero.lowerBound, waiting.lowerBound)
         XCTAssertLessThan(waiting.lowerBound, account.lowerBound)
         XCTAssertLessThan(account.lowerBound, credit.lowerBound)
         XCTAssertEqual(HomeSection<EmptyView>.titleType, GlassTabHeading<EmptyView>.titleType)
@@ -100,8 +99,10 @@ final class DesignRulings20261020Tests: XCTestCase {
     /// 2026-10-20). Signed in: Calls and Verified.
     func test_thePrivateAISectionSignsInOrCounts() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("let snapshot = model.managedSnapshot {"))
-        XCTAssertTrue(home.contains("if snapshot.nearAiSignedIn {"))
+        // A Debug build's review switch draws it signed in as well
+        // (`AppModel.reviewPrivateAISignedIn`, 2026-11-09).
+        XCTAssertTrue(home.contains("review || model.managedSnapshot != nil {"))
+        XCTAssertTrue(home.contains("if review || model.managedSnapshot?.nearAiSignedIn == true {"))
         XCTAssertTrue(home.contains("line: words.privateAISignIn, button: model.managedText(\"sign_in_near_ai\"),"))
         XCTAssertTrue(home.contains("NearAiSignIn.begin(model, openURL: openURL)"))
         // The core's managed words, which reach the model with its snapshot.

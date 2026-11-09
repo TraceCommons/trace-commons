@@ -36,9 +36,19 @@ final class ManagedToolSetupTests: XCTestCase {
             XCTAssertEqual(value.missingInstallTools.map(\.tool), ManagedSurface.supportedTools.filter { $0 != installed })
         }
         let source = try GlassSurfaceRulesTests.text("Views/ManagedSessionsView.swift")
-        XCTAssertTrue(source.contains("ForEach(snapshot.signInStartTools, id: \\.self)"))
+        XCTAssertTrue(source.contains("ForEach(Self.startTools(snapshot), id: \\.self)"))
         XCTAssertTrue(source.contains("ForEach(snapshot.missingInstallTools)"))
-        XCTAssertTrue(source.contains("if !snapshot.nearAiSignedIn, !snapshot.missingInstallTools.isEmpty {\n                    setupOnlyButtons(snapshot)"))
+        XCTAssertTrue(source.contains("if !Self.showsSignedIn(snapshot), !snapshot.missingInstallTools.isEmpty {\n                    setupOnlyButtons(snapshot)"))
+    }
+
+    /// Without the Debug review switch (`TC_REVIEW_PRIVATE_AI_SIGNED_IN`,
+    /// never set under test), the NEAR AI card follows the sign-in and its
+    /// Start buttons are the sign-in's tools.
+    func testWithoutTheReviewSwitchTheCardFollowsTheSignIn() throws {
+        XCTAssertFalse(AppModel.reviewPrivateAISignedIn)
+        let value = try snapshot(capability: true, installed: ManagedSurface.supportedTools)
+        XCTAssertFalse(ManagedSessionsSection.showsSignedIn(value))
+        XCTAssertEqual(ManagedSessionsSection.startTools(value), value.signInStartTools)
     }
 
     func testSetupBeforeSignInSendsOnlyNamedToolAndAction() async throws {
