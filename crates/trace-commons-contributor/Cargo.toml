@@ -92,7 +92,7 @@ clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
 hex = "0.4"
 # Approved for read-only OpenCode session discovery; already used by IronWire.
-rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.41", features = ["bundled", "hooks", "fallible_uint"] }
 # OS credential stores approved by the operator on 2026-09-09.
 keyring-core = "=1.0.0"
 # IronWire's proxy, run in-process behind the private_inference switch.
@@ -869,7 +869,12 @@ keyring-core = "=1.0.0"
 # ironwire_core::responses_replay module is removed; this crate never called it.
 # No manifest/dependency changes upstream. All three locks move only the eleven
 # ironwire_* source strings; Flatpak sources point at the same exact commit.
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "c314b05f19f916c584ecd1eaf76a765961a34527" }
+# ADVANCE TO b234896 (2026-11-09). Upgrade the bundled SQLite ledger to
+# rusqlite 0.41 / libsqlite3-sys 0.39, fixing RUSTSEC-2026-0459. No wire,
+# schema, credential, or proxy API changes. Keep this crate and the sources
+# crate on the same SQLite line; fallible_uint preserves their checked u64
+# conversions. All three lockfiles and Flatpak sources advance together.
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "b234896acd44e1c2216f98d2de82361b9a0a5796" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -883,8 +888,8 @@ ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "c314b05f19
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "c314b05f19f916c584ecd1eaf76a765961a34527" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "c314b05f19f916c584ecd1eaf76a765961a34527" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "b234896acd44e1c2216f98d2de82361b9a0a5796" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "b234896acd44e1c2216f98d2de82361b9a0a5796" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
