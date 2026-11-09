@@ -3192,6 +3192,23 @@ final class AppModel: ObservableObject {
         #endif
     }
 
+    /// Debug builds only: `TC_REVIEW_PRIVATE_AI_SIGNED_IN=1` draws Home's
+    /// Private AI section as signed in to NEAR AI, with the normal-day
+    /// sample's figures (`HomePrivateAI.reviewTotals`), and the Private AI
+    /// tab's NEAR AI card with its tool buttons and no sign-in notice
+    /// (`ManagedSessionsSection.showsSignedIn`), so a design review can see
+    /// them on a build that cannot hold a NEAR AI sign-in: an
+    /// ad-hoc signed build cannot reach the team keychain group, and a dry
+    /// run refuses the managed snapshot the section waits on. Nothing is
+    /// signed in and the daemon is not told. A release build never reads it.
+    static var reviewPrivateAISignedIn: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["TC_REVIEW_PRIVATE_AI_SIGNED_IN"] == "1"
+        #else
+        false
+        #endif
+    }
+
     /// Whether a watch-only first run was finished against this config
     /// directory. Keyed by a digest of the directory, never the path itself.
     var isWatchOnlyComplete: Bool {

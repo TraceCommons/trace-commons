@@ -1432,11 +1432,13 @@ pub struct MonitorHomeHistoryCopy {
     pub traces_hero_action: &'static str,
     /// The hero's three steps, left to right, each a title over one line
     /// (owner, 2026-10-29, from the owner's mock-up): contribute, earn,
-    /// spend on Private AI. Each title and its line read as one short
-    /// sentence ("Earn credit / for each trace"). The first two lines are
-    /// the owner's words (2026-11-02: "Traces from tools", "For each
-    /// trace"); the titles and "With your credit" are DRAFT, NEEDS
-    /// APPROVAL (2026-11-02 rewrite).
+    /// spend on Private AI. Each line says what happens in its step, in a
+    /// sentence or two (Ron, 2026-11-09: the earlier "Traces from tools",
+    /// "For each trace" and "With your credit" were too short). The three
+    /// lines were approved by Ron on 2026-11-09, the earn line reworded the
+    /// same day to say "final" rather than "pending", which no Home word
+    /// says bare (D6); the titles are DRAFT, NEEDS APPROVAL (2026-11-02
+    /// rewrite).
     pub traces_hero_step_contribute: &'static str,
     pub traces_hero_step_contribute_detail: &'static str,
     pub traces_hero_step_earn: &'static str,
@@ -1795,11 +1797,11 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             traces_hero_title: "Your traces earn Private AI credit",
             traces_hero_action: "Start earning",
             traces_hero_step_contribute: "Contribute",
-            traces_hero_step_contribute_detail: "Traces from tools",
+            traces_hero_step_contribute_detail: "Share traces from your coding tools. Keys, emails and file paths are removed before they're sent.",
             traces_hero_step_earn: "Earn credit",
-            traces_hero_step_earn_detail: "For each trace",
+            traces_hero_step_earn_detail: "Each accepted trace earns credit. It becomes final once it settles.",
             traces_hero_step_use: "Use Private AI",
-            traces_hero_step_use_detail: "With your credit",
+            traces_hero_step_use_detail: "Spend your credit on Claude Code, Codex or OpenCode sessions through Private AI.",
             no_credit_body: crate::consent_copy::NO_CREDIT_REMINDER,
             no_credit_open_settings: "Open Settings",
             credit_account_total: "{amount} across your account",

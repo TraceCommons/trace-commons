@@ -120,7 +120,10 @@ final class TracesInspectorHostTests: XCTestCase {
             XCTAssertTrue(traces.contains(needle), "the Traces notices lack \(needle)")
         }
         let privateAI = try member("    private var privateAIItems: [GlassPopoverItem] {")
-        for needle in ["model.showsPrivateInferenceOffer", "!snapshot.nearAiSignedIn", "model.managedText(\"sign_in_needed\")"] {
+        // Signed out of NEAR AI, unless a Debug build's review switch draws
+        // the tab signed in (`ManagedSessionsSection.showsSignedIn`).
+        for needle in ["model.showsPrivateInferenceOffer", "!ManagedSessionsSection.showsSignedIn(snapshot)",
+                       "model.managedText(\"sign_in_needed\")"] {
             XCTAssertTrue(privateAI.contains(needle), "the Private AI notices lack \(needle)")
         }
         XCTAssertFalse(traces.contains("model.showsPrivateInferenceOffer"), "Traces offers Private AI again")

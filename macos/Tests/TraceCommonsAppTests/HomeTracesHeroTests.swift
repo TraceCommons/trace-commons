@@ -25,18 +25,22 @@ final class HomeTracesHeroTests: XCTestCase {
         return home[start.upperBound..<end.lowerBound]
     }
 
-    /// Each step's title and line read as one short sentence, and the
+    /// Each step's line says what happens in it, in a sentence or two (Ron,
+    /// 2026-11-09: the earlier three-word lines were too short), and the
     /// title says what the three of them add up to.
-    func test_theHeroSaysItInFewWords() throws {
+    func test_theHeroSaysWhatEachStepDoes() throws {
         let words = try XCTUnwrap(MonitorWords.table).homeHistory
         XCTAssertEqual(words.tracesHeroTitle, "Your traces earn Private AI credit")
         XCTAssertEqual(words.tracesHeroAction, "Start earning")
         XCTAssertEqual(words.tracesHeroStepContribute, "Contribute")
-        XCTAssertEqual(words.tracesHeroStepContributeDetail, "Traces from tools")
+        XCTAssertEqual(words.tracesHeroStepContributeDetail,
+                       "Share traces from your coding tools. Keys, emails and file paths are removed before they're sent.")
         XCTAssertEqual(words.tracesHeroStepEarn, "Earn credit")
-        XCTAssertEqual(words.tracesHeroStepEarnDetail, "For each trace")
+        XCTAssertEqual(words.tracesHeroStepEarnDetail,
+                       "Each accepted trace earns credit. It becomes final once it settles.")
         XCTAssertEqual(words.tracesHeroStepUse, "Use Private AI")
-        XCTAssertEqual(words.tracesHeroStepUseDetail, "With your credit")
+        XCTAssertEqual(words.tracesHeroStepUseDetail,
+                       "Spend your credit on Claude Code, Codex or OpenCode sessions through Private AI.")
         // The line under the title is gone from the core's table and the
         // shell's copy alike.
         let copy = try String(
@@ -103,12 +107,13 @@ final class HomeTracesHeroTests: XCTestCase {
     }
 
     /// The walkthrough takes the Traces cards' place under the Traces
-    /// heading, and the launch that finished first run is the model's,
-    /// set where first run is marked done.
+    /// heading, under the no-credit line when that shows (Ron, 2026-11-09),
+    /// and the launch that finished first run is the model's, set where
+    /// first run is marked done.
     func test_theWalkthroughTakesTheCardsPlace() throws {
         let home = try Self.home()
         XCTAssertTrue(home.contains(
-            "HomeSection(words?.sectionTraces) {\n                if showsTracesWalkthrough {\n"
+            "                noCredit\n                if showsTracesWalkthrough {\n"
                 + "                    tracesHero\n                } else {\n                    Grid("))
         XCTAssertEqual(home.components(separatedBy: "                    tracesHero\n").count - 1, 1, "drawn once")
         XCTAssertTrue(home.contains("!tracesHeroClosed && words != nil && HomeFormat.showsTracesWalkthrough("))

@@ -99,8 +99,10 @@ final class DesignRulings20261020Tests: XCTestCase {
     /// 2026-10-20). Signed in: Calls and Verified.
     func test_thePrivateAISectionSignsInOrCounts() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("let snapshot = model.managedSnapshot {"))
-        XCTAssertTrue(home.contains("if snapshot.nearAiSignedIn {"))
+        // A Debug build's review switch draws it signed in as well
+        // (`AppModel.reviewPrivateAISignedIn`, 2026-11-09).
+        XCTAssertTrue(home.contains("review || model.managedSnapshot != nil {"))
+        XCTAssertTrue(home.contains("if review || model.managedSnapshot?.nearAiSignedIn == true {"))
         XCTAssertTrue(home.contains("line: words.privateAISignIn, button: model.managedText(\"sign_in_near_ai\"),"))
         XCTAssertTrue(home.contains("NearAiSignIn.begin(model, openURL: openURL)"))
         // The core's managed words, which reach the model with its snapshot.

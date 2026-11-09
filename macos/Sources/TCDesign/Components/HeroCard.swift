@@ -64,8 +64,13 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     /// The card's least height, and how much of its width the words take:
     /// the rest is the graphic's. The words set the card's height, so a
     /// longer title or a wrapped line never pushes the action off the card.
+    /// The words run over the graphic's left part, to about three quarters
+    /// of Home's card (Ron, 2026-11-09; 150 before).
     static var minHeight: CGFloat { 156 }
-    static var graphicReserve: CGFloat { 150 }
+    static var graphicReserve: CGFloat { 90 }
+    /// The graphic's own width, behind the words and past the card's
+    /// trailing edge; it stays where it was when the words grew.
+    static var graphicWidth: CGFloat { 210 }
     /// How much of the large graphic shows through: all of it. A pixel graphic
     /// carries its own transparency in its cells (Ron, 2026-11-05).
     static var graphicOpacity: Double { 1 }
@@ -122,7 +127,7 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
             .background(alignment: .trailing) {
                 // Behind the words, sized to the card, past its edges.
                 graphic
-                    .frame(width: Self.graphicReserve + 60)
+                    .frame(width: Self.graphicWidth)
                     .frame(maxHeight: .infinity)
                     .opacity(Self.graphicOpacity)
                     .accessibilityHidden(true)

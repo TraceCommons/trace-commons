@@ -175,10 +175,10 @@
     },
     "heroInsights": {
       "angle": 120,
-      "note": "Insights: a solid deep sea blue, both stops the same (Ron, 2026-11-05).",
+      "note": "Insights: a solid deep azure, both stops the same; a blue of its own beside the campaign card's navy, no longer the deep sea teal #07202b (Ron, 2026-11-05; recoloured 2026-11-09).",
       "stops": [
-        { "hex": "#07202b", "at": 0 },
-        { "hex": "#07202b", "at": 1 }
+        { "hex": "#0a2546", "at": 0 },
+        { "hex": "#0a2546", "at": 1 }
       ]
     },
     "paneFill": { "angle": 160, "stops": [

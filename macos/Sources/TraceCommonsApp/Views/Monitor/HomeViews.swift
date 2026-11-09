@@ -113,51 +113,21 @@ struct TracesHistoryPage: View {
     }
 }
 
-/// Home's hero cards that the person closed with their X (owner,
-/// 2026-10-27: Kimi and Insights were in the person's face), and Settings'
-/// switch for the campaign card. Kept in this Mac's defaults; nothing
-/// leaves the machine.
+/// Home's card switches, kept in this Mac's defaults; nothing leaves the
+/// machine: Settings' switch for the campaign card, and the Traces hero
+/// closed with its X.
 ///
-/// A closed campaign comes back when what the feed says for it changes;
-/// the Insights card comes back the next day; promotions off hides the
-/// campaign card altogether (owner, 2026-10-27).
+/// The campaign and Insights cards have no X (Ron, 2026-11-05 and
+/// 2026-11-09), and a close from an earlier build no longer hides them:
+/// with no X, one would have hidden a card for good. Promotions off still
+/// hides the campaign card (owner, 2026-10-27).
 enum HomeClosedCards {
-    /// The fingerprint of the campaign as it was when closed.
-    static let campaignKey = "home.closedCampaignFingerprint"
-    /// The day (`day(_:)`) the Insights card was closed on.
-    static let insightsKey = "home.insightsCardClosedOn"
     /// Settings' "Show promotions on Home", on by default.
     static let promotionsKey = "home.showsPromotions"
     /// The Traces hero was closed with its X (owner, 2026-11-02). It stays
     /// closed on this Mac: what it explains does not change, and Traces
     /// and Private AI keep their tabs.
     static let tracesHeroKey = "home.tracesHeroClosed"
-
-    /// Everything the campaign card shows, so any change in the feed --
-    /// under the same id or a new one -- is a different fingerprint. New
-    /// art behind the same image URL is not: the feed changes the URL with
-    /// the art.
-    static func fingerprint(_ campaign: PrivateAICampaign) -> String {
-        [campaign.id, campaign.title, campaign.body, campaign.actionTitle, campaign.actionURL.absoluteString,
-         campaign.symbol, campaign.imageURL?.absoluteString ?? ""].joined(separator: "\u{1F}")
-    }
-
-    /// A campaign shows while promotions are on and it is not the one the
-    /// person closed, as it was then.
-    static func showsCampaign(_ fingerprint: String, closed: String, promotionsOn: Bool) -> Bool {
-        promotionsOn && fingerprint != closed
-    }
-
-    /// The day `date` falls on in the person's calendar, as "2026-10-27".
-    static func day(_ date: Date, calendar: Calendar = .current) -> String {
-        let parts = calendar.dateComponents([.year, .month, .day], from: date)
-        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
-    }
-
-    /// The Insights card shows unless it was closed today: once a day.
-    static func showsInsights(closedOn: String, now: Date = Date(), calendar: Calendar = .current) -> Bool {
-        closedOn != day(now, calendar: calendar)
-    }
 }
 
 private struct HomeOverview: View {
@@ -183,16 +153,13 @@ private struct HomeOverview: View {
     /// Where the NEAR AI sign-in's browser page opens.
     @Environment(\.openURL) private var openURL
     @State private var campaignStore = PrivateAICampaignStore()
-    /// The campaign closed with its X, as it was then (`fingerprint`): it
-    /// comes back when the feed changes it (owner, 2026-10-27).
-    @AppStorage(HomeClosedCards.campaignKey) private var closedCampaign = ""
-    /// The day the Insights card was closed with its X: it is back the
-    /// next day; the Insights tab stays where it is (owner, 2026-10-27).
-    @AppStorage(HomeClosedCards.insightsKey) private var insightsClosedOn = ""
     /// Settings' "Show promotions on Home": off, no campaign card.
     @AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true
     /// The Traces hero, closed with its X: gone from Home on this Mac.
     @AppStorage(HomeClosedCards.tracesHeroKey) private var tracesHeroClosed = false
+    /// The Private AI row's sample figures under
+    /// `AppModel.reviewPrivateAISignedIn`; nil otherwise, or until read.
+    @State private var reviewTotals: (calls: Int?, verified: Int?)?
 
     /// The rollup, or nil after a failed `history_rollup` read
     /// (`SummaryFacts.fresh`): a stale one is not shown as current.
@@ -217,9 +184,7 @@ private struct HomeOverview: View {
     /// A native promotion, available from compiled copy before its remote refresh.
     @ViewBuilder
     private var campaign: some View {
-        if let campaign = campaignStore.campaign,
-           HomeClosedCards.showsCampaign(
-               HomeClosedCards.fingerprint(campaign), closed: closedCampaign, promotionsOn: promotionsOn) {
+        if let campaign = campaignStore.campaign, promotionsOn {
             GlassHeroCard(
                 gradient: GlassTokens.Gradient.heroCampaignCard,
                 title: campaign.title, subtitle: campaign.body,
@@ -268,11 +233,11 @@ private struct HomeOverview: View {
                 // Insights as a hero promotion, today's figures in its words
                 // and its graphic (owner, 2026-10-12: an upsell, not a bare
                 // way in).
-                if let insightsHeading, HomeClosedCards.showsInsights(closedOn: insightsClosedOn) {
+                // No X (Ron, 2026-11-09), as the campaign card has none.
+                if let insightsHeading {
                     GlassHeroCard(
                         gradient: GlassTokens.Gradient.heroInsights, title: insightsHeading,
-                        subtitle: words?.insightsSubtitle, actionTitle: words?.insightsAction, action: openInsights,
-                        closeLabel: MonitorWords.close, onClose: { insightsClosedOn = HomeClosedCards.day(Date()) }
+                        subtitle: words?.insightsSubtitle, actionTitle: words?.insightsAction, action: openInsights
                     ) {
                         HomeInsightsGraphic(glance: freshGlance)
                     } content: {
@@ -292,6 +257,9 @@ private struct HomeOverview: View {
         }
         .scrollIndicators(.never)
         .task { await campaignStore.refresh() }
+        .task {
+            if AppModel.reviewPrivateAISignedIn { reviewTotals = await HomePrivateAI.reviewTotals() }
+        }
         .task(id: missionsEnabled) {
             // Hidden missions read nothing: the drafts inbox stays on disk.
             if missionsEnabled { missionDrafts.preview() }
@@ -365,9 +333,11 @@ private struct HomeOverview: View {
         // closed (owner, 2026-11-02; it led Home above the heading from
         // 2026-10-28).
         return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            noCredit
             privateAI
             HomeSection(words?.sectionTraces) {
+                // Under the Traces heading, over its cards (Ron, 2026-11-09):
+                // the credit it speaks of is the traces'.
+                noCredit
                 if showsTracesWalkthrough {
                     tracesHero
                 } else {
@@ -437,10 +407,11 @@ private struct HomeOverview: View {
         }
     }
 
-    /// At the top of Home, over Private AI, while Train coding models is off
-    /// (product owner, 2026-11-05): one slim line saying no credit is earned until it
-    /// is on, and Open Settings to the data uses. No X; it goes once the use
-    /// is on.
+    /// In the Traces section, under its heading (Ron, 2026-11-09; it led
+    /// Home from 2026-11-05), while Train coding models is off (product
+    /// owner, 2026-11-05): one slim line saying no credit is earned until
+    /// it is on, and Open Settings to the data uses. No X; it goes once the
+    /// use is on.
     @ViewBuilder
     private var noCredit: some View {
         if let words, NoCreditNotice.showsOnHome(loggedIn: model.status.loggedIn, scopes: model.status.consentScopes) {
@@ -482,13 +453,18 @@ private struct HomeOverview: View {
     /// Signed out, one slim card: "Sign in to NEAR AI to get started." and
     /// Sign in, which begins the NEAR AI sign-in as the Private AI tab's
     /// notice does.
+    ///
+    /// A Debug build launched with `TC_REVIEW_PRIVATE_AI_SIGNED_IN=1`
+    /// (`AppModel.reviewPrivateAISignedIn`) draws the signed-in row with
+    /// sample figures, with or without a snapshot.
     @ViewBuilder
     private var privateAI: some View {
+        let review = AppModel.reviewPrivateAISignedIn
         if let words, model.privateInferenceCopy != nil, case .running = model.startup,
-           let snapshot = model.managedSnapshot {
+           review || model.managedSnapshot != nil {
             HomeSection(words.sectionPrivateAI) {
-                if snapshot.nearAiSignedIn {
-                    let totals = HomePrivateAI.totals(inference)
+                if review || model.managedSnapshot?.nearAiSignedIn == true {
+                    let totals = review ? (reviewTotals ?? (nil, nil)) : HomePrivateAI.totals(inference)
                     HomePrivateAIRow(
                         figures: [
                             (MonitorWords.calls, HomeFormat.count(totals.calls)),
@@ -767,6 +743,17 @@ enum HomePrivateAI {
     /// Full-window daemon totals, independent of the shared proxy's calls page.
     static func totals(_ store: InferenceStore?) -> (calls: Int?, verified: Int?) {
         networkTotals(store?.networkSummary)
+    }
+
+    /// `AppModel.reviewPrivateAISignedIn`'s figures: the normal-day sample's
+    /// network summary. Debug builds only, where the sample client is; a
+    /// release build has no figures to show here and reads none.
+    static func reviewTotals() async -> (calls: Int?, verified: Int?) {
+        #if DEBUG
+        networkTotals(try? await DaemonDataWiring.sample(.normalDay).networkInferenceSummary())
+        #else
+        (nil, nil)
+        #endif
     }
 
     static func networkTotals(_ network: DaemonData.NetworkInferenceSummary?) -> (calls: Int?, verified: Int?) {
