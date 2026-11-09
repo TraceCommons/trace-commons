@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.24.14" date="2026-11-09">
+      <description>
+        <p>Updates the bundled SQLite to fix a write-ahead-log advisory, and requires accepting the Terms of Service in the macOS first-run Welcome.</p>
+      </description>
+    </release>
     <release version="0.24.13" date="2026-11-07">
       <description>
         <p>Home's getting-started card and the Private AI tab's guide shrink in a small window and can be closed, and Home's stat cards no longer draw background icons.</p>
