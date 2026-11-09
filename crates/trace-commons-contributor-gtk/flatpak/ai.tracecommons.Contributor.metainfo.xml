@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.24.15" date="2026-11-09">
+      <description>
+        <p>Fixes the Open Settings button on the macOS Home screen, which now opens the Settings window.</p>
+      </description>
+    </release>
     <release version="0.24.14" date="2026-11-09">
       <description>
         <p>Updates the bundled SQLite to fix a write-ahead-log advisory, and requires accepting the Terms of Service in the macOS first-run Welcome.</p>

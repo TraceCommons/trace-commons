@@ -8512,7 +8512,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor"
-version = "0.24.14"
+version = "0.24.15"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -8562,7 +8562,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-ffi"
-version = "0.24.14"
+version = "0.24.15"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -8575,7 +8575,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-insights"
-version = "0.24.14"
+version = "0.24.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8597,7 +8597,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-platform"
-version = "0.24.14"
+version = "0.24.15"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -8614,7 +8614,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-sources"
-version = "0.24.14"
+version = "0.24.15"
 dependencies = [
  "anyhow",
  "chrono",
