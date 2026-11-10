@@ -2533,6 +2533,12 @@ pub struct TraceGateCreditDecisionRow {
 /// degrade.
 pub const TRACE_WITHDRAWAL_BACKEND_MISSING: &str = "TraceWithdrawalBackendMissing";
 
+/// Error label returned by a [`TraceCorpusStore`] method the backend does not
+/// implement. Every method has a default so test doubles override only what
+/// they use; `PgBackend` overrides all of them, which
+/// `tests/store_trait_coverage.rs` enforces.
+pub const TRACE_CORPUS_STORE_BACKEND_MISSING: &str = "TraceCorpusStoreBackendMissing";
+
 /// The kind of the operator audit-chain repair's own audit event, and the
 /// `Maintenance` surface of its DB row. The only row
 /// [`TraceCorpusStore::append_trace_audit_chain_resume_event`] accepts
@@ -2747,8 +2753,12 @@ pub trait TraceCorpusStore: Send + Sync {
     }
     async fn upsert_trace_submission(
         &self,
-        submission: TraceSubmissionWrite,
-    ) -> Result<TraceSubmissionRecord, DatabaseError>;
+        _submission: TraceSubmissionWrite,
+    ) -> Result<TraceSubmissionRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     /// Commit submission metadata and its optional verified witness evidence
     /// together. Stores lacking this transaction must refuse evidence writes.
@@ -2842,14 +2852,22 @@ pub trait TraceCorpusStore: Send + Sync {
 
     async fn get_trace_submission(
         &self,
-        tenant_id: &str,
-        submission_id: Uuid,
-    ) -> Result<Option<TraceSubmissionRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<Option<TraceSubmissionRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_submissions(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     /// The submissions of `tenant_id` among `submission_ids`, in no set
     /// order; an id with no submission is left out. A store that cannot read
@@ -2880,11 +2898,15 @@ pub trait TraceCorpusStore: Send + Sync {
     /// an empty page without touching the table.
     async fn list_account_trace_submissions_keyset(
         &self,
-        tenant_id: &str,
-        principal_refs: &[String],
-        cursor: Option<TraceSubmissionKeysetCursor>,
-        limit: i64,
-    ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _principal_refs: &[String],
+        _cursor: Option<TraceSubmissionKeysetCursor>,
+        _limit: i64,
+    ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     /// The submissions of `tenant_id` received after `since`, counted up to
     /// `limit` in `(received_at DESC)` order, for an hourly submission
@@ -2928,35 +2950,59 @@ pub trait TraceCorpusStore: Send + Sync {
 
     async fn upsert_trace_tenant_policy(
         &self,
-        policy: TraceTenantPolicyWrite,
-    ) -> Result<TraceTenantPolicyRecord, DatabaseError>;
+        _policy: TraceTenantPolicyWrite,
+    ) -> Result<TraceTenantPolicyRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn get_trace_tenant_policy(
         &self,
-        tenant_id: &str,
-    ) -> Result<Option<TraceTenantPolicyRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Option<TraceTenantPolicyRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_tenant_access_grant(
         &self,
-        grant: TraceTenantAccessGrantWrite,
-    ) -> Result<TraceTenantAccessGrantRecord, DatabaseError>;
+        _grant: TraceTenantAccessGrantWrite,
+    ) -> Result<TraceTenantAccessGrantRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_tenant_access_grants(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_active_trace_tenant_access_grants_for_principal(
         &self,
-        tenant_id: &str,
-        principal_ref: &str,
-        now: DateTime<Utc>,
-    ) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _principal_ref: &str,
+        _now: DateTime<Utc>,
+    ) -> Result<Vec<TraceTenantAccessGrantRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_credit_events(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceCreditEventRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceCreditEventRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     /// `list_trace_credit_events` for the events of `submission_ids` only, in
     /// the same order. The default filters the whole ledger.
@@ -3023,24 +3069,36 @@ pub trait TraceCorpusStore: Send + Sync {
     /// is an artifact rewrite rather than an UPDATE.
     async fn list_quarantined_with_only_residual_survivor(
         &self,
-        tenant_id: &str,
-        limit: i64,
-    ) -> Result<Vec<(String, Uuid)>, DatabaseError>;
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<Vec<(String, Uuid)>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn requeue_quarantined_for_pii_backstop(
         &self,
-        tenant_id: &str,
-        limit: i64,
-    ) -> Result<u64, DatabaseError>;
+        _tenant_id: &str,
+        _limit: i64,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn update_trace_submission_status(
         &self,
-        tenant_id: &str,
-        submission_id: Uuid,
-        status: TraceCorpusStatus,
-        actor_principal_ref: &str,
-        reason: Option<&str>,
-    ) -> Result<(), DatabaseError>;
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _status: TraceCorpusStatus,
+        _actor_principal_ref: &str,
+        _reason: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     /// As [`Self::update_trace_submission_status`], without the store's own
     /// audit row. For a caller that mirrors the file audit log's event for
@@ -3067,38 +3125,58 @@ pub trait TraceCorpusStore: Send + Sync {
 
     async fn claim_trace_review_lease(
         &self,
-        tenant_id: &str,
-        submission_id: Uuid,
-        actor_principal_ref: &str,
-        lease_expires_at: DateTime<Utc>,
-        review_due_at: Option<DateTime<Utc>>,
-        now: DateTime<Utc>,
-    ) -> Result<Option<TraceSubmissionRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _actor_principal_ref: &str,
+        _lease_expires_at: DateTime<Utc>,
+        _review_due_at: Option<DateTime<Utc>>,
+        _now: DateTime<Utc>,
+    ) -> Result<Option<TraceSubmissionRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn release_trace_review_lease(
         &self,
-        tenant_id: &str,
-        submission_id: Uuid,
-        actor_principal_ref: &str,
-    ) -> Result<Option<TraceSubmissionRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _actor_principal_ref: &str,
+    ) -> Result<Option<TraceSubmissionRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn append_trace_object_ref(
         &self,
-        object_ref: TraceObjectRefWrite,
-    ) -> Result<(), DatabaseError>;
+        _object_ref: TraceObjectRefWrite,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_object_refs(
         &self,
-        tenant_id: &str,
-        submission_id: Uuid,
-    ) -> Result<Vec<TraceObjectRefRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<Vec<TraceObjectRefRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn get_latest_active_trace_object_ref(
         &self,
-        tenant_id: &str,
-        submission_id: Uuid,
-        artifact_kind: TraceObjectArtifactKind,
-    ) -> Result<Option<TraceObjectRefRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _artifact_kind: TraceObjectArtifactKind,
+    ) -> Result<Option<TraceObjectRefRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     /// Invalidate every currently-active object ref of `artifact_kind` for a
     /// submission by stamping `invalidated_at`. Used defensively by the PII
@@ -3185,166 +3263,290 @@ pub trait TraceCorpusStore: Send + Sync {
 
     async fn append_trace_derived_record(
         &self,
-        derived_record: TraceDerivedRecordWrite,
-    ) -> Result<(), DatabaseError>;
+        _derived_record: TraceDerivedRecordWrite,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_derived_records(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceDerivedRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceDerivedRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_vector_entry(
         &self,
-        vector_entry: TraceVectorEntryWrite,
-    ) -> Result<TraceVectorEntryRecord, DatabaseError>;
+        _vector_entry: TraceVectorEntryWrite,
+    ) -> Result<TraceVectorEntryRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_vector_entries(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceVectorEntryRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceVectorEntryRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_ranking_model_version(
         &self,
-        model_version: TraceRankingModelVersionWrite,
-    ) -> Result<TraceRankingModelVersionRecord, DatabaseError>;
+        _model_version: TraceRankingModelVersionWrite,
+    ) -> Result<TraceRankingModelVersionRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_ranking_model_versions(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceRankingModelVersionRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceRankingModelVersionRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_ranking_calibration_dataset(
         &self,
-        dataset: TraceRankingCalibrationDatasetWrite,
-    ) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError>;
+        _dataset: TraceRankingCalibrationDatasetWrite,
+    ) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn update_trace_ranking_calibration_dataset_status(
         &self,
-        update: TraceRankingCalibrationDatasetStatusUpdate,
-    ) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError>;
+        _update: TraceRankingCalibrationDatasetStatusUpdate,
+    ) -> Result<TraceRankingCalibrationDatasetRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_ranking_calibration_datasets(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceRankingCalibrationDatasetRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceRankingCalibrationDatasetRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_ranking_feature(
         &self,
-        feature: TraceRankingFeatureWrite,
-    ) -> Result<TraceRankingFeatureRecord, DatabaseError>;
+        _feature: TraceRankingFeatureWrite,
+    ) -> Result<TraceRankingFeatureRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_ranking_features(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceRankingFeatureRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceRankingFeatureRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_ranking_prediction(
         &self,
-        prediction: TraceRankingPredictionWrite,
-    ) -> Result<TraceRankingPredictionRecord, DatabaseError>;
+        _prediction: TraceRankingPredictionWrite,
+    ) -> Result<TraceRankingPredictionRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_ranking_predictions(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceRankingPredictionRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceRankingPredictionRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_ranking_label(
         &self,
-        label: TraceRankingLabelWrite,
-    ) -> Result<TraceRankingLabelRecord, DatabaseError>;
+        _label: TraceRankingLabelWrite,
+    ) -> Result<TraceRankingLabelRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_ranking_labels(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceRankingLabelRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceRankingLabelRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_ranking_preference_label(
         &self,
-        preference: TraceRankingPreferenceLabelWrite,
-    ) -> Result<TraceRankingPreferenceLabelRecord, DatabaseError>;
+        _preference: TraceRankingPreferenceLabelWrite,
+    ) -> Result<TraceRankingPreferenceLabelRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_ranking_preference_labels(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceRankingPreferenceLabelRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceRankingPreferenceLabelRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_ranking_calibration_run(
         &self,
-        run: TraceRankingCalibrationRunWrite,
-    ) -> Result<TraceRankingCalibrationRunRecord, DatabaseError>;
+        _run: TraceRankingCalibrationRunWrite,
+    ) -> Result<TraceRankingCalibrationRunRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_ranking_calibration_runs(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceRankingCalibrationRunRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceRankingCalibrationRunRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_ranking_worker_run(
         &self,
-        run: TraceRankingWorkerRunWrite,
-    ) -> Result<TraceRankingWorkerRunRecord, DatabaseError>;
+        _run: TraceRankingWorkerRunWrite,
+    ) -> Result<TraceRankingWorkerRunRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_ranking_worker_runs(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceRankingWorkerRunRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceRankingWorkerRunRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_export_manifest(
         &self,
-        manifest: TraceExportManifestWrite,
-    ) -> Result<TraceExportManifestRecord, DatabaseError>;
+        _manifest: TraceExportManifestWrite,
+    ) -> Result<TraceExportManifestRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_export_manifest_mirror(
         &self,
-        mirror: TraceExportManifestMirrorWrite,
-    ) -> Result<TraceExportManifestRecord, DatabaseError>;
+        _mirror: TraceExportManifestMirrorWrite,
+    ) -> Result<TraceExportManifestRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn delete_trace_export_manifest_mirror(
         &self,
-        tenant_id: &str,
-        export_manifest_id: Uuid,
-    ) -> Result<(), DatabaseError>;
+        _tenant_id: &str,
+        _export_manifest_id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_export_manifests(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceExportManifestRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceExportManifestRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_export_manifest_item(
         &self,
-        item: TraceExportManifestItemWrite,
-    ) -> Result<TraceExportManifestItemRecord, DatabaseError>;
+        _item: TraceExportManifestItemWrite,
+    ) -> Result<TraceExportManifestItemRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_export_manifest_items(
         &self,
-        tenant_id: &str,
-        export_manifest_id: Uuid,
-    ) -> Result<Vec<TraceExportManifestItemRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _export_manifest_id: Uuid,
+    ) -> Result<Vec<TraceExportManifestItemRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn invalidate_trace_export_manifests_for_submission(
         &self,
-        tenant_id: &str,
-        submission_id: Uuid,
-    ) -> Result<u64, DatabaseError>;
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn invalidate_trace_export_manifest_items_for_submission(
         &self,
-        tenant_id: &str,
-        submission_id: Uuid,
-        reason: TraceExportManifestItemInvalidationReason,
-    ) -> Result<u64, DatabaseError>;
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _reason: TraceExportManifestItemInvalidationReason,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn invalidate_trace_vector_entries_for_submission(
         &self,
-        tenant_id: &str,
-        submission_id: Uuid,
-    ) -> Result<u64, DatabaseError>;
+        _tenant_id: &str,
+        _submission_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn invalidate_trace_vector_entry_for_submission(
         &self,
-        tenant_id: &str,
-        submission_id: Uuid,
-        vector_entry_id: Uuid,
-    ) -> Result<u64, DatabaseError>;
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _vector_entry_id: Uuid,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     // -- Contributor-initiated withdrawal (migration V43) --------------------
     //
@@ -3433,8 +3635,12 @@ pub trait TraceCorpusStore: Send + Sync {
 
     async fn append_trace_audit_event(
         &self,
-        audit_event: TraceAuditEventWrite,
-    ) -> Result<(), DatabaseError>;
+        _audit_event: TraceAuditEventWrite,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     /// Appends a hashed audit row that resumes the tenant's DB audit chain
     /// across a legacy segment, where the file log ran ahead through rows
@@ -3464,65 +3670,113 @@ pub trait TraceCorpusStore: Send + Sync {
 
     async fn list_trace_audit_events(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceAuditEventRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceAuditEventRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_recent_trace_audit_events(
         &self,
-        tenant_id: &str,
-        limit: usize,
-    ) -> Result<Vec<TraceAuditEventRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _limit: usize,
+    ) -> Result<Vec<TraceAuditEventRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn get_trace_audit_event_by_id(
         &self,
-        tenant_id: &str,
-        audit_event_id: Uuid,
-    ) -> Result<Option<TraceAuditEventRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _audit_event_id: Uuid,
+    ) -> Result<Option<TraceAuditEventRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn append_trace_credit_event(
         &self,
-        credit_event: TraceCreditEventWrite,
-    ) -> Result<(), DatabaseError>;
+        _credit_event: TraceCreditEventWrite,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_utility_attestation(
         &self,
-        attestation: TraceUtilityAttestationWrite,
-    ) -> Result<TraceUtilityAttestationRecord, DatabaseError>;
+        _attestation: TraceUtilityAttestationWrite,
+    ) -> Result<TraceUtilityAttestationRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_utility_attestations(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceUtilityAttestationRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceUtilityAttestationRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_credit_settlement_batch(
         &self,
-        batch: TraceCreditSettlementBatchWrite,
-    ) -> Result<TraceCreditSettlementBatchRecord, DatabaseError>;
+        _batch: TraceCreditSettlementBatchWrite,
+    ) -> Result<TraceCreditSettlementBatchRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_credit_settlement_batches(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceCreditSettlementBatchRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceCreditSettlementBatchRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_credit_hold(
         &self,
-        hold: TraceCreditHoldWrite,
-    ) -> Result<TraceCreditHoldRecord, DatabaseError>;
+        _hold: TraceCreditHoldWrite,
+    ) -> Result<TraceCreditHoldRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_credit_holds(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceCreditHoldRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceCreditHoldRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_near_credit_outbox_item(
         &self,
-        item: TraceNearCreditOutboxItemWrite,
-    ) -> Result<TraceNearCreditOutboxItemRecord, DatabaseError>;
+        _item: TraceNearCreditOutboxItemWrite,
+    ) -> Result<TraceNearCreditOutboxItemRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_near_credit_outbox_items(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceNearCreditOutboxItemRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceNearCreditOutboxItemRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     /// Update an outbox row's status. When `expected_prior_statuses` is `Some`,
     /// the write only applies if the row's CURRENT status is in that allow-list
@@ -3530,154 +3784,250 @@ pub trait TraceCorpusStore: Send + Sync {
     /// `submitted`/`confirmed` row); `None` writes unconditionally.
     async fn update_trace_near_credit_outbox_status(
         &self,
-        tenant_id: &str,
-        near_outbox_id: Uuid,
-        status: TraceCreditSettlementNearStatus,
-        near_transaction_hash: Option<String>,
-        last_error_hash: Option<String>,
-        expected_prior_statuses: Option<Vec<TraceCreditSettlementNearStatus>>,
-    ) -> Result<Option<TraceNearCreditOutboxItemRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _near_outbox_id: Uuid,
+        _status: TraceCreditSettlementNearStatus,
+        _near_transaction_hash: Option<String>,
+        _last_error_hash: Option<String>,
+        _expected_prior_statuses: Option<Vec<TraceCreditSettlementNearStatus>>,
+    ) -> Result<Option<TraceNearCreditOutboxItemRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_benchmark_registry_outbox_item(
         &self,
-        item: TraceBenchmarkRegistryOutboxItemWrite,
-    ) -> Result<TraceBenchmarkRegistryOutboxItemRecord, DatabaseError>;
+        _item: TraceBenchmarkRegistryOutboxItemWrite,
+    ) -> Result<TraceBenchmarkRegistryOutboxItemRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_benchmark_registry_outbox_items(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceBenchmarkRegistryOutboxItemRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn update_trace_benchmark_registry_outbox_status(
         &self,
-        tenant_id: &str,
-        benchmark_outbox_id: Uuid,
-        status: TraceBenchmarkRegistryOutboxStatus,
-        external_receipt_ref: Option<String>,
-        last_error_hash: Option<String>,
-    ) -> Result<Option<TraceBenchmarkRegistryOutboxItemRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _benchmark_outbox_id: Uuid,
+        _status: TraceBenchmarkRegistryOutboxStatus,
+        _external_receipt_ref: Option<String>,
+        _last_error_hash: Option<String>,
+    ) -> Result<Option<TraceBenchmarkRegistryOutboxItemRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn write_trace_tombstone(
         &self,
-        tombstone: TraceTombstoneWrite,
-    ) -> Result<(), DatabaseError>;
+        _tombstone: TraceTombstoneWrite,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_tombstones(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceTombstoneRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceTombstoneRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_retention_job(
         &self,
-        job: TraceRetentionJobWrite,
-    ) -> Result<TraceRetentionJobRecord, DatabaseError>;
+        _job: TraceRetentionJobWrite,
+    ) -> Result<TraceRetentionJobRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_retention_job_item(
         &self,
-        item: TraceRetentionJobItemWrite,
-    ) -> Result<TraceRetentionJobItemRecord, DatabaseError>;
+        _item: TraceRetentionJobItemWrite,
+    ) -> Result<TraceRetentionJobItemRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_retention_jobs(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceRetentionJobRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceRetentionJobRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_retention_job_items(
         &self,
-        tenant_id: &str,
-        retention_job_id: Uuid,
-    ) -> Result<Vec<TraceRetentionJobItemRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _retention_job_id: Uuid,
+    ) -> Result<Vec<TraceRetentionJobItemRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_export_access_grant(
         &self,
-        grant: TraceExportAccessGrantWrite,
-    ) -> Result<TraceExportAccessGrantRecord, DatabaseError>;
+        _grant: TraceExportAccessGrantWrite,
+    ) -> Result<TraceExportAccessGrantRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_export_access_grants(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceExportAccessGrantRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceExportAccessGrantRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_export_job(
         &self,
-        job: TraceExportJobWrite,
-    ) -> Result<TraceExportJobRecord, DatabaseError>;
+        _job: TraceExportJobWrite,
+    ) -> Result<TraceExportJobRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_export_jobs(
         &self,
-        tenant_id: &str,
-    ) -> Result<Vec<TraceExportJobRecord>, DatabaseError>;
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceExportJobRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn update_trace_export_job_status(
         &self,
-        tenant_id: &str,
-        export_job_id: Uuid,
-        update: TraceExportJobStatusUpdate,
-    ) -> Result<Option<TraceExportJobRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _export_job_id: Uuid,
+        _update: TraceExportJobStatusUpdate,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn claim_next_trace_export_job(
         &self,
-        tenant_id: &str,
-        requested_dataset_kind: Option<&str>,
-        claim_at: DateTime<Utc>,
-        worker_principal_ref: &str,
-    ) -> Result<Option<TraceExportJobRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _requested_dataset_kind: Option<&str>,
+        _claim_at: DateTime<Utc>,
+        _worker_principal_ref: &str,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn recover_stale_trace_export_job(
         &self,
-        tenant_id: &str,
-        export_job_id: Uuid,
-        stale_at: DateTime<Utc>,
-        update: TraceExportJobStatusUpdate,
-    ) -> Result<Option<TraceExportJobRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _export_job_id: Uuid,
+        _stale_at: DateTime<Utc>,
+        _update: TraceExportJobStatusUpdate,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn retry_failed_trace_export_job(
         &self,
-        tenant_id: &str,
-        export_job_id: Uuid,
-        retry_at: DateTime<Utc>,
-        update: TraceExportJobStatusUpdate,
-    ) -> Result<Option<TraceExportJobRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _export_job_id: Uuid,
+        _retry_at: DateTime<Utc>,
+        _update: TraceExportJobStatusUpdate,
+    ) -> Result<Option<TraceExportJobRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn upsert_trace_revocation_propagation_item(
         &self,
-        item: TraceRevocationPropagationItemWrite,
-    ) -> Result<TraceRevocationPropagationItemRecord, DatabaseError>;
+        _item: TraceRevocationPropagationItemWrite,
+    ) -> Result<TraceRevocationPropagationItemRecord, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_trace_revocation_propagation_items(
         &self,
-        tenant_id: &str,
-        source_submission_id: Uuid,
-    ) -> Result<Vec<TraceRevocationPropagationItemRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _source_submission_id: Uuid,
+    ) -> Result<Vec<TraceRevocationPropagationItemRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn list_due_trace_revocation_propagation_items(
         &self,
-        tenant_id: &str,
-        now: DateTime<Utc>,
-        limit: u32,
-    ) -> Result<Vec<TraceRevocationPropagationItemRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _now: DateTime<Utc>,
+        _limit: u32,
+    ) -> Result<Vec<TraceRevocationPropagationItemRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn update_trace_revocation_propagation_item_status(
         &self,
-        tenant_id: &str,
-        propagation_item_id: Uuid,
-        update: TraceRevocationPropagationItemStatusUpdate,
-    ) -> Result<Option<TraceRevocationPropagationItemRecord>, DatabaseError>;
+        _tenant_id: &str,
+        _propagation_item_id: Uuid,
+        _update: TraceRevocationPropagationItemStatusUpdate,
+    ) -> Result<Option<TraceRevocationPropagationItemRecord>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn invalidate_trace_submission_artifacts(
         &self,
-        tenant_id: &str,
-        submission_id: Uuid,
-        derived_status: TraceDerivedStatus,
-    ) -> Result<TraceArtifactInvalidationCounts, DatabaseError>;
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _derived_status: TraceDerivedStatus,
+    ) -> Result<TraceArtifactInvalidationCounts, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     async fn mark_trace_object_ref_deleted(
         &self,
-        tenant_id: &str,
-        submission_id: Uuid,
-        object_store: &str,
-        object_key: &str,
-    ) -> Result<u64, DatabaseError>;
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _object_store: &str,
+        _object_key: &str,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     /// Append a hash-only `trace_gate_decisions` audit row for a single
     /// `TraceGateService::evaluate_trace` call. Implementations MUST scope
@@ -3685,9 +4035,13 @@ pub trait TraceCorpusStore: Send + Sync {
     /// `trace_current_tenant_id()`).
     async fn insert_trace_gate_decision(
         &self,
-        tenant_id: &str,
-        decision: TraceGateDecisionRow,
-    ) -> Result<(), DatabaseError>;
+        _tenant_id: &str,
+        _decision: TraceGateDecisionRow,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     /// Insert a gate-decision row together with its per-chunk vector-entry
     /// rows, atomically (one transaction). The default delegates to
@@ -4153,10 +4507,14 @@ pub trait TraceCorpusStore: Send + Sync {
     /// the previous page.
     async fn stream_trace_gate_decisions_for_replay(
         &self,
-        tenant_id: &str,
-        page_size: u32,
-        after_cursor: Option<(DateTime<Utc>, Uuid)>,
-    ) -> Result<Vec<TraceGateDecisionRow>, DatabaseError>;
+        _tenant_id: &str,
+        _page_size: u32,
+        _after_cursor: Option<(DateTime<Utc>, Uuid)>,
+    ) -> Result<Vec<TraceGateDecisionRow>, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 
     /// Return true if a `trace_revocation_propagation_items` row exists
     /// matching `target_kind = VectorEntry`, `action = InvalidateVector`,
@@ -4165,9 +4523,13 @@ pub trait TraceCorpusStore: Send + Sync {
     /// revocation has already propagated.
     async fn is_vector_entry_revoked(
         &self,
-        tenant_id: &str,
-        vector_entry_id: Uuid,
-    ) -> Result<bool, DatabaseError>;
+        _tenant_id: &str,
+        _vector_entry_id: Uuid,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Query(
+            TRACE_CORPUS_STORE_BACKEND_MISSING.into(),
+        ))
+    }
 }
 
 #[cfg(test)]
