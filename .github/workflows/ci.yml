@@ -250,6 +250,36 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      # Restore-only, from the cache `ingest-bin-postgres-near-ai-staging`
+      # saves on main; this job saves nothing, so it adds nothing to the
+      # repository's 10 GB of cache storage. Why that key: this job builds
+      # `-p trace-commons-server` test targets, and `cargo tree` resolves
+      # the server's third-party graph to the ingest's except for tokio's
+      # `test-util` and two small crates, so the 27 crates downstream of
+      # tokio rebuild and the other ~430 restore. A key of its own would
+      # restore all of them for another ~1 GB of storage against the 10 GB
+      # ceiling the trim action documents; that is not worth 27 crates.
+      - id: cargo-cache
+        uses: actions/cache/restore@v5
+        with:
+          # Exactly the saving job's paths: actions/cache versions an entry
+          # by its path list, and a different list restores nothing.
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pg-ingest-bin-near-ai-staging-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            pg-ingest-bin-near-ai-staging-${{ runner.os }}-
+      - name: Report what was restored
+        env:
+          MATCHED: ${{ steps.cargo-cache.outputs.cache-matched-key }}
+        run: |
+          if [ -z "$MATCHED" ]; then
+            echo "::warning title=cargo cache::No cache restored; this run builds its dependencies cold."
+          else
+            echo "Restored $MATCHED"
+          fi
       # Several suites assert their database name begins `admission_test`
       # before running destructive fixtures, and every one of them requires the
       # host to be the literal 127.0.0.1 -- `localhost` fails the assertion. One
@@ -702,6 +732,33 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      # Restore-only, from the cache `ingest-bin-postgres-near-ai-staging`
+      # saves on main; this job saves nothing, so it adds nothing to the
+      # repository's 10 GB of cache storage. Why that key: `cargo tree` resolves
+      # `-p trace-commons-ingest` with and without `near-ai-staging` to the
+      # identical set of third-party crates and features, so that cache
+      # holds exactly this job's dependency graph.
+      - id: cargo-cache
+        uses: actions/cache/restore@v5
+        with:
+          # Exactly the saving job's paths: actions/cache versions an entry
+          # by its path list, and a different list restores nothing.
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pg-ingest-bin-near-ai-staging-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            pg-ingest-bin-near-ai-staging-${{ runner.os }}-
+      - name: Report what was restored
+        env:
+          MATCHED: ${{ steps.cargo-cache.outputs.cache-matched-key }}
+        run: |
+          if [ -z "$MATCHED" ]; then
+            echo "::warning title=cargo cache::No cache restored; this run builds its dependencies cold."
+          else
+            echo "Restored $MATCHED"
+          fi
       # One database, named `admission_test_*` on the literal host 127.0.0.1,
       # because fixtures assert both before running destructive cleanup.
       #
