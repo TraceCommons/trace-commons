@@ -8705,7 +8705,6 @@ dependencies = [
  "tower-http",
  "trace-commons-attestation",
  "trace-commons-build-info",
- "trace-commons-contributor",
  "trace-commons-gate-api",
  "trace-commons-gate-enclave",
  "trace-commons-operator-client",
@@ -8716,6 +8715,30 @@ dependencies = [
  "uuid 1.23.1",
  "wiremock",
  "zeroize",
+]
+
+[[package]]
+name = "trace-commons-ingest-contributor-tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "ring",
+ "secrecy",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tower 0.5.3",
+ "trace-commons-contributor",
+ "trace-commons-ingest",
+ "trace-commons-operator-client",
+ "trace-commons-protocol",
+ "trace-commons-server",
+ "uuid 1.23.1",
 ]
 
 [[package]]

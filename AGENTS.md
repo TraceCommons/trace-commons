@@ -21,8 +21,10 @@ Copyright (C) 2026 K&Z Partners LLC.
 - `crates/trace-commons-gate-api`
 - `crates/trace-commons-gate-enclave`
 - `crates/trace-commons-ingest`
+- `crates/trace-commons-ingest-contributor-tests` (unpublished; tests of
+  the ingest service against the contributor's client code)
 
-Every `.rs` file in these four crates begins with:
+Every `.rs` file in these crates begins with:
 
 ```rust
 // Copyright (C) 2026 K&Z Partners LLC

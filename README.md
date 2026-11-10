@@ -622,7 +622,8 @@ TraceCommons is licensed in two parts, split along the client/server seam.
 
 **Server components — AGPL-3.0-or-later** (`LICENSE-AGPL`):
 `trace-commons-server`, `trace-commons-gate-api`, `trace-commons-gate-enclave`,
-`trace-commons-ingest`.
+`trace-commons-ingest`, and the unpublished test package
+`trace-commons-ingest-contributor-tests`.
 
 These are normally operated as a network service, so section 13 applies: run a
 modified version and let others reach it over a network, and you owe those

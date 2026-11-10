@@ -365,9 +365,10 @@ This repo is **split-licensed**, and the split is load-bearing. `AGENTS.md`
 carries the full statement and working rules; the essentials are repeated here.
 
 - **AGPL-3.0-or-later**: `trace-commons-server`, `trace-commons-gate-api`,
-  `trace-commons-gate-enclave`, `trace-commons-ingest`. Copyright K&Z Partners
-  LLC. Every `.rs` file in these crates carries a two-line copyright + SPDX
-  header; new files need one.
+  `trace-commons-gate-enclave`, `trace-commons-ingest`, and the unpublished
+  test package `trace-commons-ingest-contributor-tests`. Copyright K&Z
+  Partners LLC. Every `.rs` file in these crates carries a two-line
+  copyright + SPDX header; new files need one.
 - **MIT OR Apache-2.0**: everything else (`-protocol`, `-contributor`,
   `-contributor-sources`, `-contributor-insights`, `-contributor-platform`,
   `-contributor-ffi`, `-contributor-gtk`, `-operator-client`, `-mark`,

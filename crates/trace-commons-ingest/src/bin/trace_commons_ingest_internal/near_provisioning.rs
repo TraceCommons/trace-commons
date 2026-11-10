@@ -1234,20 +1234,23 @@ fn near_ai_nonce_wire(nonce: &[u8; 32]) -> String {
 /// The base URL introspection actually uses.
 ///
 /// In a shipped build this is [`NEAR_AI_API_BASE_URL`] and nothing else: the
-/// `cfg(not(test))` arm takes no state and has no branch, so there is no value
+/// shipped arm takes no state and has no branch, so there is no value
 /// anyone could set. That is the point, and it is why the constant's own note
 /// above still holds -- making the endpoint *configurable* would create the
 /// thing the host allowlist exists to prevent, and this does not.
 ///
-/// The `cfg(test)` arm exists because introspection is the last step of
+/// The test arm exists because introspection is the last step of
 /// `finish`, so before this nothing could drive the handler far enough to
-/// reach `provision_near_ai_login` and the anchor row it writes.
-#[cfg(not(test))]
+/// reach `provision_near_ai_login` and the anchor row it writes. It is
+/// compiled under `cfg(test)` and under the tests-only `test-support`
+/// feature, which no shipped build may enable
+/// (`scripts/ci/check-release-test-support.sh`).
+#[cfg(not(any(test, feature = "test-support")))]
 fn introspection_base_url(_state: &AppState) -> &str {
     NEAR_AI_API_BASE_URL
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn introspection_base_url(state: &AppState) -> &str {
     state
         .near_ai_introspection_base_url

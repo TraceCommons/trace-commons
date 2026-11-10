@@ -1,11 +1,14 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The migrated PostgreSQL both ignored ceremony suites start from.
+//! The migrated PostgreSQL the ignored ceremony suites start from.
 //!
-//! `nearai_ceremony_pg_tests` and `wallet_v2_pg_tests` each carried their own
-//! copy of this setup, line for line. One copy changing without the other is
-//! how a fixture silently stops modelling the system, so both call this.
+//! `nearai_ceremony_pg_tests` (now in the
+//! `trace-commons-ingest-contributor-tests` package) and `wallet_v2_pg_tests`
+//! each carried their own copy of this setup, line for line. One copy
+//! changing without the other is how a fixture silently stops modelling the
+//! system, so both call this. It is mounted from `test_support`, which is
+//! how a test package outside the crate reaches it.
 
 use super::*;
 
@@ -18,7 +21,7 @@ use super::*;
 /// whose predicate compares `tenant_id` against a `trace_current_tenant_id()`
 /// that is NULL there, so it matches nothing and a returning contributor looks
 /// new.
-pub(super) fn pg_config(url: &str, resolver_url: Option<&str>) -> DatabaseConfig {
+pub fn pg_config(url: &str, resolver_url: Option<&str>) -> DatabaseConfig {
     DatabaseConfig {
         url: SecretString::from(url.to_owned()),
         pool_size: 4,
@@ -31,11 +34,11 @@ pub(super) fn pg_config(url: &str, resolver_url: Option<&str>) -> DatabaseConfig
 }
 
 /// A database migrated to this build, and the URL it was reached on.
-pub(super) struct MigratedPg {
+pub struct MigratedPg {
     url: reqwest::Url,
     /// Connects as the URL's own role (the migration owner, a superuser in CI)
     /// for the runtime pool, and as `trace_login_resolver` for the resolver.
-    pub(super) admin: Arc<PgBackend>,
+    pub admin: Arc<PgBackend>,
 }
 
 /// Migrate the isolated database named by `env_var` and wire the resolver.
@@ -44,7 +47,7 @@ pub(super) struct MigratedPg {
 /// its database name must start with it: CI's committed-transaction guard reads
 /// the database by that name, so a suite pointed anywhere else would pass
 /// without that guard ever seeing it.
-pub(super) async fn migrated_pg(env_var: &str, db_prefix: Option<&str>) -> MigratedPg {
+pub async fn migrated_pg(env_var: &str, db_prefix: Option<&str>) -> MigratedPg {
     let url = std::env::var(env_var)
         .unwrap_or_else(|_| panic!("{env_var}: explicit isolated PostgreSQL URL required"));
     let parsed = reqwest::Url::parse(&url).unwrap();
@@ -93,7 +96,7 @@ impl MigratedPg {
     /// This one can. The role is checked after it is provisioned rather than
     /// trusted, because a pre-existing role of the same name keeps whatever
     /// attributes it already had.
-    pub(super) async fn narrow_runtime(&self, role: &str) -> Arc<PgBackend> {
+    pub async fn narrow_runtime(&self, role: &str) -> Arc<PgBackend> {
         assert!(
             role.bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
