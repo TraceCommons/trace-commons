@@ -2073,6 +2073,26 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.x'
+      # The release build below was 389 s of this job's 411 s on run
+      # 42696037795, all of it cold. Cached like every other job here:
+      # restore now, trim and save on a push to main at the end. Release,
+      # not the dev profile the script could also be pointed at
+      # (SMOKE_BINARY): this is the only release build of the server and
+      # the ingest in ci.yml, and the profile the pilot ships. The trim
+      # removes the workspace's own crates, so what restores is the
+      # third-party graph; the server and ingest still build at opt-level 3
+      # on every run.
+      - id: cargo-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-pilot-bootstrap-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-pilot-bootstrap-release-
       # Build the smoke binary (and trace-commons-ingest, from its own crate,
       # which depends on the server library, so most artifacts are reused).
       # The smoke harness asserts the binary exists at
@@ -2099,6 +2119,18 @@ jobs:
       # diagnostics page is an alert. Stdlib-only; loopback HTTP only.
       - name: Run witness monitor self-tests
         run: python3 scripts/operator/test_witness_monitor.py
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why, and for why only a push to main saves.
+      - uses: ./.github/actions/trim-cargo-cache
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   operator-binaries-smoke:
     name: operator-binaries smoke
