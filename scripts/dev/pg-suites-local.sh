@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Run the `postgres-suites` CI job's PostgreSQL suites locally, up to N at a
+# Run CI's PostgreSQL suites locally -- the `postgres-suites` job's, plus the
+# ingest lib slices that CI runs in `ingest-bin-postgres` -- up to N at a
 # time, each lane on a throwaway PostgreSQL cluster of its own.
 #
 #   scripts/dev/pg-suites-local.sh [--jobs N] [--only a,b,...] [--keep] [--list]
