@@ -2,7 +2,7 @@
 
 This repository holds two things that work together.
 
-**Trace Commons** is a user-owned register of AI agent work. When an AI agent
+**Trace Commons** is a user-attributable collective of AI agent work. When an AI agent
 works for someone, it leaves a record of what happened. Trace Commons keeps
 that record under the contributor's control: traces are scrubbed on the
 contributor's own machine, only the scrubbed version is shared, and only with
@@ -87,7 +87,7 @@ irm https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/in
 
 [releases]: https://github.com/TraceCommons/trace-commons/releases
 
-## Trace Commons: a user-owned register of AI agent work
+## Trace Commons: a user-attributable collective of AI agent work
 
 When an AI agent does work for someone, it leaves a record of what actually
 happened: the tools it called, the places it failed, the result it gave back.
