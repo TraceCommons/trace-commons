@@ -1,6 +1,93 @@
-# TraceCommons
+# Trace Commons and Near AI Gateway
 
-**A user-owned register of AI agent work.**
+This repository holds two things that work together.
+
+**Trace Commons** is a user-attributable collective of AI agent work. When an AI agent
+works for someone, it leaves a record of what happened. Trace Commons keeps
+that record under the contributor's control: traces are scrubbed on the
+contributor's own machine, only the scrubbed version is shared, and only with
+their consent. A server accepts records that are new and substantive, and
+contributors earn Trace Credit for what is accepted. The server, the protocol
+and the register's storage live here.
+
+**Near AI Gateway** is the Mac app people use to take part. It watches the
+coding agents you choose, scrubs and shares traces with Trace Commons on your
+terms, and can route your tools' AI requests through NEAR AI's private
+inference. The app, the contributor CLI and the background service they share
+live here too.
+
+## Near AI Gateway
+
+**A Mac app for people who work with AI coding agents.** It keeps the record
+of that work under your control, lets you earn credit for sharing it, and can
+route your tools' AI requests through NEAR AI's private inference.
+
+For macOS 14 or later, plus the contributor CLI for macOS, Linux and Windows.
+The Windows and Linux desktop apps remain on their existing releases.
+
+### What it does
+
+- **Watches the folders you choose.** It finds the session transcripts that
+  Claude Code, Codex, Gemini CLI, Cline and OpenCode leave on your Mac, and
+  reads only the folders you allow.
+- **Keeps raw traces on your Mac.** Each trace is scrubbed on your computer
+  before anything leaves it. Sharing is off until you turn it on, and you
+  choose which uses your traces allow, such as evaluation or training coding
+  models.
+- **Earns credit for accepted traces.** Shared traces are checked on the
+  server for whether they are new and substantive. Accepted ones earn Trace
+  Credit, and first run shows what your traces could earn before you share.
+- **Private AI.** Your tools can send their AI requests through the app, to
+  be answered by NEAR AI after you sign in. No tool switches over until you
+  connect it, and requests are logged on this Mac.
+- **Insights.** A private view of your own agent work, kept on this Mac.
+
+### Install
+
+#### The Mac app
+
+Download the DMG from the [releases page][releases], or install the Homebrew
+cask:
+
+```bash
+brew install --cask TraceCommons/tap/trace-commons
+```
+
+The DMG is universal (Apple silicon and Intel) and notarized. It installs
+`Near.ai.app`, shown as Near AI Gateway.
+
+This repository publishes two release streams: app releases are tagged
+`app-v*` and CLI releases `contributor-v*`. GitHub's "latest release" is
+whichever stream was cut most recently, and an app release carries no CLI
+binary, so pick the newest release of the kind you want from the
+[releases page][releases].
+
+#### The CLI
+
+Signed binaries are published per release, so contributors do not need this
+repository or a Rust toolchain. [Contributor CLI](#contributor-cli) below
+says what each installer checks and how to use the CLI once it is installed.
+
+```bash
+# macOS or Linux: installs to ~/.local/bin, no sudo
+curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.sh -o install.sh
+sh install.sh
+
+# macOS, from the Homebrew tap instead
+brew tap TraceCommons/tap
+brew trust tracecommons/tap          # Homebrew refuses untrusted third-party taps
+brew install trace-commons-contributor
+```
+
+```powershell
+# Windows, in PowerShell
+irm https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.ps1 -OutFile install.ps1
+.\install.ps1
+```
+
+[releases]: https://github.com/TraceCommons/trace-commons/releases
+
+## Trace Commons: a user-attributable collective of AI agent work
 
 When an AI agent does work for someone, it leaves a record of what actually
 happened: the tools it called, the places it failed, the result it gave back.
@@ -39,13 +126,29 @@ The contract is "local-first, opt-in, scrub before upload":
   utility-attestation pipeline. Credits are non-transferable, bound to
   reviewed evidence, and settle on-chain via NEAR; uploads alone don't pay.
 
-This repository — `trace-commons-server` — is the hosted control plane:
-ingest, review, retention, revocation, encrypted artifact storage,
-upload-claim issuing, audit chain, and credit settlement. It also ships
-`trace-commons-contributor`, a standalone CLI contributors run on their own
-machine to discover, locally redact, and submit Claude Code / Codex
-session traces. Ironclaw is a separate, TEE-hosted trace source with its
-own client integration; the shared protocol DTOs live in
+The envelope contract and threat model are in
+[`docs/trace-commons.md`](docs/trace-commons.md). Deployment status and the
+phase plan are in [`docs/status.md`](docs/status.md) and
+[`docs/trace-commons-roadmap.md`](docs/trace-commons-roadmap.md).
+
+## The repository
+
+Three things live here:
+
+- **The hosted control plane**: ingest, review, retention, revocation,
+  encrypted artifact storage, upload-claim issuing, audit chain, and credit
+  settlement. It is PostgreSQL-only.
+- **The contributor side**: the CLI and background daemon
+  (`trace-commons-contributor`), which discover, locally redact, and submit
+  traces, and the C ABI (`trace-commons-contributor-ffi`) that the macOS and
+  Windows apps link.
+- **The desktop apps**: the native SwiftUI macOS app in `macos/` is the lead
+  client and the one new releases ship. The Windows app (`windows/`, C#),
+  the Linux GTK app (`crates/trace-commons-contributor-gtk`) and the Tauri
+  app (`tauri-desktop/`) are frozen.
+
+Ironclaw is a separate, TEE-hosted trace source with its own client
+integration; the shared protocol DTOs live in
 `crates/trace-commons-protocol`.
 
 The contributor's private-inference router is IronWire, a git dependency on
@@ -53,33 +156,7 @@ The contributor's private-inference router is IronWire, a git dependency on
 Claude Code and Codex subscription logins, each as itself; see
 [multi-subscription routing](docs/multi-subscription-routing.md).
 
-## Status: Pilot Deployment
-
-TraceCommons is **in pilot deployment as of May 2026**. What that means
-concretely:
-
-| Component | State |
-|---|---|
-| Hosted server (this repo) | Phase A code-complete, smoke-validated, deployable. |
-| Scoring backend | **NEAR AI Cloud** (TEE-hosted vLLM, Intel TDX + NVIDIA GPU TEE) — chosen so a pilot host needs no local CUDA stack. Smoke-validated against `Qwen3.6-35B-A3B-FP8`. |
-| Gate floors | Recalibration against the hosted model is required before first contributor traffic — see [`docs/operator/a27-perplexity-floor-calibration.md`](docs/operator/a27-perplexity-floor-calibration.md). |
-| Contributor gate | Invite-code allowlist on the upload-claim issuer; off by default, enabled for the pilot — see [`docs/operator/pilot-allowlist.md`](docs/operator/pilot-allowlist.md). |
-| KMS / KEK | Cloud KMS (GCP first) with envelope-encrypted per-object DEKs. Phase A trust boundary. |
-| TEE trust upgrade | Phase B — move the gate service into an attested dstack enclave once dstack-GPU primitives stabilize. The current KEK boundary is honestly weaker than the Phase B target; this is documented, not papered over. |
-| Contributor client | `trace-commons-contributor` (this repo) is available for direct human contributors: `login`, `submit`, `status`, `whoami`, `logout`, `mint-grant`. Ironclaw integration (a TEE-hosted trace source) is separate, ongoing work. The `trace-commons-pilot-bootstrap` binary stands in as a load-generation harness against real HF agent-traces sessions so calibration and end-to-end validation can proceed without either. |
-| Credits | Settlement, hash-only attestation pipeline, central-issuer ABAC, NEAR receipt outbox — all in. Credit-bearing routes are gated by a central-issuer principal allowlist. |
-
-Pilot intentionally **scopes down** from the original design: regular GPU
-hardware (in NEAR AI's TEE) instead of an attested local enclave; cloud
-KMS as the KEK; a single calibrated model rather than per-tenant selection.
-Phase B narrows the trust gap; Phase A proves the path with operators.
-
-The full phasing and open work queue lives in
-[`docs/trace-commons-roadmap.md`](docs/trace-commons-roadmap.md). Per-slice
-design specs and implementation plans live under
-[`docs/superpowers/`](docs/superpowers/).
-
-## Architecture
+### Architecture
 
 ```
 ┌────────────────────┐    ┌────────────────────┐    ┌──────────────────┐
@@ -101,6 +178,9 @@ design specs and implementation plans live under
                           └────────────────────┘
 ```
 
+The diagram shows Ironclaw as the client; the contributor CLI and the desktop
+apps submit to the same ingest service.
+
 Authoritative contracts to read before changing anything substantive:
 
 - [`docs/trace-commons.md`](docs/trace-commons.md) — envelope contract and
@@ -113,7 +193,7 @@ Authoritative contracts to read before changing anything substantive:
   IPC contract between the contributor background daemon and the native
   menu-bar and window applications
 
-## Repository Layout
+### Repository Layout
 
 ```
 crates/
@@ -123,7 +203,16 @@ crates/
 │                                Two real perplexity backends: mistralrs (local CUDA,
 │                                feature `local-gpu-models`) and NEAR AI Cloud HTTP
 │                                (feature `near-ai-scorer`).
-├── trace-commons-contributor/   Contributor-facing CLI: login, list, submit, status,
+├── trace-commons-ingest/        Hosted ingest / review / admin / worker API
+│                                (`trace-commons-ingest` binary; embed via
+│                                `trace_commons_ingest::run`).
+├── trace-commons-server/        Server library and the other hosted binaries.
+│   └── src/bin/
+│       ├── trace-commons-upload-claim-issuer    EdDSA/Ed25519 upload-claim issuer.
+│       ├── trace-commons-gate-calibrate         Offline calibration + model bake-off.
+│       ├── trace-commons-pilot-bootstrap        HF agent-traces load generator for pilot.
+│       └── trace-commons-vector-replay          Vector-index replay tool.
+├── trace-commons-contributor/   Contributor CLI and daemon: login, list, submit, status,
 │                                whoami, logout, mint-grant. See its own README.
 ├── trace-commons-contributor-sources/  Session-store parsers and routing overlay,
 │                                re-exported by the contributor at
@@ -131,29 +220,27 @@ crates/
 ├── trace-commons-contributor-insights/  Private local Insights, re-exported at
 │                                `trace_commons_contributor::insights`.
 ├── trace-commons-contributor-platform/  Shared OS credentials and local files.
-├── trace-commons-client-server-tests/  Unpublished cross-contract test package;
-│                                client-only tests do not build the server.
-├── trace-commons-ingest/        Hosted ingest / review / admin / worker API
-│                                (`trace-commons-ingest` binary; embed via
-│                                `trace_commons_ingest::run`).
-└── trace-commons-server/        Server library and the other hosted binaries.
-    └── src/bin/
-        ├── trace-commons-upload-claim-issuer    EdDSA/Ed25519 upload-claim issuer.
-        ├── trace-commons-gate-calibrate         Offline calibration + model bake-off.
-        ├── trace-commons-pilot-bootstrap        HF agent-traces load generator for pilot.
-        └── trace-commons-vector-replay          Vector-index replay tool.
+├── trace-commons-contributor-ffi/  C ABI over the contributor, for the macOS and Windows apps.
+├── trace-commons-contributor-gtk/  Linux GTK app (frozen; its own Cargo workspace).
+└── trace-commons-client-server-tests/  Unpublished cross-contract test package;
+                                 client-only tests do not build the server.
 
+macos/                           Native SwiftUI macOS app, the lead client.
+windows/                         Windows app, C# (frozen).
+tauri-desktop/                   Tauri app (frozen; its own Cargo workspace).
 migrations/                      PostgreSQL schema.
+scripts/                         install.sh, install.ps1, contribute.sh; operator and CI scripts.
 docs/
 ├── trace-commons.md, trace-commons-storage.md, trace-commons-roadmap.md  Authoritative contracts.
+├── status.md                    Deployment status and reference notes.
+├── release-runbook.md           Cutting a signed app or CLI release.
 ├── operator/                    Operator runbooks (per slice).
 └── superpowers/                 Per-slice design specs + implementation plans.
-.github/workflows/ci.yml         CI gates.
+.github/workflows/ci.yml         Server-side CI gates.
+.github/workflows/clients.yml    Desktop app CI.
 ```
 
-## Getting Started
-
-### Build + Test
+## Build and test
 
 ```bash
 # Minimum: default-features build + tests (no GPU, no external scoring)
@@ -193,23 +280,51 @@ PostgreSQL integration tests require a live database; export
 cargo test -p trace-commons-server --test trace_corpus_pg_store
 ```
 
-### Contributor CLI
+[`CLAUDE.md`](CLAUDE.md) has the rest: how each crate's integration tests are
+grouped into one `it` binary, the commands for client-only work, the shared
+compile cache, the PostgreSQL setup for the ingest tests, and what each CI
+job checks. The macOS app is a Swift package in `macos/`: build
+`trace-commons-contributor-ffi` first, because the package links that dylib,
+then run `swift test` there. The GTK and Tauri apps are separate Cargo
+workspaces, so `-p` from the repository root does not reach them; `CLAUDE.md`
+gives their manifest paths.
+
+Releases are cut from tags.
+[`docs/release-runbook.md`](docs/release-runbook.md) records the steps and
+invariants.
+
+### Run a Local Ingest Server
+
+```bash
+TRACE_COMMONS_TENANT_TOKENS='tenant-a:dev-token-a;expires_at=2027-01-01T00:00:00Z' \
+TRACE_COMMONS_BIND='127.0.0.1:3907' \
+cargo run -p trace-commons-ingest --bin trace-commons-ingest
+```
+
+This runs the dev profile against the local-encrypted artifact store and
+the in-process mock gate. Production-grade configuration (cloud KMS, real
+gate scorer, central-issuer credit profile, RLS-pinned PostgreSQL role,
+fresh rollout-smoke) is documented in
+[`docs/operator/`](docs/operator/) — start there before touching any
+deployment.
+
+[`docs/operator/README.md`](docs/operator/README.md) is the index of the
+operator runbooks.
+
+## Contributor CLI
 
 For AI agents, see [Configure the app with an AI agent](docs/agent-configuration.md)
 and the [copyable sample prompt](docs/examples/agent-configuration-prompt.md).
 
-Signed binaries are published per release, so contributors do not need this
-repository or a Rust toolchain. https://tracecommons.ai/install/ is the fuller
-guide, including how to verify a download by hand; the short form follows.
+[Install](#install) above has the install commands.
+https://tracecommons.ai/install/ is the fuller guide, including how to verify
+a download by hand.
 
 On macOS or Linux, the installer script works out which build you need,
 verifies it, and puts it in `~/.local/bin` — no `sudo`, nothing outside your
-home directory:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.sh -o install.sh
-sh install.sh
-```
+home directory. It installs the CLI under two names that run the same
+program: `near-ai`, and `trace-commons-contributor`, which the examples below
+use.
 
 It refuses to install anything it cannot verify: the published checksum has to
 match, and on macOS the signature has to be valid *and* name our Developer ID.
@@ -217,31 +332,15 @@ There is no flag to skip either check. `--dir <path>` (or `TC_INSTALL_DIR`)
 picks a different destination, and `TC_VERSION=<x.y.z>` pins a release instead
 of resolving the newest `contributor-v*` tag.
 
-On macOS, from the Homebrew tap instead:
-
-```bash
-brew tap TraceCommons/tap
-brew trust tracecommons/tap          # Homebrew refuses untrusted third-party taps
-brew install trace-commons-contributor
-```
-
-On Windows, in PowerShell — same verification policy, installs to
+On Windows, `install.ps1` has the same verification policy, installs to
 `%LOCALAPPDATA%\Programs\TraceCommons` and appends it to your user `PATH`, so
-reopen the terminal afterwards:
+reopen the terminal afterwards.
 
-```powershell
-irm https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.ps1 -OutFile install.ps1
-.\install.ps1
-```
-
-Otherwise take a binary from the [current CLI release][releases]: macOS on both
-architectures and Windows on x86_64 are code-signed — Developer ID and notarized,
-Authenticode and RFC3161-timestamped respectively — and the Linux x86_64 binary
-is not signed, so use the published checksum beside it. Follow that link rather
-than GitHub's "latest release": CLI releases are tagged `contributor-v*` and
-desktop-app releases `app-v*`, so "latest" is whichever stream was cut most
-recently — today `contributor-v0.4.6` and `app-v0.4.6` were cut minutes apart, and
-an app tag carries no CLI binary.
+Otherwise take a binary from the newest `contributor-v*` release on the
+[releases page][releases]: macOS on both architectures and Windows on x86_64
+are code-signed — Developer ID and notarized, Authenticode and
+RFC3161-timestamped respectively — and the Linux x86_64 binary is not signed,
+so use the published checksum beside it.
 
 Confirm the install with:
 
@@ -267,7 +366,7 @@ no PATH entry, no daemon, nothing that autostarts. Reading it before running it
 is encouraged, which is why the two-step form is first:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons-server/main/scripts/contribute.sh -o contribute.sh
+curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/contribute.sh -o contribute.sh
 cd ~/code/my-hackathon-project
 TRACE_COMMONS_INVITE='<your invite link>' sh ~/contribute.sh
 ```
@@ -280,13 +379,12 @@ it on every run. Put the invite in `TRACE_COMMONS_INVITE` rather than on the
 command line, where it would land in your shell history and in `ps`.
 
 The desktop app ships as a universal notarized DMG
-(`brew install --cask trace-commons`). New `app-v*` releases are macOS only:
-the Windows and Linux apps are frozen, and `app-v0.23.0` is the last release
-with a GPG-signed flatpak and a self-contained Authenticode-signed Windows zip
-(unpack it and run `TraceCommons.exe`; the .NET runtime and Windows App SDK
-are inside, so there is nothing to install first). The CLI above still ships
-for macOS, Linux and Windows. https://docs.tracecommons.ai/cli/quickstart/ is
-the fuller guide.
+(`brew install --cask TraceCommons/tap/trace-commons`). New `app-v*` releases
+are macOS only: the Windows and Linux apps are frozen on their existing
+releases, and [`docs/release-runbook.md`](docs/release-runbook.md) names the
+last release that carried them. The CLI above still ships for macOS, Linux
+and Windows. https://docs.tracecommons.ai/cli/quickstart/ is the fuller
+guide.
 
 To build it from this checkout instead — necessary on any platform without a
 published binary, Linux on arm64 for instance:
@@ -301,8 +399,6 @@ no invite is needed. With an invite, run `login --invite <link>` or set
 `TRACE_COMMONS_INVITE`. `login --key-id` prints the device key id for an
 instance-signed grant.
 
-[releases]: https://github.com/TraceCommons/trace-commons/releases/tag/contributor-v0.4.6
-
 See [`crates/trace-commons-contributor/README.md`](crates/trace-commons-contributor/README.md)
 for the full quickstart, consent model, and subcommand reference. Consent is
 scope-based, not capped to a single default: the contributor requests
@@ -314,7 +410,7 @@ consent on already-submitted traces are deferred to a future slice. See
 [`docs/superpowers/specs/2026-07-08-consent-scope-broadening-design.md`](docs/superpowers/specs/2026-07-08-consent-scope-broadening-design.md)
 for the full design.
 
-#### Uninstalling
+### Uninstalling
 
 Two things come off separately: the *local state* (device key, config,
 receipts, daemon queue and history) and the *installed program*. Start with
@@ -397,14 +493,14 @@ before the rename; bundle id `ai.tracecommons.shell`) in `/Applications` when in
 then move it to the Trash. The Windows portable build is just the unzipped
 folder — delete it.
 
-#### Contributing sessions from other harnesses
+### Contributing traces from other harnesses
 
-The CLI reads Claude Code, Codex and Gemini CLI sessions natively, straight
-from their local stores. Nothing below is needed for those.
+The CLI reads Claude Code, Codex, Gemini CLI, Cline and OpenCode sessions
+natively, straight from their local stores. Nothing below is needed for those.
 
 For any other harness [Letta Trajectory](https://github.com/letta-ai/trajectory)
 covers -- `atif`, `copilot-cli`, `cursor`, `droid`, `hermes`, `letta-code`,
-`omp`, `openclaw`, `opencode`, `openhands`, `pi` -- export the sessions first:
+`omp`, `openclaw`, `openhands`, `pi` -- export the sessions first:
 
 ```bash
 cd ~/code/my-project
@@ -429,7 +525,7 @@ you to; it has never worked. That package is a library with no `bin`, so npx
 exits with "could not determine executable to run". `@tracecommons/trajectory-export`
 is the command that instruction assumed, and it wraps the same library.
 
-##### What `submit` will and will not pick up
+#### What `submit` will and will not pick up
 
 Trajectory files are discovered in exactly two places: the working directory,
 where the name must end `.trajectory.json` or `.trajectory.jsonl`, and
@@ -445,21 +541,6 @@ treats a path that does not exist as an error rather than an empty result.
 
 Model reasoning is captured by default and redacted client-side like any
 other content. Pass `--no-reasoning` to exclude it from a submission.
-
-### Run a Local Ingest Server
-
-```bash
-TRACE_COMMONS_TENANT_TOKENS='tenant-a:dev-token-a;expires_at=2027-01-01T00:00:00Z' \
-TRACE_COMMONS_BIND='127.0.0.1:3907' \
-cargo run -p trace-commons-ingest --bin trace-commons-ingest
-```
-
-This runs the dev profile against the local-encrypted artifact store and
-the in-process mock gate. Production-grade configuration (cloud KMS, real
-gate scorer, central-issuer credit profile, RLS-pinned PostgreSQL role,
-fresh rollout-smoke) is documented in
-[`docs/operator/`](docs/operator/) — start there before touching any
-deployment.
 
 ## Contributing
 
@@ -492,7 +573,8 @@ Branch protection on `main` requires:
   `main`, on demand, and on a pull request only when it touches a client
   path, and none of them is required: a client regression shows up on
   `main` after the merge rather than blocking it.
-- A pull request (no direct pushes).
+- A pull request (no direct pushes), with one approving review from a code
+  owner listed in [`.github/CODEOWNERS`](.github/CODEOWNERS).
 - Linear history (squash or rebase, no merge commits).
 - Any review conversations resolved before merge.
 
@@ -501,10 +583,6 @@ by entering the queue, not by a direct click, and the queue re-runs the
 required checks against `main` as it is at that moment. A queued PR that
 never receives its required checks times out of the queue rather than
 merging.
-
-Self-merge is permitted; reviewer approval is not currently required (the
-project is still small). When this changes, the requirement will land here
-and in the GitHub branch protection settings simultaneously.
 
 ### Conventions worth knowing
 
@@ -529,28 +607,14 @@ follow.
 ### Where to look for what
 
 - Roadmap and pilot blockers: [`docs/trace-commons-roadmap.md`](docs/trace-commons-roadmap.md)
+- Deployment status and reference notes: [`docs/status.md`](docs/status.md)
 - Envelope + threat model: [`docs/trace-commons.md`](docs/trace-commons.md)
 - Storage contract: [`docs/trace-commons-storage.md`](docs/trace-commons-storage.md)
 - Per-slice design specs: [`docs/superpowers/specs/`](docs/superpowers/specs/)
 - Per-slice implementation plans: [`docs/superpowers/plans/`](docs/superpowers/plans/)
-- Operator runbooks: [`docs/operator/`](docs/operator/)
+- Operator runbooks: [`docs/operator/README.md`](docs/operator/README.md)
+- Cutting a release: [`docs/release-runbook.md`](docs/release-runbook.md)
 - Contributor CLI: [`crates/trace-commons-contributor/README.md`](crates/trace-commons-contributor/README.md)
-
-## Public Reference Notes
-
-The Trace Credits, ranking-evidence, and external-adapter surface areas are
-each large enough to warrant their own documents. Until they're broken out,
-they live inline in `docs/`:
-
-- **Trace Credits** — settlement model, central-issuer profile, NEAR outbox.
-  See `docs/operator/calibration.md` and the credit-settlement specs under
-  `docs/superpowers/specs/`.
-- **Ranking evidence** — calibration registry, label-source authority, model
-  promotion. See ranking-related specs under `docs/superpowers/specs/`.
-- **External adapters** — benchmark/process evaluators, NEAR credit
-  submit/confirm. All adapters are operator-owned; the server only records
-  `configured` / `not_configured` readiness fields in
-  `/v1/admin/config-status`.
 
 ## License
 
@@ -558,7 +622,8 @@ TraceCommons is licensed in two parts, split along the client/server seam.
 
 **Server components — AGPL-3.0-or-later** (`LICENSE-AGPL`):
 `trace-commons-server`, `trace-commons-gate-api`, `trace-commons-gate-enclave`,
-`trace-commons-ingest`.
+`trace-commons-ingest`, and the unpublished test package
+`trace-commons-ingest-contributor-tests`.
 
 These are normally operated as a network service, so section 13 applies: run a
 modified version and let others reach it over a network, and you owe those

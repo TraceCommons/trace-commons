@@ -11,6 +11,7 @@ final class InsightsLimitsTableTests: XCTestCase {
         "analytics_unavailable": "—", "analytics_subscriptions_provider_codex": "Codex",
         "analytics_subscriptions_provider_claude": "Claude", "analytics_limits_on_pace": "On pace",
         "analytics_limits_runs_out": "Runs out in {time}",
+        "analytics_subscriptions_default_login": "Default login",
     ]
 
     private func weekly(used: Int, hoursLeft: Double) -> Window {
@@ -51,7 +52,7 @@ final class InsightsLimitsTableTests: XCTestCase {
             .init(id: "c", label: "c", state: "observed", windows: [weekly(used: 500, hoursLeft: 126)]),
         ])
         let all = InsightsLimitsRows.rows([codex, claude], now: now, copy: copy)
-        XCTAssertEqual(all.map(\.account), ["Codex", "Codex · other", "Claude"])
+        XCTAssertEqual(all.map(\.account), ["Codex · Default login", "Codex · other", "Claude"])
         let unmeasured = all[1]
         XCTAssertFalse(unmeasured.measured)
         XCTAssertEqual([unmeasured.session, unmeasured.weekly, unmeasured.pace], ["—", "—", "—"])
@@ -72,6 +73,41 @@ final class InsightsLimitsTableTests: XCTestCase {
         XCTAssertNotNil(rows[1].weeklyReset)
         XCTAssertTrue(rows[1].pace.hasPrefix("Runs out in "))
         XCTAssertTrue(rows[1].paceWarns)
+    }
+
+    func testMultipleLoginsNameTheDefaultAndPreserveRefreshTargets() {
+        for provider in ["claude", "codex"] {
+            let name = copy["analytics_subscriptions_provider_" + provider]!
+            let logins: [DaemonData.SubscriptionUsageLogin] = [
+                .init(id: "default", label: name, defaultLogin: true, state: "unknown"),
+                .init(id: "personal-id", label: "Personal", state: "unknown"),
+            ]
+            let rows = InsightsLimitsRows.rows([
+                .init(provider: provider, enabled: true, logins: logins),
+            ], now: now, copy: copy)
+            XCTAssertEqual(rows.map(\.account), ["\(name) · Default login", "\(name) · Personal"])
+            XCTAssertEqual(rows.map(\.loginId), ["default", "personal-id"])
+            XCTAssertEqual(rows.map(\.loginLabel), ["Default login", "Personal"])
+            XCTAssertEqual(rows.map(\.provider), [provider, provider])
+            XCTAssertEqual(Set(rows.map(\.id)).count, 2)
+        }
+    }
+
+    func testSingleLoginUsesProviderTitleWithoutLosingRefreshTarget() {
+        for provider in ["claude", "codex"] {
+            let name = copy["analytics_subscriptions_provider_" + provider]!
+            for isDefault in [true, false] {
+                let login = DaemonData.SubscriptionUsageLogin(
+                    id: isDefault ? "default" : "personal-id", label: "Personal",
+                    defaultLogin: isDefault, state: "unknown")
+                let rows = InsightsLimitsRows.rows([
+                    .init(provider: provider, enabled: true, logins: [login]),
+                ], now: now, copy: copy)
+                XCTAssertEqual(rows.map(\.account), [name])
+                XCTAssertEqual(rows.map(\.loginId), [login.id])
+                XCTAssertEqual(rows.map(\.loginLabel), [isDefault ? "Default login" : "Personal"])
+            }
+        }
     }
 
     /// Owner, 2026-10-28: a login with both windows shows each window's

@@ -19,6 +19,6 @@
       [CONTRIBUTING.md](../CONTRIBUTING.md) — including for the AGPL-licensed
       server crates, which are distributed under AGPL-3.0-or-later regardless.
 - [ ] Any new `.rs` file in `trace-commons-server`, `trace-commons-ingest`,
-      `trace-commons-gate-api`, or `trace-commons-gate-enclave` carries the
-      copyright + SPDX header.
+      `trace-commons-ingest-contributor-tests`, `trace-commons-gate-api`, or
+      `trace-commons-gate-enclave` carries the copyright + SPDX header.
 - [ ] No permissive crate gained a dependency on an AGPL crate.

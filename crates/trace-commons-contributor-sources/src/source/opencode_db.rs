@@ -139,7 +139,7 @@ fn open(root: &Path) -> Result<Option<Reader>> {
     } else {
         immutable_uri(&resolved_path)
     };
-    let conn = sql(match &immutable {
+    let mut conn = sql(match &immutable {
         Some(uri) => Connection::open_with_flags(uri, flags | OpenFlags::SQLITE_OPEN_URI),
         None => Connection::open_with_flags(&resolved_path, flags),
     })?;
@@ -167,10 +167,10 @@ fn open(root: &Path) -> Result<Option<Reader>> {
     // timeout alone does not stop expensive queries on a large database.
     let work = Arc::new(AtomicU32::new(0));
     let counter = Arc::clone(&work);
-    conn.progress_handler(
+    sql(conn.progress_handler(
         1000,
         Some(move || counter.fetch_add(1, Ordering::Relaxed) + 1 >= WORK_BUDGET),
-    );
+    ))?;
     sql(conn.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;"))?;
     Ok(Some(Reader {
         conn,

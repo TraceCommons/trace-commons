@@ -23,8 +23,10 @@ struct NoCreditNotice: View {
                 .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: GlassTokens.Space.s3)
+            // A glass pill, not a link (Ron, 2026-11-09).
             Button(action, action: perform)
-                .buttonStyle(GlassButtonStyle(.link))
+                .buttonStyle(GlassButtonStyle(.glass))
+                .fixedSize()
         }
         .padding(.horizontal, GlassTokens.Space.s5)
         .padding(.vertical, GlassTokens.Space.s3)

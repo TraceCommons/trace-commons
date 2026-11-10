@@ -76,9 +76,8 @@ impl PgBackend {
                   ORDER BY n.created_at, d.device_key_id",
                 &[&account_id, &session_token_hash],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(rows
             .into_iter()
             .map(|row| crate::db::AccountDeviceSummary {
@@ -118,9 +117,8 @@ impl PgBackend {
                     AND d.revoked_at IS NULL",
                 &[&account_id, &device_key_id, &label],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(affected > 0)
     }
 
@@ -155,10 +153,9 @@ impl PgBackend {
               RETURNING n.principal_ref",
                 &[&account_id, &device_key_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let Some(row) = revoked else {
-            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            tx.commit().await?;
             return Ok(crate::db::RevokeAccountDeviceResult::default());
         };
         let principal_ref: String = row.get(0);
@@ -175,8 +172,7 @@ impl PgBackend {
                     AND status = 'active'",
                 &[&principal_ref, &actor_ref],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let sessions_revoked = tx
             .execute(
                 "UPDATE trace_sessions
@@ -187,8 +183,7 @@ impl PgBackend {
                     AND revoked_at IS NULL",
                 &[&account_id, &device_key_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         // Native sessions that name no device key (issued before V139, by
         // the login-link native sign-in, or by a WebAuthn sign-in before
         // V144) cannot be told apart from the revoked device's own, so they
@@ -220,9 +215,8 @@ impl PgBackend {
                     &caller_session_token_hash,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(crate::db::RevokeAccountDeviceResult {
             removed: true,
             sessions_revoked,

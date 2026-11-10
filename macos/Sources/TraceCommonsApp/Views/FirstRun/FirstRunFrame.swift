@@ -70,6 +70,7 @@ extension FirstRunCopy {
         case .uses: return frame.stepUses
         case .traces: return frame.stepTraces
         case .privateAI: return frame.stepPrivateAi
+        case .terms: return frame.stepTerms
         case .join: return frame.stepJoin
         }
     }

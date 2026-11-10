@@ -20,6 +20,7 @@ pub mod postgres_inference_connection;
 mod postgres_legacy_payout_carry;
 mod postgres_payout;
 mod postgres_referral;
+mod postgres_terms_acceptance;
 pub mod witness_blocked;
 #[doc(hidden)]
 pub use postgres_referral::REFERRAL_RESOLVER_ASSUME_SQL;
@@ -243,6 +244,23 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _batch: &trace_commons_protocol::usage_analytics::UsageEventBatch,
     ) -> Result<u64, DatabaseError> {
         Err(DatabaseError::Pool("usage_events_unavailable".into()))
+    }
+
+    /// Record that an account accepted a version of the Terms of Service in
+    /// its org. Append-only; a repeat of (tenant, account, version, hash)
+    /// returns the original row's `recorded_at`.
+    #[allow(clippy::too_many_arguments)]
+    async fn record_terms_acceptance(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _auth_method: &str,
+        _client_kind: &str,
+        _terms_version: &str,
+        _content_sha256: &str,
+        _accepted_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<chrono::DateTime<chrono::Utc>, DatabaseError> {
+        Err(DatabaseError::Pool("terms_acceptance_unavailable".into()))
     }
 
     async fn select_inference_connection(
@@ -530,6 +548,17 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _account: &crate::account_trust::TrustAccount,
         _limit: i64,
     ) -> Result<Vec<crate::account_trust::TrustFactSource>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_worker_unavailable".into(),
+        ))
+    }
+    /// Re-derives this account's carried age (V157) from its live,
+    /// non-pooled, device-proven tenant links, writing only what changed.
+    /// Returns how many carries the account holds afterwards.
+    async fn refresh_account_trust_carried_age(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+    ) -> Result<u32, DatabaseError> {
         Err(DatabaseError::Pool(
             "account_trust_worker_unavailable".into(),
         ))

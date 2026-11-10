@@ -20,7 +20,8 @@ licensed under whatever the project is licensed under. TraceCommons deviates,
 in one direction only.
 
 `trace-commons-server`, `trace-commons-gate-api`, `trace-commons-gate-enclave`,
-and `trace-commons-ingest` are distributed under AGPL-3.0-or-later. Anyone who
+`trace-commons-ingest`, and the unpublished test package
+`trace-commons-ingest-contributor-tests` are distributed under AGPL-3.0-or-later. Anyone who
 *receives* those crates gets them under the AGPL and owes the obligations that
 come with it — including the section 13 duty to offer source to network users.
 
@@ -66,8 +67,9 @@ it under these terms. It is not a copyright transfer.
 Which license a *file* carries depends on which crate it lives in.
 
 - **AGPL-3.0-or-later:** `trace-commons-server`, `trace-commons-gate-api`,
-  `trace-commons-gate-enclave`, `trace-commons-ingest`. Every `.rs` file in
-  these carries a copyright + SPDX header; new files need one.
+  `trace-commons-gate-enclave`, `trace-commons-ingest`,
+  `trace-commons-ingest-contributor-tests`. Every `.rs` file in these
+  carries a copyright + SPDX header; new files need one.
 - **MIT OR Apache-2.0:** everything else. These crates are meant to be embedded
   in proprietary agent harnesses.
 

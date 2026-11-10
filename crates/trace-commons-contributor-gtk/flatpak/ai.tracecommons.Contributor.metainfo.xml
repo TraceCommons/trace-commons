@@ -62,6 +62,21 @@
   </provides>
 
   <releases>
+    <release version="1.0.0" date="2026-11-09">
+      <description>
+        <p>Version 1.0. On macOS, first run asks you to read the Terms of Service before signing in, and About has a Copy button for the version.</p>
+      </description>
+    </release>
+    <release version="0.24.15" date="2026-11-09">
+      <description>
+        <p>Fixes the Open Settings button on the macOS Home screen, which now opens the Settings window.</p>
+      </description>
+    </release>
+    <release version="0.24.14" date="2026-11-09">
+      <description>
+        <p>Updates the bundled SQLite to fix a write-ahead-log advisory, and requires accepting the Terms of Service in the macOS first-run Welcome.</p>
+      </description>
+    </release>
     <release version="0.24.13" date="2026-11-07">
       <description>
         <p>Home's getting-started card and the Private AI tab's guide shrink in a small window and can be closed, and Home's stat cards no longer draw background icons.</p>

@@ -1447,6 +1447,17 @@ final class AppModel: ObservableObject {
     /// host has gone (`FirstRunDaemon.firstRunFinished`). The core's
     /// sentence; dismissed by the person.
     @Published var firstRunNotice: String?
+    /// The new-terms sheet is up (`TermsHoldPresenter`), raised by Home's
+    /// terms notice or the menu bar's row. Closing it without accepting
+    /// leaves the hold, and the notice with it.
+    @Published var termsSheetOpen = false
+    /// The terms the sheet shows, fetched again each time it opens so the
+    /// person accepts what they read.
+    var termsHoldLoader = TermsLoader()
+    #if DEBUG
+    /// Test seam: answers `terms_accept` in place of the daemon.
+    var termsAcceptForTesting: ((AcceptedTerms) throws -> Bool)?
+    #endif
     /// A tool whose launch dialog the menu bar's popover asked for (owner,
     /// 2026-10-19); the Private AI tab opens the dialog and clears it.
     @Published var pendingManagedLaunch: String?
@@ -1465,6 +1476,9 @@ final class AppModel: ObservableObject {
         }
     }
     private var clientReadGeneration = ReadEpoch()
+    /// The daemon client, for the terms sheet's `terms_accept`
+    /// (`AppModel+Terms.swift`).
+    var daemonClientForTerms: DaemonClient? { client }
     private var accountReadGeneration = ReadEpoch()
     private var statusReadGeneration = ReadEpoch()
     private var historyReadGeneration = ReadEpoch()
@@ -3204,6 +3218,23 @@ final class AppModel: ObservableObject {
         #endif
     }
 
+    /// Debug builds only: `TC_REVIEW_PRIVATE_AI_SIGNED_IN=1` draws Home's
+    /// Private AI section as signed in to NEAR AI, with the normal-day
+    /// sample's figures (`HomePrivateAI.reviewTotals`), and the Private AI
+    /// tab's NEAR AI card with its tool buttons and no sign-in notice
+    /// (`ManagedSessionsSection.showsSignedIn`), so a design review can see
+    /// them on a build that cannot hold a NEAR AI sign-in: an
+    /// ad-hoc signed build cannot reach the team keychain group, and a dry
+    /// run refuses the managed snapshot the section waits on. Nothing is
+    /// signed in and the daemon is not told. A release build never reads it.
+    static var reviewPrivateAISignedIn: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["TC_REVIEW_PRIVATE_AI_SIGNED_IN"] == "1"
+        #else
+        false
+        #endif
+    }
+
     /// Whether a watch-only first run was finished against this config
     /// directory. Keyed by a digest of the directory, never the path itself.
     var isWatchOnlyComplete: Bool {
@@ -4680,6 +4711,12 @@ extension AppModel: FirstRunDaemon {
                 continuation.resume(returning: startup == .running)
             }
         }
+    }
+
+    func recordTermsAcceptance(_ terms: AcceptedTerms) async -> Bool {
+        let result = await firstRunCall { client in try client.termsAccept(terms) }
+        guard case .success = result else { return false }
+        return true
     }
 
     func setSourceSettings(settingsJSON: String) async -> Bool {

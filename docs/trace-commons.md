@@ -1,7 +1,7 @@
 # Trace Commons
 
 Trace Commons is an opt-in pipeline for contributing locally scrubbed IronClaw
-traces to a user-owned register of agent work. Capture and redaction both happen
+traces to a user-attributable collective of agent work. Capture and redaction both happen
 on the contributor's machine; only the scrubbed envelope reaches the server.
 There, two gates decide whether a record enters the register — a **novelty**
 gate (is this genuinely different from everything already filed?) and a

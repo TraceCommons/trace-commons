@@ -13,7 +13,8 @@
 //! connection and be refused.
 //!
 //! So this binary does exactly that, and CI runs it on `windows-latest`
-//! (see the `windows-pipe-acl` job). Without it the control ships on the
+//! (see the named-pipe ACL step of the `windows contributor crates` job in
+//! `clients.yml`). Without it the control ships on the
 //! strength of an argument rather than an observation, which for the one
 //! thing standing between a local process and a contributor's transcripts
 //! is not good enough.

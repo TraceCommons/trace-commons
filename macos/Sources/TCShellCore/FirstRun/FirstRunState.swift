@@ -12,6 +12,9 @@ public enum FirstRunStep: String, Codable, Equatable, Sendable {
     case uses
     case traces
     case privateAI
+    /// The terms, read through and accepted on a page of their own, near
+    /// the end (owner, 2026-11-09).
+    case terms
     case join
 }
 

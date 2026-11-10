@@ -113,20 +113,23 @@ struct TracesHistoryPage: View {
     }
 }
 
-/// Home's hero cards that the person closed with their X (owner,
-/// 2026-10-27: Kimi and Insights were in the person's face), and Settings'
-/// switch for the campaign card. Kept in this Mac's defaults; nothing
-/// leaves the machine.
+/// Home's card switches, kept in this Mac's defaults; nothing leaves the
+/// machine: the campaign card closed with its X, Settings' switch for it,
+/// and the Traces hero closed with its X.
 ///
-/// A closed campaign comes back when what the feed says for it changes;
-/// promotions off hides the campaign card altogether (owner, 2026-10-27).
-/// The Insights card has no X and always shows (owner, 2026-11-04). The
-/// Traces hero keeps its own X and key (`HomeTracesHero.closedKey`).
+/// The campaign card keeps its X (product owner, 2026-11-09), and a closed
+/// campaign comes back when what the feed says for it changes; promotions
+/// off hides it altogether (owner, 2026-10-27). The Insights card has no X
+/// (Ron, 2026-11-09), and a close from an earlier build no longer hides it.
 enum HomeClosedCards {
     /// The fingerprint of the campaign as it was when closed.
     static let campaignKey = "home.closedCampaignFingerprint"
     /// Settings' "Show promotions on Home", on by default.
     static let promotionsKey = "home.showsPromotions"
+    /// The Traces hero was closed with its X (owner, 2026-11-02). It stays
+    /// closed on this Mac: what it explains does not change, and Traces
+    /// and Private AI keep their tabs.
+    static let tracesHeroKey = "home.tracesHeroClosed"
 
     /// Everything the campaign card shows, so any change in the feed --
     /// under the same id or a new one -- is a different fingerprint. New
@@ -167,13 +170,16 @@ private struct HomeOverview: View {
     /// Where the NEAR AI sign-in's browser page opens.
     @Environment(\.openURL) private var openURL
     @State private var campaignStore = PrivateAICampaignStore()
-    /// Home's visible height (`HomeTracesHero.visibleHeight`).
-    @State private var visibleHeight: CGFloat = 0
     /// The campaign closed with its X, as it was then (`fingerprint`): it
     /// comes back when the feed changes it (owner, 2026-10-27).
     @AppStorage(HomeClosedCards.campaignKey) private var closedCampaign = ""
     /// Settings' "Show promotions on Home": off, no campaign card.
     @AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true
+    /// The Traces hero, closed with its X: gone from Home on this Mac.
+    @AppStorage(HomeClosedCards.tracesHeroKey) private var tracesHeroClosed = false
+    /// The Private AI row's sample figures under
+    /// `AppModel.reviewPrivateAISignedIn`; nil otherwise, or until read.
+    @State private var reviewTotals: (calls: Int?, verified: Int?)?
 
     /// The rollup, or nil after a failed `history_rollup` read
     /// (`SummaryFacts.fresh`): a stale one is not shown as current.
@@ -249,7 +255,8 @@ private struct HomeOverview: View {
                 // and the commons catalogue once the daemon answers it.
                 // Insights as a hero promotion, today's figures in its words
                 // and its graphic (owner, 2026-10-12: an upsell, not a bare
-                // way in). No X (owner, 2026-11-04).
+                // way in).
+                // No X (Ron, 2026-11-09), as the campaign card has none.
                 if let insightsHeading {
                     GlassHeroCard(
                         gradient: GlassTokens.Gradient.heroInsights, title: insightsHeading,
@@ -261,8 +268,8 @@ private struct HomeOverview: View {
                     }
                 }
                 // Sent traces without Train coding models, and Review, under
-                // the Insights card while there are any: the way back to a
-                // choice, not a promotion.
+                // the Insights card while there are any. Not closed with the
+                // card: it is the way back to a choice, not a promotion.
                 SentTracesTrainingLine(model: model.sentTracesTraining, history: store.history)
                 if missionsEnabled, store.missions != nil, let catalogue = words?.missionCatalogue {
                     hostedCard(
@@ -272,10 +279,10 @@ private struct HomeOverview: View {
             }
         }
         .scrollIndicators(.never)
-        // How much of Home shows, so the Traces hero can go compact when
-        // the full card would push the stats out of view (owner, 2026-11-07).
-        .onGeometryChange(for: CGFloat.self, of: \.size.height) { visibleHeight = $0 }
         .task { await campaignStore.refresh() }
+        .task {
+            if AppModel.reviewPrivateAISignedIn { reviewTotals = await HomePrivateAI.reviewTotals() }
+        }
         .task(id: missionsEnabled) {
             // Hidden missions read nothing: the drafts inbox stays on disk.
             if missionsEnabled { missionDrafts.preview() }
@@ -343,37 +350,43 @@ private struct HomeOverview: View {
         // Three groups, each under its title: Private AI first (owner,
         // 2026-11-02: back at the top, where it was before 2026-10-28), then
         // Traces (the tiles and what is not contributed across both columns),
-        // then Account (Credit and the NEAR AI balance). The Traces hero
-        // leads Home, over every section, for everyone, new and returning,
-        // until its X closes it for good (product owner, 2026-10-28,
-        // 2026-10-29; restored 2026-11-05; X 2026-11-07).
+        // then Account (Credit and the NEAR AI balance). The Traces
+        // walkthrough stands in for the Traces cards while no trace folder is
+        // watched and on the launch that finished first run, until it is
+        // closed (owner, 2026-11-02; it led Home above the heading from
+        // 2026-10-28).
         return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            tracesHero
-            noCredit
             privateAI
             HomeSection(words?.sectionTraces) {
-                Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
-                    GridRow {
-                        HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
-                                     loading: traces.phase == .loading, action: openTraces)
-                        HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(freshRollup),
-                                     loading: store.isLoading("history_rollup"), action: openHistory)
-                        // With nothing to say beyond its count, it is a
-                        // third tile on this line (Ron, 2026-11-05).
-                        if uncontributed.count > 0, uncontributed.detail(words) == nil,
-                           let title = HomeFormat.cardHeading(words?.uncontributed) {
-                            notContributed(uncontributed, title: title)
-                        }
-                    }
-                    if uncontributed.count > 0, uncontributed.detail(words) != nil,
-                       let title = HomeFormat.cardHeading(words?.uncontributed) {
+                // Under the Traces heading, over its cards (Ron, 2026-11-09):
+                // the credit it speaks of is the traces'.
+                noCredit
+                if showsTracesWalkthrough {
+                    tracesHero
+                } else {
+                    Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
                         GridRow {
-                            notContributed(uncontributed, title: title)
-                                .gridCellColumns(2)
+                            HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
+                                         loading: traces.phase == .loading, action: openTraces)
+                            HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.contributed(freshRollup),
+                                         loading: store.isLoading("history_rollup"), action: openHistory)
+                            // With nothing to say beyond its count, it is a
+                            // third tile on this line (Ron, 2026-11-05).
+                            if uncontributed.count > 0, uncontributed.detail(words) == nil,
+                               let title = HomeFormat.cardHeading(words?.uncontributed) {
+                                notContributed(uncontributed, title: title)
+                            }
+                        }
+                        if uncontributed.count > 0, uncontributed.detail(words) != nil,
+                           let title = HomeFormat.cardHeading(words?.uncontributed) {
+                            GridRow {
+                                notContributed(uncontributed, title: title)
+                                    .gridCellColumns(2)
+                            }
                         }
                     }
+                    .fixedSize(horizontal: false, vertical: true)
                 }
-                .fixedSize(horizontal: false, vertical: true)
             }
             HomeSection(words?.sectionAccount, accessory: accountSignIn) {
                 HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)
@@ -384,21 +397,44 @@ private struct HomeOverview: View {
         }
     }
 
-    /// Home's Traces hero, the product owner's design (`HomeTracesHero`).
-    /// Drawn once the core's words have loaded, until its X closes it for
-    /// good on this Mac (owner, 2026-11-07).
+    /// Whether the Traces walkthrough stands in for the Traces cards
+    /// (`HomeFormat.showsTracesWalkthrough`), unless its X closed it.
+    private var showsTracesWalkthrough: Bool {
+        !tracesHeroClosed && words != nil && HomeFormat.showsTracesWalkthrough(
+            folders: traces.everyFolder, loaded: traces.phase == .loaded,
+            finishedFirstRunThisLaunch: model.finishedFirstRunThisLaunch)
+    }
+
+    /// Home's Traces walkthrough (owner, 2026-10-28): saying that traces
+    /// earn credit, with the way into Traces, where the person shares;
+    /// three steps, contribute, earn, use Private AI (owner, 2026-10-29).
+    /// Condensed on 2026-11-02 (owner): no line under the title, and an X
+    /// that closes it for good on this Mac. Drawn as the Insights empty
+    /// state's card is (owner, 2026-11-02, `GetStartedCard`): a plain card,
+    /// no gradient or pictures, numbered steps, and Start earning as the one
+    /// action, a text link under the step it begins. Drawn once the core's
+    /// words have loaded.
     @ViewBuilder
     private var tracesHero: some View {
-        if let words {
-            HomeTracesHero(
-                words: words, openTraces: openTraces, openPrivateAI: openPrivateAI, visibleHeight: visibleHeight)
+        if let words, !tracesHeroClosed {
+            GetStartedCard(
+                title: words.tracesHeroTitle,
+                steps: [
+                    .init(title: words.tracesHeroStepContribute, detail: words.tracesHeroStepContributeDetail,
+                          link: GetStartedCard.Link(title: words.tracesHeroAction, action: openTraces)),
+                    .init(title: words.tracesHeroStepEarn, detail: words.tracesHeroStepEarnDetail),
+                    .init(title: words.tracesHeroStepUse, detail: words.tracesHeroStepUseDetail),
+                ],
+                close: GetStartedCard.Close(label: MonitorWords.close) { tracesHeroClosed = true },
+                pixelField: true, fieldPattern: .waves)
         }
     }
 
-    /// Under the Traces hero while Train coding models is off (product
-    /// owner, 2026-11-05): one slim line saying no credit is earned until it
-    /// is on, and Open Settings to the data uses. No X; it goes once the use
-    /// is on.
+    /// In the Traces section, under its heading (Ron, 2026-11-09; it led
+    /// Home from 2026-11-05), while Train coding models is off (product
+    /// owner, 2026-11-05): one slim line saying no credit is earned until
+    /// it is on, and Open Settings to the data uses. No X; it goes once the
+    /// use is on.
     @ViewBuilder
     private var noCredit: some View {
         if let words, NoCreditNotice.showsOnHome(loggedIn: model.status.loggedIn, scopes: model.status.consentScopes) {
@@ -440,13 +476,18 @@ private struct HomeOverview: View {
     /// Signed out, one slim card: "Sign in to NEAR AI to get started." and
     /// Sign in, which begins the NEAR AI sign-in as the Private AI tab's
     /// notice does.
+    ///
+    /// A Debug build launched with `TC_REVIEW_PRIVATE_AI_SIGNED_IN=1`
+    /// (`AppModel.reviewPrivateAISignedIn`) draws the signed-in row with
+    /// sample figures, with or without a snapshot.
     @ViewBuilder
     private var privateAI: some View {
+        let review = AppModel.reviewPrivateAISignedIn
         if let words, model.privateInferenceCopy != nil, case .running = model.startup,
-           let snapshot = model.managedSnapshot {
+           review || model.managedSnapshot != nil {
             HomeSection(words.sectionPrivateAI) {
-                if snapshot.nearAiSignedIn {
-                    let totals = HomePrivateAI.totals(inference)
+                if review || model.managedSnapshot?.nearAiSignedIn == true {
+                    let totals = review ? (reviewTotals ?? (nil, nil)) : HomePrivateAI.totals(inference)
                     HomePrivateAIRow(
                         figures: [
                             (MonitorWords.calls, HomeFormat.count(totals.calls)),
@@ -718,6 +759,17 @@ enum HomePrivateAI {
     /// Full-window daemon totals, independent of the shared proxy's calls page.
     static func totals(_ store: InferenceStore?) -> (calls: Int?, verified: Int?) {
         networkTotals(store?.networkSummary)
+    }
+
+    /// `AppModel.reviewPrivateAISignedIn`'s figures: the normal-day sample's
+    /// network summary. Debug builds only, where the sample client is; a
+    /// release build has no figures to show here and reads none.
+    static func reviewTotals() async -> (calls: Int?, verified: Int?) {
+        #if DEBUG
+        networkTotals(try? await DaemonDataWiring.sample(.normalDay).networkInferenceSummary())
+        #else
+        (nil, nil)
+        #endif
     }
 
     static func networkTotals(_ network: DaemonData.NetworkInferenceSummary?) -> (calls: Int?, verified: Int?) {
@@ -1800,9 +1852,8 @@ private struct HomeStatTile: View {
     /// nil for a tile on the page its number lives on (History's).
     var action: (() -> Void)?
 
-    /// #1146's `StatCard`: a full card, the value bold and tabular. No
-    /// icon (owner, 2026-11-07: the watermark every small card on Home drew
-    /// from 2026-10-20 is gone).
+    /// #1146's `StatCard`: a full card, the value bold and tabular, with no
+    /// icon (Ron, 2026-11-05).
     var body: some View {
         if let action {
             Button(action: action) {
@@ -1893,6 +1944,18 @@ enum HomeFormat {
             return (amount, change?.text, change?.ink)
         case .sentence(let sentence): return ("—", sentence, nil)
         }
+    }
+
+    /// Whether the Traces walkthrough stands in for the Traces cards (owner,
+    /// 2026-11-02: "in place of them on first launch or when trace
+    /// directories are not setup/watched"): on the launch that finished
+    /// first run, or once the tree has loaded with no folder watched, none
+    /// at all or every one set to Never. A tree still loading, or one that
+    /// failed, shows the cards, which say unknown in their own way.
+    static func showsTracesWalkthrough(
+        folders: [TracesTree.FolderNode], loaded: Bool, finishedFirstRunThisLaunch: Bool
+    ) -> Bool {
+        finishedFirstRunThisLaunch || (loaded && !folders.contains { $0.mode != .ignore })
     }
 
     /// Whether the Account section's figures wait on a sign-in, so its

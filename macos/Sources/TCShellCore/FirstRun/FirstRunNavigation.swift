@@ -9,8 +9,9 @@ public enum FirstRunNavigation {
     /// Customize on Uses opens the per-repo rules in place, and signing in
     /// is the last step. Connecting tools asks nothing about sharing: Private
     /// AI and what the traces could earn come first, and Uses, which can be
-    /// skipped, comes just before sign-in (Ron, 2026-11-05).
-    public static let steps: [FirstRunStep] = [.welcome, .tools, .privateAI, .traces, .uses, .join]
+    /// skipped, comes next. The terms are read on a page of their own just
+    /// before sign-in, near the end (owner, 2026-11-09).
+    public static let steps: [FirstRunStep] = [.welcome, .tools, .privateAI, .traces, .uses, .terms, .join]
 
     /// The steps the step thread names: every one after Welcome.
     public static var threadSteps: [FirstRunStep] { Array(steps.dropFirst()) }
@@ -93,6 +94,10 @@ public enum FirstRunNavigation {
     ) -> Bool {
         switch state.step {
         case .welcome, .traces, .privateAI:
+            return true
+        case .terms:
+            // The terms screen gates itself on the runner's acceptance,
+            // which the state does not carry.
             return true
         case .tools:
             return state.watchesAnything && state.watchedTwice.isEmpty && state.sessionRoots.settingsJSON() != nil

@@ -527,6 +527,7 @@ pub const METHODS: &[&str] = &[
     "skill_review",
     "status",
     "subscribe",
+    "terms_accept",
     "unenroll",
     "withdraw",
     "withdraw_bulk",
@@ -650,6 +651,10 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "queue_outcome_counts",
     "token_storage_status",
     "get_public_profile",
+    // Writes only `terms-state.json`. Lifting the terms hold sends nothing:
+    // a dry run still refuses every send, and the post to ingest is a tick
+    // pass a dry run does not run.
+    "terms_accept",
 ];
 
 /// K2 (#1173): the one dry-run check, made by both dispatchers before they
@@ -990,6 +995,25 @@ pub struct DaemonShared {
     /// cleared when that call returns: the contributor's own pause is never
     /// rewritten. Checked under the queue lock where an entry is claimed.
     pub uploads_held: AtomicBool,
+    /// Uploads are held because an in-effect Terms of Service version is
+    /// published that this Mac has not accepted (`terms_state`). Its own
+    /// flag, never `paused`: Resume does not clear it, and accepting does not
+    /// resume a pause the contributor set. Always `terms.lock().held()`,
+    /// kept in step by `terms_state::store_and_note`.
+    pub terms_held: AtomicBool,
+    /// The terms acceptance and the last published version, as saved in
+    /// `terms-state.json`. A leaf lock: never held across an await, and
+    /// nothing else is locked while it is held.
+    pub(crate) terms: Mutex<super::terms_state::TermsState>,
+    /// When a failed acceptance post may be tried again, and for which
+    /// tenant and acceptance. In-memory only: a restart tries at once.
+    pub(crate) terms_post_retry: Mutex<Option<super::terms_state::PostRetry>>,
+    /// Tests only: what the daemon's terms fetch returns instead of reaching
+    /// the network. `None` is an unavailable fetch, so no test ever fetches
+    /// the live document.
+    #[cfg(test)]
+    pub(crate) terms_fetch_override:
+        Mutex<Option<Result<crate::terms::FetchedTerms, &'static str>>>,
     /// Raised to stop an upload in flight now: the upload pass races each
     /// entry's upload against a change here, drops it, and returns the entry
     /// to `Approved`. A count in a watch channel, so a raise between the
@@ -1630,6 +1654,13 @@ impl DaemonShared {
         let model_catalogue =
             crate::managed::catalogue_cache::CatalogueCache::open(Some(store.dir()));
         let insights_counter = super::insights_week::CounterPass::for_store(&store);
+        // An unreadable terms file reads as nothing seen yet: the start-up
+        // fetch re-establishes the published version. Label only.
+        let terms = super::terms_state::TermsState::load(&store).unwrap_or_else(|_| {
+            tracing::warn!(reason = "terms-state-unreadable", "terms state not loaded");
+            super::terms_state::TermsState::default()
+        });
+        let terms_held = terms.held();
         Ok(Self {
             managed,
             model_catalogue,
@@ -1645,6 +1676,11 @@ impl DaemonShared {
             paused: AtomicBool::new(paused),
             quiesced: AtomicBool::new(false),
             uploads_held: AtomicBool::new(false),
+            terms_held: AtomicBool::new(terms_held),
+            terms: Mutex::new(terms),
+            terms_post_retry: Mutex::new(None),
+            #[cfg(test)]
+            terms_fetch_override: Mutex::new(None),
             upload_interrupt: tokio::sync::watch::Sender::new(0),
             shutdown: AtomicBool::new(false),
             shutdown_signal: Arc::new(Notify::new()),
@@ -2823,6 +2859,11 @@ impl DaemonShared {
         // The settlement estimate: the settings switch, then its own leaf
         // lock, each released before the policy and queue section.
         let settlement_estimate = super::settlement_estimate::status_value(self, now);
+        // The terms hold: its own leaf lock, released before policy and queue.
+        let (terms_hold, terms_version_owed) = {
+            let terms = self.terms.lock().expect("terms lock");
+            (terms.held(), terms.version_owed())
+        };
         // Policy, then queue: the order every method above follows. Both
         // counts below come from this one queue guard, so `decisions_owed`
         // and `queue_depth` can never describe two different queues. The
@@ -3030,6 +3071,12 @@ impl DaemonShared {
             // and never chosen; `null` otherwise. Label only. See
             // `config::consent_hold`.
             "consent_hold": consent_hold,
+            // Additive. Uploads are held until the published in-effect Terms
+            // of Service version is accepted (`terms_state`); separate from
+            // `paused`, which is the contributor's own. `terms_version_owed`
+            // names that version, `null` when nothing is owed.
+            "terms_hold": terms_hold,
+            "terms_version_owed": terms_version_owed,
             "paused": paused,
             "queue_depth": queue.pending().len(),
             // Authoritative admission capacity, independent of the single
@@ -4314,6 +4361,8 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "harness_plan" => super::harness::handle_plan(shared, req),
         "harness_commit" => super::harness::handle_commit(shared, req),
         "skill_review" => super::skill_loop::handle_review(shared, req),
+        // Writes only `terms-state.json`; the post to ingest is the tick's.
+        "terms_accept" => super::terms_state::handle_accept(shared, req),
         "pause" => handle_pause(shared, req),
         "resume" => {
             shared.paused.store(false, Ordering::Relaxed);
@@ -7388,6 +7437,9 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "legacy_invite_migrate" => super::legacy_migration::handle_migrate(shared, req).await,
         "near_ai_credential_start" => super::nearai_credential::handle_start(shared, req).await,
         "near_ai_credential_migrate" => super::nearai_credential::handle_migrate(shared, req).await,
+        // Also on the sync path, which decides the answer; here the site is
+        // checked again first when the version named is not the cached one.
+        "terms_accept" => super::terms_state::handle_accept_async(shared, req).await,
         // Both of these answer identically on the sync path -- they are in
         // `handle_request` too, and that is what defines the response. The
         // override exists so the reconcile that makes the answer true of the
@@ -20584,8 +20636,8 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 111, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 84, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(sync.len(), 112, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(asy.len(), 85, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =
