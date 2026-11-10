@@ -229,6 +229,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
 
     /// The payload fields this shell decodes, by wire name.
     public static let consumedFields = [
+        "about_app",
         "computer",
         "commons",
         "waiting",

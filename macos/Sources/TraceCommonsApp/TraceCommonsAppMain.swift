@@ -154,6 +154,15 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
         }
         .defaultSize(width: GlassTokens.Size.modalWidth, height: 640)
         .windowResizability(.contentMinSize)
+
+        // About, from the app menu: the standard panel's lines, and a Copy
+        // button for the version, which the standard panel cannot hold.
+        Window(MonitorWords.table?.aboutApp ?? "", id: WindowID.about) {
+            AboutWindowView()
+        }
+        .windowResizability(.contentSize)
+        .windowStyle(.hiddenTitleBar)
+        .defaultPosition(.center)
     }
 }
 
@@ -235,15 +244,6 @@ struct MonitorScene: Scene {
         .commands {
             MonitorCommands(model: model, navigation: navigation)
         }
-
-        // About, from the app menu: the standard panel's lines, and a Copy
-        // button for the version, which the standard panel cannot hold.
-        Window(MonitorWords.table?.aboutApp ?? "", id: WindowID.about) {
-            AboutWindowView()
-        }
-        .windowResizability(.contentSize)
-        .windowStyle(.hiddenTitleBar)
-        .defaultPosition(.center)
     }
 }
 
