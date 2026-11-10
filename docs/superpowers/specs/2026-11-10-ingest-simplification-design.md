@@ -33,14 +33,15 @@ one:
 The short version:
 
 - The module is 88,080 lines: 1,838 free functions, 555 structs, 601
-  constants, 225 routes, and one `AppState` with 185 fields.
+  constants, about 280 route registrations, and one `AppState` with 185
+  fields.
 - There is almost no dead code. The compiler already proves it: every item
   is private to a `pub(crate)` module and CI builds with `-D warnings`. One
   17-line shim is all that grep adds.
 - The size is breadth and repetition, not rot. The largest removable
   amounts are four families of near-identical code (scheduler setup, drill
   evidence, the Prometheus body, database-mirror result handling), an
-  estimated 1,350 to 2,000 lines together, and all four can be done as
+  estimated 1,200 to 1,900 lines together, and all four can be done as
   body-only edits.
 - The module divides along real seams. The cheapest is drills and the
   operational summary: 5,500 lines that the rest of the module reaches
@@ -94,9 +95,9 @@ e4882bf9b.
 | functions over 100 / 200 / 300 lines | 109 / 37 / 16 |
 | lines inside functions over 100 / over 200 lines | 25,347 / 14,994 |
 
-#2055 counts 3,053 top-level items; it leaves out `impl` blocks and `mod`
-declarations. With those removed this count is 3,062, which agrees to
-within 9.
+#2055 counts 3,053 top-level items. Counting only named items (no `impl`
+blocks, no `mod` declarations) this survey finds 3,062. The two scripts
+are independent and agree to within 9; the difference was not traced.
 
 ### 2.2 The twenty largest functions
 
@@ -146,8 +147,25 @@ Arms whose pattern spans several lines are not in this count.
 
 ### 2.3 Routes
 
-Measured: 225 `.route(` registrations in the app file and its siblings,
-carrying 246 method and handler pairs.
+Measured, by how each route is registered:
+
+| how | count |
+|---|---|
+| `.route("...")` with a literal path, in the app file | 225 paths, 246 method and handler pairs |
+| `.route(CONSTANT, ...)` with a path constant from the protocol crate (lines 8990 to 9219) | 7 |
+| through the `AccountRoutes` builder, one method each: `account_route_groups` (8745) | 26 |
+| through the same builder in 8 sibling modules | 24 |
+
+That is 282 registrations. The number of method and path pairs is at
+least 303 (246 + 7 + 50); the seven constant-path routes were not opened
+to count their methods.
+
+`scripts/operator/pipeline-deployment-inventory.py` reports 225 routes for
+the same file. It matches literal `.route("` calls only, so it does not
+see the other 57. That is a gap in the inventory tool, noted here because
+section 5 uses the route list as an invariant.
+
+The 225 literal paths by prefix:
 
 | prefix | routes |
 |---|---|
@@ -161,19 +179,24 @@ By subject, counting path text: 31 ranking, 24 credit, 20 pipeline, 19
 drill, 11 export, 10 benchmark.
 
 No handler is unregistered: an unreferenced private function fails the
-build. Going the other way, each path's static stem was searched for
-outside the ingest crate (`crates/`, `macos/`, `windows/`,
-`tauri-desktop/`, `scripts/`, `deploy/`, `docs/`, `README.md`). Every path
-is mentioned somewhere. 136 are mentioned only in Markdown, with no caller
-in code or scripts. That is expected for admin and drill routes an operator
-calls by hand, so it is a list of candidates and not of dead routes. The
-notable group is ranking: all 31 ranking routes are in it.
+build. Going the other way, the static stem of each of the 225 literal
+paths was searched for outside the ingest crate (`crates/`, `macos/`,
+`windows/`, `tauri-desktop/`, `scripts/`, `deploy/`, `docs/`,
+`README.md`). Every path is mentioned somewhere. 136 are mentioned only in
+Markdown, with no caller in code or scripts. That is expected for admin
+and drill routes an operator calls by hand, so it is a list of candidates
+and not of dead routes. The notable group is ranking: all 31 ranking
+routes are in it. The 57 other registrations were not cross-checked; the
+constant-path ones share their constant with the clients, and the builder
+ones are the signed-in account surface the apps use.
 
 ### 2.4 Dead code
 
 Measured.
 
-- No blanket `#![allow]` in the app file, `ingest.rs` or `lib.rs`.
+- No blanket `#![allow]` in the app file, `ingest.rs` or `lib.rs` (the
+  last two were read in full; every `allow(` in the app file is an outer
+  attribute on one item).
 - 45 `#[allow(dead_code)]` attributes, 39 of them on top-level items. 33
   of the 39 sit on constants and helpers that are used only under
   `local-gpu-models`, `near-ai-scorer` or `gcp-kms` (lines 406 to 649,
@@ -253,15 +276,17 @@ more than one family):
 
 Measured over the 204 `*_handler` functions (median 32.5 lines).
 
-- 159 begin by authenticating: 109 with
-  `authenticate_with_tenant_access_grant`, 40 with
+- 164 call an `authenticate*` function, 159 of them as their first
+  statement: 109 with `authenticate_with_tenant_access_grant`, 40 with
   `authenticate_ctx_with_tenant_access_grant`, 10 with `authenticate`.
-- The statement after it is a role check in all but 9: `require_admin` 89,
-  `require_reviewer` 18, `require_utility_operator` 16, and 15 other
-  `require_*` checks with 6 or fewer uses each. Those 15 are the scoped
-  worker credentials.
-- 86 of the 159 take a `Json` body extractor in their signature. For those,
-  axum parses the body before the handler authenticates.
+- In the 164, the statement after that call is `require_admin` in 89,
+  `require_reviewer` in 18, `require_utility_operator` in 16, one of 14
+  other checks in 32 (six or fewer uses each: export worker, benchmark
+  worker, exporter, vector, retention, revocation propagation, process
+  evaluation and so on), and something else in 9. The narrow checks are
+  where the scoped worker credentials are enforced.
+- 86 of the 159 also take a `Json` body extractor in their signature, so
+  for those routes the body is parsed before the handler authenticates.
 
 ### 2.7 Errors and responses
 
@@ -285,15 +310,22 @@ Measured.
 
 - The ingest production source names 348 distinct `TRACE_COMMONS_*`
   variables, 298 of them in the app file.
-- `docs/operator/env-reference.md` names 352. 75 that ingest reads are not
-  in it, including the storage-mode switches (`TRACE_COMMONS_DB_DUAL_WRITE`,
-  `TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES`, the `DB_*_READS` family) and 22
-  `TRACE_COMMONS_PIPELINE_*` names. 79 that it names are not in the ingest
-  source; 66 of those appear in some other `.rs` file under `crates/`,
-  and 13 appear in none (three `ACCOUNT_ADMISSION_EVIDENCE_*`, two
-  `CLIENT_MAX_*_PER_DAY`, eight `UNBOUND_REAPER_*`). A name assembled at
-  run time from a prefix would be missed by this search, so the 13 are
-  candidates to check and not proven stale.
+- Of the 348, two are prefixes that `admission.rs` (lines 58 to 63)
+  completes at run time, and two are `PIPELINE_TEST_*` names. So the count
+  of whole variable names is 344, plus whatever the two prefixes expand
+  to.
+- `docs/operator/env-reference.md` names 352. 71 variables that ingest
+  reads are not in it, including the storage-mode switches
+  (`TRACE_COMMONS_DB_DUAL_WRITE`, `TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES`,
+  the `DB_*_READS` family) and 19 `TRACE_COMMONS_PIPELINE_*` names. Each
+  of the 71 is named in some other document, script or workflow; the
+  reference is incomplete as an index, not the documentation as a whole.
+- 79 names in the reference are not literals in the ingest source. 66
+  appear in another `.rs` file under `crates/`. Of the other 13, three
+  are `ACCOUNT_ADMISSION_EVIDENCE_*` names built from the prefix above,
+  and ten (`CLIENT_MAX_*_PER_DAY`, `UNBOUND_REAPER_*`) are in the
+  reference as deprecated or ignored (two of the ten rows were read).
+  None was found stale.
 - The files under `deploy/` assign 52 of the 348. They assign none of the
   36 `CREDIT`, 28 `BENCHMARK`, 22 `PIPELINE`, 15 `VECTOR`, 14 `PROCESS`, 12
   `RANKING`, 12 `PERPLEXITY`, 10 `EXPORT` or 8 `RETENTION` names, and no
@@ -396,11 +428,19 @@ Change: one helper that takes a drill's check name, readiness and evidence
 value, and does the status, hash and audit append. The evidence-hash
 functions become the value each drill passes in.
 
-Size: estimated 250 to 400 lines removed.
-Risk: medium. The evidence hash is a hash of JSON, and promotion gates
-compare it across runs. The change is correct only if every drill's hash
-is byte-identical before and after for the same inputs. That needs a
-pinned-hash test per drill before the refactor (section 5).
+The hash functions themselves are pure: each takes plain values and
+returns `json_evidence_hash` of a JSON object that lists them
+(`audit_chain_drill_evidence_hash`, 52020, is typical). They are the
+schema of each drill's evidence and mostly stay. What merges is the code
+around them.
+
+Size: estimated 150 to 300 lines removed. Low confidence: two of the 18
+sites were read.
+Risk: medium. Promotion gates compare the evidence hash across runs. The
+change is correct only if every drill's hash is byte-identical before and
+after for the same inputs. Because the hash functions are pure, a test
+that calls each with fixed arguments and pins the result is cheap, and it
+comes first (section 5).
 
 ### F3. The Prometheus body is a 1,284-line function
 
@@ -428,7 +468,10 @@ Change: fold the warn-then-enforce step into one helper for the sites
 where it is uniform. Sites that roll something back between the two (the
 submit path does) stay as they are.
 
-Size: estimated 200 to 300 lines removed.
+Size: estimated 150 to 300 lines removed. Low confidence: the 54 sites
+were counted, not sorted by shape, and the two that were read are of the
+kind that stays. The PR's first step is that sort; if fewer than half are
+uniform, drop the change.
 Risk: medium. This is a fail-closed path:
 `TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES` turns a mirror failure into a
 refusal. The helper must refuse wherever a copy refused, and log the same
@@ -527,26 +570,44 @@ Size: an estimated 6,000 to 9,000 lines of production code if file-backed
 mode were retired, and a rewrite of the test fixture that most tests use.
 Risk: very high.
 
-### F9. The legacy upload path is live, not a closed compatibility window
+### F9. Almost nothing named "legacy", "compat" or "deprecated" has expired
 
-Evidence: 28 items with `legacy` in the name, 585 lines; the word appears
-339 times. `docs/operator/pipeline-activation.md` defines the legacy path
-as where an upload goes when a tenant has no routing row or a `legacy`
-row, as what `deactivate` returns a tenant to, and as the permanent owner
-of every receipt it claimed. `GET /v1/admin/pipeline/legacy-drain` reports
-what it still owes.
+Evidence (measured): 28 top-level items have `legacy` in their name, 585
+lines; four have `compat`; the word `deprecated` marks one variable. By
+what they serve:
 
-Conclusion: nothing under this name is obsolete. It leaves only when the
-owner retires the rollback target, after the drain report is empty for
-every tenant. Not part of this plan.
+| group | items | lines | why it is still live |
+|---|---|---|---|
+| Legacy upload path (`claim_legacy_receipt`, 16345) | 1 | 28 | `docs/operator/pipeline-activation.md`: where an upload goes when a tenant has no routing row or a `legacy` row, what `deactivate` returns a tenant to, and the permanent owner of every receipt it claimed. `GET /v1/admin/pipeline/legacy-drain` reports what it still owes. |
+| Audit legacy segments (659, 64981 to 65341, 73098 to 73654, 83086) | 23 | about 530 | Audit rows written before the hash chain covered them. `docs/operator/audit-trail-forensics.md` documents the repair and its switch, `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME`. Needed for as long as such rows exist in a deployment's data. |
+| `legacy_principal_ref` (79987) | 1 | 3 | A fixed label, used 16 times, 30 test mentions. |
+| Store label `TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE` (371) | 1 | 1 | A stored value, not a switch. |
+| Compatibility status for clients (`compatibility_statuses_from_database` 18759, `compatibility_credit_decision` 18720) | 2 | 96 | Maps pipeline results to the status shape existing clients read. |
+| Old session cookie (`append_legacy_account_session_clear`, 22276) | 2 | 21 | Expires the cookie name used before the `__Host-` prefix. The old name is never read. |
+| `TRACE_COMMONS_PERPLEXITY_MODEL_ARCH` warning (594, 6648 to 6658) | 1 | about 15 | Warns when a variable that is no longer read is still set. `local-gpu-models` builds only. |
 
-### F10. Documentation of the env surface has drifted
+The legacy-invite routes live in a sibling module
+(`legacy_invite_link.rs`, 119 lines) and are covered by
+`docs/operator/legacy-invite-migration.md`.
 
-Evidence: 2.8. 75 variables read and not in `env-reference.md`; 13 named
-there that no Rust file contains.
+The last two rows are the only true closing windows, about 36 lines
+together. Each closes on a date the owner picks: the cookie shim once no
+browser can still hold the old cookie (its lifetime was not looked up),
+the warning once no deployment sets the variable. The migration history
+(150 files under `migrations/`) was not read file by file; nothing in the
+app file is keyed to a migration number in a way this survey could test.
 
-Change: a documentation PR. Confirm each of the 13 by reading the code
-that would build the name, then remove or correct it; add the 75.
+Conclusion: no legacy code is removable today. The upload path leaves only
+when the owner retires the rollback target, after the drain report is
+empty for every tenant.
+
+### F10. The env reference is an incomplete index
+
+Evidence: 2.8. 71 variables that ingest reads are not in
+`env-reference.md`. No documented name was found stale.
+
+Change: a documentation PR that adds the 71, each with a pointer to the
+document that already describes it.
 Size: no Rust lines.
 Risk: none to the service.
 
@@ -566,12 +627,12 @@ estimates unless marked.
 
 | # | change | finding | removed | moved | risk | when |
 |---|---|---|---|---|---|---|
-| 1 | Correct `env-reference.md` against the source | F10 | 0 | 0 | none | now |
+| 1 | Complete `env-reference.md` from the source | F10 | 0 | 0 | none | now |
 | 2 | Delete the dead audit shim | F11 | 17 (measured) | 0 | none | now |
 | 3 | One generic scheduler parser and spawner | F1 | 500 to 700 | 0 | low | now |
 | 4 | Table-driven Prometheus body | F3 | 400 to 600 | 0 | low | now |
-| 5 | One drill-evidence helper, after pinning each drill's hash | F2 | 250 to 400 | 0 | medium | now |
-| 6 | One mirror-result helper for the uniform sites | F4 | 200 to 300 | 0 | medium | now |
+| 5 | One drill-evidence helper, after pinning each drill's hash | F2 | 150 to 300 | 0 | medium | now |
+| 6 | One mirror-result helper for the uniform sites | F4 | 150 to 300 | 0 | medium | now |
 | 7 | Drills and operational summary to child modules | F5 | 0 | 5,500 to 7,000 | low | after #2055 phase 2 |
 | 8 | Gate, PII backstop, dedup and scoring to a child module (seam L: 23 inbound names) | 2.9 | 0 | about 4,000 | low | after #2055 phase 2 |
 | 9 | Submit, routing and receipts to a child module (seam D: 33 inbound names) | 2.9 | 0 | about 3,800 | medium | after #2055 phase 3 |
@@ -581,7 +642,7 @@ estimates unless marked.
 | 13 | Storage, mirror, audit repair and maintenance to child modules (seams N and O) | 2.9 | 0 | about 16,000 | medium | after 10 |
 | 14 | Account to a child module (seam E: 74 inbound) | 2.9 | 0 | about 5,500 | medium | after 10 |
 
-Totals, estimated: changes 2 to 6 remove 1,350 to 2,000 lines. Changes 7
+Totals, estimated: changes 2 to 6 remove 1,200 to 1,900 lines. Changes 7
 to 14 move about 53,000 to 57,000 lines out of the app file and leave it
 at roughly 30,000: startup, the router, authentication, policy helpers and
 shared types. Nothing in the table changes behaviour.
@@ -599,6 +660,10 @@ cargo fmt --all -- --check
 cargo check -p trace-commons-server -p trace-commons-ingest --bins
 cargo check -p trace-commons-ingest --features near-ai-scorer
 cargo check -p trace-commons-ingest --features local-gpu-models
+# The pilot's feature set (deploy/pilot-gcp/deploy.sh). No ci.yml job
+# compiles ingest with gcp-kms.
+cargo check -p trace-commons-ingest \
+  --features gcs-client,gcp-kms,near-ai-scorer,near-attestation-collateral
 cargo test -p trace-commons-ingest --no-run
 cargo clippy -p trace-commons-server -p trace-commons-ingest --all-targets -- \
   -A clippy::type_complexity -A clippy::collapsible_if \
@@ -609,7 +674,7 @@ cargo test -p trace-commons-server --test it -- 'license_boundary::'
 scripts/dev/pg-suites-local.sh
 ```
 
-The feature checks matter because 37 of the `allow(dead_code)` items exist
+The feature checks matter because 33 of the `allow(dead_code)` items exist
 only for those builds; a move that compiles under default features can
 fail there. Builds go through the build lock and the suites through the
 test lock, as `CLAUDE.md` describes.
@@ -618,13 +683,16 @@ A passing count is not enough, because a filter that matches nothing
 passes. Each PR also compares, before and after:
 
 - **Test names.** `cargo test -p trace-commons-ingest --lib -- --list`,
-  sorted. The two lists must be identical. The names under
+  sorted. Every name in the first list must be in the second; the only
+  additions are the tests the PR says it adds. The names under
   `ingest::app::tests::` are pinned by `scripts/operator/pipeline.py` and
   `pipeline_tooling/`; no change here renames a test module.
-- **Routes.** The sorted list of method and path pairs from the router.
-  225 paths and 246 pairs today.
+- **Routes.** The sorted list of registrations, taken three ways because
+  no one tool sees all of them (2.3): the 225 literal paths and their 246
+  method and handler pairs, the 7 constant-path registrations, and the 50
+  builder registrations.
 - **Variable names.** The sorted list of `TRACE_COMMONS_*` strings in the
-  production source. 348 today.
+  production source. 348 today, two of them prefixes.
 
 Per change:
 
@@ -633,7 +701,7 @@ Per change:
 | 2 | The build. |
 | 3 | The existing scheduler-config tests (56 scheduler items are mentioned by tests). Add one test per scheduler that asserts the error text for a missing token, written against the current code first. |
 | 4 | Capture the body for a fixed `TraceOperationalSummaryResponse` from the current code; assert the new code returns the same bytes. The 17 existing uses stay. |
-| 5 | Before the refactor, a test per drill that runs it on a fixed state and pins the evidence hash. Then `scripts/dev/pg-suites-local.sh` and the smoke script test (`cargo test -p trace-commons-ingest --test smoke_gate_script`), which ties `scripts/operator/smoke-gate.sh` to the drill structs. |
+| 5 | Before the refactor, a test per evidence-hash function that calls it with fixed arguments and pins the result. Then `scripts/dev/pg-suites-local.sh` and the smoke script test (`cargo test -p trace-commons-ingest --test smoke_gate_script`), which ties `scripts/operator/smoke-gate.sh` to the drill structs. |
 | 6 | `scripts/dev/pg-suites-local.sh` in full, and the whole ingest library against PostgreSQL with the login-resolver URL, single-threaded, as `CLAUDE.md` gives it. The file-only tests do not reach this code with a database. |
 | 7 to 9, 11 to 14 | A move is correct when nothing but paths and visibility changed. Check with `git diff --color-moved=zebra` and by comparing the sorted set of item bodies before and after. Then everything above, plus `python3 scripts/operator/pipeline.py qualify` for any move that touches pipeline or submit code. For 7, update the two text readers named in F5 in the same PR. About 120 files under `docs/`, `scripts/`, `crates/` and `deploy/` name the app file's path, most of them documents; a move PR greps for the items it moved and corrects the ones that point at them. |
 | 10 | Everything above. Config status is an operator contract: capture its JSON for a fixed environment before and assert it is equal after. |
@@ -692,8 +760,8 @@ These are the large numbers, and none is a refactor.
    drills that compare the two stores.
 3. **File-level overlap with #2055 (section 6).** Start changes 2 to 6
    now, or hold them until its phase 1.
-4. **The 13 documented variables no code reads (F10).** Confirm they are
-   stale before the documentation PR removes them.
+4. **The two closing windows in F9.** When the old-cookie shim and the
+   `MODEL_ARCH` warning may go. About 36 lines.
 
 ## 8. Recommended against
 
@@ -701,20 +769,24 @@ These are the large numbers, and none is a refactor.
   survey: 1,501 names cross seam boundaries and every seam reads
   `AppState`. Change 10 is the precondition, and after changes 7 to 14 the
   boundaries will be visible in the module tree. Decide then.
-- **An authentication extractor.** 159 handlers start with the same call,
-  and an extractor would remove it. But 86 of them take a `Json` body
-  first, so today a malformed body is refused before authentication runs,
-  and an extractor placed ahead of the body reverses that order for 86
-  routes. It also rewrites 159 signatures that the tests call, and it
-  moves each route's credential scope out of the handler body where a
-  reviewer sees it. The saving is one line per handler.
+- **An authentication extractor, as a simplification.** 159 handlers
+  start with the same call, and an extractor would remove it. It is not
+  behaviour-preserving: 86 of them take a `Json` body, which today is
+  parsed before the handler authenticates, and an extractor placed ahead
+  of the body changes which refusal such a request gets. It also rewrites
+  159 signatures that the tests call, and it moves each route's role check
+  out of the handler body, where a reviewer sees it today. The saving is
+  one line per handler. Whether authentication should run before the body
+  is parsed is a separate question with its own answer; if the owner wants
+  that order, it is a behaviour change with its own PR and tests, and it
+  would bring the extractor with it.
 - **A blanket error conversion in place of `.map_err(internal_error)`.**
   591 sites, and an `impl From` would let `?` do it. It would also make
   every error that reaches a handler a logged 500 by default. Today that
   is a choice visible at each call. It changes the `ApiResult` alias used
   by 465 functions. Keep the explicit call.
 - **Merging the `require_*` role checks or generating the route table
-  from a macro.** The 15 scoped worker checks are few and deliberate, and
+  from a macro.** The narrow role checks are few and deliberate, and
   the 926-line router is long because it is the one place that states
   every route, its body limit and its layers.
 - **Splitting long ordered functions for length alone.**
@@ -724,7 +796,8 @@ These are the large numbers, and none is a refactor.
   functions and removes nothing.
 - **Removing routes because no code calls them.** 136 routes have no
   in-repo caller. Operators call them by hand and 19 of them are drills.
-- **Removing the legacy upload path (F9).** It is the rollback target.
+- **Removing the legacy upload path or the audit legacy-segment code
+  (F9).** One is the rollback target; the other reads data that exists.
 - **Any of this for build time.** #2055 measured that it does not help.
 
 ## 9. How the numbers were produced
@@ -741,8 +814,12 @@ All from a checkout of `main` at e4882bf9b, with no build.
   This is the same name-based method as #2055 section 2.6 and has the same
   weakness: a common name can match something else. It finds 1,070
   test-mentioned top-level items against #2055's 1,041.
-- **Routes.** Every `.route("...")` in the app file and its production
-  siblings; callers by `grep -rlF` of the path up to its first `{`.
+- **Routes.** Every `.route(` line in the app file and its production
+  siblings, split by whether a string literal follows; builder
+  registrations by matching `.get(`, `.post(` and the other builder
+  methods followed by a path, in `account_route_groups` and in the
+  siblings that use `AccountRoutes`. Callers by `grep -rlF` of a literal
+  path up to its first `{`.
 - **Repetition.** Windows of consecutive non-blank, non-comment lines with
   whitespace collapsed; a line counts once if it lies in any window that
   occurred earlier in the file.
