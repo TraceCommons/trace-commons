@@ -49,11 +49,57 @@ Retain build 2's Developer ID `IDEDistributionProvisioning.log` and workflow
 ID above for Apple Support. No certificate was revoked and no app was
 published or installed. Production release publishing remains on GitHub.
 
+Build 4 (`b96f5d43-35dd-4737-a786-7b4e5eb2224c`, 2026-11-10) ran after the
+Account Holder granted the Cloud Managed Developer ID permission. It failed
+the same way: HTTP 409 / resultCode 7460 on creating the managed certificate.
+The App Store Connect API lists no managed Developer ID certificate; the
+team's only Developer ID certificate is the ordinary `DEVELOPER_ID_APPLICATION_G2`
+one that release-apps.yml signs with. The missing permission was therefore
+not the cause. The stuck certificate state is Apple's to clear, through a
+Developer Support request from the Account Holder.
+
+The archive itself is sound. Build 4's archive, exported locally with the
+ordinary Developer ID certificate and the committed profile
+(`macos/TraceCommons-DeveloperID.provisionprofile`), notarized on the first
+submission, stapled, and passed `spctl` as "Notarized Developer ID". It also
+passed `verify-macos-entitlements.sh`'s static checks. Its embedded metadata
+named the production channel, a universal release build and the production
+Sparkle key.
+
+## Sign and notarize from GitHub
+
+Until Apple clears the managed certificate, `.github/workflows/xcode-cloud-pilot.yml`
+signs Cloud archives the way releases are signed. A push to
+`xcode-cloud-release-pilot` starts a clean Cloud build of that commit; a manual
+run can name a branch, or an existing build run to sign without starting one.
+The job then:
+
+1. waits for the run and downloads the Archive action's archive. While the
+   managed export fails, every run ends FAILED, so the archive is the gate;
+2. refuses to sign unless the embedded `pilot-build.json` names the commit
+   Cloud built (and, for a push, the commit pushed), the production channel,
+   a universal release build and the production Sparkle key;
+3. exports with `method developer-id`, the release Developer ID certificate
+   (in a throwaway keychain) and the committed profile;
+4. verifies Developer ID authority and hardened runtime on the app, CLI, FFI
+   and Sparkle, the staging-marker check and `verify-macos-entitlements.sh`,
+   which launches the app;
+5. notarizes, staples, assesses with `spctl`, and uploads the stapled app as
+   a 14-day workflow artifact.
+
+It publishes nothing. It uses the `release` environment and the secrets
+release-apps.yml already has (`MACOS_CERTIFICATE_*`, `MACOS_NOTARY_ASC_*`,
+`SPARKLE_PUBLIC_ED_KEY`). Starting Cloud builds needs an App Store Connect
+key whose role reaches Xcode Cloud (App Manager or higher):
+`XCODE_CLOUD_ASC_KEY_P8_BASE64`, `XCODE_CLOUD_ASC_KEY_ID` and
+`XCODE_CLOUD_ASC_ISSUER_ID`, or, when those are unset, the notary key.
+`macos/ci_scripts/xcode-cloud-api.py` makes the App Store Connect calls with
+the standard library and `openssl`; no third-party client runs in the job
+that holds the Developer ID key.
+
 ## Trigger from automation
 
-GitHub Actions can use an App Store Connect API key stored in GitHub secrets
-to trigger builds, poll results, and retrieve artifacts. Native Xcode is only
-needed for initial onboarding. With the `asc` CLI authenticated:
+To start or inspect builds by hand, with the `asc` CLI authenticated:
 
 ```sh
 asc xcode-cloud run --workflow-id 59025125-A8A9-4F65-9D19-8E504576C729 \
@@ -63,8 +109,8 @@ asc xcode-cloud doctor --run-id BUILD_RUN_ID
 ```
 
 Verify the returned source commit. Publishing must wait for successful
-notarization and independent artifact verification. This pilot does not yet
-add a GitHub Actions trigger or replace the release workflow.
+notarization and independent artifact verification. The pilot does not
+replace the release workflow.
 
 ## Reproduce workflow setup
 
