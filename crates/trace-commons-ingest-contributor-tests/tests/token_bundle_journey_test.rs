@@ -1,6 +1,17 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use axum::http::StatusCode;
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+use axum::response::IntoResponse;
+use chrono::Utc;
+use trace_commons_ingest::test_support::witness_receipt_fixture as witness_receipt;
+use trace_commons_ingest::test_support::*;
+use trace_commons_server::trace_corpus_storage::TraceCorpusStore;
+
 /// The provider and witness signer are fixtures; ingest HTTP, encrypted storage,
 /// PostgreSQL processing, client approval pin and receipt journal are real.
 #[tokio::test]
@@ -170,7 +181,9 @@ async fn token_bundle_http_journey_recovers_a_lost_finalize_response() {
                     ))
                     .header(AUTHORIZATION, "Bearer token-a")
                     .header(CONTENT_TYPE, "application/json")
-                    .body(axum::body::Body::from(serde_json::to_vec(&envelope).unwrap()))
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&envelope).unwrap(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -191,7 +204,11 @@ async fn token_bundle_http_journey_recovers_a_lost_finalize_response() {
         2,
         "each unknown-bundle finalize spends the pre-check counter"
     );
-    configure_submit_rate_limits_for_test(&precheck_key, u32::MAX, SUBMIT_PER_PRINCIPAL_CONCURRENCY);
+    configure_submit_rate_limits_for_test(
+        &precheck_key,
+        u32::MAX,
+        SUBMIT_PER_PRINCIPAL_CONCURRENCY,
+    );
     let finalize_requests = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let finalize_seen = finalize_requests.clone();
     let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));

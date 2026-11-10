@@ -1,0 +1,48 @@
+[package]
+name = "trace-commons-ingest-contributor-tests"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+# These tests were written inside the AGPL ingest crate and keep its licence.
+license = "AGPL-3.0-or-later"
+repository.workspace = true
+publish = false
+description = "Test-only: the ingest service against the contributor's own client code"
+autotests = false
+
+# One test binary; each `tests/<name>.rs` is a module of it.
+[[test]]
+name = "it"
+path = "tests/it.rs"
+
+[features]
+default = []
+# The same build configurations the ingest crate's own tests run under. The
+# tests here read `cfg!(feature = "near-ai-staging")`, so the feature has to
+# exist in this package as well as be forwarded.
+near-ai-scorer = ["trace-commons-ingest/near-ai-scorer"]
+near-ai-staging = ["trace-commons-ingest/near-ai-staging"]
+
+# All dependencies are test-only; this package ships no library or binary.
+# `trace-commons-ingest`'s `test-support` feature must never reach a shipped
+# build: `scripts/ci/check-release-test-support.sh` refuses one that enables
+# it, and that script names this manifest as an allowed place.
+[dev-dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+ring = "0.17"
+secrecy = { version = "0.10", features = ["serde"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+trace-commons-contributor = { path = "../trace-commons-contributor" }
+trace-commons-ingest = { path = "../trace-commons-ingest", features = ["test-support"] }
+trace-commons-operator-client = { path = "../trace-commons-operator-client" }
+trace-commons-protocol = { path = "../trace-commons-protocol" }
+trace-commons-server = { path = "../trace-commons-server" }
+uuid = { version = "1", features = ["v4", "serde"] }

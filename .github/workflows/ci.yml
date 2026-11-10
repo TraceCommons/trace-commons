@@ -134,6 +134,16 @@ jobs:
         run: |
           scripts/ci/check-release-staging-feature.sh check
           scripts/ci/check-release-staging-feature.sh self-test
+      # Seconds, no build. The ingest crate's `test-support` feature exports
+      # its test fixtures to test packages outside the crate, and with them
+      # the levers that are otherwise `cfg(test)`-only (the NEAR AI
+      # introspection redirect among them). This refuses any release,
+      # packaging or deploy file or manifest that could turn it on outside a
+      # listed test package; the self-test seeds each violation.
+      - name: No shipped build enables the ingest test fixtures
+        run: |
+          scripts/ci/check-release-test-support.sh check
+          scripts/ci/check-release-test-support.sh self-test
       # Seconds, no build. The macOS Info.plist per bundle channel: a
       # production plist byte-identical to the one before the channel files,
       # a staging plist with only staging identity and feed.
@@ -948,6 +958,21 @@ jobs:
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest_bin
           TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_ingest_bin
+      # The one provisioning test that drives the contributor's own client
+      # code lives in `trace-commons-ingest-contributor-tests`, so the
+      # harness above does not depend on the contributor. Same database and
+      # build configuration as the step above, where it ran until then. A
+      # filter that matches nothing passes, so the step requires the test by
+      # name.
+      - name: NEAR AI capabilities v2 against the contributor's client
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test --locked -p trace-commons-ingest-contributor-tests --test it near_ai_provisioning_tests -- --test-threads=1 2>&1 | tee ingest-contributor-tests.log
+          grep -q 'open_sign_up::capabilities_v2_publishes_the_issuer_with_no_witness_and_the_client_signs_up_on_it ... ok' ingest-contributor-tests.log
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest_bin
+          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_ingest_bin
       # The named slices from `postgres-suites`, each on its own database
       # with only its own variables. After the whole-bin run, so that run
       # sees the same fresh server it always has; `!cancelled()` on each, so
@@ -979,9 +1004,15 @@ jobs:
         run: cargo test -p trace-commons-ingest --lib inference_connection_requires_explicit_account_session_selection -- --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_inference_connection_route
+      # In `trace-commons-ingest-contributor-tests` since the ingest crate
+      # stopped depending on the contributor to build its tests. A filter
+      # that matches nothing passes, so the step requires the test by name.
       - name: token bundle HTTP lost-response recovery
         if: ${{ !cancelled() }}
-        run: cargo test --locked -p trace-commons-ingest --lib token_bundle_http_journey
+        run: |
+          set -euo pipefail
+          cargo test --locked -p trace-commons-ingest-contributor-tests --test it token_bundle_http_journey 2>&1 | tee token-bundle-journey.log
+          grep -q 'token_bundle_http_journey_recovers_a_lost_finalize_response ... ok' token-bundle-journey.log
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_tokens
           TRACE_COMMONS_BUNDLE_SERVER_ID: journey-server
@@ -1052,7 +1083,7 @@ jobs:
         run: |
           dbus-run-session -- sh -eu -c '
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets
-            cargo test -p trace-commons-ingest --lib nearai_ceremony_pg_tests -- --ignored
+            cargo test -p trace-commons-ingest-contributor-tests --test it nearai_ceremony_pg_tests -- --ignored
           '
         env:
           TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest
@@ -1191,6 +1222,21 @@ jobs:
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest_bin_near_ai
           TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_ingest_bin_near_ai
+      # The one provisioning test that drives the contributor's own client
+      # code lives in `trace-commons-ingest-contributor-tests`, so the
+      # harness above does not depend on the contributor. Same database and
+      # build configuration as the step above, where it ran until then. A
+      # filter that matches nothing passes, so the step requires the test by
+      # name.
+      - name: NEAR AI capabilities v2 against the contributor's client (near-ai-scorer)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test --locked -p trace-commons-ingest-contributor-tests --features near-ai-scorer --test it near_ai_provisioning_tests -- --test-threads=1 2>&1 | tee ingest-contributor-tests-near-ai-scorer.log
+          grep -q 'open_sign_up::capabilities_v2_publishes_the_issuer_with_no_witness_and_the_client_signs_up_on_it ... ok' ingest-contributor-tests-near-ai-scorer.log
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest_bin_near_ai
+          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_ingest_bin_near_ai
       # The guard of `ingest-bin-postgres`, with the same floors: the
       # pipeline HTTP tests, the production assembly's end-to-end test among
       # them, commit to the `_pilot` database their harness creates.
@@ -1321,6 +1367,21 @@ jobs:
           grep -q 'open_sign_up::a_staging_build_signs_up_without_the_admission_ledger ... ok' staging-lib-tests.log
           grep -q 'open_sign_up::a_staging_build_admits_the_first_upload_without_the_admission_ledger ... ok' staging-lib-tests.log
           grep -q 'a_staging_build_never_offers_wallet_provisioning ... ok' staging-lib-tests.log
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest_bin_staging
+          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_ingest_bin_staging
+      # The one provisioning test that drives the contributor's own client
+      # code lives in `trace-commons-ingest-contributor-tests`, so the
+      # harness above does not depend on the contributor. Same database and
+      # build configuration as the step above, where it ran until then. A
+      # filter that matches nothing passes, so the step requires the test by
+      # name.
+      - name: NEAR AI capabilities v2 against the contributor's client (near-ai-staging)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test --locked -p trace-commons-ingest-contributor-tests --features near-ai-staging --test it near_ai_provisioning_tests -- --test-threads=1 2>&1 | tee ingest-contributor-tests-staging.log
+          grep -q 'open_sign_up::capabilities_v2_publishes_the_issuer_with_no_witness_and_the_client_signs_up_on_it ... ok' ingest-contributor-tests-staging.log
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest_bin_staging
           TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_ingest_bin_staging
