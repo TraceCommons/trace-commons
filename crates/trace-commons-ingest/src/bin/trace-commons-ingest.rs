@@ -52639,42 +52639,96 @@ async fn operational_metrics_handler(
     ))
 }
 
+/// Builds the operational Prometheus body: a `# HELP` and `# TYPE` header
+/// per gauge family, then its samples, every one labelled with the tenant
+/// storage ref first.
+struct PrometheusGauges<'a> {
+    body: String,
+    metric_count: usize,
+    tenant_storage_ref: &'a str,
+}
+
+impl<'a> PrometheusGauges<'a> {
+    fn new(tenant_storage_ref: &'a str) -> Self {
+        Self {
+            body: String::new(),
+            metric_count: 0,
+            tenant_storage_ref,
+        }
+    }
+
+    fn header(&mut self, name: &str, help: &str) {
+        self.body.push_str("# HELP ");
+        self.body.push_str(name);
+        self.body.push(' ');
+        self.body.push_str(help);
+        self.body.push('\n');
+        self.body.push_str("# TYPE ");
+        self.body.push_str(name);
+        self.body.push_str(" gauge\n");
+    }
+
+    fn sample(&mut self, name: &str, labels: &[(&str, &str)], value: usize) {
+        push_prometheus_gauge(&mut self.body, &mut self.metric_count, name, labels, value);
+    }
+
+    /// A family with one sample, labelled by tenant only.
+    fn tenant_gauge(&mut self, name: &str, help: &str, value: usize) {
+        self.header(name, help);
+        let tenant_storage_ref = self.tenant_storage_ref;
+        self.sample(name, &[("tenant_storage_ref", tenant_storage_ref)], value);
+    }
+
+    /// A family with one sample per value of `label`, in the order given.
+    fn labelled<'v>(
+        &mut self,
+        name: &str,
+        help: &str,
+        label: &str,
+        samples: impl IntoIterator<Item = (&'v str, usize)>,
+    ) {
+        self.header(name, help);
+        let tenant_storage_ref = self.tenant_storage_ref;
+        for (label_value, value) in samples {
+            self.sample(
+                name,
+                &[
+                    ("tenant_storage_ref", tenant_storage_ref),
+                    (label, label_value),
+                ],
+                value,
+            );
+        }
+    }
+
+    fn finish(self) -> (String, usize) {
+        (self.body, self.metric_count)
+    }
+}
+
 fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) -> (String, usize) {
-    let mut body = String::new();
-    let mut metric_count = 0usize;
-    body.push_str("# HELP trace_commons_operational_promotion_ready Whether operational promotion gates have no blockers.\n");
-    body.push_str("# TYPE trace_commons_operational_promotion_ready gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    let mut gauges = PrometheusGauges::new(&response.tenant_storage_ref);
+    gauges.tenant_gauge(
         "trace_commons_operational_promotion_ready",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Whether operational promotion gates have no blockers.",
         usize::from(response.promotion_gates.ready),
     );
-    body.push_str("# HELP trace_commons_operational_promotion_blocking_gates Count of blocking operational promotion gates.\n");
-    body.push_str("# TYPE trace_commons_operational_promotion_blocking_gates gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_promotion_blocking_gates",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Count of blocking operational promotion gates.",
         response.promotion_gates.blocking_count,
     );
-    body.push_str("# HELP trace_commons_operational_promotion_warning_gates Count of warning operational promotion gates.\n");
-    body.push_str("# TYPE trace_commons_operational_promotion_warning_gates gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_promotion_warning_gates",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Count of warning operational promotion gates.",
         response.promotion_gates.warning_count,
     );
-    body.push_str("# HELP trace_commons_operational_promotion_gate Individual operational promotion gate values by severity and gate name.\n");
-    body.push_str("# TYPE trace_commons_operational_promotion_gate gauge\n");
+    gauges.header(
+        "trace_commons_operational_promotion_gate",
+        "Individual operational promotion gate values by severity and gate name.",
+    );
     for gate in operational_summary_promotion_gate_metric_fields(response) {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
+        gauges.sample(
             "trace_commons_operational_promotion_gate",
             &[
                 ("tenant_storage_ref", &gate.tenant_storage_ref),
@@ -52686,202 +52740,178 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
     }
     let postgres_rls_diagnostics_available =
         response.promotion_gates.trace_corpus_rls_ready.is_some();
-    body.push_str("# HELP trace_commons_operational_postgres_rls_readiness Safe PostgreSQL RLS readiness flags by subcheck.\n");
-    body.push_str("# TYPE trace_commons_operational_postgres_rls_readiness gauge\n");
-    for (state, value) in [
-        (
-            "diagnostics_available",
-            usize::from(postgres_rls_diagnostics_available),
-        ),
-        (
-            "ready",
-            usize::from(
-                response
-                    .promotion_gates
-                    .trace_corpus_rls_ready
-                    .unwrap_or(false),
+    gauges.labelled(
+        "trace_commons_operational_postgres_rls_readiness",
+        "Safe PostgreSQL RLS readiness flags by subcheck.",
+        "state",
+        [
+            (
+                "diagnostics_available",
+                usize::from(postgres_rls_diagnostics_available),
             ),
-        ),
-        (
-            "policy_coverage",
-            usize::from(
-                postgres_rls_diagnostics_available
-                    && response
+            (
+                "ready",
+                usize::from(
+                    response
                         .promotion_gates
-                        .trace_corpus_rls_missing_policy_table_count
-                        == 0,
-            ),
-        ),
-        (
-            "rls_enabled",
-            usize::from(
-                postgres_rls_diagnostics_available
-                    && response
-                        .promotion_gates
-                        .trace_corpus_rls_disabled_table_count
-                        == 0,
-            ),
-        ),
-        (
-            "force_rls_enabled",
-            usize::from(
-                postgres_rls_diagnostics_available
-                    && response.promotion_gates.force_rls_disabled_table_count == 0,
-            ),
-        ),
-        (
-            "policy_expression_current",
-            usize::from(
-                postgres_rls_diagnostics_available
-                    && response
-                        .promotion_gates
-                        .trace_corpus_rls_expression_mismatch_table_count
-                        == 0,
-            ),
-        ),
-        (
-            "runtime_role_non_bypassing",
-            usize::from(
-                postgres_rls_diagnostics_available
-                    && !response.promotion_gates.current_role_bypasses_rls,
-            ),
-        ),
-        (
-            "runtime_role_not_table_owner",
-            usize::from(
-                postgres_rls_diagnostics_available
-                    && !response.promotion_gates.current_role_owns_trace_tables,
-            ),
-        ),
-        (
-            "runtime_role_expected_hash_configured",
-            usize::from(
-                response
-                    .promotion_gates
-                    .postgres_runtime_role_hash_configured,
-            ),
-        ),
-        (
-            "runtime_role_expected_hash_matched",
-            usize::from(
-                postgres_rls_diagnostics_available
-                    && response
-                        .promotion_gates
-                        .postgres_runtime_role_hash_matched
+                        .trace_corpus_rls_ready
                         .unwrap_or(false),
+                ),
             ),
-        ),
-        (
-            "tenant_context_transaction_local",
-            usize::from(
-                postgres_rls_diagnostics_available
-                    && response.promotion_gates.tenant_context_transaction_local,
+            (
+                "policy_coverage",
+                usize::from(
+                    postgres_rls_diagnostics_available
+                        && response
+                            .promotion_gates
+                            .trace_corpus_rls_missing_policy_table_count
+                            == 0,
+                ),
             ),
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_postgres_rls_readiness",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_postgres_rls_gap_tables Safe aggregate PostgreSQL RLS table-gap counts by gap kind.\n");
-    body.push_str("# TYPE trace_commons_operational_postgres_rls_gap_tables gauge\n");
-    for (gap, value) in [
-        (
-            "missing_policy_tables",
-            response
-                .promotion_gates
-                .trace_corpus_rls_missing_policy_table_count,
-        ),
-        (
-            "rls_disabled_tables",
-            response
-                .promotion_gates
-                .trace_corpus_rls_disabled_table_count,
-        ),
-        (
-            "force_rls_disabled_tables",
-            response.promotion_gates.force_rls_disabled_table_count,
-        ),
-        (
-            "policy_expression_mismatch_tables",
-            response
-                .promotion_gates
-                .trace_corpus_rls_expression_mismatch_table_count,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_postgres_rls_gap_tables",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("gap", gap),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_object_store_readiness Safe artifact object-store readiness flags.\n");
-    body.push_str("# TYPE trace_commons_operational_object_store_readiness gauge\n");
-    for (state, value) in [
-        ("configured", usize::from(response.object_store.configured)),
-        ("io_enabled", usize::from(response.object_store.io_enabled)),
-        (
-            "object_primary_eligible",
-            usize::from(response.object_store.object_primary_eligible),
-        ),
-        (
-            "plaintext_compatibility_allowed",
-            usize::from(response.object_store.plaintext_compatibility_allowed),
-        ),
-        (
-            "versioning_required",
-            usize::from(response.object_store.versioning_required),
-        ),
-        (
-            "object_versioning_supported",
-            usize::from(response.object_store.object_versioning_supported),
-        ),
-        (
-            "restore_after_delete_supported",
-            usize::from(response.object_store.restore_after_delete_supported),
-        ),
-        (
-            "remote_object_deleter_required",
-            usize::from(response.object_store.remote_object_deleter_required),
-        ),
-        (
-            "remote_object_deleter_configured",
-            usize::from(response.object_store.remote_object_deleter_configured),
-        ),
-        (
-            "remote_object_deleter_ready",
-            usize::from(response.object_store.remote_object_deleter_ready),
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_object_store_readiness",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
+            (
+                "rls_enabled",
+                usize::from(
+                    postgres_rls_diagnostics_available
+                        && response
+                            .promotion_gates
+                            .trace_corpus_rls_disabled_table_count
+                            == 0,
+                ),
+            ),
+            (
+                "force_rls_enabled",
+                usize::from(
+                    postgres_rls_diagnostics_available
+                        && response.promotion_gates.force_rls_disabled_table_count == 0,
+                ),
+            ),
+            (
+                "policy_expression_current",
+                usize::from(
+                    postgres_rls_diagnostics_available
+                        && response
+                            .promotion_gates
+                            .trace_corpus_rls_expression_mismatch_table_count
+                            == 0,
+                ),
+            ),
+            (
+                "runtime_role_non_bypassing",
+                usize::from(
+                    postgres_rls_diagnostics_available
+                        && !response.promotion_gates.current_role_bypasses_rls,
+                ),
+            ),
+            (
+                "runtime_role_not_table_owner",
+                usize::from(
+                    postgres_rls_diagnostics_available
+                        && !response.promotion_gates.current_role_owns_trace_tables,
+                ),
+            ),
+            (
+                "runtime_role_expected_hash_configured",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .postgres_runtime_role_hash_configured,
+                ),
+            ),
+            (
+                "runtime_role_expected_hash_matched",
+                usize::from(
+                    postgres_rls_diagnostics_available
+                        && response
+                            .promotion_gates
+                            .postgres_runtime_role_hash_matched
+                            .unwrap_or(false),
+                ),
+            ),
+            (
+                "tenant_context_transaction_local",
+                usize::from(
+                    postgres_rls_diagnostics_available
+                        && response.promotion_gates.tenant_context_transaction_local,
+                ),
+            ),
+        ],
+    );
+    gauges.labelled(
+        "trace_commons_operational_postgres_rls_gap_tables",
+        "Safe aggregate PostgreSQL RLS table-gap counts by gap kind.",
+        "gap",
+        [
+            (
+                "missing_policy_tables",
+                response
+                    .promotion_gates
+                    .trace_corpus_rls_missing_policy_table_count,
+            ),
+            (
+                "rls_disabled_tables",
+                response
+                    .promotion_gates
+                    .trace_corpus_rls_disabled_table_count,
+            ),
+            (
+                "force_rls_disabled_tables",
+                response.promotion_gates.force_rls_disabled_table_count,
+            ),
+            (
+                "policy_expression_mismatch_tables",
+                response
+                    .promotion_gates
+                    .trace_corpus_rls_expression_mismatch_table_count,
+            ),
+        ],
+    );
+    gauges.labelled(
+        "trace_commons_operational_object_store_readiness",
+        "Safe artifact object-store readiness flags.",
+        "state",
+        [
+            ("configured", usize::from(response.object_store.configured)),
+            ("io_enabled", usize::from(response.object_store.io_enabled)),
+            (
+                "object_primary_eligible",
+                usize::from(response.object_store.object_primary_eligible),
+            ),
+            (
+                "plaintext_compatibility_allowed",
+                usize::from(response.object_store.plaintext_compatibility_allowed),
+            ),
+            (
+                "versioning_required",
+                usize::from(response.object_store.versioning_required),
+            ),
+            (
+                "object_versioning_supported",
+                usize::from(response.object_store.object_versioning_supported),
+            ),
+            (
+                "restore_after_delete_supported",
+                usize::from(response.object_store.restore_after_delete_supported),
+            ),
+            (
+                "remote_object_deleter_required",
+                usize::from(response.object_store.remote_object_deleter_required),
+            ),
+            (
+                "remote_object_deleter_configured",
+                usize::from(response.object_store.remote_object_deleter_configured),
+            ),
+            (
+                "remote_object_deleter_ready",
+                usize::from(response.object_store.remote_object_deleter_ready),
+            ),
+        ],
+    );
     if let Some(object_store_name) = response.object_store.object_store_name.as_deref() {
-        body.push_str("# HELP trace_commons_operational_object_store_alias Configured safe artifact object-store alias.\n");
-        body.push_str("# TYPE trace_commons_operational_object_store_alias gauge\n");
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
+        gauges.header(
+            "trace_commons_operational_object_store_alias",
+            "Configured safe artifact object-store alias.",
+        );
+        gauges.sample(
             "trace_commons_operational_object_store_alias",
             &[
                 ("tenant_storage_ref", &response.tenant_storage_ref),
@@ -52890,22 +52920,22 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             1,
         );
     }
-    body.push_str("# HELP trace_commons_operational_ranking_worker_actionable_skips Count of ranking worker risk or ineligible skips that need operator review.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_worker_actionable_skips gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.header(
+        "trace_commons_operational_ranking_worker_actionable_skips",
+        "Count of ranking worker risk or ineligible skips that need operator review.",
+    );
+    gauges.sample(
         "trace_commons_operational_ranking_worker_actionable_skips",
         &[("tenant_storage_ref", &response.tenant_storage_ref)],
         response
             .promotion_gates
             .ranking_worker_run_actionable_skip_count,
     );
-    body.push_str("# HELP trace_commons_operational_withdrawal_completion_pending Whether persisted source-session withdrawals need completion for this tenant.\n");
-    body.push_str("# TYPE trace_commons_operational_withdrawal_completion_pending gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.header(
+        "trace_commons_operational_withdrawal_completion_pending",
+        "Whether persisted source-session withdrawals need completion for this tenant.",
+    );
+    gauges.sample(
         "trace_commons_operational_withdrawal_completion_pending",
         &[("tenant_storage_ref", &response.tenant_storage_ref)],
         usize::from(
@@ -52914,140 +52944,104 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
                 .withdrawal_completion_pending,
         ),
     );
-    body.push_str("# HELP trace_commons_operational_revocation_propagation_latest_run Latest audited revocation-propagation worker counts by state.\n");
-    body.push_str("# TYPE trace_commons_operational_revocation_propagation_latest_run gauge\n");
-    for (state, value) in [
-        (
-            "recorded",
-            usize::from(response.revocation_propagation.latest_run_recorded),
-        ),
-        (
-            "dry_run",
-            usize::from(response.revocation_propagation.latest_run_dry_run),
-        ),
-        (
-            "checked",
-            response.revocation_propagation.latest_checked_count,
-        ),
-        (
-            "completed",
-            response.revocation_propagation.latest_completed_count,
-        ),
-        (
-            "failed",
-            response.revocation_propagation.latest_failed_count,
-        ),
-        (
-            "skipped",
-            response.revocation_propagation.latest_skipped_count,
-        ),
-        (
-            "pending",
-            response.revocation_propagation.latest_pending_count,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_revocation_propagation_latest_run",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_revocation_propagation_readiness Safe revocation-propagation infrastructure readiness flags.\n");
-    body.push_str("# TYPE trace_commons_operational_revocation_propagation_readiness gauge\n");
-    for (state, value) in [
-        (
-            "worker_cache_invalidator_required",
-            usize::from(
-                response
-                    .revocation_propagation
-                    .worker_cache_invalidator_required,
+    gauges.labelled(
+        "trace_commons_operational_revocation_propagation_latest_run",
+        "Latest audited revocation-propagation worker counts by state.",
+        "state",
+        [
+            (
+                "recorded",
+                usize::from(response.revocation_propagation.latest_run_recorded),
             ),
-        ),
-        (
-            "worker_cache_invalidator_configured",
-            usize::from(
-                response
-                    .revocation_propagation
-                    .worker_cache_invalidator_configured,
+            (
+                "dry_run",
+                usize::from(response.revocation_propagation.latest_run_dry_run),
             ),
-        ),
-        (
-            "worker_cache_invalidator_ready",
-            usize::from(
-                response
-                    .revocation_propagation
-                    .worker_cache_invalidator_ready,
+            (
+                "checked",
+                response.revocation_propagation.latest_checked_count,
             ),
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_revocation_propagation_readiness",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_rollout_smoke_missing_evidence Count of required rollout smoke checks without captured rehearsal evidence.\n");
-    body.push_str("# TYPE trace_commons_operational_rollout_smoke_missing_evidence gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+            (
+                "completed",
+                response.revocation_propagation.latest_completed_count,
+            ),
+            (
+                "failed",
+                response.revocation_propagation.latest_failed_count,
+            ),
+            (
+                "skipped",
+                response.revocation_propagation.latest_skipped_count,
+            ),
+            (
+                "pending",
+                response.revocation_propagation.latest_pending_count,
+            ),
+        ],
+    );
+    gauges.labelled(
+        "trace_commons_operational_revocation_propagation_readiness",
+        "Safe revocation-propagation infrastructure readiness flags.",
+        "state",
+        [
+            (
+                "worker_cache_invalidator_required",
+                usize::from(
+                    response
+                        .revocation_propagation
+                        .worker_cache_invalidator_required,
+                ),
+            ),
+            (
+                "worker_cache_invalidator_configured",
+                usize::from(
+                    response
+                        .revocation_propagation
+                        .worker_cache_invalidator_configured,
+                ),
+            ),
+            (
+                "worker_cache_invalidator_ready",
+                usize::from(
+                    response
+                        .revocation_propagation
+                        .worker_cache_invalidator_ready,
+                ),
+            ),
+        ],
+    );
+    gauges.tenant_gauge(
         "trace_commons_operational_rollout_smoke_missing_evidence",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Count of required rollout smoke checks without captured rehearsal evidence.",
         response.rollout_smoke.missing_evidence_count,
     );
-    body.push_str("# HELP trace_commons_operational_rollout_smoke_recorded_evidence Count of required rollout smoke checks with captured rehearsal evidence.\n");
-    body.push_str("# TYPE trace_commons_operational_rollout_smoke_recorded_evidence gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_rollout_smoke_recorded_evidence",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Count of required rollout smoke checks with captured rehearsal evidence.",
         response.rollout_smoke.recorded_evidence_count,
     );
-    body.push_str("# HELP trace_commons_operational_rollout_smoke_passed_evidence Count of required rollout smoke checks whose latest captured rehearsal evidence passed.\n");
-    body.push_str("# TYPE trace_commons_operational_rollout_smoke_passed_evidence gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_rollout_smoke_passed_evidence",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Count of required rollout smoke checks whose latest captured rehearsal evidence passed.",
         response.rollout_smoke.passed_evidence_count,
     );
-    body.push_str("# HELP trace_commons_operational_rollout_smoke_failed_evidence Count of required rollout smoke checks whose latest captured rehearsal evidence failed.\n");
-    body.push_str("# TYPE trace_commons_operational_rollout_smoke_failed_evidence gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_rollout_smoke_failed_evidence",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Count of required rollout smoke checks whose latest captured rehearsal evidence failed.",
         response.rollout_smoke.failed_evidence_count,
     );
-    body.push_str("# HELP trace_commons_operational_rollout_smoke_stale_evidence Count of required rollout smoke checks whose latest captured rehearsal evidence is too old.\n");
-    body.push_str("# TYPE trace_commons_operational_rollout_smoke_stale_evidence gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_rollout_smoke_stale_evidence",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Count of required rollout smoke checks whose latest captured rehearsal evidence is too old.",
         response.rollout_smoke.stale_evidence_count,
     );
-    body.push_str("# HELP trace_commons_operational_rollout_smoke_check Latest rollout-smoke evidence state for each required check.\n");
-    body.push_str("# TYPE trace_commons_operational_rollout_smoke_check gauge\n");
+    gauges.header(
+        "trace_commons_operational_rollout_smoke_check",
+        "Latest rollout-smoke evidence state for each required check.",
+    );
     for check_name in &response.rollout_smoke.required_checks {
         let check_state = rollout_smoke_check_metric_state(&response.rollout_smoke, check_name);
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
+        gauges.sample(
             "trace_commons_operational_rollout_smoke_check",
             &[
                 ("tenant_storage_ref", &response.tenant_storage_ref),
@@ -53057,76 +53051,48 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             1,
         );
     }
-    body.push_str("# HELP trace_commons_operational_submissions_total Total tenant submissions visible to operational summary.\n");
-    body.push_str("# TYPE trace_commons_operational_submissions_total gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_submissions_total",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Total tenant submissions visible to operational summary.",
         response.submissions.total,
     );
-    body.push_str(
-        "# HELP trace_commons_operational_submissions_by_status Submission counts by corpus status.\n",
+    gauges.labelled(
+        "trace_commons_operational_submissions_by_status",
+        "Submission counts by corpus status.",
+        "status",
+        [
+            ("accepted", response.submissions.accepted),
+            ("quarantined", response.submissions.quarantined),
+            ("rejected", response.submissions.rejected),
+            ("revoked", response.submissions.revoked),
+            ("expired", response.submissions.expired),
+            ("purged", response.submissions.purged),
+        ],
     );
-    body.push_str("# TYPE trace_commons_operational_submissions_by_status gauge\n");
-    for (status, value) in [
-        ("accepted", response.submissions.accepted),
-        ("quarantined", response.submissions.quarantined),
-        ("rejected", response.submissions.rejected),
-        ("revoked", response.submissions.revoked),
-        ("expired", response.submissions.expired),
-        ("purged", response.submissions.purged),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_submissions_by_status",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("status", status),
-            ],
-            value,
-        );
-    }
-    body.push_str(
-        "# HELP trace_commons_operational_review_sla Review queue pressure counts by SLA state.\n",
+    gauges.labelled(
+        "trace_commons_operational_review_sla",
+        "Review queue pressure counts by SLA state.",
+        "state",
+        [
+            ("quarantined_total", response.review_sla.quarantined_total),
+            ("fresh", response.review_sla.fresh),
+            ("due", response.review_sla.due),
+            ("overdue", response.review_sla.overdue),
+            ("urgent", response.review_sla.urgent),
+            ("assigned", response.review_sla.assigned),
+            ("expired_leases", response.review_sla.expired_leases),
+        ],
     );
-    body.push_str("# TYPE trace_commons_operational_review_sla gauge\n");
-    for (state, value) in [
-        ("quarantined_total", response.review_sla.quarantined_total),
-        ("fresh", response.review_sla.fresh),
-        ("due", response.review_sla.due),
-        ("overdue", response.review_sla.overdue),
-        ("urgent", response.review_sla.urgent),
-        ("assigned", response.review_sla.assigned),
-        ("expired_leases", response.review_sla.expired_leases),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_review_sla",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_export_jobs_total Export job rows visible to operational summary.\n");
-    body.push_str("# TYPE trace_commons_operational_export_jobs_total gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_export_jobs_total",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Export job rows visible to operational summary.",
         response.exports.job_count,
     );
-    body.push_str("# HELP trace_commons_operational_export_infrastructure Safe export-worker infrastructure readiness flags.\n");
-    body.push_str("# TYPE trace_commons_operational_export_infrastructure gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.header(
+        "trace_commons_operational_export_infrastructure",
+        "Safe export-worker infrastructure readiness flags.",
+    );
+    gauges.sample(
         "trace_commons_operational_export_infrastructure",
         &[
             ("tenant_storage_ref", &response.tenant_storage_ref),
@@ -53134,20 +53100,16 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         ],
         usize::from(response.exports.scheduler_enabled),
     );
-    body.push_str("# HELP trace_commons_operational_retention_jobs_total Retention job rows visible to operational summary.\n");
-    body.push_str("# TYPE trace_commons_operational_retention_jobs_total gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_retention_jobs_total",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Retention job rows visible to operational summary.",
         response.retention.job_count,
     );
-    body.push_str("# HELP trace_commons_operational_retention_infrastructure Safe retention-worker infrastructure readiness flags.\n");
-    body.push_str("# TYPE trace_commons_operational_retention_infrastructure gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.header(
+        "trace_commons_operational_retention_infrastructure",
+        "Safe retention-worker infrastructure readiness flags.",
+    );
+    gauges.sample(
         "trace_commons_operational_retention_infrastructure",
         &[
             ("tenant_storage_ref", &response.tenant_storage_ref),
@@ -53155,299 +53117,227 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         ],
         usize::from(response.retention.scheduler_enabled),
     );
-    body.push_str("# HELP trace_commons_operational_analytics_release_readiness Safe analytics broad-release readiness flags.\n");
-    body.push_str("# TYPE trace_commons_operational_analytics_release_readiness gauge\n");
-    for (state, value) in [
-        (
-            "min_cell_count_configured",
-            usize::from(response.analytics.min_cell_count_configured),
-        ),
-        (
-            "broad_release_noise_configured",
-            usize::from(response.analytics.broad_release_noise_configured),
-        ),
-        (
-            "broad_release_ready",
-            usize::from(response.analytics.broad_release_ready),
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_analytics_release_readiness",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
+    gauges.labelled(
+        "trace_commons_operational_analytics_release_readiness",
+        "Safe analytics broad-release readiness flags.",
+        "state",
+        [
+            (
+                "min_cell_count_configured",
+                usize::from(response.analytics.min_cell_count_configured),
+            ),
+            (
+                "broad_release_noise_configured",
+                usize::from(response.analytics.broad_release_noise_configured),
+            ),
+            (
+                "broad_release_ready",
+                usize::from(response.analytics.broad_release_ready),
+            ),
+        ],
+    );
     if let Some(max_delta) = response.analytics.broad_release_noise_max_delta {
-        body.push_str("# HELP trace_commons_operational_analytics_noise_max_delta Configured analytics broad-release count-noise max delta.\n");
-        body.push_str("# TYPE trace_commons_operational_analytics_noise_max_delta gauge\n");
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
+        gauges.header(
+            "trace_commons_operational_analytics_noise_max_delta",
+            "Configured analytics broad-release count-noise max delta.",
+        );
+        gauges.sample(
             "trace_commons_operational_analytics_noise_max_delta",
             &[("tenant_storage_ref", &response.tenant_storage_ref)],
             max_delta,
         );
     }
-    body.push_str(
-        "# HELP trace_commons_operational_vector_entries Vector-entry counts by operational state.\n",
+    gauges.labelled(
+        "trace_commons_operational_vector_entries",
+        "Vector-entry counts by operational state.",
+        "state",
+        [
+            ("total", response.vectors.entry_count),
+            ("active", response.vectors.active_entries),
+            ("invalidated", response.vectors.invalidated_entries),
+            ("deleted", response.vectors.deleted_entries),
+            (
+                "accepted_current_derived",
+                response.vectors.accepted_current_derived,
+            ),
+            (
+                "accepted_current_with_active_vector",
+                response.vectors.accepted_current_derived_with_active_vector,
+            ),
+            (
+                "nearest_neighbor_policy_gaps",
+                response.vectors.nearest_neighbor_policy_gap_count,
+            ),
+        ],
     );
-    body.push_str("# TYPE trace_commons_operational_vector_entries gauge\n");
-    for (state, value) in [
-        ("total", response.vectors.entry_count),
-        ("active", response.vectors.active_entries),
-        ("invalidated", response.vectors.invalidated_entries),
-        ("deleted", response.vectors.deleted_entries),
-        (
-            "accepted_current_derived",
-            response.vectors.accepted_current_derived,
-        ),
-        (
-            "accepted_current_with_active_vector",
-            response.vectors.accepted_current_derived_with_active_vector,
-        ),
-        (
-            "nearest_neighbor_policy_gaps",
-            response.vectors.nearest_neighbor_policy_gap_count,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_vector_entries",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_vector_infrastructure Safe vector infrastructure readiness flags.\n");
-    body.push_str("# TYPE trace_commons_operational_vector_infrastructure gauge\n");
-    for (state, value) in [
-        (
-            "private_embedder_configured",
-            usize::from(response.vectors.private_embedder_configured),
-        ),
-        (
-            "private_embedder_required",
-            usize::from(response.vectors.private_embedder_required),
-        ),
-        (
-            "private_searcher_configured",
-            usize::from(response.vectors.private_searcher_configured),
-        ),
-        (
-            "private_searcher_required",
-            usize::from(response.vectors.private_searcher_required),
-        ),
-        (
-            "scheduler_enabled",
-            usize::from(response.vectors.scheduler_enabled),
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_vector_infrastructure",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str(
-        "# HELP trace_commons_operational_benchmarks Benchmark lifecycle counts by operational state.\n",
+    gauges.labelled(
+        "trace_commons_operational_vector_infrastructure",
+        "Safe vector infrastructure readiness flags.",
+        "state",
+        [
+            (
+                "private_embedder_configured",
+                usize::from(response.vectors.private_embedder_configured),
+            ),
+            (
+                "private_embedder_required",
+                usize::from(response.vectors.private_embedder_required),
+            ),
+            (
+                "private_searcher_configured",
+                usize::from(response.vectors.private_searcher_configured),
+            ),
+            (
+                "private_searcher_required",
+                usize::from(response.vectors.private_searcher_required),
+            ),
+            (
+                "scheduler_enabled",
+                usize::from(response.vectors.scheduler_enabled),
+            ),
+        ],
     );
-    body.push_str("# TYPE trace_commons_operational_benchmarks gauge\n");
-    for (state, value) in [
-        ("total", response.benchmarks.total_artifact_count),
-        (
-            "registry_submitter_configured",
-            usize::from(response.benchmarks.registry_submitter_configured),
-        ),
-        (
-            "registry_submitter_auth_configured",
-            usize::from(response.benchmarks.registry_submitter_auth_configured),
-        ),
-        (
-            "registry_confirmer_configured",
-            usize::from(response.benchmarks.registry_confirmer_configured),
-        ),
-        (
-            "registry_confirmer_auth_configured",
-            usize::from(response.benchmarks.registry_confirmer_auth_configured),
-        ),
-        (
-            "registry_adapter_auth_required",
-            usize::from(response.benchmarks.registry_require_adapter_auth),
-        ),
-        (
-            "external_evaluator_configured",
-            usize::from(response.benchmarks.external_evaluator_configured),
-        ),
-        ("publishable", response.benchmarks.publishable_count),
-        (
-            "publishable_without_external_evaluator",
-            response
-                .benchmarks
-                .publishable_without_external_evaluator_count,
-        ),
-        (
-            "registry_outbox_pending_without_submitter",
-            response
-                .benchmarks
-                .registry_outbox_pending_without_submitter_count,
-        ),
-        (
-            "registry_outbox_pending_without_submitter_auth",
-            response
-                .benchmarks
-                .registry_outbox_pending_without_submitter_auth_count,
-        ),
-        (
-            "registry_outbox_submitted_without_confirmer",
-            response
-                .benchmarks
-                .registry_outbox_submitted_without_confirmer_count,
-        ),
-        (
-            "registry_outbox_submitted_without_confirmer_auth",
-            response
-                .benchmarks
-                .registry_outbox_submitted_without_confirmer_auth_count,
-        ),
-        (
-            "registry_outbox_failed",
-            response.benchmarks.registry_outbox_failed_count,
-        ),
-        ("published", response.benchmarks.published_count),
-        ("revoked", response.benchmarks.revoked_count),
-        (
-            "external_registry_adapter_gap",
-            response.benchmarks.external_registry_adapter_gap_count,
-        ),
-        (
-            "external_registry_invalidation_gap",
-            response.benchmarks.external_registry_invalidation_gap_count,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_benchmarks",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str(
-        "# HELP trace_commons_operational_ranking_models Ranking model counts by readiness state.\n",
+    gauges.labelled(
+        "trace_commons_operational_benchmarks",
+        "Benchmark lifecycle counts by operational state.",
+        "state",
+        [
+            ("total", response.benchmarks.total_artifact_count),
+            (
+                "registry_submitter_configured",
+                usize::from(response.benchmarks.registry_submitter_configured),
+            ),
+            (
+                "registry_submitter_auth_configured",
+                usize::from(response.benchmarks.registry_submitter_auth_configured),
+            ),
+            (
+                "registry_confirmer_configured",
+                usize::from(response.benchmarks.registry_confirmer_configured),
+            ),
+            (
+                "registry_confirmer_auth_configured",
+                usize::from(response.benchmarks.registry_confirmer_auth_configured),
+            ),
+            (
+                "registry_adapter_auth_required",
+                usize::from(response.benchmarks.registry_require_adapter_auth),
+            ),
+            (
+                "external_evaluator_configured",
+                usize::from(response.benchmarks.external_evaluator_configured),
+            ),
+            ("publishable", response.benchmarks.publishable_count),
+            (
+                "publishable_without_external_evaluator",
+                response
+                    .benchmarks
+                    .publishable_without_external_evaluator_count,
+            ),
+            (
+                "registry_outbox_pending_without_submitter",
+                response
+                    .benchmarks
+                    .registry_outbox_pending_without_submitter_count,
+            ),
+            (
+                "registry_outbox_pending_without_submitter_auth",
+                response
+                    .benchmarks
+                    .registry_outbox_pending_without_submitter_auth_count,
+            ),
+            (
+                "registry_outbox_submitted_without_confirmer",
+                response
+                    .benchmarks
+                    .registry_outbox_submitted_without_confirmer_count,
+            ),
+            (
+                "registry_outbox_submitted_without_confirmer_auth",
+                response
+                    .benchmarks
+                    .registry_outbox_submitted_without_confirmer_auth_count,
+            ),
+            (
+                "registry_outbox_failed",
+                response.benchmarks.registry_outbox_failed_count,
+            ),
+            ("published", response.benchmarks.published_count),
+            ("revoked", response.benchmarks.revoked_count),
+            (
+                "external_registry_adapter_gap",
+                response.benchmarks.external_registry_adapter_gap_count,
+            ),
+            (
+                "external_registry_invalidation_gap",
+                response.benchmarks.external_registry_invalidation_gap_count,
+            ),
+        ],
     );
-    body.push_str("# TYPE trace_commons_operational_ranking_models gauge\n");
-    for (state, value) in [
-        ("active", response.ranking.active_model_count),
-        ("monitored", response.ranking.monitored_model_count),
-        ("at_risk", response.ranking.at_risk_model_count),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_ranking_models",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_ranking_backtests Ranking model-target backtest counts by outcome.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_backtests gauge\n");
-    for (state, value) in [
-        ("evaluated", response.ranking.backtest_model_target_count),
-        (
-            "passing",
-            response.ranking.passing_backtest_model_target_count,
-        ),
-        (
-            "failing",
-            response.ranking.failing_backtest_model_target_count,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_ranking_backtests",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str(
-        "# HELP trace_commons_operational_ranking_adjudication Ranking label-adjudication issue counts.\n",
+    gauges.labelled(
+        "trace_commons_operational_ranking_models",
+        "Ranking model counts by readiness state.",
+        "state",
+        [
+            ("active", response.ranking.active_model_count),
+            ("monitored", response.ranking.monitored_model_count),
+            ("at_risk", response.ranking.at_risk_model_count),
+        ],
     );
-    body.push_str("# TYPE trace_commons_operational_ranking_adjudication gauge\n");
-    for (state, value) in [
-        (
-            "issue_groups",
-            response.ranking.adjudication_issue_group_count,
-        ),
-        (
-            "disputed_label_groups",
-            response.ranking.unresolved_disputed_label_group_count,
-        ),
-        (
-            "absolute_conflicts",
-            response.ranking.conflicting_absolute_label_group_count,
-        ),
-        (
-            "preference_conflicts",
-            response.ranking.conflicting_preference_pair_count,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_ranking_adjudication",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_ranking_credit_readiness Ranking-derived credit event counts by readiness state.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_credit_readiness gauge\n");
-    for (state, value) in [
-        ("pending", response.ranking.pending_credit_event_count),
-        ("ready", response.ranking.ready_credit_event_count),
-        ("blocked", response.ranking.blocked_credit_event_count),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_ranking_credit_readiness",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_ranking_evaluator_readiness Ranking evaluator adapter readiness flags.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_evaluator_readiness gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.labelled(
+        "trace_commons_operational_ranking_backtests",
+        "Ranking model-target backtest counts by outcome.",
+        "state",
+        [
+            ("evaluated", response.ranking.backtest_model_target_count),
+            (
+                "passing",
+                response.ranking.passing_backtest_model_target_count,
+            ),
+            (
+                "failing",
+                response.ranking.failing_backtest_model_target_count,
+            ),
+        ],
+    );
+    gauges.labelled(
+        "trace_commons_operational_ranking_adjudication",
+        "Ranking label-adjudication issue counts.",
+        "state",
+        [
+            (
+                "issue_groups",
+                response.ranking.adjudication_issue_group_count,
+            ),
+            (
+                "disputed_label_groups",
+                response.ranking.unresolved_disputed_label_group_count,
+            ),
+            (
+                "absolute_conflicts",
+                response.ranking.conflicting_absolute_label_group_count,
+            ),
+            (
+                "preference_conflicts",
+                response.ranking.conflicting_preference_pair_count,
+            ),
+        ],
+    );
+    gauges.labelled(
+        "trace_commons_operational_ranking_credit_readiness",
+        "Ranking-derived credit event counts by readiness state.",
+        "state",
+        [
+            ("pending", response.ranking.pending_credit_event_count),
+            ("ready", response.ranking.ready_credit_event_count),
+            ("blocked", response.ranking.blocked_credit_event_count),
+        ],
+    );
+    gauges.header(
+        "trace_commons_operational_ranking_evaluator_readiness",
+        "Ranking evaluator adapter readiness flags.",
+    );
+    gauges.sample(
         "trace_commons_operational_ranking_evaluator_readiness",
         &[
             ("tenant_storage_ref", &response.tenant_storage_ref),
@@ -53455,19 +53345,15 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         ],
         usize::from(response.ranking.process_evaluator_configured),
     );
-    body.push_str("# HELP trace_commons_operational_ranking_calibration_dataset_manifest_conflicts Active ranking calibration dataset manifest conflict count.\n");
-    body.push_str(
-        "# TYPE trace_commons_operational_ranking_calibration_dataset_manifest_conflicts gauge\n",
-    );
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_ranking_calibration_dataset_manifest_conflicts",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Active ranking calibration dataset manifest conflict count.",
         response.ranking.calibration_dataset_manifest_conflict_count,
     );
-    body.push_str("# HELP trace_commons_operational_ranking_reason_counts Ranking readiness reason-code counts by report.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_reason_counts gauge\n");
+    gauges.header(
+        "trace_commons_operational_ranking_reason_counts",
+        "Ranking readiness reason-code counts by report.",
+    );
     for (report, reason_counts) in [
         ("model_risk", &response.ranking.risk_code_counts),
         ("backtest", &response.ranking.backtest_reason_counts),
@@ -53478,9 +53364,7 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         ),
     ] {
         for (reason, value) in reason_counts {
-            push_prometheus_gauge(
-                &mut body,
-                &mut metric_count,
+            gauges.sample(
                 "trace_commons_operational_ranking_reason_counts",
                 &[
                     ("tenant_storage_ref", &response.tenant_storage_ref),
@@ -53491,34 +53375,26 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             );
         }
     }
-    body.push_str("# HELP trace_commons_operational_ranking_worker_runs Ranking worker-run counts by operational status.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_worker_runs gauge\n");
-    for (status, value) in [
-        ("running", response.ranking.running_worker_run_count),
-        (
-            "stale_running",
-            response.ranking.stale_running_worker_run_count,
-        ),
-        ("failed", response.ranking.failed_worker_run_count),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_ranking_worker_runs",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("status", status),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_ranking_worker_runs_by_kind Ranking worker-run counts by automation kind and operational status.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_worker_runs_by_kind gauge\n");
+    gauges.labelled(
+        "trace_commons_operational_ranking_worker_runs",
+        "Ranking worker-run counts by operational status.",
+        "status",
+        [
+            ("running", response.ranking.running_worker_run_count),
+            (
+                "stale_running",
+                response.ranking.stale_running_worker_run_count,
+            ),
+            ("failed", response.ranking.failed_worker_run_count),
+        ],
+    );
+    gauges.header(
+        "trace_commons_operational_ranking_worker_runs_by_kind",
+        "Ranking worker-run counts by automation kind and operational status.",
+    );
     for (run_kind, status_counts) in &response.ranking.worker_run_kind_status_counts {
         for (status, value) in status_counts {
-            push_prometheus_gauge(
-                &mut body,
-                &mut metric_count,
+            gauges.sample(
                 "trace_commons_operational_ranking_worker_runs_by_kind",
                 &[
                     ("tenant_storage_ref", &response.tenant_storage_ref),
@@ -53529,45 +53405,37 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             );
         }
     }
-    body.push_str("# HELP trace_commons_operational_ranking_worker_run_totals Ranking worker-run aggregate item counts by state.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_worker_run_totals gauge\n");
-    for (state, value) in [
-        ("checked", response.ranking.worker_run_checked_total),
-        ("succeeded", response.ranking.worker_run_succeeded_total),
-        (
-            "skipped_existing",
-            response.ranking.worker_run_skipped_existing_total,
-        ),
-        (
-            "skipped_model_risk",
-            response.ranking.worker_run_skipped_model_risk_total,
-        ),
-        (
-            "skipped_ineligible",
-            response.ranking.worker_run_skipped_ineligible_total,
-        ),
-        (
-            "pending_after",
-            response.ranking.worker_run_pending_after_total,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_ranking_worker_run_totals",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_ranking_worker_run_reason_counts Ranking worker-run skip and blocker reason-code counts.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_worker_run_reason_counts gauge\n");
+    gauges.labelled(
+        "trace_commons_operational_ranking_worker_run_totals",
+        "Ranking worker-run aggregate item counts by state.",
+        "state",
+        [
+            ("checked", response.ranking.worker_run_checked_total),
+            ("succeeded", response.ranking.worker_run_succeeded_total),
+            (
+                "skipped_existing",
+                response.ranking.worker_run_skipped_existing_total,
+            ),
+            (
+                "skipped_model_risk",
+                response.ranking.worker_run_skipped_model_risk_total,
+            ),
+            (
+                "skipped_ineligible",
+                response.ranking.worker_run_skipped_ineligible_total,
+            ),
+            (
+                "pending_after",
+                response.ranking.worker_run_pending_after_total,
+            ),
+        ],
+    );
+    gauges.header(
+        "trace_commons_operational_ranking_worker_run_reason_counts",
+        "Ranking worker-run skip and blocker reason-code counts.",
+    );
     for (reason, value) in &response.ranking.worker_run_reason_counts {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
+        gauges.sample(
             "trace_commons_operational_ranking_worker_run_reason_counts",
             &[
                 ("tenant_storage_ref", &response.tenant_storage_ref),
@@ -53576,352 +53444,312 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             *value,
         );
     }
-    body.push_str("# HELP trace_commons_operational_near_credit_outbox NEAR non-transferable credit receipt outbox counts by operational state.\n");
-    body.push_str("# TYPE trace_commons_operational_near_credit_outbox gauge\n");
-    for (state, value) in [
-        ("total", response.near_credit.item_count),
-        ("disabled", response.near_credit.disabled_count),
-        ("pending", response.near_credit.pending_count),
-        ("submitted", response.near_credit.submitted_count),
-        ("confirmed", response.near_credit.confirmed_count),
-        ("failed", response.near_credit.failed_count),
-        (
-            "pending_without_submitter",
-            response.near_credit.pending_without_submitter_count,
-        ),
-        (
-            "submitted_without_confirmer",
-            response.near_credit.submitted_without_confirmer_count,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_near_credit_outbox",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_near_credit_adapters Safe NEAR credit adapter readiness flags.\n");
-    body.push_str("# TYPE trace_commons_operational_near_credit_adapters gauge\n");
-    for (state, value) in [
-        (
-            "submitter_configured",
-            usize::from(response.near_credit.submitter_configured),
-        ),
-        (
-            "submitter_auth_configured",
-            usize::from(response.near_credit.submitter_auth_configured),
-        ),
-        (
-            "confirmer_configured",
-            usize::from(response.near_credit.confirmer_configured),
-        ),
-        (
-            "confirmer_auth_configured",
-            usize::from(response.near_credit.confirmer_auth_configured),
-        ),
-        (
-            "adapter_auth_required",
-            usize::from(response.near_credit.require_adapter_auth),
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_near_credit_adapters",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_delayed_credit_events_total Delayed credit ledger events visible to operational summary.\n");
-    body.push_str("# TYPE trace_commons_operational_delayed_credit_events_total gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.labelled(
+        "trace_commons_operational_near_credit_outbox",
+        "NEAR non-transferable credit receipt outbox counts by operational state.",
+        "state",
+        [
+            ("total", response.near_credit.item_count),
+            ("disabled", response.near_credit.disabled_count),
+            ("pending", response.near_credit.pending_count),
+            ("submitted", response.near_credit.submitted_count),
+            ("confirmed", response.near_credit.confirmed_count),
+            ("failed", response.near_credit.failed_count),
+            (
+                "pending_without_submitter",
+                response.near_credit.pending_without_submitter_count,
+            ),
+            (
+                "submitted_without_confirmer",
+                response.near_credit.submitted_without_confirmer_count,
+            ),
+        ],
+    );
+    gauges.labelled(
+        "trace_commons_operational_near_credit_adapters",
+        "Safe NEAR credit adapter readiness flags.",
+        "state",
+        [
+            (
+                "submitter_configured",
+                usize::from(response.near_credit.submitter_configured),
+            ),
+            (
+                "submitter_auth_configured",
+                usize::from(response.near_credit.submitter_auth_configured),
+            ),
+            (
+                "confirmer_configured",
+                usize::from(response.near_credit.confirmer_configured),
+            ),
+            (
+                "confirmer_auth_configured",
+                usize::from(response.near_credit.confirmer_auth_configured),
+            ),
+            (
+                "adapter_auth_required",
+                usize::from(response.near_credit.require_adapter_auth),
+            ),
+        ],
+    );
+    gauges.tenant_gauge(
         "trace_commons_operational_delayed_credit_events_total",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Delayed credit ledger events visible to operational summary.",
         response.delayed_credit.event_count,
     );
-    body.push_str("# HELP trace_commons_operational_delayed_credit_reversal_events_total Delayed credit reversal ledger events visible to operational summary.\n");
-    body.push_str("# TYPE trace_commons_operational_delayed_credit_reversal_events_total gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_delayed_credit_reversal_events_total",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Delayed credit reversal ledger events visible to operational summary.",
         response.delayed_credit.reversal_event_count,
     );
-    body.push_str("# HELP trace_commons_operational_credit_risk Credit settlement risk projection aggregates without account refs.\n");
-    body.push_str("# TYPE trace_commons_operational_credit_risk gauge\n");
-    for (state, value) in [
-        ("accounts", response.credit_risk.account_count),
-        (
-            "returned_accounts",
-            response.credit_risk.returned_account_count,
-        ),
-        ("truncated", usize::from(response.credit_risk.truncated)),
-        (
-            "pending_accounts",
-            response.credit_risk.pending_account_count,
-        ),
-        ("held_accounts", response.credit_risk.held_account_count),
-        (
-            "over_cap_accounts",
-            response.credit_risk.over_cap_account_count,
-        ),
-        (
-            "pending_credit_micros",
-            response.credit_risk.pending_credit_micros.max(0) as usize,
-        ),
-        (
-            "held_credit_micros",
-            response.credit_risk.held_credit_micros.max(0) as usize,
-        ),
-        (
-            "over_cap_credit_micros",
-            response.credit_risk.over_cap_credit_micros.max(0) as usize,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_credit_risk",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_credit_settlement_readiness Credit settlement governance readiness states.\n");
-    body.push_str("# TYPE trace_commons_operational_credit_settlement_readiness gauge\n");
-    for (state, value) in [
-        (
-            "central_issuer_profile_required",
-            usize::from(
+    gauges.labelled(
+        "trace_commons_operational_credit_risk",
+        "Credit settlement risk projection aggregates without account refs.",
+        "state",
+        [
+            ("accounts", response.credit_risk.account_count),
+            (
+                "returned_accounts",
+                response.credit_risk.returned_account_count,
+            ),
+            ("truncated", usize::from(response.credit_risk.truncated)),
+            (
+                "pending_accounts",
+                response.credit_risk.pending_account_count,
+            ),
+            ("held_accounts", response.credit_risk.held_account_count),
+            (
+                "over_cap_accounts",
+                response.credit_risk.over_cap_account_count,
+            ),
+            (
+                "pending_credit_micros",
+                response.credit_risk.pending_credit_micros.max(0) as usize,
+            ),
+            (
+                "held_credit_micros",
+                response.credit_risk.held_credit_micros.max(0) as usize,
+            ),
+            (
+                "over_cap_credit_micros",
+                response.credit_risk.over_cap_credit_micros.max(0) as usize,
+            ),
+        ],
+    );
+    gauges.labelled(
+        "trace_commons_operational_credit_settlement_readiness",
+        "Credit settlement governance readiness states.",
+        "state",
+        [
+            (
+                "central_issuer_profile_required",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_central_issuer_profile_required,
+                ),
+            ),
+            (
+                "central_issuer_profile_ready",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_central_issuer_profile_ready,
+                ),
+            ),
+            (
+                "central_issuer_profile_missing_control_count",
                 response
                     .promotion_gates
-                    .credit_settlement_central_issuer_profile_required,
+                    .credit_settlement_central_issuer_profile_missing_control_count,
             ),
-        ),
-        (
-            "central_issuer_profile_ready",
-            usize::from(
+            (
+                "managed_eddsa_signed_tokens_required",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_managed_eddsa_signed_tokens_required,
+                ),
+            ),
+            (
+                "tenant_access_grants_required",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_tenant_access_grants_required,
+                ),
+            ),
+            (
+                "account_cap_configured",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_account_cap_configured,
+                ),
+            ),
+            (
+                "account_cap_missing",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_account_cap_missing,
+                ),
+            ),
+            (
+                "policy_allowlist_configured",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_policy_allowlist_configured,
+                ),
+            ),
+            (
+                "policy_allowlist_missing",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_policy_allowlist_missing,
+                ),
+            ),
+            (
+                "held_account_count",
                 response
                     .promotion_gates
-                    .credit_settlement_central_issuer_profile_ready,
+                    .credit_settlement_held_account_count,
             ),
-        ),
-        (
-            "central_issuer_profile_missing_control_count",
-            response
-                .promotion_gates
-                .credit_settlement_central_issuer_profile_missing_control_count,
-        ),
-        (
-            "managed_eddsa_signed_tokens_required",
-            usize::from(
+            (
+                "over_cap_account_count",
                 response
                     .promotion_gates
-                    .credit_settlement_managed_eddsa_signed_tokens_required,
+                    .credit_settlement_over_cap_account_count,
             ),
-        ),
-        (
-            "tenant_access_grants_required",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_tenant_access_grants_required,
+            (
+                "risk_summary_truncated",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_risk_summary_truncated,
+                ),
             ),
-        ),
-        (
-            "account_cap_configured",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_account_cap_configured,
+            (
+                "near_contract_required",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_contract_required,
+                ),
             ),
-        ),
-        (
-            "account_cap_missing",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_account_cap_missing,
+            (
+                "near_contract_configured",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_contract_configured,
+                ),
             ),
-        ),
-        (
-            "policy_allowlist_configured",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_policy_allowlist_configured,
+            (
+                "near_contract_missing",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_contract_missing,
+                ),
             ),
-        ),
-        (
-            "policy_allowlist_missing",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_policy_allowlist_missing,
+            (
+                "near_submitter_configured",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_submitter_configured,
+                ),
             ),
-        ),
-        (
-            "held_account_count",
-            response
-                .promotion_gates
-                .credit_settlement_held_account_count,
-        ),
-        (
-            "over_cap_account_count",
-            response
-                .promotion_gates
-                .credit_settlement_over_cap_account_count,
-        ),
-        (
-            "risk_summary_truncated",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_risk_summary_truncated,
+            (
+                "near_submitter_missing",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_submitter_missing,
+                ),
             ),
-        ),
-        (
-            "near_contract_required",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_contract_required,
+            (
+                "near_confirmer_configured",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_confirmer_configured,
+                ),
             ),
-        ),
-        (
-            "near_contract_configured",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_contract_configured,
+            (
+                "near_confirmer_missing",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_confirmer_missing,
+                ),
             ),
-        ),
-        (
-            "near_contract_missing",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_contract_missing,
+            (
+                "near_adapter_auth_required",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_adapter_auth_required,
+                ),
             ),
-        ),
-        (
-            "near_submitter_configured",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_submitter_configured,
+            (
+                "near_submitter_auth_configured",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_submitter_auth_configured,
+                ),
             ),
-        ),
-        (
-            "near_submitter_missing",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_submitter_missing,
+            (
+                "near_submitter_auth_missing",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_submitter_auth_missing,
+                ),
             ),
-        ),
-        (
-            "near_confirmer_configured",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_confirmer_configured,
+            (
+                "near_confirmer_auth_configured",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_confirmer_auth_configured,
+                ),
             ),
-        ),
-        (
-            "near_confirmer_missing",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_confirmer_missing,
+            (
+                "near_confirmer_auth_missing",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_confirmer_auth_missing,
+                ),
             ),
-        ),
-        (
-            "near_adapter_auth_required",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_adapter_auth_required,
+            (
+                "issuer_approval_required",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_issuer_approval_required,
+                ),
             ),
-        ),
-        (
-            "near_submitter_auth_configured",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_submitter_auth_configured,
+            (
+                "issuer_approval_missing",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_issuer_approval_missing,
+                ),
             ),
-        ),
-        (
-            "near_submitter_auth_missing",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_submitter_auth_missing,
+            (
+                "scheduler_enabled",
+                usize::from(response.promotion_gates.credit_settlement_scheduler_enabled),
             ),
-        ),
-        (
-            "near_confirmer_auth_configured",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_confirmer_auth_configured,
-            ),
-        ),
-        (
-            "near_confirmer_auth_missing",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_confirmer_auth_missing,
-            ),
-        ),
-        (
-            "issuer_approval_required",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_issuer_approval_required,
-            ),
-        ),
-        (
-            "issuer_approval_missing",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_issuer_approval_missing,
-            ),
-        ),
-        (
-            "scheduler_enabled",
-            usize::from(response.promotion_gates.credit_settlement_scheduler_enabled),
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_credit_settlement_readiness",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    (body, metric_count)
+        ],
+    );
+    gauges.finish()
 }
 
 fn rollout_smoke_check_metric_state(
