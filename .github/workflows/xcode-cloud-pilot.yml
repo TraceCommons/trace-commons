@@ -47,9 +47,13 @@ jobs:
     env:
       # NearAI Cloud pilot, Iqlusion team KXSWJN7WY8.
       XCODE_CLOUD_WORKFLOW_ID: 59025125-A8A9-4F65-9D19-8E504576C729
-      WORK: ${{ runner.temp }}/xcode-cloud-pilot
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # The runner context is not available in a job's env, so the scratch
+      # directory is set here.
+      - name: Set the scratch directory
+        run: echo "WORK=$RUNNER_TEMP/xcode-cloud-pilot" >> "$GITHUB_ENV"
 
       # Starting builds needs a key whose role reaches Xcode Cloud (App
       # Manager or higher). XCODE_CLOUD_ASC_* names one; without it the
