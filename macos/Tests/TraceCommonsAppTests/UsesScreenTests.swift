@@ -89,7 +89,7 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertTrue(source.contains(".onChange(of: required?.name, initial: true) { _, _ in includeRequired() }"))
         let join = try Self.joinSource()
         let start = try XCTUnwrap(join.range(of: "private func start() {"))
-        let startBody = String(join[start.upperBound...].prefix(500))
+        let startBody = String(join[start.upperBound...].prefix(400))
         let include = try XCTUnwrap(startBody.range(of: "JoinScreenLayout.startState("))
         let route = try XCTUnwrap(startBody.range(of: "UsesScreenLayout.startRoute(runner.state)"))
         XCTAssertLessThan(include.lowerBound, route.lowerBound)

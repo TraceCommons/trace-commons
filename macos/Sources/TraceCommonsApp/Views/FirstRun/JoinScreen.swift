@@ -371,15 +371,7 @@ struct JoinScreen: View {
     @State private var automaticallyStarting = false
     @State private var singleOrganizationReady = false
     @State private var automaticStartAttempted = false
-    /// The published terms, read and accepted here before signing in.
-    @StateObject private var termsLoader = TermsLoader()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    /// The terms on screen were read and accepted: Sign in, Start sharing
-    /// and the automatic start all wait for it.
-    private var termsAccepted: Bool {
-        runner.hasAcceptedTerms(legal: copy.welcome.legal, terms: termsLoader.terms)
-    }
 
     private var privateAI: PrivateInferenceCopy? { model.privateInferenceCopy }
 
@@ -389,7 +381,7 @@ struct JoinScreen: View {
     }
 
     private var shouldAutomaticallyStart: Bool {
-        termsAccepted && JoinScreenLayout.canAutomaticallyStart(
+        JoinScreenLayout.canAutomaticallyStart(
             runner.state, organizationReady: singleOrganizationReady, attempted: automaticStartAttempted,
             starting: starting, uses: copy.uses,
             requiredScope: UsesScreenLayout.requiredScope(model.consentScopes),
@@ -474,7 +466,7 @@ struct JoinScreen: View {
                 for: runner.failure, in: runner.state, copy: copy, onboarding: onboarding, privateAI: privateAI),
             footer: FirstRunFooter(
                 title: JoinScreenLayout.footerTitle(runner.state, copy: copy),
-                isEnabled: termsAccepted && JoinScreenLayout.canStart(
+                isEnabled: JoinScreenLayout.canStart(
                     runner.state, uses: copy.uses, requiredScope: required, grant: grant,
                     isCommitting: runner.isCommitting),
                 // About taking the action, so directly above the action bar.
@@ -501,9 +493,6 @@ struct JoinScreen: View {
         } content: {
             ScrollView {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                    if let legal = copy.welcome.legal {
-                        termsCard(legal)
-                    }
                     nearAICard
                     if let words = referralWords {
                         nearAIReferralField(words)
@@ -617,17 +606,6 @@ struct JoinScreen: View {
         }
     }
 
-    /// The terms, on a card of their own above NEAR AI's: read through and
-    /// accepted before signing in (owner, 2026-11-09). The document's own
-    /// title heads it, so the card adds no words.
-    private func termsCard(_ legal: FirstRunCopy.Welcome.Legal) -> some View {
-        TermsReader(
-            copy: legal, loader: termsLoader, accepted: runner.acceptedTerms,
-            onAccepted: { runner.acceptedTerms = $0 })
-            .frame(maxWidth: .infinity)
-            .firstRunCard(padding: EdgeInsets(top: 14, leading: 18, bottom: 14, trailing: 18))
-    }
-
     private var nearAICard: some View {
         accountCard(
             title: copy.join.nearAiEyebrow,
@@ -647,7 +625,7 @@ struct JoinScreen: View {
                     }
                 }
                 .buttonStyle(GlassButtonStyle(.glass))
-                .disabled(runner.isCommitting || !termsAccepted || !JoinScreenLayout.canToggleNearAI(runner.state))
+                .disabled(runner.isCommitting || !JoinScreenLayout.canToggleNearAI(runner.state))
             }
         }
     }
@@ -734,7 +712,6 @@ struct JoinScreen: View {
 
     /// near.ai chosen and signed in at once: the daemon is running.
     private func signIn() {
-        guard termsAccepted else { return }
         runner.state = JoinScreenLayout.chooseNearAI(runner.state)
         Task { await runner.commit(.signIn) }
     }
@@ -742,7 +719,6 @@ struct JoinScreen: View {
     // MARK: - Start sharing
 
     private func start() {
-        guard termsAccepted else { return }
         // What Start sends matches what Uses showed: the required use
         // included when sharing; nothing for Private AI only.
         let ready = JoinScreenLayout.startState(

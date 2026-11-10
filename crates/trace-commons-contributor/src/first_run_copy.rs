@@ -112,6 +112,9 @@ pub struct FrameCopy {
     /// `private_ai.title_bold`, and free to diverge: one names a step, the
     /// other ends a title. DRAFT, NEEDS APPROVAL.
     pub step_private_ai: &'static str,
+    /// The animated first run's Terms step, near the end, before Join
+    /// (owner, 2026-11-09). DRAFT, NEEDS APPROVAL.
+    pub step_terms: &'static str,
     /// Approved 2026-10-08 (button rule). On Uses it opens the per-repo
     /// rules in place (Ron, 2026-11-05).
     pub custom_setup_instead: &'static str,
@@ -206,6 +209,9 @@ pub struct WelcomeCopy {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WelcomeLegalCopy {
+    /// The Terms step's title, before `terms` in bold. DRAFT, NEEDS
+    /// APPROVAL.
+    pub title_light: &'static str,
     pub accept: &'static str,
     pub terms: &'static str,
     pub privacy: &'static str,
@@ -526,6 +532,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             step_uses: "Uses",
             step_traces: "Traces",
             step_private_ai: "Private AI",
+            step_terms: "Terms",
             custom_setup_instead: "Customize",
             continue_button: "Continue",
             answer_every_tool: "Answer every tool above to continue",
@@ -542,6 +549,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             body: "Private AI solutions that put you in control of your data.",
             start: "Get started",
             legal: WelcomeLegalCopy {
+                title_light: "Read the ",
                 accept: "I accept the Terms of Service",
                 terms: "Terms of Service",
                 privacy: "Privacy Policy",

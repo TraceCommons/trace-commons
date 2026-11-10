@@ -61,7 +61,7 @@ final class FirstRunBackDuringSignInTests: XCTestCase {
         XCTAssertNil(runner.failure)
         XCTAssertFalse(runner.isCommitting)
         XCTAssertNil(runner.committing)
-        XCTAssertEqual(runner.state.step, .uses)
+        XCTAssertEqual(runner.state.step, .terms, "Back from Join is the Terms step")
         XCTAssertFalse(runner.state.holdsEnrolment)
     }
 }

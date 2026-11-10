@@ -78,22 +78,37 @@ final class AnimatedFirstRunTests: XCTestCase {
         XCTAssertTrue(daemon.termsRecorded.isEmpty)
     }
 
-    /// Join's Sign in and Start sharing wait for terms that were read and
-    /// accepted: the runner holds the accepted version and hash, unticking
-    /// takes it back, and Back keeps it.
+    /// The Terms step, just before Join, is left only with terms that were
+    /// read and accepted: the runner holds the accepted version and hash,
+    /// unticking takes it back, a repeated action cannot skip a step, and
+    /// Back keeps the acceptance.
     @MainActor
-    func testJoinRequiresScrolledAcceptance() throws {
+    func testTermsStepRequiresScrolledAcceptance() throws {
+        XCTAssertEqual(
+            FirstRunNavigation.steps.suffix(2), [.terms, .join], "the terms come just before Join")
         let daemon = RecordingFirstRunDaemon()
-        let runner = FirstRunRunner(state: FirstRunState(), daemon: daemon)
+        var state = FirstRunState()
+        state.step = .terms
+        let runner = FirstRunRunner(state: state, daemon: daemon)
         let legal = try XCTUnwrap(words().welcome.legal)
-        XCTAssertFalse(runner.hasAcceptedTerms(legal: legal, terms: Self.loaded))
+        runner.continueFromTerms(legal: legal, terms: Self.loaded)
+        XCTAssertEqual(runner.state.step, .terms, "nothing accepted")
+
         runner.acceptedTerms = Self.accepted
         XCTAssertTrue(runner.hasAcceptedTerms(legal: legal, terms: Self.loaded))
         runner.acceptedTerms = nil
-        XCTAssertFalse(runner.hasAcceptedTerms(legal: legal, terms: Self.loaded), "unticking takes it back")
+        runner.continueFromTerms(legal: legal, terms: Self.loaded)
+        XCTAssertEqual(runner.state.step, .terms, "unticking closes the step again")
+
         runner.acceptedTerms = Self.accepted
-        runner.state.step = .join
+        runner.continueFromTerms(legal: nil, terms: Self.loaded)
+        XCTAssertEqual(runner.state.step, .terms, "no terms copy, no way past")
+        runner.continueFromTerms(legal: legal, terms: Self.loaded)
+        XCTAssertEqual(runner.state.step, .join)
+        runner.continueFromTerms(legal: legal, terms: Self.loaded)
+        XCTAssertEqual(runner.state.step, .join, "a repeated action cannot skip a step")
         runner.state = FirstRunNavigation.back(runner.state)
+        XCTAssertEqual(runner.state.step, .terms)
         XCTAssertEqual(runner.acceptedTerms, Self.accepted, "Back retains the accepted terms")
         XCTAssertTrue(daemon.log.isEmpty, "acceptance is not a trace-sharing grant")
     }
@@ -128,8 +143,8 @@ final class AnimatedFirstRunTests: XCTestCase {
         XCTAssertTrue(runner.hasAcceptedTerms(legal: legal, terms: loading.terms))
     }
 
-    /// An acceptance kept from an earlier visit (Back rebuilds Join and its
-    /// loader) does not count on its own: the document it names has to be
+    /// An acceptance kept from an earlier visit (Back rebuilds the Terms
+    /// step and its loader) does not count on its own: the document it names has to be
     /// loaded again, so it does not count while the terms load, after they
     /// failed, or for another document.
     @MainActor

@@ -19,6 +19,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         /// The animated first run's Traces and Private AI steps.
         public let stepTraces: String
         public let stepPrivateAi: String
+        /// The Terms step, before Join.
+        public let stepTerms: String
         public let customSetupInstead: String
         public let continueButton: String
         public let answerEveryTool: String
@@ -53,6 +55,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let legal: Legal?
 
         public struct Legal: Decodable, Equatable, Sendable {
+            /// The Terms step's title, before `terms` in bold.
+            public let titleLight: String
             public let accept: String
             public let terms: String
             public let privacy: String
