@@ -1862,9 +1862,12 @@ jobs:
       - name: Verify native wallet browser state transitions
         run: node scripts/ci/test-near-wallet-browser.cjs
       - uses: dtolnay/rust-toolchain@stable
-      # Before the cache restore: these jobs restore a large `target` and
-      # compile on top of it; see the action for what it deletes and why.
+      # Starts the deletions in the background before the cache restore;
+      # the `phase: wait` step just before the first compile holds it until
+      # the disk is free. See the action for what it deletes and why.
       - uses: ./.github/actions/free-runner-disk
+        with:
+          phase: start
       - id: cargo-cache
         uses: ./.github/actions/restore-cargo-test-cache
         with:
@@ -1877,6 +1880,9 @@ jobs:
       - uses: ./.github/actions/apt-update-ubuntu-only
       - name: Install a Secret Service provider for credential tests
         run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
+      - uses: ./.github/actions/free-runner-disk
+        with:
+          phase: wait
       - name: Run workspace tests with Secret Service
         run: |
           dbus-run-session -- sh -eu -c '
@@ -1916,9 +1922,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      # Before the cache restore: these jobs restore a large `target` and
-      # compile on top of it; see the action for what it deletes and why.
+      # Starts the deletions in the background before the cache restore;
+      # the `phase: wait` step just before the first compile holds it until
+      # the disk is free. See the action for what it deletes and why.
       - uses: ./.github/actions/free-runner-disk
+        with:
+          phase: start
       # Its own cache, saved on main below: this job's package and feature
       # selection resolves some third-party crates (the tokio/hyper/zbus
       # chain) with different features from the workspace run, and those
@@ -1948,6 +1957,9 @@ jobs:
       # the server's pin re-sign tool (`trace-commons-staging-pins`), which
       # requires the feature. None of them is compiled into the
       # `cargo test (default features)` build.
+      - uses: ./.github/actions/free-runner-disk
+        with:
+          phase: wait
       - name: Staging channel tests
         run: |
           dbus-run-session -- sh -eu -c '
@@ -1978,9 +1990,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      # Before the cache restore: these jobs restore a large `target` and
-      # compile on top of it; see the action for what it deletes and why.
+      # Starts the deletions in the background before the cache restore;
+      # the `phase: wait` step just before the first compile holds it until
+      # the disk is free. See the action for what it deletes and why.
       - uses: ./.github/actions/free-runner-disk
+        with:
+          phase: start
       # Its own cache, saved on main below: this job's package and feature
       # selection resolves some third-party crates (the tokio/hyper/zbus
       # chain) with different features from the workspace run, and those
@@ -1999,6 +2014,9 @@ jobs:
             playwright@1.63.0 playwright-core@1.63.0
           node "$RUNNER_TEMP/trace-commons-wallet-ci/node_modules/playwright/cli.js" \
             install --with-deps chromium
+      - uses: ./.github/actions/free-runner-disk
+        with:
+          phase: wait
       - name: Verify the real wallet SDK and production CSP
         run: |
           export TC_PLAYWRIGHT_MODULE="$RUNNER_TEMP/trace-commons-wallet-ci/node_modules/playwright"
