@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import TCBridge
 import TCDesign
@@ -187,8 +188,18 @@ struct TermsReader: View {
                         Color.clear.preference(
                             key: TermsContentFrameKey.self, value: content.frame(in: .named(space)))
                     })
+                .background(TermsScrollPositionProbe { content, viewport, offset in
+                    gate.observe(contentHeight: content, viewportHeight: viewport, offset: offset)
+                })
             }
+            .modifier(TermsScrollGeometryWatch { content, viewport, offset in
+                gate.observe(contentHeight: content, viewportHeight: viewport, offset: offset)
+            })
             .coordinateSpace(name: space)
+            // The first layout only: it settles a document that fits without
+            // scrolling. Scrolling an NSScrollView does not lay its content
+            // out again, so this never sees a scroll; the two watchers above
+            // do (found 2026-11-09: the box never unlocked).
             .onPreferenceChange(TermsContentFrameKey.self) { frame in
                 gate.observe(
                     contentHeight: frame.height, viewportHeight: viewport.size.height,
@@ -302,5 +313,90 @@ private struct TermsBodyText: ViewModifier {
             .foregroundStyle(GlassColor.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
             .textSelection(.enabled)
+    }
+}
+
+/// The scroll position as the scroll view itself reports it (macOS 15 and
+/// later): content height, visible height, and the visible top.
+private struct TermsScrollGeometryWatch: ViewModifier {
+    let observe: (CGFloat, CGFloat, CGFloat) -> Void
+
+    func body(content: Content) -> some View {
+        if #available(macOS 15, *) {
+            content.onScrollGeometryChange(for: CGRect.self) { geometry in
+                CGRect(
+                    x: 0, y: geometry.visibleRect.minY,
+                    width: geometry.contentSize.height, height: geometry.visibleRect.height)
+            } action: { _, seen in
+                observe(seen.width, seen.height, seen.minY)
+            }
+        } else {
+            content
+        }
+    }
+}
+
+/// The same reading on macOS 14, which has no scroll geometry callback:
+/// the enclosing NSScrollView's clip view posts a bounds change on every
+/// scroll. On macOS 15 and later it attaches nothing.
+private struct TermsScrollPositionProbe: NSViewRepresentable {
+    let observe: (CGFloat, CGFloat, CGFloat) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(observe: observe) }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        if #unavailable(macOS 15) {
+            let coordinator = context.coordinator
+            // Not in a scroll view until it is in the window's hierarchy.
+            DispatchQueue.main.async { MainActor.assumeIsolated { coordinator.attach(to: view) } }
+        }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.observe = observe
+    }
+
+    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    @MainActor
+    final class Coordinator {
+        var observe: (CGFloat, CGFloat, CGFloat) -> Void
+        private weak var scrollView: NSScrollView?
+        private var token: NSObjectProtocol?
+
+        init(observe: @escaping (CGFloat, CGFloat, CGFloat) -> Void) {
+            self.observe = observe
+        }
+
+        func attach(to view: NSView) {
+            guard token == nil, let scrollView = view.enclosingScrollView else { return }
+            self.scrollView = scrollView
+            scrollView.contentView.postsBoundsChangedNotifications = true
+            token = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.report() }
+            }
+            report()
+        }
+
+        func detach() {
+            if let token { NotificationCenter.default.removeObserver(token) }
+            token = nil
+        }
+
+        private func report() {
+            guard let scrollView, let document = scrollView.documentView else { return }
+            let visible = scrollView.contentView.documentVisibleRect
+            let height = document.frame.height
+            // Distance from the content's top to the visible top, whichever
+            // way the document view is flipped.
+            let offset = document.isFlipped ? visible.minY : height - visible.maxY
+            observe(height, visible.height, offset)
+        }
     }
 }

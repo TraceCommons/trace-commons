@@ -126,10 +126,10 @@ enum FirstRunFailure: Equatable {
 @MainActor
 final class FirstRunRunner: ObservableObject {
     @Published var state: FirstRunState
-    /// The terms the person scrolled through and accepted on Welcome: the
+    /// The terms the person scrolled through and accepted on Join: the
     /// version and hash they read, and when. Nil until then, and again if
     /// they untick. Retained when navigating Back; held in memory only, and
-    /// handed to the daemon once, right after it first starts.
+    /// handed to the daemon once, at the first commit after acceptance.
     @Published var acceptedTerms: AcceptedTerms?
     /// `acceptedTerms` was handed to the started daemon (taken or not), so
     /// it is not handed again in this first run.
@@ -184,19 +184,22 @@ final class FirstRunRunner: ObservableObject {
         self.finishedNotice = finishedNotice
     }
 
-    /// Welcome may be left only with a loaded document (`terms`, Welcome's
-    /// loader) that is the one accepted, version and hash. `acceptedTerms`
-    /// outlives Back while Welcome's loader starts over, so an acceptance
-    /// alone does not open the step while the terms load or after they
-    /// failed (spec section 2).
-    func canLeaveWelcome(legal: FirstRunCopy.Welcome.Legal?, terms: FetchedTerms?) -> Bool {
-        guard state.step == .welcome, legal != nil, let acceptedTerms, let terms else { return false }
+    /// Join's Sign in and Start sharing wait for this: the terms copy is
+    /// present, and the document Join's loader has loaded (`terms`) is the
+    /// one accepted, version and hash. `acceptedTerms` outlives Back while
+    /// Join's loader starts over, so an acceptance alone does not count
+    /// while the terms load, after they failed, or for another document
+    /// (spec section 2).
+    func hasAcceptedTerms(legal: FirstRunCopy.Welcome.Legal?, terms: FetchedTerms?) -> Bool {
+        guard legal != nil, let acceptedTerms, let terms else { return false }
         return acceptedTerms.version == terms.document.version
             && acceptedTerms.contentSHA256 == terms.contentSHA256
     }
 
-    func continueFromWelcome(legal: FirstRunCopy.Welcome.Legal?, terms: FetchedTerms?) {
-        guard canLeaveWelcome(legal: legal, terms: terms) else { return }
+    /// Get started on Welcome. The terms are read on Join, near the end of
+    /// the first run, not on the splash (owner, 2026-11-09).
+    func continueFromWelcome() {
+        guard state.step == .welcome else { return }
         state = FirstRunNavigation.next(state)
     }
 
@@ -229,8 +232,9 @@ final class FirstRunRunner: ObservableObject {
             failure = .startFailed
             return
         }
-        // A first run that began with the daemon already running has no
-        // `.startDaemon` to follow: hand the terms over at its first commit.
+        // Join accepts the terms after Tools started the daemon, and a first
+        // run may begin with it running: hand them over at the first commit
+        // after they were accepted (Join's sign-in or Start sharing).
         if state.daemonStarted { await handOverTerms() }
         for call in FirstRunPlan.calls(for: state, at: point) {
             guard await run(call) else { return }

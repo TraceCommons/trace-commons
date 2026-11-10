@@ -443,7 +443,8 @@ final class JoinScreenTests: XCTestCase {
         // Nothing reaches watch only from Join any more.
         let source = try Self.source()
         XCTAssertFalse(source.contains("copy.join.skip"), "Join reads no Skip words")
-        XCTAssertTrue(source.contains("isEnabled: JoinScreenLayout.canStart("))
+        // Start sharing also waits for the terms read on Join (2026-11-09).
+        XCTAssertTrue(source.contains("isEnabled: termsAccepted && JoinScreenLayout.canStart("))
 
         // near.ai reads "Signed in" only once the daemon signed in.
         XCTAssertFalse(JoinScreenLayout.showsSignedIn(FirstRunState(account: .nearAI)))
@@ -574,7 +575,9 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertLessThan(note.lowerBound, graphic.lowerBound, "an argument of the footer, not content")
 
         let flat = source.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-        let near = try XCTUnwrap(flat.range(of: "VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) { nearAICard"))
+        // The terms card first, then NEAR AI's: read and accept, then sign
+        // in (owner, 2026-11-09).
+        let near = try XCTUnwrap(flat.range(of: "VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) { if let legal = copy.welcome.legal { termsCard(legal) } nearAICard"))
         let invite = try XCTUnwrap(flat.range(of: "if JoinScreenLayout.showsInviteCard(runner.state) { inviteCard"))
         XCTAssertLessThan(near.lowerBound, invite.lowerBound)
     }

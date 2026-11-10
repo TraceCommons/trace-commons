@@ -91,8 +91,6 @@ struct WelcomeScreen: View {
     @ObservedObject var runner: FirstRunRunner
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var openedAt = Date()
-    /// The published terms, loaded when Welcome opens.
-    @StateObject private var termsLoader = TermsLoader()
 
     var body: some View {
         GlassAnimationTimeline(paused: reduceMotion) { date in
@@ -116,21 +114,10 @@ struct WelcomeScreen: View {
                     .modifier(Rise(amount: WelcomeScreenLayout.risen(
                         after: elapsed, delay: WelcomeScreenLayout.bodyDelay, reduceMotion: reduceMotion)))
                     .padding(.bottom, 38)
-                Button(copy.welcome.start) {
-                    runner.continueFromWelcome(legal: copy.welcome.legal, terms: termsLoader.terms)
-                }
+                Button(copy.welcome.start) { runner.continueFromWelcome() }
                 .buttonStyle(GlassButtonStyle(.primary, size: .stage))
-                .disabled(!runner.canLeaveWelcome(legal: copy.welcome.legal, terms: termsLoader.terms))
                 .modifier(Rise(amount: WelcomeScreenLayout.risen(
                     after: elapsed, delay: WelcomeScreenLayout.buttonDelay, reduceMotion: reduceMotion)))
-                if let legal = copy.welcome.legal {
-                    TermsReader(
-                        copy: legal, loader: termsLoader, accepted: runner.acceptedTerms,
-                        onAccepted: { runner.acceptedTerms = $0 })
-                        .padding(.top, GlassTokens.Space.s6)
-                        .modifier(Rise(amount: WelcomeScreenLayout.risen(
-                            after: elapsed, delay: WelcomeScreenLayout.buttonDelay, reduceMotion: reduceMotion)))
-                }
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -934,7 +934,7 @@ final class FirstRunRunnerTests: XCTestCase {
         version: "2026-08-22-draft", contentSHA256: String(repeating: "a", count: 64),
         acceptedAt: Date(timeIntervalSince1970: 1_762_689_600))
 
-    /// The terms accepted on Welcome go to the daemon exactly once, right
+    /// Terms accepted before the daemon starts go to it exactly once, right
     /// after it first starts, and not again on a later commit.
     func testTermsHandedToDaemonOnceAfterStart() async throws {
         let daemon = RecordingFirstRunDaemon()
@@ -969,6 +969,28 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertEqual(daemon.termsRecorded.map(\.terms), [Self.accepted])
         await runner.commit(.leaveTools)
         XCTAssertEqual(daemon.termsRecorded.count, 1)
+    }
+
+    /// The first-run order since the terms moved to Join: Tools starts the
+    /// daemon with nothing accepted, so nothing is handed over then; the
+    /// terms accepted on Join go over at Join's sign-in, once.
+    func testTermsAcceptedOnJoinHandedOverAtSignIn() async {
+        let daemon = RecordingFirstRunDaemon()
+        var state = onFolders()
+        state.step = .tools
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        await runner.commit(.leaveTools)
+        XCTAssertTrue(runner.state.daemonStarted)
+        XCTAssertTrue(daemon.termsRecorded.isEmpty, "nothing accepted yet")
+        XCTAssertFalse(runner.termsHandedOver)
+
+        runner.acceptedTerms = Self.accepted
+        let before = daemon.log.count
+        await runner.commit(.signIn)
+        XCTAssertEqual(daemon.termsRecorded.map(\.terms), [Self.accepted])
+        XCTAssertEqual(daemon.termsRecorded.first?.afterCalls, before, "before the sign-in's calls")
+        await runner.commit(.signIn)
+        XCTAssertEqual(daemon.termsRecorded.count, 1, "handed over once per first run")
     }
 
     /// Nothing accepted, nothing handed over.
