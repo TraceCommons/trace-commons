@@ -114,8 +114,7 @@ impl NearCreditSubmitAdvisoryLockInner {
                 "SELECT pg_advisory_unlock($1, $2)",
                 &[&NEAR_CREDIT_SUBMIT_ADVISORY_LOCK_CLASSID, &self.objid],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(())
     }
 }
@@ -133,8 +132,7 @@ impl CreditSettlementAdvisoryLockInner {
                 "SELECT pg_advisory_unlock($1, $2)",
                 &[&CREDIT_SETTLEMENT_ADVISORY_LOCK_CLASSID, &self.objid],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(())
     }
 }
@@ -670,8 +668,7 @@ impl PgBackend {
                 ),
                 &[],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         rows.into_iter().map(Self::invite_entry_from_row).collect()
     }
 
@@ -698,8 +695,7 @@ impl PgBackend {
                     AND (expires_at IS NULL OR expires_at > NOW())",
                 &[&policy_label],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let live: i64 = row.get("live");
         u32::try_from(live).map_err(|_| {
             DatabaseError::Serialization("invite grant count out of range".to_string())
@@ -735,8 +731,7 @@ impl PgBackend {
                     AND credential_binding_hash IS NOT NULL",
                 &[&policy_label],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let bound: i64 = row.get("bound");
         u32::try_from(bound).map_err(|_| {
             DatabaseError::Serialization("invite grant count out of range".to_string())
@@ -769,8 +764,7 @@ impl PgBackend {
                  ) AS bound",
                 &[&policy_labels, &credential_binding_hash],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(row.get("bound"))
     }
 
@@ -855,8 +849,7 @@ impl PgBackend {
                   WHERE invite_subject_hash = $1 AND revoked_at IS NULL",
                 &[&invite_subject_hash],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(updated == 1)
     }
 
@@ -882,8 +875,7 @@ impl PgBackend {
                 ),
                 &[&invite_subject_hash],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         row.map(|row| {
             let consumed_uses: i32 = row.get("consumed_uses");
             Self::invite_entry_from_row(row).map(|entry| InvitePeek {
@@ -905,8 +897,7 @@ impl PgBackend {
             "SELECT set_config('trace_commons.invite_subject', $1, true)",
             &[&invite_subject_hash],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
         let row = tx
             .query_opt(
                 &format!(
@@ -919,8 +910,7 @@ impl PgBackend {
                 ),
                 &[&invite_subject_hash],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         row.map(Self::invite_entry_from_row).transpose()
     }
 
@@ -941,10 +931,7 @@ impl PgBackend {
     ) -> Result<Option<InviteRedemption>, DatabaseError> {
         let pool = self.trace_pool();
         let mut client = pool.get().await.map_err(DatabaseError::from)?;
-        let tx = client
-            .transaction()
-            .await
-            .map_err(DatabaseError::Postgres)?;
+        let tx = client.transaction().await?;
         let Some(entry) = Self::lookup_invite_grant_in_tx(&tx, invite_subject_hash).await? else {
             return Ok(None);
         };
@@ -963,7 +950,7 @@ impl PgBackend {
             }
         };
 
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(Some(InviteRedemption {
             tenant_id,
             policy_version: entry.policy_version,
@@ -2180,8 +2167,7 @@ pub(super) async fn create_or_reuse_account_in_tx_opened(
                 AND unlinked_at IS NULL",
             &[&principal_ref],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?
+        .await?
     {
         return Ok((row.get("account_id"), false));
     }
@@ -2196,8 +2182,7 @@ pub(super) async fn create_or_reuse_account_in_tx_opened(
          VALUES (trace_current_tenant_id(), $1)",
         &[&new_account_id],
     )
-    .await
-    .map_err(DatabaseError::Postgres)?;
+    .await?;
     tx.execute(
         "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
          VALUES (trace_current_tenant_id(), $1, $2)
@@ -2231,8 +2216,7 @@ pub(super) async fn create_or_reuse_account_in_tx_opened(
                 AND unlinked_at IS NULL",
             &[&principal_ref],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
     let account_id: Uuid = row.get("account_id");
     if account_id != new_account_id {
         tx.execute(
@@ -2240,8 +2224,7 @@ pub(super) async fn create_or_reuse_account_in_tx_opened(
               WHERE tenant_id = trace_current_tenant_id() AND account_id = $1",
             &[&new_account_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
         return Ok((account_id, false));
     }
     Ok((account_id, true))
@@ -2312,8 +2295,7 @@ pub(super) async fn active_near_identity_count(
                 AND revoked_at IS NULL",
             &[account_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
     Ok(row.get("key_count"))
 }
 
@@ -2343,8 +2325,7 @@ pub(super) async fn active_strong_authenticator_count(
                     AS strong_count",
             &[account_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
     Ok(row.get("strong_count"))
 }
 
@@ -2820,16 +2801,14 @@ impl Database for PgBackend {
                 "SELECT hashtext('near-credit-submit:' || $1)",
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
             .get(0);
         let acquired: bool = client
             .query_one(
                 "SELECT pg_try_advisory_lock($1, $2)",
                 &[&NEAR_CREDIT_SUBMIT_ADVISORY_LOCK_CLASSID, &objid],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
             .get(0);
         if !acquired {
             // Another submit run already holds the lock; drop the connection back
@@ -2852,16 +2831,14 @@ impl Database for PgBackend {
             .map_err(|e| DatabaseError::Pool(e.to_string()))?;
         let objid: i32 = client
             .query_one("SELECT hashtext('credit-settlement:' || $1)", &[&tenant_id])
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
             .get(0);
         let acquired: bool = client
             .query_one(
                 "SELECT pg_try_advisory_lock($1, $2)",
                 &[&CREDIT_SETTLEMENT_ADVISORY_LOCK_CLASSID, &objid],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
             .get(0);
         if !acquired {
             return Ok(None);
@@ -2996,9 +2973,8 @@ impl Database for PgBackend {
                     &bio_opt,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(crate::db::ContributorProfileRow {
             tenant_id: row.get("tenant_id"),
             principal_ref: row.get("principal_ref"),
@@ -3029,10 +3005,9 @@ impl Database for PgBackend {
                   FOR UPDATE",
                 &[&tenant_id, &principal_ref],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let Some(profile) = profile else {
-            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            tx.commit().await?;
             return Ok(None);
         };
         let display_handle: String = profile.get("display_handle");
@@ -3045,8 +3020,7 @@ impl Database for PgBackend {
               RETURNING withdrawn_at",
                 &[&tenant_id, &principal_ref],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let withdrawn_at: chrono::DateTime<chrono::Utc> = withdrawn.get("withdrawn_at");
         // Coalesce by (window, metric): N withdrawals in a window share one
         // rebuild. Keep the latest pending_requested_at so a snapshot that
@@ -3066,8 +3040,7 @@ impl Database for PgBackend {
                  RETURNING pending_requested_at",
                 &[&window_label, &metric, &withdrawn_at],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let invalidation_requested_at: chrono::DateTime<chrono::Utc> =
             invalidation.get("pending_requested_at");
         let eviction_id = uuid::Uuid::new_v4();
@@ -3088,9 +3061,8 @@ impl Database for PgBackend {
                 &metric,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(Some(crate::db::CommunityWithdrawalEvictionRow {
             eviction_id,
             tenant_id: tenant_id.to_string(),
@@ -3118,8 +3090,7 @@ impl Database for PgBackend {
                     AND pending_requested_at IS NOT NULL",
                 &[&window_label, &metric],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(row.map(|row| row.get("pending_requested_at")))
     }
 
@@ -3131,10 +3102,7 @@ impl Database for PgBackend {
         snapshot_computed_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, DatabaseError> {
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
-        let tx = client
-            .transaction()
-            .await
-            .map_err(DatabaseError::Postgres)?;
+        let tx = client.transaction().await?;
         // The eviction UPDATE below is deliberately cross-tenant: one drain
         // covers every pending withdrawal for this (window, metric). V56 gates
         // that on this transaction-local GUC rather than on a tenant
@@ -3145,8 +3113,7 @@ impl Database for PgBackend {
             "SELECT set_config('trace_commons.community_drain', 'on', true)",
             &[],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
         let drained = tx
             .execute(
                 "UPDATE trace_community_snapshot_invalidations
@@ -3160,8 +3127,7 @@ impl Database for PgBackend {
                     AND pending_requested_at <= $3",
                 &[&window_label, &metric, &snapshot_computed_at, &snapshot_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         if drained > 0 {
             tx.execute(
                 "UPDATE trace_community_withdrawal_evictions
@@ -3173,10 +3139,9 @@ impl Database for PgBackend {
                     AND invalidation_requested_at <= $3",
                 &[&window_label, &metric, &snapshot_computed_at, &snapshot_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         }
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(drained > 0)
     }
 
@@ -3203,9 +3168,8 @@ impl Database for PgBackend {
                 &reason,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -3261,8 +3225,7 @@ impl Database for PgBackend {
         let tenant_ids: Vec<String> = if configured_tenant_ids.is_empty() {
             client
                 .query("SELECT tenant_id FROM trace_tenants", &[])
-                .await
-                .map_err(DatabaseError::Postgres)?
+                .await?
                 .into_iter()
                 .map(|row| row.get::<_, String>("tenant_id"))
                 .collect()
@@ -3280,9 +3243,8 @@ impl Database for PgBackend {
                     LEADERBOARD_INPUTS_SQL,
                     &[&window_days.to_string(), &min_cell_count],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?;
-            tx.commit().await.map_err(DatabaseError::Postgres)?;
+                .await?;
+            tx.commit().await?;
             for pg_row in pg_rows {
                 rows.push(crate::db::LeaderboardContributorRow {
                     tenant_id: pg_row.get("tenant_id"),
@@ -3310,8 +3272,7 @@ impl Database for PgBackend {
         let tenant_ids: Vec<String> = if configured_tenant_ids.is_empty() {
             client
                 .query("SELECT tenant_id FROM trace_tenants", &[])
-                .await
-                .map_err(DatabaseError::Postgres)?
+                .await?
                 .into_iter()
                 .map(|row| row.get::<_, String>("tenant_id"))
                 .collect()
@@ -3354,8 +3315,7 @@ impl Database for PgBackend {
                      WHERE received_at >= NOW() - ($1 || ' days')::interval",
                     &[&window_days.to_string()],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?;
+                .await?;
             total_submissions += counts.get::<_, i64>("total");
             total_accepted += counts.get::<_, i64>("accepted");
             total_rejected += counts.get::<_, i64>("rejected");
@@ -3370,8 +3330,7 @@ impl Database for PgBackend {
                      GROUP BY 1",
                     &[&window_days.to_string()],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?;
+                .await?;
             for row in buckets {
                 let idx: i64 = row.get("bucket_idx");
                 let count: i64 = row.get("bucket_count");
@@ -3389,8 +3348,7 @@ impl Database for PgBackend {
                      WHERE decided_at >= NOW() - ($1 || ' days')::interval",
                     &[&window_days.to_string()],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?;
+                .await?;
             let outcome = outcomes
                 .first()
                 .ok_or_else(|| DatabaseError::Pool("expected 1 row".to_string()))?;
@@ -3398,7 +3356,7 @@ impl Database for PgBackend {
             novelty_failed += outcome.get::<_, i64>("novelty_failed");
             perplexity_failed += outcome.get::<_, i64>("perplexity_failed");
             both_failed += outcome.get::<_, i64>("both_failed");
-            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            tx.commit().await?;
         }
 
         let accept_rate = if total_submissions > 0 {
@@ -3442,16 +3400,14 @@ impl Database for PgBackend {
                         ) AS bypasses_rls",
                 &[],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let role_sees_through_rls =
             visibility.get::<_, bool>("is_superuser") || visibility.get::<_, bool>("bypasses_rls");
 
         let tenant_ids: Vec<String> = if configured_tenant_ids.is_empty() {
             client
                 .query("SELECT tenant_id FROM trace_tenants", &[])
-                .await
-                .map_err(DatabaseError::Postgres)?
+                .await?
                 .into_iter()
                 .map(|row| row.get::<_, String>("tenant_id"))
                 .collect()
@@ -3478,8 +3434,7 @@ impl Database for PgBackend {
                     "SELECT COUNT(*) AS accepted FROM trace_submissions WHERE status = 'accepted'",
                     &[],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?;
+                .await?;
             traces_accepted += accepted.get::<_, i64>("accepted");
 
             let issued = tx
@@ -3489,8 +3444,7 @@ impl Database for PgBackend {
                      WHERE points_delta::numeric > 0",
                     &[],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?;
+                .await?;
             points_issued += issued.get::<_, f64>("issued");
 
             let accounts = tx
@@ -3498,12 +3452,11 @@ impl Database for PgBackend {
                     "SELECT DISTINCT credit_account_ref FROM trace_credit_ledger",
                     &[],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?;
+                .await?;
             for row in accounts {
                 contributors.insert(row.get::<_, String>("credit_account_ref"));
             }
-            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            tx.commit().await?;
         }
 
         Ok(crate::db::RegisterStatsTotals {
@@ -3516,10 +3469,7 @@ impl Database for PgBackend {
 
     async fn fetch_register_stats_row(&self) -> Result<crate::db::RegisterStatsRow, DatabaseError> {
         let client = self.trace_pool().get().await?;
-        let row = client
-            .query_one(REGISTER_STATS_SELECT_SQL, &[])
-            .await
-            .map_err(DatabaseError::Postgres)?;
+        let row = client.query_one(REGISTER_STATS_SELECT_SQL, &[]).await?;
         Ok(register_stats_row_from(&row))
     }
 
@@ -3528,10 +3478,7 @@ impl Database for PgBackend {
     ) -> Result<crate::db::RegisterStatsRow, DatabaseError> {
         let pool = self.trace_pool();
         let mut client = pool.get().await?;
-        let tx = client
-            .transaction()
-            .await
-            .map_err(DatabaseError::Postgres)?;
+        let tx = client.transaction().await?;
         // SET LOCAL, never a bare SET: the role reverts when this transaction
         // ends, including on the error path, so a pooled connection can never
         // be handed back to another request still wearing it.
@@ -3542,14 +3489,10 @@ impl Database for PgBackend {
         // different role gets an error on this endpoint rather than a quietly
         // over-privileged read. See docs/operator/register-stats-role.md.
         tx.batch_execute("SET LOCAL ROLE trace_commons_public_read")
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        let row = tx
-            .query_one(REGISTER_STATS_SELECT_SQL, &[])
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
+        let row = tx.query_one(REGISTER_STATS_SELECT_SQL, &[]).await?;
         let parsed = register_stats_row_from(&row);
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(parsed)
     }
 
@@ -3567,8 +3510,7 @@ impl Database for PgBackend {
                     &totals.points_issued,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(register_stats_row_from(&row))
     }
 
@@ -3596,8 +3538,7 @@ impl Database for PgBackend {
                     &write.noise_seed_hash,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(crate::db::LeaderboardSnapshotRow {
             snapshot_id: row.get("snapshot_id"),
             computed_at: row.get("computed_at"),
@@ -3634,8 +3575,7 @@ impl Database for PgBackend {
                     )",
                 &[&window_label, &metric, &keep],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(removed)
     }
 
@@ -3656,8 +3596,7 @@ impl Database for PgBackend {
                  LIMIT 1",
                 &[&window_label, &metric],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(row.map(|row| crate::db::LeaderboardSnapshotRow {
             snapshot_id: row.get("snapshot_id"),
             computed_at: row.get("computed_at"),
@@ -3692,9 +3631,8 @@ impl Database for PgBackend {
                     &device_key.client_info,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(device_key_record_from_row(row))
     }
 
@@ -3714,9 +3652,8 @@ impl Database for PgBackend {
                   WHERE tenant_id = $1 AND device_key_id = $2",
                 &[&tenant_id, &device_key_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(row.map(device_key_record_from_row))
     }
 
@@ -3736,9 +3673,8 @@ impl Database for PgBackend {
                   ORDER BY created_at ASC, device_key_id ASC",
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(rows.into_iter().map(device_key_record_from_row).collect())
     }
 
@@ -3759,9 +3695,8 @@ impl Database for PgBackend {
                             client_info, created_at, revoked_at",
                 &[&tenant_id, &device_key_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(row.map(device_key_record_from_row))
     }
 
@@ -4009,8 +3944,7 @@ impl Database for PgBackend {
                 &format!("instance-enroll:{}", p.instance_subject_hash),
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
 
         // Register the device key (the principal). `device_key_id` is a GLOBAL
         // primary key, so an `ON CONFLICT DO NOTHING` no-op can mean the key
@@ -4034,8 +3968,7 @@ impl Database for PgBackend {
                     &p.client_info,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
 
         if inserted.is_none() {
             let existing = tx
@@ -4045,8 +3978,7 @@ impl Database for PgBackend {
                       WHERE tenant_id = $1 AND device_key_id = $2",
                     &[&p.tenant_id, &p.device_key_id],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?;
+                .await?;
             let usable = match existing {
                 Some(row) => {
                     let public_key: String = row.get("public_key");
@@ -4083,7 +4015,7 @@ impl Database for PgBackend {
         )
         .await?;
 
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
 
         // Create-or-reuse the contributor account and bind the device principal so
         // instance-enrolled users get account-scoped trace read-back immediately,
@@ -4106,16 +4038,12 @@ impl Database for PgBackend {
         max_enrollments: i64,
     ) -> Result<crate::db::InstanceEnrollmentOutcome, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
-        let tx = client
-            .transaction()
-            .await
-            .map_err(DatabaseError::Postgres)?;
+        let tx = client.transaction().await?;
         tx.execute(
             "SELECT set_config('trace_commons.instance_subject', $1, true)",
             &[&instance_subject_hash],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
 
         // Already enrolled? Idempotent — no cap consumption.
         let existing = tx
@@ -4124,10 +4052,9 @@ impl Database for PgBackend {
                   WHERE instance_subject_hash = $1 AND user_subject_hash = $2",
                 &[&instance_subject_hash, &user_subject_hash],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         if existing.is_some() {
-            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            tx.commit().await?;
             return Ok(crate::db::InstanceEnrollmentOutcome::ExistingUser);
         }
 
@@ -4143,11 +4070,10 @@ impl Database for PgBackend {
                   WHERE instance_subject_hash = $1",
                 &[&instance_subject_hash],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
             .get(0);
         if count >= max_enrollments {
-            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            tx.commit().await?;
             return Ok(crate::db::InstanceEnrollmentOutcome::CapExceeded);
         }
 
@@ -4159,9 +4085,8 @@ impl Database for PgBackend {
                  ON CONFLICT (instance_subject_hash, user_subject_hash) DO NOTHING",
                 &[&instance_subject_hash, &user_subject_hash, &tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
 
         // A racing insert of the SAME user resolves to ExistingUser.
         Ok(if inserted == 1 {
@@ -4194,8 +4119,7 @@ impl Database for PgBackend {
                     ) AS policy_present",
                 &[],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let rls_forced: bool = row.get("rls_forced");
         let policy_present: bool = row.get("policy_present");
         Ok(rls_forced && policy_present)
@@ -4210,7 +4134,7 @@ impl Database for PgBackend {
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let account_id = create_or_reuse_account_in_tx(&tx, principal_ref).await?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(account_id)
     }
 
@@ -4237,9 +4161,8 @@ impl Database for PgBackend {
                     AND principal_ref = ANY($1)",
                 &[&principal_refs],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         let mut map = std::collections::HashMap::with_capacity(rows.len());
         for row in rows {
             let principal_ref: String = row.get("principal_ref");
@@ -4267,10 +4190,9 @@ impl Database for PgBackend {
                     AND expires_at > now()",
                 &[&created_principal_ref],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let outstanding: i64 = row.get("outstanding");
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(outstanding)
     }
 
@@ -4301,9 +4223,8 @@ impl Database for PgBackend {
                 &expires_at,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -4324,9 +4245,8 @@ impl Database for PgBackend {
              ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
             &[&action, &actor_ref, &outcome, &safe_metadata],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -4493,12 +4413,11 @@ impl Database for PgBackend {
                   RETURNING account_id",
                 &[&code_hash],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let Some(consumed) = consumed else {
             // No row consumed: commit the no-op tx so the link stays UNconsumed and
             // retryable, and return None for the uniform deny upstream.
-            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            tx.commit().await?;
             return Ok(None);
         };
         let account_id: Uuid = consumed.get("account_id");
@@ -4520,8 +4439,7 @@ impl Database for PgBackend {
                 &session.expires_at,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
 
         // ... and the hash-only / label-only audit row. Actor is derived from the
         // consumed account_id (reserved-prefix, never sha-shaped). If any of these
@@ -4536,10 +4454,9 @@ impl Database for PgBackend {
              ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
             &[&audit.action, &actor_ref, &audit.outcome, &audit.metadata],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
 
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(Some(crate::db::RedeemedSession {
             account_id,
             session_id,
@@ -4614,8 +4531,7 @@ impl Database for PgBackend {
                     &crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let Some(row) = row else {
             // Miss OR idle-capped. Auto-revoke any matching row that is still live
             // (unexpired, unrevoked) but fell past the idle cap, so a leaked secret
@@ -4634,9 +4550,8 @@ impl Database for PgBackend {
                     AND last_seen_at <= now() - INTERVAL '3 days'",
                 &[&token_hash],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+            tx.commit().await?;
             return Ok(None);
         };
         let account_id: Uuid = row.get("account_id");
@@ -4711,12 +4626,11 @@ impl Database for PgBackend {
                             as i32),
                     ],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?;
+                .await?;
             match rotated {
                 Some(rotated) => expires_at = rotated.get("expires_at"),
                 None => {
-                    tx.commit().await.map_err(DatabaseError::Postgres)?;
+                    tx.commit().await?;
                     return Ok(Some(crate::db::ValidatedSession {
                         account_id,
                         auth_credential_id,
@@ -4743,8 +4657,7 @@ impl Database for PgBackend {
                     &serde_json::json!({}),
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
             Some(new_secret)
         } else {
             // Live hit (no rotation): bump last_seen_at to slide the idle window
@@ -4756,11 +4669,10 @@ impl Database for PgBackend {
                     AND token_hash = $1",
                 &[&current_token_hash],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
             None
         };
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(Some(crate::db::ValidatedSession {
             account_id,
             auth_credential_id,
@@ -4798,9 +4710,8 @@ impl Database for PgBackend {
                     AND revoked_at IS NULL",
                 &[&token_hash],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(revoked)
     }
 
@@ -4823,9 +4734,8 @@ impl Database for PgBackend {
                     AND revoked_at IS NULL",
                 &[&account_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(revoked)
     }
 
@@ -4894,10 +4804,9 @@ impl Database for PgBackend {
                     AND unlinked_at IS NULL",
                 &[&principal_ref],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let account_id = row.map(|row| row.get::<_, Uuid>("account_id"));
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(account_id)
     }
 
@@ -4918,13 +4827,12 @@ impl Database for PgBackend {
                     AND account_id = $1",
                 &[&account_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let principals = crate::account_session::AccountPrincipalSet::from_iter(
             rows.into_iter()
                 .map(|row| row.get::<_, String>("principal_ref")),
         );
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(principals)
     }
 
@@ -4961,8 +4869,7 @@ impl Database for PgBackend {
                 &session.expires_at,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
 
         let actor_ref = crate::account_session::account_actor_ref(
             &crate::account_session::AccountId::from_uuid(account_id),
@@ -4973,10 +4880,9 @@ impl Database for PgBackend {
              ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
             &[&audit.action, &actor_ref, &audit.outcome, &audit.metadata],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
 
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -5017,8 +4923,7 @@ impl Database for PgBackend {
                 &session.expires_at,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
 
         // Hash-only / label-only audit row in the SAME tx so an audit failure rolls
         // back the session (no un-audited session, no orphaned audit). Never the
@@ -5032,10 +4937,9 @@ impl Database for PgBackend {
              ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
             &[&audit.action, &actor_ref, &audit.outcome, &audit.metadata],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
 
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -5114,9 +5018,8 @@ impl Database for PgBackend {
              )",
             &[&public_key, &near_account_id, &account_id, &label],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(true)
     }
 
@@ -5141,9 +5044,8 @@ impl Database for PgBackend {
                     AND revoked_at IS NULL",
                 &[&public_key],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(row.map(|row| crate::db::NearIdentityRow {
             account_id: row.get("account_id"),
             near_account_id: row.get("near_account_id"),
@@ -5168,9 +5070,8 @@ impl Database for PgBackend {
                 AND revoked_at IS NULL",
             &[&public_key],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -5193,9 +5094,8 @@ impl Database for PgBackend {
                   ORDER BY created_at",
                 &[&account_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(rows
             .into_iter()
             .map(|row| {
@@ -5234,9 +5134,8 @@ impl Database for PgBackend {
                     AND revoked_at IS NULL",
                 &[&label, &account_id, &public_key],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(affected > 0)
     }
 
@@ -5269,12 +5168,11 @@ impl Database for PgBackend {
                     AND revoked_at IS NULL",
                 &[&account_id, &public_key],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         // Remaining NEAR identities (NEAR keys), computed in the SAME tx after
         // the revoke. Not the gate's count: a NEAR AI login is not a key.
         let remaining_strong = active_near_identity_count(&tx, &account_id).await?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(crate::db::RevokeNearResult {
             removed: removed > 0,
             remaining_strong,
@@ -5290,7 +5188,7 @@ impl Database for PgBackend {
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let strong = active_strong_authenticator_count(&tx, &account_id).await?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(strong)
     }
 
@@ -5431,8 +5329,7 @@ impl Database for PgBackend {
                 AND payout_designated_at IS NOT NULL",
             &[&account_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
         // Stamp the named active key. account-scoped + revoked_at IS NULL so an
         // unknown / revoked / other-account key affects zero rows.
         let affected = tx
@@ -5445,9 +5342,8 @@ impl Database for PgBackend {
                     AND revoked_at IS NULL",
                 &[&account_id, &public_key],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(affected > 0)
     }
 
@@ -5471,9 +5367,8 @@ impl Database for PgBackend {
                     AND payout_designated_at IS NOT NULL",
                 &[&account_id, &public_key],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(affected > 0)
     }
 
@@ -5486,7 +5381,7 @@ impl Database for PgBackend {
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         let resolution = resolve_payout_near_account_id_on_tx(&tx, account_id).await?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(resolution)
     }
 
@@ -5516,10 +5411,9 @@ impl Database for PgBackend {
                   RETURNING account_id",
                 &[&merge_code_hash],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let Some(consumed) = consumed else {
-            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            tx.commit().await?;
             return Ok(None);
         };
         let absorbed_account_id: Uuid = consumed.get("account_id");
@@ -5527,7 +5421,7 @@ impl Database for PgBackend {
         // Guard: cannot merge an account into itself. The consume already fired,
         // so commit it (the link is single-use spent) and deny.
         if absorbed_account_id == surviving_account_id {
-            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            tx.commit().await?;
             return Ok(None);
         }
 
@@ -5541,11 +5435,10 @@ impl Database for PgBackend {
                   FOR UPDATE",
                 &[&absorbed_account_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
             .get("closed_at");
         if closed_at.is_some() {
-            tx.commit().await.map_err(DatabaseError::Postgres)?;
+            tx.commit().await?;
             return Ok(None);
         }
 
@@ -5558,8 +5451,7 @@ impl Database for PgBackend {
                     AND unlinked_at IS NULL",
                 &[&absorbed_account_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
             .get(0);
 
         // Stage the single-use, time-bounded proposal. proposal_id is
@@ -5580,10 +5472,9 @@ impl Database for PgBackend {
                 &absorbed_principal_count,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
 
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(Some(crate::db::StagedMergeProposal {
             proposal_id,
             absorbed_account_id,
@@ -5607,8 +5498,7 @@ impl Database for PgBackend {
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 691))",
             &[&tenant_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
         // A legacy tenant's tenant-link lock (V81, V148), also before any
         // account row lock: a link or attestation holds it while its claim
         // writes principals referencing an account, and closing the absorbed
@@ -5620,8 +5510,7 @@ impl Database for PgBackend {
                 "SELECT pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || $1, 0))",
                 &[&tenant_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         }
 
         // Load + consume the proposal atomically. The conditional UPDATE
@@ -5653,8 +5542,7 @@ impl Database for PgBackend {
                   RETURNING absorbed_account_id",
                 &[&proposal_id, &surviving_account_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let Some(consumed) = consumed else {
             return Ok(None);
         };
@@ -5676,16 +5564,14 @@ impl Database for PgBackend {
                       ORDER BY legacy_tenant_id",
                     &[&absorbed_account_id],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?;
+                .await?;
             for row in legacy_tenants {
                 let legacy: String = row.get(0);
                 tx.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || $1, 0))",
                     &[&legacy],
                 )
-                .await
-                .map_err(DatabaseError::Postgres)?;
+                .await?;
             }
         }
 
@@ -5709,8 +5595,7 @@ impl Database for PgBackend {
                     &proposal_id,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         let near_anchors_carried: i64 = near_carried.get(0);
         let near_devices_carried: i64 = near_carried.get(1);
 
@@ -5725,8 +5610,7 @@ impl Database for PgBackend {
                   FOR UPDATE",
                 &[&absorbed_account_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
             .get("closed_at");
         if closed_at.is_some() {
             return Ok(None);
@@ -5762,8 +5646,7 @@ impl Database for PgBackend {
                     AND unlinked_at IS NULL",
                 &[&surviving_account_id, &absorbed_account_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)? as i64;
+            .await? as i64;
 
         // Re-key B's ACTIVE NEAR identities onto A, CLEARING payout_designated_at:
         // A may already have its own designated payout, and the partial-unique
@@ -5778,8 +5661,7 @@ impl Database for PgBackend {
                     AND revoked_at IS NULL",
                 &[&surviving_account_id, &absorbed_account_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)? as i64;
+            .await? as i64;
         let authenticators_moved = near_moved;
 
         // Public pages remain attached to their accepted submissions, but their
@@ -5793,8 +5675,7 @@ impl Database for PgBackend {
                     AND account_id = $2",
                 &[&surviving_account_id, &absorbed_account_id],
             )
-            .await
-            .map_err(DatabaseError::Postgres)? as i64;
+            .await? as i64;
 
         // Source-session withdrawal is account-scoped. Carry B's sessions onto
         // A so a withdrawal made by either identity reaches every mapped
@@ -5814,8 +5695,7 @@ impl Database for PgBackend {
                     &proposal_id,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
             .get(0);
 
         // Invite trust follows the identity: B's grant rows (with their
@@ -5834,8 +5714,7 @@ impl Database for PgBackend {
                     &proposal_id,
                 ],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?
+            .await?
             .get(0);
 
         // Revoke ALL of B's live sessions (mirror revoke_all_account_sessions):
@@ -5847,8 +5726,7 @@ impl Database for PgBackend {
                 AND revoked_at IS NULL",
             &[&absorbed_account_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
 
         // Close B.
         tx.execute(
@@ -5858,8 +5736,7 @@ impl Database for PgBackend {
                 AND closed_at IS NULL",
             &[&absorbed_account_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
 
         // Hash-only / label-only audit. Actor is the surviving account A
         // (reserved-prefix). Metadata is COUNTS ONLY: no principal_refs, public
@@ -5882,10 +5759,9 @@ impl Database for PgBackend {
              ) VALUES (trace_current_tenant_id(), $1, $2, $3, $4)",
             &[&"account_merged", &actor_ref, &"success", &safe_metadata],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
 
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        tx.commit().await?;
         Ok(Some(crate::db::ExecutedMerge {
             principals_moved,
             authenticators_moved,
@@ -5935,8 +5811,7 @@ impl Database for PgBackend {
                  ) pending",
                 &[&max_attempts, &backoff_base_seconds, &now],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(row.get::<_, i64>(0))
     }
 
@@ -5995,8 +5870,7 @@ impl Database for PgBackend {
                  LIMIT $4",
                 &[&max_attempts, &backoff_base_seconds, &now, &limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
 
         Ok(rows
             .into_iter()
@@ -6070,8 +5944,7 @@ impl Database for PgBackend {
                  LIMIT $4",
                 &[&max_attempts, &backoff_base_seconds, &now, &limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
 
         Ok(rows
             .into_iter()
@@ -6122,8 +5995,7 @@ impl Database for PgBackend {
                  LIMIT $1",
                 &[&limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
 
         Ok(rows
             .into_iter()
@@ -6168,8 +6040,7 @@ impl Database for PgBackend {
                  LIMIT $1",
                 &[&limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(rows
             .into_iter()
             .map(|row| crate::trace_corpus_storage::GateCreditInput {
@@ -6207,8 +6078,7 @@ impl Database for PgBackend {
                  LIMIT $1",
                 &[&limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(rows
             .into_iter()
             .map(|row| crate::trace_corpus_storage::DedupSignalRow {
@@ -6244,8 +6114,7 @@ impl Database for PgBackend {
                  WHERE bit_count((representative_simhash # $1)::bit(64)) <= $2",
                 &[&simhash, &max_hamming],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(rows
             .into_iter()
             .map(
@@ -6306,9 +6175,8 @@ impl Database for PgBackend {
                        AND s.instrument_id = 'trace_credit'",
                 &[&tenant_id, &submission_ids],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        tx.commit().await.map_err(DatabaseError::Postgres)?;
+            .await?;
+        tx.commit().await?;
         Ok(rows
             .into_iter()
             .map(|row| {
@@ -6357,8 +6225,7 @@ impl Database for PgBackend {
                  LIMIT $1",
                 &[&limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(rows
             .into_iter()
             .map(|row| crate::trace_corpus_storage::GateDecisionKeyRow {
@@ -6398,8 +6265,7 @@ impl Database for PgBackend {
                  LIMIT $1",
                 &[&limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(rows
             .into_iter()
             .map(|row| crate::trace_corpus_storage::DedupRederiveRow {
@@ -6437,8 +6303,7 @@ impl Database for PgBackend {
                  LIMIT $1",
                 &[&limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(rows
             .into_iter()
             .map(|row| crate::trace_corpus_storage::CorrectionSignalRow {
@@ -6478,8 +6343,7 @@ impl Database for PgBackend {
                  LIMIT $1",
                 &[&limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(rows
             .into_iter()
             .map(|row| crate::trace_corpus_storage::ContributorCapSignalRow {
@@ -6528,8 +6392,7 @@ impl Database for PgBackend {
                  ORDER BY submission_id, decided_at DESC, decision_id DESC",
                 &[&submission_ids],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(rows
             .into_iter()
             .map(|row| {
@@ -6605,8 +6468,7 @@ impl Database for PgBackend {
                  LIMIT $3",
                 &[&tenant_id, &auth_principal_ref, &limit],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(rows
             .into_iter()
             .map(|row| {
@@ -6672,8 +6534,7 @@ impl Database for PgBackend {
                  ORDER BY s.submission_id, d.decided_at DESC NULLS LAST, d.decision_id DESC",
                 &[&tenant_id, &auth_principal_ref, &submission_ids],
             )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+            .await?;
         Ok(rows
             .into_iter()
             .map(|row| {
@@ -6829,8 +6690,7 @@ async fn upsert_onboarding_device_tenant_access_grant(
             &metadata_json,
         ],
     )
-    .await
-    .map_err(DatabaseError::Postgres)?;
+    .await?;
     Ok(())
 }
 
@@ -6894,8 +6754,7 @@ pub(super) async fn insert_near_ai_signup_device_tenant_access_grant(
                 &issued_at,
             ],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
     Ok(inserted == 1)
 }
 
@@ -7319,8 +7178,7 @@ pub(crate) async fn resolve_payout_near_account_id_on_tx(
                 AND revoked_at IS NULL",
             &[&account_id],
         )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+        .await?;
 
     // A designated active identity wins outright.
     if let Some(row) = rows.iter().find(|row| {

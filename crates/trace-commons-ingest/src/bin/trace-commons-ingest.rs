@@ -1843,7 +1843,7 @@ fn flush_vector_indexes_on_shutdown(state: &AppState) {
 }
 
 #[derive(Clone)]
-struct AppState {
+pub struct AppState {
     activity_missions_policy:
         Option<Arc<trace_commons_protocol::activity_missions::ActivityPolicy>>,
     /// The local credit estimate table `GET /v1/credit-estimate/table`
@@ -1906,15 +1906,15 @@ struct AppState {
     /// and read (V154). `None` without a database: reports are dropped.
     witness_blocked:
         Option<Arc<dyn trace_commons_server::db::witness_blocked::WitnessBlockedStore>>,
-    inference_connection_catalog:
+    pub inference_connection_catalog:
         Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
-    near_provisioning_enabled: bool,
-    near_provisioning_admission_ready: bool,
-    near_provisioning_public_origin: Option<String>,
+    pub near_provisioning_enabled: bool,
+    pub near_provisioning_admission_ready: bool,
+    pub near_provisioning_public_origin: Option<String>,
     /// Pepper + account-name key for wallet provisioning. `None` only when
     /// provisioning is disabled; when it is enabled, boot fails rather than
     /// leaving this unset, so no request path can find it missing and improvise.
-    near_account_identity: Option<Arc<NearAccountIdentity>>,
+    pub near_account_identity: Option<Arc<NearAccountIdentity>>,
     /// The NEAR AI sign-up policy template
     /// (`TRACE_COMMONS_NEAR_AI_SIGNUP_POLICY_TEMPLATE`, owner decision
     /// 2026-10-24). NEAR AI provisioning, bind and device enrollment write the
@@ -1936,7 +1936,7 @@ struct AppState {
     require_tenant_access_grants: bool,
     tenant_policies: Arc<BTreeMap<String, TenantSubmissionPolicy>>,
     require_tenant_submission_policy: bool,
-    db_mirror: Option<Arc<dyn Database>>,
+    pub db_mirror: Option<Arc<dyn Database>>,
     pipeline_service: Option<Arc<PipelineService>>,
     /// Product reads over the pipeline's records: the status block, the
     /// score attestation, exports, and the administrator summaries. Present
@@ -1992,7 +1992,7 @@ struct AppState {
     /// development storage and static tokens, so without it no test could
     /// pass the gate through a route. The field does not exist in a shipped
     /// binary.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pipeline_infrastructure_override: Option<
         trace_commons_server::versioned_pipeline_qualification::ProductionInfrastructureProfile,
     >,
@@ -2051,7 +2051,7 @@ struct AppState {
     db_replay_export_require_object_refs: bool,
     db_audit_reads: bool,
     db_tenant_policy_reads: bool,
-    require_db_mirror_writes: bool,
+    pub require_db_mirror_writes: bool,
     /// `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME`, read once at startup. Off
     /// by default: the audit-chain repair then refuses to resume the DB chain
     /// across a legacy segment (`legacy_segment_resume_disabled`), and its dry
@@ -2078,7 +2078,7 @@ struct AppState {
     /// every deployment had before this existed.
     community_snapshot_interval: Option<StdDuration>,
     community_analytics_publication_basis: CommunityAnalyticsPublicationBasis,
-    accept_medium_risk_submissions: bool,
+    pub accept_medium_risk_submissions: bool,
     community_tenant_ids: Arc<Vec<String>>,
     tenant_rollout_gates: TraceTenantRolloutGates,
     max_export_items_per_request: usize,
@@ -2113,7 +2113,7 @@ struct AppState {
     credit_settlement_require_near_contract: bool,
     submission_quota: TraceSubmissionQuotaConfig,
     legal_hold_retention_policy_ids: Arc<BTreeSet<String>>,
-    artifact_store: Option<ConfiguredTraceArtifactStore>,
+    pub artifact_store: Option<ConfiguredTraceArtifactStore>,
     require_object_store_versioning: bool,
     /// The NEAR AI inference endpoint the attestation drill probes, or
     /// `None` when the base URL / model / API key are not all configured.
@@ -2155,14 +2155,21 @@ struct AppState {
     /// Gated on `cfg(test)`, the lever does not exist in a shipped binary --
     /// there is no value to set, because there is no field.
     ///
+    /// The `test-support` feature compiles the field too, for the test
+    /// package that drives this ceremony from outside the crate
+    /// (`trace-commons-ingest-contributor-tests`). That keeps the property
+    /// only as long as no shipped build enables the feature, which
+    /// `scripts/ci/check-release-test-support.sh` refuses. The field is still
+    /// set by test code alone; nothing reads it from configuration.
+    ///
     /// It exists because `near_ai_provision_finish_handler` calls NEAR AI as
     /// its last step, so without this no test can reach what comes after:
     /// `provision_near_ai_login` and the anchor row it writes. That was the
     /// whole of the untested gap -- both halves of the ceremony had unit
     /// suites and nothing had ever driven the handler far enough to write an
     /// anchor.
-    #[cfg(test)]
-    near_ai_introspection_base_url: Option<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub near_ai_introspection_base_url: Option<String>,
     near_credit_submitter: Option<Arc<dyn TraceNearCreditSubmitter>>,
     near_credit_submitter_timeout_ms: Option<u64>,
     near_credit_submitter_auth_configured: bool,
@@ -2218,7 +2225,7 @@ struct AppState {
     /// address, a measurement set and a policy allowlist, and a certificate
     /// verifying against all three keeps a submission out of the hold. It
     /// lifts no quarantine and never means the trace is clean.
-    witness_bypass: Option<WitnessBypassConfig>,
+    pub witness_bypass: Option<WitnessBypassConfig>,
     witness_capture_pin: Option<WitnessPin>,
     admission: Option<admission::AdmissionConfig>,
     account_admission: Option<admission::AccountAdmissionConfig>,
@@ -2310,7 +2317,7 @@ struct AppState {
     /// `NearConfig` is fully configured. `None` makes the NEAR sign-in surface
     /// fail closed (its accessor 503s). Wired into the begin/finish ceremony
     /// handlers in later Slice 3a tasks.
-    account_near_config: Option<Arc<NearConfig>>,
+    pub account_near_config: Option<Arc<NearConfig>>,
     /// Server-signed score attestations: `None` when
     /// `TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KEY_PEM` (and its sibling
     /// public-key/kid envs) are unconfigured, which makes the
@@ -2384,9 +2391,12 @@ struct AppState {
     /// Test-only override for the NEAR access-key binding check (Slice 3a Task 6).
     /// When `Some`, the enroll-finish handler consults this stub instead of the
     /// live `view_access_key_list` JSON-RPC call, so the binding check is
-    /// exercisable without a live NEAR RPC. `#[cfg(test)]`-only: the production
-    /// binary never carries this field and always takes the live RPC path.
-    #[cfg(test)]
+    /// exercisable without a live NEAR RPC. Compiled under `cfg(test)` and the
+    /// tests-only `test-support` feature: the production binary never carries
+    /// this field and always takes the live RPC path
+    /// (`scripts/ci/check-release-test-support.sh` refuses a shipped build
+    /// with the feature on).
+    #[cfg(any(test, feature = "test-support"))]
     near_access_key_checker_override:
         Option<Arc<dyn trace_commons_server::account_near::NearAccessKeyChecker>>,
 }
@@ -2987,9 +2997,9 @@ impl TraceExportAccessGrant {
 }
 
 #[derive(Clone)]
-struct ConfiguredTraceArtifactStore {
+pub struct ConfiguredTraceArtifactStore {
     object_store_name: String,
-    store: Arc<dyn TraceArtifactStore>,
+    pub store: Arc<dyn TraceArtifactStore>,
     object_io_enabled: bool,
     plaintext_compatibility_allowed: bool,
     object_versioning_supported: bool,
@@ -3016,7 +3026,7 @@ impl ConfiguredTraceArtifactStore {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn legacy(store: Arc<LocalEncryptedTraceArtifactStore>) -> Self {
         Self::new(TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE, store)
     }
@@ -3672,7 +3682,7 @@ impl TenantAuth {
 }
 
 #[derive(Debug, Clone)]
-struct TenantCtx {
+pub struct TenantCtx {
     auth: TenantAuth,
 }
 
@@ -3685,7 +3695,7 @@ impl TenantCtx {
         &self.auth
     }
 
-    fn tenant_id(&self) -> &str {
+    pub fn tenant_id(&self) -> &str {
         &self.auth.tenant_id
     }
 
@@ -3693,7 +3703,7 @@ impl TenantCtx {
         self.auth.role
     }
 
-    fn principal_ref(&self) -> &str {
+    pub fn principal_ref(&self) -> &str {
         &self.auth.principal_ref
     }
 
@@ -3744,7 +3754,7 @@ impl TenantCtx {
         tenant_storage_ref(self.tenant_id())
     }
 
-    fn safe_auth_method(&self) -> TraceAuthMethod {
+    pub fn safe_auth_method(&self) -> TraceAuthMethod {
         self.auth.auth_method
     }
 
@@ -3821,7 +3831,7 @@ impl TenantCtx {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum TraceAuthMethod {
+pub enum TraceAuthMethod {
     StaticToken,
     SignedClaim,
     InternalScheduler,
@@ -5191,7 +5201,7 @@ impl AppState {
             // compiles this constructor too. `None` unconditionally, like the
             // clock above -- `from_env` never reads an override for it, so no
             // configuration can reach it even in a test binary.
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             near_ai_introspection_base_url: None,
             driver_liveness: Arc::new(DriverLivenessRegistry::default()),
             tokens: Arc::new(tokens),
@@ -5214,7 +5224,7 @@ impl AppState {
             pipeline_main_gate,
             // `cfg(test)` because the field is; `None` unconditionally, so no
             // configuration reaches it.
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             pipeline_infrastructure_override: None,
             pipeline_unqualified_routing: pipeline_allow_test_dependencies,
             pipeline_runtime_selection,
@@ -5404,7 +5414,7 @@ impl AppState {
             )),
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
             dedup_vector_index_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             near_access_key_checker_override: None,
         };
         // `run_ingest` emits `pipeline_production_adapters` over these once
@@ -8917,7 +8927,7 @@ fn community_cors_origins() -> Vec<HeaderValue> {
     origins
 }
 
-fn app(state: Arc<AppState>) -> Router {
+pub fn app(state: Arc<AppState>) -> Router {
     // One gate per body ceiling, so a declared length over the route's own
     // ceiling is refused before any bytes are budgeted or read.
     let large_body_auth = axum::middleware::from_fn_with_state(
@@ -13544,7 +13554,7 @@ fn validate_retention_policy_id(policy_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn insert_token(
     tokens: &mut BTreeMap<String, TenantAuth>,
     tenant_id: &str,
@@ -16340,7 +16350,7 @@ async fn submit_trace_handler_authenticated(
             (tenant, Some(slot))
         }
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pause_submit_after_rate_limit_for_test(&submit_principal_rate_limit_key(
         authenticated_tenant.tenant_id(),
         authenticated_tenant.safe_auth_method(),
@@ -22331,7 +22341,7 @@ const SUBMIT_PER_PRINCIPAL_LIMIT: u32 =
     trace_commons_protocol::submit_rate::SUBMIT_PER_PRINCIPAL_LIMIT;
 /// Concurrency cap on in-flight submissions per principal. The re-scrub and gate
 /// path gets half the content-read concurrency allowance of 4.
-const SUBMIT_PER_PRINCIPAL_CONCURRENCY: u32 = 2;
+pub const SUBMIT_PER_PRINCIPAL_CONCURRENCY: u32 = 2;
 /// Highest per-window submission rate an operator may configure. Ten a second
 /// sustained is far past any contributor's real pace; above it the limit
 /// bounds nothing the deployment-wide caps do not.
@@ -22555,7 +22565,7 @@ fn large_body_concurrency_refusal() -> axum::response::Response {
     ))
 }
 
-fn submit_principal_rate_limit_key(
+pub fn submit_principal_rate_limit_key(
     tenant_id: &str,
     auth_method: TraceAuthMethod,
     principal_ref: &str,
@@ -22598,8 +22608,8 @@ fn large_body_principal_concurrency(key: &str) -> u32 {
     configured_rate_limits(key).map_or(LARGE_BODY_PER_PRINCIPAL_CONCURRENCY, |(_, c)| c)
 }
 
-#[cfg(test)]
-fn configure_submit_rate_limits_for_test(key: &str, rate: u32, concurrency: u32) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn configure_submit_rate_limits_for_test(key: &str, rate: u32, concurrency: u32) {
     let limits = SUBMIT_RATE_LIMIT_TEST_LIMITS
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     match limits.lock() {
@@ -22650,11 +22660,14 @@ impl AccountRateWindows {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn clear(&mut self) {
         self.entries.clear();
         self.last_prune = None;
-        self.prune_runs = 0;
+        #[cfg(test)]
+        {
+            self.prune_runs = 0;
+        }
     }
 }
 
@@ -22669,7 +22682,7 @@ impl AccountRateWindows {
 /// principal or account. A key-cardinality flood on the public surfaces fills
 /// only the first, so it cannot fold a contributor into the anonymous overflow
 /// bucket.
-struct AccountRateLimiter {
+pub struct AccountRateLimiter {
     windows: std::sync::Mutex<AccountRateWindows>,
     principal_windows: std::sync::Mutex<AccountRateWindows>,
     concurrency: std::sync::Mutex<std::collections::HashMap<String, u32>>,
@@ -22852,7 +22865,7 @@ impl AccountRateLimiter {
     /// test calls this at the top (via `reset_account_rate_limiter_for_test`) so it
     /// is independent of limiter state from prior tests. A poisoned lock is cleared
     /// into a fresh map so a panic in one test cannot wedge the limiter for the rest.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn reset_for_test(&self) {
         for table in [&self.windows, &self.principal_windows] {
             table
@@ -22873,8 +22886,8 @@ impl AccountRateLimiter {
         configure_submit_rate_limit_pause_for_test(None);
     }
 
-    #[cfg(test)]
-    fn count_for_test(&self, key: &str) -> u32 {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn count_for_test(&self, key: &str) -> u32 {
         [&self.windows, &self.principal_windows]
             .into_iter()
             .map(|table| {
@@ -22920,13 +22933,13 @@ impl AccountRateLimiter {
 /// DB-backed account/session/rotation tests call this at the start of
 /// each test so they don't inherit hit counts from prior tests sharing the
 /// `ACCOUNT_RATE_LIMITER` singleton. See `AccountRateLimiter::reset_for_test`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn reset_account_rate_limiter_for_test() {
     ACCOUNT_RATE_LIMITER.reset_for_test();
 }
 
-#[cfg(test)]
-fn submit_rate_limit_count_for_test(
+#[cfg(any(test, feature = "test-support"))]
+pub fn submit_rate_limit_count_for_test(
     tenant_id: &str,
     auth_method: TraceAuthMethod,
     principal_ref: &str,
@@ -22938,7 +22951,7 @@ fn submit_rate_limit_count_for_test(
     ))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
 struct SubmitRateLimitTestPause {
     key: String,
@@ -22946,12 +22959,12 @@ struct SubmitRateLimitTestPause {
     proceed: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static SUBMIT_RATE_LIMIT_TEST_PAUSE: std::sync::LazyLock<
     std::sync::Mutex<Option<SubmitRateLimitTestPause>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn configure_submit_rate_limit_pause_for_test(pause: Option<SubmitRateLimitTestPause>) {
     match SUBMIT_RATE_LIMIT_TEST_PAUSE.lock() {
         Ok(mut configured) => *configured = pause,
@@ -22959,7 +22972,7 @@ fn configure_submit_rate_limit_pause_for_test(pause: Option<SubmitRateLimitTestP
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 async fn pause_submit_after_rate_limit_for_test(key: &str) {
     let pause = match SUBMIT_RATE_LIMIT_TEST_PAUSE.lock() {
         Ok(configured) => configured.clone(),
@@ -22987,7 +23000,7 @@ impl Drop for ConcurrencyGuard<'_> {
 }
 
 /// Process-global authenticated-surface limiter. Single-instance (see module note).
-static ACCOUNT_RATE_LIMITER: std::sync::LazyLock<AccountRateLimiter> =
+pub static ACCOUNT_RATE_LIMITER: std::sync::LazyLock<AccountRateLimiter> =
     std::sync::LazyLock::new(AccountRateLimiter::new);
 
 /// Extract the canonical client IP rate-limit key from `X-Forwarded-For`.
@@ -23818,11 +23831,11 @@ async fn account_near_enroll_finish_handler(
     // confirming it is a FullAccess key on it. The signature alone only proves
     // possession of the private key; it does not bind the key to `accountId`.
     //
-    // Test seam: when the `#[cfg(test)]` override is installed, consult it instead
+    // Test seam: when the test-only override is installed, consult it instead
     // of the live `view_access_key_list` RPC so the binding check is testable
     // without a NEAR node. Production never installs an override -> live RPC.
     let has_full_access = {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             match state.near_access_key_checker_override.as_ref() {
                 Some(checker) => {
@@ -23840,7 +23853,7 @@ async fn account_near_enroll_finish_handler(
                 }
             }
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             trace_commons_server::account_near::near_account_has_full_access_key(
                 &cfg,
@@ -62985,7 +62998,7 @@ fn bearer_auth_headers_from_token(token: &str) -> ApiResult<HeaderMap> {
     Ok(headers)
 }
 
-fn authenticate_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantCtx> {
+pub fn authenticate_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantCtx> {
     authenticate(state, headers).map(TenantCtx::from_auth)
 }
 
@@ -79489,7 +79502,7 @@ fn tenant_storage_ref(tenant_id: &str) -> String {
 type ApiResult<T> = Result<T, (StatusCode, Json<ApiError>)>;
 
 #[derive(Debug, Serialize)]
-struct ApiError {
+pub struct ApiError {
     error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     retry_after_seconds: Option<i64>,
@@ -87554,6 +87567,12 @@ async fn fetch_attestation_collateral(
         trace_commons_server::near_attestation::client::COLLATERAL_CLIENT_CONTROL,
     ))
 }
+
+/// Fixtures shared by the unit tests below and by test packages outside
+/// this crate. Never part of a shipped build; see the module's own note.
+#[cfg(any(test, feature = "test-support"))]
+#[path = "trace_commons_ingest_internal/test_support.rs"]
+pub mod test_support;
 
 #[cfg(test)]
 #[path = "trace_commons_ingest_internal/tests.rs"]

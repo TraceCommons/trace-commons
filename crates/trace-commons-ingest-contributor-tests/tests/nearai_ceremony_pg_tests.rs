@@ -42,13 +42,21 @@
 //! the ceremony is stood in for; the preimage, the signature and the ceremony
 //! storage are the things under test.
 
-use super::*;
+use std::sync::Arc;
+
 use axum::body::Body;
+use axum::http::StatusCode;
+use axum::http::header::CONTENT_TYPE;
+use base64::Engine as _;
+use secrecy::SecretString;
 use tower::ServiceExt;
 use trace_commons_contributor::daemon::nearai_onboarding::{
     device_proof_for_ceremony, start_payload,
 };
 use trace_commons_contributor::identity::DeviceIdentity;
+use trace_commons_ingest::test_support::*;
+use trace_commons_server::db::Database;
+use trace_commons_server::db::postgres::PgBackend;
 
 /// A subject nobody has enrolled before, minted per call.
 ///
@@ -107,7 +115,7 @@ fn serial() -> &'static tokio::sync::Mutex<()> {
 /// job, and a suite that silently invents its own would not be running against
 /// the schema the job migrated.
 async fn ceremony_pg_admin() -> Arc<PgBackend> {
-    super::migrated_pg_fixture::migrated_pg("TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL", None)
+    migrated_pg_fixture::migrated_pg("TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL", None)
         .await
         .admin
 }

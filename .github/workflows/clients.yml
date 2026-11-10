@@ -332,14 +332,15 @@ jobs:
       # Pinning also makes the job deterministic: it asserts install.ps1's
       # verify-and-refuse behavior against a known published artifact rather
       # than against whatever was cut most recently. The cost is that this
-      # version must be bumped when contributor-v0.1.0's assets are eventually
-      # removed; the job will fail loudly if that happens, which is the right
-      # way to find out.
+      # version must be bumped when its release stops being downloadable: the
+      # pre-1.0 releases were hidden as drafts on 2026-11-10, which is how
+      # contributor-v0.1.0 stopped working here, so it now pins 1.0.0, the
+      # oldest CLI release still published.
       - name: It installs the real, verified binary
         shell: pwsh
         run: |
           $dir = Join-Path $env:RUNNER_TEMP 'tc-ok'
-          ./scripts/install.ps1 -Dir $dir -Version 0.1.0
+          ./scripts/install.ps1 -Dir $dir -Version 1.0.0
           $exe = Join-Path $dir 'trace-commons-contributor.exe'
           if (-not (Test-Path $exe)) { throw "no binary at $exe" }
           $v = & $exe --version
@@ -362,7 +363,7 @@ jobs:
           # for an unrelated reason, and the guard below would then correctly
           # report that the test proved nothing. Removing the network variable
           # keeps a red result here meaning what it claims to mean.
-          $out = & pwsh -File $bad -Dir $dir -Version 0.1.0 2>&1 | Out-String
+          $out = & pwsh -File $bad -Dir $dir -Version 1.0.0 2>&1 | Out-String
           $code = $LASTEXITCODE
           Write-Host $out
 

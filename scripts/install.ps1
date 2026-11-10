@@ -35,7 +35,7 @@ a status-only check waves through.
 Where to install. Defaults to %LOCALAPPDATA%\Programs\TraceCommons.
 
 .PARAMETER Version
-Which release to install, e.g. 0.1.0. Defaults to the newest CLI release.
+Which release to install, e.g. 1.0.0. Defaults to the newest CLI release.
 #>
 [CmdletBinding()]
 param(
@@ -119,7 +119,7 @@ if ($Version -eq 'latest') {
         Die @"
 could not reach the GitHub API to work out the latest CLI release.
 It may be rate-limiting you. Pass a version explicitly instead:
-  .\install.ps1 -Version 0.1.0
+  .\install.ps1 -Version 1.0.0
 "@
     }
     # Check the SHAPE before reading it. A rate-limited GitHub returns a JSON
@@ -135,7 +135,7 @@ It may be rate-limiting you. Pass a version explicitly instead:
 GitHub did not return a release list. It is most likely rate-limiting you.
 The unauthenticated limit is 60 requests/hour for everyone sharing your IP
 address. Pass a version explicitly to skip this lookup entirely:
-  .\install.ps1 -Version 0.2.0
+  .\install.ps1 -Version 1.0.0
 "@
     }
 
@@ -146,11 +146,15 @@ address. Pass a version explicitly to skip this lookup entirely:
     # plain explanation with a stack trace about a property name. The shape
     # check above cannot stand in for this: a well-formed list with no
     # contributor-v* release in it is exactly the case this catches.
+    # Skip drafts. A token with access to this repository sees draft releases
+    # too, listed first, and a draft's assets are not downloadable by URL --
+    # the pre-1.0 releases were hidden as drafts, and a tokened run resolved
+    # one of them and failed. Anonymous requests never see drafts.
     $release = $usable |
-        Where-Object { $_.tag_name -like 'contributor-v*' } |
+        Where-Object { $_.tag_name -like 'contributor-v*' -and -not $_.draft } |
         Select-Object -First 1
     if (-not $release) {
-        Die "found no contributor-v* release. Pass a version explicitly: .\install.ps1 -Version 0.1.0"
+        Die "found no contributor-v* release. Pass a version explicitly: .\install.ps1 -Version 1.0.0"
     }
     $tag = $release.tag_name
 } else {

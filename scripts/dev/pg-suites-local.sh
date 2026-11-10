@@ -77,7 +77,8 @@ case "$JOBS" in ''|*[!0-9]*|0) echo "pg-suites-local: --jobs must be a positive 
 
 # name|package|target|test args|databases|env|required pattern|forbidden pattern
 #
-#   package    S = trace-commons-server, I = trace-commons-ingest
+#   package    S = trace-commons-server, I = trace-commons-ingest,
+#              C = trace-commons-ingest-contributor-tests (its one target, `it`)
 #   target     `lib`, or the integration test target name
 #   databases  created fresh before the suite; `~name` is created but not held
 #              to the transaction count, because the test works in a
@@ -116,7 +117,7 @@ trace_invite_registry_pg|S|trace_invite_registry_pg||admission_test_invite|TRACE
 account_merge_pg|S|account_merge_pg||admission_test_merge|TRACE_COMMONS_PG_TEST_DATABASE_URL=@admission_test_merge||
 trace_corpus_pg_rls|S|trace_corpus_pg_rls||admission_test_rls|TRACE_COMMONS_PG_TEST_DATABASE_URL=@admission_test_rls||
 token_bundle_pg|S|token_bundle_pg||admission_test_tokens|TRACE_COMMONS_PG_TEST_DATABASE_URL=@admission_test_tokens||
-token_bundle_http_journey|I|lib|token_bundle_http_journey|admission_test_tokens|TRACE_COMMONS_PG_TEST_DATABASE_URL=@admission_test_tokens TRACE_COMMONS_BUNDLE_SERVER_ID=journey-server||
+token_bundle_http_journey|C|it|token_bundle_http_journey|admission_test_tokens|TRACE_COMMONS_PG_TEST_DATABASE_URL=@admission_test_tokens TRACE_COMMONS_BUNDLE_SERVER_ID=journey-server||
 trace_corpus_pg_store|S|trace_corpus_pg_store||admission_test_store|TRACE_COMMONS_PG_TEST_DATABASE_URL=@admission_test_store||
 witness_evidence_pg|S|witness_evidence_pg||admission_test_witness_evidence|TRACE_COMMONS_PG_TEST_DATABASE_URL=@admission_test_witness_evidence||
 trace_session_withdrawal_pg|S|trace_session_withdrawal_pg||admission_test_source_sessions|TRACE_COMMONS_PG_TEST_DATABASE_URL=@admission_test_source_sessions||
@@ -193,10 +194,12 @@ done
 
 # ---- 1. build once -------------------------------------------------------
 tests=()
-need_s=0; need_s_lib=0; need_i_lib=0
+need_s=0; need_s_lib=0; need_i_lib=0; need_c=0
 while IFS='|' read -r _name pkg target _rest; do
   [ -n "$pkg" ] || continue
-  if [ "$target" = lib ]; then
+  if [ "$pkg" = C ]; then
+    need_c=1
+  elif [ "$target" = lib ]; then
     if [ "$pkg" = S ]; then need_s_lib=1; else need_i_lib=1; fi
   else
     need_s=1; tests+=(--test "$target")
@@ -210,14 +213,27 @@ if [ "$need_i_lib" = 1 ]; then build+=(-p trace-commons-ingest); fi
 if [ "$need_s_lib" = 1 ] || [ "$need_i_lib" = 1 ]; then build+=(--lib); fi
 build+=(${tests[@]+"${tests[@]}"})
 echo "pg-suites-local: building test binaries; logs in $WORK" >&2
-(cd "$ROOT" && turn build "pg-suites-local build" -- "${build[@]}") \
-  > "$WORK/build.json" 2> "$WORK/build.log" \
-  || { tail -40 "$WORK/build.log" >&2; echo "pg-suites-local: build failed" >&2; exit 1; }
+: > "$WORK/build.json"; : > "$WORK/build.log"
+if [ "$need_s" = 1 ] || [ "$need_s_lib" = 1 ] || [ "$need_i_lib" = 1 ]; then
+  (cd "$ROOT" && turn build "pg-suites-local build" -- "${build[@]}") \
+    >> "$WORK/build.json" 2>> "$WORK/build.log" \
+    || { tail -40 "$WORK/build.log" >&2; echo "pg-suites-local: build failed" >&2; exit 1; }
+fi
+# Its own invocation: `--test it` beside `-p trace-commons-server` would also
+# select the server's target of the same name.
+if [ "$need_c" = 1 ]; then
+  (cd "$ROOT" && turn build "pg-suites-local build" -- cargo test --no-run \
+      --message-format=json-render-diagnostics -p trace-commons-ingest-contributor-tests --test it) \
+    >> "$WORK/build.json" 2>> "$WORK/build.log" \
+    || { tail -40 "$WORK/build.log" >&2; echo "pg-suites-local: build failed" >&2; exit 1; }
+fi
 
 # "<S|I>:<lib|test name> <executable> <manifest>", from cargo's artifacts.
 python3 -I - "$WORK/build.json" > "$WORK/executables.txt" <<'PY'
 import json, sys
-short = {"trace-commons-server": "S", "trace-commons-ingest": "I"}
+# Longest name first: the ingest name is a prefix of the test package's.
+short = {"trace-commons-ingest-contributor-tests": "C", "trace-commons-server": "S",
+         "trace-commons-ingest": "I"}
 for line in open(sys.argv[1]):
     try:
         m = json.loads(line)
