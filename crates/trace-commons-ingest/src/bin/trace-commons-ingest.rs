@@ -5582,6 +5582,23 @@ fn enforce_db_mirror_write_result(
     }
 }
 
+/// Logs a failed database-mirror write, hash-only and with the caller's own
+/// field, then applies [`enforce_db_mirror_write_result`]. A macro rather
+/// than a function so each call site keeps its structured log field name.
+macro_rules! warn_and_enforce_db_mirror_write {
+    ($state:expr, $operation:expr, $result:expr, $message:literal, $($field:tt)+) => {{
+        let mirror_result = $result;
+        if let Err(error) = &mirror_result {
+            tracing::warn!(
+                error_hash = %safe_runtime_error_hash(error),
+                $($field)+,
+                $message
+            );
+        }
+        enforce_db_mirror_write_result($state, $operation, mirror_result)
+    }};
+}
+
 /// Refuses to start ingest with `pipeline_receipts_configured_without_runtime`
 /// when `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` names tenants but no
 /// pipeline runtime was injected -- a configured tenant would otherwise fall
@@ -7455,15 +7472,12 @@ fn pipeline_main_gate_config_from_env(
 
 fn parse_trace_near_credit_outbox_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceNearCreditOutboxSchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_ENABLED,
+        TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_TOKEN}"
-        );
     };
     let interval = parse_near_credit_outbox_scheduler_interval_from_env()?;
     let submit_limit = parse_optional_scheduler_u32_env(
@@ -7478,10 +7492,11 @@ fn parse_trace_near_credit_outbox_scheduler_config_from_env()
         1,
         TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_MAX_LIMIT,
     )?;
-    let purpose = optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_PURPOSE)?
-        .unwrap_or_else(|| TRACE_NEAR_CREDIT_OUTBOX_SCHEDULER_DEFAULT_PURPOSE.to_string());
-    let purpose = validate_near_credit_outbox_scheduler_purpose(&purpose)
-        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let purpose = scheduler_text_from_env(
+        TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_PURPOSE,
+        TRACE_NEAR_CREDIT_OUTBOX_SCHEDULER_DEFAULT_PURPOSE,
+        validate_near_credit_outbox_scheduler_purpose,
+    )?;
     Ok(Some(TraceNearCreditOutboxSchedulerConfig {
         worker_token: SecretString::from(worker_token),
         interval,
@@ -7494,21 +7509,16 @@ fn parse_trace_near_credit_outbox_scheduler_config_from_env()
 
 fn parse_trace_export_job_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceExportJobSchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_EXPORT_JOB_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_EXPORT_JOB_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_EXPORT_JOB_SCHEDULER_ENABLED,
+        TRACE_COMMONS_EXPORT_JOB_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_EXPORT_JOB_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_EXPORT_JOB_SCHEDULER_TOKEN}"
-        );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_EXPORT_JOB_SCHEDULER_INTERVAL_SECONDS,
         TRACE_EXPORT_JOB_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
     let dataset_kind = match optional_trimmed_env(TRACE_COMMONS_EXPORT_JOB_SCHEDULER_DATASET_KIND)?
     {
@@ -7558,7 +7568,7 @@ fn parse_trace_export_job_scheduler_config_from_env()
         .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
     Ok(Some(TraceExportJobSchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         dataset_kind,
         run_queued_max_jobs,
         retry_failed_max_jobs,
@@ -7571,26 +7581,22 @@ fn parse_trace_export_job_scheduler_config_from_env()
 
 fn parse_trace_retention_maintenance_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceRetentionMaintenanceSchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_ENABLED,
+        TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_TOKEN}"
-        );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_INTERVAL_SECONDS,
         TRACE_RETENTION_MAINTENANCE_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
-    let purpose = optional_trimmed_env(TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_PURPOSE)?
-        .unwrap_or_else(|| TRACE_RETENTION_MAINTENANCE_SCHEDULER_DEFAULT_PURPOSE.to_string());
-    let purpose = validate_retention_maintenance_scheduler_purpose(&purpose)
-        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let purpose = scheduler_text_from_env(
+        TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_PURPOSE,
+        TRACE_RETENTION_MAINTENANCE_SCHEDULER_DEFAULT_PURPOSE,
+        validate_retention_maintenance_scheduler_purpose,
+    )?;
     let prune_export_cache = parse_optional_scheduler_bool_env(
         TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_PRUNE_EXPORT_CACHE,
         true,
@@ -7614,7 +7620,7 @@ fn parse_trace_retention_maintenance_scheduler_config_from_env()
             .transpose()?;
     Ok(Some(TraceRetentionMaintenanceSchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         dry_run: env_truthy(TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_DRY_RUN),
         purpose,
         prune_export_cache,
@@ -7625,21 +7631,16 @@ fn parse_trace_retention_maintenance_scheduler_config_from_env()
 
 fn parse_trace_vector_index_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceVectorIndexSchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED,
+        TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN}"
-        );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_INTERVAL_SECONDS,
         TRACE_VECTOR_INDEX_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
     let limit = parse_optional_scheduler_usize_env(
         TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_LIMIT,
@@ -7647,13 +7648,14 @@ fn parse_trace_vector_index_scheduler_config_from_env()
         1,
         TRACE_VECTOR_INDEX_WORKER_MAX_LIMIT,
     )?;
-    let purpose = optional_trimmed_env(TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_PURPOSE)?
-        .unwrap_or_else(|| TRACE_VECTOR_INDEX_SCHEDULER_DEFAULT_PURPOSE.to_string());
-    let purpose = validate_vector_index_scheduler_purpose(&purpose)
-        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let purpose = scheduler_text_from_env(
+        TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_PURPOSE,
+        TRACE_VECTOR_INDEX_SCHEDULER_DEFAULT_PURPOSE,
+        validate_vector_index_scheduler_purpose,
+    )?;
     Ok(Some(TraceVectorIndexSchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         limit,
         dry_run: env_truthy(TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_DRY_RUN),
         purpose,
@@ -7662,21 +7664,16 @@ fn parse_trace_vector_index_scheduler_config_from_env()
 
 fn parse_trace_benchmark_registry_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceBenchmarkRegistrySchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_ENABLED,
+        TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_TOKEN}"
-        );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_INTERVAL_SECONDS,
         TRACE_BENCHMARK_REGISTRY_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
     let submit_limit = parse_optional_scheduler_u32_env(
         TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_SUBMIT_LIMIT,
@@ -7690,13 +7687,14 @@ fn parse_trace_benchmark_registry_scheduler_config_from_env()
         1,
         TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_MAX_LIMIT,
     )?;
-    let purpose = optional_trimmed_env(TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_PURPOSE)?
-        .unwrap_or_else(|| TRACE_BENCHMARK_REGISTRY_SCHEDULER_DEFAULT_PURPOSE.to_string());
-    let purpose = validate_benchmark_registry_scheduler_purpose(&purpose)
-        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let purpose = scheduler_text_from_env(
+        TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_PURPOSE,
+        TRACE_BENCHMARK_REGISTRY_SCHEDULER_DEFAULT_PURPOSE,
+        validate_benchmark_registry_scheduler_purpose,
+    )?;
     Ok(Some(TraceBenchmarkRegistrySchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         submit_limit,
         confirm_limit,
         dry_run: env_truthy(TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_DRY_RUN),
@@ -7706,21 +7704,16 @@ fn parse_trace_benchmark_registry_scheduler_config_from_env()
 
 fn parse_trace_benchmark_pipeline_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceBenchmarkPipelineSchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_ENABLED,
+        TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_TOKEN}"
-        );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_INTERVAL_SECONDS,
         TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
     let evaluation_limit = parse_optional_scheduler_usize_env(
         TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_EVALUATION_LIMIT,
@@ -7760,13 +7753,14 @@ fn parse_trace_benchmark_pipeline_scheduler_config_from_env()
         .map(|configured| parse_benchmark_pipeline_scheduler_min_score(&configured))
         .transpose()?
         .unwrap_or(TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_MIN_SCORE);
-    let reason = optional_trimmed_env(TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON)?
-        .unwrap_or_else(|| TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_REASON.to_string());
-    let reason = validate_benchmark_pipeline_scheduler_reason(&reason)
-        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let reason = scheduler_text_from_env(
+        TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON,
+        TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_REASON,
+        validate_benchmark_pipeline_scheduler_reason,
+    )?;
     Ok(Some(TraceBenchmarkPipelineSchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         evaluation_limit,
         publication_limit,
         dry_run: env_truthy(TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_DRY_RUN),
@@ -7937,21 +7931,16 @@ fn parse_pii_backstop_driver_config_from_env() -> anyhow::Result<Option<PiiBacks
 
 fn parse_trace_credit_cycle_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceCreditCycleSchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED,
+        TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TOKEN}"
-        );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_INTERVAL_SECONDS,
         TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
     let target_use = match optional_trimmed_env(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TARGET_USE)? {
         Some(configured) => parse_trace_allowed_use_env(
@@ -7972,10 +7961,11 @@ fn parse_trace_credit_cycle_scheduler_config_from_env()
                 .map_err(|error| anyhow::anyhow!(error.1.0.error))
         })
         .transpose()?;
-    let reason = optional_trimmed_env(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_REASON)?
-        .unwrap_or_else(|| TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_REASON.to_string());
-    let reason = validate_credit_cycle_scheduler_reason(&reason)
-        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let reason = scheduler_text_from_env(
+        TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_REASON,
+        TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_REASON,
+        validate_credit_cycle_scheduler_reason,
+    )?;
     let near_contract_id =
         optional_trimmed_env(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_NEAR_CONTRACT_ID)?
             .map(|configured| validate_credit_settlement_near_contract_id(&configured))
@@ -7988,7 +7978,7 @@ fn parse_trace_credit_cycle_scheduler_config_from_env()
     )?;
     Ok(Some(TraceCreditCycleSchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         target_use,
         model_version,
         policy_version,
@@ -8035,11 +8025,9 @@ fn parse_trace_credit_settlement_scheduler_config_from_env()
             "{TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN}"
         );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_INTERVAL_SECONDS,
         TRACE_CREDIT_SETTLEMENT_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
     let policy_version = optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION)?
         .ok_or_else(|| {
@@ -8051,10 +8039,11 @@ fn parse_trace_credit_settlement_scheduler_config_from_env()
             validate_credit_settlement_policy_version(&configured)
                 .map_err(|error| anyhow::anyhow!(error.1.0.error))
         })?;
-    let reason = optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_REASON)?
-        .unwrap_or_else(|| TRACE_CREDIT_SETTLEMENT_SCHEDULER_DEFAULT_REASON.to_string());
-    let reason = validate_credit_settlement_scheduler_reason(&reason)
-        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let reason = scheduler_text_from_env(
+        TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_REASON,
+        TRACE_CREDIT_SETTLEMENT_SCHEDULER_DEFAULT_REASON,
+        validate_credit_settlement_scheduler_reason,
+    )?;
     let issuer_approval_evidence_hash = match optional_trimmed_env(
         TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ISSUER_APPROVAL_EVIDENCE_HASH,
     )? {
@@ -8097,7 +8086,7 @@ fn parse_trace_credit_settlement_scheduler_config_from_env()
     Ok(Some(TraceCreditSettlementSchedulerConfig {
         scope,
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         dry_run: env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_DRY_RUN),
         policy_version,
         reason,
@@ -8111,21 +8100,16 @@ fn parse_trace_credit_settlement_scheduler_config_from_env()
 
 fn parse_trace_process_evaluation_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceProcessEvaluationSchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_ENABLED,
+        TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TOKEN}"
-        );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_INTERVAL_SECONDS,
         TRACE_PROCESS_EVALUATION_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
     let limit = parse_optional_scheduler_usize_env(
         TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_LIMIT,
@@ -8184,7 +8168,7 @@ fn parse_trace_process_evaluation_scheduler_config_from_env()
         .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
     Ok(Some(TraceProcessEvaluationSchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         limit,
         dry_run: env_truthy(TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_DRY_RUN),
         require_external_evaluator: parse_optional_scheduler_bool_env(
@@ -8201,21 +8185,16 @@ fn parse_trace_process_evaluation_scheduler_config_from_env()
 
 fn parse_trace_revocation_propagation_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceRevocationPropagationSchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_ENABLED,
+        TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_TOKEN}"
-        );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_INTERVAL_SECONDS,
         TRACE_REVOCATION_PROPAGATION_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
     let limit = parse_optional_scheduler_u32_env(
         TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_LIMIT,
@@ -8223,13 +8202,14 @@ fn parse_trace_revocation_propagation_scheduler_config_from_env()
         1,
         TRACE_REVOCATION_PROPAGATION_MAX_LIMIT,
     )?;
-    let purpose = optional_trimmed_env(TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_PURPOSE)?
-        .unwrap_or_else(|| TRACE_REVOCATION_PROPAGATION_SCHEDULER_DEFAULT_PURPOSE.to_string());
-    let purpose = validate_revocation_propagation_scheduler_purpose(&purpose)
-        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let purpose = scheduler_text_from_env(
+        TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_PURPOSE,
+        TRACE_REVOCATION_PROPAGATION_SCHEDULER_DEFAULT_PURPOSE,
+        validate_revocation_propagation_scheduler_purpose,
+    )?;
     Ok(Some(TraceRevocationPropagationSchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         limit,
         dry_run: env_truthy(TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_DRY_RUN),
         purpose,
@@ -8266,6 +8246,56 @@ fn parse_trace_ranking_utility_category_env(
 ) -> anyhow::Result<StorageTraceRankingUtilityCategory> {
     serde_json::from_value(serde_json::Value::String(value.trim().to_string()))
         .with_context(|| format!("{name} must be a valid trace ranking utility category"))
+}
+
+/// The worker token of a scheduler that is switched on, or `None` when
+/// neither its enabled flag nor its token is set. Enabled without a token
+/// refuses startup and names both variables.
+fn scheduler_worker_token_from_env(
+    enabled_var: &'static str,
+    token_var: &'static str,
+) -> anyhow::Result<Option<String>> {
+    let enabled = env_truthy(enabled_var);
+    let worker_token = optional_trimmed_env(token_var)?;
+    if !enabled && worker_token.is_none() {
+        return Ok(None);
+    }
+    let Some(worker_token) = worker_token else {
+        anyhow::bail!("{enabled_var}=true requires {token_var}");
+    };
+    Ok(Some(worker_token))
+}
+
+/// A scheduler's tick interval: whole seconds from 5 to 86,400.
+fn scheduler_interval_from_env(
+    var: &'static str,
+    default_seconds: u64,
+) -> anyhow::Result<StdDuration> {
+    parse_optional_scheduler_u64_env(var, default_seconds, 5, 86_400).map(StdDuration::from_secs)
+}
+
+/// A scheduler's free-text purpose or reason: the variable's value, or
+/// `default`, passed through `validate`.
+fn scheduler_text_from_env(
+    var: &'static str,
+    default: &str,
+    validate: fn(&str) -> ApiResult<String>,
+) -> anyhow::Result<String> {
+    let value = optional_trimmed_env(var)?.unwrap_or_else(|| default.to_string());
+    validate(&value).map_err(|error| anyhow::anyhow!(error.1.0.error))
+}
+
+/// Maps a startup validation refusal to the error that names the scheduler.
+fn scheduler_config_error(
+    scheduler: &'static str,
+) -> impl Fn((StatusCode, Json<ApiError>)) -> anyhow::Error + Copy {
+    move |error| {
+        anyhow::anyhow!(
+            "invalid Trace Commons {scheduler} scheduler configuration: status={}, error={}",
+            error.0,
+            error.1.0.error
+        )
+    }
 }
 
 fn parse_optional_scheduler_u64_env(
@@ -11569,29 +11599,26 @@ fn spawn_trace_export_job_scheduler_task(
         retry_failed_max_retry_count = config.retry_failed_max_retry_count,
         "Trace Commons export job scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         EXPORT_JOB_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_export_job_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| worker_route_error(EXPORT_JOB_SCHEDULER_DRIVER_NAME, error))?;
-                tracing::info!(
-                    tenant_storage_ref = %summary.run_queued.tenant_storage_ref,
-                    dataset_kind = ?summary.run_queued.requested_dataset_kind,
-                    retried_count = summary.retry_failed.retried_count,
-                    claimed_count = summary.run_queued.claimed_count,
-                    completed_count = summary.run_queued.completed_count,
-                    failed_count = summary.run_queued.failed_count,
-                    pending_after_count = summary.run_queued.pending_after_count,
-                    "Trace Commons export job scheduler tick completed"
-                );
-                export_job_scheduler_tick_outcome(&summary)
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_export_job_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| worker_route_error(EXPORT_JOB_SCHEDULER_DRIVER_NAME, error))?;
+            tracing::info!(
+                tenant_storage_ref = %summary.run_queued.tenant_storage_ref,
+                dataset_kind = ?summary.run_queued.requested_dataset_kind,
+                retried_count = summary.retry_failed.retried_count,
+                claimed_count = summary.run_queued.claimed_count,
+                completed_count = summary.run_queued.completed_count,
+                failed_count = summary.run_queued.failed_count,
+                pending_after_count = summary.run_queued.pending_after_count,
+                "Trace Commons export job scheduler tick completed"
+            );
+            export_job_scheduler_tick_outcome(&summary)
         },
     );
 }
@@ -11610,33 +11637,30 @@ fn spawn_trace_near_credit_outbox_scheduler_task(
         dry_run = config.dry_run,
         "Trace Commons NEAR credit outbox scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         NEAR_CREDIT_OUTBOX_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_near_credit_outbox_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(NEAR_CREDIT_OUTBOX_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                tracing::info!(
-                    submit_checked = summary.submit.checked,
-                    submitted = summary.submit.submitted,
-                    submit_failed = summary.submit.failed,
-                    confirm_checked = summary.confirm.checked,
-                    confirmed = summary.confirm.confirmed,
-                    confirm_failed = summary.confirm.failed,
-                    submit_pending = summary.submit.pending,
-                    confirm_pending = summary.confirm.pending,
-                    dry_run = summary.submit.dry_run || summary.confirm.dry_run,
-                    "Trace Commons NEAR credit outbox scheduler tick completed"
-                );
-                near_credit_outbox_scheduler_tick_outcome(&summary)
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_near_credit_outbox_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| {
+                    worker_route_error(NEAR_CREDIT_OUTBOX_SCHEDULER_DRIVER_NAME, error)
+                })?;
+            tracing::info!(
+                submit_checked = summary.submit.checked,
+                submitted = summary.submit.submitted,
+                submit_failed = summary.submit.failed,
+                confirm_checked = summary.confirm.checked,
+                confirmed = summary.confirm.confirmed,
+                confirm_failed = summary.confirm.failed,
+                submit_pending = summary.submit.pending,
+                confirm_pending = summary.confirm.pending,
+                dry_run = summary.submit.dry_run || summary.confirm.dry_run,
+                "Trace Commons NEAR credit outbox scheduler tick completed"
+            );
+            near_credit_outbox_scheduler_tick_outcome(&summary)
         },
     );
 }
@@ -11656,32 +11680,29 @@ fn spawn_trace_retention_maintenance_scheduler_task(
         purge_expired_before_configured = config.purge_expired_before.is_some(),
         "Trace Commons retention maintenance scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         RETENTION_MAINTENANCE_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_retention_maintenance_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(RETENTION_MAINTENANCE_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                tracing::info!(
-                    tenant_storage_ref = %summary.run.tenant_storage_ref,
-                    records_marked_revoked = summary.run.records_marked_revoked,
-                    records_marked_expired = summary.run.records_marked_expired,
-                    records_marked_purged = summary.run.records_marked_purged,
-                    export_cache_files_pruned = summary.run.export_cache_files_pruned,
-                    trace_object_files_deleted = summary.run.trace_object_files_deleted,
-                    encrypted_artifacts_deleted = summary.run.encrypted_artifacts_deleted,
-                    dry_run = summary.run.dry_run,
-                    "Trace Commons retention maintenance scheduler tick completed"
-                );
-                retention_maintenance_scheduler_tick_outcome(&summary)
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_retention_maintenance_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| {
+                    worker_route_error(RETENTION_MAINTENANCE_SCHEDULER_DRIVER_NAME, error)
+                })?;
+            tracing::info!(
+                tenant_storage_ref = %summary.run.tenant_storage_ref,
+                records_marked_revoked = summary.run.records_marked_revoked,
+                records_marked_expired = summary.run.records_marked_expired,
+                records_marked_purged = summary.run.records_marked_purged,
+                export_cache_files_pruned = summary.run.export_cache_files_pruned,
+                trace_object_files_deleted = summary.run.trace_object_files_deleted,
+                encrypted_artifacts_deleted = summary.run.encrypted_artifacts_deleted,
+                dry_run = summary.run.dry_run,
+                "Trace Commons retention maintenance scheduler tick completed"
+            );
+            retention_maintenance_scheduler_tick_outcome(&summary)
         },
     );
 }
@@ -11699,34 +11720,29 @@ fn spawn_trace_vector_index_scheduler_task(
         dry_run = config.dry_run,
         "Trace Commons vector index scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         VECTOR_INDEX_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_vector_index_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(VECTOR_INDEX_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                tracing::info!(
-                    tenant_storage_ref = %summary.tenant_storage_ref,
-                    checked_count = summary.checked_count,
-                    vector_entries_indexed = summary.vector_entries_indexed,
-                    skipped_existing_count = summary.skipped_existing_count,
-                    pending_after_count = summary.pending_after_count,
-                    dry_run = summary.dry_run,
-                    "Trace Commons vector index scheduler tick completed"
-                );
-                // No give-up signal: indexing has no failure counter at all --
-                // an item either indexes, is already indexed, or stays
-                // pending, and a failure aborts the whole tick through `?`
-                // above. Any tick that reaches here is a live tick.
-                Ok(())
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_vector_index_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| worker_route_error(VECTOR_INDEX_SCHEDULER_DRIVER_NAME, error))?;
+            tracing::info!(
+                tenant_storage_ref = %summary.tenant_storage_ref,
+                checked_count = summary.checked_count,
+                vector_entries_indexed = summary.vector_entries_indexed,
+                skipped_existing_count = summary.skipped_existing_count,
+                pending_after_count = summary.pending_after_count,
+                dry_run = summary.dry_run,
+                "Trace Commons vector index scheduler tick completed"
+            );
+            // No give-up signal: indexing has no failure counter at all --
+            // an item either indexes, is already indexed, or stays
+            // pending, and a failure aborts the whole tick through `?`
+            // above. Any tick that reaches here is a live tick.
+            Ok(())
         },
     );
 }
@@ -11784,6 +11800,24 @@ const ALL_DRIVER_NAMES: &[&str] = &[
 /// `tick` returns `Result<()>` and owns its own success logging, because the
 /// summary fields differ per driver and are worth keeping verbatim. Only the
 /// failure path is shared -- that is the part that was uniform and broken.
+/// Spawns a scheduler's driver loop. Each tick gets its own copy of the
+/// scheduler's configuration.
+fn spawn_scheduler_driver<C, F, Fut>(
+    state: &Arc<AppState>,
+    driver: &'static str,
+    interval: StdDuration,
+    config: C,
+    tick: F,
+) where
+    C: Clone + Send + Sync + 'static,
+    F: Fn(Arc<AppState>, C) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<()>> + Send,
+{
+    spawn_driver_loop(state, driver, interval, move |state| {
+        tick(state, config.clone())
+    });
+}
+
 fn spawn_driver_loop<F, Fut>(
     state: &Arc<AppState>,
     driver: &'static str,
@@ -11839,28 +11873,25 @@ fn spawn_perplexity_score_driver_task(
         skip_duplicates = config.knobs.skip_duplicates,
         "Trace Commons perplexity score driver enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         PERPLEXITY_SCORE_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_perplexity_score_driver_tick(state, &config).await?;
-                tracing::info!(
-                    scored = summary.scored,
-                    skipped_duplicate = summary.skipped_duplicate,
-                    cached = summary.cached,
-                    failed = summary.failed,
-                    transient = summary.transient,
-                    breaker_tripped = summary.breaker_tripped,
-                    tick_duration_ms = summary.tick_duration_ms,
-                    backlog = summary.backlog,
-                    "Trace Commons perplexity score driver tick completed"
-                );
-                perplexity_tick_outcome(&summary)
-            }
+        config,
+        |state, config| async move {
+            let summary = run_perplexity_score_driver_tick(state, &config).await?;
+            tracing::info!(
+                scored = summary.scored,
+                skipped_duplicate = summary.skipped_duplicate,
+                cached = summary.cached,
+                failed = summary.failed,
+                transient = summary.transient,
+                breaker_tripped = summary.breaker_tripped,
+                tick_duration_ms = summary.tick_duration_ms,
+                backlog = summary.backlog,
+                "Trace Commons perplexity score driver tick completed"
+            );
+            perplexity_tick_outcome(&summary)
         },
     );
 }
@@ -11883,50 +11914,47 @@ fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBacks
         backoff_base_seconds = config.backoff_base_seconds,
         "Trace Commons PII backstop driver enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         PII_BACKSTOP_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                // Resolved per tick, from TRACE_PRIVACY_FILTER_BACKEND rather
-                // than hardcoded to near-ai. Until #495 there was only one
-                // backend, so the hardcode was invisible; with a second one it
-                // meant the backend that boot logs, /health and the canary all
-                // report was NOT the one doing the work.
-                //
-                // Resolved here rather than inside the tick so the tick takes
-                // its adapter as an argument: it is the unit under test, and
-                // reading process env inside it made every test that sets the
-                // backend var visible to every other test running in parallel.
-                //
-                // An unset backend is refused rather than defaulted. This
-                // driver re-redacts traces being HELD pending a prose-PII
-                // check; running it with no filter would release them having
-                // checked nothing.
-                let adapter =
-                    trace_commons_protocol::trace_contribution::privacy_filter_adapter_from_env()
-                        .context("PII backstop adapter unavailable")?
-                        .map(|(adapter, _backend)| adapter)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "PII backstop requires a privacy filter backend (missing \
-                                 control: privacy_filter_backend)"
-                            )
-                        })?;
-                let summary = run_pii_backstop_driver_tick(state, &config, adapter).await?;
-                tracing::info!(
-                    done = summary.done,
-                    failed = summary.failed,
-                    transient = summary.transient,
-                    exhausted = summary.exhausted,
-                    breaker_tripped = summary.breaker_tripped,
-                    "Trace Commons PII backstop driver tick completed"
-                );
-                pii_backstop_tick_outcome(&summary)
-            }
+        config,
+        |state, config| async move {
+            // Resolved per tick, from TRACE_PRIVACY_FILTER_BACKEND rather
+            // than hardcoded to near-ai. Until #495 there was only one
+            // backend, so the hardcode was invisible; with a second one it
+            // meant the backend that boot logs, /health and the canary all
+            // report was NOT the one doing the work.
+            //
+            // Resolved here rather than inside the tick so the tick takes
+            // its adapter as an argument: it is the unit under test, and
+            // reading process env inside it made every test that sets the
+            // backend var visible to every other test running in parallel.
+            //
+            // An unset backend is refused rather than defaulted. This
+            // driver re-redacts traces being HELD pending a prose-PII
+            // check; running it with no filter would release them having
+            // checked nothing.
+            let adapter =
+                trace_commons_protocol::trace_contribution::privacy_filter_adapter_from_env()
+                    .context("PII backstop adapter unavailable")?
+                    .map(|(adapter, _backend)| adapter)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "PII backstop requires a privacy filter backend (missing \
+                         control: privacy_filter_backend)"
+                        )
+                    })?;
+            let summary = run_pii_backstop_driver_tick(state, &config, adapter).await?;
+            tracing::info!(
+                done = summary.done,
+                failed = summary.failed,
+                transient = summary.transient,
+                exhausted = summary.exhausted,
+                breaker_tripped = summary.breaker_tripped,
+                "Trace Commons PII backstop driver tick completed"
+            );
+            pii_backstop_tick_outcome(&summary)
         },
     );
 }
@@ -11945,33 +11973,30 @@ fn spawn_trace_benchmark_registry_scheduler_task(
         dry_run = config.dry_run,
         "Trace Commons benchmark registry scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         BENCHMARK_REGISTRY_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_benchmark_registry_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(BENCHMARK_REGISTRY_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                tracing::info!(
-                    submit_checked = summary.submit.checked,
-                    submitted = summary.submit.submitted,
-                    submit_failed = summary.submit.failed,
-                    confirm_checked = summary.confirm.checked,
-                    confirmed = summary.confirm.confirmed,
-                    confirm_failed = summary.confirm.failed,
-                    submit_pending = summary.submit.pending,
-                    confirm_pending = summary.confirm.pending,
-                    dry_run = summary.submit.dry_run || summary.confirm.dry_run,
-                    "Trace Commons benchmark registry scheduler tick completed"
-                );
-                benchmark_registry_scheduler_tick_outcome(&summary)
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_benchmark_registry_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| {
+                    worker_route_error(BENCHMARK_REGISTRY_SCHEDULER_DRIVER_NAME, error)
+                })?;
+            tracing::info!(
+                submit_checked = summary.submit.checked,
+                submitted = summary.submit.submitted,
+                submit_failed = summary.submit.failed,
+                confirm_checked = summary.confirm.checked,
+                confirmed = summary.confirm.confirmed,
+                confirm_failed = summary.confirm.failed,
+                submit_pending = summary.submit.pending,
+                confirm_pending = summary.confirm.pending,
+                dry_run = summary.submit.dry_run || summary.confirm.dry_run,
+                "Trace Commons benchmark registry scheduler tick completed"
+            );
+            benchmark_registry_scheduler_tick_outcome(&summary)
         },
     );
 }
@@ -11994,38 +12019,35 @@ fn spawn_trace_benchmark_pipeline_scheduler_task(
         registry_ref_prefix_configured = !config.registry_ref_prefix.is_empty(),
         "Trace Commons benchmark pipeline scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         BENCHMARK_PIPELINE_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_benchmark_pipeline_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(BENCHMARK_PIPELINE_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                tracing::info!(
-                    evaluation_checked = summary.evaluation.checked_count,
-                    evaluated = summary.evaluation.evaluated_count,
-                    passed = summary.evaluation.passed_count,
-                    failed = summary.evaluation.failed_count,
-                    evaluation_pending = summary.evaluation.pending_after_count,
-                    publication_checked = summary.publication.checked_count,
-                    published = summary.publication.published_count,
-                    publication_pending = summary.publication.pending_after_count,
-                    dry_run = summary.evaluation.dry_run || summary.publication.dry_run,
-                    "Trace Commons benchmark pipeline scheduler tick completed"
-                );
-                // No give-up signal: `failed_count` here is a benchmark
-                // verdict -- a candidate scored below `min_score` -- not an
-                // error, and publication has no failure counter. Reading it
-                // as a driver failure would report a working evaluator as
-                // dead every time a batch of candidates was simply bad.
-                Ok(())
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_benchmark_pipeline_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| {
+                    worker_route_error(BENCHMARK_PIPELINE_SCHEDULER_DRIVER_NAME, error)
+                })?;
+            tracing::info!(
+                evaluation_checked = summary.evaluation.checked_count,
+                evaluated = summary.evaluation.evaluated_count,
+                passed = summary.evaluation.passed_count,
+                failed = summary.evaluation.failed_count,
+                evaluation_pending = summary.evaluation.pending_after_count,
+                publication_checked = summary.publication.checked_count,
+                published = summary.publication.published_count,
+                publication_pending = summary.publication.pending_after_count,
+                dry_run = summary.evaluation.dry_run || summary.publication.dry_run,
+                "Trace Commons benchmark pipeline scheduler tick completed"
+            );
+            // No give-up signal: `failed_count` here is a benchmark
+            // verdict -- a candidate scored below `min_score` -- not an
+            // error, and publication has no failure counter. Reading it
+            // as a driver failure would report a working evaluator as
+            // dead every time a batch of candidates was simply bad.
+            Ok(())
         },
     );
 }
@@ -12050,34 +12072,29 @@ fn spawn_trace_credit_cycle_scheduler_task(
         near_contract_configured = config.near_contract_id.is_some(),
         "Trace Commons credit cycle scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         CREDIT_CYCLE_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_credit_cycle_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(CREDIT_CYCLE_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                tracing::info!(
-                    tenant_storage_ref = %summary.tenant_storage_ref,
-                    target_use = ?summary.target_use,
-                    checked_count = summary.checked_count,
-                    eligible_count = summary.eligible_count,
-                    started_count = summary.started_count,
-                    skipped_count = summary.skipped_count,
-                    skipped_active_count = summary.skipped_active_count,
-                    pending_after_count = summary.pending_after_count,
-                    dry_run = summary.dry_run,
-                    preflight_only = summary.preflight_only,
-                    "Trace Commons credit cycle scheduler tick completed"
-                );
-                credit_cycle_scheduler_tick_outcome(&summary)
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_credit_cycle_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| worker_route_error(CREDIT_CYCLE_SCHEDULER_DRIVER_NAME, error))?;
+            tracing::info!(
+                tenant_storage_ref = %summary.tenant_storage_ref,
+                target_use = ?summary.target_use,
+                checked_count = summary.checked_count,
+                eligible_count = summary.eligible_count,
+                started_count = summary.started_count,
+                skipped_count = summary.skipped_count,
+                skipped_active_count = summary.skipped_active_count,
+                pending_after_count = summary.pending_after_count,
+                dry_run = summary.dry_run,
+                preflight_only = summary.preflight_only,
+                "Trace Commons credit cycle scheduler tick completed"
+            );
+            credit_cycle_scheduler_tick_outcome(&summary)
         },
     );
 }
@@ -12100,57 +12117,54 @@ fn spawn_trace_credit_settlement_scheduler_task(
         dry_run = config.dry_run,
         "Trace Commons credit settlement scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                if matches!(
-                    config.scope,
-                    CreditSettlementSchedulerScope::AllTenants { .. }
-                ) {
-                    let summary = run_all_tenant_credit_settlement_tick(
-                        state,
-                        &config,
-                        CREDIT_SETTLEMENT_TENANT_PAGE_LIMIT,
-                    )
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                    tracing::info!(
-                        tenants_checked = summary.tenants_checked,
-                        tenants_failed = summary.tenants_failed,
-                        settled_source_event_count = summary.settled_source_event_count,
-                        "All-tenant credit settlement scheduler tick completed"
-                    );
-                    anyhow::ensure!(
-                        summary.tenants_failed == 0,
-                        "credit settlement tenant failures; inspect hashed failure diagnostics"
-                    );
-                    return Ok(());
-                }
-                let summary = run_trace_credit_settlement_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME, error)
-                    })?;
+        config,
+        |state, config| async move {
+            if matches!(
+                config.scope,
+                CreditSettlementSchedulerScope::AllTenants { .. }
+            ) {
+                let summary = run_all_tenant_credit_settlement_tick(
+                    state,
+                    &config,
+                    CREDIT_SETTLEMENT_TENANT_PAGE_LIMIT,
+                )
+                .await
+                .map_err(|error| {
+                    worker_route_error(CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME, error)
+                })?;
                 tracing::info!(
-                    tenant_storage_ref = %summary.tenant_storage_ref,
-                    dry_run = summary.dry_run,
-                    policy_version_allowed = summary.policy_version_allowed,
+                    tenants_checked = summary.tenants_checked,
+                    tenants_failed = summary.tenants_failed,
                     settled_source_event_count = summary.settled_source_event_count,
-                    eligible_source_event_count = summary.eligible_source_event_count,
-                    pending_after_count = summary.pending_after_count,
-                    settled_account_count = summary.settled_account_count,
-                    near_outbox_item_count = summary.near_outbox_item_count,
-                    "Trace Commons credit settlement scheduler tick completed"
+                    "All-tenant credit settlement scheduler tick completed"
                 );
-                credit_settlement_scheduler_tick_outcome(&summary)
+                anyhow::ensure!(
+                    summary.tenants_failed == 0,
+                    "credit settlement tenant failures; inspect hashed failure diagnostics"
+                );
+                return Ok(());
             }
+            let summary = run_trace_credit_settlement_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| {
+                    worker_route_error(CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME, error)
+                })?;
+            tracing::info!(
+                tenant_storage_ref = %summary.tenant_storage_ref,
+                dry_run = summary.dry_run,
+                policy_version_allowed = summary.policy_version_allowed,
+                settled_source_event_count = summary.settled_source_event_count,
+                eligible_source_event_count = summary.eligible_source_event_count,
+                pending_after_count = summary.pending_after_count,
+                settled_account_count = summary.settled_account_count,
+                near_outbox_item_count = summary.near_outbox_item_count,
+                "Trace Commons credit settlement scheduler tick completed"
+            );
+            credit_settlement_scheduler_tick_outcome(&summary)
         },
     );
 }
@@ -12173,35 +12187,32 @@ fn spawn_trace_process_evaluation_scheduler_task(
         external_ref_prefix_configured = config.external_ref_prefix.is_some(),
         "Trace Commons process evaluation scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_process_evaluation_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                tracing::info!(
-                    checked = summary.run.checked_count,
-                    evaluated = summary.run.evaluated_count,
-                    labels_appended = summary.run.ranking_label_appended_count,
-                    labels_skipped_existing = summary.run.ranking_label_skipped_existing_count,
-                    skipped_existing = summary.run.skipped_existing_count,
-                    skipped_ineligible = summary.run.skipped_ineligible_count,
-                    pending_after = summary.run.pending_after_count,
-                    dry_run = summary.run.dry_run,
-                    "Trace Commons process evaluation scheduler tick completed"
-                );
-                // No give-up signal: the tick has no failure counter. Each
-                // candidate is evaluated or skipped as ineligible or already
-                // done; an evaluator error aborts the tick through `?` above.
-                Ok(())
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_process_evaluation_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| {
+                    worker_route_error(PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME, error)
+                })?;
+            tracing::info!(
+                checked = summary.run.checked_count,
+                evaluated = summary.run.evaluated_count,
+                labels_appended = summary.run.ranking_label_appended_count,
+                labels_skipped_existing = summary.run.ranking_label_skipped_existing_count,
+                skipped_existing = summary.run.skipped_existing_count,
+                skipped_ineligible = summary.run.skipped_ineligible_count,
+                pending_after = summary.run.pending_after_count,
+                dry_run = summary.run.dry_run,
+                "Trace Commons process evaluation scheduler tick completed"
+            );
+            // No give-up signal: the tick has no failure counter. Each
+            // candidate is evaluated or skipped as ineligible or already
+            // done; an evaluator error aborts the tick through `?` above.
+            Ok(())
         },
     );
 }
@@ -12219,31 +12230,28 @@ fn spawn_trace_revocation_propagation_scheduler_task(
         dry_run = config.dry_run,
         "Trace Commons revocation propagation scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_revocation_propagation_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                tracing::info!(
-                    checked = summary.run.checked,
-                    completed = summary.run.completed,
-                    failed = summary.run.failed,
-                    skipped = summary.run.skipped,
-                    pending = summary.run.pending,
-                    next_attempt_scheduled = summary.run.next_attempt_scheduled,
-                    dry_run = summary.run.dry_run,
-                    "Trace Commons revocation propagation scheduler tick completed"
-                );
-                revocation_propagation_scheduler_tick_outcome(&summary)
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_revocation_propagation_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| {
+                    worker_route_error(REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME, error)
+                })?;
+            tracing::info!(
+                checked = summary.run.checked,
+                completed = summary.run.completed,
+                failed = summary.run.failed,
+                skipped = summary.run.skipped,
+                pending = summary.run.pending,
+                next_attempt_scheduled = summary.run.next_attempt_scheduled,
+                dry_run = summary.run.dry_run,
+                "Trace Commons revocation propagation scheduler tick completed"
+            );
+            revocation_propagation_scheduler_tick_outcome(&summary)
         },
     );
 }
@@ -12334,19 +12342,11 @@ async fn validate_trace_export_job_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_export_scheduler_config_error)?;
+        .map_err(scheduler_config_error("export job"))?;
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
-        .map_err(trace_export_scheduler_config_error)?;
-    require_export_worker_operator(&auth).map_err(trace_export_scheduler_config_error)
-}
-
-fn trace_export_scheduler_config_error(error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons export job scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
+        .map_err(scheduler_config_error("export job"))?;
+    require_export_worker_operator(&auth).map_err(scheduler_config_error("export job"))
 }
 
 async fn validate_trace_near_credit_outbox_scheduler_config(
@@ -12357,13 +12357,13 @@ async fn validate_trace_near_credit_outbox_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_near_credit_outbox_scheduler_config_error)?;
+        .map_err(scheduler_config_error("NEAR credit outbox"))?;
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
-        .map_err(trace_near_credit_outbox_scheduler_config_error)?;
-    require_utility_operator(&auth).map_err(trace_near_credit_outbox_scheduler_config_error)?;
+        .map_err(scheduler_config_error("NEAR credit outbox"))?;
+    require_utility_operator(&auth).map_err(scheduler_config_error("NEAR credit outbox"))?;
     require_near_credit_outbox_principal_if_configured(state, &auth, config.dry_run)
-        .map_err(trace_near_credit_outbox_scheduler_config_error)?;
+        .map_err(scheduler_config_error("NEAR credit outbox"))?;
     if !config.dry_run {
         // The submitter is withheld both when its URL env var is unset AND when
         // the resolved settlement mode is not `http` (Disabled/DryRun supply no
@@ -12397,16 +12397,6 @@ async fn validate_trace_near_credit_outbox_scheduler_config(
     Ok(())
 }
 
-fn trace_near_credit_outbox_scheduler_config_error(
-    error: (StatusCode, Json<ApiError>),
-) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons NEAR credit outbox scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
-}
-
 async fn validate_trace_retention_maintenance_scheduler_config(
     state: &AppState,
     config: Option<&TraceRetentionMaintenanceSchedulerConfig>,
@@ -12415,23 +12405,12 @@ async fn validate_trace_retention_maintenance_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_retention_maintenance_scheduler_config_error)?;
+        .map_err(scheduler_config_error("retention maintenance"))?;
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
-        .map_err(trace_retention_maintenance_scheduler_config_error)?;
-    require_retention_operator(&auth)
-        .map_err(trace_retention_maintenance_scheduler_config_error)?;
+        .map_err(scheduler_config_error("retention maintenance"))?;
+    require_retention_operator(&auth).map_err(scheduler_config_error("retention maintenance"))?;
     Ok(())
-}
-
-fn trace_retention_maintenance_scheduler_config_error(
-    error: (StatusCode, Json<ApiError>),
-) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons retention maintenance scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
 }
 
 async fn validate_trace_vector_index_scheduler_config(
@@ -12442,24 +12421,16 @@ async fn validate_trace_vector_index_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_vector_index_scheduler_config_error)?;
+        .map_err(scheduler_config_error("vector index"))?;
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
-        .map_err(trace_vector_index_scheduler_config_error)?;
-    require_vector_operator(&auth).map_err(trace_vector_index_scheduler_config_error)?;
+        .map_err(scheduler_config_error("vector index"))?;
+    require_vector_operator(&auth).map_err(scheduler_config_error("vector index"))?;
     anyhow::ensure!(
         state.db_mirror.is_some(),
         "invalid Trace Commons vector index scheduler configuration: TRACE_COMMONS_DB_DUAL_WRITE is required"
     );
     Ok(())
-}
-
-fn trace_vector_index_scheduler_config_error(error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons vector index scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
 }
 
 async fn validate_trace_benchmark_registry_scheduler_config(
@@ -12470,14 +12441,14 @@ async fn validate_trace_benchmark_registry_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_benchmark_registry_scheduler_config_error)?;
+        .map_err(scheduler_config_error("benchmark registry"))?;
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
-        .map_err(trace_benchmark_registry_scheduler_config_error)?;
+        .map_err(scheduler_config_error("benchmark registry"))?;
     require_benchmark_worker_operator(&auth)
-        .map_err(trace_benchmark_registry_scheduler_config_error)?;
+        .map_err(scheduler_config_error("benchmark registry"))?;
     require_benchmark_registry_outbox_principal_if_configured(state, &auth, config.dry_run)
-        .map_err(trace_benchmark_registry_scheduler_config_error)?;
+        .map_err(scheduler_config_error("benchmark registry"))?;
     if !config.dry_run {
         anyhow::ensure!(
             state.benchmark_registry_submitter.is_some(),
@@ -12501,16 +12472,6 @@ async fn validate_trace_benchmark_registry_scheduler_config(
     Ok(())
 }
 
-fn trace_benchmark_registry_scheduler_config_error(
-    error: (StatusCode, Json<ApiError>),
-) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons benchmark registry scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
-}
-
 async fn validate_trace_benchmark_pipeline_scheduler_config(
     state: &AppState,
     config: Option<&TraceBenchmarkPipelineSchedulerConfig>,
@@ -12519,12 +12480,12 @@ async fn validate_trace_benchmark_pipeline_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_benchmark_pipeline_scheduler_config_error)?;
+        .map_err(scheduler_config_error("benchmark pipeline"))?;
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
-        .map_err(trace_benchmark_pipeline_scheduler_config_error)?;
+        .map_err(scheduler_config_error("benchmark pipeline"))?;
     require_benchmark_worker_operator(&auth)
-        .map_err(trace_benchmark_pipeline_scheduler_config_error)?;
+        .map_err(scheduler_config_error("benchmark pipeline"))?;
     if config.require_external_evaluator {
         anyhow::ensure!(
             state.benchmark_evaluator.is_some(),
@@ -12532,16 +12493,6 @@ async fn validate_trace_benchmark_pipeline_scheduler_config(
         );
     }
     Ok(())
-}
-
-fn trace_benchmark_pipeline_scheduler_config_error(
-    error: (StatusCode, Json<ApiError>),
-) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons benchmark pipeline scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
 }
 
 async fn validate_trace_credit_cycle_scheduler_config(
@@ -12552,17 +12503,17 @@ async fn validate_trace_credit_cycle_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_credit_cycle_scheduler_config_error)?;
+        .map_err(scheduler_config_error("credit cycle"))?;
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
-        .map_err(trace_credit_cycle_scheduler_config_error)?;
-    require_utility_operator(&auth).map_err(trace_credit_cycle_scheduler_config_error)?;
+        .map_err(scheduler_config_error("credit cycle"))?;
+    require_utility_operator(&auth).map_err(scheduler_config_error("credit cycle"))?;
     require_credit_settlement_central_issuer_principal_if_configured(
         state,
         &auth,
         config.dry_run || config.preflight_only,
     )
-    .map_err(trace_credit_cycle_scheduler_config_error)?;
+    .map_err(scheduler_config_error("credit cycle"))?;
     if !config.dry_run && !config.preflight_only {
         anyhow::ensure!(
             !state.credit_settlement_require_issuer_approval,
@@ -12596,14 +12547,6 @@ async fn validate_trace_credit_cycle_scheduler_config(
     Ok(())
 }
 
-fn trace_credit_cycle_scheduler_config_error(error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons credit cycle scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
-}
-
 async fn validate_trace_credit_settlement_scheduler_config(
     state: &AppState,
     config: Option<&TraceCreditSettlementSchedulerConfig>,
@@ -12614,10 +12557,10 @@ async fn validate_trace_credit_settlement_scheduler_config(
     let auth = match &config.scope {
         CreditSettlementSchedulerScope::Tenant => {
             let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-                .map_err(trace_credit_settlement_scheduler_config_error)?;
+                .map_err(scheduler_config_error("credit settlement"))?;
             authenticate_with_tenant_access_grant(state, &headers)
                 .await
-                .map_err(trace_credit_settlement_scheduler_config_error)?
+                .map_err(scheduler_config_error("credit settlement"))?
         }
         CreditSettlementSchedulerScope::AllTenants { .. } => {
             anyhow::ensure!(
@@ -12635,9 +12578,9 @@ async fn validate_trace_credit_settlement_scheduler_config(
             internal_credit_settlement_actor("scheduler-validation")
         }
     };
-    require_utility_operator(&auth).map_err(trace_credit_settlement_scheduler_config_error)?;
+    require_utility_operator(&auth).map_err(scheduler_config_error("credit settlement"))?;
     require_credit_settlement_central_issuer_principal_if_configured(state, &auth, config.dry_run)
-        .map_err(trace_credit_settlement_scheduler_config_error)?;
+        .map_err(scheduler_config_error("credit settlement"))?;
     if config.ranking_target_use.is_some() && config.ranking_model_version.is_none() {
         anyhow::bail!(
             "invalid Trace Commons credit settlement scheduler configuration: {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_TARGET_USE} requires {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_MODEL_VERSION}"
@@ -12676,22 +12619,12 @@ async fn validate_trace_credit_settlement_scheduler_config(
             false,
             config.near_contract_id.as_deref(),
         )
-        .map_err(trace_credit_settlement_scheduler_config_error)?;
+        .map_err(scheduler_config_error("credit settlement"))?;
     } else if let Some(near_contract_id) = config.near_contract_id.as_deref() {
         resolve_credit_settlement_near_contract_id(state, true, Some(near_contract_id))
-            .map_err(trace_credit_settlement_scheduler_config_error)?;
+            .map_err(scheduler_config_error("credit settlement"))?;
     }
     Ok(())
-}
-
-fn trace_credit_settlement_scheduler_config_error(
-    error: (StatusCode, Json<ApiError>),
-) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons credit settlement scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
 }
 
 async fn validate_trace_process_evaluation_scheduler_config(
@@ -12702,12 +12635,12 @@ async fn validate_trace_process_evaluation_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_process_evaluation_scheduler_config_error)?;
+        .map_err(scheduler_config_error("process evaluation"))?;
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
-        .map_err(trace_process_evaluation_scheduler_config_error)?;
+        .map_err(scheduler_config_error("process evaluation"))?;
     require_process_evaluation_operator(&auth)
-        .map_err(trace_process_evaluation_scheduler_config_error)?;
+        .map_err(scheduler_config_error("process evaluation"))?;
     if config.require_external_evaluator {
         anyhow::ensure!(
             state.process_evaluator.is_some(),
@@ -12715,16 +12648,6 @@ async fn validate_trace_process_evaluation_scheduler_config(
         );
     }
     Ok(())
-}
-
-fn trace_process_evaluation_scheduler_config_error(
-    error: (StatusCode, Json<ApiError>),
-) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons process evaluation scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
 }
 
 async fn validate_trace_revocation_propagation_scheduler_config(
@@ -12735,26 +12658,16 @@ async fn validate_trace_revocation_propagation_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_revocation_propagation_scheduler_config_error)?;
-    let auth = authenticate(state, &headers)
-        .map_err(trace_revocation_propagation_scheduler_config_error)?;
+        .map_err(scheduler_config_error("revocation propagation"))?;
+    let auth =
+        authenticate(state, &headers).map_err(scheduler_config_error("revocation propagation"))?;
     require_revocation_propagation_operator(&auth)
-        .map_err(trace_revocation_propagation_scheduler_config_error)?;
+        .map_err(scheduler_config_error("revocation propagation"))?;
     anyhow::ensure!(
         state.db_mirror.is_some(),
         "invalid Trace Commons revocation propagation scheduler configuration: TRACE_COMMONS_DB_DUAL_WRITE is required"
     );
     Ok(())
-}
-
-fn trace_revocation_propagation_scheduler_config_error(
-    error: (StatusCode, Json<ApiError>),
-) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons revocation propagation scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
 }
 
 fn signed_token_claims_to_auth(claims: TraceCommonsSignedTokenClaims) -> ApiResult<TenantAuth> {
@@ -17006,15 +16919,14 @@ async fn submit_trace_handler_authenticated(
                 mirror_kind,
             )
             .await;
-            if let Err(error) = &mirror_result {
-                tracing::warn!(
-                    error_hash = %safe_runtime_error_hash(error),
-                    submission_id = %record.submission_id,
-                    "Trace Commons DB dual-write mirror failed"
-                );
-            }
-            enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
-                .map_err(internal_error)?;
+            warn_and_enforce_db_mirror_write!(
+                state.as_ref(),
+                "submission",
+                mirror_result,
+                "Trace Commons DB dual-write mirror failed",
+                submission_id = %record.submission_id
+            )
+            .map_err(internal_error)?;
         }
         append_audit_event_mirrored(
             state.as_ref(),
@@ -28740,28 +28652,26 @@ async fn append_credit_event_handler(
     };
     if state.require_db_mirror_writes {
         let mirror_result = mirror_credit_event_to_db(&state, &event).await;
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                submission_id = %event.submission_id,
-                "Trace Commons DB dual-write credit mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state.as_ref(), "credit ledger event", mirror_result)
-            .map_err(internal_error)?;
+        warn_and_enforce_db_mirror_write!(
+            state.as_ref(),
+            "credit ledger event",
+            mirror_result,
+            "Trace Commons DB dual-write credit mirror failed",
+            submission_id = %event.submission_id
+        )
+        .map_err(internal_error)?;
         append_credit_event(&state.root, &tenant.tenant_id, &event).map_err(internal_error)?;
     } else {
         append_credit_event(&state.root, &tenant.tenant_id, &event).map_err(internal_error)?;
         let mirror_result = mirror_credit_event_to_db(&state, &event).await;
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                submission_id = %event.submission_id,
-                "Trace Commons DB dual-write credit mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state.as_ref(), "credit ledger event", mirror_result)
-            .map_err(internal_error)?;
+        warn_and_enforce_db_mirror_write!(
+            state.as_ref(),
+            "credit ledger event",
+            mirror_result,
+            "Trace Commons DB dual-write credit mirror failed",
+            submission_id = %event.submission_id
+        )
+        .map_err(internal_error)?;
     }
     let credit_audit_event = TraceCommonsAuditEvent::credit_mutation(
         &tenant,
@@ -30195,27 +30105,13 @@ async fn run_credit_settlement_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "credit_settlement".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "credit_settlement",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await
         .map_err(internal_error)?;
@@ -34324,26 +34220,24 @@ async fn append_utility_attestation_with_db_mirror(
 ) -> anyhow::Result<()> {
     let mirror_result = mirror_utility_attestation_to_db(state, attestation).await;
     if state.require_db_mirror_writes {
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                attestation_id = %attestation.attestation_id,
-                "Trace Commons DB dual-write utility attestation mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "utility attestation", mirror_result)?;
+        warn_and_enforce_db_mirror_write!(
+            state,
+            "utility attestation",
+            mirror_result,
+            "Trace Commons DB dual-write utility attestation mirror failed",
+            attestation_id = %attestation.attestation_id
+        )?;
         append_utility_attestation(&state.root, &tenant.tenant_id, attestation)?;
         return Ok(());
     }
     append_utility_attestation(&state.root, &tenant.tenant_id, attestation)?;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(error),
-            attestation_id = %attestation.attestation_id,
-            "Trace Commons DB dual-write utility attestation mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "utility attestation", mirror_result)
+    warn_and_enforce_db_mirror_write!(
+        state,
+        "utility attestation",
+        mirror_result,
+        "Trace Commons DB dual-write utility attestation mirror failed",
+        attestation_id = %attestation.attestation_id
+    )
 }
 
 /// Superseded in production by `append_credit_settlement_finalize_with_db_mirror`,
@@ -34362,26 +34256,24 @@ async fn append_credit_settlement_batch_with_db_mirror(
     ensure_credit_settlement_batch_has_no_finalized_source_conflict(state, tenant, batch).await?;
     let mirror_result = mirror_credit_settlement_batch_to_db(state, batch).await;
     if state.require_db_mirror_writes {
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                settlement_batch_id = %batch.settlement_batch_id,
-                "Trace Commons DB dual-write credit settlement mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "credit settlement batch", mirror_result)?;
+        warn_and_enforce_db_mirror_write!(
+            state,
+            "credit settlement batch",
+            mirror_result,
+            "Trace Commons DB dual-write credit settlement mirror failed",
+            settlement_batch_id = %batch.settlement_batch_id
+        )?;
         append_credit_settlement_batch(&state.root, &tenant.tenant_id, batch)?;
         return Ok(());
     }
     append_credit_settlement_batch(&state.root, &tenant.tenant_id, batch)?;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(error),
-            settlement_batch_id = %batch.settlement_batch_id,
-            "Trace Commons DB dual-write credit settlement mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "credit settlement batch", mirror_result)
+    warn_and_enforce_db_mirror_write!(
+        state,
+        "credit settlement batch",
+        mirror_result,
+        "Trace Commons DB dual-write credit settlement mirror failed",
+        settlement_batch_id = %batch.settlement_batch_id
+    )
 }
 
 /// Persist a finalized settlement batch and every NEAR outbox row it expects as
@@ -34533,14 +34425,13 @@ async fn append_credit_settlement_finalize_with_db_mirror(
             .await
             .map(|_| ())
             .map_err(anyhow::Error::from);
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                settlement_batch_id = %batch.settlement_batch_id,
-                "Trace Commons DB dual-write credit settlement finalize mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "credit settlement finalize", mirror_result)?;
+        warn_and_enforce_db_mirror_write!(
+            state,
+            "credit settlement finalize",
+            mirror_result,
+            "Trace Commons DB dual-write credit settlement finalize mirror failed",
+            settlement_batch_id = %batch.settlement_batch_id
+        )?;
     }
     Ok(())
 }
@@ -34665,26 +34556,24 @@ async fn append_credit_hold_with_db_mirror(
 ) -> anyhow::Result<()> {
     let mirror_result = mirror_credit_hold_to_db(state, hold).await;
     if state.require_db_mirror_writes {
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                hold_id = %hold.hold_id,
-                "Trace Commons DB dual-write credit hold mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "credit hold", mirror_result)?;
+        warn_and_enforce_db_mirror_write!(
+            state,
+            "credit hold",
+            mirror_result,
+            "Trace Commons DB dual-write credit hold mirror failed",
+            hold_id = %hold.hold_id
+        )?;
         append_credit_hold(&state.root, &tenant.tenant_id, hold)?;
         return Ok(());
     }
     append_credit_hold(&state.root, &tenant.tenant_id, hold)?;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(error),
-            hold_id = %hold.hold_id,
-            "Trace Commons DB dual-write credit hold mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "credit hold", mirror_result)
+    warn_and_enforce_db_mirror_write!(
+        state,
+        "credit hold",
+        mirror_result,
+        "Trace Commons DB dual-write credit hold mirror failed",
+        hold_id = %hold.hold_id
+    )
 }
 
 async fn append_near_credit_outbox_item_with_db_mirror(
@@ -34694,26 +34583,24 @@ async fn append_near_credit_outbox_item_with_db_mirror(
 ) -> anyhow::Result<()> {
     let mirror_result = mirror_near_credit_outbox_item_to_db(state, item).await;
     if state.require_db_mirror_writes {
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                near_outbox_id = %item.near_outbox_id,
-                "Trace Commons DB dual-write NEAR credit outbox mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "NEAR credit outbox item", mirror_result)?;
+        warn_and_enforce_db_mirror_write!(
+            state,
+            "NEAR credit outbox item",
+            mirror_result,
+            "Trace Commons DB dual-write NEAR credit outbox mirror failed",
+            near_outbox_id = %item.near_outbox_id
+        )?;
         append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item)?;
         return Ok(());
     }
     append_near_credit_outbox_item(&state.root, &tenant.tenant_id, item)?;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(error),
-            near_outbox_id = %item.near_outbox_id,
-            "Trace Commons DB dual-write NEAR credit outbox mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "NEAR credit outbox item", mirror_result)
+    warn_and_enforce_db_mirror_write!(
+        state,
+        "NEAR credit outbox item",
+        mirror_result,
+        "Trace Commons DB dual-write NEAR credit outbox mirror failed",
+        near_outbox_id = %item.near_outbox_id
+    )
 }
 
 async fn ensure_benchmark_registry_publish_outbox_item_with_db_mirror(
@@ -34741,26 +34628,24 @@ async fn ensure_benchmark_registry_outbox_item_with_db_mirror(
 ) -> anyhow::Result<()> {
     let mirror_result = mirror_benchmark_registry_outbox_item_to_db(state, item).await;
     if state.require_db_mirror_writes {
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                benchmark_outbox_id = %item.benchmark_outbox_id,
-                "Trace Commons DB dual-write benchmark registry outbox mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "benchmark registry outbox item", mirror_result)?;
+        warn_and_enforce_db_mirror_write!(
+            state,
+            "benchmark registry outbox item",
+            mirror_result,
+            "Trace Commons DB dual-write benchmark registry outbox mirror failed",
+            benchmark_outbox_id = %item.benchmark_outbox_id
+        )?;
         upsert_benchmark_registry_outbox_item(&state.root, &tenant.tenant_id, item)?;
         return Ok(());
     }
     upsert_benchmark_registry_outbox_item(&state.root, &tenant.tenant_id, item)?;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(error),
-            benchmark_outbox_id = %item.benchmark_outbox_id,
-            "Trace Commons DB dual-write benchmark registry outbox mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "benchmark registry outbox item", mirror_result)
+    warn_and_enforce_db_mirror_write!(
+        state,
+        "benchmark registry outbox item",
+        mirror_result,
+        "Trace Commons DB dual-write benchmark registry outbox mirror failed",
+        benchmark_outbox_id = %item.benchmark_outbox_id
+    )
 }
 
 async fn update_near_credit_outbox_item_status_with_db_mirror(
@@ -38979,26 +38864,24 @@ async fn append_ranking_model_version_with_db_mirror(
 ) -> anyhow::Result<()> {
     let mirror_result = mirror_ranking_model_version_to_db(state, record).await;
     if state.require_db_mirror_writes {
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                model_version_hash = %sha256_prefixed(&record.model_version),
-                "Trace Commons DB dual-write ranking model version mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "ranking model version", mirror_result)?;
+        warn_and_enforce_db_mirror_write!(
+            state,
+            "ranking model version",
+            mirror_result,
+            "Trace Commons DB dual-write ranking model version mirror failed",
+            model_version_hash = %sha256_prefixed(&record.model_version)
+        )?;
         append_ranking_model_version(&state.root, &tenant.tenant_id, record)?;
         return Ok(());
     }
     append_ranking_model_version(&state.root, &tenant.tenant_id, record)?;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(error),
-            model_version_hash = %sha256_prefixed(&record.model_version),
-            "Trace Commons DB dual-write ranking model version mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "ranking model version", mirror_result)
+    warn_and_enforce_db_mirror_write!(
+        state,
+        "ranking model version",
+        mirror_result,
+        "Trace Commons DB dual-write ranking model version mirror failed",
+        model_version_hash = %sha256_prefixed(&record.model_version)
+    )
 }
 
 async fn append_ranking_calibration_dataset_with_db_mirror(
@@ -39009,26 +38892,24 @@ async fn append_ranking_calibration_dataset_with_db_mirror(
     ensure_ranking_calibration_dataset_append_allowed(&state.root, &tenant.tenant_id, record)?;
     let mirror_result = mirror_ranking_calibration_dataset_to_db(state, record).await;
     if state.require_db_mirror_writes {
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                calibration_dataset_hash = %record.calibration_dataset_hash,
-                "Trace Commons DB dual-write ranking calibration dataset mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "ranking calibration dataset", mirror_result)?;
+        warn_and_enforce_db_mirror_write!(
+            state,
+            "ranking calibration dataset",
+            mirror_result,
+            "Trace Commons DB dual-write ranking calibration dataset mirror failed",
+            calibration_dataset_hash = %record.calibration_dataset_hash
+        )?;
         append_ranking_calibration_dataset(&state.root, &tenant.tenant_id, record)?;
         return Ok(());
     }
     append_ranking_calibration_dataset(&state.root, &tenant.tenant_id, record)?;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(error),
-            calibration_dataset_hash = %record.calibration_dataset_hash,
-            "Trace Commons DB dual-write ranking calibration dataset mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "ranking calibration dataset", mirror_result)
+    warn_and_enforce_db_mirror_write!(
+        state,
+        "ranking calibration dataset",
+        mirror_result,
+        "Trace Commons DB dual-write ranking calibration dataset mirror failed",
+        calibration_dataset_hash = %record.calibration_dataset_hash
+    )
 }
 
 async fn append_ranking_calibration_dataset_status_override_with_db_mirror(
@@ -39040,17 +38921,12 @@ async fn append_ranking_calibration_dataset_status_override_with_db_mirror(
     let mirror_result =
         mirror_ranking_calibration_dataset_status_override_to_db(state, record).await;
     if state.require_db_mirror_writes {
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                calibration_dataset_hash = %record.calibration_dataset_hash,
-                "Trace Commons DB ranking calibration dataset status override mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(
+        warn_and_enforce_db_mirror_write!(
             state,
             "ranking calibration dataset status override",
             mirror_result,
+            "Trace Commons DB ranking calibration dataset status override mirror failed",
+            calibration_dataset_hash = %record.calibration_dataset_hash
         )?;
         append_ranking_calibration_dataset_without_manifest_check(
             &state.root,
@@ -39064,17 +38940,12 @@ async fn append_ranking_calibration_dataset_status_override_with_db_mirror(
         &tenant.tenant_id,
         record,
     )?;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(error),
-            calibration_dataset_hash = %record.calibration_dataset_hash,
-            "Trace Commons DB ranking calibration dataset status override mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(
+    warn_and_enforce_db_mirror_write!(
         state,
         "ranking calibration dataset status override",
         mirror_result,
+        "Trace Commons DB ranking calibration dataset status override mirror failed",
+        calibration_dataset_hash = %record.calibration_dataset_hash
     )
 }
 
@@ -39085,26 +38956,24 @@ async fn append_ranking_feature_with_db_mirror(
 ) -> anyhow::Result<()> {
     let mirror_result = mirror_ranking_feature_to_db(state, record).await;
     if state.require_db_mirror_writes {
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                ranking_feature_id = %record.ranking_feature_id,
-                "Trace Commons DB dual-write ranking feature mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "ranking feature", mirror_result)?;
+        warn_and_enforce_db_mirror_write!(
+            state,
+            "ranking feature",
+            mirror_result,
+            "Trace Commons DB dual-write ranking feature mirror failed",
+            ranking_feature_id = %record.ranking_feature_id
+        )?;
         append_ranking_feature(&state.root, &tenant.tenant_id, record)?;
         return Ok(());
     }
     append_ranking_feature(&state.root, &tenant.tenant_id, record)?;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(error),
-            ranking_feature_id = %record.ranking_feature_id,
-            "Trace Commons DB dual-write ranking feature mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "ranking feature", mirror_result)
+    warn_and_enforce_db_mirror_write!(
+        state,
+        "ranking feature",
+        mirror_result,
+        "Trace Commons DB dual-write ranking feature mirror failed",
+        ranking_feature_id = %record.ranking_feature_id
+    )
 }
 
 async fn append_ranking_prediction_with_db_mirror(
@@ -39114,26 +38983,24 @@ async fn append_ranking_prediction_with_db_mirror(
 ) -> anyhow::Result<()> {
     let mirror_result = mirror_ranking_prediction_to_db(state, record).await;
     if state.require_db_mirror_writes {
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                ranking_prediction_id = %record.ranking_prediction_id,
-                "Trace Commons DB dual-write ranking prediction mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "ranking prediction", mirror_result)?;
+        warn_and_enforce_db_mirror_write!(
+            state,
+            "ranking prediction",
+            mirror_result,
+            "Trace Commons DB dual-write ranking prediction mirror failed",
+            ranking_prediction_id = %record.ranking_prediction_id
+        )?;
         append_ranking_prediction(&state.root, &tenant.tenant_id, record)?;
         return Ok(());
     }
     append_ranking_prediction(&state.root, &tenant.tenant_id, record)?;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(error),
-            ranking_prediction_id = %record.ranking_prediction_id,
-            "Trace Commons DB dual-write ranking prediction mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "ranking prediction", mirror_result)
+    warn_and_enforce_db_mirror_write!(
+        state,
+        "ranking prediction",
+        mirror_result,
+        "Trace Commons DB dual-write ranking prediction mirror failed",
+        ranking_prediction_id = %record.ranking_prediction_id
+    )
 }
 
 async fn append_ranking_label_with_db_mirror(
@@ -39143,26 +39010,24 @@ async fn append_ranking_label_with_db_mirror(
 ) -> anyhow::Result<()> {
     let mirror_result = mirror_ranking_label_to_db(state, record).await;
     if state.require_db_mirror_writes {
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                ranking_label_id = %record.ranking_label_id,
-                "Trace Commons DB dual-write ranking label mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "ranking label", mirror_result)?;
+        warn_and_enforce_db_mirror_write!(
+            state,
+            "ranking label",
+            mirror_result,
+            "Trace Commons DB dual-write ranking label mirror failed",
+            ranking_label_id = %record.ranking_label_id
+        )?;
         append_ranking_label(&state.root, &tenant.tenant_id, record)?;
         return Ok(());
     }
     append_ranking_label(&state.root, &tenant.tenant_id, record)?;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(error),
-            ranking_label_id = %record.ranking_label_id,
-            "Trace Commons DB dual-write ranking label mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "ranking label", mirror_result)
+    warn_and_enforce_db_mirror_write!(
+        state,
+        "ranking label",
+        mirror_result,
+        "Trace Commons DB dual-write ranking label mirror failed",
+        ranking_label_id = %record.ranking_label_id
+    )
 }
 
 async fn append_ranking_preference_label_with_db_mirror(
@@ -39172,26 +39037,24 @@ async fn append_ranking_preference_label_with_db_mirror(
 ) -> anyhow::Result<()> {
     let mirror_result = mirror_ranking_preference_label_to_db(state, record).await;
     if state.require_db_mirror_writes {
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                preference_label_id = %record.preference_label_id,
-                "Trace Commons DB dual-write ranking preference label mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "ranking preference label", mirror_result)?;
+        warn_and_enforce_db_mirror_write!(
+            state,
+            "ranking preference label",
+            mirror_result,
+            "Trace Commons DB dual-write ranking preference label mirror failed",
+            preference_label_id = %record.preference_label_id
+        )?;
         append_ranking_preference_label(&state.root, &tenant.tenant_id, record)?;
         return Ok(());
     }
     append_ranking_preference_label(&state.root, &tenant.tenant_id, record)?;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(error),
-            preference_label_id = %record.preference_label_id,
-            "Trace Commons DB dual-write ranking preference label mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "ranking preference label", mirror_result)
+    warn_and_enforce_db_mirror_write!(
+        state,
+        "ranking preference label",
+        mirror_result,
+        "Trace Commons DB dual-write ranking preference label mirror failed",
+        preference_label_id = %record.preference_label_id
+    )
 }
 
 async fn append_ranking_calibration_run_with_db_mirror(
@@ -39201,26 +39064,24 @@ async fn append_ranking_calibration_run_with_db_mirror(
 ) -> anyhow::Result<()> {
     let mirror_result = mirror_ranking_calibration_run_to_db(state, record).await;
     if state.require_db_mirror_writes {
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                calibration_run_id = %record.calibration_run_id,
-                "Trace Commons DB dual-write ranking calibration run mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "ranking calibration run", mirror_result)?;
+        warn_and_enforce_db_mirror_write!(
+            state,
+            "ranking calibration run",
+            mirror_result,
+            "Trace Commons DB dual-write ranking calibration run mirror failed",
+            calibration_run_id = %record.calibration_run_id
+        )?;
         append_ranking_calibration_run(&state.root, &tenant.tenant_id, record)?;
         return Ok(());
     }
     append_ranking_calibration_run(&state.root, &tenant.tenant_id, record)?;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(error),
-            calibration_run_id = %record.calibration_run_id,
-            "Trace Commons DB dual-write ranking calibration run mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "ranking calibration run", mirror_result)
+    warn_and_enforce_db_mirror_write!(
+        state,
+        "ranking calibration run",
+        mirror_result,
+        "Trace Commons DB dual-write ranking calibration run mirror failed",
+        calibration_run_id = %record.calibration_run_id
+    )
 }
 
 async fn append_ranking_worker_run_with_db_mirror(
@@ -39230,26 +39091,24 @@ async fn append_ranking_worker_run_with_db_mirror(
 ) -> anyhow::Result<()> {
     let mirror_result = mirror_ranking_worker_run_to_db(state, record).await;
     if state.require_db_mirror_writes {
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                ranking_worker_run_id = %record.ranking_worker_run_id,
-                "Trace Commons DB dual-write ranking worker run mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "ranking worker run", mirror_result)?;
+        warn_and_enforce_db_mirror_write!(
+            state,
+            "ranking worker run",
+            mirror_result,
+            "Trace Commons DB dual-write ranking worker run mirror failed",
+            ranking_worker_run_id = %record.ranking_worker_run_id
+        )?;
         append_ranking_worker_run(&state.root, &tenant.tenant_id, record)?;
         return Ok(());
     }
     append_ranking_worker_run(&state.root, &tenant.tenant_id, record)?;
-    if let Err(error) = &mirror_result {
-        tracing::warn!(
-            error_hash = %safe_runtime_error_hash(error),
-            ranking_worker_run_id = %record.ranking_worker_run_id,
-            "Trace Commons DB dual-write ranking worker run mirror failed"
-        );
-    }
-    enforce_db_mirror_write_result(state, "ranking worker run", mirror_result)
+    warn_and_enforce_db_mirror_write!(
+        state,
+        "ranking worker run",
+        mirror_result,
+        "Trace Commons DB dual-write ranking worker run mirror failed",
+        ranking_worker_run_id = %record.ranking_worker_run_id
+    )
 }
 
 async fn mirror_ranking_model_version_to_db(
@@ -43906,15 +43765,14 @@ async fn append_automatic_utility_credit_events_once_with_counts_at(
         };
         append_credit_event(&state.root, &tenant.tenant_id, &event).map_err(internal_error)?;
         let mirror_result = mirror_credit_event_to_db(state, &event).await;
-        if let Err(error) = &mirror_result {
-            tracing::warn!(
-                error_hash = %safe_runtime_error_hash(error),
-                submission_id = %event.submission_id,
-                "Trace Commons DB dual-write automatic credit mirror failed"
-            );
-        }
-        enforce_db_mirror_write_result(state, "automatic credit ledger event", mirror_result)
-            .map_err(internal_error)?;
+        warn_and_enforce_db_mirror_write!(
+            state,
+            "automatic credit ledger event",
+            mirror_result,
+            "Trace Commons DB dual-write automatic credit mirror failed",
+            submission_id = %event.submission_id
+        )
+        .map_err(internal_error)?;
         append_audit_event_with_db_mirror(
             state,
             tenant,
@@ -49418,32 +49276,18 @@ async fn run_canary_read_drill(
 
     if request.record_evidence {
         for (check_name, passed) in canary_read_drill_check_statuses(&response) {
-            let evidence = TraceRolloutSmokeEvidenceResponse {
-                event_id: Uuid::new_v4(),
-                tenant_id: tenant.tenant_id.clone(),
-                tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-                check_name: check_name.to_string(),
-                status: if passed {
-                    TraceRolloutSmokeEvidenceStatus::Passed
-                } else {
-                    TraceRolloutSmokeEvidenceStatus::Failed
-                },
-                evidence_hash: canary_read_drill_check_evidence_hash(
+            let evidence = record_rollout_smoke_evidence(
+                state,
+                tenant,
+                check_name,
+                passed,
+                canary_read_drill_check_evidence_hash(
                     tenant,
                     &response.evidence_hash,
                     check_name,
                     passed,
                 ),
-                evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-                actor_principal_ref: tenant.principal_ref.clone(),
-                recorded_at: Utc::now(),
-            };
-            append_audit_event_with_db_mirror(
-                state,
-                tenant,
-                TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-                StorageTraceAuditAction::Read,
-                StorageTraceAuditSafeMetadata::Empty,
+                Some(sha256_prefixed(&purpose)),
             )
             .await?;
             response.recorded_evidence.push(evidence);
@@ -49578,27 +49422,13 @@ async fn run_object_primary_read_drill(
     response.evidence_hash = object_primary_read_drill_evidence_hash(tenant, &response);
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "object_primary_reads".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: object_primary_read_drill_evidence_hash(tenant, &response),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "object_primary_reads",
+            response.ready,
+            object_primary_read_drill_evidence_hash(tenant, &response),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -49773,27 +49603,13 @@ async fn run_object_store_migration_drill(
     response.evidence_hash = object_store_migration_drill_evidence_hash(tenant, &response);
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "object_store_migration".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(response.migration_manifest_hash.clone()),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "object_store_migration",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(response.migration_manifest_hash.clone()),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -49846,27 +49662,13 @@ async fn run_revocation_propagation_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "revocation_propagation".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "revocation_propagation",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -50104,32 +49906,18 @@ async fn run_revocation_effects_drill(
 
     if request.record_evidence {
         for (check_name, passed) in revocation_effects_drill_check_statuses(&response) {
-            let evidence = TraceRolloutSmokeEvidenceResponse {
-                event_id: Uuid::new_v4(),
-                tenant_id: tenant.tenant_id.clone(),
-                tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-                check_name: check_name.to_string(),
-                status: if passed {
-                    TraceRolloutSmokeEvidenceStatus::Passed
-                } else {
-                    TraceRolloutSmokeEvidenceStatus::Failed
-                },
-                evidence_hash: revocation_effects_drill_check_evidence_hash(
+            let evidence = record_rollout_smoke_evidence(
+                state,
+                tenant,
+                check_name,
+                passed,
+                revocation_effects_drill_check_evidence_hash(
                     tenant,
                     &response.evidence_hash,
                     check_name,
                     passed,
                 ),
-                evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-                actor_principal_ref: tenant.principal_ref.clone(),
-                recorded_at: Utc::now(),
-            };
-            append_audit_event_with_db_mirror(
-                state,
-                tenant,
-                TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-                StorageTraceAuditAction::Read,
-                StorageTraceAuditSafeMetadata::Empty,
+                Some(sha256_prefixed(&purpose)),
             )
             .await?;
             response.recorded_evidence.push(evidence);
@@ -50200,27 +49988,13 @@ async fn run_retention_dry_run_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "retention_dry_run".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "retention_dry_run",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -50297,27 +50071,13 @@ async fn run_vector_index_drill(
     response.evidence_hash = vector_index_drill_evidence_hash(tenant, &response, state);
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "vector_index".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "vector_index",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -50427,27 +50187,13 @@ async fn run_analytics_release_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "analytics_release".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "analytics_release",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -50524,27 +50270,13 @@ async fn run_benchmark_readiness_drill(
     response.evidence_hash = benchmark_readiness_drill_evidence_hash(tenant, &response);
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "benchmark_pipeline".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "benchmark_pipeline",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -50659,27 +50391,13 @@ async fn run_ranking_model_readiness_drill(
     response.evidence_hash = ranking_model_readiness_drill_evidence_hash(tenant, &response);
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "ranking_model_readiness".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "ranking_model_readiness",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -50753,27 +50471,13 @@ async fn run_postgres_rls_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "postgres_rls_readiness".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "postgres_rls_readiness",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -50941,27 +50645,13 @@ async fn run_db_reconciliation_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "db_reconciliation_clean".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "db_reconciliation_clean",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -51081,27 +50771,13 @@ async fn run_audit_chain_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "audit_chain_verification".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "audit_chain_verification",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -51275,27 +50951,13 @@ async fn run_key_rotation_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "key_rotation_drill".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "key_rotation_drill",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
@@ -51473,33 +51135,56 @@ async fn run_rollback_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "rollback_flag_drill".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "rollback_flag_drill",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await?;
         response.recorded_evidence = Some(evidence);
     }
 
     Ok(response)
+}
+
+/// Records one drill's rollout-smoke evidence for the calling tenant:
+/// `Passed` when the drill is ready, `Failed` otherwise, appended to the
+/// audit log as a read. Returns the recorded row for the drill's response.
+async fn record_rollout_smoke_evidence(
+    state: &AppState,
+    tenant: &TenantAuth,
+    check_name: &str,
+    ready: bool,
+    evidence_hash: String,
+    evidence_ref_hash: Option<String>,
+) -> anyhow::Result<TraceRolloutSmokeEvidenceResponse> {
+    let evidence = TraceRolloutSmokeEvidenceResponse {
+        event_id: Uuid::new_v4(),
+        tenant_id: tenant.tenant_id.clone(),
+        tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
+        check_name: check_name.to_string(),
+        status: if ready {
+            TraceRolloutSmokeEvidenceStatus::Passed
+        } else {
+            TraceRolloutSmokeEvidenceStatus::Failed
+        },
+        evidence_hash,
+        evidence_ref_hash,
+        actor_principal_ref: tenant.principal_ref.clone(),
+        recorded_at: Utc::now(),
+    };
+    append_audit_event_with_db_mirror(
+        state,
+        tenant,
+        TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
+        StorageTraceAuditAction::Read,
+        StorageTraceAuditSafeMetadata::Empty,
+    )
+    .await?;
+    Ok(evidence)
 }
 
 fn push_rollback_gap_count(gaps: &mut Vec<String>, label: &str, count: usize) {
@@ -52756,42 +52441,96 @@ async fn operational_metrics_handler(
     ))
 }
 
+/// Builds the operational Prometheus body: a `# HELP` and `# TYPE` header
+/// per gauge family, then its samples, every one labelled with the tenant
+/// storage ref first.
+struct PrometheusGauges<'a> {
+    body: String,
+    metric_count: usize,
+    tenant_storage_ref: &'a str,
+}
+
+impl<'a> PrometheusGauges<'a> {
+    fn new(tenant_storage_ref: &'a str) -> Self {
+        Self {
+            body: String::new(),
+            metric_count: 0,
+            tenant_storage_ref,
+        }
+    }
+
+    fn header(&mut self, name: &str, help: &str) {
+        self.body.push_str("# HELP ");
+        self.body.push_str(name);
+        self.body.push(' ');
+        self.body.push_str(help);
+        self.body.push('\n');
+        self.body.push_str("# TYPE ");
+        self.body.push_str(name);
+        self.body.push_str(" gauge\n");
+    }
+
+    fn sample(&mut self, name: &str, labels: &[(&str, &str)], value: usize) {
+        push_prometheus_gauge(&mut self.body, &mut self.metric_count, name, labels, value);
+    }
+
+    /// A family with one sample, labelled by tenant only.
+    fn tenant_gauge(&mut self, name: &str, help: &str, value: usize) {
+        self.header(name, help);
+        let tenant_storage_ref = self.tenant_storage_ref;
+        self.sample(name, &[("tenant_storage_ref", tenant_storage_ref)], value);
+    }
+
+    /// A family with one sample per value of `label`, in the order given.
+    fn labelled<'v>(
+        &mut self,
+        name: &str,
+        help: &str,
+        label: &str,
+        samples: impl IntoIterator<Item = (&'v str, usize)>,
+    ) {
+        self.header(name, help);
+        let tenant_storage_ref = self.tenant_storage_ref;
+        for (label_value, value) in samples {
+            self.sample(
+                name,
+                &[
+                    ("tenant_storage_ref", tenant_storage_ref),
+                    (label, label_value),
+                ],
+                value,
+            );
+        }
+    }
+
+    fn finish(self) -> (String, usize) {
+        (self.body, self.metric_count)
+    }
+}
+
 fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) -> (String, usize) {
-    let mut body = String::new();
-    let mut metric_count = 0usize;
-    body.push_str("# HELP trace_commons_operational_promotion_ready Whether operational promotion gates have no blockers.\n");
-    body.push_str("# TYPE trace_commons_operational_promotion_ready gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    let mut gauges = PrometheusGauges::new(&response.tenant_storage_ref);
+    gauges.tenant_gauge(
         "trace_commons_operational_promotion_ready",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Whether operational promotion gates have no blockers.",
         usize::from(response.promotion_gates.ready),
     );
-    body.push_str("# HELP trace_commons_operational_promotion_blocking_gates Count of blocking operational promotion gates.\n");
-    body.push_str("# TYPE trace_commons_operational_promotion_blocking_gates gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_promotion_blocking_gates",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Count of blocking operational promotion gates.",
         response.promotion_gates.blocking_count,
     );
-    body.push_str("# HELP trace_commons_operational_promotion_warning_gates Count of warning operational promotion gates.\n");
-    body.push_str("# TYPE trace_commons_operational_promotion_warning_gates gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_promotion_warning_gates",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Count of warning operational promotion gates.",
         response.promotion_gates.warning_count,
     );
-    body.push_str("# HELP trace_commons_operational_promotion_gate Individual operational promotion gate values by severity and gate name.\n");
-    body.push_str("# TYPE trace_commons_operational_promotion_gate gauge\n");
+    gauges.header(
+        "trace_commons_operational_promotion_gate",
+        "Individual operational promotion gate values by severity and gate name.",
+    );
     for gate in operational_summary_promotion_gate_metric_fields(response) {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
+        gauges.sample(
             "trace_commons_operational_promotion_gate",
             &[
                 ("tenant_storage_ref", &gate.tenant_storage_ref),
@@ -52803,202 +52542,178 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
     }
     let postgres_rls_diagnostics_available =
         response.promotion_gates.trace_corpus_rls_ready.is_some();
-    body.push_str("# HELP trace_commons_operational_postgres_rls_readiness Safe PostgreSQL RLS readiness flags by subcheck.\n");
-    body.push_str("# TYPE trace_commons_operational_postgres_rls_readiness gauge\n");
-    for (state, value) in [
-        (
-            "diagnostics_available",
-            usize::from(postgres_rls_diagnostics_available),
-        ),
-        (
-            "ready",
-            usize::from(
-                response
-                    .promotion_gates
-                    .trace_corpus_rls_ready
-                    .unwrap_or(false),
+    gauges.labelled(
+        "trace_commons_operational_postgres_rls_readiness",
+        "Safe PostgreSQL RLS readiness flags by subcheck.",
+        "state",
+        [
+            (
+                "diagnostics_available",
+                usize::from(postgres_rls_diagnostics_available),
             ),
-        ),
-        (
-            "policy_coverage",
-            usize::from(
-                postgres_rls_diagnostics_available
-                    && response
+            (
+                "ready",
+                usize::from(
+                    response
                         .promotion_gates
-                        .trace_corpus_rls_missing_policy_table_count
-                        == 0,
-            ),
-        ),
-        (
-            "rls_enabled",
-            usize::from(
-                postgres_rls_diagnostics_available
-                    && response
-                        .promotion_gates
-                        .trace_corpus_rls_disabled_table_count
-                        == 0,
-            ),
-        ),
-        (
-            "force_rls_enabled",
-            usize::from(
-                postgres_rls_diagnostics_available
-                    && response.promotion_gates.force_rls_disabled_table_count == 0,
-            ),
-        ),
-        (
-            "policy_expression_current",
-            usize::from(
-                postgres_rls_diagnostics_available
-                    && response
-                        .promotion_gates
-                        .trace_corpus_rls_expression_mismatch_table_count
-                        == 0,
-            ),
-        ),
-        (
-            "runtime_role_non_bypassing",
-            usize::from(
-                postgres_rls_diagnostics_available
-                    && !response.promotion_gates.current_role_bypasses_rls,
-            ),
-        ),
-        (
-            "runtime_role_not_table_owner",
-            usize::from(
-                postgres_rls_diagnostics_available
-                    && !response.promotion_gates.current_role_owns_trace_tables,
-            ),
-        ),
-        (
-            "runtime_role_expected_hash_configured",
-            usize::from(
-                response
-                    .promotion_gates
-                    .postgres_runtime_role_hash_configured,
-            ),
-        ),
-        (
-            "runtime_role_expected_hash_matched",
-            usize::from(
-                postgres_rls_diagnostics_available
-                    && response
-                        .promotion_gates
-                        .postgres_runtime_role_hash_matched
+                        .trace_corpus_rls_ready
                         .unwrap_or(false),
+                ),
             ),
-        ),
-        (
-            "tenant_context_transaction_local",
-            usize::from(
-                postgres_rls_diagnostics_available
-                    && response.promotion_gates.tenant_context_transaction_local,
+            (
+                "policy_coverage",
+                usize::from(
+                    postgres_rls_diagnostics_available
+                        && response
+                            .promotion_gates
+                            .trace_corpus_rls_missing_policy_table_count
+                            == 0,
+                ),
             ),
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_postgres_rls_readiness",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_postgres_rls_gap_tables Safe aggregate PostgreSQL RLS table-gap counts by gap kind.\n");
-    body.push_str("# TYPE trace_commons_operational_postgres_rls_gap_tables gauge\n");
-    for (gap, value) in [
-        (
-            "missing_policy_tables",
-            response
-                .promotion_gates
-                .trace_corpus_rls_missing_policy_table_count,
-        ),
-        (
-            "rls_disabled_tables",
-            response
-                .promotion_gates
-                .trace_corpus_rls_disabled_table_count,
-        ),
-        (
-            "force_rls_disabled_tables",
-            response.promotion_gates.force_rls_disabled_table_count,
-        ),
-        (
-            "policy_expression_mismatch_tables",
-            response
-                .promotion_gates
-                .trace_corpus_rls_expression_mismatch_table_count,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_postgres_rls_gap_tables",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("gap", gap),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_object_store_readiness Safe artifact object-store readiness flags.\n");
-    body.push_str("# TYPE trace_commons_operational_object_store_readiness gauge\n");
-    for (state, value) in [
-        ("configured", usize::from(response.object_store.configured)),
-        ("io_enabled", usize::from(response.object_store.io_enabled)),
-        (
-            "object_primary_eligible",
-            usize::from(response.object_store.object_primary_eligible),
-        ),
-        (
-            "plaintext_compatibility_allowed",
-            usize::from(response.object_store.plaintext_compatibility_allowed),
-        ),
-        (
-            "versioning_required",
-            usize::from(response.object_store.versioning_required),
-        ),
-        (
-            "object_versioning_supported",
-            usize::from(response.object_store.object_versioning_supported),
-        ),
-        (
-            "restore_after_delete_supported",
-            usize::from(response.object_store.restore_after_delete_supported),
-        ),
-        (
-            "remote_object_deleter_required",
-            usize::from(response.object_store.remote_object_deleter_required),
-        ),
-        (
-            "remote_object_deleter_configured",
-            usize::from(response.object_store.remote_object_deleter_configured),
-        ),
-        (
-            "remote_object_deleter_ready",
-            usize::from(response.object_store.remote_object_deleter_ready),
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_object_store_readiness",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
+            (
+                "rls_enabled",
+                usize::from(
+                    postgres_rls_diagnostics_available
+                        && response
+                            .promotion_gates
+                            .trace_corpus_rls_disabled_table_count
+                            == 0,
+                ),
+            ),
+            (
+                "force_rls_enabled",
+                usize::from(
+                    postgres_rls_diagnostics_available
+                        && response.promotion_gates.force_rls_disabled_table_count == 0,
+                ),
+            ),
+            (
+                "policy_expression_current",
+                usize::from(
+                    postgres_rls_diagnostics_available
+                        && response
+                            .promotion_gates
+                            .trace_corpus_rls_expression_mismatch_table_count
+                            == 0,
+                ),
+            ),
+            (
+                "runtime_role_non_bypassing",
+                usize::from(
+                    postgres_rls_diagnostics_available
+                        && !response.promotion_gates.current_role_bypasses_rls,
+                ),
+            ),
+            (
+                "runtime_role_not_table_owner",
+                usize::from(
+                    postgres_rls_diagnostics_available
+                        && !response.promotion_gates.current_role_owns_trace_tables,
+                ),
+            ),
+            (
+                "runtime_role_expected_hash_configured",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .postgres_runtime_role_hash_configured,
+                ),
+            ),
+            (
+                "runtime_role_expected_hash_matched",
+                usize::from(
+                    postgres_rls_diagnostics_available
+                        && response
+                            .promotion_gates
+                            .postgres_runtime_role_hash_matched
+                            .unwrap_or(false),
+                ),
+            ),
+            (
+                "tenant_context_transaction_local",
+                usize::from(
+                    postgres_rls_diagnostics_available
+                        && response.promotion_gates.tenant_context_transaction_local,
+                ),
+            ),
+        ],
+    );
+    gauges.labelled(
+        "trace_commons_operational_postgres_rls_gap_tables",
+        "Safe aggregate PostgreSQL RLS table-gap counts by gap kind.",
+        "gap",
+        [
+            (
+                "missing_policy_tables",
+                response
+                    .promotion_gates
+                    .trace_corpus_rls_missing_policy_table_count,
+            ),
+            (
+                "rls_disabled_tables",
+                response
+                    .promotion_gates
+                    .trace_corpus_rls_disabled_table_count,
+            ),
+            (
+                "force_rls_disabled_tables",
+                response.promotion_gates.force_rls_disabled_table_count,
+            ),
+            (
+                "policy_expression_mismatch_tables",
+                response
+                    .promotion_gates
+                    .trace_corpus_rls_expression_mismatch_table_count,
+            ),
+        ],
+    );
+    gauges.labelled(
+        "trace_commons_operational_object_store_readiness",
+        "Safe artifact object-store readiness flags.",
+        "state",
+        [
+            ("configured", usize::from(response.object_store.configured)),
+            ("io_enabled", usize::from(response.object_store.io_enabled)),
+            (
+                "object_primary_eligible",
+                usize::from(response.object_store.object_primary_eligible),
+            ),
+            (
+                "plaintext_compatibility_allowed",
+                usize::from(response.object_store.plaintext_compatibility_allowed),
+            ),
+            (
+                "versioning_required",
+                usize::from(response.object_store.versioning_required),
+            ),
+            (
+                "object_versioning_supported",
+                usize::from(response.object_store.object_versioning_supported),
+            ),
+            (
+                "restore_after_delete_supported",
+                usize::from(response.object_store.restore_after_delete_supported),
+            ),
+            (
+                "remote_object_deleter_required",
+                usize::from(response.object_store.remote_object_deleter_required),
+            ),
+            (
+                "remote_object_deleter_configured",
+                usize::from(response.object_store.remote_object_deleter_configured),
+            ),
+            (
+                "remote_object_deleter_ready",
+                usize::from(response.object_store.remote_object_deleter_ready),
+            ),
+        ],
+    );
     if let Some(object_store_name) = response.object_store.object_store_name.as_deref() {
-        body.push_str("# HELP trace_commons_operational_object_store_alias Configured safe artifact object-store alias.\n");
-        body.push_str("# TYPE trace_commons_operational_object_store_alias gauge\n");
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
+        gauges.header(
+            "trace_commons_operational_object_store_alias",
+            "Configured safe artifact object-store alias.",
+        );
+        gauges.sample(
             "trace_commons_operational_object_store_alias",
             &[
                 ("tenant_storage_ref", &response.tenant_storage_ref),
@@ -53007,22 +52722,22 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             1,
         );
     }
-    body.push_str("# HELP trace_commons_operational_ranking_worker_actionable_skips Count of ranking worker risk or ineligible skips that need operator review.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_worker_actionable_skips gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.header(
+        "trace_commons_operational_ranking_worker_actionable_skips",
+        "Count of ranking worker risk or ineligible skips that need operator review.",
+    );
+    gauges.sample(
         "trace_commons_operational_ranking_worker_actionable_skips",
         &[("tenant_storage_ref", &response.tenant_storage_ref)],
         response
             .promotion_gates
             .ranking_worker_run_actionable_skip_count,
     );
-    body.push_str("# HELP trace_commons_operational_withdrawal_completion_pending Whether persisted source-session withdrawals need completion for this tenant.\n");
-    body.push_str("# TYPE trace_commons_operational_withdrawal_completion_pending gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.header(
+        "trace_commons_operational_withdrawal_completion_pending",
+        "Whether persisted source-session withdrawals need completion for this tenant.",
+    );
+    gauges.sample(
         "trace_commons_operational_withdrawal_completion_pending",
         &[("tenant_storage_ref", &response.tenant_storage_ref)],
         usize::from(
@@ -53031,140 +52746,104 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
                 .withdrawal_completion_pending,
         ),
     );
-    body.push_str("# HELP trace_commons_operational_revocation_propagation_latest_run Latest audited revocation-propagation worker counts by state.\n");
-    body.push_str("# TYPE trace_commons_operational_revocation_propagation_latest_run gauge\n");
-    for (state, value) in [
-        (
-            "recorded",
-            usize::from(response.revocation_propagation.latest_run_recorded),
-        ),
-        (
-            "dry_run",
-            usize::from(response.revocation_propagation.latest_run_dry_run),
-        ),
-        (
-            "checked",
-            response.revocation_propagation.latest_checked_count,
-        ),
-        (
-            "completed",
-            response.revocation_propagation.latest_completed_count,
-        ),
-        (
-            "failed",
-            response.revocation_propagation.latest_failed_count,
-        ),
-        (
-            "skipped",
-            response.revocation_propagation.latest_skipped_count,
-        ),
-        (
-            "pending",
-            response.revocation_propagation.latest_pending_count,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_revocation_propagation_latest_run",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_revocation_propagation_readiness Safe revocation-propagation infrastructure readiness flags.\n");
-    body.push_str("# TYPE trace_commons_operational_revocation_propagation_readiness gauge\n");
-    for (state, value) in [
-        (
-            "worker_cache_invalidator_required",
-            usize::from(
-                response
-                    .revocation_propagation
-                    .worker_cache_invalidator_required,
+    gauges.labelled(
+        "trace_commons_operational_revocation_propagation_latest_run",
+        "Latest audited revocation-propagation worker counts by state.",
+        "state",
+        [
+            (
+                "recorded",
+                usize::from(response.revocation_propagation.latest_run_recorded),
             ),
-        ),
-        (
-            "worker_cache_invalidator_configured",
-            usize::from(
-                response
-                    .revocation_propagation
-                    .worker_cache_invalidator_configured,
+            (
+                "dry_run",
+                usize::from(response.revocation_propagation.latest_run_dry_run),
             ),
-        ),
-        (
-            "worker_cache_invalidator_ready",
-            usize::from(
-                response
-                    .revocation_propagation
-                    .worker_cache_invalidator_ready,
+            (
+                "checked",
+                response.revocation_propagation.latest_checked_count,
             ),
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_revocation_propagation_readiness",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_rollout_smoke_missing_evidence Count of required rollout smoke checks without captured rehearsal evidence.\n");
-    body.push_str("# TYPE trace_commons_operational_rollout_smoke_missing_evidence gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+            (
+                "completed",
+                response.revocation_propagation.latest_completed_count,
+            ),
+            (
+                "failed",
+                response.revocation_propagation.latest_failed_count,
+            ),
+            (
+                "skipped",
+                response.revocation_propagation.latest_skipped_count,
+            ),
+            (
+                "pending",
+                response.revocation_propagation.latest_pending_count,
+            ),
+        ],
+    );
+    gauges.labelled(
+        "trace_commons_operational_revocation_propagation_readiness",
+        "Safe revocation-propagation infrastructure readiness flags.",
+        "state",
+        [
+            (
+                "worker_cache_invalidator_required",
+                usize::from(
+                    response
+                        .revocation_propagation
+                        .worker_cache_invalidator_required,
+                ),
+            ),
+            (
+                "worker_cache_invalidator_configured",
+                usize::from(
+                    response
+                        .revocation_propagation
+                        .worker_cache_invalidator_configured,
+                ),
+            ),
+            (
+                "worker_cache_invalidator_ready",
+                usize::from(
+                    response
+                        .revocation_propagation
+                        .worker_cache_invalidator_ready,
+                ),
+            ),
+        ],
+    );
+    gauges.tenant_gauge(
         "trace_commons_operational_rollout_smoke_missing_evidence",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Count of required rollout smoke checks without captured rehearsal evidence.",
         response.rollout_smoke.missing_evidence_count,
     );
-    body.push_str("# HELP trace_commons_operational_rollout_smoke_recorded_evidence Count of required rollout smoke checks with captured rehearsal evidence.\n");
-    body.push_str("# TYPE trace_commons_operational_rollout_smoke_recorded_evidence gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_rollout_smoke_recorded_evidence",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Count of required rollout smoke checks with captured rehearsal evidence.",
         response.rollout_smoke.recorded_evidence_count,
     );
-    body.push_str("# HELP trace_commons_operational_rollout_smoke_passed_evidence Count of required rollout smoke checks whose latest captured rehearsal evidence passed.\n");
-    body.push_str("# TYPE trace_commons_operational_rollout_smoke_passed_evidence gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_rollout_smoke_passed_evidence",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Count of required rollout smoke checks whose latest captured rehearsal evidence passed.",
         response.rollout_smoke.passed_evidence_count,
     );
-    body.push_str("# HELP trace_commons_operational_rollout_smoke_failed_evidence Count of required rollout smoke checks whose latest captured rehearsal evidence failed.\n");
-    body.push_str("# TYPE trace_commons_operational_rollout_smoke_failed_evidence gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_rollout_smoke_failed_evidence",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Count of required rollout smoke checks whose latest captured rehearsal evidence failed.",
         response.rollout_smoke.failed_evidence_count,
     );
-    body.push_str("# HELP trace_commons_operational_rollout_smoke_stale_evidence Count of required rollout smoke checks whose latest captured rehearsal evidence is too old.\n");
-    body.push_str("# TYPE trace_commons_operational_rollout_smoke_stale_evidence gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_rollout_smoke_stale_evidence",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Count of required rollout smoke checks whose latest captured rehearsal evidence is too old.",
         response.rollout_smoke.stale_evidence_count,
     );
-    body.push_str("# HELP trace_commons_operational_rollout_smoke_check Latest rollout-smoke evidence state for each required check.\n");
-    body.push_str("# TYPE trace_commons_operational_rollout_smoke_check gauge\n");
+    gauges.header(
+        "trace_commons_operational_rollout_smoke_check",
+        "Latest rollout-smoke evidence state for each required check.",
+    );
     for check_name in &response.rollout_smoke.required_checks {
         let check_state = rollout_smoke_check_metric_state(&response.rollout_smoke, check_name);
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
+        gauges.sample(
             "trace_commons_operational_rollout_smoke_check",
             &[
                 ("tenant_storage_ref", &response.tenant_storage_ref),
@@ -53174,76 +52853,48 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             1,
         );
     }
-    body.push_str("# HELP trace_commons_operational_submissions_total Total tenant submissions visible to operational summary.\n");
-    body.push_str("# TYPE trace_commons_operational_submissions_total gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_submissions_total",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Total tenant submissions visible to operational summary.",
         response.submissions.total,
     );
-    body.push_str(
-        "# HELP trace_commons_operational_submissions_by_status Submission counts by corpus status.\n",
+    gauges.labelled(
+        "trace_commons_operational_submissions_by_status",
+        "Submission counts by corpus status.",
+        "status",
+        [
+            ("accepted", response.submissions.accepted),
+            ("quarantined", response.submissions.quarantined),
+            ("rejected", response.submissions.rejected),
+            ("revoked", response.submissions.revoked),
+            ("expired", response.submissions.expired),
+            ("purged", response.submissions.purged),
+        ],
     );
-    body.push_str("# TYPE trace_commons_operational_submissions_by_status gauge\n");
-    for (status, value) in [
-        ("accepted", response.submissions.accepted),
-        ("quarantined", response.submissions.quarantined),
-        ("rejected", response.submissions.rejected),
-        ("revoked", response.submissions.revoked),
-        ("expired", response.submissions.expired),
-        ("purged", response.submissions.purged),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_submissions_by_status",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("status", status),
-            ],
-            value,
-        );
-    }
-    body.push_str(
-        "# HELP trace_commons_operational_review_sla Review queue pressure counts by SLA state.\n",
+    gauges.labelled(
+        "trace_commons_operational_review_sla",
+        "Review queue pressure counts by SLA state.",
+        "state",
+        [
+            ("quarantined_total", response.review_sla.quarantined_total),
+            ("fresh", response.review_sla.fresh),
+            ("due", response.review_sla.due),
+            ("overdue", response.review_sla.overdue),
+            ("urgent", response.review_sla.urgent),
+            ("assigned", response.review_sla.assigned),
+            ("expired_leases", response.review_sla.expired_leases),
+        ],
     );
-    body.push_str("# TYPE trace_commons_operational_review_sla gauge\n");
-    for (state, value) in [
-        ("quarantined_total", response.review_sla.quarantined_total),
-        ("fresh", response.review_sla.fresh),
-        ("due", response.review_sla.due),
-        ("overdue", response.review_sla.overdue),
-        ("urgent", response.review_sla.urgent),
-        ("assigned", response.review_sla.assigned),
-        ("expired_leases", response.review_sla.expired_leases),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_review_sla",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_export_jobs_total Export job rows visible to operational summary.\n");
-    body.push_str("# TYPE trace_commons_operational_export_jobs_total gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_export_jobs_total",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Export job rows visible to operational summary.",
         response.exports.job_count,
     );
-    body.push_str("# HELP trace_commons_operational_export_infrastructure Safe export-worker infrastructure readiness flags.\n");
-    body.push_str("# TYPE trace_commons_operational_export_infrastructure gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.header(
+        "trace_commons_operational_export_infrastructure",
+        "Safe export-worker infrastructure readiness flags.",
+    );
+    gauges.sample(
         "trace_commons_operational_export_infrastructure",
         &[
             ("tenant_storage_ref", &response.tenant_storage_ref),
@@ -53251,20 +52902,16 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         ],
         usize::from(response.exports.scheduler_enabled),
     );
-    body.push_str("# HELP trace_commons_operational_retention_jobs_total Retention job rows visible to operational summary.\n");
-    body.push_str("# TYPE trace_commons_operational_retention_jobs_total gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_retention_jobs_total",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Retention job rows visible to operational summary.",
         response.retention.job_count,
     );
-    body.push_str("# HELP trace_commons_operational_retention_infrastructure Safe retention-worker infrastructure readiness flags.\n");
-    body.push_str("# TYPE trace_commons_operational_retention_infrastructure gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.header(
+        "trace_commons_operational_retention_infrastructure",
+        "Safe retention-worker infrastructure readiness flags.",
+    );
+    gauges.sample(
         "trace_commons_operational_retention_infrastructure",
         &[
             ("tenant_storage_ref", &response.tenant_storage_ref),
@@ -53272,299 +52919,227 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         ],
         usize::from(response.retention.scheduler_enabled),
     );
-    body.push_str("# HELP trace_commons_operational_analytics_release_readiness Safe analytics broad-release readiness flags.\n");
-    body.push_str("# TYPE trace_commons_operational_analytics_release_readiness gauge\n");
-    for (state, value) in [
-        (
-            "min_cell_count_configured",
-            usize::from(response.analytics.min_cell_count_configured),
-        ),
-        (
-            "broad_release_noise_configured",
-            usize::from(response.analytics.broad_release_noise_configured),
-        ),
-        (
-            "broad_release_ready",
-            usize::from(response.analytics.broad_release_ready),
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_analytics_release_readiness",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
+    gauges.labelled(
+        "trace_commons_operational_analytics_release_readiness",
+        "Safe analytics broad-release readiness flags.",
+        "state",
+        [
+            (
+                "min_cell_count_configured",
+                usize::from(response.analytics.min_cell_count_configured),
+            ),
+            (
+                "broad_release_noise_configured",
+                usize::from(response.analytics.broad_release_noise_configured),
+            ),
+            (
+                "broad_release_ready",
+                usize::from(response.analytics.broad_release_ready),
+            ),
+        ],
+    );
     if let Some(max_delta) = response.analytics.broad_release_noise_max_delta {
-        body.push_str("# HELP trace_commons_operational_analytics_noise_max_delta Configured analytics broad-release count-noise max delta.\n");
-        body.push_str("# TYPE trace_commons_operational_analytics_noise_max_delta gauge\n");
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
+        gauges.header(
+            "trace_commons_operational_analytics_noise_max_delta",
+            "Configured analytics broad-release count-noise max delta.",
+        );
+        gauges.sample(
             "trace_commons_operational_analytics_noise_max_delta",
             &[("tenant_storage_ref", &response.tenant_storage_ref)],
             max_delta,
         );
     }
-    body.push_str(
-        "# HELP trace_commons_operational_vector_entries Vector-entry counts by operational state.\n",
+    gauges.labelled(
+        "trace_commons_operational_vector_entries",
+        "Vector-entry counts by operational state.",
+        "state",
+        [
+            ("total", response.vectors.entry_count),
+            ("active", response.vectors.active_entries),
+            ("invalidated", response.vectors.invalidated_entries),
+            ("deleted", response.vectors.deleted_entries),
+            (
+                "accepted_current_derived",
+                response.vectors.accepted_current_derived,
+            ),
+            (
+                "accepted_current_with_active_vector",
+                response.vectors.accepted_current_derived_with_active_vector,
+            ),
+            (
+                "nearest_neighbor_policy_gaps",
+                response.vectors.nearest_neighbor_policy_gap_count,
+            ),
+        ],
     );
-    body.push_str("# TYPE trace_commons_operational_vector_entries gauge\n");
-    for (state, value) in [
-        ("total", response.vectors.entry_count),
-        ("active", response.vectors.active_entries),
-        ("invalidated", response.vectors.invalidated_entries),
-        ("deleted", response.vectors.deleted_entries),
-        (
-            "accepted_current_derived",
-            response.vectors.accepted_current_derived,
-        ),
-        (
-            "accepted_current_with_active_vector",
-            response.vectors.accepted_current_derived_with_active_vector,
-        ),
-        (
-            "nearest_neighbor_policy_gaps",
-            response.vectors.nearest_neighbor_policy_gap_count,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_vector_entries",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_vector_infrastructure Safe vector infrastructure readiness flags.\n");
-    body.push_str("# TYPE trace_commons_operational_vector_infrastructure gauge\n");
-    for (state, value) in [
-        (
-            "private_embedder_configured",
-            usize::from(response.vectors.private_embedder_configured),
-        ),
-        (
-            "private_embedder_required",
-            usize::from(response.vectors.private_embedder_required),
-        ),
-        (
-            "private_searcher_configured",
-            usize::from(response.vectors.private_searcher_configured),
-        ),
-        (
-            "private_searcher_required",
-            usize::from(response.vectors.private_searcher_required),
-        ),
-        (
-            "scheduler_enabled",
-            usize::from(response.vectors.scheduler_enabled),
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_vector_infrastructure",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str(
-        "# HELP trace_commons_operational_benchmarks Benchmark lifecycle counts by operational state.\n",
+    gauges.labelled(
+        "trace_commons_operational_vector_infrastructure",
+        "Safe vector infrastructure readiness flags.",
+        "state",
+        [
+            (
+                "private_embedder_configured",
+                usize::from(response.vectors.private_embedder_configured),
+            ),
+            (
+                "private_embedder_required",
+                usize::from(response.vectors.private_embedder_required),
+            ),
+            (
+                "private_searcher_configured",
+                usize::from(response.vectors.private_searcher_configured),
+            ),
+            (
+                "private_searcher_required",
+                usize::from(response.vectors.private_searcher_required),
+            ),
+            (
+                "scheduler_enabled",
+                usize::from(response.vectors.scheduler_enabled),
+            ),
+        ],
     );
-    body.push_str("# TYPE trace_commons_operational_benchmarks gauge\n");
-    for (state, value) in [
-        ("total", response.benchmarks.total_artifact_count),
-        (
-            "registry_submitter_configured",
-            usize::from(response.benchmarks.registry_submitter_configured),
-        ),
-        (
-            "registry_submitter_auth_configured",
-            usize::from(response.benchmarks.registry_submitter_auth_configured),
-        ),
-        (
-            "registry_confirmer_configured",
-            usize::from(response.benchmarks.registry_confirmer_configured),
-        ),
-        (
-            "registry_confirmer_auth_configured",
-            usize::from(response.benchmarks.registry_confirmer_auth_configured),
-        ),
-        (
-            "registry_adapter_auth_required",
-            usize::from(response.benchmarks.registry_require_adapter_auth),
-        ),
-        (
-            "external_evaluator_configured",
-            usize::from(response.benchmarks.external_evaluator_configured),
-        ),
-        ("publishable", response.benchmarks.publishable_count),
-        (
-            "publishable_without_external_evaluator",
-            response
-                .benchmarks
-                .publishable_without_external_evaluator_count,
-        ),
-        (
-            "registry_outbox_pending_without_submitter",
-            response
-                .benchmarks
-                .registry_outbox_pending_without_submitter_count,
-        ),
-        (
-            "registry_outbox_pending_without_submitter_auth",
-            response
-                .benchmarks
-                .registry_outbox_pending_without_submitter_auth_count,
-        ),
-        (
-            "registry_outbox_submitted_without_confirmer",
-            response
-                .benchmarks
-                .registry_outbox_submitted_without_confirmer_count,
-        ),
-        (
-            "registry_outbox_submitted_without_confirmer_auth",
-            response
-                .benchmarks
-                .registry_outbox_submitted_without_confirmer_auth_count,
-        ),
-        (
-            "registry_outbox_failed",
-            response.benchmarks.registry_outbox_failed_count,
-        ),
-        ("published", response.benchmarks.published_count),
-        ("revoked", response.benchmarks.revoked_count),
-        (
-            "external_registry_adapter_gap",
-            response.benchmarks.external_registry_adapter_gap_count,
-        ),
-        (
-            "external_registry_invalidation_gap",
-            response.benchmarks.external_registry_invalidation_gap_count,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_benchmarks",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str(
-        "# HELP trace_commons_operational_ranking_models Ranking model counts by readiness state.\n",
+    gauges.labelled(
+        "trace_commons_operational_benchmarks",
+        "Benchmark lifecycle counts by operational state.",
+        "state",
+        [
+            ("total", response.benchmarks.total_artifact_count),
+            (
+                "registry_submitter_configured",
+                usize::from(response.benchmarks.registry_submitter_configured),
+            ),
+            (
+                "registry_submitter_auth_configured",
+                usize::from(response.benchmarks.registry_submitter_auth_configured),
+            ),
+            (
+                "registry_confirmer_configured",
+                usize::from(response.benchmarks.registry_confirmer_configured),
+            ),
+            (
+                "registry_confirmer_auth_configured",
+                usize::from(response.benchmarks.registry_confirmer_auth_configured),
+            ),
+            (
+                "registry_adapter_auth_required",
+                usize::from(response.benchmarks.registry_require_adapter_auth),
+            ),
+            (
+                "external_evaluator_configured",
+                usize::from(response.benchmarks.external_evaluator_configured),
+            ),
+            ("publishable", response.benchmarks.publishable_count),
+            (
+                "publishable_without_external_evaluator",
+                response
+                    .benchmarks
+                    .publishable_without_external_evaluator_count,
+            ),
+            (
+                "registry_outbox_pending_without_submitter",
+                response
+                    .benchmarks
+                    .registry_outbox_pending_without_submitter_count,
+            ),
+            (
+                "registry_outbox_pending_without_submitter_auth",
+                response
+                    .benchmarks
+                    .registry_outbox_pending_without_submitter_auth_count,
+            ),
+            (
+                "registry_outbox_submitted_without_confirmer",
+                response
+                    .benchmarks
+                    .registry_outbox_submitted_without_confirmer_count,
+            ),
+            (
+                "registry_outbox_submitted_without_confirmer_auth",
+                response
+                    .benchmarks
+                    .registry_outbox_submitted_without_confirmer_auth_count,
+            ),
+            (
+                "registry_outbox_failed",
+                response.benchmarks.registry_outbox_failed_count,
+            ),
+            ("published", response.benchmarks.published_count),
+            ("revoked", response.benchmarks.revoked_count),
+            (
+                "external_registry_adapter_gap",
+                response.benchmarks.external_registry_adapter_gap_count,
+            ),
+            (
+                "external_registry_invalidation_gap",
+                response.benchmarks.external_registry_invalidation_gap_count,
+            ),
+        ],
     );
-    body.push_str("# TYPE trace_commons_operational_ranking_models gauge\n");
-    for (state, value) in [
-        ("active", response.ranking.active_model_count),
-        ("monitored", response.ranking.monitored_model_count),
-        ("at_risk", response.ranking.at_risk_model_count),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_ranking_models",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_ranking_backtests Ranking model-target backtest counts by outcome.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_backtests gauge\n");
-    for (state, value) in [
-        ("evaluated", response.ranking.backtest_model_target_count),
-        (
-            "passing",
-            response.ranking.passing_backtest_model_target_count,
-        ),
-        (
-            "failing",
-            response.ranking.failing_backtest_model_target_count,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_ranking_backtests",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str(
-        "# HELP trace_commons_operational_ranking_adjudication Ranking label-adjudication issue counts.\n",
+    gauges.labelled(
+        "trace_commons_operational_ranking_models",
+        "Ranking model counts by readiness state.",
+        "state",
+        [
+            ("active", response.ranking.active_model_count),
+            ("monitored", response.ranking.monitored_model_count),
+            ("at_risk", response.ranking.at_risk_model_count),
+        ],
     );
-    body.push_str("# TYPE trace_commons_operational_ranking_adjudication gauge\n");
-    for (state, value) in [
-        (
-            "issue_groups",
-            response.ranking.adjudication_issue_group_count,
-        ),
-        (
-            "disputed_label_groups",
-            response.ranking.unresolved_disputed_label_group_count,
-        ),
-        (
-            "absolute_conflicts",
-            response.ranking.conflicting_absolute_label_group_count,
-        ),
-        (
-            "preference_conflicts",
-            response.ranking.conflicting_preference_pair_count,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_ranking_adjudication",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_ranking_credit_readiness Ranking-derived credit event counts by readiness state.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_credit_readiness gauge\n");
-    for (state, value) in [
-        ("pending", response.ranking.pending_credit_event_count),
-        ("ready", response.ranking.ready_credit_event_count),
-        ("blocked", response.ranking.blocked_credit_event_count),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_ranking_credit_readiness",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_ranking_evaluator_readiness Ranking evaluator adapter readiness flags.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_evaluator_readiness gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.labelled(
+        "trace_commons_operational_ranking_backtests",
+        "Ranking model-target backtest counts by outcome.",
+        "state",
+        [
+            ("evaluated", response.ranking.backtest_model_target_count),
+            (
+                "passing",
+                response.ranking.passing_backtest_model_target_count,
+            ),
+            (
+                "failing",
+                response.ranking.failing_backtest_model_target_count,
+            ),
+        ],
+    );
+    gauges.labelled(
+        "trace_commons_operational_ranking_adjudication",
+        "Ranking label-adjudication issue counts.",
+        "state",
+        [
+            (
+                "issue_groups",
+                response.ranking.adjudication_issue_group_count,
+            ),
+            (
+                "disputed_label_groups",
+                response.ranking.unresolved_disputed_label_group_count,
+            ),
+            (
+                "absolute_conflicts",
+                response.ranking.conflicting_absolute_label_group_count,
+            ),
+            (
+                "preference_conflicts",
+                response.ranking.conflicting_preference_pair_count,
+            ),
+        ],
+    );
+    gauges.labelled(
+        "trace_commons_operational_ranking_credit_readiness",
+        "Ranking-derived credit event counts by readiness state.",
+        "state",
+        [
+            ("pending", response.ranking.pending_credit_event_count),
+            ("ready", response.ranking.ready_credit_event_count),
+            ("blocked", response.ranking.blocked_credit_event_count),
+        ],
+    );
+    gauges.header(
+        "trace_commons_operational_ranking_evaluator_readiness",
+        "Ranking evaluator adapter readiness flags.",
+    );
+    gauges.sample(
         "trace_commons_operational_ranking_evaluator_readiness",
         &[
             ("tenant_storage_ref", &response.tenant_storage_ref),
@@ -53572,19 +53147,15 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         ],
         usize::from(response.ranking.process_evaluator_configured),
     );
-    body.push_str("# HELP trace_commons_operational_ranking_calibration_dataset_manifest_conflicts Active ranking calibration dataset manifest conflict count.\n");
-    body.push_str(
-        "# TYPE trace_commons_operational_ranking_calibration_dataset_manifest_conflicts gauge\n",
-    );
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_ranking_calibration_dataset_manifest_conflicts",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Active ranking calibration dataset manifest conflict count.",
         response.ranking.calibration_dataset_manifest_conflict_count,
     );
-    body.push_str("# HELP trace_commons_operational_ranking_reason_counts Ranking readiness reason-code counts by report.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_reason_counts gauge\n");
+    gauges.header(
+        "trace_commons_operational_ranking_reason_counts",
+        "Ranking readiness reason-code counts by report.",
+    );
     for (report, reason_counts) in [
         ("model_risk", &response.ranking.risk_code_counts),
         ("backtest", &response.ranking.backtest_reason_counts),
@@ -53595,9 +53166,7 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
         ),
     ] {
         for (reason, value) in reason_counts {
-            push_prometheus_gauge(
-                &mut body,
-                &mut metric_count,
+            gauges.sample(
                 "trace_commons_operational_ranking_reason_counts",
                 &[
                     ("tenant_storage_ref", &response.tenant_storage_ref),
@@ -53608,34 +53177,26 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             );
         }
     }
-    body.push_str("# HELP trace_commons_operational_ranking_worker_runs Ranking worker-run counts by operational status.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_worker_runs gauge\n");
-    for (status, value) in [
-        ("running", response.ranking.running_worker_run_count),
-        (
-            "stale_running",
-            response.ranking.stale_running_worker_run_count,
-        ),
-        ("failed", response.ranking.failed_worker_run_count),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_ranking_worker_runs",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("status", status),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_ranking_worker_runs_by_kind Ranking worker-run counts by automation kind and operational status.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_worker_runs_by_kind gauge\n");
+    gauges.labelled(
+        "trace_commons_operational_ranking_worker_runs",
+        "Ranking worker-run counts by operational status.",
+        "status",
+        [
+            ("running", response.ranking.running_worker_run_count),
+            (
+                "stale_running",
+                response.ranking.stale_running_worker_run_count,
+            ),
+            ("failed", response.ranking.failed_worker_run_count),
+        ],
+    );
+    gauges.header(
+        "trace_commons_operational_ranking_worker_runs_by_kind",
+        "Ranking worker-run counts by automation kind and operational status.",
+    );
     for (run_kind, status_counts) in &response.ranking.worker_run_kind_status_counts {
         for (status, value) in status_counts {
-            push_prometheus_gauge(
-                &mut body,
-                &mut metric_count,
+            gauges.sample(
                 "trace_commons_operational_ranking_worker_runs_by_kind",
                 &[
                     ("tenant_storage_ref", &response.tenant_storage_ref),
@@ -53646,45 +53207,37 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             );
         }
     }
-    body.push_str("# HELP trace_commons_operational_ranking_worker_run_totals Ranking worker-run aggregate item counts by state.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_worker_run_totals gauge\n");
-    for (state, value) in [
-        ("checked", response.ranking.worker_run_checked_total),
-        ("succeeded", response.ranking.worker_run_succeeded_total),
-        (
-            "skipped_existing",
-            response.ranking.worker_run_skipped_existing_total,
-        ),
-        (
-            "skipped_model_risk",
-            response.ranking.worker_run_skipped_model_risk_total,
-        ),
-        (
-            "skipped_ineligible",
-            response.ranking.worker_run_skipped_ineligible_total,
-        ),
-        (
-            "pending_after",
-            response.ranking.worker_run_pending_after_total,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_ranking_worker_run_totals",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_ranking_worker_run_reason_counts Ranking worker-run skip and blocker reason-code counts.\n");
-    body.push_str("# TYPE trace_commons_operational_ranking_worker_run_reason_counts gauge\n");
+    gauges.labelled(
+        "trace_commons_operational_ranking_worker_run_totals",
+        "Ranking worker-run aggregate item counts by state.",
+        "state",
+        [
+            ("checked", response.ranking.worker_run_checked_total),
+            ("succeeded", response.ranking.worker_run_succeeded_total),
+            (
+                "skipped_existing",
+                response.ranking.worker_run_skipped_existing_total,
+            ),
+            (
+                "skipped_model_risk",
+                response.ranking.worker_run_skipped_model_risk_total,
+            ),
+            (
+                "skipped_ineligible",
+                response.ranking.worker_run_skipped_ineligible_total,
+            ),
+            (
+                "pending_after",
+                response.ranking.worker_run_pending_after_total,
+            ),
+        ],
+    );
+    gauges.header(
+        "trace_commons_operational_ranking_worker_run_reason_counts",
+        "Ranking worker-run skip and blocker reason-code counts.",
+    );
     for (reason, value) in &response.ranking.worker_run_reason_counts {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
+        gauges.sample(
             "trace_commons_operational_ranking_worker_run_reason_counts",
             &[
                 ("tenant_storage_ref", &response.tenant_storage_ref),
@@ -53693,352 +53246,312 @@ fn trace_operational_metrics_body(response: &TraceOperationalSummaryResponse) ->
             *value,
         );
     }
-    body.push_str("# HELP trace_commons_operational_near_credit_outbox NEAR non-transferable credit receipt outbox counts by operational state.\n");
-    body.push_str("# TYPE trace_commons_operational_near_credit_outbox gauge\n");
-    for (state, value) in [
-        ("total", response.near_credit.item_count),
-        ("disabled", response.near_credit.disabled_count),
-        ("pending", response.near_credit.pending_count),
-        ("submitted", response.near_credit.submitted_count),
-        ("confirmed", response.near_credit.confirmed_count),
-        ("failed", response.near_credit.failed_count),
-        (
-            "pending_without_submitter",
-            response.near_credit.pending_without_submitter_count,
-        ),
-        (
-            "submitted_without_confirmer",
-            response.near_credit.submitted_without_confirmer_count,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_near_credit_outbox",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_near_credit_adapters Safe NEAR credit adapter readiness flags.\n");
-    body.push_str("# TYPE trace_commons_operational_near_credit_adapters gauge\n");
-    for (state, value) in [
-        (
-            "submitter_configured",
-            usize::from(response.near_credit.submitter_configured),
-        ),
-        (
-            "submitter_auth_configured",
-            usize::from(response.near_credit.submitter_auth_configured),
-        ),
-        (
-            "confirmer_configured",
-            usize::from(response.near_credit.confirmer_configured),
-        ),
-        (
-            "confirmer_auth_configured",
-            usize::from(response.near_credit.confirmer_auth_configured),
-        ),
-        (
-            "adapter_auth_required",
-            usize::from(response.near_credit.require_adapter_auth),
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_near_credit_adapters",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_delayed_credit_events_total Delayed credit ledger events visible to operational summary.\n");
-    body.push_str("# TYPE trace_commons_operational_delayed_credit_events_total gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.labelled(
+        "trace_commons_operational_near_credit_outbox",
+        "NEAR non-transferable credit receipt outbox counts by operational state.",
+        "state",
+        [
+            ("total", response.near_credit.item_count),
+            ("disabled", response.near_credit.disabled_count),
+            ("pending", response.near_credit.pending_count),
+            ("submitted", response.near_credit.submitted_count),
+            ("confirmed", response.near_credit.confirmed_count),
+            ("failed", response.near_credit.failed_count),
+            (
+                "pending_without_submitter",
+                response.near_credit.pending_without_submitter_count,
+            ),
+            (
+                "submitted_without_confirmer",
+                response.near_credit.submitted_without_confirmer_count,
+            ),
+        ],
+    );
+    gauges.labelled(
+        "trace_commons_operational_near_credit_adapters",
+        "Safe NEAR credit adapter readiness flags.",
+        "state",
+        [
+            (
+                "submitter_configured",
+                usize::from(response.near_credit.submitter_configured),
+            ),
+            (
+                "submitter_auth_configured",
+                usize::from(response.near_credit.submitter_auth_configured),
+            ),
+            (
+                "confirmer_configured",
+                usize::from(response.near_credit.confirmer_configured),
+            ),
+            (
+                "confirmer_auth_configured",
+                usize::from(response.near_credit.confirmer_auth_configured),
+            ),
+            (
+                "adapter_auth_required",
+                usize::from(response.near_credit.require_adapter_auth),
+            ),
+        ],
+    );
+    gauges.tenant_gauge(
         "trace_commons_operational_delayed_credit_events_total",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Delayed credit ledger events visible to operational summary.",
         response.delayed_credit.event_count,
     );
-    body.push_str("# HELP trace_commons_operational_delayed_credit_reversal_events_total Delayed credit reversal ledger events visible to operational summary.\n");
-    body.push_str("# TYPE trace_commons_operational_delayed_credit_reversal_events_total gauge\n");
-    push_prometheus_gauge(
-        &mut body,
-        &mut metric_count,
+    gauges.tenant_gauge(
         "trace_commons_operational_delayed_credit_reversal_events_total",
-        &[("tenant_storage_ref", &response.tenant_storage_ref)],
+        "Delayed credit reversal ledger events visible to operational summary.",
         response.delayed_credit.reversal_event_count,
     );
-    body.push_str("# HELP trace_commons_operational_credit_risk Credit settlement risk projection aggregates without account refs.\n");
-    body.push_str("# TYPE trace_commons_operational_credit_risk gauge\n");
-    for (state, value) in [
-        ("accounts", response.credit_risk.account_count),
-        (
-            "returned_accounts",
-            response.credit_risk.returned_account_count,
-        ),
-        ("truncated", usize::from(response.credit_risk.truncated)),
-        (
-            "pending_accounts",
-            response.credit_risk.pending_account_count,
-        ),
-        ("held_accounts", response.credit_risk.held_account_count),
-        (
-            "over_cap_accounts",
-            response.credit_risk.over_cap_account_count,
-        ),
-        (
-            "pending_credit_micros",
-            response.credit_risk.pending_credit_micros.max(0) as usize,
-        ),
-        (
-            "held_credit_micros",
-            response.credit_risk.held_credit_micros.max(0) as usize,
-        ),
-        (
-            "over_cap_credit_micros",
-            response.credit_risk.over_cap_credit_micros.max(0) as usize,
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_credit_risk",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    body.push_str("# HELP trace_commons_operational_credit_settlement_readiness Credit settlement governance readiness states.\n");
-    body.push_str("# TYPE trace_commons_operational_credit_settlement_readiness gauge\n");
-    for (state, value) in [
-        (
-            "central_issuer_profile_required",
-            usize::from(
+    gauges.labelled(
+        "trace_commons_operational_credit_risk",
+        "Credit settlement risk projection aggregates without account refs.",
+        "state",
+        [
+            ("accounts", response.credit_risk.account_count),
+            (
+                "returned_accounts",
+                response.credit_risk.returned_account_count,
+            ),
+            ("truncated", usize::from(response.credit_risk.truncated)),
+            (
+                "pending_accounts",
+                response.credit_risk.pending_account_count,
+            ),
+            ("held_accounts", response.credit_risk.held_account_count),
+            (
+                "over_cap_accounts",
+                response.credit_risk.over_cap_account_count,
+            ),
+            (
+                "pending_credit_micros",
+                response.credit_risk.pending_credit_micros.max(0) as usize,
+            ),
+            (
+                "held_credit_micros",
+                response.credit_risk.held_credit_micros.max(0) as usize,
+            ),
+            (
+                "over_cap_credit_micros",
+                response.credit_risk.over_cap_credit_micros.max(0) as usize,
+            ),
+        ],
+    );
+    gauges.labelled(
+        "trace_commons_operational_credit_settlement_readiness",
+        "Credit settlement governance readiness states.",
+        "state",
+        [
+            (
+                "central_issuer_profile_required",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_central_issuer_profile_required,
+                ),
+            ),
+            (
+                "central_issuer_profile_ready",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_central_issuer_profile_ready,
+                ),
+            ),
+            (
+                "central_issuer_profile_missing_control_count",
                 response
                     .promotion_gates
-                    .credit_settlement_central_issuer_profile_required,
+                    .credit_settlement_central_issuer_profile_missing_control_count,
             ),
-        ),
-        (
-            "central_issuer_profile_ready",
-            usize::from(
+            (
+                "managed_eddsa_signed_tokens_required",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_managed_eddsa_signed_tokens_required,
+                ),
+            ),
+            (
+                "tenant_access_grants_required",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_tenant_access_grants_required,
+                ),
+            ),
+            (
+                "account_cap_configured",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_account_cap_configured,
+                ),
+            ),
+            (
+                "account_cap_missing",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_account_cap_missing,
+                ),
+            ),
+            (
+                "policy_allowlist_configured",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_policy_allowlist_configured,
+                ),
+            ),
+            (
+                "policy_allowlist_missing",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_policy_allowlist_missing,
+                ),
+            ),
+            (
+                "held_account_count",
                 response
                     .promotion_gates
-                    .credit_settlement_central_issuer_profile_ready,
+                    .credit_settlement_held_account_count,
             ),
-        ),
-        (
-            "central_issuer_profile_missing_control_count",
-            response
-                .promotion_gates
-                .credit_settlement_central_issuer_profile_missing_control_count,
-        ),
-        (
-            "managed_eddsa_signed_tokens_required",
-            usize::from(
+            (
+                "over_cap_account_count",
                 response
                     .promotion_gates
-                    .credit_settlement_managed_eddsa_signed_tokens_required,
+                    .credit_settlement_over_cap_account_count,
             ),
-        ),
-        (
-            "tenant_access_grants_required",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_tenant_access_grants_required,
+            (
+                "risk_summary_truncated",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_risk_summary_truncated,
+                ),
             ),
-        ),
-        (
-            "account_cap_configured",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_account_cap_configured,
+            (
+                "near_contract_required",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_contract_required,
+                ),
             ),
-        ),
-        (
-            "account_cap_missing",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_account_cap_missing,
+            (
+                "near_contract_configured",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_contract_configured,
+                ),
             ),
-        ),
-        (
-            "policy_allowlist_configured",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_policy_allowlist_configured,
+            (
+                "near_contract_missing",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_contract_missing,
+                ),
             ),
-        ),
-        (
-            "policy_allowlist_missing",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_policy_allowlist_missing,
+            (
+                "near_submitter_configured",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_submitter_configured,
+                ),
             ),
-        ),
-        (
-            "held_account_count",
-            response
-                .promotion_gates
-                .credit_settlement_held_account_count,
-        ),
-        (
-            "over_cap_account_count",
-            response
-                .promotion_gates
-                .credit_settlement_over_cap_account_count,
-        ),
-        (
-            "risk_summary_truncated",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_risk_summary_truncated,
+            (
+                "near_submitter_missing",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_submitter_missing,
+                ),
             ),
-        ),
-        (
-            "near_contract_required",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_contract_required,
+            (
+                "near_confirmer_configured",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_confirmer_configured,
+                ),
             ),
-        ),
-        (
-            "near_contract_configured",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_contract_configured,
+            (
+                "near_confirmer_missing",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_confirmer_missing,
+                ),
             ),
-        ),
-        (
-            "near_contract_missing",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_contract_missing,
+            (
+                "near_adapter_auth_required",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_adapter_auth_required,
+                ),
             ),
-        ),
-        (
-            "near_submitter_configured",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_submitter_configured,
+            (
+                "near_submitter_auth_configured",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_submitter_auth_configured,
+                ),
             ),
-        ),
-        (
-            "near_submitter_missing",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_submitter_missing,
+            (
+                "near_submitter_auth_missing",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_submitter_auth_missing,
+                ),
             ),
-        ),
-        (
-            "near_confirmer_configured",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_confirmer_configured,
+            (
+                "near_confirmer_auth_configured",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_confirmer_auth_configured,
+                ),
             ),
-        ),
-        (
-            "near_confirmer_missing",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_confirmer_missing,
+            (
+                "near_confirmer_auth_missing",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_near_confirmer_auth_missing,
+                ),
             ),
-        ),
-        (
-            "near_adapter_auth_required",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_adapter_auth_required,
+            (
+                "issuer_approval_required",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_issuer_approval_required,
+                ),
             ),
-        ),
-        (
-            "near_submitter_auth_configured",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_submitter_auth_configured,
+            (
+                "issuer_approval_missing",
+                usize::from(
+                    response
+                        .promotion_gates
+                        .credit_settlement_issuer_approval_missing,
+                ),
             ),
-        ),
-        (
-            "near_submitter_auth_missing",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_submitter_auth_missing,
+            (
+                "scheduler_enabled",
+                usize::from(response.promotion_gates.credit_settlement_scheduler_enabled),
             ),
-        ),
-        (
-            "near_confirmer_auth_configured",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_confirmer_auth_configured,
-            ),
-        ),
-        (
-            "near_confirmer_auth_missing",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_near_confirmer_auth_missing,
-            ),
-        ),
-        (
-            "issuer_approval_required",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_issuer_approval_required,
-            ),
-        ),
-        (
-            "issuer_approval_missing",
-            usize::from(
-                response
-                    .promotion_gates
-                    .credit_settlement_issuer_approval_missing,
-            ),
-        ),
-        (
-            "scheduler_enabled",
-            usize::from(response.promotion_gates.credit_settlement_scheduler_enabled),
-        ),
-    ] {
-        push_prometheus_gauge(
-            &mut body,
-            &mut metric_count,
-            "trace_commons_operational_credit_settlement_readiness",
-            &[
-                ("tenant_storage_ref", &response.tenant_storage_ref),
-                ("state", state),
-            ],
-            value,
-        );
-    }
-    (body, metric_count)
+        ],
+    );
+    gauges.finish()
 }
 
 fn rollout_smoke_check_metric_state(
@@ -74436,26 +73949,7 @@ async fn verify_mirrored_audit_event_after_file_append(
     Ok(())
 }
 
-/// Backward-compatible shim. Prefer `append_trace_content_read_audit_per_source`
-/// when caller code can surface the list of `object_ref_id`s that were read.
-#[allow(dead_code)]
-async fn append_trace_content_read_audit(
-    state: &AppState,
-    tenant: &TenantAuth,
-    submission_id: Uuid,
-    object_ref_id: Option<Uuid>,
-    surface: &str,
-    purpose: Option<&str>,
-) -> anyhow::Result<()> {
-    let refs: &[Uuid] = match object_ref_id.as_ref() {
-        Some(id) => std::slice::from_ref(id),
-        None => &[],
-    };
-    append_trace_content_read_audit_per_source(state, tenant, submission_id, refs, surface, purpose)
-        .await
-}
-
-/// Per-source variant of the trace-content read audit helper.
+/// Trace-content read audit helper.
 ///
 /// Emits one audit row per `(submission_id, object_ref_id)` pair when
 /// `object_ref_ids` is non-empty. When `object_ref_ids` is empty the helper
@@ -85569,27 +85063,13 @@ async fn run_near_attestation_drill(
     };
 
     if request.record_evidence {
-        let evidence = TraceRolloutSmokeEvidenceResponse {
-            event_id: Uuid::new_v4(),
-            tenant_id: tenant.tenant_id.clone(),
-            tenant_storage_ref: tenant_storage_ref(&tenant.tenant_id),
-            check_name: "near_attestation".to_string(),
-            status: if response.ready {
-                TraceRolloutSmokeEvidenceStatus::Passed
-            } else {
-                TraceRolloutSmokeEvidenceStatus::Failed
-            },
-            evidence_hash: response.evidence_hash.clone(),
-            evidence_ref_hash: Some(sha256_prefixed(&purpose)),
-            actor_principal_ref: tenant.principal_ref.clone(),
-            recorded_at: Utc::now(),
-        };
-        append_audit_event_with_db_mirror(
+        let evidence = record_rollout_smoke_evidence(
             state,
             tenant,
-            TraceCommonsAuditEvent::rollout_smoke_evidence(&evidence),
-            StorageTraceAuditAction::Read,
-            StorageTraceAuditSafeMetadata::Empty,
+            "near_attestation",
+            response.ready,
+            response.evidence_hash.clone(),
+            Some(sha256_prefixed(&purpose)),
         )
         .await
         .map_err(internal_error)?;
