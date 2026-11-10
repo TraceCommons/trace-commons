@@ -38,6 +38,15 @@ byte changes still fail the exact digest check; they are never accepted
 implicitly. The source URL remains unversioned, so this pin does not promise
 future availability.
 
+On 2026-11-10, the same URL was serving the 130,575-byte build again, with
+SHA-256 `539487d2ac8cf8b55a96ad771c2dbb3e37b08ce5687f39ed5a85759aa07ee465`
+(last-modified 2026-11-02). It is byte-identical to the build pinned on
+2026-11-04, so the pin returns to it; the 2026-11-06 digest above is no longer
+accepted. Its three inline installation/link handlers are again the ones
+above, each in the CSP hash list, and it contacts the same hosts. The URL has
+now served both builds alternately, so either digest can stop matching
+without notice.
+
 MyNearWallet is excluded following the product owner's retirement report.
 Intear generates and stores an application private key during connection.
 OKX returns an opaque extension access-key object whose private contents have
