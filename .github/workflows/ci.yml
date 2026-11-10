@@ -968,6 +968,14 @@ jobs:
     # the same service, roles, single thread and xact_commit floors, on its
     # own database and cache. No network: the tests build no NEAR AI scorer
     # and load no fastembed model.
+    #
+    # Runs on a push to main and on every merge-queue batch, not on pull
+    # requests: at 611 s (near-ai-scorer) and 666 s (near-ai-staging) on run
+    # 42696037795 these two were the longest jobs a pull request started,
+    # for a check that blocks nothing. A regression in either feature now
+    # shows in the merge queue (still non-blocking) or on main, not on the
+    # pull request. The main run still saves this job's cache.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -1073,6 +1081,15 @@ jobs:
     # CI. Everything else is
     # `ingest-bin-postgres`: the same service, roles, single thread and
     # xact_commit floors, on its own database and cache.
+    #
+    # Runs on a push to main and on every merge-queue batch, not on pull
+    # requests: at 611 s (near-ai-scorer) and 666 s (near-ai-staging) on run
+    # 42696037795 these two were the longest jobs a pull request started,
+    # for a check that blocks nothing. A regression in either feature now
+    # shows in the merge queue (still non-blocking) or on main, not on the
+    # pull request. The main run still saves this job's cache.
+    # `postgres-suites` and `ingest-bin-postgres` restore it too.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
