@@ -235,6 +235,15 @@ struct MonitorScene: Scene {
         .commands {
             MonitorCommands(model: model, navigation: navigation)
         }
+
+        // About, from the app menu: the standard panel's lines, and a Copy
+        // button for the version, which the standard panel cannot hold.
+        Window(MonitorWords.table?.aboutApp ?? "", id: WindowID.about) {
+            AboutWindowView()
+        }
+        .windowResizability(.contentSize)
+        .windowStyle(.hiddenTitleBar)
+        .defaultPosition(.center)
     }
 }
 
@@ -291,6 +300,11 @@ struct MonitorCommands: Commands {
             Divider()
             toggle
         }
+        // The app menu's About opens the app's own About window, which can
+        // hold a Copy button for the version (owner, 2026-11-09).
+        CommandGroup(replacing: .appInfo) {
+            OpenAboutButton()
+        }
         // Cmd-comma: the Settings window (owner, 2026-10-08).
         CommandGroup(replacing: .appSettings) {
             OpenSettingsButton(navigation: navigation)
@@ -329,6 +343,14 @@ struct MonitorCommands: Commands {
             .disabled(
                 on && (model.privateInferenceBusy || model.daemonSettings?.privateInference == nil))
         }
+    }
+}
+
+private struct OpenAboutButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button(MonitorWords.table?.aboutApp ?? "") { openWindow(id: WindowID.about) }
     }
 }
 
@@ -549,4 +571,6 @@ enum WindowID {
     /// The menu-bar item and popover in a window (R13), for review where
     /// the menu bar has no room for the item. Debug builds only.
     static let menuPreview = "trace-commons-menu-preview"
+    /// About, in place of the standard panel, so the version can be copied.
+    static let about = "trace-commons-about"
 }

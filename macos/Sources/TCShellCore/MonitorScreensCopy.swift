@@ -63,6 +63,8 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
     public let checkForUpdates: String?
     public let manageRules: String
     public let settings: String
+    /// The app menu's About item.
+    public let aboutApp: String
     /// The Settings modal's title, subtitle, section list name and close
     /// button (Ron's #1146 `SettingsModal`, #1241 Task 10).
     public let settingsTitle: String
@@ -183,6 +185,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         case manageRules = "manage_rules"
         case settings
         case settingsTitle = "settings_title"
+        case aboutApp = "about_app"
         case settingsSubtitle = "settings_subtitle"
         case settingsSections = "settings_sections"
         case close

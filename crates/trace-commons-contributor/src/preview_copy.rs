@@ -905,6 +905,10 @@ pub struct MonitorScreensCopy {
     /// with the ellipsis of a command that opens a window. Approved by the
     /// owner on 2026-10-29.
     pub check_for_updates: &'static str,
+    /// The app menu's About item, which opens the app's own About window
+    /// with a Copy button for the version (owner, 2026-11-09). The macOS
+    /// convention, "About" and the app's name. DRAFT, NEEDS APPROVAL.
+    pub about_app: &'static str,
     /// Opens the folders' rules.
     pub manage_rules: &'static str,
     /// Opens Settings.
@@ -1569,6 +1573,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         flagged: SECOND_LOOK_HEADING,
         open_app: concat!("Open ", crate::app_name!()),
         check_for_updates: "Check for Updates\u{2026}",
+        about_app: concat!("About ", crate::app_name!()),
         manage_rules: "Manage rules…",
         // #1146 tray word (`tray.rs`), with the ellipsis of a command that
         // opens a window; the modal it opens is titled bare "Settings".
