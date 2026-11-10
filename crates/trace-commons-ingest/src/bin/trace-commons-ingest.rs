@@ -7445,15 +7445,12 @@ fn pipeline_main_gate_config_from_env(
 
 fn parse_trace_near_credit_outbox_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceNearCreditOutboxSchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_ENABLED,
+        TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_TOKEN}"
-        );
     };
     let interval = parse_near_credit_outbox_scheduler_interval_from_env()?;
     let submit_limit = parse_optional_scheduler_u32_env(
@@ -7468,10 +7465,11 @@ fn parse_trace_near_credit_outbox_scheduler_config_from_env()
         1,
         TRACE_NEAR_CREDIT_OUTBOX_CONFIRM_MAX_LIMIT,
     )?;
-    let purpose = optional_trimmed_env(TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_PURPOSE)?
-        .unwrap_or_else(|| TRACE_NEAR_CREDIT_OUTBOX_SCHEDULER_DEFAULT_PURPOSE.to_string());
-    let purpose = validate_near_credit_outbox_scheduler_purpose(&purpose)
-        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let purpose = scheduler_text_from_env(
+        TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_PURPOSE,
+        TRACE_NEAR_CREDIT_OUTBOX_SCHEDULER_DEFAULT_PURPOSE,
+        validate_near_credit_outbox_scheduler_purpose,
+    )?;
     Ok(Some(TraceNearCreditOutboxSchedulerConfig {
         worker_token: SecretString::from(worker_token),
         interval,
@@ -7484,21 +7482,16 @@ fn parse_trace_near_credit_outbox_scheduler_config_from_env()
 
 fn parse_trace_export_job_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceExportJobSchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_EXPORT_JOB_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_EXPORT_JOB_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_EXPORT_JOB_SCHEDULER_ENABLED,
+        TRACE_COMMONS_EXPORT_JOB_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_EXPORT_JOB_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_EXPORT_JOB_SCHEDULER_TOKEN}"
-        );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_EXPORT_JOB_SCHEDULER_INTERVAL_SECONDS,
         TRACE_EXPORT_JOB_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
     let dataset_kind = match optional_trimmed_env(TRACE_COMMONS_EXPORT_JOB_SCHEDULER_DATASET_KIND)?
     {
@@ -7548,7 +7541,7 @@ fn parse_trace_export_job_scheduler_config_from_env()
         .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
     Ok(Some(TraceExportJobSchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         dataset_kind,
         run_queued_max_jobs,
         retry_failed_max_jobs,
@@ -7561,26 +7554,22 @@ fn parse_trace_export_job_scheduler_config_from_env()
 
 fn parse_trace_retention_maintenance_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceRetentionMaintenanceSchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_ENABLED,
+        TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_TOKEN}"
-        );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_INTERVAL_SECONDS,
         TRACE_RETENTION_MAINTENANCE_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
-    let purpose = optional_trimmed_env(TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_PURPOSE)?
-        .unwrap_or_else(|| TRACE_RETENTION_MAINTENANCE_SCHEDULER_DEFAULT_PURPOSE.to_string());
-    let purpose = validate_retention_maintenance_scheduler_purpose(&purpose)
-        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let purpose = scheduler_text_from_env(
+        TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_PURPOSE,
+        TRACE_RETENTION_MAINTENANCE_SCHEDULER_DEFAULT_PURPOSE,
+        validate_retention_maintenance_scheduler_purpose,
+    )?;
     let prune_export_cache = parse_optional_scheduler_bool_env(
         TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_PRUNE_EXPORT_CACHE,
         true,
@@ -7604,7 +7593,7 @@ fn parse_trace_retention_maintenance_scheduler_config_from_env()
             .transpose()?;
     Ok(Some(TraceRetentionMaintenanceSchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         dry_run: env_truthy(TRACE_COMMONS_RETENTION_MAINTENANCE_SCHEDULER_DRY_RUN),
         purpose,
         prune_export_cache,
@@ -7615,21 +7604,16 @@ fn parse_trace_retention_maintenance_scheduler_config_from_env()
 
 fn parse_trace_vector_index_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceVectorIndexSchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED,
+        TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_TOKEN}"
-        );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_INTERVAL_SECONDS,
         TRACE_VECTOR_INDEX_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
     let limit = parse_optional_scheduler_usize_env(
         TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_LIMIT,
@@ -7637,13 +7621,14 @@ fn parse_trace_vector_index_scheduler_config_from_env()
         1,
         TRACE_VECTOR_INDEX_WORKER_MAX_LIMIT,
     )?;
-    let purpose = optional_trimmed_env(TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_PURPOSE)?
-        .unwrap_or_else(|| TRACE_VECTOR_INDEX_SCHEDULER_DEFAULT_PURPOSE.to_string());
-    let purpose = validate_vector_index_scheduler_purpose(&purpose)
-        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let purpose = scheduler_text_from_env(
+        TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_PURPOSE,
+        TRACE_VECTOR_INDEX_SCHEDULER_DEFAULT_PURPOSE,
+        validate_vector_index_scheduler_purpose,
+    )?;
     Ok(Some(TraceVectorIndexSchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         limit,
         dry_run: env_truthy(TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_DRY_RUN),
         purpose,
@@ -7652,21 +7637,16 @@ fn parse_trace_vector_index_scheduler_config_from_env()
 
 fn parse_trace_benchmark_registry_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceBenchmarkRegistrySchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_ENABLED,
+        TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_TOKEN}"
-        );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_INTERVAL_SECONDS,
         TRACE_BENCHMARK_REGISTRY_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
     let submit_limit = parse_optional_scheduler_u32_env(
         TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_SUBMIT_LIMIT,
@@ -7680,13 +7660,14 @@ fn parse_trace_benchmark_registry_scheduler_config_from_env()
         1,
         TRACE_BENCHMARK_REGISTRY_OUTBOX_CONFIRM_MAX_LIMIT,
     )?;
-    let purpose = optional_trimmed_env(TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_PURPOSE)?
-        .unwrap_or_else(|| TRACE_BENCHMARK_REGISTRY_SCHEDULER_DEFAULT_PURPOSE.to_string());
-    let purpose = validate_benchmark_registry_scheduler_purpose(&purpose)
-        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let purpose = scheduler_text_from_env(
+        TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_PURPOSE,
+        TRACE_BENCHMARK_REGISTRY_SCHEDULER_DEFAULT_PURPOSE,
+        validate_benchmark_registry_scheduler_purpose,
+    )?;
     Ok(Some(TraceBenchmarkRegistrySchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         submit_limit,
         confirm_limit,
         dry_run: env_truthy(TRACE_COMMONS_BENCHMARK_REGISTRY_SCHEDULER_DRY_RUN),
@@ -7696,21 +7677,16 @@ fn parse_trace_benchmark_registry_scheduler_config_from_env()
 
 fn parse_trace_benchmark_pipeline_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceBenchmarkPipelineSchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_ENABLED,
+        TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_TOKEN}"
-        );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_INTERVAL_SECONDS,
         TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
     let evaluation_limit = parse_optional_scheduler_usize_env(
         TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_EVALUATION_LIMIT,
@@ -7750,13 +7726,14 @@ fn parse_trace_benchmark_pipeline_scheduler_config_from_env()
         .map(|configured| parse_benchmark_pipeline_scheduler_min_score(&configured))
         .transpose()?
         .unwrap_or(TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_MIN_SCORE);
-    let reason = optional_trimmed_env(TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON)?
-        .unwrap_or_else(|| TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_REASON.to_string());
-    let reason = validate_benchmark_pipeline_scheduler_reason(&reason)
-        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let reason = scheduler_text_from_env(
+        TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON,
+        TRACE_BENCHMARK_PIPELINE_SCHEDULER_DEFAULT_REASON,
+        validate_benchmark_pipeline_scheduler_reason,
+    )?;
     Ok(Some(TraceBenchmarkPipelineSchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         evaluation_limit,
         publication_limit,
         dry_run: env_truthy(TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_DRY_RUN),
@@ -7927,21 +7904,16 @@ fn parse_pii_backstop_driver_config_from_env() -> anyhow::Result<Option<PiiBacks
 
 fn parse_trace_credit_cycle_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceCreditCycleSchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED,
+        TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TOKEN}"
-        );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_INTERVAL_SECONDS,
         TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
     let target_use = match optional_trimmed_env(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_TARGET_USE)? {
         Some(configured) => parse_trace_allowed_use_env(
@@ -7962,10 +7934,11 @@ fn parse_trace_credit_cycle_scheduler_config_from_env()
                 .map_err(|error| anyhow::anyhow!(error.1.0.error))
         })
         .transpose()?;
-    let reason = optional_trimmed_env(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_REASON)?
-        .unwrap_or_else(|| TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_REASON.to_string());
-    let reason = validate_credit_cycle_scheduler_reason(&reason)
-        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let reason = scheduler_text_from_env(
+        TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_REASON,
+        TRACE_CREDIT_CYCLE_SCHEDULER_DEFAULT_REASON,
+        validate_credit_cycle_scheduler_reason,
+    )?;
     let near_contract_id =
         optional_trimmed_env(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_NEAR_CONTRACT_ID)?
             .map(|configured| validate_credit_settlement_near_contract_id(&configured))
@@ -7978,7 +7951,7 @@ fn parse_trace_credit_cycle_scheduler_config_from_env()
     )?;
     Ok(Some(TraceCreditCycleSchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         target_use,
         model_version,
         policy_version,
@@ -8025,11 +7998,9 @@ fn parse_trace_credit_settlement_scheduler_config_from_env()
             "{TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN}"
         );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_INTERVAL_SECONDS,
         TRACE_CREDIT_SETTLEMENT_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
     let policy_version = optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION)?
         .ok_or_else(|| {
@@ -8041,10 +8012,11 @@ fn parse_trace_credit_settlement_scheduler_config_from_env()
             validate_credit_settlement_policy_version(&configured)
                 .map_err(|error| anyhow::anyhow!(error.1.0.error))
         })?;
-    let reason = optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_REASON)?
-        .unwrap_or_else(|| TRACE_CREDIT_SETTLEMENT_SCHEDULER_DEFAULT_REASON.to_string());
-    let reason = validate_credit_settlement_scheduler_reason(&reason)
-        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let reason = scheduler_text_from_env(
+        TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_REASON,
+        TRACE_CREDIT_SETTLEMENT_SCHEDULER_DEFAULT_REASON,
+        validate_credit_settlement_scheduler_reason,
+    )?;
     let issuer_approval_evidence_hash = match optional_trimmed_env(
         TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ISSUER_APPROVAL_EVIDENCE_HASH,
     )? {
@@ -8087,7 +8059,7 @@ fn parse_trace_credit_settlement_scheduler_config_from_env()
     Ok(Some(TraceCreditSettlementSchedulerConfig {
         scope,
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         dry_run: env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_DRY_RUN),
         policy_version,
         reason,
@@ -8101,21 +8073,16 @@ fn parse_trace_credit_settlement_scheduler_config_from_env()
 
 fn parse_trace_process_evaluation_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceProcessEvaluationSchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_ENABLED,
+        TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_TOKEN}"
-        );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_INTERVAL_SECONDS,
         TRACE_PROCESS_EVALUATION_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
     let limit = parse_optional_scheduler_usize_env(
         TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_LIMIT,
@@ -8174,7 +8141,7 @@ fn parse_trace_process_evaluation_scheduler_config_from_env()
         .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
     Ok(Some(TraceProcessEvaluationSchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         limit,
         dry_run: env_truthy(TRACE_COMMONS_PROCESS_EVALUATION_SCHEDULER_DRY_RUN),
         require_external_evaluator: parse_optional_scheduler_bool_env(
@@ -8191,21 +8158,16 @@ fn parse_trace_process_evaluation_scheduler_config_from_env()
 
 fn parse_trace_revocation_propagation_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceRevocationPropagationSchedulerConfig>> {
-    let enabled = env_truthy(TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_ENABLED);
-    let worker_token = optional_trimmed_env(TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_TOKEN)?;
-    if !enabled && worker_token.is_none() {
+    let Some(worker_token) = scheduler_worker_token_from_env(
+        TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_ENABLED,
+        TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_TOKEN,
+    )?
+    else {
         return Ok(None);
-    }
-    let Some(worker_token) = worker_token else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_TOKEN}"
-        );
     };
-    let interval_seconds = parse_optional_scheduler_u64_env(
+    let interval = scheduler_interval_from_env(
         TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_INTERVAL_SECONDS,
         TRACE_REVOCATION_PROPAGATION_SCHEDULER_DEFAULT_INTERVAL_SECONDS,
-        5,
-        86_400,
     )?;
     let limit = parse_optional_scheduler_u32_env(
         TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_LIMIT,
@@ -8213,13 +8175,14 @@ fn parse_trace_revocation_propagation_scheduler_config_from_env()
         1,
         TRACE_REVOCATION_PROPAGATION_MAX_LIMIT,
     )?;
-    let purpose = optional_trimmed_env(TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_PURPOSE)?
-        .unwrap_or_else(|| TRACE_REVOCATION_PROPAGATION_SCHEDULER_DEFAULT_PURPOSE.to_string());
-    let purpose = validate_revocation_propagation_scheduler_purpose(&purpose)
-        .map_err(|error| anyhow::anyhow!(error.1.0.error))?;
+    let purpose = scheduler_text_from_env(
+        TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_PURPOSE,
+        TRACE_REVOCATION_PROPAGATION_SCHEDULER_DEFAULT_PURPOSE,
+        validate_revocation_propagation_scheduler_purpose,
+    )?;
     Ok(Some(TraceRevocationPropagationSchedulerConfig {
         worker_token: SecretString::from(worker_token),
-        interval: StdDuration::from_secs(interval_seconds),
+        interval,
         limit,
         dry_run: env_truthy(TRACE_COMMONS_REVOCATION_PROPAGATION_SCHEDULER_DRY_RUN),
         purpose,
@@ -8256,6 +8219,56 @@ fn parse_trace_ranking_utility_category_env(
 ) -> anyhow::Result<StorageTraceRankingUtilityCategory> {
     serde_json::from_value(serde_json::Value::String(value.trim().to_string()))
         .with_context(|| format!("{name} must be a valid trace ranking utility category"))
+}
+
+/// The worker token of a scheduler that is switched on, or `None` when
+/// neither its enabled flag nor its token is set. Enabled without a token
+/// refuses startup and names both variables.
+fn scheduler_worker_token_from_env(
+    enabled_var: &'static str,
+    token_var: &'static str,
+) -> anyhow::Result<Option<String>> {
+    let enabled = env_truthy(enabled_var);
+    let worker_token = optional_trimmed_env(token_var)?;
+    if !enabled && worker_token.is_none() {
+        return Ok(None);
+    }
+    let Some(worker_token) = worker_token else {
+        anyhow::bail!("{enabled_var}=true requires {token_var}");
+    };
+    Ok(Some(worker_token))
+}
+
+/// A scheduler's tick interval: whole seconds from 5 to 86,400.
+fn scheduler_interval_from_env(
+    var: &'static str,
+    default_seconds: u64,
+) -> anyhow::Result<StdDuration> {
+    parse_optional_scheduler_u64_env(var, default_seconds, 5, 86_400).map(StdDuration::from_secs)
+}
+
+/// A scheduler's free-text purpose or reason: the variable's value, or
+/// `default`, passed through `validate`.
+fn scheduler_text_from_env(
+    var: &'static str,
+    default: &str,
+    validate: fn(&str) -> ApiResult<String>,
+) -> anyhow::Result<String> {
+    let value = optional_trimmed_env(var)?.unwrap_or_else(|| default.to_string());
+    validate(&value).map_err(|error| anyhow::anyhow!(error.1.0.error))
+}
+
+/// Maps a startup validation refusal to the error that names the scheduler.
+fn scheduler_config_error(
+    scheduler: &'static str,
+) -> impl Fn((StatusCode, Json<ApiError>)) -> anyhow::Error + Copy {
+    move |error| {
+        anyhow::anyhow!(
+            "invalid Trace Commons {scheduler} scheduler configuration: status={}, error={}",
+            error.0,
+            error.1.0.error
+        )
+    }
 }
 
 fn parse_optional_scheduler_u64_env(
@@ -11559,29 +11572,26 @@ fn spawn_trace_export_job_scheduler_task(
         retry_failed_max_retry_count = config.retry_failed_max_retry_count,
         "Trace Commons export job scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         EXPORT_JOB_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_export_job_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| worker_route_error(EXPORT_JOB_SCHEDULER_DRIVER_NAME, error))?;
-                tracing::info!(
-                    tenant_storage_ref = %summary.run_queued.tenant_storage_ref,
-                    dataset_kind = ?summary.run_queued.requested_dataset_kind,
-                    retried_count = summary.retry_failed.retried_count,
-                    claimed_count = summary.run_queued.claimed_count,
-                    completed_count = summary.run_queued.completed_count,
-                    failed_count = summary.run_queued.failed_count,
-                    pending_after_count = summary.run_queued.pending_after_count,
-                    "Trace Commons export job scheduler tick completed"
-                );
-                export_job_scheduler_tick_outcome(&summary)
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_export_job_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| worker_route_error(EXPORT_JOB_SCHEDULER_DRIVER_NAME, error))?;
+            tracing::info!(
+                tenant_storage_ref = %summary.run_queued.tenant_storage_ref,
+                dataset_kind = ?summary.run_queued.requested_dataset_kind,
+                retried_count = summary.retry_failed.retried_count,
+                claimed_count = summary.run_queued.claimed_count,
+                completed_count = summary.run_queued.completed_count,
+                failed_count = summary.run_queued.failed_count,
+                pending_after_count = summary.run_queued.pending_after_count,
+                "Trace Commons export job scheduler tick completed"
+            );
+            export_job_scheduler_tick_outcome(&summary)
         },
     );
 }
@@ -11600,33 +11610,30 @@ fn spawn_trace_near_credit_outbox_scheduler_task(
         dry_run = config.dry_run,
         "Trace Commons NEAR credit outbox scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         NEAR_CREDIT_OUTBOX_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_near_credit_outbox_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(NEAR_CREDIT_OUTBOX_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                tracing::info!(
-                    submit_checked = summary.submit.checked,
-                    submitted = summary.submit.submitted,
-                    submit_failed = summary.submit.failed,
-                    confirm_checked = summary.confirm.checked,
-                    confirmed = summary.confirm.confirmed,
-                    confirm_failed = summary.confirm.failed,
-                    submit_pending = summary.submit.pending,
-                    confirm_pending = summary.confirm.pending,
-                    dry_run = summary.submit.dry_run || summary.confirm.dry_run,
-                    "Trace Commons NEAR credit outbox scheduler tick completed"
-                );
-                near_credit_outbox_scheduler_tick_outcome(&summary)
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_near_credit_outbox_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| {
+                    worker_route_error(NEAR_CREDIT_OUTBOX_SCHEDULER_DRIVER_NAME, error)
+                })?;
+            tracing::info!(
+                submit_checked = summary.submit.checked,
+                submitted = summary.submit.submitted,
+                submit_failed = summary.submit.failed,
+                confirm_checked = summary.confirm.checked,
+                confirmed = summary.confirm.confirmed,
+                confirm_failed = summary.confirm.failed,
+                submit_pending = summary.submit.pending,
+                confirm_pending = summary.confirm.pending,
+                dry_run = summary.submit.dry_run || summary.confirm.dry_run,
+                "Trace Commons NEAR credit outbox scheduler tick completed"
+            );
+            near_credit_outbox_scheduler_tick_outcome(&summary)
         },
     );
 }
@@ -11646,32 +11653,29 @@ fn spawn_trace_retention_maintenance_scheduler_task(
         purge_expired_before_configured = config.purge_expired_before.is_some(),
         "Trace Commons retention maintenance scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         RETENTION_MAINTENANCE_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_retention_maintenance_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(RETENTION_MAINTENANCE_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                tracing::info!(
-                    tenant_storage_ref = %summary.run.tenant_storage_ref,
-                    records_marked_revoked = summary.run.records_marked_revoked,
-                    records_marked_expired = summary.run.records_marked_expired,
-                    records_marked_purged = summary.run.records_marked_purged,
-                    export_cache_files_pruned = summary.run.export_cache_files_pruned,
-                    trace_object_files_deleted = summary.run.trace_object_files_deleted,
-                    encrypted_artifacts_deleted = summary.run.encrypted_artifacts_deleted,
-                    dry_run = summary.run.dry_run,
-                    "Trace Commons retention maintenance scheduler tick completed"
-                );
-                retention_maintenance_scheduler_tick_outcome(&summary)
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_retention_maintenance_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| {
+                    worker_route_error(RETENTION_MAINTENANCE_SCHEDULER_DRIVER_NAME, error)
+                })?;
+            tracing::info!(
+                tenant_storage_ref = %summary.run.tenant_storage_ref,
+                records_marked_revoked = summary.run.records_marked_revoked,
+                records_marked_expired = summary.run.records_marked_expired,
+                records_marked_purged = summary.run.records_marked_purged,
+                export_cache_files_pruned = summary.run.export_cache_files_pruned,
+                trace_object_files_deleted = summary.run.trace_object_files_deleted,
+                encrypted_artifacts_deleted = summary.run.encrypted_artifacts_deleted,
+                dry_run = summary.run.dry_run,
+                "Trace Commons retention maintenance scheduler tick completed"
+            );
+            retention_maintenance_scheduler_tick_outcome(&summary)
         },
     );
 }
@@ -11689,34 +11693,29 @@ fn spawn_trace_vector_index_scheduler_task(
         dry_run = config.dry_run,
         "Trace Commons vector index scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         VECTOR_INDEX_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_vector_index_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(VECTOR_INDEX_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                tracing::info!(
-                    tenant_storage_ref = %summary.tenant_storage_ref,
-                    checked_count = summary.checked_count,
-                    vector_entries_indexed = summary.vector_entries_indexed,
-                    skipped_existing_count = summary.skipped_existing_count,
-                    pending_after_count = summary.pending_after_count,
-                    dry_run = summary.dry_run,
-                    "Trace Commons vector index scheduler tick completed"
-                );
-                // No give-up signal: indexing has no failure counter at all --
-                // an item either indexes, is already indexed, or stays
-                // pending, and a failure aborts the whole tick through `?`
-                // above. Any tick that reaches here is a live tick.
-                Ok(())
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_vector_index_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| worker_route_error(VECTOR_INDEX_SCHEDULER_DRIVER_NAME, error))?;
+            tracing::info!(
+                tenant_storage_ref = %summary.tenant_storage_ref,
+                checked_count = summary.checked_count,
+                vector_entries_indexed = summary.vector_entries_indexed,
+                skipped_existing_count = summary.skipped_existing_count,
+                pending_after_count = summary.pending_after_count,
+                dry_run = summary.dry_run,
+                "Trace Commons vector index scheduler tick completed"
+            );
+            // No give-up signal: indexing has no failure counter at all --
+            // an item either indexes, is already indexed, or stays
+            // pending, and a failure aborts the whole tick through `?`
+            // above. Any tick that reaches here is a live tick.
+            Ok(())
         },
     );
 }
@@ -11774,6 +11773,24 @@ const ALL_DRIVER_NAMES: &[&str] = &[
 /// `tick` returns `Result<()>` and owns its own success logging, because the
 /// summary fields differ per driver and are worth keeping verbatim. Only the
 /// failure path is shared -- that is the part that was uniform and broken.
+/// Spawns a scheduler's driver loop. Each tick gets its own copy of the
+/// scheduler's configuration.
+fn spawn_scheduler_driver<C, F, Fut>(
+    state: &Arc<AppState>,
+    driver: &'static str,
+    interval: StdDuration,
+    config: C,
+    tick: F,
+) where
+    C: Clone + Send + Sync + 'static,
+    F: Fn(Arc<AppState>, C) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<()>> + Send,
+{
+    spawn_driver_loop(state, driver, interval, move |state| {
+        tick(state, config.clone())
+    });
+}
+
 fn spawn_driver_loop<F, Fut>(
     state: &Arc<AppState>,
     driver: &'static str,
@@ -11829,28 +11846,25 @@ fn spawn_perplexity_score_driver_task(
         skip_duplicates = config.knobs.skip_duplicates,
         "Trace Commons perplexity score driver enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         PERPLEXITY_SCORE_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_perplexity_score_driver_tick(state, &config).await?;
-                tracing::info!(
-                    scored = summary.scored,
-                    skipped_duplicate = summary.skipped_duplicate,
-                    cached = summary.cached,
-                    failed = summary.failed,
-                    transient = summary.transient,
-                    breaker_tripped = summary.breaker_tripped,
-                    tick_duration_ms = summary.tick_duration_ms,
-                    backlog = summary.backlog,
-                    "Trace Commons perplexity score driver tick completed"
-                );
-                perplexity_tick_outcome(&summary)
-            }
+        config,
+        |state, config| async move {
+            let summary = run_perplexity_score_driver_tick(state, &config).await?;
+            tracing::info!(
+                scored = summary.scored,
+                skipped_duplicate = summary.skipped_duplicate,
+                cached = summary.cached,
+                failed = summary.failed,
+                transient = summary.transient,
+                breaker_tripped = summary.breaker_tripped,
+                tick_duration_ms = summary.tick_duration_ms,
+                backlog = summary.backlog,
+                "Trace Commons perplexity score driver tick completed"
+            );
+            perplexity_tick_outcome(&summary)
         },
     );
 }
@@ -11873,50 +11887,47 @@ fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBacks
         backoff_base_seconds = config.backoff_base_seconds,
         "Trace Commons PII backstop driver enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         PII_BACKSTOP_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                // Resolved per tick, from TRACE_PRIVACY_FILTER_BACKEND rather
-                // than hardcoded to near-ai. Until #495 there was only one
-                // backend, so the hardcode was invisible; with a second one it
-                // meant the backend that boot logs, /health and the canary all
-                // report was NOT the one doing the work.
-                //
-                // Resolved here rather than inside the tick so the tick takes
-                // its adapter as an argument: it is the unit under test, and
-                // reading process env inside it made every test that sets the
-                // backend var visible to every other test running in parallel.
-                //
-                // An unset backend is refused rather than defaulted. This
-                // driver re-redacts traces being HELD pending a prose-PII
-                // check; running it with no filter would release them having
-                // checked nothing.
-                let adapter =
-                    trace_commons_protocol::trace_contribution::privacy_filter_adapter_from_env()
-                        .context("PII backstop adapter unavailable")?
-                        .map(|(adapter, _backend)| adapter)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "PII backstop requires a privacy filter backend (missing \
-                                 control: privacy_filter_backend)"
-                            )
-                        })?;
-                let summary = run_pii_backstop_driver_tick(state, &config, adapter).await?;
-                tracing::info!(
-                    done = summary.done,
-                    failed = summary.failed,
-                    transient = summary.transient,
-                    exhausted = summary.exhausted,
-                    breaker_tripped = summary.breaker_tripped,
-                    "Trace Commons PII backstop driver tick completed"
-                );
-                pii_backstop_tick_outcome(&summary)
-            }
+        config,
+        |state, config| async move {
+            // Resolved per tick, from TRACE_PRIVACY_FILTER_BACKEND rather
+            // than hardcoded to near-ai. Until #495 there was only one
+            // backend, so the hardcode was invisible; with a second one it
+            // meant the backend that boot logs, /health and the canary all
+            // report was NOT the one doing the work.
+            //
+            // Resolved here rather than inside the tick so the tick takes
+            // its adapter as an argument: it is the unit under test, and
+            // reading process env inside it made every test that sets the
+            // backend var visible to every other test running in parallel.
+            //
+            // An unset backend is refused rather than defaulted. This
+            // driver re-redacts traces being HELD pending a prose-PII
+            // check; running it with no filter would release them having
+            // checked nothing.
+            let adapter =
+                trace_commons_protocol::trace_contribution::privacy_filter_adapter_from_env()
+                    .context("PII backstop adapter unavailable")?
+                    .map(|(adapter, _backend)| adapter)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "PII backstop requires a privacy filter backend (missing \
+                         control: privacy_filter_backend)"
+                        )
+                    })?;
+            let summary = run_pii_backstop_driver_tick(state, &config, adapter).await?;
+            tracing::info!(
+                done = summary.done,
+                failed = summary.failed,
+                transient = summary.transient,
+                exhausted = summary.exhausted,
+                breaker_tripped = summary.breaker_tripped,
+                "Trace Commons PII backstop driver tick completed"
+            );
+            pii_backstop_tick_outcome(&summary)
         },
     );
 }
@@ -11935,33 +11946,30 @@ fn spawn_trace_benchmark_registry_scheduler_task(
         dry_run = config.dry_run,
         "Trace Commons benchmark registry scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         BENCHMARK_REGISTRY_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_benchmark_registry_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(BENCHMARK_REGISTRY_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                tracing::info!(
-                    submit_checked = summary.submit.checked,
-                    submitted = summary.submit.submitted,
-                    submit_failed = summary.submit.failed,
-                    confirm_checked = summary.confirm.checked,
-                    confirmed = summary.confirm.confirmed,
-                    confirm_failed = summary.confirm.failed,
-                    submit_pending = summary.submit.pending,
-                    confirm_pending = summary.confirm.pending,
-                    dry_run = summary.submit.dry_run || summary.confirm.dry_run,
-                    "Trace Commons benchmark registry scheduler tick completed"
-                );
-                benchmark_registry_scheduler_tick_outcome(&summary)
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_benchmark_registry_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| {
+                    worker_route_error(BENCHMARK_REGISTRY_SCHEDULER_DRIVER_NAME, error)
+                })?;
+            tracing::info!(
+                submit_checked = summary.submit.checked,
+                submitted = summary.submit.submitted,
+                submit_failed = summary.submit.failed,
+                confirm_checked = summary.confirm.checked,
+                confirmed = summary.confirm.confirmed,
+                confirm_failed = summary.confirm.failed,
+                submit_pending = summary.submit.pending,
+                confirm_pending = summary.confirm.pending,
+                dry_run = summary.submit.dry_run || summary.confirm.dry_run,
+                "Trace Commons benchmark registry scheduler tick completed"
+            );
+            benchmark_registry_scheduler_tick_outcome(&summary)
         },
     );
 }
@@ -11984,38 +11992,35 @@ fn spawn_trace_benchmark_pipeline_scheduler_task(
         registry_ref_prefix_configured = !config.registry_ref_prefix.is_empty(),
         "Trace Commons benchmark pipeline scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         BENCHMARK_PIPELINE_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_benchmark_pipeline_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(BENCHMARK_PIPELINE_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                tracing::info!(
-                    evaluation_checked = summary.evaluation.checked_count,
-                    evaluated = summary.evaluation.evaluated_count,
-                    passed = summary.evaluation.passed_count,
-                    failed = summary.evaluation.failed_count,
-                    evaluation_pending = summary.evaluation.pending_after_count,
-                    publication_checked = summary.publication.checked_count,
-                    published = summary.publication.published_count,
-                    publication_pending = summary.publication.pending_after_count,
-                    dry_run = summary.evaluation.dry_run || summary.publication.dry_run,
-                    "Trace Commons benchmark pipeline scheduler tick completed"
-                );
-                // No give-up signal: `failed_count` here is a benchmark
-                // verdict -- a candidate scored below `min_score` -- not an
-                // error, and publication has no failure counter. Reading it
-                // as a driver failure would report a working evaluator as
-                // dead every time a batch of candidates was simply bad.
-                Ok(())
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_benchmark_pipeline_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| {
+                    worker_route_error(BENCHMARK_PIPELINE_SCHEDULER_DRIVER_NAME, error)
+                })?;
+            tracing::info!(
+                evaluation_checked = summary.evaluation.checked_count,
+                evaluated = summary.evaluation.evaluated_count,
+                passed = summary.evaluation.passed_count,
+                failed = summary.evaluation.failed_count,
+                evaluation_pending = summary.evaluation.pending_after_count,
+                publication_checked = summary.publication.checked_count,
+                published = summary.publication.published_count,
+                publication_pending = summary.publication.pending_after_count,
+                dry_run = summary.evaluation.dry_run || summary.publication.dry_run,
+                "Trace Commons benchmark pipeline scheduler tick completed"
+            );
+            // No give-up signal: `failed_count` here is a benchmark
+            // verdict -- a candidate scored below `min_score` -- not an
+            // error, and publication has no failure counter. Reading it
+            // as a driver failure would report a working evaluator as
+            // dead every time a batch of candidates was simply bad.
+            Ok(())
         },
     );
 }
@@ -12040,34 +12045,29 @@ fn spawn_trace_credit_cycle_scheduler_task(
         near_contract_configured = config.near_contract_id.is_some(),
         "Trace Commons credit cycle scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         CREDIT_CYCLE_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_credit_cycle_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(CREDIT_CYCLE_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                tracing::info!(
-                    tenant_storage_ref = %summary.tenant_storage_ref,
-                    target_use = ?summary.target_use,
-                    checked_count = summary.checked_count,
-                    eligible_count = summary.eligible_count,
-                    started_count = summary.started_count,
-                    skipped_count = summary.skipped_count,
-                    skipped_active_count = summary.skipped_active_count,
-                    pending_after_count = summary.pending_after_count,
-                    dry_run = summary.dry_run,
-                    preflight_only = summary.preflight_only,
-                    "Trace Commons credit cycle scheduler tick completed"
-                );
-                credit_cycle_scheduler_tick_outcome(&summary)
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_credit_cycle_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| worker_route_error(CREDIT_CYCLE_SCHEDULER_DRIVER_NAME, error))?;
+            tracing::info!(
+                tenant_storage_ref = %summary.tenant_storage_ref,
+                target_use = ?summary.target_use,
+                checked_count = summary.checked_count,
+                eligible_count = summary.eligible_count,
+                started_count = summary.started_count,
+                skipped_count = summary.skipped_count,
+                skipped_active_count = summary.skipped_active_count,
+                pending_after_count = summary.pending_after_count,
+                dry_run = summary.dry_run,
+                preflight_only = summary.preflight_only,
+                "Trace Commons credit cycle scheduler tick completed"
+            );
+            credit_cycle_scheduler_tick_outcome(&summary)
         },
     );
 }
@@ -12090,57 +12090,54 @@ fn spawn_trace_credit_settlement_scheduler_task(
         dry_run = config.dry_run,
         "Trace Commons credit settlement scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                if matches!(
-                    config.scope,
-                    CreditSettlementSchedulerScope::AllTenants { .. }
-                ) {
-                    let summary = run_all_tenant_credit_settlement_tick(
-                        state,
-                        &config,
-                        CREDIT_SETTLEMENT_TENANT_PAGE_LIMIT,
-                    )
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                    tracing::info!(
-                        tenants_checked = summary.tenants_checked,
-                        tenants_failed = summary.tenants_failed,
-                        settled_source_event_count = summary.settled_source_event_count,
-                        "All-tenant credit settlement scheduler tick completed"
-                    );
-                    anyhow::ensure!(
-                        summary.tenants_failed == 0,
-                        "credit settlement tenant failures; inspect hashed failure diagnostics"
-                    );
-                    return Ok(());
-                }
-                let summary = run_trace_credit_settlement_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME, error)
-                    })?;
+        config,
+        |state, config| async move {
+            if matches!(
+                config.scope,
+                CreditSettlementSchedulerScope::AllTenants { .. }
+            ) {
+                let summary = run_all_tenant_credit_settlement_tick(
+                    state,
+                    &config,
+                    CREDIT_SETTLEMENT_TENANT_PAGE_LIMIT,
+                )
+                .await
+                .map_err(|error| {
+                    worker_route_error(CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME, error)
+                })?;
                 tracing::info!(
-                    tenant_storage_ref = %summary.tenant_storage_ref,
-                    dry_run = summary.dry_run,
-                    policy_version_allowed = summary.policy_version_allowed,
+                    tenants_checked = summary.tenants_checked,
+                    tenants_failed = summary.tenants_failed,
                     settled_source_event_count = summary.settled_source_event_count,
-                    eligible_source_event_count = summary.eligible_source_event_count,
-                    pending_after_count = summary.pending_after_count,
-                    settled_account_count = summary.settled_account_count,
-                    near_outbox_item_count = summary.near_outbox_item_count,
-                    "Trace Commons credit settlement scheduler tick completed"
+                    "All-tenant credit settlement scheduler tick completed"
                 );
-                credit_settlement_scheduler_tick_outcome(&summary)
+                anyhow::ensure!(
+                    summary.tenants_failed == 0,
+                    "credit settlement tenant failures; inspect hashed failure diagnostics"
+                );
+                return Ok(());
             }
+            let summary = run_trace_credit_settlement_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| {
+                    worker_route_error(CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME, error)
+                })?;
+            tracing::info!(
+                tenant_storage_ref = %summary.tenant_storage_ref,
+                dry_run = summary.dry_run,
+                policy_version_allowed = summary.policy_version_allowed,
+                settled_source_event_count = summary.settled_source_event_count,
+                eligible_source_event_count = summary.eligible_source_event_count,
+                pending_after_count = summary.pending_after_count,
+                settled_account_count = summary.settled_account_count,
+                near_outbox_item_count = summary.near_outbox_item_count,
+                "Trace Commons credit settlement scheduler tick completed"
+            );
+            credit_settlement_scheduler_tick_outcome(&summary)
         },
     );
 }
@@ -12163,35 +12160,32 @@ fn spawn_trace_process_evaluation_scheduler_task(
         external_ref_prefix_configured = config.external_ref_prefix.is_some(),
         "Trace Commons process evaluation scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_process_evaluation_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                tracing::info!(
-                    checked = summary.run.checked_count,
-                    evaluated = summary.run.evaluated_count,
-                    labels_appended = summary.run.ranking_label_appended_count,
-                    labels_skipped_existing = summary.run.ranking_label_skipped_existing_count,
-                    skipped_existing = summary.run.skipped_existing_count,
-                    skipped_ineligible = summary.run.skipped_ineligible_count,
-                    pending_after = summary.run.pending_after_count,
-                    dry_run = summary.run.dry_run,
-                    "Trace Commons process evaluation scheduler tick completed"
-                );
-                // No give-up signal: the tick has no failure counter. Each
-                // candidate is evaluated or skipped as ineligible or already
-                // done; an evaluator error aborts the tick through `?` above.
-                Ok(())
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_process_evaluation_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| {
+                    worker_route_error(PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME, error)
+                })?;
+            tracing::info!(
+                checked = summary.run.checked_count,
+                evaluated = summary.run.evaluated_count,
+                labels_appended = summary.run.ranking_label_appended_count,
+                labels_skipped_existing = summary.run.ranking_label_skipped_existing_count,
+                skipped_existing = summary.run.skipped_existing_count,
+                skipped_ineligible = summary.run.skipped_ineligible_count,
+                pending_after = summary.run.pending_after_count,
+                dry_run = summary.run.dry_run,
+                "Trace Commons process evaluation scheduler tick completed"
+            );
+            // No give-up signal: the tick has no failure counter. Each
+            // candidate is evaluated or skipped as ineligible or already
+            // done; an evaluator error aborts the tick through `?` above.
+            Ok(())
         },
     );
 }
@@ -12209,31 +12203,28 @@ fn spawn_trace_revocation_propagation_scheduler_task(
         dry_run = config.dry_run,
         "Trace Commons revocation propagation scheduler enabled"
     );
-    let tick_config = config.clone();
-    spawn_driver_loop(
+    spawn_scheduler_driver(
         state,
         REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME,
         config.interval,
-        move |state| {
-            let config = tick_config.clone();
-            async move {
-                let summary = run_trace_revocation_propagation_scheduler_tick(state, &config)
-                    .await
-                    .map_err(|error| {
-                        worker_route_error(REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME, error)
-                    })?;
-                tracing::info!(
-                    checked = summary.run.checked,
-                    completed = summary.run.completed,
-                    failed = summary.run.failed,
-                    skipped = summary.run.skipped,
-                    pending = summary.run.pending,
-                    next_attempt_scheduled = summary.run.next_attempt_scheduled,
-                    dry_run = summary.run.dry_run,
-                    "Trace Commons revocation propagation scheduler tick completed"
-                );
-                revocation_propagation_scheduler_tick_outcome(&summary)
-            }
+        config,
+        |state, config| async move {
+            let summary = run_trace_revocation_propagation_scheduler_tick(state, &config)
+                .await
+                .map_err(|error| {
+                    worker_route_error(REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME, error)
+                })?;
+            tracing::info!(
+                checked = summary.run.checked,
+                completed = summary.run.completed,
+                failed = summary.run.failed,
+                skipped = summary.run.skipped,
+                pending = summary.run.pending,
+                next_attempt_scheduled = summary.run.next_attempt_scheduled,
+                dry_run = summary.run.dry_run,
+                "Trace Commons revocation propagation scheduler tick completed"
+            );
+            revocation_propagation_scheduler_tick_outcome(&summary)
         },
     );
 }
@@ -12324,19 +12315,11 @@ async fn validate_trace_export_job_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_export_scheduler_config_error)?;
+        .map_err(scheduler_config_error("export job"))?;
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
-        .map_err(trace_export_scheduler_config_error)?;
-    require_export_worker_operator(&auth).map_err(trace_export_scheduler_config_error)
-}
-
-fn trace_export_scheduler_config_error(error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons export job scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
+        .map_err(scheduler_config_error("export job"))?;
+    require_export_worker_operator(&auth).map_err(scheduler_config_error("export job"))
 }
 
 async fn validate_trace_near_credit_outbox_scheduler_config(
@@ -12347,13 +12330,13 @@ async fn validate_trace_near_credit_outbox_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_near_credit_outbox_scheduler_config_error)?;
+        .map_err(scheduler_config_error("NEAR credit outbox"))?;
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
-        .map_err(trace_near_credit_outbox_scheduler_config_error)?;
-    require_utility_operator(&auth).map_err(trace_near_credit_outbox_scheduler_config_error)?;
+        .map_err(scheduler_config_error("NEAR credit outbox"))?;
+    require_utility_operator(&auth).map_err(scheduler_config_error("NEAR credit outbox"))?;
     require_near_credit_outbox_principal_if_configured(state, &auth, config.dry_run)
-        .map_err(trace_near_credit_outbox_scheduler_config_error)?;
+        .map_err(scheduler_config_error("NEAR credit outbox"))?;
     if !config.dry_run {
         // The submitter is withheld both when its URL env var is unset AND when
         // the resolved settlement mode is not `http` (Disabled/DryRun supply no
@@ -12387,16 +12370,6 @@ async fn validate_trace_near_credit_outbox_scheduler_config(
     Ok(())
 }
 
-fn trace_near_credit_outbox_scheduler_config_error(
-    error: (StatusCode, Json<ApiError>),
-) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons NEAR credit outbox scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
-}
-
 async fn validate_trace_retention_maintenance_scheduler_config(
     state: &AppState,
     config: Option<&TraceRetentionMaintenanceSchedulerConfig>,
@@ -12405,23 +12378,12 @@ async fn validate_trace_retention_maintenance_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_retention_maintenance_scheduler_config_error)?;
+        .map_err(scheduler_config_error("retention maintenance"))?;
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
-        .map_err(trace_retention_maintenance_scheduler_config_error)?;
-    require_retention_operator(&auth)
-        .map_err(trace_retention_maintenance_scheduler_config_error)?;
+        .map_err(scheduler_config_error("retention maintenance"))?;
+    require_retention_operator(&auth).map_err(scheduler_config_error("retention maintenance"))?;
     Ok(())
-}
-
-fn trace_retention_maintenance_scheduler_config_error(
-    error: (StatusCode, Json<ApiError>),
-) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons retention maintenance scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
 }
 
 async fn validate_trace_vector_index_scheduler_config(
@@ -12432,24 +12394,16 @@ async fn validate_trace_vector_index_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_vector_index_scheduler_config_error)?;
+        .map_err(scheduler_config_error("vector index"))?;
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
-        .map_err(trace_vector_index_scheduler_config_error)?;
-    require_vector_operator(&auth).map_err(trace_vector_index_scheduler_config_error)?;
+        .map_err(scheduler_config_error("vector index"))?;
+    require_vector_operator(&auth).map_err(scheduler_config_error("vector index"))?;
     anyhow::ensure!(
         state.db_mirror.is_some(),
         "invalid Trace Commons vector index scheduler configuration: TRACE_COMMONS_DB_DUAL_WRITE is required"
     );
     Ok(())
-}
-
-fn trace_vector_index_scheduler_config_error(error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons vector index scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
 }
 
 async fn validate_trace_benchmark_registry_scheduler_config(
@@ -12460,14 +12414,14 @@ async fn validate_trace_benchmark_registry_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_benchmark_registry_scheduler_config_error)?;
+        .map_err(scheduler_config_error("benchmark registry"))?;
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
-        .map_err(trace_benchmark_registry_scheduler_config_error)?;
+        .map_err(scheduler_config_error("benchmark registry"))?;
     require_benchmark_worker_operator(&auth)
-        .map_err(trace_benchmark_registry_scheduler_config_error)?;
+        .map_err(scheduler_config_error("benchmark registry"))?;
     require_benchmark_registry_outbox_principal_if_configured(state, &auth, config.dry_run)
-        .map_err(trace_benchmark_registry_scheduler_config_error)?;
+        .map_err(scheduler_config_error("benchmark registry"))?;
     if !config.dry_run {
         anyhow::ensure!(
             state.benchmark_registry_submitter.is_some(),
@@ -12491,16 +12445,6 @@ async fn validate_trace_benchmark_registry_scheduler_config(
     Ok(())
 }
 
-fn trace_benchmark_registry_scheduler_config_error(
-    error: (StatusCode, Json<ApiError>),
-) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons benchmark registry scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
-}
-
 async fn validate_trace_benchmark_pipeline_scheduler_config(
     state: &AppState,
     config: Option<&TraceBenchmarkPipelineSchedulerConfig>,
@@ -12509,12 +12453,12 @@ async fn validate_trace_benchmark_pipeline_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_benchmark_pipeline_scheduler_config_error)?;
+        .map_err(scheduler_config_error("benchmark pipeline"))?;
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
-        .map_err(trace_benchmark_pipeline_scheduler_config_error)?;
+        .map_err(scheduler_config_error("benchmark pipeline"))?;
     require_benchmark_worker_operator(&auth)
-        .map_err(trace_benchmark_pipeline_scheduler_config_error)?;
+        .map_err(scheduler_config_error("benchmark pipeline"))?;
     if config.require_external_evaluator {
         anyhow::ensure!(
             state.benchmark_evaluator.is_some(),
@@ -12522,16 +12466,6 @@ async fn validate_trace_benchmark_pipeline_scheduler_config(
         );
     }
     Ok(())
-}
-
-fn trace_benchmark_pipeline_scheduler_config_error(
-    error: (StatusCode, Json<ApiError>),
-) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons benchmark pipeline scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
 }
 
 async fn validate_trace_credit_cycle_scheduler_config(
@@ -12542,17 +12476,17 @@ async fn validate_trace_credit_cycle_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_credit_cycle_scheduler_config_error)?;
+        .map_err(scheduler_config_error("credit cycle"))?;
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
-        .map_err(trace_credit_cycle_scheduler_config_error)?;
-    require_utility_operator(&auth).map_err(trace_credit_cycle_scheduler_config_error)?;
+        .map_err(scheduler_config_error("credit cycle"))?;
+    require_utility_operator(&auth).map_err(scheduler_config_error("credit cycle"))?;
     require_credit_settlement_central_issuer_principal_if_configured(
         state,
         &auth,
         config.dry_run || config.preflight_only,
     )
-    .map_err(trace_credit_cycle_scheduler_config_error)?;
+    .map_err(scheduler_config_error("credit cycle"))?;
     if !config.dry_run && !config.preflight_only {
         anyhow::ensure!(
             !state.credit_settlement_require_issuer_approval,
@@ -12586,14 +12520,6 @@ async fn validate_trace_credit_cycle_scheduler_config(
     Ok(())
 }
 
-fn trace_credit_cycle_scheduler_config_error(error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons credit cycle scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
-}
-
 async fn validate_trace_credit_settlement_scheduler_config(
     state: &AppState,
     config: Option<&TraceCreditSettlementSchedulerConfig>,
@@ -12604,10 +12530,10 @@ async fn validate_trace_credit_settlement_scheduler_config(
     let auth = match &config.scope {
         CreditSettlementSchedulerScope::Tenant => {
             let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-                .map_err(trace_credit_settlement_scheduler_config_error)?;
+                .map_err(scheduler_config_error("credit settlement"))?;
             authenticate_with_tenant_access_grant(state, &headers)
                 .await
-                .map_err(trace_credit_settlement_scheduler_config_error)?
+                .map_err(scheduler_config_error("credit settlement"))?
         }
         CreditSettlementSchedulerScope::AllTenants { .. } => {
             anyhow::ensure!(
@@ -12625,9 +12551,9 @@ async fn validate_trace_credit_settlement_scheduler_config(
             internal_credit_settlement_actor("scheduler-validation")
         }
     };
-    require_utility_operator(&auth).map_err(trace_credit_settlement_scheduler_config_error)?;
+    require_utility_operator(&auth).map_err(scheduler_config_error("credit settlement"))?;
     require_credit_settlement_central_issuer_principal_if_configured(state, &auth, config.dry_run)
-        .map_err(trace_credit_settlement_scheduler_config_error)?;
+        .map_err(scheduler_config_error("credit settlement"))?;
     if config.ranking_target_use.is_some() && config.ranking_model_version.is_none() {
         anyhow::bail!(
             "invalid Trace Commons credit settlement scheduler configuration: {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_TARGET_USE} requires {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_RANKING_MODEL_VERSION}"
@@ -12666,22 +12592,12 @@ async fn validate_trace_credit_settlement_scheduler_config(
             false,
             config.near_contract_id.as_deref(),
         )
-        .map_err(trace_credit_settlement_scheduler_config_error)?;
+        .map_err(scheduler_config_error("credit settlement"))?;
     } else if let Some(near_contract_id) = config.near_contract_id.as_deref() {
         resolve_credit_settlement_near_contract_id(state, true, Some(near_contract_id))
-            .map_err(trace_credit_settlement_scheduler_config_error)?;
+            .map_err(scheduler_config_error("credit settlement"))?;
     }
     Ok(())
-}
-
-fn trace_credit_settlement_scheduler_config_error(
-    error: (StatusCode, Json<ApiError>),
-) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons credit settlement scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
 }
 
 async fn validate_trace_process_evaluation_scheduler_config(
@@ -12692,12 +12608,12 @@ async fn validate_trace_process_evaluation_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_process_evaluation_scheduler_config_error)?;
+        .map_err(scheduler_config_error("process evaluation"))?;
     let auth = authenticate_with_tenant_access_grant(state, &headers)
         .await
-        .map_err(trace_process_evaluation_scheduler_config_error)?;
+        .map_err(scheduler_config_error("process evaluation"))?;
     require_process_evaluation_operator(&auth)
-        .map_err(trace_process_evaluation_scheduler_config_error)?;
+        .map_err(scheduler_config_error("process evaluation"))?;
     if config.require_external_evaluator {
         anyhow::ensure!(
             state.process_evaluator.is_some(),
@@ -12705,16 +12621,6 @@ async fn validate_trace_process_evaluation_scheduler_config(
         );
     }
     Ok(())
-}
-
-fn trace_process_evaluation_scheduler_config_error(
-    error: (StatusCode, Json<ApiError>),
-) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons process evaluation scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
 }
 
 async fn validate_trace_revocation_propagation_scheduler_config(
@@ -12725,26 +12631,16 @@ async fn validate_trace_revocation_propagation_scheduler_config(
         return Ok(());
     };
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_revocation_propagation_scheduler_config_error)?;
-    let auth = authenticate(state, &headers)
-        .map_err(trace_revocation_propagation_scheduler_config_error)?;
+        .map_err(scheduler_config_error("revocation propagation"))?;
+    let auth =
+        authenticate(state, &headers).map_err(scheduler_config_error("revocation propagation"))?;
     require_revocation_propagation_operator(&auth)
-        .map_err(trace_revocation_propagation_scheduler_config_error)?;
+        .map_err(scheduler_config_error("revocation propagation"))?;
     anyhow::ensure!(
         state.db_mirror.is_some(),
         "invalid Trace Commons revocation propagation scheduler configuration: TRACE_COMMONS_DB_DUAL_WRITE is required"
     );
     Ok(())
-}
-
-fn trace_revocation_propagation_scheduler_config_error(
-    error: (StatusCode, Json<ApiError>),
-) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid Trace Commons revocation propagation scheduler configuration: status={}, error={}",
-        error.0,
-        error.1.0.error
-    )
 }
 
 fn signed_token_claims_to_auth(claims: TraceCommonsSignedTokenClaims) -> ApiResult<TenantAuth> {
