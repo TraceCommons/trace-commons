@@ -33,7 +33,8 @@
 //! property of the Windows security model and cannot be observed from a
 //! cross-compile on another operating system.
 //!
-//! The observation is automated. CI's `windows-pipe-acl` job runs
+//! The observation is automated. The named-pipe ACL step of CI's `windows
+//! contributor crates` job (`clients.yml`) runs
 //! `scripts/windows/verify-pipe-acl.ps1` on `windows-latest`, which creates a
 //! second, non-administrator local account, has it attempt to open this pipe,
 //! and requires ERROR_ACCESS_DENIED -- plus a control confirming the owning
