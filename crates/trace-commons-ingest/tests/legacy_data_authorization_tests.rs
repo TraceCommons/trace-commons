@@ -3,7 +3,24 @@
 
 //! Historical ownerless records fail closed for ordinary contributors.
 //! Exact credential aliases and tenant-scoped reviewer recovery remain available.
-use super::*;
+use trace_commons_ingest::test_support::*;
+use axum::extract::Query;
+use axum::extract::State;
+use chrono::Utc;
+use trace_commons_server::trace_corpus_storage::TraceCorpusStatus as StorageTraceCorpusStatus;
+use trace_commons_protocol::trace_contribution::TraceAllowedUse;
+use trace_commons_protocol::trace_contribution::ConsentScope;
+use trace_commons_protocol::trace_contribution::ResidualPiiRisk;
+use trace_commons_protocol::trace_contribution::TraceSubmissionStatusRequest;
+use axum::Json;
+use axum::http::header::AUTHORIZATION;
+use axum::http::StatusCode;
+use uuid::Uuid;
+use std::time::Duration;
+use std::collections::BTreeSet;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::path::Path;
 use axum::{body::Body, http::Request};
 use tower::ServiceExt;
 

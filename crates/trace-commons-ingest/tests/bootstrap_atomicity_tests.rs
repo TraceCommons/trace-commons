@@ -3,7 +3,16 @@
 
 //! Real PostgreSQL regressions for commit-time first-authenticator admission.
 //! Run with the ingest PG suite's disposable database and --test-threads=1.
-use super::*;
+use trace_commons_ingest::test_support::*;
+use trace_commons_server::db::Database;
+use axum::Json;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::http::HeaderValue;
+use axum::http::HeaderMap;
+use uuid::Uuid;
+use trace_commons_server::db::postgres::PgBackend;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn database_default_cannot_bypass_atomic_enrollment() {

@@ -8,7 +8,25 @@
 //! the ones ingest makes. That is what lets the ignored probe below measure the
 //! server's peak resident set from outside, with `/usr/bin/time -l`.
 
-use super::*;
+use trace_commons_ingest::test_support::*;
+use trace_commons_server::trace_artifact_store::TraceArtifactProviderConfig;
+use trace_commons_server::trace_artifact_store::ServiceOwnedTraceArtifactStore;
+use trace_commons_server::trace_artifact_store::FileRemoteTraceArtifactProvider;
+use trace_commons_server::trace_artifact_kek::LocalMasterKeyWrapper;
+use secrecy::SecretString;
+use trace_commons_server::secrets::SecretsCrypto;
+use axum::http::HeaderValue;
+use axum::http::HeaderMap;
+use trace_commons_server::db::Database;
+use chrono::Utc;
+use chrono::DateTime;
+use std::time::Duration as StdDuration;
+use uuid::Uuid;
+use std::io::Write;
+use std::time::Duration;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::path::Path;
 
 /// Words for synthetic event text. Ordinary prose: nothing here matches a
 /// redaction pattern, so the server's re-scrub does its full scan and changes

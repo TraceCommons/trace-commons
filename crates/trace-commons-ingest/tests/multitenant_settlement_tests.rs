@@ -1,7 +1,21 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use super::*;
+use trace_commons_ingest::test_support::*;
+use trace_commons_server::db::Database;
+use axum::extract::State;
+use std::time::Duration as StdDuration;
+use secrecy::SecretString;
+use axum::http::HeaderMap;
+use trace_commons_protocol::trace_contribution::TraceAllowedUse;
+use trace_commons_protocol::trace_contribution::ConsentScope;
+use trace_commons_server::config::DatabaseConfig;
+use trace_commons_server::db::postgres::PgBackend;
+use uuid::Uuid;
+use axum::Json;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
 #[test]
 fn multitenant_settlement_explicit_config_needs_no_tenant_bearer() {

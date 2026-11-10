@@ -5,7 +5,18 @@
 //! scoring award was withheld as `policy_mismatch` takes the use and earns
 //! the award once, without being scored again.
 
-use super::*;
+use trace_commons_ingest::test_support::*;
+use axum::extract::State;
+use axum::http::StatusCode;
+use trace_commons_protocol::trace_contribution::TraceAllowedUse;
+use trace_commons_protocol::trace_contribution::ConsentScope;
+use axum::Json;
+use uuid::Uuid;
+use trace_commons_server::db::postgres::PgBackend;
+use trace_commons_server::trace_corpus_storage::TraceCorpusStore;
+use std::path::Path;
+use std::collections::BTreeSet;
+use std::sync::Arc;
 use trace_commons_protocol::model_training_consent::{
     MODEL_TRAINING_NOT_PERMITTED_LABEL, ModelTrainingAwardState, ModelTrainingConsentGrantRequest,
     ModelTrainingConsentOutcome,

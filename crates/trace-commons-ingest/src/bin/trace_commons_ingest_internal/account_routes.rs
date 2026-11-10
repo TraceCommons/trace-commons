@@ -154,7 +154,7 @@ impl AccountRoutes {
 }
 
 /// Account routes already behind `account_auth_middleware`, with their record.
-pub(crate) struct AuthenticatedAccountRoutes {
+pub struct AuthenticatedAccountRoutes {
     router: Router<Arc<AppState>>,
     // Read only by tests.
     #[cfg_attr(not(test), allow(dead_code))]

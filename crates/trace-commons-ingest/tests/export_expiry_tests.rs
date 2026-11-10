@@ -1,7 +1,16 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use super::*;
+use trace_commons_ingest::test_support::*;
+use axum::extract::Query;
+use axum::extract::State;
+use trace_commons_server::trace_corpus_storage::TraceObjectArtifactKind as StorageTraceObjectArtifactKind;
+use trace_commons_protocol::trace_contribution::TraceAllowedUse;
+use trace_commons_protocol::trace_contribution::ConsentScope;
+use chrono::Utc;
+use axum::Json;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::test]
 async fn export_eligibility_refuses_the_deadline_without_waiting_for_maintenance() {

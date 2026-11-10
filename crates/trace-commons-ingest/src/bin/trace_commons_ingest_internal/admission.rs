@@ -18,13 +18,13 @@ use trace_commons_server::admission_ledger::{
 };
 
 #[derive(Clone)]
-pub(super) struct AdmissionConfig {
+pub struct AdmissionConfig {
     pub limits: AdmissionLimits,
     pub providers: AdmissionProviderTrust,
 }
 
 #[derive(Clone)]
-pub(super) struct AccountAdmissionConfig {
+pub struct AccountAdmissionConfig {
     pub policy: BoundedPolicy,
     pub lease_seconds: i64,
     pub providers: Option<AdmissionProviderTrust>,

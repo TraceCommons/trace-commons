@@ -4,7 +4,20 @@
 //! `POST /v1/account/terms-acceptance`: authentication, the same-origin rule
 //! for cookie sessions, validation labels, and the PostgreSQL-backed record.
 
-use super::*;
+use trace_commons_ingest::test_support::*;
+use axum::Json;
+use axum::Extension;
+use axum::extract::State;
+use axum::http::HeaderValue;
+use axum::http::StatusCode;
+use uuid::Uuid;
+use trace_commons_server::db::Database;
+use axum::http::header::AUTHORIZATION;
+use axum::http::header::CONTENT_TYPE;
+use axum::http::HeaderMap;
+use trace_commons_server::account_session::AccountCtx;
+use trace_commons_server::account_session::AccountAuthMethod;
+use std::sync::Arc;
 use axum::body::Body;
 use tower::ServiceExt;
 use trace_commons_protocol::terms::{

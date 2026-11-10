@@ -4,54 +4,6 @@
 use super::test_support::*;
 use super::*;
 
-#[path = "tests/export_expiry_tests.rs"]
-mod export_expiry_tests;
-
-#[path = "tests/bootstrap_atomicity_tests.rs"]
-mod bootstrap_atomicity_tests;
-
-#[path = "tests/legacy_data_authorization_tests.rs"]
-mod legacy_data_authorization_tests;
-
-#[path = "tests/scope_escalation_tests.rs"]
-mod scope_escalation_tests;
-
-#[path = "tests/multitenant_settlement_tests.rs"]
-mod multitenant_settlement_tests;
-
-#[path = "tests/activity_missions_tests.rs"]
-mod activity_missions_tests;
-#[path = "tests/large_envelope_tests.rs"]
-mod large_envelope_tests;
-#[path = "tests/legacy_invite_link_tests.rs"]
-mod legacy_invite_link_tests;
-#[path = "tests/mission_catalog_tests.rs"]
-mod mission_catalog_tests;
-#[path = "tests/model_training_consent_tests.rs"]
-mod model_training_consent_tests;
-#[path = "tests/native_session_sliding_expiry_tests.rs"]
-mod native_session_sliding_expiry_tests;
-#[path = "tests/near_ai_provisioning_tests.rs"]
-mod near_ai_provisioning_tests;
-#[path = "tests/payout_link_tests.rs"]
-mod payout_link_tests;
-#[path = "tests/payout_rails_tests.rs"]
-mod payout_rails_tests;
-#[path = "tests/public_run_lifecycle_tests.rs"]
-mod public_run_lifecycle_tests;
-#[path = "tests/public_run_tests.rs"]
-mod public_run_tests;
-#[path = "tests/referral_admin_tests.rs"]
-mod referral_admin_tests;
-#[path = "tests/referral_tests.rs"]
-mod referral_tests;
-#[path = "tests/removed_account_routes_tests.rs"]
-mod removed_account_routes_tests;
-#[path = "tests/reward_participant_tests.rs"]
-mod reward_participant_tests;
-#[path = "tests/terms_acceptance_tests.rs"]
-mod terms_acceptance_tests;
-
 /// Shorthand for the direct-call handler tests. See [SubmitBody::for_test].
 fn submit_body(envelope: TraceContributionEnvelope) -> SubmitBody {
     SubmitBody::for_test(envelope)

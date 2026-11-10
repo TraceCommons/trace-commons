@@ -17,7 +17,7 @@ use trace_commons_protocol::{
 };
 use uuid::Uuid;
 
-use crate::ingest::app::tests::reward_participant_tests::*;
+use super::*;
 
 fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))

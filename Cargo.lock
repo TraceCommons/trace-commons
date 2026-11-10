@@ -8707,6 +8707,7 @@ dependencies = [
  "trace-commons-build-info",
  "trace-commons-gate-api",
  "trace-commons-gate-enclave",
+ "trace-commons-ingest",
  "trace-commons-operator-client",
  "trace-commons-protocol",
  "trace-commons-server",

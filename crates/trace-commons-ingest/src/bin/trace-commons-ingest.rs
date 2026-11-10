@@ -16,13 +16,13 @@ mod account_device_codes_routes;
 #[path = "trace_commons_ingest_internal/account_devices.rs"]
 mod account_devices_routes;
 #[path = "trace_commons_ingest_internal/account_routes.rs"]
-mod account_routes;
+pub mod account_routes;
 #[path = "trace_commons_ingest_internal/account_trust_growth.rs"]
 mod account_trust_growth_routes;
 #[path = "trace_commons_ingest_internal/activity_missions.rs"]
 mod activity_missions;
 #[path = "trace_commons_ingest_internal/admission.rs"]
-mod admission;
+pub mod admission;
 #[path = "trace_commons_ingest_internal/credit_estimate.rs"]
 mod credit_estimate;
 #[path = "trace_commons_ingest_internal/file_witness.rs"]
@@ -348,7 +348,7 @@ const DEFAULT_BIND: &str = "127.0.0.1:3907";
 /// Request-body ceiling. Derived from the shared envelope cap plus framing
 /// headroom (JSON wrapper, headers) so ingest always admits an envelope the
 /// contributor was willing to build; see `MAX_TRACE_ENVELOPE_BYTES`.
-const MAX_INGEST_BODY_BYTES: usize =
+pub const MAX_INGEST_BODY_BYTES: usize =
     trace_commons_protocol::trace_contribution::MAX_TRACE_ENVELOPE_BYTES + 4 * 1024 * 1024;
 /// Bundle `begin` (a manifest) and `put` (one attachment, envelope included)
 /// refuse anything over the attachment cap in their handlers, so a larger body
@@ -371,7 +371,7 @@ const TRACE_COMMONS_FILE_OBJECT_STORE: &str = "trace_commons_file_store";
 const TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE: &str = "trace_commons_encrypted_artifact_store";
 const TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE: &str =
     "trace_commons_service_local_encrypted";
-const TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE: &str = "trace_commons_service_owned_remote";
+pub const TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE: &str = "trace_commons_service_owned_remote";
 const TRACE_COMMONS_SERVICE_REMOTE_DISABLED_OBJECT_STORE: &str =
     "trace_commons_service_owned_remote_disabled";
 const TRACE_DEFAULT_REVOCATION_REASON: &str = "contributor_revocation";
@@ -752,10 +752,10 @@ const DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: usize = 500;
 const TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN: &str =
     "TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN";
 /// Deployment-wide upload byte budget; see [`parse_large_body_byte_budget`].
-const TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET: &str = "TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET";
+pub const TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET: &str = "TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET";
 /// Most of that budget one principal may hold; see
 /// [`parse_large_body_principal_byte_share`].
-const TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES: &str =
+pub const TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES: &str =
     "TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES";
 /// `POST /v1/traces` submissions one principal may have in flight at once.
 const TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY: &str =
@@ -836,13 +836,13 @@ const TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT";
-const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED: &str =
+pub const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED";
-const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN: &str =
+pub const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_INTERVAL_SECONDS: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_INTERVAL_SECONDS";
-const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION: &str =
+pub const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_REASON: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_REASON";
@@ -1844,7 +1844,7 @@ fn flush_vector_indexes_on_shutdown(state: &AppState) {
 
 #[derive(Clone)]
 pub struct AppState {
-    activity_missions_policy:
+    pub activity_missions_policy:
         Option<Arc<trace_commons_protocol::activity_missions::ActivityPolicy>>,
     /// The local credit estimate table `GET /v1/credit-estimate/table`
     /// serves: the operator-installed one, validated at boot, else the
@@ -1858,28 +1858,28 @@ pub struct AppState {
     /// The payout rails (payout spec sections 3, 4 and 7): one entry per
     /// rail this build knows, each `disabled` unless configured, with its
     /// readiness status (`payout_rails::payout_rails_from_env`).
-    payout_rails: Arc<trace_commons_server::payout_worker::PayoutRails>,
+    pub payout_rails: Arc<trace_commons_server::payout_worker::PayoutRails>,
     /// The payout store the rails' workers and operator routes use: the
     /// database mirror's PostgreSQL backend, or `None` without one.
-    payout_store: Option<Arc<dyn trace_commons_server::db::PayoutStore>>,
+    pub payout_store: Option<Arc<dyn trace_commons_server::db::PayoutStore>>,
     /// The sha256 of the operator's payout control token
     /// (`TRACE_COMMONS_PAYOUT_CONTROL_TOKEN`), the only credential the
     /// rail-wide payout controls (halt, resume, hold clearing) accept. `None`
     /// when unset: those routes then refuse every caller. Never the token.
-    payout_control_token_hash: Option<String>,
+    pub payout_control_token_hash: Option<String>,
     /// The referral code store (referral spec sections 2 and 3): the
     /// database mirror's PostgreSQL backend, or `None` without one. The
     /// referral routes then answer `referral_unavailable`, and a sign-up
     /// code is not applied.
-    referral_store: Option<Arc<dyn trace_commons_server::db::ReferralStore>>,
+    pub referral_store: Option<Arc<dyn trace_commons_server::db::ReferralStore>>,
     /// The referral program's settings (`TRACE_COMMONS_REFERRAL_*`),
     /// validated at boot. Unset means the program has not started.
-    referral_config: Arc<trace_commons_server::referral_config::ReferralConfig>,
+    pub referral_config: Arc<trace_commons_server::referral_config::ReferralConfig>,
     /// The key network marks are made under
     /// (`TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY`). Required, at boot,
     /// whenever the referral program or its bonus is configured; `None`
     /// otherwise, and then no mark is recorded.
-    referral_network_mark_key:
+    pub referral_network_mark_key:
         Option<Arc<trace_commons_server::referral_network::ReferralNetworkMarkKey>>,
     /// The first run's dollar estimate `GET /v1/public/first-run-estimate`
     /// serves: from the operator's two settings, validated at boot, or
@@ -1922,19 +1922,19 @@ pub struct AppState {
     /// writes, which the issuer reads as the claim ceiling. `None` writes no
     /// grant, so the device's claims keep the floor. A malformed value fails
     /// boot.
-    near_ai_signup_policy_template:
+    pub near_ai_signup_policy_template:
         Option<trace_commons_server::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
-    root: PathBuf,
+    pub root: PathBuf,
     /// #438: per-driver liveness, so a background loop that has been failing
     /// for days is visible as such instead of only as a repeating WARN.
     driver_liveness: Arc<DriverLivenessRegistry>,
-    tokens: Arc<BTreeMap<String, TenantAuth>>,
-    signed_token_verifier: Option<SharedTraceCommonsSignedTokenVerifier>,
+    pub tokens: Arc<BTreeMap<String, TenantAuth>>,
+    pub signed_token_verifier: Option<SharedTraceCommonsSignedTokenVerifier>,
     managed_eddsa_keyset_refresh: Option<TraceCommonsManagedEddsaKeysetRefreshConfig>,
-    require_eddsa_signed_tokens: bool,
+    pub require_eddsa_signed_tokens: bool,
     require_managed_eddsa_signed_tokens: bool,
     require_tenant_access_grants: bool,
-    tenant_policies: Arc<BTreeMap<String, TenantSubmissionPolicy>>,
+    pub tenant_policies: Arc<BTreeMap<String, TenantSubmissionPolicy>>,
     require_tenant_submission_policy: bool,
     pub db_mirror: Option<Arc<dyn Database>>,
     pipeline_service: Option<Arc<PipelineService>>,
@@ -2047,7 +2047,7 @@ pub struct AppState {
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
-    db_replay_export_reads: bool,
+    pub db_replay_export_reads: bool,
     db_replay_export_require_object_refs: bool,
     db_audit_reads: bool,
     db_tenant_policy_reads: bool,
@@ -2061,7 +2061,7 @@ pub struct AppState {
     require_postgres_trace_rls_ready: bool,
     postgres_runtime_role_sha256: Option<String>,
     require_derived_export_object_refs: bool,
-    object_primary_submit_review: bool,
+    pub object_primary_submit_review: bool,
     object_primary_replay_export: bool,
     object_primary_derived_exports: bool,
     require_db_reconciliation_clean: bool,
@@ -2087,10 +2087,10 @@ pub struct AppState {
     /// Deployment-wide budget of upload body bytes in flight, taken by
     /// [`authenticate_large_body_request`] for each upload by its declared
     /// size. Shared by every clone of the state.
-    large_body_bytes: Arc<tokio::sync::Semaphore>,
+    pub large_body_bytes: Arc<tokio::sync::Semaphore>,
     /// Upload body bytes each principal holds of [`Self::large_body_bytes`],
     /// and the most it may hold. Shared by every clone of the state.
-    large_body_principal_bytes: Arc<LargeBodyPrincipalBytes>,
+    pub large_body_principal_bytes: Arc<LargeBodyPrincipalBytes>,
     /// How long an upload body may go without a new chunk before
     /// [`authenticate_large_body_request`] refuses it
     /// ([`UPLOAD_BODY_IDLE_TIMEOUT`]; tests shorten it).
@@ -2227,8 +2227,8 @@ pub struct AppState {
     /// lifts no quarantine and never means the trace is clean.
     pub witness_bypass: Option<WitnessBypassConfig>,
     witness_capture_pin: Option<WitnessPin>,
-    admission: Option<admission::AdmissionConfig>,
-    account_admission: Option<admission::AccountAdmissionConfig>,
+    pub admission: Option<admission::AdmissionConfig>,
+    pub account_admission: Option<admission::AccountAdmissionConfig>,
     /// Optional narrow nonowner trust pool; the ingest source pool is unchanged.
     client_upload_trust_database: Option<Arc<dyn Database>>,
     /// A candidate earned-trust growth policy for the shadow evaluator. Never
@@ -2329,7 +2329,7 @@ pub struct AppState {
     /// present only when `TRACE_COMMONS_LEGACY_INVITE_LINK_ENABLED` is on.
     /// `None` keeps both link routes closed (503
     /// `legacy_invite_link_not_enabled`).
-    legacy_invite_link:
+    pub legacy_invite_link:
         Option<Arc<trace_commons_server::legacy_invite_link::LegacyInviteLinkSigner>>,
     /// Cross-trace dedup (shadow-only): a SEPARATE `UsearchVectorIndex`
     /// instance from the novelty index — sharing the novelty index would
@@ -2615,7 +2615,7 @@ struct TraceCreditCycleSchedulerConfig {
 }
 
 #[derive(Clone)]
-struct TraceCreditSettlementSchedulerConfig {
+pub struct TraceCreditSettlementSchedulerConfig {
     scope: CreditSettlementSchedulerScope,
     worker_token: SecretString,
     interval: StdDuration,
@@ -2630,7 +2630,7 @@ struct TraceCreditSettlementSchedulerConfig {
 }
 
 #[derive(Clone, Default)]
-enum CreditSettlementSchedulerScope {
+pub enum CreditSettlementSchedulerScope {
     #[default]
     Tenant,
     AllTenants {
@@ -2638,11 +2638,11 @@ enum CreditSettlementSchedulerScope {
     },
 }
 
-const CREDIT_SETTLEMENT_SCHEDULER_SCOPE_ENV: &str =
+pub const CREDIT_SETTLEMENT_SCHEDULER_SCOPE_ENV: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_SCOPE";
 const CREDIT_SETTLEMENT_TENANT_PAGE_LIMIT: usize = 100;
 
-fn internal_credit_settlement_actor(tenant_id: &str) -> TenantAuth {
+pub fn internal_credit_settlement_actor(tenant_id: &str) -> TenantAuth {
     TenantAuth {
         tenant_id: tenant_id.to_owned(),
         role: TokenRole::UtilityWorker,
@@ -3069,7 +3069,7 @@ impl ConfiguredTraceArtifactStore {
         }
     }
 
-    fn remote_service(
+    pub fn remote_service(
         config: TraceRemoteObjectStoreConfig,
         key: SecretString,
     ) -> anyhow::Result<Self> {
@@ -3320,7 +3320,7 @@ impl ConfiguredTraceArtifactStore {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TraceRemoteObjectStoreConfig {
+pub struct TraceRemoteObjectStoreConfig {
     provider: TraceRemoteObjectStoreProvider,
     bucket: String,
     kms_key_id: String,
@@ -3646,21 +3646,21 @@ impl TraceEncryptedObjectStoreKind {
 }
 
 #[derive(Debug, Clone)]
-struct TenantAuth {
+pub struct TenantAuth {
     tenant_id: String,
     role: TokenRole,
     /// Canonical method-bound principal (#209). Written on new submissions.
-    principal_ref: String,
+    pub principal_ref: String,
     /// Pre-#209 derivation for the same credential. Dual-read only — never
     /// written to new submissions, grants, or allowlists after this change.
-    legacy_principal_ref: Option<String>,
+    pub legacy_principal_ref: Option<String>,
     expires_at: Option<DateTime<Utc>>,
     auth_method: TraceAuthMethod,
     signed_claim_issuer: Option<String>,
     signed_claim_audiences: BTreeSet<String>,
     signed_claim_subject: Option<String>,
-    allowed_consent_scopes: BTreeSet<ConsentScope>,
-    allowed_uses: BTreeSet<TraceAllowedUse>,
+    pub allowed_consent_scopes: BTreeSet<ConsentScope>,
+    pub allowed_uses: BTreeSet<TraceAllowedUse>,
 }
 
 impl TenantAuth {
@@ -3669,7 +3669,7 @@ impl TenantAuth {
         std::iter::once(self.principal_ref.as_str()).chain(self.legacy_principal_ref.as_deref())
     }
 
-    fn matches_stored_principal(&self, stored_principal_ref: &str) -> bool {
+    pub fn matches_stored_principal(&self, stored_principal_ref: &str) -> bool {
         self.principal_aliases()
             .any(|principal_ref| principal_ref == stored_principal_ref)
     }
@@ -3728,7 +3728,7 @@ impl TenantCtx {
     /// whose `principal_ref` and `sub` disagree falls back rather than
     /// borrowing `sub`. `principal_ref()` itself is unchanged: it remains the
     /// ownership key every submission row is written under.
-    fn account_principal_ref(&self) -> String {
+    pub fn account_principal_ref(&self) -> String {
         self.device_principal_ref()
             .unwrap_or_else(|| self.auth.principal_ref.clone())
     }
@@ -3865,7 +3865,7 @@ fn method_bound_principal_ref(method: TraceAuthMethod, identity_material: &str) 
     principal_storage_ref(&method_bound_principal_material(method, identity_material))
 }
 
-fn static_token_principal_refs(token: &str) -> (String, String) {
+pub fn static_token_principal_refs(token: &str) -> (String, String) {
     (
         method_bound_principal_ref(TraceAuthMethod::StaticToken, token),
         principal_storage_ref(token),
@@ -3891,8 +3891,8 @@ fn signed_claim_principal_refs(tenant_id: &str, actor_ref: &str) -> (String, Str
 /// deleted because `cargo check --bins` does not compile tests, so without
 /// the gate it reads as dead code under `-D warnings` while 201 call sites in
 /// the extracted test module depend on it.
-#[cfg(test)]
-fn static_token_principal_ref(token: &str) -> String {
+#[cfg(any(test, feature = "test-support"))]
+pub fn static_token_principal_ref(token: &str) -> String {
     static_token_principal_refs(token).0
 }
 
@@ -3920,7 +3920,7 @@ struct TraceCommonsSignedEddsaKeysetEnvConfig {
 }
 
 #[derive(Clone)]
-struct TraceCommonsSignedTokenVerifier {
+pub struct TraceCommonsSignedTokenVerifier {
     default_secret: Option<SecretString>,
     keyed_secrets: BTreeMap<String, SecretString>,
     default_eddsa_public_key: Option<TraceCommonsSignedEddsaPublicKey>,
@@ -3936,7 +3936,7 @@ struct TraceCommonsSignedTokenVerifier {
 }
 
 #[derive(Debug, Clone)]
-struct TraceCommonsSignedEddsaPublicKey {
+pub struct TraceCommonsSignedEddsaPublicKey {
     pem: String,
     not_before: Option<DateTime<Utc>>,
     not_after: Option<DateTime<Utc>>,
@@ -4003,16 +4003,16 @@ impl TraceCommonsAudienceClaim {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-struct TenantSubmissionPolicy {
+pub struct TenantSubmissionPolicy {
     #[serde(default)]
-    allowed_consent_scopes: BTreeSet<ConsentScope>,
+    pub allowed_consent_scopes: BTreeSet<ConsentScope>,
     #[serde(default)]
-    allowed_uses: BTreeSet<TraceAllowedUse>,
+    pub allowed_uses: BTreeSet<TraceAllowedUse>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum TokenRole {
+pub enum TokenRole {
     Contributor,
     Reviewer,
     Admin,
@@ -8002,7 +8002,7 @@ fn parse_trace_credit_cycle_scheduler_config_from_env()
     }))
 }
 
-fn parse_trace_credit_settlement_scheduler_config_from_env()
+pub fn parse_trace_credit_settlement_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceCreditSettlementSchedulerConfig>> {
     let enabled = env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED);
     let worker_token = optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN)?;
@@ -8739,7 +8739,7 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
 ///
 /// Routes join ONLY through [`account_routes::AccountRoutes`], which records
 /// each `(method, path)`.
-fn authenticated_account_surface(
+pub fn authenticated_account_surface(
     state: Arc<AppState>,
 ) -> account_routes::AuthenticatedAccountRoutes {
     let (general, rewards) = account_route_groups();
@@ -10044,7 +10044,7 @@ fn admit_submit_principal(
 /// body of unknown length can be that large. `None` when the length is over
 /// `limit`: that request is refused outright rather than buffered up to the
 /// limit first.
-fn large_body_weight(headers: &HeaderMap, exact_length: Option<u64>, limit: usize) -> Option<u32> {
+pub fn large_body_weight(headers: &HeaderMap, exact_length: Option<u64>, limit: usize) -> Option<u32> {
     // Every upload ceiling fits a u32 (asserted at compile time).
     let limit = limit.min(MAX_INGEST_BODY_BYTES) as u64;
     let declared = headers
@@ -10070,7 +10070,7 @@ fn large_body_byte_permit(
 /// same weight [`large_body_byte_permit`] takes, and the most one principal
 /// may hold at once (`cap`). Entries exist only while bytes are held, so the
 /// table is bounded by the uploads in flight.
-struct LargeBodyPrincipalBytes {
+pub struct LargeBodyPrincipalBytes {
     cap: u64,
     held: std::sync::Mutex<HashMap<String, u64>>,
 }
@@ -10167,14 +10167,14 @@ const LARGE_BODY_GLOBAL_CONCURRENCY: u32 = 32;
 /// encrypted artifact), so resident memory for uploads is a multiple of this
 /// budget, not the budget itself; size it against the host's memory with that
 /// multiple, measured in `large_envelope_tests`.
-const LARGE_BODY_GLOBAL_BYTES: usize = MAX_INGEST_BODY_BYTES + 128 * 1024 * 1024;
+pub const LARGE_BODY_GLOBAL_BYTES: usize = MAX_INGEST_BODY_BYTES + 128 * 1024 * 1024;
 /// A budget below one maximal body would refuse that upload forever.
 const _: () = assert!(LARGE_BODY_GLOBAL_BYTES >= MAX_INGEST_BODY_BYTES);
 /// Upload weights are `u32` permits.
 const _: () = assert!(MAX_INGEST_BODY_BYTES <= u32::MAX as usize);
 const LARGE_BODY_GLOBAL_KEY: &str = "large-body-global";
 
-fn large_body_principal_key(
+pub fn large_body_principal_key(
     tenant_id: &str,
     auth_method: TraceAuthMethod,
     principal_ref: &str,
@@ -10301,7 +10301,7 @@ fn parse_token_secret_and_expiry(raw: &str) -> anyhow::Result<(String, Option<Da
     Ok((token.to_string(), expires_at))
 }
 
-fn shared_signed_token_verifier(
+pub fn shared_signed_token_verifier(
     verifier: TraceCommonsSignedTokenVerifier,
 ) -> SharedTraceCommonsSignedTokenVerifier {
     Arc::new(RwLock::new(verifier))
@@ -12604,7 +12604,7 @@ fn trace_credit_cycle_scheduler_config_error(error: (StatusCode, Json<ApiError>)
     )
 }
 
-async fn validate_trace_credit_settlement_scheduler_config(
+pub async fn validate_trace_credit_settlement_scheduler_config(
     state: &AppState,
     config: Option<&TraceCreditSettlementSchedulerConfig>,
 ) -> anyhow::Result<()> {
@@ -13642,7 +13642,7 @@ fn validate_retention_policy_id(policy_id: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-fn insert_token(
+pub fn insert_token(
     tokens: &mut BTreeMap<String, TenantAuth>,
     tenant_id: &str,
     token: &str,
@@ -13652,7 +13652,7 @@ fn insert_token(
         .expect("test tenant token inserts");
 }
 
-fn insert_token_with_expiry(
+pub fn insert_token_with_expiry(
     tokens: &mut BTreeMap<String, TenantAuth>,
     tenant_id: &str,
     token: &str,
@@ -13762,7 +13762,7 @@ async fn health_handler() -> Json<HealthResponse> {
 }
 
 #[derive(Debug, Deserialize)]
-struct TraceTenantPolicyRequest {
+pub struct TraceTenantPolicyRequest {
     policy_version: String,
     #[serde(default)]
     allowed_consent_scopes: Vec<ConsentScope>,
@@ -13771,7 +13771,7 @@ struct TraceTenantPolicyRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct TraceTenantAccessGrantRequest {
+pub struct TraceTenantAccessGrantRequest {
     grant_id: Option<Uuid>,
     principal_ref: String,
     role: StorageTraceTenantAccessGrantRole,
@@ -13816,7 +13816,7 @@ struct DeviceKeysQuery {
 }
 
 #[derive(Debug, Serialize)]
-struct TraceTenantPolicyResponse {
+pub struct TraceTenantPolicyResponse {
     tenant_id: String,
     policy_version: String,
     allowed_consent_scopes: Vec<String>,
@@ -13827,7 +13827,7 @@ struct TraceTenantPolicyResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct TraceTenantAccessGrantResponse {
+pub struct TraceTenantAccessGrantResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     grant_id: Uuid,
@@ -14836,7 +14836,7 @@ async fn get_tenant_policy_handler(
     Ok(Json(response))
 }
 
-async fn put_tenant_policy_handler(
+pub async fn put_tenant_policy_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(request): Json<TraceTenantPolicyRequest>,
@@ -14956,7 +14956,7 @@ async fn tenant_access_grants_handler(
     Ok(Json(summaries))
 }
 
-async fn create_tenant_access_grant_handler(
+pub async fn create_tenant_access_grant_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(request): Json<TraceTenantAccessGrantRequest>,
@@ -17123,7 +17123,7 @@ async fn revoke_trace_body_handler(
     revoke_submission(&state, &headers, body.submission_id, body.reason.as_deref()).await
 }
 
-async fn revoke_submission(
+pub async fn revoke_submission(
     state: &AppState,
     headers: &HeaderMap,
     submission_id: Uuid,
@@ -18422,7 +18422,7 @@ async fn delete_community_profile_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn credit_handler(
+pub async fn credit_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Json<TraceCommonsTenantCreditResponse>> {
@@ -18507,7 +18507,7 @@ async fn near_ai_measurements_handler(
     ))
 }
 
-async fn credit_events_handler(
+pub async fn credit_events_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<TraceCommonsCreditLedgerRecord>>> {
@@ -18537,7 +18537,7 @@ async fn credit_events_handler(
     Ok(Json(credit_events))
 }
 
-async fn submission_status_handler(
+pub async fn submission_status_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<TraceSubmissionStatusRequest>,
@@ -20003,8 +20003,8 @@ fn rotated_cookie_max_age(
     cookie::time::Duration::seconds(remaining.min(ACCOUNT_SESSION_TTL_DAYS * 24 * 60 * 60))
 }
 
-#[cfg(test)]
-async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult<AccountCtx> {
+#[cfg(any(test, feature = "test-support"))]
+pub async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult<AccountCtx> {
     // Thin wrapper that DROPS any rotation outcome. Retained so direct unit-test
     // call sites (which assert resolver semantics, not cookie attach) keep working.
     // The PRODUCTION attach point is `account_auth_middleware`, which calls
@@ -20752,7 +20752,7 @@ fn spawn_account_content_read_failure_audit(
     }))
 }
 
-async fn account_trace_content_handler(
+pub async fn account_trace_content_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
     AxumPath(submission_id): AxumPath<Uuid>,
@@ -21886,7 +21886,7 @@ async fn mint_login_link_handler(
 /// analogue of `Set-Cookie`, emitted by `account_auth_middleware` on the one
 /// response where rotation fired, to the already-authenticated caller that
 /// presented the old token.
-const ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER: &str =
+pub const ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER: &str =
     trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER;
 /// The rotated native session's new expiry, sent beside the rotated token.
 const ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER: &str =
@@ -22076,7 +22076,7 @@ use pipeline_activation::{
 /// falls through to the ordinary post-login redirect: the human's browser login
 /// genuinely succeeded, so denying it would be wrong, and the native app simply
 /// times out waiting on its listener and reports a failed sign-in.
-fn issue_native_authorization_code(
+pub fn issue_native_authorization_code(
     state: &AppState,
     request_id: &str,
     tenant_id: &str,
@@ -22266,7 +22266,7 @@ const ACCOUNT_SESSION_TTL_DAYS: i64 = 7;
 /// browser accepts it only with `Secure`, `Path=/` and no `Domain`, so the
 /// cookie can be neither set nor shadowed from any other host. Every
 /// `Set-Cookie` for this name must therefore keep those three attributes.
-const ACCOUNT_SESSION_COOKIE: &str = "__Host-tc_account_session";
+pub const ACCOUNT_SESSION_COOKIE: &str = "__Host-tc_account_session";
 
 /// The session cookie's name before it took the `__Host-` prefix. It is never
 /// read: a request that carries only this name is unauthenticated, and the
@@ -22515,7 +22515,7 @@ impl Default for SubmitPrincipalLimits {
 /// `u32::MAX`. Unset is [`LARGE_BODY_GLOBAL_BYTES`]. Anything else refuses
 /// startup, naming the variable: a budget under one maximal body would turn
 /// the largest accepted upload into a permanent 429.
-fn parse_large_body_byte_budget(configured: Option<&str>) -> anyhow::Result<usize> {
+pub fn parse_large_body_byte_budget(configured: Option<&str>) -> anyhow::Result<usize> {
     let Some(configured) = configured else {
         return Ok(LARGE_BODY_GLOBAL_BYTES);
     };
@@ -22538,7 +22538,7 @@ fn parse_large_body_byte_budget(configured: Option<&str>) -> anyhow::Result<usiz
 /// the budget, but never less than one maximal upload, so the largest
 /// accepted upload always fits a principal's share. Anything else refuses
 /// startup, naming the variable.
-fn parse_large_body_principal_byte_share(
+pub fn parse_large_body_principal_byte_share(
     configured: Option<&str>,
     budget: usize,
 ) -> anyhow::Result<usize> {
@@ -23858,7 +23858,7 @@ async fn account_near_enroll_start_handler(
 /// access key; `signature` is the base64 NEP-413 signature; `label` is an
 /// optional user-supplied display name.
 #[derive(serde::Deserialize)]
-struct AccountNearEnrollFinishBody {
+pub struct AccountNearEnrollFinishBody {
     #[serde(rename = "accountId")]
     account_id: String,
     #[serde(rename = "publicKey")]
@@ -23875,7 +23875,7 @@ struct AccountNearEnrollFinishBody {
 /// the stashed challenge, then performs the BINDING CHECK: the signing key must
 /// be a FullAccess key of the named NEAR account (a non-FullAccess key or any RPC
 /// error -> 400, no row). Only then is the identity persisted. Audit is hash-only.
-async fn account_near_enroll_finish_handler(
+pub async fn account_near_enroll_finish_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
     headers: HeaderMap,
@@ -26568,7 +26568,7 @@ struct TraceCreditLedgerAppendRequest {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum TraceCreditLedgerEventType {
+pub enum TraceCreditLedgerEventType {
     BenchmarkConversion,
     RegressionCatch,
     TrainingUtility,
@@ -26629,7 +26629,7 @@ impl TraceCreditLedgerEventType {
 }
 
 #[derive(Debug, Deserialize)]
-struct TraceUtilityCreditJobRequest {
+pub struct TraceUtilityCreditJobRequest {
     event_type: TraceCreditLedgerEventType,
     credit_points_delta: f32,
     reason: String,
@@ -26638,14 +26638,14 @@ struct TraceUtilityCreditJobRequest {
 }
 
 #[derive(Debug, Serialize)]
-struct TraceUtilityCreditJobResponse {
+pub struct TraceUtilityCreditJobResponse {
     tenant_id: String,
     tenant_storage_ref: String,
     event_type: TraceCreditLedgerEventType,
     credit_points_delta: f32,
     external_ref: String,
     requested_count: usize,
-    appended_count: usize,
+    pub appended_count: usize,
     skipped_existing_count: usize,
 }
 
@@ -26924,7 +26924,7 @@ struct TraceCreditCycleWorkerRunResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TraceCreditSettlementBatchRecord {
+pub struct TraceCreditSettlementBatchRecord {
     settlement_batch_id: Uuid,
     tenant_id: String,
     tenant_storage_ref: String,
@@ -28794,7 +28794,7 @@ async fn append_credit_event_handler(
     Ok(Json(event))
 }
 
-async fn utility_credit_handler(
+pub async fn utility_credit_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<TraceUtilityCreditJobRequest>,
@@ -45106,7 +45106,7 @@ fn clear_review_lease_metadata(record: &mut TraceCommonsSubmissionRecord) {
 }
 
 #[derive(Debug, Deserialize)]
-struct DatasetExportQuery {
+pub struct DatasetExportQuery {
     limit: Option<usize>,
     purpose: Option<String>,
     status: Option<TraceCorpusStatus>,
@@ -45114,7 +45114,7 @@ struct DatasetExportQuery {
     consent_scope: Option<String>,
 }
 
-async fn dataset_replay_handler(
+pub async fn dataset_replay_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<DatasetExportQuery>,
@@ -47552,15 +47552,15 @@ async fn run_trace_credit_settlement_scheduler_tick(
 }
 
 #[derive(Default)]
-struct AllTenantCreditSettlementSummary {
-    tenants_checked: usize,
-    tenants_failed: usize,
-    settled_source_event_count: usize,
+pub struct AllTenantCreditSettlementSummary {
+    pub tenants_checked: usize,
+    pub tenants_failed: usize,
+    pub settled_source_event_count: usize,
 }
 
 /// Deployment-only entry point; no HTTP route accepts this scope or actor.
 /// The existing kernel remains authoritative for financial eligibility.
-async fn run_all_tenant_credit_settlement_tick(
+pub async fn run_all_tenant_credit_settlement_tick(
     state: Arc<AppState>,
     config: &TraceCreditSettlementSchedulerConfig,
     tenant_limit: usize,
@@ -55892,7 +55892,7 @@ async fn persist_benchmark_lifecycle_artifact(
 }
 
 #[derive(Debug, Deserialize)]
-struct RankerTrainingExportQuery {
+pub struct RankerTrainingExportQuery {
     limit: Option<usize>,
     #[serde(default)]
     purpose: Option<String>,
@@ -55904,7 +55904,7 @@ struct RankerTrainingExportQuery {
     privacy_risk: Option<ResidualPiiRisk>,
 }
 
-async fn ranker_training_candidates_handler(
+pub async fn ranker_training_candidates_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<RankerTrainingExportQuery>,
@@ -57258,19 +57258,19 @@ struct TraceVectorIndexResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct TraceGateEvaluateWorkerRequest {
+pub struct TraceGateEvaluateWorkerRequest {
     submission_id: Uuid,
 }
 
 #[derive(Debug, Serialize)]
-struct TraceGateEvaluateWorkerResponse {
+pub struct TraceGateEvaluateWorkerResponse {
     tenant_id: String,
     submission_id: Uuid,
     decision_id: Uuid,
     gate_policy_version: String,
     gate_version_hash: String,
-    perplexity_passed: bool,
-    novelty_passed: bool,
+    pub perplexity_passed: bool,
+    pub novelty_passed: bool,
     /// UUID of the inserted vector index entry. `Some` only when both gates
     /// passed and the embedding was inserted into the gate service's vector
     /// index. Operators who need to call `invalidate_vector_entry` later
@@ -57282,13 +57282,13 @@ struct TraceGateEvaluateWorkerResponse {
     /// idempotent helper). `false` when the gate failed, ABAC withheld credit,
     /// the production-gate guard refused, or an idempotency hit returned a
     /// previously-emitted event (`skipped_existing`).
-    credit_emitted: bool,
+    pub credit_emitted: bool,
     /// Phase A5: stable label-only reason explaining why credit was withheld
     /// despite a passing gate. `None` on gate-fail rows and on successful
     /// emit rows. Values: `"policy_mismatch"`, `"central_issuer_denied"`,
     /// `"non_production_gate"`, `"submission_not_accepted"`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    credit_withheld_reason: Option<String>,
+    pub credit_withheld_reason: Option<String>,
     /// #444: how much of the trace this decision read, in words, when it read
     /// less than all of it. Absent for a fully scored trace -- a caveat on
     /// every response is noise. Derived from the same three columns the score
@@ -60489,7 +60489,7 @@ async fn score_one_submission(
 /// future deployments will trigger it post-ingest or post-review. The
 /// vector-worker bearer-token gate is reused because the gate evaluation
 /// is the upstream step of the same indexing pipeline.
-async fn gate_evaluate_worker_handler(
+pub async fn gate_evaluate_worker_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<TraceGateEvaluateWorkerRequest>,
@@ -62210,7 +62210,7 @@ fn apply_tenant_access_grant_scope(
     )
 }
 
-fn restrict_effective_allowlist<T>(
+pub fn restrict_effective_allowlist<T>(
     current: &mut BTreeSet<T>,
     grant_values: BTreeSet<T>,
     empty_message: &'static str,
@@ -62873,7 +62873,7 @@ fn enforce_scoped_token_export_policy(
     enforce_scoped_token_required_use(tenant, surface, required_use)
 }
 
-fn enforce_scoped_token_requested_scope(
+pub fn enforce_scoped_token_requested_scope(
     tenant: &TenantAuth,
     surface: &str,
     requested_scope: ConsentScope,
@@ -62895,7 +62895,7 @@ fn enforce_scoped_token_requested_scope(
     Ok(())
 }
 
-fn enforce_scoped_token_required_use(
+pub fn enforce_scoped_token_required_use(
     tenant: &TenantAuth,
     surface: &str,
     required_use: TraceAllowedUse,
@@ -63252,7 +63252,7 @@ fn ensure_record_matches_privileged_action_policy_abac(
 /// signed-claim and privileged-action policy ceilings. Empty lists mean
 /// unrestricted on both sides, matching the runtime policy/grant consumers:
 /// an empty target therefore exceeds any nonempty ceiling for that dimension.
-fn ensure_action_target_matches_privileged_action_policy_abac(
+pub fn ensure_action_target_matches_privileged_action_policy_abac(
     target_scopes: &BTreeSet<ConsentScope>,
     target_uses: &BTreeSet<TraceAllowedUse>,
     tenant: &TenantAuth,
@@ -63406,7 +63406,7 @@ async fn ensure_maintenance_purge_matches_privileged_action_policy(
     Ok(())
 }
 
-fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantAuth> {
+pub fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<TenantAuth> {
     let authorization = headers
         .get(AUTHORIZATION)
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "missing bearer token"))?
@@ -63704,7 +63704,7 @@ fn require_admin(auth: &TenantAuth) -> ApiResult<()> {
     }
 }
 
-fn can_access_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecord) -> bool {
+pub fn can_access_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecord) -> bool {
     auth.role.can_review() || principal_owns_submission(auth, record)
 }
 
@@ -63717,14 +63717,14 @@ fn can_access_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecor
 /// `principal_owns_submission_ref` predicate `can_access_submission` itself
 /// resolves to (through `principal_owns_submission`), so the two can never
 /// drift apart.
-fn can_access_submission_ref(auth: &TenantAuth, auth_principal_ref: &str) -> bool {
+pub fn can_access_submission_ref(auth: &TenantAuth, auth_principal_ref: &str) -> bool {
     auth.role.can_review() || principal_owns_submission_ref(auth, auth_principal_ref)
 }
 
 /// Owned quarantined submissions may be superseded by a corrected envelope on
 /// the same `submission_id` (#214). Accepted / rejected / revoked rows stay
 /// classic-idempotent; reviewers use the dedicated rescrub route instead.
-fn principal_can_remediate_quarantined(
+pub fn principal_can_remediate_quarantined(
     auth: &TenantAuth,
     record: &TraceCommonsSubmissionRecord,
 ) -> bool {
@@ -63732,11 +63732,11 @@ fn principal_can_remediate_quarantined(
         && principal_can_self_revoke_submission(auth, record)
 }
 
-fn can_access_storage_submission(auth: &TenantAuth, record: &StorageTraceSubmissionRecord) -> bool {
+pub fn can_access_storage_submission(auth: &TenantAuth, record: &StorageTraceSubmissionRecord) -> bool {
     auth.role.can_review() || principal_owns_storage_submission(auth, record)
 }
 
-fn principal_owns_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecord) -> bool {
+pub fn principal_owns_submission(auth: &TenantAuth, record: &TraceCommonsSubmissionRecord) -> bool {
     principal_owns_submission_ref(auth, &record.auth_principal_ref)
 }
 
@@ -63747,21 +63747,21 @@ fn principal_owns_submission_ref(auth: &TenantAuth, auth_principal_ref: &str) ->
     auth.matches_stored_principal(auth_principal_ref)
 }
 
-fn principal_owns_storage_submission(
+pub fn principal_owns_storage_submission(
     auth: &TenantAuth,
     record: &StorageTraceSubmissionRecord,
 ) -> bool {
     principal_owns_submission_ref(auth, &record.auth_principal_ref)
 }
 
-fn principal_can_self_revoke_submission(
+pub fn principal_can_self_revoke_submission(
     auth: &TenantAuth,
     record: &TraceCommonsSubmissionRecord,
 ) -> bool {
     principal_owns_submission_ref(auth, &record.auth_principal_ref)
 }
 
-fn principal_can_self_revoke_storage_submission(
+pub fn principal_can_self_revoke_storage_submission(
     auth: &TenantAuth,
     record: &StorageTraceSubmissionRecord,
 ) -> bool {
@@ -63885,7 +63885,7 @@ fn visible_credit_events_for_account(
         .collect()
 }
 
-fn can_access_credit_event(auth: &TenantAuth, event: &TraceCommonsCreditLedgerRecord) -> bool {
+pub fn can_access_credit_event(auth: &TenantAuth, event: &TraceCommonsCreditLedgerRecord) -> bool {
     auth.role.can_review() || auth.matches_stored_principal(&event.auth_principal_ref)
 }
 
@@ -66430,7 +66430,7 @@ fn trace_envelope_artifact_object_id(
     )
 }
 
-fn trace_envelope_object_key(
+pub fn trace_envelope_object_key(
     tenant_id: &str,
     status: TraceCorpusStatus,
     submission_id: Uuid,
@@ -70023,7 +70023,7 @@ fn serde_storage_string<T: Serialize>(value: &T) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("storage enum did not serialize to a string"))
 }
 
-fn write_submission_record(
+pub fn write_submission_record(
     root: &Path,
     record: &TraceCommonsSubmissionRecord,
 ) -> anyhow::Result<()> {
@@ -70031,7 +70031,7 @@ fn write_submission_record(
     file_witness::write_record(root, record)
 }
 
-fn submission_metadata_path(root: &Path, tenant_id: &str, submission_id: Uuid) -> PathBuf {
+pub fn submission_metadata_path(root: &Path, tenant_id: &str, submission_id: Uuid) -> PathBuf {
     let tenant_key = tenant_storage_key(tenant_id);
     root.join("tenants")
         .join(tenant_key)
@@ -70039,7 +70039,7 @@ fn submission_metadata_path(root: &Path, tenant_id: &str, submission_id: Uuid) -
         .join(format!("{submission_id}.json"))
 }
 
-fn read_submission_record(
+pub fn read_submission_record(
     root: &Path,
     tenant_id: &str,
     submission_id: Uuid,
@@ -70078,7 +70078,7 @@ fn ensure_submission_record_tenant(
     Ok(())
 }
 
-fn read_envelope_by_record(
+pub fn read_envelope_by_record(
     state: &AppState,
     record: &TraceCommonsSubmissionRecord,
 ) -> anyhow::Result<TraceContributionEnvelope> {
@@ -71744,7 +71744,7 @@ fn read_all_derived_records_for_backfill(
     Ok(read)
 }
 
-fn append_credit_event(
+pub fn append_credit_event(
     root: &Path,
     tenant_id: &str,
     event: &TraceCommonsCreditLedgerRecord,
@@ -71773,7 +71773,7 @@ fn credit_ledger_path(root: &Path, tenant_id: &str) -> PathBuf {
         .join("events.jsonl")
 }
 
-fn read_all_credit_events(
+pub fn read_all_credit_events(
     root: &Path,
     tenant_id: &str,
 ) -> anyhow::Result<Vec<TraceCommonsCreditLedgerRecord>> {
@@ -71893,7 +71893,7 @@ fn credit_settlement_batches_path(root: &Path, tenant_id: &str) -> PathBuf {
         .join("batches.jsonl")
 }
 
-fn append_credit_settlement_batch(
+pub fn append_credit_settlement_batch(
     root: &Path,
     tenant_id: &str,
     batch: &TraceCreditSettlementBatchRecord,
@@ -72821,7 +72821,7 @@ fn write_revocation(root: &Path, tombstone: &TraceCommonsRevocation) -> anyhow::
     write_json_file(&path, tombstone, "trace revocation tombstone")
 }
 
-fn read_revocation(
+pub fn read_revocation(
     root: &Path,
     tenant_id: &str,
     submission_id: Uuid,
@@ -74567,7 +74567,7 @@ async fn append_derived_source_read_audits(
 // Revalidate against the same metadata authority used for replay selection.
 // An optional DB mirror must neither override current file expiry nor turn an
 // otherwise file-backed export into a DB-only operation.
-async fn revalidate_replay_export_sources(
+pub async fn revalidate_replay_export_sources(
     state: &AppState,
     tenant: &TenantAuth,
     submission_ids: &[Uuid],
@@ -74587,7 +74587,7 @@ async fn revalidate_replay_export_sources(
 // Derived selection uses the reviewer metadata authority. Keep the existing
 // DB/provenance checks, then check file authority AFTER those awaited lookups
 // so an optional stale mirror cannot hide a deadline or revocation change.
-async fn revalidate_derived_export_sources(
+pub async fn revalidate_derived_export_sources(
     state: &AppState,
     tenant: &TenantAuth,
     submission_ids: &[Uuid],
@@ -74629,7 +74629,7 @@ fn revalidate_file_export_sources(
     Ok(())
 }
 
-async fn revalidate_db_export_sources(
+pub async fn revalidate_db_export_sources(
     state: &AppState,
     tenant: &TenantAuth,
     submission_ids: &[Uuid],
@@ -75029,7 +75029,7 @@ fn normalize_audit_event_metadata(
     Ok(metadata)
 }
 
-fn read_all_audit_events(
+pub fn read_all_audit_events(
     root: &Path,
     tenant_id: &str,
 ) -> anyhow::Result<Vec<TraceCommonsAuditEvent>> {
@@ -79950,7 +79950,7 @@ impl std::io::Write for Sha256CountingWriter {
 
 /// `sha256_prefixed` and the length of `serde_json::to_string_pretty(value)`,
 /// without building that string.
-fn pretty_json_sha256_prefixed_and_len<T: Serialize + ?Sized>(
+pub fn pretty_json_sha256_prefixed_and_len<T: Serialize + ?Sized>(
     value: &T,
 ) -> serde_json::Result<(String, u64)> {
     let mut writer = Sha256CountingWriter::default();
@@ -79966,7 +79966,7 @@ fn tenant_storage_key(tenant_id: &str) -> String {
     hex::encode(&digest[..16])
 }
 
-fn sha256_prefixed(input: &str) -> String {
+pub fn sha256_prefixed(input: &str) -> String {
     let digest = Sha256::digest(input.as_bytes());
     format!("sha256:{}", hex::encode(digest))
 }
@@ -79997,19 +79997,19 @@ fn principal_storage_ref(token: &str) -> String {
     format!("principal_{}", sha256_prefixed(token))
 }
 
-fn legacy_principal_ref() -> String {
+pub fn legacy_principal_ref() -> String {
     "principal_legacy".to_string()
 }
 
-fn tenant_storage_ref(tenant_id: &str) -> String {
+pub fn tenant_storage_ref(tenant_id: &str) -> String {
     format!("tenant_sha256:{}", tenant_storage_key(tenant_id))
 }
 
-type ApiResult<T> = Result<T, (StatusCode, Json<ApiError>)>;
+pub type ApiResult<T> = Result<T, (StatusCode, Json<ApiError>)>;
 
 #[derive(Debug, Serialize)]
 pub struct ApiError {
-    error: String,
+    pub error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     retry_after_seconds: Option<i64>,
     /// The blockers of a promotion decision that is not ready, labels only:
@@ -80250,7 +80250,7 @@ impl std::error::Error for TracePostgresRlsDiagnosticsUnavailable {}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum TraceCorpusStatus {
+pub enum TraceCorpusStatus {
     Accepted,
     Quarantined,
     // Held state: the trace is out of consumer/export/credit reach pending the
@@ -80279,21 +80279,21 @@ impl TraceCorpusStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TraceCommonsSubmissionRecord {
+pub struct TraceCommonsSubmissionRecord {
     /// Private original source proof, never part of an envelope or receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     witness_evidence: Option<file_witness::Evidence>,
     tenant_id: String,
     tenant_storage_ref: String,
     #[serde(default = "legacy_principal_ref")]
-    auth_principal_ref: String,
+    pub auth_principal_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     submitted_tenant_scope_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     contributor_pseudonym: Option<String>,
     submission_id: Uuid,
     trace_id: Uuid,
-    status: TraceCorpusStatus,
+    pub status: TraceCorpusStatus,
     privacy_risk: ResidualPiiRisk,
     submission_score: f32,
     credit_points_pending: f32,
@@ -80304,7 +80304,7 @@ struct TraceCommonsSubmissionRecord {
     allowed_uses: Vec<TraceAllowedUse>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     redaction_counts: BTreeMap<String, u32>,
-    received_at: DateTime<Utc>,
+    pub received_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     review_assigned_to_principal_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -80316,7 +80316,7 @@ struct TraceCommonsSubmissionRecord {
     #[serde(default = "default_retention_policy_id")]
     retention_policy_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     purged_at: Option<DateTime<Utc>>,
     /// Allowlisted label for why the submission is in its current status.
@@ -80329,7 +80329,7 @@ struct TraceCommonsSubmissionRecord {
     /// `None` means not recorded (every record written before V51), never
     /// "no condition held".
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    residual_risk_basis: Option<Vec<String>>,
+    pub residual_risk_basis: Option<Vec<String>>,
     object_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     artifact_receipt: Option<EncryptedTraceArtifactReceipt>,
@@ -80349,7 +80349,7 @@ impl TraceCommonsSubmissionRecord {
         )
     }
 
-    fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
+    pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
         self.expires_at.is_some_and(|expires_at| expires_at <= now)
             && !matches!(
                 self.status,
@@ -80361,7 +80361,7 @@ impl TraceCommonsSubmissionRecord {
         self.is_export_eligible_at(Utc::now())
     }
 
-    fn is_export_eligible_at(&self, now: DateTime<Utc>) -> bool {
+    pub fn is_export_eligible_at(&self, now: DateTime<Utc>) -> bool {
         self.status == TraceCorpusStatus::Accepted
             && self.expires_at.is_none_or(|deadline| deadline > now)
     }
@@ -80412,14 +80412,14 @@ struct TraceCommonsDerivedRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TraceCommonsCreditLedgerRecord {
-    event_id: Uuid,
+pub struct TraceCommonsCreditLedgerRecord {
+    pub event_id: Uuid,
     tenant_id: String,
     tenant_storage_ref: String,
-    submission_id: Uuid,
+    pub submission_id: Uuid,
     trace_id: Uuid,
     auth_principal_ref: String,
-    event_type: TraceCreditLedgerEventType,
+    pub event_type: TraceCreditLedgerEventType,
     credit_points_delta: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
@@ -80800,15 +80800,15 @@ fn trace_review_escalation(
 }
 
 #[derive(Debug, Serialize)]
-struct TraceReplayDatasetExport {
+pub struct TraceReplayDatasetExport {
     tenant_id: String,
     tenant_storage_ref: String,
     export_id: Uuid,
     audit_event_id: Uuid,
     created_at: DateTime<Utc>,
-    item_count: usize,
+    pub item_count: usize,
     manifest: TraceReplayExportManifest,
-    items: Vec<TraceReplayDatasetItem>,
+    pub items: Vec<TraceReplayDatasetItem>,
 }
 
 #[derive(Debug, Serialize)]
@@ -81205,7 +81205,7 @@ struct TraceReplayExportFilters {
 }
 
 #[derive(Debug, Serialize)]
-struct TraceReplayDatasetItem {
+pub struct TraceReplayDatasetItem {
     submission_id: Uuid,
     trace_id: Uuid,
     schema_version: String,
@@ -81858,16 +81858,16 @@ fn benchmark_candidate_passes_structural_evaluation(candidate: &TraceBenchmarkCa
 }
 
 #[derive(Debug, Serialize)]
-struct TraceRankerTrainingCandidateExport {
+pub struct TraceRankerTrainingCandidateExport {
     tenant_id: String,
     tenant_storage_ref: String,
     export_id: Uuid,
     audit_event_id: Uuid,
     purpose: String,
     generated_at: DateTime<Utc>,
-    item_count: usize,
+    pub item_count: usize,
     source_item_list_hash: String,
-    candidates: Vec<TraceRankerTrainingCandidate>,
+    pub candidates: Vec<TraceRankerTrainingCandidate>,
 }
 
 #[derive(Debug, Serialize)]
@@ -81884,7 +81884,7 @@ struct TraceRankerTrainingPairExport {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct TraceRankerTrainingCandidate {
+pub struct TraceRankerTrainingCandidate {
     submission_id: Uuid,
     trace_id: Uuid,
     #[serde(skip)]
@@ -83170,7 +83170,7 @@ fn record_reader_parity(
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TraceCommonsRevocation {
+pub struct TraceCommonsRevocation {
     tenant_id: String,
     tenant_storage_ref: String,
     submission_id: Uuid,
@@ -83183,11 +83183,11 @@ struct TraceCommonsRevocation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TraceCommonsAuditEvent {
+pub struct TraceCommonsAuditEvent {
     event_id: Uuid,
     tenant_id: String,
-    submission_id: Uuid,
-    kind: String,
+    pub submission_id: Uuid,
+    pub kind: String,
     created_at: DateTime<Utc>,
     status: Option<TraceCorpusStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83195,7 +83195,7 @@ struct TraceCommonsAuditEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     actor_principal_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
+    pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     export_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84041,10 +84041,10 @@ impl TraceCommonsAuditEvent {
 }
 
 #[derive(Debug, Serialize)]
-struct TraceCommonsTenantCreditResponse {
+pub struct TraceCommonsTenantCreditResponse {
     tenant_id: String,
     tenant_storage_ref: String,
-    accepted: usize,
+    pub accepted: usize,
     quarantined: usize,
     revoked: usize,
     rejected: usize,
@@ -84055,7 +84055,7 @@ struct TraceCommonsTenantCreditResponse {
     credit_points_total: f32,
     credit_points_estimated: f32,
     credit_points_pending_ledger: f32,
-    credit_points_settled: f32,
+    pub credit_points_settled: f32,
     credit_points_reversed: f32,
     credit_points_held: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]

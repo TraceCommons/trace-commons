@@ -2,7 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Effective target scope regressions: an empty set means unrestricted.
-use super::*;
+use trace_commons_ingest::test_support::*;
+use axum::Json;
+use axum::extract::State;
+use axum::http::StatusCode;
+use trace_commons_protocol::trace_contribution::TraceAllowedUse;
+use trace_commons_protocol::trace_contribution::ConsentScope;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 fn scoped_admin() -> TenantAuth {
     let mut auth = test_reviewer_auth("tenant-a");

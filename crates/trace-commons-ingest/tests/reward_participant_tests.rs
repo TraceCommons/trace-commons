@@ -4,7 +4,9 @@
 //! HTTP acceptance coverage for participant reward offers and reservations.
 //! INTEGRATION: `tests.rs` includes this module after the reward routes are wired.
 
-use crate::ingest::app::tests::*;
+use trace_commons_ingest::test_support::*;
+use trace_commons_server::account_native_auth::native_token_parts;
+use std::sync::Arc;
 
 // Mission HTTP/PG coverage stays nested so it can reuse this suite's private
 // real-router reward fixture without widening or splitting inherited helpers.

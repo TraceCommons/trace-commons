@@ -7,6 +7,7 @@ rust-version.workspace = true
 license = "AGPL-3.0-or-later"
 repository.workspace = true
 autobins = false
+autotests = false
 
 [dependencies]
 anyhow = "1"
@@ -76,7 +77,32 @@ test-support = ["dep:tower"]
 name = "trace-commons-ingest"
 path = "src/bin/trace_commons_ingest_main.rs"
 
+# Integration tests. `it` holds every `tests/<name>.rs` that can share a
+# process, as a module (see `tests/it.rs`). The others each need a process
+# of their own.
+[[test]]
+name = "it"
+path = "tests/it.rs"
+
+# Asserts what an embedding binary sees of the library's public entry point.
+[[test]]
+name = "ingest_library_entry"
+path = "tests/ingest_library_entry.rs"
+
+# Boots the built binary; built by the near-ai-staging CI step by name.
+[[test]]
+name = "near_ai_host_coherence_boot"
+path = "tests/near_ai_host_coherence_boot.rs"
+
+# Runs the operator smoke-gate script as a child process.
+[[test]]
+name = "smoke_gate_script"
+path = "tests/smoke_gate_script.rs"
+
 [dev-dependencies]
+# The crate's own tests build against its test fixtures. Cargo applies a
+# dev-dependency's features to test builds only, never to `cargo build`.
+trace-commons-ingest = { path = ".", features = ["test-support"] }
 # Paused-clock tests (`tokio::time::pause`/`advance`). This used to arrive
 # through the removed WebAuthn test dependency.
 tokio = { version = "1", features = ["test-util"] }
